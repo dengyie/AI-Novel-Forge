@@ -140,6 +140,24 @@ test("continue_existing from structured ignores stale front10 checkpoint when th
   assert.equal(plan.effectiveStage, "structured_outline");
 });
 
+test("continue_existing from chapter backfills structured outline when repair signals exist but no executable range is ready", () => {
+  const plan = resolveDirectorTakeoverPlan({
+    entryStep: "chapter",
+    strategy: "continue_existing",
+    snapshot: buildSnapshot({
+      firstVolumePreparedChapterCount: 3,
+      structuredOutlineRecoveryStep: "chapter_detail_bundle",
+      pendingRepairChapterCount: 3,
+    }),
+    latestCheckpoint: null,
+    executableRange: null,
+  });
+
+  assert.equal(plan.executionMode, "phase");
+  assert.equal(plan.effectiveStep, "structured");
+  assert.equal(plan.effectiveStage, "structured_outline");
+});
+
 test("continue_existing from structured keeps partially detailed requested scope out of quality repair", () => {
   const plan = resolveDirectorTakeoverPlan({
     entryStep: "structured",
