@@ -17,9 +17,7 @@ export class DirectorExecutionService {
   async executeCommand(command: NonNullable<DirectorRunCommandRow>): Promise<void> {
     const payload = this.commandService.parseCommandPayload(command);
     if (command.commandType === "continue" || command.commandType === "resume_from_checkpoint" || command.commandType === "retry") {
-      const takeoverRequest = command.commandType === "resume_from_checkpoint"
-        ? await this.resolveContextlessTakeoverRecovery(command.taskId)
-        : null;
+      const takeoverRequest = await this.resolveContextlessTakeoverRecovery(command.taskId);
       if (takeoverRequest) {
         await this.directorService.startTakeover(takeoverRequest, {
           workflowTaskId: command.taskId,

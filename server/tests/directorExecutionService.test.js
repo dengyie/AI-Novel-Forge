@@ -6,12 +6,12 @@ const { DirectorExecutionService } = require("../dist/services/novel/director/Di
 const { NovelDirectorService } = require("../dist/services/novel/director/NovelDirectorService.js");
 const { NovelWorkflowService } = require("../dist/services/novel/workflow/NovelWorkflowService.js");
 
-function resumeCommand() {
+function recoveryCommand(commandType = "resume_from_checkpoint") {
   return {
-    id: "command-resume",
+    id: `command-${commandType}`,
     taskId: "task-1",
     novelId: "novel-1",
-    commandType: "resume_from_checkpoint",
+    commandType,
     status: "running",
     payloadJson: "{\"forceResume\":true}",
   };
@@ -56,7 +56,61 @@ test("director execution replays takeover request when recovery task lacks direc
 
   try {
     const service = new DirectorExecutionService();
-    await service.executeCommand(resumeCommand());
+    await service.executeCommand(recoveryCommand());
+
+    assert.deepEqual(calls, [[
+      "takeover",
+      takeoverRequest,
+      { workflowTaskId: "task-1" },
+    ]]);
+  } finally {
+    NovelDirectorService.prototype.startTakeover = originals.startTakeover;
+    NovelDirectorService.prototype.executeContinueTask = originals.executeContinueTask;
+    NovelWorkflowService.prototype.getTaskByIdWithoutHealing = originals.getTaskByIdWithoutHealing;
+    prisma.directorRunCommand.findFirst = originals.commandFindFirst;
+  }
+});
+
+test("director execution replays takeover request when a contextless recovery is continued", async () => {
+  const calls = [];
+  const takeoverRequest = {
+    novelId: "novel-1",
+    entryStep: "structured",
+    strategy: "continue_existing",
+    runMode: "auto_to_execution",
+  };
+  const originals = {
+    startTakeover: NovelDirectorService.prototype.startTakeover,
+    executeContinueTask: NovelDirectorService.prototype.executeContinueTask,
+    getTaskByIdWithoutHealing: NovelWorkflowService.prototype.getTaskByIdWithoutHealing,
+    commandFindFirst: prisma.directorRunCommand.findFirst,
+  };
+
+  NovelWorkflowService.prototype.getTaskByIdWithoutHealing = async () => ({
+    id: "task-1",
+    lane: "auto_director",
+    seedPayloadJson: JSON.stringify({
+      takeover: {
+        entryStep: "structured",
+      },
+    }),
+  });
+  prisma.directorRunCommand.findFirst = async () => ({
+    id: "command-takeover",
+    taskId: "task-1",
+    commandType: "takeover",
+    payloadJson: JSON.stringify({ takeoverRequest }),
+  });
+  NovelDirectorService.prototype.startTakeover = async (request, options) => {
+    calls.push(["takeover", request, options]);
+  };
+  NovelDirectorService.prototype.executeContinueTask = async () => {
+    calls.push(["continue"]);
+  };
+
+  try {
+    const service = new DirectorExecutionService();
+    await service.executeCommand(recoveryCommand("continue"));
 
     assert.deepEqual(calls, [[
       "takeover",
@@ -104,7 +158,7 @@ test("director execution keeps normal recovery path when director input is alrea
 
   try {
     const service = new DirectorExecutionService();
-    await service.executeCommand(resumeCommand());
+    await service.executeCommand(recoveryCommand());
 
     assert.deepEqual(calls, [["continue", "task-1", true]]);
   } finally {
