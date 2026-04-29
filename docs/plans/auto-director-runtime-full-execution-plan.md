@@ -52,7 +52,7 @@
 
 当前未完成但必须纳入完整交付：
 
-- 自动导演执行面仍与 Web API 控制面运行在同一 Node 进程中；`structured_outline / chapter_list / chapter_detail_bundle / chapter_execution / quality_repair` 这类重型链路会拖住普通 API。该问题已在 2026-04-29 明确为架构级阻塞，必须按执行面隔离计划拆出独立 Worker，不能再用 route 内 fire-and-forget 作为完成态。
+- 自动导演执行面已完成第一版 Worker 化：`continue / resume_from_checkpoint / retry / takeover` 已进入 `DirectorRunCommand` 队列并由独立 Director Worker 执行，前端运行态也已改为轻量 projection 轮询。但候选确认、标题修复等旧入口仍有同步准备或旧式后台调度，SQLite 写锁、运行态 delta 持久化和真实 Prisma 长链路回归仍是后续收口重点，不能把 route 内 fire-and-forget 当作新增能力接入方式。
 - Step Module / NodeRunner / PolicyEngine 写入合同已覆盖自动导演关键写入面；下一步重点转为真实数据恢复、ledger 真相层、质量闭环和状态驱动 replan。
 - `PolicyEngine` 还不是所有写入动作、覆盖动作和高成本审校动作的硬 gate。
 - Artifact Ledger 仍是 seed payload wrapper 索引，缺独立持久化表、完整生命周期、跨任务依赖演进和可恢复查询能力。
@@ -66,15 +66,33 @@
 
 当前完成度判断：
 
-- 按 MVP 底座衡量：约 `80%` 已完成。
-- 按完整统一运行时衡量：约 `65%-70%` 已完成。
-- 剩余风险不在“是否使用 LangGraph”，而在产物真相是否可恢复、真实数据链路是否稳定、质量闭环是否能局部修复，以及状态驱动 replan 是否真正成为默认判断。
+- 按 MVP 底座衡量：约 `85%` 已完成。
+- 按完整统一运行时衡量：约 `70%` 已完成。
+- 按完整 P0“让新手稳定完成整本小说”产品目标衡量：约 `55%-60%` 已完成。
+- 剩余风险不在“是否使用 LangGraph”，而在执行面二次隔离是否彻底、产物真相是否可恢复、真实数据链路是否稳定、质量闭环是否能局部修复，以及状态驱动 replan 是否真正成为默认判断。
+
+## 2.0.1 2026-04-30 分支阶段总结
+
+当前 `codex/auto-director-runtime-mvp-plan` 分支相对优化前已经完成以下关键升级：
+
+- 从旧自动导演长流程函数推进为统一运行时边界：`DirectorRuntimeService / NodeRunner / PolicyEngine / Step Module / Runtime Projection / DirectorEvent` 已成为主骨架。
+- 从 Web API 直接执行重型链路推进为第一版执行面隔离：`DirectorRunCommand`、独立 `Director Worker`、租约、续租、失败落态和轻量 projection 轮询已落地。
+- 恢复链从“失败后人工猜测”推进为从真实资产断点恢复：服务重启、租约过期、残留 running step、缺失 outline、历史接管任务和上下文丢失继续都已有针对性处理。
+- 任务状态从后台字段推进到用户可解释状态：任务中心、编辑页、小说列表和恢复弹窗开始展示当前阶段、阻塞原因、恢复动作和最近健康阶段。
+- 章节执行交接从“拆章确认态”推进到真实执行态：正文开始生成后，侧栏流程和 checkpoint 会跟随章节执行阶段，避免用户看到“已经写正文但流程仍待拆章”的错位。
+- Artifact Ledger、Prompt Workbench、Context Broker 和 runtime tools 已进入统一运行时，后续可以继续承接产物真相、提示词治理和创作中枢控制。
+
+当前仍不视为完成的内容：
+
+- 执行面隔离仍需二次收口：SQLite WAL / busy timeout、运行态 delta 持久化、可见工作区刷新边界，以及候选确认、标题修复等旧入口 command 化。
+- 真实 Prisma 抽样回归仍需覆盖旧项目接管、服务重启恢复、章节批次恢复、取消后重试、章节执行和状态版本。
+- 章节细化质量门禁、`patch_first` 修复策略、阶段级模型路由、质量产物闭环和新手入口收敛仍是完整 P0 产品目标的主要缺口。
 
 ## 2.1 下一轮最高优先级开发队列
 
 以下 14 项作为 `codex/auto-director-runtime-mvp-plan` 分支的下一轮即将开发项目，优先级高于后续扩入口、创作中枢主导编排和 LangGraph 主链化。
 
-1. **执行面隔离与 API 保活**：按专项计划新增命令化入口、独立 Director Worker、轻量 runtime projection 和 API 保活回归；禁止 Web API route 直接执行自动导演重型链路。
+1. **执行面隔离与 API 保活二次收口**：在第一版命令化入口、独立 Director Worker 和轻量 runtime projection 基础上，继续收口 SQLite WAL / busy timeout、运行态 delta 持久化、可见工作区刷新边界，以及候选确认、标题修复等旧入口 command 化；禁止 Web API route 新增直接执行自动导演重型链路。
 2. **规划恢复链稳定**：在 Worker 语义下补齐 `volume_strategy` 幂等重放、持久化卷规划恢复到 `structured_outline` 的真实数据回归；确保已有资产不会被重复生成或跳过。
 3. **真实 Prisma 抽样回归**：覆盖旧项目接管、服务重启手动恢复、失败重试、章节批量执行、候选变更和状态版本，重点验证 `migration -> 章节写入 -> 候选变更 -> 状态版本`。
 4. **Artifact Ledger 真相层**：从 wrapper 索引推进到跨任务可查询、版本生命周期、stale、用户内容保护和局部恢复能力；保持 additive schema，不破坏旧数据。

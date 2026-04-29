@@ -377,3 +377,28 @@ Web API 控制面
 - 候选确认、标题修复等入口仍包含部分同步准备或旧式后台调度，后续必须逐步迁到可序列化 command。
 - `NovelDirectorService.scheduleBackgroundRun` 仍保留兼容旧入口，不能作为新增能力的接入方式。
 - Worker 化后的真实 Prisma 抽样仍需覆盖旧项目接管、重启恢复、章节批次恢复和取消后重试。
+
+## 13. 2026-04-30 阶段总结
+
+当前执行面隔离已从“方案确认”推进到“第一版可运行骨架”：
+
+- `DirectorRunCommand` 已承载 `continue / resume_from_checkpoint / retry / takeover` 等控制面命令。
+- 独立 Director Worker 已负责领取命令、续租、执行、成功/失败/stale 落态。
+- 安全的 `continue / resume_from_checkpoint` 命令首次租约过期时会自动重排，避免短暂 Worker 停顿直接变成手动失败；同一命令重复过期仍转入手动恢复，避免频繁重复 LLM 调用。
+- Worker stale 回收会同步清理残留 `DirectorStepRun.running`，减少 runtime projection 展示假运行。
+- 前端运行态已从批量刷新完整工作区资产转向轻量 projection 轮询。
+- 章节执行开始后会清理前序拆章确认 checkpoint，工作台侧栏可跟随真实章节执行阶段。
+
+当前进度口径：
+
+- 执行面隔离第一版：约 `75%`。
+- 自动导演 Runtime MVP：约 `85%`。
+- 完整统一运行时：约 `70%`。
+
+下一轮优先收口：
+
+- 确认 SQLite 在开发态和桌面态默认启用 `WAL + synchronous=NORMAL + busy_timeout`，并保留显式诊断开关。
+- 确认运行态持久化按 delta 写入，不再每次 mutation 全量删除重建 steps/events/artifacts，也不继续把完整 runtime 塞回任务 seed payload。
+- 确认自动导演运行中前端只轮询轻量 projection；完整业务资产只在用户可见工作区、任务完成或等待确认时按边界刷新。
+- 把候选确认、标题修复等旧入口迁到可序列化 command，避免旧式后台调度绕过 Worker。
+- 用真实 Prisma 数据抽样验证旧项目接管、重启恢复、章节批次恢复、取消后重试和标题修复失败后的主流程状态隔离。

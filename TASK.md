@@ -90,12 +90,12 @@
 - 任务状态可解释性的基础合同已进入主链：`displayStatus / blockingReason / resumeAction / lastHealthyStage` 已接入自动导演任务摘要、任务中心、首页与小说列表，后续重点转为补齐 `pendingReviewCount / nextAction` 这类更细粒度状态
 - `auto_to_ready` 单检查点语义已基本成立，且当前系统已超出旧方案进入 `auto_to_execution`；不再把“只跑到 front10_ready”本身当作新的主待办
 - 当前最值得优先推进的稳定性收口集中在：章节细化可用性门禁、轻量 `taskSheet` 执行摘要与非阻塞 `artifactHealth`、阶段级模型路由与 fallback、默认 `patch_first` 修复，以及 `统一状态源 + 状态驱动生成 + 手动/导演共线` 向书级前半段和真实数据链路继续收口
-- 2026-04-28 自动导演统一运行时 MVP 底座约完成 `80%`；按完整统一运行时目标衡量约完成 `60%-65%`
+- 2026-04-30 当前分支阶段总结：自动导演 Runtime MVP 底座约完成 `85%`；按完整统一运行时目标衡量约完成 `70%`；按完整 P0“让新手稳定完成整本小说”产品目标衡量约完成 `55%-60%`
 - 自动导演主执行链当前仍不是 LangGraph；LangGraph 已进入 `DirectorLangGraphPilot` 低风险试点，后续只作为编排、interrupt、resume、trace 外壳接入
 - 服务重启后的自动导演策略已调整为“标记待手动恢复 -> 用户确认 -> 从真实资产断点继续”，不做后台静默自动续跑
 - 小说实体链路与自动导演执行链路已完成首轮边界收口：小说编辑页 `taskId` 专属自动导演任务，手动编辑工作流改用 `workspaceTaskId`，后端 bootstrap 会拒绝跨 lane 复用同一个 workflow task，避免 manual_create 与 auto_director 互相污染状态
 - 2026-04-29 已确认自动导演恢复/继续挂起属于架构级问题：Web API 控制面与自动导演执行面没有隔离，重型 `structured_outline / chapter_list` 链路会拖住普通 API；同时运行态活动任务接口不能再返回完整 `seedPayload / directorSession` 大对象；专项方案见 `docs/plans/auto-director-execution-plane-isolation-plan.md`
-- 下一轮自动导演重点不是继续扩入口，而是先完成执行面隔离与 API 保活，再把所有写入动作收口到 `Step Module / NodeRunner / PolicyEngine`，并用真实 Prisma 数据验证旧项目接管、手动恢复、章节批量执行和改文后局部修复
+- 2026-04-30 当前分支已完成第一版执行面隔离、命令队列、独立 Director Worker、轻量 projection 轮询、stale lease 自动重排、等待恢复优先展示和章节执行侧栏状态同步；下一轮重点不再扩入口，而是继续收口执行面二次隔离、真实数据回归、质量门禁和局部修复闭环
 
 当前唯一主线仍然是 `P0`：
 
@@ -171,7 +171,7 @@ P0 的默认主链统一为：
 
 以下 14 项作为下一轮即将开发项目，优先级高于本节后续历史条目：
 
-1. `P0-E0 / 执行面隔离`：完成自动导演命令化入口、独立 Director Worker、轻量 runtime projection、活动任务轻量详情和 API 保活回归；禁止 Web API route 直接执行自动导演重型链路，也禁止运行态轮询返回完整执行面大对象。2026-04-29 已补充：Worker 命令强制真实恢复，stale lease 同步清理残留 running step，continue 默认不再触发完整 workspace / Artifact Ledger 分析，待手动恢复状态优先覆盖“运行中”展示；二次收口必须同时完成 SQLite WAL、运行态 delta 持久化和前端运行态按可见工作区刷新，否则不得视为执行面隔离完成。
+1. `P0-E0 / 执行面隔离`：第一版命令化入口、独立 Director Worker、轻量 runtime projection、活动任务轻量详情和 API 保活回归已落地；Web API route 不得再新增直接执行自动导演重型链路的入口，运行态轮询不得返回完整执行面大对象。2026-04-30 已补充：Worker 命令强制真实恢复，stale lease 会先自动重排安全的继续/恢复命令并清理残留 running step，重复过期再进入手动恢复；continue 默认不再触发完整 workspace / Artifact Ledger 分析，待手动恢复状态优先覆盖“运行中”展示，章节执行开始后左侧流程会跟随真实执行阶段。后续二次收口继续聚焦 SQLite WAL、运行态 delta 持久化、前端按可见工作区刷新，以及候选确认/标题修复等旧入口的 command 化。
 2. `P0-E1 / 恢复链`：在 Worker 语义下继续稳定规划恢复链，补齐 `volume_strategy` 幂等重放、持久化卷规划恢复到 `structured_outline` 的真实数据回归。
 3. `P0-A / 真实数据`：真实 Prisma 抽样回归，覆盖旧项目接管、服务重启手动恢复、失败重试、章节批量执行、候选变更、状态版本。
 4. `P0-E1 / Artifact Ledger`：Artifact Ledger 真相层，从 wrapper 索引推进到跨任务可查询、版本生命周期、stale、用户内容保护、局部恢复。
@@ -1178,6 +1178,8 @@ P2 重点解决：
 - 2026-04-29 [开发中] 完成第一版执行面隔离落地：新增 `DirectorRunCommand` 命令队列表与独立 `Director Worker` 入口，`continue`、恢复、任务中心重试、follow-up 继续动作和旧项目接管已改为写入命令队列；前端运行态移除 2 秒强刷 `volumes`，改为轻量 runtime projection 轮询；新增 command 幂等/租约与控制面边界回归测试。候选确认和标题修复等旧入口仍需继续迁移到可序列化 command。
 - 2026-04-29 [开发中] 二次收口 Worker 化后仍出现 pending XHR 的根因：SQLite 默认 DELETE journal 仍会让 Worker 写锁阻塞 API 读请求，运行态持久化全量重放 steps/events/artifacts 会放大写锁窗口，前端运行态批量刷新完整 workspace 资源会放大浏览器 pending。已改为启动时配置 SQLite WAL、DirectorRuntime delta 持久化、运行态只按可见工作区刷新，并补充控制面边界测试。
 - 2026-04-29 [开发中] 收口 waiting_approval 继续协议：小说页和任务中心的等待确认继续会提交 `resume`，Worker 执行时只对当前匹配的等待确认节点做一次性 gate 放行，不再出现空 continue 命令成功但又停回同一 gate 的状态循环；后续高风险 gate 仍由 PolicyEngine 拦截。
+- 2026-04-30 [已完成] 收口租约过期与执行状态错位：安全的 `continue / resume_from_checkpoint` 命令首次租约过期时自动重排，不再立刻失败；重复过期仍转入手动恢复以避免重复 LLM 消耗。章节执行开始后会清理前序拆章确认 checkpoint，编辑页左侧流程优先跟随真实运行阶段，不再出现正文已开始生成但侧栏仍停在“节奏 / 拆章”的错位。
+- 2026-04-30 [阶段总结] 当前分支相对优化前已完成统一运行时主体骨架、第一版执行面隔离、恢复链强化、任务状态可解释性、章节执行交接修复、Artifact Ledger 初步持久化和 Prompt/Context 治理接入。当前进度按 Runtime MVP 约 `85%`、完整统一运行时约 `70%`、完整 P0 产品目标约 `55%-60%` 记录；剩余重点是执行面二次收口、真实 Prisma 长链路回归、章节细化质量门禁、Artifact Ledger 真相层、PolicyEngine 硬 gate 深化、质量闭环、阶段级模型路由和新手入口收敛。
 <!-- task-md-sync:item:task-87bf3232fd:end -->
 <!-- task-md-sync:item:task-7efc49bcdc:start -->
 ### 自动导演接管状态投影恢复
