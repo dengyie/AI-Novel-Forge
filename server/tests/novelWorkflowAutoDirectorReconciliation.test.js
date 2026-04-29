@@ -6,7 +6,7 @@ const {
 } = require("../dist/services/novel/workflow/novelWorkflowAutoDirectorReconciliation.js");
 const { prisma } = require("../dist/db/prisma.js");
 
-test("syncAutoDirectorChapterBatchCheckpoint refreshes resume target to the first remaining chapter", async () => {
+test("syncAutoDirectorChapterBatchCheckpoint refreshes resume target to the first unprocessed chapter", async () => {
   const originals = {
     chapterFindMany: prisma.chapter.findMany,
     workflowUpdate: prisma.novelWorkflowTask.update,
@@ -57,12 +57,12 @@ test("syncAutoDirectorChapterBatchCheckpoint refreshes resume target to the firs
     const resumeTarget = JSON.parse(patch.resumeTargetJson);
     const seedPayload = JSON.parse(patch.seedPayloadJson);
 
-    assert.equal(resumeTarget.chapterId, "chapter-2");
+    assert.equal(resumeTarget.chapterId, "chapter-3");
     assert.equal(patch.currentItemLabel, "前 3 章自动执行已暂停");
-    assert.match(patch.checkpointSummary, /当前仍有 2 章待继续/);
-    assert.equal(seedPayload.autoExecution.remainingChapterCount, 2);
-    assert.equal(seedPayload.autoExecution.nextChapterId, "chapter-2");
-    assert.equal(seedPayload.autoExecution.nextChapterOrder, 2);
+    assert.match(patch.checkpointSummary, /当前仍有 1 章待继续/);
+    assert.equal(seedPayload.autoExecution.remainingChapterCount, 1);
+    assert.equal(seedPayload.autoExecution.nextChapterId, "chapter-3");
+    assert.equal(seedPayload.autoExecution.nextChapterOrder, 3);
   } finally {
     prisma.chapter.findMany = originals.chapterFindMany;
     prisma.novelWorkflowTask.update = originals.workflowUpdate;

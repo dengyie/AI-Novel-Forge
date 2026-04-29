@@ -195,7 +195,11 @@ export default function NovelWorkspaceRail(props: NovelWorkspaceRailProps) {
       const isSelected = activeTab === step.key;
       const isWorkflowCurrent = workflowCurrentTab === step.key;
       const isReset = resetSteps.has(step.key);
-      const isDone = !isReset && (stepReadiness[step.key] || (workflowIndex >= 0 && index < workflowIndex));
+      const isDone = !isReset && (
+        workflowIndex >= 0
+          ? index < workflowIndex
+          : stepReadiness[step.key]
+      );
       const statusLabel = isWorkflowCurrent
         ? isSelected ? "当前步骤" : "流程中"
         : isSelected
@@ -215,6 +219,7 @@ export default function NovelWorkspaceRail(props: NovelWorkspaceRailProps) {
   ), [activeTab, resetSteps, stepReadiness, workflowCurrentTab, workflowIndex]);
 
   const completedStepCount = stepStates.filter((item) => item.isDone).length;
+  const workflowProgressCount = workflowIndex >= 0 ? workflowIndex + 1 : completedStepCount;
   const novelTitle = novelDetail?.title?.trim() || "小说创作工作台";
   const runtimeActionSummary = runtimeProjection?.nextActionLabel
     ? `下一步：${runtimeProjection.nextActionLabel}`
@@ -324,7 +329,7 @@ export default function NovelWorkspaceRail(props: NovelWorkspaceRailProps) {
           <div className="rounded-2xl border border-border/70 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
             <div className="flex items-center justify-between gap-2">
               <span>流程：{getNovelWorkspaceTabLabel(workflowCurrentTab ?? activeTab)}</span>
-              <span>{completedStepCount}/{NOVEL_WORKSPACE_FLOW_STEPS.length}</span>
+              <span>{workflowProgressCount}/{NOVEL_WORKSPACE_FLOW_STEPS.length}</span>
             </div>
           </div>
         ) : null}

@@ -139,12 +139,59 @@ test("pipeline resumes structured outline from persisted volume workspace when v
   assert.equal(highMemoryChecks[0].volumeId, "volume_1");
 });
 
+test("pipeline pauses after volume strategy checkpoint instead of falling through to structured outline", async () => {
+  const modules = [];
+  let getVolumeCalls = 0;
+  const runtime = createRuntime({
+    volumeService: {
+      async getVolumes() {
+        getVolumeCalls += 1;
+        if (getVolumeCalls === 1) {
+          return { volumes: [], strategyPlan: null };
+        }
+        return {
+          volumes: [{ id: "volume_1", chapters: [] }],
+          strategyPlan: { targetChapterCount: 30 },
+        };
+      },
+    },
+    runtimeOrchestrator: {
+      async runStepModule({ module }) {
+        modules.push(module.id);
+        if (module.id === "volume.strategy.plan") {
+          return null;
+        }
+        throw new Error(`unexpected module after volume checkpoint: ${module.id}`);
+      },
+      async runChapterExecutionNode() {},
+      async markTaskRunning() {},
+    },
+  });
+
+  await runtime.runPipeline({
+    taskId: "task_pipeline_volume_checkpoint",
+    novelId: "novel_pipeline_volume_checkpoint",
+    input: buildDirectorInput({
+      workflowTaskId: "task_pipeline_volume_checkpoint",
+      runMode: "stage_review",
+    }),
+    startPhase: "volume_strategy",
+  });
+
+  assert.deepEqual(modules, ["volume.strategy.plan"]);
+  assert.equal(getVolumeCalls, 1);
+});
+
 test("pipeline resumes book contract when story macro exists without contract", async () => {
   const modules = [];
   const runtime = createRuntime({
     storyMacroService: {
       async getPlan() {
-        return { id: "story_macro_existing" };
+        return {
+          id: "story_macro_existing",
+          storyInput: "story",
+          decomposition: { core_conflict: "conflict" },
+        };
       },
     },
     runtimeOrchestrator: {
@@ -175,7 +222,11 @@ test("pipeline does not rerun book planning nodes when story macro and contract 
   const runtime = createRuntime({
     storyMacroService: {
       async getPlan() {
-        return { id: "story_macro_existing" };
+        return {
+          id: "story_macro_existing",
+          storyInput: "story",
+          decomposition: { core_conflict: "conflict" },
+        };
       },
     },
     bookContractService: {
@@ -204,4 +255,50 @@ test("pipeline does not rerun book planning nodes when story macro and contract 
   });
 
   assert.deepEqual(modules, ["character.cast.prepare", "volume.strategy.plan"]);
+});
+
+test("pipeline treats empty story macro shell as incomplete during recovery", async () => {
+  const modules = [];
+  const runtime = createRuntime({
+    storyMacroService: {
+      async getPlan() {
+        return { id: "story_macro_shell", storyInput: "", decomposition: null };
+      },
+    },
+    bookContractService: {
+      async getByNovelId() {
+        return { id: "book_contract_existing" };
+      },
+    },
+    novelContextService: {
+      async listCharacters() {
+        return [{ id: "character_1", name: "Courier" }];
+      },
+    },
+    volumeService: {
+      async getVolumes() {
+        return {
+          volumes: [{ id: "volume_1", chapters: [] }],
+          strategyPlan: { targetChapterCount: 30 },
+        };
+      },
+    },
+    runtimeOrchestrator: {
+      async runStepModule({ module }) {
+        modules.push(module.id);
+        return null;
+      },
+      async runChapterExecutionNode() {},
+      async markTaskRunning() {},
+    },
+  });
+
+  await runtime.runPipeline({
+    taskId: "task_pipeline_story_shell",
+    novelId: "novel_pipeline_story_shell",
+    input: buildDirectorInput({ workflowTaskId: "task_pipeline_story_shell" }),
+    startPhase: "structured_outline",
+  });
+
+  assert.equal(modules[0], "story.macro.plan");
 });

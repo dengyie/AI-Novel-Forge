@@ -90,11 +90,11 @@ router.get("/recovery-candidates", async (_req, res, next) => {
 
 router.post("/recovery-candidates/resume-all", async (_req, res, next) => {
   try {
-    const resumed = await recoveryTaskService.resumeAllRecoveryCandidates();
-    res.status(200).json({
+    const resumed = await recoveryTaskService.startResumeAllRecoveryCandidates();
+    res.status(202).json({
       success: true,
       data: { resumed },
-      message: "Recovery candidates resumed.",
+      message: "Recovery candidates resume accepted.",
     } satisfies ApiResponse<{ resumed: typeof resumed }>);
   } catch (error) {
     next(error);
@@ -104,11 +104,11 @@ router.post("/recovery-candidates/resume-all", async (_req, res, next) => {
 router.post("/recovery-candidates/:kind/:id/resume", validate({ params: recoveryTaskParamsSchema }), async (req, res, next) => {
   try {
     const { kind, id } = req.params as z.infer<typeof recoveryTaskParamsSchema>;
-    await recoveryTaskService.resumeRecoveryCandidate(kind, id);
-    res.status(200).json({
+    await recoveryTaskService.startResumeRecoveryCandidate(kind, id);
+    res.status(202).json({
       success: true,
       data: { kind, id },
-      message: "Recovery candidate resumed.",
+      message: "Recovery candidate resume accepted.",
     } satisfies ApiResponse<{ kind: typeof kind; id: string }>);
   } catch (error) {
     next(error);

@@ -1138,15 +1138,15 @@ P2 重点解决：
 ### 自动导演完整统一运行时
 - 标识：`task-87bf3232fd`
 - 状态：开发中
-- 最近更新：2026-04-29 01:08
+- 最近更新：2026-04-29 19:40
 - 概要：优先完成自动导演正常主流程：新建确认、规划、拆章、章节执行、服务重启恢复、失败重试与用户内容保护先跑稳；创作中枢闭环暂后置。
 
 计划清单：
 - [x] 正常主流程收口：候选、确认、接管、story_macro、book_contract、character_setup、volume_strategy、structured_outline、章节执行、审校、修复和状态提交已纳入 Step Module -> NodeRunner -> PolicyEngine 合同。
 - [x] 建书写入关口：novel_create 已注册为正式 Step Module，并通过 RuntimeOrchestrator.runStepModule 执行；成功语义包含创建小说并绑定任务，重复确认会补 runtime novelId。
-- [ ] 规划恢复链稳定：已有 story_macro/book_contract/角色资产时跳过对应写入节点；volume_strategy 幂等重放无返回值时从持久化卷规划继续 structured_outline。
+- [x] 规划恢复链稳定：已有 story_macro/book_contract/角色资产时跳过对应写入节点；volume_strategy 幂等重放无返回值时从持久化卷规划继续 structured_outline，并已补真实 Prisma 抽样回归。
 - [x] 章节批次恢复：chapter_batch_ready 对账按首个未完成章节恢复，不把缺正文的 repaired 章节误判为完成。
-- [ ] Artifact Ledger 幂等恢复：DirectorArtifactDependency 写入需要去重和 upsert，历史任务重复恢复同一依赖不得触发唯一约束。
+- [x] Artifact Ledger 幂等恢复：DirectorArtifactDependency 写入先规整依赖、仅删除过期边，并对 Artifact/Dependency upsert 竞争做 P2002 回退；历史任务重复恢复同一依赖不得触发唯一约束。
 - [ ] 章节标题质量门禁：章名结构集中会进入语义重试；标题修复可兼容 workflow service 读取差异，并在仍集中时保留任务提示。
 - [ ] PolicyEngine 硬 gate：正常流程内的写入、覆盖用户内容、高风险修复和高成本审校先过策略判断，自动修复预算保持一次。
 - [ ] Artifact Ledger 正常流真相：DirectorRun/StepRun/Event/Artifact/Dependency 已落 additive schema 与双写，Workspace Analyzer 已优先合并持久化 ledger，再用旧表 backfill。
@@ -1159,6 +1159,12 @@ P2 重点解决：
 - 2026-04-28 23:39 [开发中] 修复历史小说任务继续时的 Artifact Ledger 依赖重复入账问题：DirectorArtifactDependency 写入先按 artifactId 去重并改为 upsert，避免重复恢复同一依赖时触发唯一约束；新增 runtime store 回归测试。
 - 2026-04-29 00:41 [已完成] 收口章节批次恢复对账：从数据库读取到正文为空的 repaired/completed 章节时，仍按未完成章节恢复到该章，不再误判整批完成；补充自动导演章节批次对账回归测试。
 - 2026-04-29 01:08 [已完成] 完成自动导演写入合同全量收口：新增完整 Step Module 写入合同校验，拆分 story_macro 与 book_contract 独立节点，确认建书和接管入口改为直接 runStepModule，章节执行/审校/修复/状态提交继续由统一节点序列覆盖。
+- 2026-04-29 18:20 [开发中] 收口规划恢复链关键边界：`volume_strategy` 阶段审核暂停不会误穿透到 `structured_outline`，持久化卷策略恢复也不会跳过缺失的 story macro / book contract / 角色资产；继续任务会保留卷/章节恢复指针，结构化大纲启动定位会指向实际恢复 cursor。真实 Prisma 抽样回归仍需继续补齐。
+- 2026-04-29 18:50 [已完成] 补齐规划恢复链真实 Prisma 抽样回归：临时复制 `dev.db` 后验证持久化卷战略可通过 `continueTask` 恢复到 `structured_outline`，并确认任务行与后台管线同时保留卷级恢复指针；服务端 build 与 47 条恢复链定向测试通过。
+- 2026-04-29 19:10 [已完成] 完成 Artifact Ledger 幂等恢复收口：依赖进入快照前会按 artifactId 去重并保留最高版本，持久化写入不再先整组删除依赖边；Artifact 与 Dependency upsert 遇到 Prisma P2002 竞争会回退 update。服务端 build、Artifact Ledger/Runtime Store 定向测试与 43 条恢复链相关回归均已通过。
+- 2026-04-29 19:20 [已完成] 修复待恢复任务入口长时间阻塞页面的问题：`recovery-candidates` 单个/批量恢复现在快速返回 accepted，再由后台恢复任务继续执行；服务端 build 与 32 条恢复路由/恢复链相关回归通过。
+- 2026-04-29 19:30 [已完成] 修正小说工作台左侧流程状态：自动导演有当前阶段时，步骤完成态优先跟随任务阶段，不再因已有旧卷战略资产把后续“卷战略 / 卷骨架”误标为已完成；客户端 typecheck 与 build 已通过。
+- 2026-04-29 19:40 [已完成] 优化待恢复任务弹窗体验：恢复请求被后台接受后，弹窗会先隐藏已接受恢复的任务并异步刷新任务状态，不再让按钮停留在“恢复中”；客户端 typecheck 与 build 已通过。
 <!-- task-md-sync:item:task-87bf3232fd:end -->
 <!-- task-md-sync:item:task-7efc49bcdc:start -->
 ### 自动导演接管状态投影恢复

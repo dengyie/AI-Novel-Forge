@@ -260,15 +260,17 @@ export class NovelDirectorContinueRuntime {
       phase,
       isBackgroundRunning: true,
     });
-    const resumeTarget = buildNovelEditResumeTarget({
-      novelId,
-      taskId,
-      stage: this.resolveDirectorEditStage(phase),
-    });
     const recoveryResumeTarget = mergeResumeTargets(
       parseResumeTargetLike(row.resumeTargetJson),
       parseResumeTargetLike(seedPayload.resumeTarget),
     );
+    const resumeTarget = buildNovelEditResumeTarget({
+      novelId,
+      taskId,
+      stage: this.resolveDirectorEditStage(phase),
+      volumeId: recoveryResumeTarget?.volumeId,
+      chapterId: recoveryResumeTarget?.chapterId,
+    });
     if (phase === "structured_outline") {
       await this.deps.assertHighMemoryStartAllowed({
         taskId,
@@ -291,7 +293,11 @@ export class NovelDirectorContinueRuntime {
         resumeTarget,
       }),
     });
-    await this.deps.workflowService.markTaskRunning(taskId, resolveDirectorRunningStateForPhase(phase));
+    await this.deps.workflowService.markTaskRunning(taskId, {
+      ...resolveDirectorRunningStateForPhase(phase),
+      volumeId: recoveryResumeTarget?.volumeId,
+      chapterId: recoveryResumeTarget?.chapterId,
+    });
     this.deps.scheduleBackgroundRun(taskId, async () => {
       await this.runDirectorPipeline({
         taskId,

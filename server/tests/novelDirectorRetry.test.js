@@ -502,6 +502,10 @@ test("continueTask resumes auto-director tasks that are still marked running aft
     novelId: "novel_recovery_resume",
     checkpointType: null,
     currentItemKey: "chapter_detail_bundle",
+    resumeTargetJson: JSON.stringify({
+      stage: "structured",
+      volumeId: "volume_1",
+    }),
     seedPayloadJson: JSON.stringify({
       directorInput: buildDirectorInput({
         workflowTaskId: "task_recovery_resume",
@@ -535,12 +539,14 @@ test("continueTask resumes auto-director tasks that are still marked running aft
     await service.continueTask("task_recovery_resume");
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(bootstrapCalls.length, 1);
+    assert.equal(bootstrapCalls[0].seedPayload.resumeTarget.volumeId, "volume_1");
     assert.equal(runningCalls.length, 1);
     assert.equal(runningCalls[0].stage, "structured_outline");
+    assert.equal(runningCalls[0].volumeId, "volume_1");
     assert.equal(scheduledRuns.length, 1);
     assert.equal(pipelineRuns.length, 1);
     assert.equal(pipelineRuns[0].startPhase, "structured_outline");
-    assert.equal(pipelineRuns[0].scope, "book");
+    assert.equal(pipelineRuns[0].scope, "volume:volume_1");
   } finally {
     service.continueCandidateStageTask = originalContinueCandidateStageTask;
     service.workflowService.getTaskById = originalGetTaskById;

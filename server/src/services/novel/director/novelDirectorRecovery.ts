@@ -24,16 +24,25 @@ export function resolveSafeDirectorPipelineStartPhase(input: {
   hasVolumeWorkspace: boolean;
   hasVolumeStrategyPlan: boolean;
 }): DirectorPipelinePhase {
-  if (input.requestedPhase === "structured_outline" && (!input.hasVolumeWorkspace || !input.hasVolumeStrategyPlan)) {
-    return "volume_strategy";
-  }
-
   const observedPhase = resolveObservedResumePhaseFromWorkspace({
     hasVolumeWorkspace: input.hasVolumeWorkspace,
     hasVolumeStrategyPlan: input.hasVolumeStrategyPlan,
   });
-  if (observedPhase) {
-    return observedPhase;
+  const shouldEnterStructuredOutline = input.requestedPhase === "structured_outline" || Boolean(observedPhase);
+  if (shouldEnterStructuredOutline) {
+    if (!input.hasStoryMacroPlan) {
+      return "story_macro";
+    }
+    if (!input.hasBookContract) {
+      return "book_contract";
+    }
+    if (!input.hasCharacters) {
+      return "character_setup";
+    }
+    if (!input.hasVolumeWorkspace || !input.hasVolumeStrategyPlan) {
+      return "volume_strategy";
+    }
+    return "structured_outline";
   }
 
   let safePhase = input.requestedPhase;

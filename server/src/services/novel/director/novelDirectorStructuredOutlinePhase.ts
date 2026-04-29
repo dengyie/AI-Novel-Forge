@@ -177,11 +177,16 @@ export async function runDirectorStructuredOutlinePhase(input: {
     phase: "structured_outline",
     isBackgroundRunning: true,
   });
+  const initialRecoveryCursor = resolveStructuredOutlineRecoveryCursor({
+    workspace: baseWorkspace,
+    plan: detailPlan,
+  });
   const runningResumeTarget = buildNovelEditResumeTarget({
     novelId,
     taskId,
     stage: "structured",
-    volumeId: firstVolume.id,
+    volumeId: initialRecoveryCursor.volumeId ?? firstVolume.id,
+    chapterId: initialRecoveryCursor.chapterId,
   });
   await dependencies.workflowService.bootstrapTask({
     workflowTaskId: taskId,

@@ -309,14 +309,29 @@ function normalizeDependencies(
   if (!dependencies || dependencies.length === 0) {
     return undefined;
   }
-  return dependencies
-    .filter((dependency) => dependency.artifactId?.trim())
-    .map((dependency) => ({
-      artifactId: dependency.artifactId,
-      version: typeof dependency.version === "number" && Number.isFinite(dependency.version)
-        ? Math.max(1, Math.round(dependency.version))
-        : null,
-    }));
+  const byArtifactId = new Map<string, DirectorArtifactDependency>();
+  for (const dependency of dependencies) {
+    const artifactId = dependency.artifactId?.trim();
+    if (!artifactId) {
+      continue;
+    }
+    const version = typeof dependency.version === "number" && Number.isFinite(dependency.version)
+      ? Math.max(1, Math.round(dependency.version))
+      : null;
+    const existing = byArtifactId.get(artifactId);
+    if (!existing) {
+      byArtifactId.set(artifactId, { artifactId, version });
+      continue;
+    }
+    const existingVersion = existing.version ?? 0;
+    const nextVersion = version ?? 0;
+    byArtifactId.set(artifactId, {
+      artifactId,
+      version: nextVersion > existingVersion ? version : existing.version,
+    });
+  }
+  const normalized = [...byArtifactId.values()];
+  return normalized.length > 0 ? normalized : undefined;
 }
 
 function normalizeUpdatedAt(value?: Date | string | null): string | null {

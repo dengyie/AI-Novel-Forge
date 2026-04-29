@@ -36,9 +36,14 @@ function formatTaskKind(kind: RecoverableTaskSummary["kind"]): string {
   return "图片任务";
 }
 
+function recoveryItemKey(item: { kind: string; id: string }): string {
+  return `${item.kind}:${item.id}`;
+}
+
 export default function TaskRecoveryDialog() {
   const queryClient = useQueryClient();
   const [dismissed, setDismissed] = useState(false);
+  const [acceptedRecoveryKeys, setAcceptedRecoveryKeys] = useState<Set<string>>(() => new Set());
 
   const recoveryQuery = useQuery({
     queryKey: queryKeys.tasks.recoveryCandidates,
@@ -46,17 +51,22 @@ export default function TaskRecoveryDialog() {
     staleTime: 10_000,
   });
 
-  const items = recoveryQuery.data?.data?.items ?? [];
+  const rawItems = recoveryQuery.data?.data?.items ?? [];
+  const items = useMemo(
+    () => rawItems.filter((item) => !acceptedRecoveryKeys.has(recoveryItemKey(item))),
+    [acceptedRecoveryKeys, rawItems],
+  );
   const open = !dismissed && items.length > 0;
 
   useEffect(() => {
-    if (items.length === 0) {
+    if (rawItems.length === 0) {
       setDismissed(false);
+      setAcceptedRecoveryKeys(new Set());
     }
-  }, [items.length]);
+  }, [rawItems.length]);
 
-  const refreshTaskState = async () => {
-    await Promise.all([
+  const refreshTaskState = () => {
+    void Promise.all([
       queryClient.invalidateQueries({ queryKey: ["tasks"] }),
       queryClient.invalidateQueries({ queryKey: queryKeys.novels.all }),
     ]);
@@ -64,10 +74,15 @@ export default function TaskRecoveryDialog() {
 
   const resumeSingleMutation = useMutation({
     mutationFn: (input: { kind: RecoverableTaskSummary["kind"]; id: string }) => resumeRecoveryCandidate(input.kind, input.id),
-    onSuccess: async () => {
-      toast.success("任务已恢复运行。");
-      await refreshTaskState();
-      await recoveryQuery.refetch();
+    onSuccess: (_response, variables) => {
+      setAcceptedRecoveryKeys((previous) => {
+        const next = new Set(previous);
+        next.add(recoveryItemKey(variables));
+        return next;
+      });
+      toast.success("已开始恢复任务。");
+      refreshTaskState();
+      void recoveryQuery.refetch();
     },
     onError: (error) => {
       toast.error(error instanceof Error ? error.message : "恢复任务失败。");
@@ -76,11 +91,18 @@ export default function TaskRecoveryDialog() {
 
   const resumeAllMutation = useMutation({
     mutationFn: resumeAllRecoveryCandidates,
-    onSuccess: async (response) => {
+    onSuccess: (response) => {
       const resumedCount = response.data?.resumed.length ?? 0;
-      toast.success(resumedCount > 0 ? `已恢复 ${resumedCount} 个任务。` : "当前没有可恢复任务。");
-      await refreshTaskState();
-      await recoveryQuery.refetch();
+      setAcceptedRecoveryKeys((previous) => {
+        const next = new Set(previous);
+        for (const item of response.data?.resumed ?? []) {
+          next.add(recoveryItemKey(item));
+        }
+        return next;
+      });
+      toast.success(resumedCount > 0 ? `已开始恢复 ${resumedCount} 个任务。` : "当前没有可恢复任务。");
+      refreshTaskState();
+      void recoveryQuery.refetch();
     },
     onError: (error) => {
       toast.error(error instanceof Error ? error.message : "批量恢复任务失败。");

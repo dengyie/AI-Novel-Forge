@@ -28,11 +28,27 @@ test("observed resume phase does not treat placeholder legacy volumes as structu
 test("safe pipeline phase falls back to volume strategy when structured outline assets are incomplete", () => {
   const phase = resolveSafeDirectorPipelineStartPhase({
     requestedPhase: "structured_outline",
+    hasStoryMacroPlan: true,
+    hasBookContract: true,
+    hasCharacters: true,
     hasVolumeWorkspace: true,
     hasVolumeStrategyPlan: false,
   });
 
   assert.equal(phase, "volume_strategy");
+});
+
+test("safe pipeline phase does not let stale volume strategy skip missing book assets", () => {
+  const phase = resolveSafeDirectorPipelineStartPhase({
+    requestedPhase: "structured_outline",
+    hasStoryMacroPlan: false,
+    hasBookContract: false,
+    hasCharacters: true,
+    hasVolumeWorkspace: true,
+    hasVolumeStrategyPlan: true,
+  });
+
+  assert.equal(phase, "story_macro");
 });
 
 test("safe pipeline phase resumes book contract when story macro exists without contract", () => {

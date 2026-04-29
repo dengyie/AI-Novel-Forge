@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 
 const {
   buildDirectorArtifactId,
+  compactDirectorArtifactDependencies,
   normalizeDirectorArtifactTargets,
   reconcileDirectorArtifactLedger,
   stableDirectorContentHash,
@@ -120,6 +121,42 @@ test("director artifact targets normalize hashes and stable ids", () => {
   assert.equal(artifacts[0].contentHash.length, 64);
   assert.equal(artifacts[0].source, "user_edited");
   assert.equal(artifacts[0].protectedUserContent, true);
+});
+
+test("director artifact dependencies are compacted before snapshot persistence", () => {
+  const artifacts = normalizeDirectorArtifactTargets([
+    {
+      artifactType: "audit_report",
+      targetType: "chapter",
+      targetId: "chapter-1",
+      contentRef: { table: "AuditReport", id: "audit-1" },
+      dependsOn: [
+        { artifactId: " chapter_draft:chapter:chapter-1:Chapter:chapter-1 ", version: 1 },
+        { artifactId: "chapter_draft:chapter:chapter-1:Chapter:chapter-1", version: 3 },
+        { artifactId: "chapter_draft:chapter:chapter-1:Chapter:chapter-1", version: 2 },
+        { artifactId: "", version: 1 },
+      ],
+    },
+  ], "novel-1");
+
+  assert.deepEqual(artifacts[0].dependsOn, [{
+    artifactId: "chapter_draft:chapter:chapter-1:Chapter:chapter-1",
+    version: 3,
+  }]);
+});
+
+test("director artifact dependency helper deduplicates mixed dependency inputs", () => {
+  const dependencies = compactDirectorArtifactDependencies([
+    "story_macro:novel:novel-1:StoryMacroPlan:macro-1",
+    { artifactId: "story_macro:novel:novel-1:StoryMacroPlan:macro-1", version: 4 },
+    { artifactId: " story_macro:novel:novel-1:StoryMacroPlan:macro-1 ", version: 2 },
+    null,
+  ]);
+
+  assert.deepEqual(dependencies, [{
+    artifactId: "story_macro:novel:novel-1:StoryMacroPlan:macro-1",
+    version: 4,
+  }]);
 });
 
 test("director artifact ledger summary exposes missing, stale and protected content", () => {

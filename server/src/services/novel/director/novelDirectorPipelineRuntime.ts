@@ -129,13 +129,17 @@ export class NovelDirectorPipelineRuntime {
 
   private async runVolumeAndOutline(input: DirectorPipelineRunInput): Promise<void> {
     const volumeStrategyModule = getDirectorPlanningStepModule("volume_strategy");
-    const volumeWorkspace = await this.deps.runtimeOrchestrator.runStepModule({
+    const volumeStepOutput = await this.deps.runtimeOrchestrator.runStepModule({
       module: volumeStrategyModule,
       taskId: input.taskId,
       novelId: input.novelId,
       targetId: input.novelId,
       runner: () => this.runVolumeStrategyPhase(input.taskId, input.novelId, input.input),
-    }) ?? await this.loadVolumeWorkspaceForOutline(input.novelId);
+    });
+    if (volumeStepOutput === null) {
+      return;
+    }
+    const volumeWorkspace = volumeStepOutput ?? await this.loadVolumeWorkspaceForOutline(input.novelId);
     if (!volumeWorkspace) {
       return;
     }
@@ -219,7 +223,12 @@ export class NovelDirectorPipelineRuntime {
     ]);
     return resolveSafeDirectorPipelineStartPhase({
       requestedPhase: input.requestedPhase,
-      hasStoryMacroPlan: Boolean(storyMacroPlan),
+      hasStoryMacroPlan: Boolean(
+        storyMacroPlan
+        && typeof storyMacroPlan.storyInput === "string"
+        && storyMacroPlan.storyInput.trim()
+        && storyMacroPlan.decomposition,
+      ),
       hasBookContract: Boolean(bookContract),
       hasCharacters: characters.length > 0,
       hasVolumeWorkspace: Boolean(workspace?.volumes.length),

@@ -70,6 +70,12 @@ function isoFromDate(value: Date | string | null | undefined): string | null {
   return value instanceof Date ? value.toISOString() : value;
 }
 
+function isPrismaUniqueConstraintError(error: unknown): boolean {
+  return typeof error === "object"
+    && error !== null
+    && (error as { code?: unknown }).code === "P2002";
+}
+
 function normalizeRuntimeSnapshot(input: {
   taskId: string;
   novelId?: string | null;
@@ -770,53 +776,62 @@ export class DirectorRuntimeStore {
             ...artifact,
             runId: artifact.runId ?? snapshot.runId,
           });
-          await prisma.directorArtifact.upsert({
-            where: { id: normalized.id },
-            create: {
-              id: normalized.id,
-              runId: normalized.runId ?? snapshot.runId,
-              novelId: normalized.novelId,
-              taskId: input.taskId,
-              artifactType: normalized.artifactType,
-              targetType: normalized.targetType,
-              targetId: normalized.targetId ?? null,
-              version: normalized.version,
-              status: normalized.status,
-              source: normalized.source,
-              contentTable: normalized.contentRef.table,
-              contentId: normalized.contentRef.id,
-              contentHash: normalized.contentHash ?? null,
-              schemaVersion: normalized.schemaVersion,
-              promptAssetKey: normalized.promptAssetKey ?? null,
-              promptVersion: normalized.promptVersion ?? null,
-              modelRoute: normalized.modelRoute ?? null,
-              sourceStepRunId: normalized.sourceStepRunId ?? null,
-              protectedUserContent: normalized.protectedUserContent ?? null,
-              artifactUpdatedAt: dateFromIso(normalized.updatedAt),
-            },
-            update: {
-              runId: normalized.runId ?? snapshot.runId,
-              taskId: input.taskId,
-              version: normalized.version,
-              status: normalized.status,
-              source: normalized.source,
-              contentHash: normalized.contentHash ?? null,
-              schemaVersion: normalized.schemaVersion,
-              promptAssetKey: normalized.promptAssetKey ?? null,
-              promptVersion: normalized.promptVersion ?? null,
-              modelRoute: normalized.modelRoute ?? null,
-              sourceStepRunId: normalized.sourceStepRunId ?? null,
-              protectedUserContent: normalized.protectedUserContent ?? null,
-              artifactUpdatedAt: dateFromIso(normalized.updatedAt),
-            },
-          });
+          const create = {
+            id: normalized.id,
+            runId: normalized.runId ?? snapshot.runId,
+            novelId: normalized.novelId,
+            taskId: input.taskId,
+            artifactType: normalized.artifactType,
+            targetType: normalized.targetType,
+            targetId: normalized.targetId ?? null,
+            version: normalized.version,
+            status: normalized.status,
+            source: normalized.source,
+            contentTable: normalized.contentRef.table,
+            contentId: normalized.contentRef.id,
+            contentHash: normalized.contentHash ?? null,
+            schemaVersion: normalized.schemaVersion,
+            promptAssetKey: normalized.promptAssetKey ?? null,
+            promptVersion: normalized.promptVersion ?? null,
+            modelRoute: normalized.modelRoute ?? null,
+            sourceStepRunId: normalized.sourceStepRunId ?? null,
+            protectedUserContent: normalized.protectedUserContent ?? null,
+            artifactUpdatedAt: dateFromIso(normalized.updatedAt),
+          };
+          const update = {
+            runId: normalized.runId ?? snapshot.runId,
+            taskId: input.taskId,
+            version: normalized.version,
+            status: normalized.status,
+            source: normalized.source,
+            contentHash: normalized.contentHash ?? null,
+            schemaVersion: normalized.schemaVersion,
+            promptAssetKey: normalized.promptAssetKey ?? null,
+            promptVersion: normalized.promptVersion ?? null,
+            modelRoute: normalized.modelRoute ?? null,
+            sourceStepRunId: normalized.sourceStepRunId ?? null,
+            protectedUserContent: normalized.protectedUserContent ?? null,
+            artifactUpdatedAt: dateFromIso(normalized.updatedAt),
+          };
+          try {
+            await prisma.directorArtifact.upsert({
+              where: { id: normalized.id },
+              create,
+              update,
+            });
+          } catch (error) {
+            if (!isPrismaUniqueConstraintError(error)) {
+              throw error;
+            }
+            await prisma.directorArtifact.update({
+              where: { id: normalized.id },
+              data: update,
+            });
+          }
         }
 
         for (const artifact of snapshot.artifacts) {
           const normalized = normalizeDirectorArtifactRef(artifact);
-          await prisma.directorArtifactDependency.deleteMany({
-            where: { artifactId: normalized.id },
-          });
           const dependencyMap = new Map<string, NonNullable<typeof normalized.dependsOn>[number]>();
           for (const dependency of normalized.dependsOn ?? []) {
             if (!artifactIds.has(dependency.artifactId)) {
@@ -825,23 +840,49 @@ export class DirectorRuntimeStore {
             dependencyMap.set(dependency.artifactId, dependency);
           }
           const dependencies = [...dependencyMap.values()];
-          for (const dependency of dependencies) {
-            await prisma.directorArtifactDependency.upsert({
+          if (dependencies.length > 0) {
+            await prisma.directorArtifactDependency.deleteMany({
               where: {
-                artifactId_dependsOnArtifactId: {
-                  artifactId: normalized.id,
-                  dependsOnArtifactId: dependency.artifactId,
+                artifactId: normalized.id,
+                dependsOnArtifactId: {
+                  notIn: dependencies.map((dependency) => dependency.artifactId),
                 },
               },
-              create: {
+            });
+          } else {
+            await prisma.directorArtifactDependency.deleteMany({
+              where: { artifactId: normalized.id },
+            });
+          }
+          for (const dependency of dependencies) {
+            const where = {
+              artifactId_dependsOnArtifactId: {
                 artifactId: normalized.id,
                 dependsOnArtifactId: dependency.artifactId,
-                dependsOnVersion: dependency.version ?? null,
               },
-              update: {
-                dependsOnVersion: dependency.version ?? null,
-              },
-            });
+            };
+            const data = {
+              dependsOnVersion: dependency.version ?? null,
+            };
+            try {
+              await prisma.directorArtifactDependency.upsert({
+                where,
+                create: {
+                  artifactId: normalized.id,
+                  dependsOnArtifactId: dependency.artifactId,
+                  ...data,
+                },
+                update: data,
+              });
+            } catch (error) {
+              if (!isPrismaUniqueConstraintError(error)) {
+                throw error;
+              }
+              await prisma.directorArtifactDependency.update({
+                where,
+                data,
+              });
+            }
           }
         }
       },

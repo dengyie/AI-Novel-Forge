@@ -292,3 +292,130 @@ test("director runtime store deduplicates repeated artifact dependencies before 
     prisma.directorArtifact.upsert = originals.artifactUpsert;
   }
 });
+
+test("director runtime store tolerates duplicate artifact ledger recovery writes", async () => {
+  const store = new DirectorRuntimeStore();
+  const artifactUpdates = [];
+  const dependencyDeleteCalls = [];
+  const dependencyUpdates = [];
+  let artifactUpsertCalls = 0;
+  let dependencyUpsertCalls = 0;
+  const originals = {
+    workflowFindUnique: prisma.novelWorkflowTask.findUnique,
+    workflowUpdate: prisma.novelWorkflowTask.update,
+    runUpsert: prisma.directorRun.upsert,
+    dependencyDeleteMany: prisma.directorArtifactDependency.deleteMany,
+    dependencyUpsert: prisma.directorArtifactDependency.upsert,
+    dependencyUpdate: prisma.directorArtifactDependency.update,
+    artifactUpsert: prisma.directorArtifact.upsert,
+    artifactUpdate: prisma.directorArtifact.update,
+  };
+
+  prisma.novelWorkflowTask.findUnique = async () => ({
+    id: "task-1",
+    novelId: "novel-1",
+    seedPayloadJson: JSON.stringify({ novelId: "novel-1" }),
+  });
+  prisma.novelWorkflowTask.update = async () => ({});
+  prisma.directorRun.upsert = async () => ({});
+  prisma.directorArtifact.upsert = async ({ create }) => {
+    artifactUpsertCalls += 1;
+    if (create.id === "story_macro:novel:novel-1:StoryMacroPlan:macro-1") {
+      throw { code: "P2002" };
+    }
+    return {};
+  };
+  prisma.directorArtifact.update = async ({ where, data }) => {
+    artifactUpdates.push([where.id, data.version]);
+    return {};
+  };
+  prisma.directorArtifactDependency.deleteMany = async ({ where }) => {
+    dependencyDeleteCalls.push(where);
+    return { count: 0 };
+  };
+  prisma.directorArtifactDependency.upsert = async ({ create }) => {
+    dependencyUpsertCalls += 1;
+    if (create.artifactId === "volume_strategy:novel:novel-1:VolumePlan:volume-1") {
+      throw { code: "P2002" };
+    }
+    return {};
+  };
+  prisma.directorArtifactDependency.update = async ({ where, data }) => {
+    dependencyUpdates.push([
+      where.artifactId_dependsOnArtifactId.artifactId,
+      where.artifactId_dependsOnArtifactId.dependsOnArtifactId,
+      data.dependsOnVersion,
+    ]);
+    return {};
+  };
+
+  try {
+    await store.mutateSnapshot("task-1", (snapshot) => ({
+      ...snapshot,
+      runId: "task-1",
+      novelId: "novel-1",
+      artifacts: [
+        {
+          id: "story_macro:novel:novel-1:StoryMacroPlan:macro-1",
+          novelId: "novel-1",
+          artifactType: "story_macro",
+          targetType: "novel",
+          targetId: "novel-1",
+          version: 1,
+          status: "active",
+          source: "ai_generated",
+          contentRef: { table: "StoryMacroPlan", id: "macro-1" },
+          schemaVersion: "test",
+        },
+        {
+          id: "volume_strategy:novel:novel-1:VolumePlan:volume-1",
+          novelId: "novel-1",
+          artifactType: "volume_strategy",
+          targetType: "novel",
+          targetId: "novel-1",
+          version: 2,
+          status: "active",
+          source: "ai_generated",
+          contentRef: { table: "VolumePlan", id: "volume-1" },
+          schemaVersion: "test",
+          dependsOn: [{
+            artifactId: "story_macro:novel:novel-1:StoryMacroPlan:macro-1",
+            version: 1,
+          }],
+        },
+      ],
+    }));
+
+    assert.equal(artifactUpsertCalls, 2);
+    assert.deepEqual(artifactUpdates, [[
+      "story_macro:novel:novel-1:StoryMacroPlan:macro-1",
+      1,
+    ]]);
+    assert.equal(dependencyUpsertCalls, 1);
+    assert.deepEqual(dependencyUpdates, [[
+      "volume_strategy:novel:novel-1:VolumePlan:volume-1",
+      "story_macro:novel:novel-1:StoryMacroPlan:macro-1",
+      1,
+    ]]);
+    assert.deepEqual(
+      dependencyDeleteCalls.find((where) => (
+        where.artifactId === "volume_strategy:novel:novel-1:VolumePlan:volume-1"
+      )),
+      {
+        artifactId: "volume_strategy:novel:novel-1:VolumePlan:volume-1",
+        dependsOnArtifactId: {
+          notIn: ["story_macro:novel:novel-1:StoryMacroPlan:macro-1"],
+        },
+      },
+    );
+  } finally {
+    prisma.novelWorkflowTask.findUnique = originals.workflowFindUnique;
+    prisma.novelWorkflowTask.update = originals.workflowUpdate;
+    prisma.directorRun.upsert = originals.runUpsert;
+    prisma.directorArtifactDependency.deleteMany = originals.dependencyDeleteMany;
+    prisma.directorArtifactDependency.upsert = originals.dependencyUpsert;
+    prisma.directorArtifactDependency.update = originals.dependencyUpdate;
+    prisma.directorArtifact.upsert = originals.artifactUpsert;
+    prisma.directorArtifact.update = originals.artifactUpdate;
+  }
+});
