@@ -199,6 +199,7 @@ export class NovelDirectorContinueRuntime {
       || input?.continuationMode === "auto_execute_front10"
     );
     const approveCurrentGate = input?.continuationMode === "resume";
+    const approveAutoExecutionGate = approveCurrentGate || requestedAutoExecutionContinue;
     if (
       assetFirstRecovery?.type === "auto_execution"
       || shouldResumeStoredBatchCheckpoint
@@ -249,7 +250,7 @@ export class NovelDirectorContinueRuntime {
           resumeCheckpointType,
           previousFailureMessage: row.lastError ?? null,
           allowSkipReviewBlockedChapter: canSkipReviewBlockedChapter,
-          approveCurrentGate,
+          approveCurrentGate: approveAutoExecutionGate,
         });
       });
       return;

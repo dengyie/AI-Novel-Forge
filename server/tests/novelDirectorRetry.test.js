@@ -53,9 +53,10 @@ function buildDirectorInput(overrides = {}) {
   };
 }
 
-function stubDirectorRuntimeNode(service) {
+function stubDirectorRuntimeNode(service, onRunNode) {
   const originalRunNode = service.directorRuntime.runNode;
-  service.directorRuntime.runNode = async (contract, _input, collectArtifacts) => {
+  service.directorRuntime.runNode = async (contract, input, collectArtifacts) => {
+    onRunNode?.(contract, input);
     const output = await contract.run();
     return {
       status: "completed",
@@ -685,11 +686,15 @@ test("continueTask upgrades an explicit auto-execution continuation to execution
   const originalMarkTaskRunning = service.workflowService.markTaskRunning;
   const originalScheduleBackgroundRun = service.scheduleBackgroundRun;
   const originalRunFromReady = service.autoExecutionRuntime.runFromReady;
+  const originalGetSnapshot = service.directorRuntime.getSnapshot;
   const recoveryInputs = [];
   const runningCalls = [];
   const scheduledRuns = [];
   const runtimeCalls = [];
-  const restoreDirectorRunNode = stubDirectorRuntimeNode(service);
+  const runtimeNodeInputs = [];
+  const restoreDirectorRunNode = stubDirectorRuntimeNode(service, (contract, input) => {
+    runtimeNodeInputs.push({ nodeKey: contract.nodeKey, input });
+  });
 
   service.continueCandidateStageTask = async () => false;
   service.resolveAssetFirstRecovery = async (input) => {
@@ -748,6 +753,18 @@ test("continueTask upgrades an explicit auto-execution continuation to execution
   service.scheduleBackgroundRun = (taskId, runner) => {
     scheduledRuns.push({ taskId, runner });
   };
+  service.directorRuntime.getSnapshot = async () => ({
+    policy: { mode: "run_until_gate" },
+    steps: [
+      {
+        status: "waiting_approval",
+        nodeKey: "chapter_execution_node",
+        targetType: "novel",
+        targetId: "novel_front10_execution_continue",
+      },
+    ],
+    artifacts: [],
+  });
   service.autoExecutionRuntime.runFromReady = async (input) => {
     runtimeCalls.push(input);
   };
@@ -769,6 +786,8 @@ test("continueTask upgrades an explicit auto-execution continuation to execution
     assert.equal(runtimeCalls.length, 1);
     assert.equal(runtimeCalls[0].request.runMode, "auto_to_execution");
     assert.equal(runtimeCalls[0].resumeCheckpointType, "front10_ready");
+    assert.equal(runtimeNodeInputs[0]?.nodeKey, "chapter_execution_node");
+    assert.equal(runtimeNodeInputs[0]?.input?.policy?.policy?.mode, "auto_safe_scope");
   } finally {
     service.continueCandidateStageTask = originalContinueCandidateStageTask;
     service.workflowService.getTaskById = originalGetTaskById;
@@ -776,6 +795,7 @@ test("continueTask upgrades an explicit auto-execution continuation to execution
     service.workflowService.markTaskRunning = originalMarkTaskRunning;
     service.scheduleBackgroundRun = originalScheduleBackgroundRun;
     service.autoExecutionRuntime.runFromReady = originalRunFromReady;
+    service.directorRuntime.getSnapshot = originalGetSnapshot;
     restoreDirectorRunNode();
   }
 });
