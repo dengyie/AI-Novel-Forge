@@ -33,6 +33,12 @@ function isPrismaUniqueConstraintError(error: unknown): boolean {
     && (error as { code?: unknown }).code === "P2002";
 }
 
+function isPrismaForeignKeyConstraintError(error: unknown): boolean {
+  return typeof error === "object"
+    && error !== null
+    && (error as { code?: unknown }).code === "P2003";
+}
+
 function sameJson(left: unknown, right: unknown): boolean {
   return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
 }
@@ -314,6 +320,9 @@ export async function persistDirectorRuntimeSnapshot(input: {
               update: data,
             });
           } catch (error) {
+            if (isPrismaForeignKeyConstraintError(error)) {
+              continue;
+            }
             if (!isPrismaUniqueConstraintError(error)) {
               throw error;
             }

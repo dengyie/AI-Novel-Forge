@@ -109,6 +109,7 @@ export interface DirectorRecoverySampleTaskDiagnosis {
   priority: "high" | "medium" | "low";
   evidence: string;
   nextAction: string;
+  supersededByTaskId?: string | null;
   updatedAt: string | null;
 }
 
@@ -263,10 +264,48 @@ function hasErrorText(task: DirectorRecoverySampleTask, pattern: RegExp): boolea
   return Boolean(task.lastError && pattern.test(task.lastError));
 }
 
+function timeValue(value: string | null): number {
+  if (!value) {
+    return 0;
+  }
+  const time = new Date(value).getTime();
+  return Number.isFinite(time) ? time : 0;
+}
+
+function canSupersedeRecoveryTask(task: DirectorRecoverySampleTask): boolean {
+  if (task.pendingManualRecovery) {
+    return false;
+  }
+  return task.status === "queued"
+    || task.status === "running"
+    || task.status === "waiting_approval"
+    || task.status === "succeeded";
+}
+
+function isSupersedableRecoveryTask(task: DirectorRecoverySampleTask): boolean {
+  return task.status === "failed" || task.status === "cancelled" || task.pendingManualRecovery;
+}
+
 function diagnoseTask(
   task: DirectorRecoverySampleTask,
   contextlessTakeoverTaskIds: Set<string>,
+  supersedingTasks: Map<string, DirectorRecoverySampleTask>,
 ): DirectorRecoverySampleTaskDiagnosis | null {
+  const supersedingTask = supersedingTasks.get(task.id);
+  if (supersedingTask && isSupersedableRecoveryTask(task)) {
+    return {
+      taskId: task.id,
+      novelId: task.novelId,
+      status: task.status,
+      code: "superseded_by_newer_auto_director_task",
+      category: "historical_compatibility",
+      priority: "low",
+      evidence: `newer ${supersedingTask.status} task ${supersedingTask.id} exists for the same novel`,
+      nextAction: "follow the newer auto director task before rerunning this historical task",
+      supersededByTaskId: supersedingTask.id,
+      updatedAt: task.updatedAt,
+    };
+  }
   if (contextlessTakeoverTaskIds.has(task.id)) {
     return {
       taskId: task.id,
@@ -376,8 +415,29 @@ export function buildDirectorRecoverySampleAudit(
       .map((task) => task.id),
   );
   const contextlessTakeoverRecoveryTasks = tasks.filter((task) => contextlessTakeoverTaskIds.has(task.id));
+  const supersedingTasks = new Map<string, DirectorRecoverySampleTask>();
+  const tasksByNovelId = new Map<string, DirectorRecoverySampleTask[]>();
+  for (const task of tasks) {
+    if (!task.novelId) {
+      continue;
+    }
+    tasksByNovelId.set(task.novelId, [...(tasksByNovelId.get(task.novelId) ?? []), task]);
+  }
+  for (const task of tasks) {
+    if (!task.novelId || !isSupersedableRecoveryTask(task)) {
+      continue;
+    }
+    const newerTask = (tasksByNovelId.get(task.novelId) ?? [])
+      .filter((candidate) => candidate.id !== task.id)
+      .filter(canSupersedeRecoveryTask)
+      .filter((candidate) => timeValue(candidate.updatedAt) > timeValue(task.updatedAt))
+      .sort((left, right) => timeValue(right.updatedAt) - timeValue(left.updatedAt))[0];
+    if (newerTask) {
+      supersedingTasks.set(task.id, newerTask);
+    }
+  }
   const taskDiagnostics = tasks
-    .map((task) => diagnoseTask(task, contextlessTakeoverTaskIds))
+    .map((task) => diagnoseTask(task, contextlessTakeoverTaskIds, supersedingTasks))
     .filter((diagnosis): diagnosis is DirectorRecoverySampleTaskDiagnosis => Boolean(diagnosis))
     .sort((left, right) => {
       const priorityRank = { high: 0, medium: 1, low: 2 };

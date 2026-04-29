@@ -45,7 +45,7 @@ test("director recovery sample audit classifies real-data recovery fixtures", ()
       },
       {
         id: "task-fk",
-        novelId: "novel-2",
+        novelId: "novel-4",
         status: "failed",
         pendingManualRecovery: true,
         currentStage: "chapter_sync",
@@ -58,6 +58,22 @@ test("director recovery sample audit classifies real-data recovery fixtures", ()
         resumeTargetJson: JSON.stringify({ stage: "structured" }),
         lastError: "Invalid `prisma.directorArtifactDependency.upsert()` invocation Foreign key constraint violated",
         updatedAt: "2026-04-29T00:07:00.000Z",
+      },
+      {
+        id: "task-old-fk",
+        novelId: "novel-2",
+        status: "failed",
+        pendingManualRecovery: true,
+        currentStage: "chapter_sync",
+        currentItemKey: "chapter_sync",
+        currentItemLabel: "old sync failed",
+        seedPayloadJson: JSON.stringify({
+          directorInput: { runMode: "auto_to_ready" },
+          directorSession: { phase: "structured_outline" },
+        }),
+        resumeTargetJson: JSON.stringify({ stage: "structured" }),
+        lastError: "Invalid `prisma.directorArtifactDependency.upsert()` invocation Foreign key constraint violated",
+        updatedAt: "2026-04-29T00:00:30.000Z",
       },
       {
         id: "task-timeout",
@@ -152,13 +168,13 @@ test("director recovery sample audit classifies real-data recovery fixtures", ()
     ],
   });
 
-  assert.equal(audit.counts.autoDirectorTasks, 4);
+  assert.equal(audit.counts.autoDirectorTasks, 5);
   assert.equal(audit.counts.takeoverCommands, 1);
-  assert.equal(audit.counts.recoveryTasks, 3);
+  assert.equal(audit.counts.recoveryTasks, 4);
   assert.equal(audit.counts.chapterBatchTasks, 1);
   assert.equal(audit.counts.waitingTasks, 1);
   assert.equal(audit.counts.contextlessTakeoverRecoveryTasks, 1);
-  assert.equal(audit.counts.diagnosedTasks, 4);
+  assert.equal(audit.counts.diagnosedTasks, 5);
   assert.equal(audit.counts.manualEditCandidates, 1);
   assert.equal(audit.counts.manualEditHashChanged, 1);
   assert.equal(audit.counts.draftBaselineArtifacts, 1);
@@ -173,11 +189,16 @@ test("director recovery sample audit classifies real-data recovery fixtures", ()
       "contextless_takeover_recovery",
       "llm_transport_failure",
       "manual_approval_gate",
+      "superseded_by_newer_auto_director_task",
     ],
   );
   assert.equal(
     audit.samples.taskDiagnostics.find((diagnosis) => diagnosis.taskId === "task-fk").category,
     "historical_compatibility",
+  );
+  assert.equal(
+    audit.samples.taskDiagnostics.find((diagnosis) => diagnosis.taskId === "task-old-fk").supersededByTaskId,
+    "task-front10",
   );
   assert.equal(audit.samples.manualEditCandidates[0].hashChanged, true);
   assert.equal(audit.samples.untrackedDraftChapters[0].chapterId, "chapter-2");
