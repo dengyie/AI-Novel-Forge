@@ -142,7 +142,8 @@ test("director runtime persistence writes deltas instead of replaying full snaps
   assert.match(persistenceSource, /buildDirectorRuntimePersistenceDelta/);
   assert.match(persistenceSource, /for \(const step of delta\.steps\)/);
   assert.match(persistenceSource, /for \(const event of delta\.events\)/);
-  assert.match(persistenceSource, /for \(const artifact of delta\.artifacts\)/);
+  assert.match(persistenceSource, /const normalizedArtifacts = delta\.artifacts\.map/);
+  assert.match(persistenceSource, /for \(const normalized of normalizedArtifacts\)/);
   assert.doesNotMatch(
     persistenceSource,
     /for \(const step of snapshot\.steps\)/,

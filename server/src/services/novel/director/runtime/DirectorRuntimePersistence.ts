@@ -193,12 +193,12 @@ export async function persistDirectorRuntimeSnapshot(input: {
         });
       }
 
-      const artifactIds = new Set(snapshot.artifacts.map((artifact) => artifact.id));
-      for (const artifact of delta.artifacts) {
-        const normalized = normalizeDirectorArtifactRef({
-          ...artifact,
-          runId: artifact.runId ?? snapshot.runId,
-        });
+      const snapshotArtifactIds = new Set(snapshot.artifacts.map((artifact) => artifact.id));
+      const normalizedArtifacts = delta.artifacts.map((artifact) => normalizeDirectorArtifactRef({
+        ...artifact,
+        runId: artifact.runId ?? snapshot.runId,
+      }));
+      for (const normalized of normalizedArtifacts) {
         const create = {
           id: normalized.id,
           runId: normalized.runId ?? snapshot.runId,
@@ -251,10 +251,29 @@ export async function persistDirectorRuntimeSnapshot(input: {
             data: update,
           });
         }
+      }
 
+      const referencedArtifactIds = Array.from(new Set(
+        normalizedArtifacts.flatMap((artifact) => (
+          artifact.dependsOn ?? []
+        ).map((dependency) => dependency.artifactId))
+          .filter((artifactId) => snapshotArtifactIds.has(artifactId)),
+      ));
+      const existingReferencedArtifactIds = referencedArtifactIds.length > 0
+        ? new Set((await prisma.directorArtifact.findMany({
+          where: { id: { in: referencedArtifactIds } },
+          select: { id: true },
+        })).map((artifact) => artifact.id))
+        : new Set<string>();
+      const persistedArtifactIds = new Set([
+        ...normalizedArtifacts.map((artifact) => artifact.id),
+        ...existingReferencedArtifactIds,
+      ]);
+
+      for (const normalized of normalizedArtifacts) {
         const dependencyMap = new Map<string, NonNullable<typeof normalized.dependsOn>[number]>();
         for (const dependency of normalized.dependsOn ?? []) {
-          if (!artifactIds.has(dependency.artifactId)) {
+          if (!persistedArtifactIds.has(dependency.artifactId)) {
             continue;
           }
           dependencyMap.set(dependency.artifactId, dependency);
