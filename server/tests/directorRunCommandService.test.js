@@ -119,7 +119,12 @@ function createHarness(task = createTask()) {
     if (where?.leaseExpiresAt?.lt) {
       rows = rows.filter((row) => row.leaseExpiresAt && row.leaseExpiresAt < where.leaseExpiresAt.lt);
     }
-    return rows.map((row) => ({ id: row.id, taskId: row.taskId }));
+    return rows.map((row) => ({
+      id: row.id,
+      taskId: row.taskId,
+      commandType: row.commandType,
+      attempt: row.attempt,
+    }));
   };
   prisma.directorRunCommand.updateMany = async ({ where, data }) => {
     let count = 0;
@@ -161,8 +166,13 @@ function createHarness(task = createTask()) {
   };
   prisma.novelWorkflowTask.updateMany = async (args) => {
     taskUpdates.push(args);
-    if (args?.where?.id && args.where.id !== task.id) {
-      return { count: 0 };
+    if (args?.where?.id) {
+      if (typeof args.where.id === "string" && args.where.id !== task.id) {
+        return { count: 0 };
+      }
+      if (Array.isArray(args.where.id.in) && !args.where.id.in.includes(task.id)) {
+        return { count: 0 };
+      }
     }
     Object.assign(task, args?.data ?? {});
     task.updatedAt = new Date(task.updatedAt.getTime() + 1);
@@ -313,22 +323,55 @@ test("director command service leases a queued command once", async () => {
   }
 });
 
-test("director command service marks expired leases stale and requeues task recovery", async () => {
+test("director command service auto requeues first stale continue lease", async () => {
+  const harness = createHarness(createTask({
+    status: "running",
+    pendingManualRecovery: false,
+    lastError: null,
+  }));
+  try {
+    await harness.service.enqueueContinueCommand("task-1");
+    harness.commands[0].status = "running";
+    harness.commands[0].leaseOwner = "worker-a";
+    harness.commands[0].attempt = 1;
+    harness.commands[0].leaseExpiresAt = new Date("2026-04-29T12:00:00.000Z");
+    const count = await harness.service.recoverStaleLeases(new Date("2026-04-29T12:01:00.000Z"));
+    assert.equal(count, 1);
+    assert.equal(harness.commands[0].status, "queued");
+    assert.equal(harness.commands[0].leaseOwner, null);
+    assert.equal(harness.commands[0].leaseExpiresAt, null);
+    assert.equal(harness.commands[0].startedAt, null);
+    assert.equal(harness.commands[0].finishedAt, null);
+    assert.equal(harness.commands[0].errorMessage, "\u540e\u53f0\u6267\u884c\u4e2d\u65ad\uff0c\u7cfb\u7edf\u5df2\u81ea\u52a8\u4ece\u6700\u8fd1\u8fdb\u5ea6\u7ee7\u7eed\u3002");
+    assert.equal(harness.requeued.length, 0);
+    assert.equal(harness.stepUpdates.length, 0);
+    assert.equal(harness.task.status, "queued");
+    assert.equal(harness.task.pendingManualRecovery, false);
+    assert.equal(harness.task.lastError, null);
+  } finally {
+    harness.restore();
+  }
+});
+
+test("director command service marks exhausted expired leases stale and requeues task recovery", async () => {
   const harness = createHarness();
   try {
     await harness.service.enqueueContinueCommand("task-1");
     harness.commands[0].status = "running";
     harness.commands[0].leaseOwner = "worker-a";
+    harness.commands[0].attempt = 2;
     harness.commands[0].leaseExpiresAt = new Date("2026-04-29T12:00:00.000Z");
     const count = await harness.service.recoverStaleLeases(new Date("2026-04-29T12:01:00.000Z"));
     assert.equal(count, 1);
     assert.equal(harness.commands[0].status, "stale");
     assert.equal(harness.requeued.length, 1);
     assert.equal(harness.requeued[0].taskId, "task-1");
+    assert.match(harness.requeued[0].message, /\u70b9\u51fb\u6062\u590d/);
     assert.equal(harness.stepUpdates.length, 1);
     assert.equal(harness.stepUpdates[0].where.taskId, "task-1");
     assert.equal(harness.stepUpdates[0].where.status, "running");
     assert.equal(harness.stepUpdates[0].data.status, "failed");
+    assert.match(harness.stepUpdates[0].data.error, /\u79df\u7ea6\u8fc7\u671f/);
   } finally {
     harness.restore();
   }

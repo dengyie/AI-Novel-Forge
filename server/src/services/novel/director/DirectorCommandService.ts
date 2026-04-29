@@ -22,8 +22,6 @@ const EXECUTION_COMMAND_TYPES: DirectorRunCommandType[] = [
   "takeover",
   "repair_chapter_titles",
 ];
-const STALE_COMMAND_RECOVERY_MESSAGE = "Director Worker 租约过期，任务等待手动恢复。";
-
 export interface DirectorCommandPayload {
   continuationMode?: DirectorContinuationMode;
   batchAlreadyStartedCount?: number;
@@ -83,6 +81,28 @@ function parsePayload(payloadJson: string | null): DirectorCommandPayload {
   } catch {
     return {};
   }
+}
+
+const DEFAULT_STALE_AUTO_RECOVERY_MAX_ATTEMPTS = 2;
+const STALE_COMMAND_AUTO_RECOVERY_MESSAGE = "后台执行中断，系统已自动从最近进度继续。";
+const STALE_COMMAND_MANUAL_RECOVERY_MESSAGE = "后台执行中断，任务已暂停。点击恢复后会从最近进度继续。";
+const STALE_COMMAND_INTERNAL_MESSAGE = "Director Worker 租约过期，任务等待恢复。";
+
+function resolveNumberEnv(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+}
+
+function isAutoRecoverableStaleCommand(command: {
+  commandType: string;
+  attempt: number;
+}): boolean {
+  const maxAttempts = resolveNumberEnv(
+    "DIRECTOR_WORKER_STALE_AUTO_RECOVERY_MAX_ATTEMPTS",
+    DEFAULT_STALE_AUTO_RECOVERY_MAX_ATTEMPTS,
+  );
+  return command.attempt < maxAttempts
+    && (command.commandType === "continue" || command.commandType === "resume_from_checkpoint");
 }
 
 export class DirectorCommandService {
@@ -229,22 +249,60 @@ export class DirectorCommandService {
         status: { in: ["leased", "running"] },
         leaseExpiresAt: { lt: now },
       },
-      select: { id: true, taskId: true },
+      select: {
+        id: true,
+        taskId: true,
+        commandType: true,
+        attempt: true,
+      },
     });
     if (staleCommands.length === 0) {
       return 0;
     }
-    const staleIds = staleCommands.map((command) => command.id);
+    const autoRecoverableCommands = staleCommands.filter(isAutoRecoverableStaleCommand);
+    const manualRecoveryCommands = staleCommands.filter((command) => !isAutoRecoverableStaleCommand(command));
+
+    if (autoRecoverableCommands.length > 0) {
+      const autoRecoverableIds = autoRecoverableCommands.map((command) => command.id);
+      await prisma.directorRunCommand.updateMany({
+        where: { id: { in: autoRecoverableIds } },
+        data: {
+          status: "queued",
+          leaseOwner: null,
+          leaseExpiresAt: null,
+          runAfter: now,
+          startedAt: null,
+          finishedAt: null,
+          errorMessage: STALE_COMMAND_AUTO_RECOVERY_MESSAGE,
+        },
+      });
+      const autoRecoverableTaskIds = Array.from(new Set(autoRecoverableCommands.map((command) => command.taskId)));
+      await prisma.novelWorkflowTask.updateMany({
+        where: { id: { in: autoRecoverableTaskIds } },
+        data: {
+          status: "queued",
+          pendingManualRecovery: false,
+          lastError: null,
+          heartbeatAt: now,
+          finishedAt: null,
+        },
+      }).catch(() => null);
+    }
+
+    if (manualRecoveryCommands.length === 0) {
+      return staleCommands.length;
+    }
+    const manualRecoveryIds = manualRecoveryCommands.map((command) => command.id);
     await prisma.directorRunCommand.updateMany({
-      where: { id: { in: staleIds } },
+      where: { id: { in: manualRecoveryIds } },
       data: {
         status: "stale",
         finishedAt: now,
-        errorMessage: STALE_COMMAND_RECOVERY_MESSAGE,
+        errorMessage: STALE_COMMAND_INTERNAL_MESSAGE,
       },
     });
-    const taskIds = Array.from(new Set(staleCommands.map((command) => command.taskId)));
-    for (const taskId of taskIds) {
+    const manualRecoveryTaskIds = Array.from(new Set(manualRecoveryCommands.map((command) => command.taskId)));
+    for (const taskId of manualRecoveryTaskIds) {
       await prisma.directorStepRun.updateMany({
         where: {
           taskId,
@@ -253,10 +311,10 @@ export class DirectorCommandService {
         data: {
           status: "failed",
           finishedAt: now,
-          error: STALE_COMMAND_RECOVERY_MESSAGE,
+          error: STALE_COMMAND_INTERNAL_MESSAGE,
         },
       }).catch(() => null);
-      await this.workflowService.requeueTaskForRecovery(taskId, "Director Worker 已中断，任务已暂停，等待手动恢复。")
+      await this.workflowService.requeueTaskForRecovery(taskId, STALE_COMMAND_MANUAL_RECOVERY_MESSAGE)
         .catch(() => null);
     }
     return staleCommands.length;
