@@ -609,6 +609,7 @@ export default function NovelEdit() {
       currentItemKey: activeAutoDirectorTask?.currentItemKey,
       checkpointType: activeAutoDirectorTask?.checkpointType,
       reviewScope: activeDirectorSession?.reviewScope ?? null,
+      status: activeAutoDirectorTask?.status,
     }),
     [
       activeAutoDirectorTask?.checkpointType,

@@ -332,8 +332,8 @@ test("runFromReady records a normal checkpoint when pipeline completes with qual
       async getTaskById() {
         return { status: "running" };
       },
-      async markTaskRunning() {
-        calls.push(["markTaskRunning"]);
+      async markTaskRunning(_taskId, input) {
+        calls.push(["markTaskRunning", input.clearCheckpoint ?? false]);
       },
       async recordCheckpoint(taskId, input) {
         calls.push([
@@ -357,6 +357,7 @@ test("runFromReady records a normal checkpoint when pipeline completes with qual
     taskId: "task-auto-exec",
     novelId: "novel-1",
     request: buildRequest(),
+    resumeCheckpointType: "front10_ready",
     existingState: {
       enabled: true,
       firstChapterId: "chapter-1",
@@ -370,7 +371,7 @@ test("runFromReady records a normal checkpoint when pipeline completes with qual
 
   assert.equal(calls.length, 7);
   assert.deepEqual(calls[0], ["bootstrapTask", "queued"]);
-  assert.deepEqual(calls[1], ["markTaskRunning"]);
+  assert.deepEqual(calls[1], ["markTaskRunning", true]);
   assert.deepEqual(calls[2], ["startPipelineJob"]);
   assert.deepEqual(calls[3], ["bootstrapTask", "queued"]);
   assert.deepEqual(calls[4], ["getPipelineJobById", "job-quality"]);

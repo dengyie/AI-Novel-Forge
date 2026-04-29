@@ -152,6 +152,7 @@ export default function NovelWorkspaceRail(props: NovelWorkspaceRailProps) {
       currentItemKey: activeTask?.currentItemKey,
       checkpointType: activeTask?.checkpointType,
       reviewScope,
+      status: activeTask?.status,
     }),
     [
       activeTask?.checkpointType,

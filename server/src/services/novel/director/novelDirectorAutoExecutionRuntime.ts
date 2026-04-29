@@ -137,6 +137,12 @@ function isNoChaptersToGenerateError(error: unknown): boolean {
   return error instanceof Error && error.message.includes("指定区间内没有可生成的章节");
 }
 
+function shouldClearAutoExecutionCheckpoint(checkpointType?: "front10_ready" | "chapter_batch_ready" | "replan_required" | null): boolean {
+  return checkpointType === "front10_ready"
+    || checkpointType === "chapter_batch_ready"
+    || checkpointType === "replan_required";
+}
+
 function resolveNextChapterExecutionOrder(
   range: DirectorAutoExecutionRange,
   autoExecution: DirectorAutoExecutionState,
@@ -327,7 +333,7 @@ export class NovelDirectorAutoExecutionRuntime {
           itemKey: "chapter_execution",
           itemLabel: `正在自动执行${buildDirectorAutoExecutionScopeLabelFromState(autoExecution, range.totalChapterCount)}`,
           progress: 0.93,
-          clearCheckpoint: input.resumeCheckpointType === "chapter_batch_ready",
+          clearCheckpoint: shouldClearAutoExecutionCheckpoint(input.resumeCheckpointType),
         });
         try {
           const job = await this.deps.novelService.startPipelineJob(
@@ -395,7 +401,7 @@ export class NovelDirectorAutoExecutionRuntime {
           const runningState = resolveDirectorAutoExecutionWorkflowState(job, range, autoExecution);
           await this.deps.workflowService.markTaskRunning(input.taskId, {
             ...runningState,
-            clearCheckpoint: input.resumeCheckpointType === "chapter_batch_ready" || input.resumeCheckpointType === "replan_required",
+            clearCheckpoint: shouldClearAutoExecutionCheckpoint(input.resumeCheckpointType),
           });
           ({ range, autoExecution } = await this.resolveRangeAndState({
             novelId: input.novelId,

@@ -113,13 +113,15 @@ export function tabFromDirectorProgress(input: {
   currentItemKey?: string | null;
   checkpointType?: string | null;
   reviewScope?: DirectorLockScope | null;
+  status?: string | null;
 }): NovelWorkspaceFlowTab | null {
   const reviewTab = tabFromScope(input.reviewScope);
   if (reviewTab) {
     return reviewTab;
   }
 
-  switch (input.checkpointType) {
+  const checkpointTab = (() => {
+    switch (input.checkpointType) {
     case "book_contract_ready":
       return "story_macro";
     case "character_setup_required":
@@ -133,9 +135,12 @@ export function tabFromDirectorProgress(input: {
       return "pipeline";
     default:
       break;
-  }
+    }
+    return null;
+  })();
 
-  switch (input.currentItemKey) {
+  const currentTab = (() => {
+    switch (input.currentItemKey) {
     case "novel_create":
     case "project_setup":
       return "basic";
@@ -162,7 +167,17 @@ export function tabFromDirectorProgress(input: {
       return "pipeline";
     default:
       break;
+    }
+    return tabFromWorkflowStageName(input.currentStage);
+  })();
+
+  const shouldPreferActiveCurrentTab = (input.status === "running" || input.status === "queued")
+    && checkpointTab
+    && currentTab
+    && getNovelWorkspaceFlowStepIndex(currentTab) > getNovelWorkspaceFlowStepIndex(checkpointTab);
+  if (shouldPreferActiveCurrentTab) {
+    return currentTab;
   }
 
-  return tabFromWorkflowStageName(input.currentStage);
+  return checkpointTab ?? currentTab;
 }
