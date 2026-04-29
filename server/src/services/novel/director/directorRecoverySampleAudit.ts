@@ -70,6 +70,7 @@ export interface DirectorRecoverySampleAuditInput {
   jobs: DirectorRecoverySampleJobRow[];
   artifacts: DirectorRecoverySampleArtifactRow[];
   chapters: DirectorRecoverySampleChapterRow[];
+  draftBaselineArtifacts?: DirectorRecoverySampleArtifactRow[];
   draftChapters?: DirectorRecoverySampleChapterRow[];
 }
 
@@ -101,6 +102,7 @@ export interface DirectorRecoverySampleAudit {
     protectedOrStaleArtifacts: number;
     manualEditCandidates: number;
     manualEditHashChanged: number;
+    draftBaselineArtifacts: number;
     untrackedDraftChapters: number;
     generationJobs: number;
   };
@@ -257,8 +259,9 @@ export function buildDirectorRecoverySampleAudit(
         updatedAt: iso(artifact.updatedAt),
       };
     });
+  const draftBaselineArtifacts = input.draftBaselineArtifacts ?? input.artifacts;
   const trackedDraftChapterIds = new Set(
-    input.artifacts
+    draftBaselineArtifacts
       .filter((artifact) => artifact.artifactType === "chapter_draft" && artifact.contentTable === "Chapter")
       .map((artifact) => artifact.contentId),
   );
@@ -283,6 +286,7 @@ export function buildDirectorRecoverySampleAudit(
       protectedOrStaleArtifacts: input.artifacts.length,
       manualEditCandidates: manualEditCandidates.length,
       manualEditHashChanged: manualEditCandidates.filter((candidate) => candidate.hashChanged).length,
+      draftBaselineArtifacts: draftBaselineArtifacts.length,
       untrackedDraftChapters: untrackedDraftChapters.length,
       generationJobs: input.jobs.length,
     },

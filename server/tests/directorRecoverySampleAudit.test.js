@@ -122,9 +122,60 @@ test("director recovery sample audit classifies real-data recovery fixtures", ()
   assert.equal(audit.counts.waitingTasks, 1);
   assert.equal(audit.counts.manualEditCandidates, 1);
   assert.equal(audit.counts.manualEditHashChanged, 1);
+  assert.equal(audit.counts.draftBaselineArtifacts, 1);
   assert.equal(audit.counts.untrackedDraftChapters, 1);
   assert.equal(audit.samples.recoveryTasks[0].id, "task-takeover-recovery");
   assert.equal(audit.samples.chapterBatchTasks[0].runMode, "auto_to_execution");
   assert.equal(audit.samples.manualEditCandidates[0].hashChanged, true);
+  assert.equal(audit.samples.untrackedDraftChapters[0].chapterId, "chapter-2");
+});
+
+test("director recovery sample audit checks draft baselines separately from protected artifacts", () => {
+  const audit = buildDirectorRecoverySampleAudit({
+    tasks: [],
+    commands: [],
+    jobs: [],
+    artifacts: [],
+    chapters: [],
+    draftBaselineArtifacts: [
+      {
+        id: "chapter_draft:chapter:chapter-1:Chapter:chapter-1",
+        novelId: "novel-2",
+        artifactType: "chapter_draft",
+        targetType: "chapter",
+        targetId: "chapter-1",
+        version: 1,
+        status: "active",
+        source: "inventory_backfill",
+        contentTable: "Chapter",
+        contentId: "chapter-1",
+        contentHash: hash("chapter with ordinary ledger baseline"),
+        protectedUserContent: false,
+        updatedAt: "2026-04-29T00:04:00.000Z",
+      },
+    ],
+    draftChapters: [
+      {
+        id: "chapter-1",
+        novelId: "novel-2",
+        order: 1,
+        title: "Chapter 1",
+        content: "chapter with ordinary ledger baseline",
+        updatedAt: "2026-04-29T00:05:00.000Z",
+      },
+      {
+        id: "chapter-2",
+        novelId: "novel-2",
+        order: 2,
+        title: "Chapter 2",
+        content: "draft without ledger baseline",
+        updatedAt: "2026-04-29T00:06:00.000Z",
+      },
+    ],
+  });
+
+  assert.equal(audit.counts.protectedOrStaleArtifacts, 0);
+  assert.equal(audit.counts.draftBaselineArtifacts, 1);
+  assert.equal(audit.counts.untrackedDraftChapters, 1);
   assert.equal(audit.samples.untrackedDraftChapters[0].chapterId, "chapter-2");
 });

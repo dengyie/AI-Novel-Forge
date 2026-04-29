@@ -29,7 +29,7 @@ async function main() {
 
   const take = Number.parseInt(process.env.DIRECTOR_SAMPLE_TAKE ?? "40", 10);
   const rowLimit = Number.isFinite(take) && take > 0 ? take : 40;
-  const [tasks, commands, jobs, artifacts, draftChapters] = await Promise.all([
+  const [tasks, commands, jobs, artifacts, draftBaselineArtifacts, draftChapters] = await Promise.all([
     prisma.novelWorkflowTask.findMany({
       where: { lane: "auto_director" },
       orderBy: [{ updatedAt: "desc" }],
@@ -103,6 +103,29 @@ async function main() {
         updatedAt: true,
       },
     }),
+    prisma.directorArtifact.findMany({
+      where: {
+        artifactType: "chapter_draft",
+        contentTable: "Chapter",
+      },
+      orderBy: [{ updatedAt: "desc" }],
+      take: rowLimit * 4,
+      select: {
+        id: true,
+        novelId: true,
+        artifactType: true,
+        targetType: true,
+        targetId: true,
+        version: true,
+        status: true,
+        source: true,
+        contentTable: true,
+        contentId: true,
+        contentHash: true,
+        protectedUserContent: true,
+        updatedAt: true,
+      },
+    }),
     prisma.chapter.findMany({
       where: {
         content: { not: null },
@@ -145,6 +168,7 @@ async function main() {
     jobs,
     artifacts,
     chapters,
+    draftBaselineArtifacts,
     draftChapters,
   });
   console.log(JSON.stringify(audit, null, 2));
