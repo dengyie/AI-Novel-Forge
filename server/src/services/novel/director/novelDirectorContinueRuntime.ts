@@ -168,15 +168,27 @@ export class NovelDirectorContinueRuntime {
     if (!directorInput || !novelId) {
       throw new Error("自动导演任务缺少恢复所需上下文。");
     }
-    const assetFirstRecovery = await this.resolveAssetFirstRecovery({
-      novelId,
-      directorInput,
-    });
     const fallbackRunMode = typeof seedPayload.runMode === "string"
       && (DIRECTOR_RUN_MODES as readonly string[]).includes(seedPayload.runMode)
       ? seedPayload.runMode as (typeof DIRECTOR_RUN_MODES)[number]
       : undefined;
-    const runMode = normalizeDirectorRunMode(directorInput.runMode ?? fallbackRunMode);
+    const requestedAutoExecutionContinue = (
+      input?.continuationMode === "auto_execute_range"
+      || input?.continuationMode === "auto_execute_front10"
+    );
+    const runMode = requestedAutoExecutionContinue
+      ? "auto_to_execution"
+      : normalizeDirectorRunMode(directorInput.runMode ?? fallbackRunMode);
+    const effectiveDirectorInput = requestedAutoExecutionContinue && normalizeDirectorRunMode(directorInput.runMode) !== "auto_to_execution"
+      ? {
+        ...directorInput,
+        runMode,
+      }
+      : directorInput;
+    const assetFirstRecovery = await this.resolveAssetFirstRecovery({
+      novelId,
+      directorInput: effectiveDirectorInput,
+    });
     const shouldResumeStoredBatchCheckpoint = runMode === "auto_to_execution"
       && (row.checkpointType === "chapter_batch_ready" || row.checkpointType === "replan_required");
     const canSkipReviewBlockedChapter = (
@@ -212,9 +224,9 @@ export class NovelDirectorContinueRuntime {
           : "正在恢复当前章节批次",
         progress: resumeCheckpointType === "replan_required" ? 0.975 : 0.93,
         clearCheckpoint: resumeCheckpointType === "chapter_batch_ready" || resumeCheckpointType === "replan_required",
-        seedPayload: this.deps.buildDirectorSeedPayload(directorInput, novelId, {
+        seedPayload: this.deps.buildDirectorSeedPayload(effectiveDirectorInput, novelId, {
           directorSession: buildDirectorSessionState({
-            runMode: directorInput.runMode,
+            runMode: effectiveDirectorInput.runMode,
             phase: "front10_ready",
             isBackgroundRunning: true,
           }),
@@ -231,7 +243,7 @@ export class NovelDirectorContinueRuntime {
         await this.deps.runtimeOrchestrator.runChapterExecutionNode({
           taskId,
           novelId,
-          request: directorInput,
+          request: effectiveDirectorInput,
           existingPipelineJobId: seedPayload.autoExecution?.pipelineJobId ?? null,
           existingState: seedPayload.autoExecution ?? null,
           resumeCheckpointType,
@@ -252,7 +264,7 @@ export class NovelDirectorContinueRuntime {
       });
 
     const directorSession = buildDirectorSessionState({
-      runMode: directorInput.runMode,
+      runMode: effectiveDirectorInput.runMode,
       phase,
       isBackgroundRunning: true,
     });
@@ -283,8 +295,8 @@ export class NovelDirectorContinueRuntime {
       workflowTaskId: taskId,
       novelId,
       lane: "auto_director",
-      title: directorInput.candidate.workingTitle,
-      seedPayload: this.deps.buildDirectorSeedPayload(directorInput, novelId, {
+      title: effectiveDirectorInput.candidate.workingTitle,
+      seedPayload: this.deps.buildDirectorSeedPayload(effectiveDirectorInput, novelId, {
         directorSession,
         resumeTarget,
       }),
@@ -298,7 +310,7 @@ export class NovelDirectorContinueRuntime {
       await this.runDirectorPipeline({
         taskId,
         novelId,
-        input: directorInput,
+        input: effectiveDirectorInput,
         startPhase: phase,
         scope: normalizeDirectorMemoryScope({
           volumeId: recoveryResumeTarget?.volumeId,
