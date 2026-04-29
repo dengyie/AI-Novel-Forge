@@ -23,6 +23,10 @@ import {
   buildDirectorRuntimePersistenceDelta,
   persistDirectorRuntimeSnapshot,
 } from "./DirectorRuntimePersistence";
+import {
+  hasLegacyRuntimeArtifacts,
+  mergeLegacyRuntimeArtifacts,
+} from "./DirectorRuntimeSnapshotMerge";
 
 const MAX_RUNTIME_EVENTS = 120;
 const MAX_RUNTIME_STEPS = 120;
@@ -136,17 +140,19 @@ export class DirectorRuntimeStore {
     if (!row) {
       return null;
     }
-    const persisted = await this.getPersistentSnapshot(taskId);
-    if (persisted) {
-      this.snapshotCache.set(taskId, persisted);
-      return persisted;
-    }
     const seedPayload = parseSeedPayload<DirectorWorkflowSeedPayload>(row.seedPayloadJson) ?? {};
-    return normalizeRuntimeSnapshot({
+    const seedSnapshot = normalizeRuntimeSnapshot({
       taskId: row.id,
       novelId: row.novelId,
       seedPayload,
     });
+    const persisted = await this.getPersistentSnapshot(taskId);
+    if (persisted) {
+      const snapshot = mergeLegacyRuntimeArtifacts(persisted, seedSnapshot);
+      this.snapshotCache.set(taskId, snapshot);
+      return snapshot;
+    }
+    return seedSnapshot;
   }
 
   async mutateSnapshot(
@@ -165,18 +171,25 @@ export class DirectorRuntimeStore {
       return null;
     }
     const seedPayload = parseSeedPayload<DirectorWorkflowSeedPayload>(row.seedPayloadJson) ?? {};
-    const current = this.snapshotCache.get(taskId)
-      ?? await this.getPersistentSnapshot(taskId)
-      ?? normalizeRuntimeSnapshot({
-        taskId: row.id,
-        novelId: row.novelId,
-        seedPayload,
-      });
+    const seedSnapshot = normalizeRuntimeSnapshot({
+      taskId: row.id,
+      novelId: row.novelId,
+      seedPayload,
+    });
+    const cached = this.snapshotCache.get(taskId);
+    const persisted = cached && !hasLegacyRuntimeArtifacts(seedSnapshot)
+      ? null
+      : await this.getPersistentSnapshot(taskId);
+    const current = mergeLegacyRuntimeArtifacts(
+      cached ?? persisted ?? seedSnapshot,
+      seedSnapshot,
+    );
     const nextRuntime = trimRuntimeSnapshot({
       ...mutator(current, seedPayload),
       updatedAt: new Date().toISOString(),
     });
-    const delta = buildDirectorRuntimePersistenceDelta(current, nextRuntime);
+    const deltaBase = persisted ?? (cached && !hasLegacyRuntimeArtifacts(seedSnapshot) ? cached : null);
+    const delta = buildDirectorRuntimePersistenceDelta(deltaBase, nextRuntime);
     await persistDirectorRuntimeSnapshot({
       taskId,
       novelId: row.novelId,

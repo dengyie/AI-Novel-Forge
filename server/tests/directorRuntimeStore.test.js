@@ -401,7 +401,7 @@ test("director runtime store writes all artifacts before artifact dependencies",
   }
 });
 
-test("director runtime store skips dependencies whose snapshot target is not persisted", async () => {
+test("director runtime store skips dependencies whose target is outside snapshot and database", async () => {
   const store = new DirectorRuntimeStore();
   const dependencyCalls = [];
   const existingArtifact = {
@@ -440,7 +440,7 @@ test("director runtime store skips dependencies whose snapshot target is not per
         policy: { mode: "suggest_only", updatedAt: "2026-04-28T00:00:00.000Z" },
         steps: [],
         events: [],
-        artifacts: [existingArtifact],
+        artifacts: [],
         updatedAt: "2026-04-28T00:00:00.000Z",
       },
     }),
@@ -585,6 +585,189 @@ test("director runtime store writes dependencies to persisted snapshot targets",
     prisma.directorRun.upsert = originals.runUpsert;
     prisma.directorArtifactDependency.deleteMany = originals.dependencyDeleteMany;
     prisma.directorArtifactDependency.upsert = originals.dependencyUpsert;
+    prisma.directorArtifact.upsert = originals.artifactUpsert;
+    prisma.directorArtifact.findMany = originals.artifactFindMany;
+  }
+});
+
+test("director runtime store persists legacy seed artifacts before new dependency edges", async () => {
+  const store = new DirectorRuntimeStore();
+  const artifactCalls = [];
+  const dependencyCalls = [];
+  const parentArtifact = {
+    id: "story_macro:novel:novel-1:StoryMacroPlan:macro-legacy",
+    novelId: "novel-1",
+    artifactType: "story_macro",
+    targetType: "novel",
+    targetId: "novel-1",
+    version: 1,
+    status: "active",
+    source: "ai_generated",
+    contentRef: { table: "StoryMacroPlan", id: "macro-legacy" },
+    schemaVersion: "test",
+  };
+  const originals = {
+    workflowFindUnique: prisma.novelWorkflowTask.findUnique,
+    workflowUpdate: prisma.novelWorkflowTask.update,
+    runFindUnique: prisma.directorRun.findUnique,
+    runUpsert: prisma.directorRun.upsert,
+    dependencyDeleteMany: prisma.directorArtifactDependency.deleteMany,
+    dependencyUpsert: prisma.directorArtifactDependency.upsert,
+    artifactUpsert: prisma.directorArtifact.upsert,
+    artifactFindMany: prisma.directorArtifact.findMany,
+  };
+
+  prisma.novelWorkflowTask.findUnique = async () => ({
+    id: "task-legacy",
+    novelId: "novel-1",
+    seedPayloadJson: JSON.stringify({
+      novelId: "novel-1",
+      directorRuntime: {
+        schemaVersion: 1,
+        runId: "task-legacy",
+        novelId: "novel-1",
+        entrypoint: "takeover",
+        policy: { mode: "run_until_gate", updatedAt: "2026-04-28T00:00:00.000Z" },
+        steps: [],
+        events: [],
+        artifacts: [parentArtifact],
+        updatedAt: "2026-04-28T00:00:00.000Z",
+      },
+    }),
+  });
+  prisma.novelWorkflowTask.update = async () => ({});
+  prisma.directorRun.findUnique = async () => null;
+  prisma.directorRun.upsert = async () => ({});
+  prisma.directorArtifact.upsert = async ({ create }) => {
+    artifactCalls.push(create.id);
+    return {};
+  };
+  prisma.directorArtifact.findMany = async ({ where }) => (
+    (where?.id?.in ?? []).map((id) => ({ id }))
+  );
+  prisma.directorArtifactDependency.deleteMany = async () => ({ count: 0 });
+  prisma.directorArtifactDependency.upsert = async ({ create }) => {
+    dependencyCalls.push([create.artifactId, create.dependsOnArtifactId]);
+    return {};
+  };
+
+  try {
+    await store.mutateSnapshot("task-legacy", (snapshot) => ({
+      ...snapshot,
+      artifacts: [
+        ...snapshot.artifacts,
+        {
+          id: "volume_strategy:novel:novel-1:VolumePlan:volume-1",
+          novelId: "novel-1",
+          artifactType: "volume_strategy",
+          targetType: "novel",
+          targetId: "novel-1",
+          version: 1,
+          status: "active",
+          source: "ai_generated",
+          contentRef: { table: "VolumePlan", id: "volume-1" },
+          schemaVersion: "test",
+          dependsOn: [{
+            artifactId: parentArtifact.id,
+            version: 1,
+          }],
+        },
+      ],
+    }));
+
+    assert.deepEqual(artifactCalls, [
+      parentArtifact.id,
+      "volume_strategy:novel:novel-1:VolumePlan:volume-1",
+    ]);
+    assert.deepEqual(dependencyCalls, [[
+      "volume_strategy:novel:novel-1:VolumePlan:volume-1",
+      parentArtifact.id,
+    ]]);
+  } finally {
+    prisma.novelWorkflowTask.findUnique = originals.workflowFindUnique;
+    prisma.novelWorkflowTask.update = originals.workflowUpdate;
+    prisma.directorRun.findUnique = originals.runFindUnique;
+    prisma.directorRun.upsert = originals.runUpsert;
+    prisma.directorArtifactDependency.deleteMany = originals.dependencyDeleteMany;
+    prisma.directorArtifactDependency.upsert = originals.dependencyUpsert;
+    prisma.directorArtifact.upsert = originals.artifactUpsert;
+    prisma.directorArtifact.findMany = originals.artifactFindMany;
+  }
+});
+
+test("director runtime store backfills legacy seed artifacts missing from persistent runs", async () => {
+  const store = new DirectorRuntimeStore();
+  const artifactCalls = [];
+  const legacyArtifact = {
+    id: "book_contract:novel:novel-1:BookContract:contract-legacy",
+    novelId: "novel-1",
+    artifactType: "book_contract",
+    targetType: "novel",
+    targetId: "novel-1",
+    version: 1,
+    status: "active",
+    source: "ai_generated",
+    contentRef: { table: "BookContract", id: "contract-legacy" },
+    schemaVersion: "test",
+  };
+  const originals = {
+    workflowFindUnique: prisma.novelWorkflowTask.findUnique,
+    workflowUpdate: prisma.novelWorkflowTask.update,
+    runFindUnique: prisma.directorRun.findUnique,
+    runUpsert: prisma.directorRun.upsert,
+    dependencyDeleteMany: prisma.directorArtifactDependency.deleteMany,
+    artifactUpsert: prisma.directorArtifact.upsert,
+    artifactFindMany: prisma.directorArtifact.findMany,
+  };
+
+  prisma.novelWorkflowTask.findUnique = async () => ({
+    id: "task-legacy-existing-run",
+    novelId: "novel-1",
+    seedPayloadJson: JSON.stringify({
+      novelId: "novel-1",
+      directorRuntime: {
+        schemaVersion: 1,
+        runId: "task-legacy-existing-run",
+        novelId: "novel-1",
+        entrypoint: "takeover",
+        policy: { mode: "run_until_gate", updatedAt: "2026-04-28T00:00:00.000Z" },
+        steps: [],
+        events: [],
+        artifacts: [legacyArtifact],
+        updatedAt: "2026-04-28T00:00:00.000Z",
+      },
+    }),
+  });
+  prisma.novelWorkflowTask.update = async () => ({});
+  prisma.directorRun.findUnique = async () => ({
+    id: "task-legacy-existing-run",
+    novelId: "novel-1",
+    entrypoint: "takeover",
+    policyJson: JSON.stringify({ mode: "run_until_gate", updatedAt: "2026-04-28T00:00:00.000Z" }),
+    lastWorkspaceAnalysisJson: null,
+    updatedAt: new Date("2026-04-28T00:00:00.000Z"),
+    steps: [],
+    events: [],
+    artifacts: [],
+  });
+  prisma.directorRun.upsert = async () => ({});
+  prisma.directorArtifact.upsert = async ({ create }) => {
+    artifactCalls.push(create.id);
+    return {};
+  };
+  prisma.directorArtifact.findMany = async () => [];
+  prisma.directorArtifactDependency.deleteMany = async () => ({ count: 0 });
+
+  try {
+    await store.mutateSnapshot("task-legacy-existing-run", (snapshot) => snapshot);
+
+    assert.deepEqual(artifactCalls, [legacyArtifact.id]);
+  } finally {
+    prisma.novelWorkflowTask.findUnique = originals.workflowFindUnique;
+    prisma.novelWorkflowTask.update = originals.workflowUpdate;
+    prisma.directorRun.findUnique = originals.runFindUnique;
+    prisma.directorRun.upsert = originals.runUpsert;
+    prisma.directorArtifactDependency.deleteMany = originals.dependencyDeleteMany;
     prisma.directorArtifact.upsert = originals.artifactUpsert;
     prisma.directorArtifact.findMany = originals.artifactFindMany;
   }
