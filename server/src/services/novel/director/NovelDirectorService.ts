@@ -38,7 +38,7 @@ import { NovelWorkflowService } from "../workflow/NovelWorkflowService";
 import { NovelDirectorCandidateStageService } from "./novelDirectorCandidateStage";
 import { resolveDirectorBookFraming } from "./novelDirectorFraming";
 import {
-  buildWorkflowSeedPayload,
+  buildDirectorWorkflowSeedPayload,
 } from "./novelDirectorHelpers";
 import {
   buildDirectorTakeoverInput,
@@ -82,22 +82,12 @@ import { NovelDirectorConfirmRuntime } from "./novelDirectorConfirmRuntime";
 import { NovelDirectorChapterTitleRepairRuntime } from "./novelDirectorChapterTitleRepairRuntime";
 import { NovelDirectorContinueRuntime } from "./novelDirectorContinueRuntime";
 import { prisma } from "../../../db/prisma";
+import { loadPersistentDirectorRuntimeProjection } from "./novelDirectorRuntimeProjection";
 
 function isWorkflowTaskCancelledError(error: unknown): boolean {
   return error instanceof AppError
     && error.statusCode === 409
     && error.message === "WORKFLOW_TASK_CANCELLED";
-}
-
-function parseJsonOrNull<T>(value: string | null | undefined): T | null {
-  if (!value?.trim()) {
-    return null;
-  }
-  try {
-    return JSON.parse(value) as T;
-  } catch {
-    return null;
-  }
 }
 
 type BackgroundRunMode = "detached" | "inline";
@@ -124,7 +114,7 @@ export class NovelDirectorService {
     novelService: this.novelService,
     volumeWorkspaceService: this.volumeService,
     workflowService: this.workflowService,
-    buildDirectorSeedPayload: (input, novelId, extra) => this.buildDirectorSeedPayload(input, novelId, extra),
+    buildDirectorSeedPayload: (input, novelId, extra) => buildDirectorWorkflowSeedPayload(input, novelId, extra),
     shouldAutoContinueQualityRepair: async ({ request, qualityRepairRisk }) => (
       qualityRepairRisk.autoContinuable
       && shouldAutoApproveDirectorApprovalPoint(
@@ -162,7 +152,7 @@ export class NovelDirectorService {
     bookContractService: this.bookContractService,
     volumeService: this.volumeService,
     runtimeOrchestrator: this.directorRuntimeOrchestrator,
-    buildDirectorSeedPayload: (directorInput, novelId, extra) => this.buildDirectorSeedPayload(directorInput, novelId, extra),
+    buildDirectorSeedPayload: (directorInput, novelId, extra) => buildDirectorWorkflowSeedPayload(directorInput, novelId, extra),
     assertHighMemoryStartAllowed: (payload) => this.assertHighMemoryDirectorStartAllowed(payload),
   });
   private readonly confirmRuntime = new NovelDirectorConfirmRuntime({
@@ -171,7 +161,7 @@ export class NovelDirectorService {
     directorRuntime: this.directorRuntime,
     runtimeOrchestrator: this.directorRuntimeOrchestrator,
     pipelineRuntime: this.directorPipelineRuntime,
-    buildDirectorSeedPayload: (directorInput, novelId, extra) => this.buildDirectorSeedPayload(directorInput, novelId, extra),
+    buildDirectorSeedPayload: (directorInput, novelId, extra) => buildDirectorWorkflowSeedPayload(directorInput, novelId, extra),
     enrichDirectorStyleContext: (directorInput) => this.enrichDirectorStyleContext(directorInput),
     ensurePrimaryNovelStyleBinding: (novelId, styleProfileId) => this.ensurePrimaryNovelStyleBinding(novelId, styleProfileId),
     withWorkflowTaskUsage: (workflowTaskId, runner) => this.withWorkflowTaskUsage(workflowTaskId, runner),
@@ -180,7 +170,7 @@ export class NovelDirectorService {
   private readonly chapterTitleRepairRuntime = new NovelDirectorChapterTitleRepairRuntime({
     workflowService: this.workflowService,
     volumeService: this.volumeService,
-    buildDirectorSeedPayload: (directorInput, novelId, extra) => this.buildDirectorSeedPayload(directorInput, novelId, extra),
+    buildDirectorSeedPayload: (directorInput, novelId, extra) => buildDirectorWorkflowSeedPayload(directorInput, novelId, extra),
     assertHighMemoryStartAllowed: (payload) => this.assertHighMemoryDirectorStartAllowed(payload),
     scheduleBackgroundRun: (taskId, runner) => this.scheduleBackgroundRun(taskId, runner),
   });
@@ -196,7 +186,7 @@ export class NovelDirectorService {
     continueCandidateStageTask: (taskId, payload) => this.continueCandidateStageTask(taskId, payload),
     resolveAssetFirstRecovery: (payload) => this.resolveAssetFirstRecovery(payload),
     runDirectorPipeline: (payload) => this.runDirectorPipeline(payload),
-    buildDirectorSeedPayload: (directorInput, novelId, extra) => this.buildDirectorSeedPayload(directorInput, novelId, extra),
+    buildDirectorSeedPayload: (directorInput, novelId, extra) => buildDirectorWorkflowSeedPayload(directorInput, novelId, extra),
     getDirectorAssetSnapshot: (novelId) => this.getDirectorAssetSnapshot(novelId),
     assertHighMemoryStartAllowed: (payload) => this.assertHighMemoryDirectorStartAllowed(payload),
     scheduleBackgroundRun: (taskId, runner) => this.scheduleBackgroundRun(taskId, runner),
@@ -241,6 +231,23 @@ export class NovelDirectorService {
       throw error;
     } finally {
       await releaseHighMemoryDirectorReservations(taskId);
+    }
+  }
+
+  private async runWithInlineBackgroundRuns(action: () => Promise<void>): Promise<void> {
+    const scheduledRuns: InlineBackgroundRunner[] = [];
+    const previousRuns = this.inlineBackgroundRuns;
+    this.inlineBackgroundRuns = scheduledRuns;
+    try {
+      await action();
+      while (scheduledRuns.length > 0) {
+        const nextRun = scheduledRuns.shift();
+        if (nextRun) {
+          await nextRun();
+        }
+      }
+    } finally {
+      this.inlineBackgroundRuns = previousRuns;
     }
   }
 
@@ -367,20 +374,7 @@ export class NovelDirectorService {
     batchAlreadyStartedCount?: number;
     forceResume?: boolean;
   }): Promise<void> {
-    const scheduledRuns: InlineBackgroundRunner[] = [];
-    const previousRuns = this.inlineBackgroundRuns;
-    this.inlineBackgroundRuns = scheduledRuns;
-    try {
-      await this.continueRuntime.continueTask(taskId, input);
-      while (scheduledRuns.length > 0) {
-        const nextRun = scheduledRuns.shift();
-        if (nextRun) {
-          await nextRun();
-        }
-      }
-    } finally {
-      this.inlineBackgroundRuns = previousRuns;
-    }
+    return this.runWithInlineBackgroundRuns(() => this.continueRuntime.continueTask(taskId, input));
   }
 
   async continueCandidateStageTask(
@@ -406,6 +400,12 @@ export class NovelDirectorService {
     volumeId?: string | null;
   }): Promise<void> {
     return this.chapterTitleRepairRuntime.repairChapterTitles(taskId, input);
+  }
+
+  async executeChapterTitleRepair(taskId: string, input?: {
+    volumeId?: string | null;
+  }): Promise<void> {
+    return this.runWithInlineBackgroundRuns(() => this.chapterTitleRepairRuntime.repairChapterTitles(taskId, input));
   }
 
   async getTakeoverReadiness(novelId: string): Promise<DirectorTakeoverReadinessResponse> {
@@ -465,95 +465,14 @@ export class NovelDirectorService {
   }
 
   async getRuntimeProjection(taskId: string): Promise<DirectorRuntimeProjection | null> {
-    const run = await prisma.directorRun.findUnique({
-      where: { taskId },
-      select: {
-        id: true,
-        novelId: true,
-        entrypoint: true,
-        policyJson: true,
-        updatedAt: true,
-        steps: {
-          orderBy: [{ updatedAt: "desc" }, { startedAt: "desc" }],
-          take: 30,
-          select: {
-            idempotencyKey: true,
-            nodeKey: true,
-            label: true,
-            status: true,
-            targetType: true,
-            targetId: true,
-            startedAt: true,
-            finishedAt: true,
-            error: true,
-            policyDecisionJson: true,
-          },
-        },
-        events: {
-          orderBy: { occurredAt: "desc" },
-          take: 30,
-          select: {
-            id: true,
-            type: true,
-            taskId: true,
-            novelId: true,
-            nodeKey: true,
-            artifactId: true,
-            artifactType: true,
-            summary: true,
-            affectedScope: true,
-            severity: true,
-            occurredAt: true,
-          },
-        },
-      },
-    });
-    if (!run) {
-      return this.buildRuntimeProjection(await this.getRuntimeSnapshot(taskId));
+    const persistentProjection = await loadPersistentDirectorRuntimeProjection(
+      taskId,
+      this.directorEventProjectionService,
+    );
+    if (persistentProjection) {
+      return persistentProjection;
     }
-    const snapshot: DirectorRuntimeSnapshot = {
-      schemaVersion: 1,
-      runId: run.id,
-      novelId: run.novelId,
-      entrypoint: run.entrypoint,
-      policy: parseJsonOrNull<DirectorRuntimeSnapshot["policy"]>(run.policyJson)
-        ?? {
-          mode: "run_until_gate",
-          mayOverwriteUserContent: false,
-          maxAutoRepairAttempts: 1,
-          allowExpensiveReview: false,
-          modelTier: "balanced",
-          updatedAt: run.updatedAt.toISOString(),
-        },
-      steps: [...run.steps].reverse().map((step) => ({
-        idempotencyKey: step.idempotencyKey,
-        nodeKey: step.nodeKey,
-        label: step.label,
-        status: step.status as DirectorRuntimeSnapshot["steps"][number]["status"],
-        targetType: step.targetType as DirectorRuntimeSnapshot["steps"][number]["targetType"],
-        targetId: step.targetId,
-        startedAt: step.startedAt.toISOString(),
-        finishedAt: step.finishedAt?.toISOString() ?? null,
-        error: step.error,
-        policyDecision: parseJsonOrNull<DirectorRuntimeSnapshot["steps"][number]["policyDecision"]>(step.policyDecisionJson),
-      })),
-      events: [...run.events].reverse().map((event) => ({
-        eventId: event.id,
-        type: event.type as DirectorRuntimeSnapshot["events"][number]["type"],
-        taskId: event.taskId,
-        novelId: event.novelId,
-        nodeKey: event.nodeKey,
-        artifactId: event.artifactId,
-        artifactType: event.artifactType as DirectorRuntimeSnapshot["events"][number]["artifactType"],
-        summary: event.summary,
-        affectedScope: event.affectedScope,
-        severity: event.severity as DirectorRuntimeSnapshot["events"][number]["severity"],
-        occurredAt: event.occurredAt.toISOString(),
-      })),
-      artifacts: [],
-      updatedAt: run.updatedAt.toISOString(),
-    };
-    return this.buildRuntimeProjection(snapshot);
+    return this.buildRuntimeProjection(await this.getRuntimeSnapshot(taskId));
   }
 
   async updateRuntimePolicy(taskId: string, input: {
@@ -647,7 +566,7 @@ export class NovelDirectorService {
         prepareRequestedAutoExecution: (payload) => this.autoExecutionRuntime.prepareRequestedAutoExecution(payload),
         runFromReady: (payload) => this.directorRuntimeOrchestrator.runChapterExecutionNode(payload),
       },
-      buildDirectorSeedPayload: (request, novelId, extra) => this.buildDirectorSeedPayload(request, novelId, extra),
+      buildDirectorSeedPayload: (request, novelId, extra) => buildDirectorWorkflowSeedPayload(request, novelId, extra),
       scheduleBackgroundRun: (taskId, runner) => this.scheduleBackgroundRun(taskId, async () => {
         const module = getDirectorTakeoverStepModule();
         await this.directorRuntime.initializeRun({
@@ -771,40 +690,4 @@ export class NovelDirectorService {
     return this.confirmRuntime.confirmCandidate(input);
   }
 
-  private buildDirectorSeedPayload(
-    input: DirectorConfirmRequest,
-    novelId: string | null,
-    extra?: Record<string, unknown>,
-  ) {
-    const directorSessionPhase = extra?.directorSession
-      && typeof extra.directorSession === "object"
-      && "phase" in extra.directorSession
-      ? (extra.directorSession as { phase?: unknown }).phase
-      : null;
-    const shouldClearCandidateStage = Boolean(novelId)
-      || (
-        typeof directorSessionPhase === "string"
-        && directorSessionPhase !== "candidate_selection"
-      );
-    const nextCandidateStage = shouldClearCandidateStage
-      ? null
-      : (Object.prototype.hasOwnProperty.call(extra ?? {}, "candidateStage")
-          ? (extra as { candidateStage?: unknown }).candidateStage
-          : undefined);
-
-    return buildWorkflowSeedPayload(input, {
-      novelId,
-      candidate: input.candidate,
-      batch: {
-        id: input.batchId,
-        round: input.round,
-      },
-      directorInput: input,
-      ...extra,
-      candidateStage: nextCandidateStage,
-    });
-  }
-
-  // Director 侧 JSON 输出解析/修复统一由 invokeStructuredLlm 完成，
-  // 不再维护 extractJSONObject/JSON.parse 的重复逻辑。
 }

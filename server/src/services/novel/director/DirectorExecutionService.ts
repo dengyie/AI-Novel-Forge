@@ -26,6 +26,12 @@ export class DirectorExecutionService {
       });
       return;
     }
+    if (command.commandType === "repair_chapter_titles") {
+      await this.directorService.executeChapterTitleRepair(command.taskId, {
+        volumeId: payload.volumeId,
+      });
+      return;
+    }
     if (command.commandType === "cancel") {
       await this.workflowService.cancelTask(command.taskId);
       return;

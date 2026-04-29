@@ -29,7 +29,7 @@ export async function continueNovelWorkflow(taskId: string, payload?: {
 export async function repairNovelWorkflowChapterTitles(taskId: string, payload?: {
   volumeId?: string;
 }) {
-  const { data } = await apiClient.post<ApiResponse<UnifiedTaskDetail | null>>(
+  const { data } = await apiClient.post<ApiResponse<DirectorCommandAcceptedResponse>>(
     `/novel-workflows/${taskId}/repair-chapter-titles`,
     payload ?? {},
   );

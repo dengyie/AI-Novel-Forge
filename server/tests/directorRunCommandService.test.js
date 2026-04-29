@@ -253,6 +253,44 @@ test("director command service reuses active takeover command by novel", async (
   }
 });
 
+test("director command service queues chapter title repair without clearing the warning", async () => {
+  const harness = createHarness(createTask({
+    status: "failed",
+    lastError: "章节标题过于相似，需要修复。",
+  }));
+  try {
+    const accepted = await harness.service.enqueueChapterTitleRepairCommand("task-1", {
+      volumeId: " volume-1 ",
+    });
+
+    assert.equal(accepted.status, "queued");
+    assert.equal(accepted.commandType, "repair_chapter_titles");
+    assert.equal(harness.commands.length, 1);
+    assert.equal(harness.commands[0].payloadJson, "{\"volumeId\":\"volume-1\"}");
+    assert.equal(harness.task.status, "queued");
+    assert.equal(harness.task.lastError, "章节标题过于相似，需要修复。");
+    assert.equal("lastError" in harness.taskUpdates[0].data, false);
+  } finally {
+    harness.restore();
+  }
+});
+
+test("director command service queues chapter title repair with a null volume filter", async () => {
+  const harness = createHarness(createTask({ status: "failed" }));
+  try {
+    const accepted = await harness.service.enqueueChapterTitleRepairCommand("task-1", {
+      volumeId: "   ",
+    });
+
+    assert.equal(accepted.commandType, "repair_chapter_titles");
+    assert.equal(harness.commands.length, 1);
+    assert.equal(harness.commands[0].payloadJson, "{\"volumeId\":null}");
+    assert.equal("lastError" in harness.taskUpdates[0].data, false);
+  } finally {
+    harness.restore();
+  }
+});
+
 test("director command service leases a queued command once", async () => {
   const harness = createHarness();
   try {
@@ -291,6 +329,33 @@ test("director command service marks expired leases stale and requeues task reco
     assert.equal(harness.stepUpdates[0].where.taskId, "task-1");
     assert.equal(harness.stepUpdates[0].where.status, "running");
     assert.equal(harness.stepUpdates[0].data.status, "failed");
+  } finally {
+    harness.restore();
+  }
+});
+
+test("director command service requeues task recovery when worker execution fails", async () => {
+  const harness = createHarness();
+  try {
+    await harness.service.enqueueContinueCommand("task-1");
+    harness.commands[0].status = "running";
+    harness.commands[0].leaseOwner = "worker-a";
+
+    await harness.service.markCommandFailed("command-1", "worker-a", new Error("worker boom"));
+
+    assert.equal(harness.commands[0].status, "failed");
+    assert.equal(harness.commands[0].leaseExpiresAt, null);
+    assert.equal(harness.commands[0].errorMessage, "worker boom");
+    assert.equal(harness.requeued.length, 1);
+    assert.deepEqual(harness.requeued[0], {
+      taskId: "task-1",
+      message: "worker boom",
+    });
+    assert.equal(harness.stepUpdates.length, 1);
+    assert.equal(harness.stepUpdates[0].where.taskId, "task-1");
+    assert.equal(harness.stepUpdates[0].where.status, "running");
+    assert.equal(harness.stepUpdates[0].data.status, "failed");
+    assert.equal(harness.stepUpdates[0].data.error, "worker boom");
   } finally {
     harness.restore();
   }

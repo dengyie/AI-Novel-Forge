@@ -3,7 +3,6 @@ import type { ApiResponse } from "@ai-novel/shared/types/api";
 import { z } from "zod";
 import { authMiddleware } from "../middleware/auth";
 import { validate } from "../middleware/validate";
-import { NovelDirectorService } from "../services/novel/director/NovelDirectorService";
 import { DirectorCommandService } from "../services/novel/director/DirectorCommandService";
 import { NovelWorkflowService } from "../services/novel/workflow/NovelWorkflowService";
 import { NovelWorkflowTaskAdapter } from "../services/task/adapters/NovelWorkflowTaskAdapter";
@@ -11,7 +10,6 @@ import { NovelWorkflowTaskAdapter } from "../services/task/adapters/NovelWorkflo
 const router = Router();
 const workflowService = new NovelWorkflowService();
 const workflowAdapter = new NovelWorkflowTaskAdapter();
-const novelDirectorService = new NovelDirectorService();
 const directorCommandService = new DirectorCommandService(workflowService);
 
 const stageSchema = z.enum([
@@ -127,14 +125,13 @@ router.post("/:id/repair-chapter-titles", validate({ params: continueParamsSchem
   try {
     const { id } = req.params as z.infer<typeof continueParamsSchema>;
     const body = req.body as z.infer<typeof repairChapterTitlesBodySchema>;
-    await novelDirectorService.repairChapterTitles(id, {
+    const data = await directorCommandService.enqueueChapterTitleRepairCommand(id, {
       volumeId: body.volumeId,
     });
-    const data = await workflowAdapter.detail(id);
-    res.status(200).json({
+    res.status(202).json({
       success: true,
       data,
-      message: "Chapter title repair started.",
+      message: "Chapter title repair accepted.",
     } satisfies ApiResponse<typeof data>);
   } catch (error) {
     next(error);

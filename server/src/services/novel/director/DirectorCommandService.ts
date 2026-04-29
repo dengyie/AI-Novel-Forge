@@ -15,7 +15,13 @@ import { AppError } from "../../../middleware/errorHandler";
 import { NovelWorkflowService } from "../workflow/NovelWorkflowService";
 
 const ACTIVE_COMMAND_STATUSES: DirectorRunCommandStatus[] = ["queued", "leased", "running"];
-const EXECUTION_COMMAND_TYPES: DirectorRunCommandType[] = ["continue", "resume_from_checkpoint", "retry", "takeover"];
+const EXECUTION_COMMAND_TYPES: DirectorRunCommandType[] = [
+  "continue",
+  "resume_from_checkpoint",
+  "retry",
+  "takeover",
+  "repair_chapter_titles",
+];
 const STALE_COMMAND_RECOVERY_MESSAGE = "Director Worker 租约过期，任务等待手动恢复。";
 
 export interface DirectorCommandPayload {
@@ -23,6 +29,7 @@ export interface DirectorCommandPayload {
   batchAlreadyStartedCount?: number;
   forceResume?: boolean;
   takeoverRequest?: DirectorTakeoverRequest;
+  volumeId?: string | null;
 }
 
 export type DirectorRunCommandRow = Awaited<ReturnType<DirectorCommandService["getCommandById"]>>;
@@ -197,6 +204,19 @@ export class DirectorCommandService {
     });
   }
 
+  async enqueueChapterTitleRepairCommand(taskId: string, input: {
+    volumeId?: string | null;
+  } = {}): Promise<DirectorCommandAcceptedResponse> {
+    return this.enqueueExecutionCommand({
+      taskId,
+      commandType: "repair_chapter_titles",
+      payload: {
+        volumeId: input.volumeId?.trim() || null,
+      },
+      preserveLastError: true,
+    });
+  }
+
   async getCommandById(commandId: string) {
     return prisma.directorRunCommand.findUnique({
       where: { id: commandId },
@@ -324,7 +344,8 @@ export class DirectorCommandService {
 
   async markCommandFailed(commandId: string, workerId: string, error: unknown): Promise<void> {
     const message = error instanceof Error ? error.message : String(error);
-    await prisma.directorRunCommand.updateMany({
+    const failedAt = new Date();
+    const updated = await prisma.directorRunCommand.updateMany({
       where: {
         id: commandId,
         leaseOwner: workerId,
@@ -333,10 +354,30 @@ export class DirectorCommandService {
       data: {
         status: "failed",
         leaseExpiresAt: null,
-        finishedAt: new Date(),
+        finishedAt: failedAt,
         errorMessage: message,
       },
     });
+    if (updated.count !== 1) {
+      return;
+    }
+    const command = await this.getCommandById(commandId);
+    if (!command) {
+      return;
+    }
+    await prisma.directorStepRun.updateMany({
+      where: {
+        taskId: command.taskId,
+        status: "running",
+      },
+      data: {
+        status: "failed",
+        finishedAt: failedAt,
+        error: message,
+      },
+    }).catch(() => null);
+    await this.workflowService.requeueTaskForRecovery(command.taskId, message)
+      .catch(() => null);
   }
 
   parseCommandPayload(command: NonNullable<DirectorRunCommandRow>): DirectorCommandPayload {
@@ -348,6 +389,7 @@ export class DirectorCommandService {
     commandType: DirectorRunCommandType;
     payload: DirectorCommandPayload;
     allowTerminalReuse?: boolean;
+    preserveLastError?: boolean;
   }): Promise<DirectorCommandAcceptedResponse> {
     const row = await this.workflowService.getTaskById(input.taskId);
     if (!row) {
@@ -386,7 +428,9 @@ export class DirectorCommandService {
 
     try {
       const command = await withSqliteRetry(createCommand, { label: "director.command.create" });
-      await this.markCommandAcceptedOnTask(input.taskId);
+      await this.markCommandAcceptedOnTask(input.taskId, {
+        preserveLastError: input.preserveLastError,
+      });
       return toAcceptedResponse(command);
     } catch (error) {
       if (!isUniqueConstraintError(error) || input.allowTerminalReuse === false) {
@@ -407,7 +451,9 @@ export class DirectorCommandService {
     }
   }
 
-  private async markCommandAcceptedOnTask(taskId: string): Promise<void> {
+  private async markCommandAcceptedOnTask(taskId: string, options: {
+    preserveLastError?: boolean;
+  } = {}): Promise<void> {
     await prisma.novelWorkflowTask.updateMany({
       where: {
         id: taskId,
@@ -419,7 +465,7 @@ export class DirectorCommandService {
       data: {
         status: "queued",
         pendingManualRecovery: false,
-        lastError: null,
+        ...(options.preserveLastError ? {} : { lastError: null }),
         heartbeatAt: new Date(),
         finishedAt: null,
         cancelRequestedAt: null,

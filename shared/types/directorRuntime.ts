@@ -218,6 +218,7 @@ export const DIRECTOR_RUN_COMMAND_TYPES = [
   "resume_from_checkpoint",
   "retry",
   "takeover",
+  "repair_chapter_titles",
   "cancel",
 ] as const;
 

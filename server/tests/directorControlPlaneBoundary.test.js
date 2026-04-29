@@ -18,6 +18,8 @@ test("auto director control-plane routes enqueue commands instead of executing h
   const forbiddenCalls = [
     [/\.continueTask\s*\(/, "NovelDirectorService.continueTask"],
     [/\.startTakeover\s*\(/, "NovelDirectorService.startTakeover"],
+    [/\.repairChapterTitles\s*\(/, "NovelDirectorService.repairChapterTitles"],
+    [/\.executeChapterTitleRepair\s*\(/, "NovelDirectorService.executeChapterTitleRepair"],
     [/runDirectorStructuredOutlinePhase\s*\(/, "runDirectorStructuredOutlinePhase"],
     [/runChapterExecutionNode\s*\(/, "runChapterExecutionNode"],
     [/invokeStructuredLlm\s*\(/, "invokeStructuredLlm"],
@@ -34,6 +36,29 @@ test("auto director control-plane routes enqueue commands instead of executing h
   }
 });
 
+test("chapter title repair is queued through director commands", () => {
+  const routeSource = readSource("server/src/routes/novelWorkflows.ts");
+  const commandSource = readSource("server/src/services/novel/director/DirectorCommandService.ts");
+  const executionSource = readSource("server/src/services/novel/director/DirectorExecutionService.ts");
+  const hookSource = readSource("client/src/hooks/useDirectorChapterTitleRepair.ts");
+
+  assert.match(
+    routeSource,
+    /repair-chapter-titles[\s\S]*enqueueChapterTitleRepairCommand[\s\S]*res\.status\(202\)/,
+  );
+  assert.match(commandSource, /commandType:\s*"repair_chapter_titles"/);
+  assert.match(commandSource, /preserveLastError:\s*true/);
+  assert.match(
+    executionSource,
+    /command\.commandType === "repair_chapter_titles"[\s\S]*executeChapterTitleRepair/,
+  );
+  assert.doesNotMatch(
+    hookSource,
+    /invalidateQueries\(\{\s*queryKey:\s*queryKeys\.novels\.volumeWorkspace/,
+    "Submitting title repair should not immediately refetch the full volume workspace.",
+  );
+});
+
 test("director worker remains a separate entrypoint from the web api", () => {
   const rootPackage = JSON.parse(readSource("package.json"));
   const serverPackage = JSON.parse(readSource("server/package.json"));
@@ -41,6 +66,38 @@ test("director worker remains a separate entrypoint from the web api", () => {
   assert.match(rootPackage.scripts["dev:desktop:raw"], /dev:director-worker:wait/);
   assert.match(serverPackage.scripts["dev:director-worker"], /src\/workers\/directorWorker\.ts/);
   assert.match(serverPackage.scripts["start:director-worker"], /dist\/workers\/directorWorker\.js/);
+});
+
+test("director command migrations keep queue indexes aligned across database providers", () => {
+  const migrationPaths = [
+    "server/src/prisma/migrations/20260429213000_director_run_commands/migration.sql",
+    "server/src/prisma/migrations.sqlite/20260429213000_director_run_commands/migration.sql",
+  ];
+  const schemaPaths = [
+    "server/src/prisma/schema.prisma",
+    "server/src/prisma/schema.sqlite.prisma",
+  ];
+
+  for (const relativePath of migrationPaths) {
+    const source = readSource(relativePath);
+    assert.match(source, /CREATE TABLE "DirectorRunCommand"/);
+    assert.match(source, /"commandType"/);
+    assert.match(source, /"idempotencyKey"/);
+    assert.match(source, /"payloadJson"/);
+    assert.match(source, /DirectorRunCommand_taskId_commandType_idempotencyKey_key/);
+    assert.match(source, /DirectorRunCommand_status_runAfter_updatedAt_idx/);
+    assert.match(source, /DirectorRunCommand_taskId_status_updatedAt_idx/);
+    assert.match(source, /DirectorRunCommand_leaseOwner_leaseExpiresAt_idx/);
+    assert.match(source, /ON DELETE CASCADE/);
+  }
+
+  for (const relativePath of schemaPaths) {
+    const source = readSource(relativePath);
+    assert.match(source, /model DirectorRunCommand/);
+    assert.match(source, /directorCommands\s+DirectorRunCommand\[\]/);
+    assert.match(source, /@@unique\(\[taskId, commandType, idempotencyKey\]\)/);
+    assert.match(source, /@@index\(\[leaseOwner, leaseExpiresAt\]\)/);
+  }
 });
 
 test("director worker commands force a real continuation instead of trusting stale running task state", () => {
