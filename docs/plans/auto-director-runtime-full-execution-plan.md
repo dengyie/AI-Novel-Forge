@@ -6,6 +6,7 @@
 
 - [自动导演统一运行时重构方案](./auto-director-unified-runtime-refactor-plan.md)
 - [自动导演统一运行时 MVP 落地切片方案](./auto-director-mvp-migration-plan.md)
+- [自动导演执行面隔离与 API 保活计划](./auto-director-execution-plane-isolation-plan.md)
 - [提示词工作台、上下文装配与统一步骤运行时方案](./prompt-workbench-context-and-step-runtime-plan.md)
 - [Auto Director Progress Audit](../checkpoints/auto-director-progress-audit.md)
 
@@ -51,6 +52,7 @@
 
 当前未完成但必须纳入完整交付：
 
+- 自动导演执行面仍与 Web API 控制面运行在同一 Node 进程中；`structured_outline / chapter_list / chapter_detail_bundle / chapter_execution / quality_repair` 这类重型链路会拖住普通 API。该问题已在 2026-04-29 明确为架构级阻塞，必须按执行面隔离计划拆出独立 Worker，不能再用 route 内 fire-and-forget 作为完成态。
 - Step Module / NodeRunner / PolicyEngine 写入合同已覆盖自动导演关键写入面；下一步重点转为真实数据恢复、ledger 真相层、质量闭环和状态驱动 replan。
 - `PolicyEngine` 还不是所有写入动作、覆盖动作和高成本审校动作的硬 gate。
 - Artifact Ledger 仍是 seed payload wrapper 索引，缺独立持久化表、完整生命周期、跨任务依赖演进和可恢复查询能力。
@@ -70,21 +72,22 @@
 
 ## 2.1 下一轮最高优先级开发队列
 
-以下 13 项作为 `codex/auto-director-runtime-mvp-plan` 分支的下一轮即将开发项目，优先级高于后续扩入口、创作中枢主导编排和 LangGraph 主链化。
+以下 14 项作为 `codex/auto-director-runtime-mvp-plan` 分支的下一轮即将开发项目，优先级高于后续扩入口、创作中枢主导编排和 LangGraph 主链化。
 
-1. **规划恢复链稳定**：补齐 `volume_strategy` 幂等重放、持久化卷规划恢复到 `structured_outline` 的真实数据回归；确保已有资产不会被重复生成或跳过。
-2. **真实 Prisma 抽样回归**：覆盖旧项目接管、服务重启手动恢复、失败重试、章节批量执行、候选变更和状态版本，重点验证 `migration -> 章节写入 -> 候选变更 -> 状态版本`。
-3. **Artifact Ledger 真相层**：从 wrapper 索引推进到跨任务可查询、版本生命周期、stale、用户内容保护和局部恢复能力；保持 additive schema，不破坏旧数据。
-4. **PolicyEngine 硬 gate 深化**：高成本审校、高风险修复、大范围自动执行、覆盖用户内容等场景必须在写入前经过策略判断和审批边界。
-5. **质量产物闭环**：`reader_promise / chapter_retention_contract / continuity_state / rolling_window_review / character_governance_state` 从记录型产物推进为评估、失效、局部修复、再评估闭环。
-6. **Planner / Replan 状态驱动化**：`PlannerService.replan` 的窗口决策、触发理由和章节选择切到 `CanonicalStateService / ContextAssemblyService / ChapterStateGoal`。
-7. **章节任务单质量门禁**：为 `purpose / boundary / taskSheet` 增加 schema + 语义可用性双门禁，拦截坏细化产物进入同步和执行链。
-8. **章节修复策略**：补 `patch_first` 默认策略；动态角色系统进入执行期角色筛选、修复边界和 replan 判断。
-9. **模型路由细化**：从 `planner / writer / review / repair` 粗粒度推进到小说生产阶段级路由与 fallback。
-10. **卷级工作台消费链**：把 `critique / rebalance / uncertainty / canonical payoff ledger` 接成卷级工作台默认消费链，并让卷级账本视图成为主视图。
-11. **新手入口收敛**：首页、创建页、空状态统一为“AI 自动导演推荐入口 + 手动高级入口”；关键节点只保留一个推荐下一步。
-12. **拆书任务合同**：补齐 `scope / pause / resume / coverage`，形成“前 N 片段试跑 -> 扩范围继续”的渐进式流程。
-13. **技术债收口**：拆分 `workflowRegistry.ts`，继续瘦身 `NovelDirectorService` 和 `DirectorRuntimeStore`，避免新能力继续堆回主 service。
+1. **执行面隔离与 API 保活**：按专项计划新增命令化入口、独立 Director Worker、轻量 runtime projection 和 API 保活回归；禁止 Web API route 直接执行自动导演重型链路。
+2. **规划恢复链稳定**：在 Worker 语义下补齐 `volume_strategy` 幂等重放、持久化卷规划恢复到 `structured_outline` 的真实数据回归；确保已有资产不会被重复生成或跳过。
+3. **真实 Prisma 抽样回归**：覆盖旧项目接管、服务重启手动恢复、失败重试、章节批量执行、候选变更和状态版本，重点验证 `migration -> 章节写入 -> 候选变更 -> 状态版本`。
+4. **Artifact Ledger 真相层**：从 wrapper 索引推进到跨任务可查询、版本生命周期、stale、用户内容保护和局部恢复能力；保持 additive schema，不破坏旧数据。
+5. **PolicyEngine 硬 gate 深化**：高成本审校、高风险修复、大范围自动执行、覆盖用户内容等场景必须在写入前经过策略判断和审批边界。
+6. **质量产物闭环**：`reader_promise / chapter_retention_contract / continuity_state / rolling_window_review / character_governance_state` 从记录型产物推进为评估、失效、局部修复、再评估闭环。
+7. **Planner / Replan 状态驱动化**：`PlannerService.replan` 的窗口决策、触发理由和章节选择切到 `CanonicalStateService / ContextAssemblyService / ChapterStateGoal`。
+8. **章节任务单质量门禁**：为 `purpose / boundary / taskSheet` 增加 schema + 语义可用性双门禁，拦截坏细化产物进入同步和执行链。
+9. **章节修复策略**：补 `patch_first` 默认策略；动态角色系统进入执行期角色筛选、修复边界和 replan 判断。
+10. **模型路由细化**：从 `planner / writer / review / repair` 粗粒度推进到小说生产阶段级路由与 fallback。
+11. **卷级工作台消费链**：把 `critique / rebalance / uncertainty / canonical payoff ledger` 接成卷级工作台默认消费链，并让卷级账本视图成为主视图。
+12. **新手入口收敛**：首页、创建页、空状态统一为“AI 自动导演推荐入口 + 手动高级入口”；关键节点只保留一个推荐下一步。
+13. **拆书任务合同**：补齐 `scope / pause / resume / coverage`，形成“前 N 片段试跑 -> 扩范围继续”的渐进式流程。
+14. **技术债收口**：拆分 `workflowRegistry.ts`，继续瘦身 `NovelDirectorService` 和 `DirectorRuntimeStore`，避免新能力继续堆回主 service。
 
 ## 3. 执行原则
 

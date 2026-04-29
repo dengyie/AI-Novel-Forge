@@ -1,4 +1,5 @@
 import type { ApiResponse } from "@ai-novel/shared/types/api";
+import type { DirectorCommandAcceptedResponse } from "@ai-novel/shared/types/directorRuntime";
 import type {
   RecoverableTaskListResponse,
   TaskOverviewSummary,
@@ -39,7 +40,7 @@ export async function listRecoveryCandidates() {
 }
 
 export async function resumeRecoveryCandidate(kind: Extract<TaskKind, "book_analysis" | "novel_pipeline" | "image_generation" | "novel_workflow" | "style_extraction">, id: string) {
-  const { data } = await apiClient.post<ApiResponse<{ kind: string; id: string }>>(`/tasks/recovery-candidates/${kind}/${id}/resume`, {});
+  const { data } = await apiClient.post<ApiResponse<{ kind: string; id: string; command?: DirectorCommandAcceptedResponse | null }>>(`/tasks/recovery-candidates/${kind}/${id}/resume`, {});
   return data;
 }
 
@@ -73,6 +74,7 @@ export async function retryTask(
   options?: {
     llmOverride?: Pick<DirectorLLMOptions, "provider" | "model" | "temperature">;
     resume?: boolean;
+    batchAlreadyStartedCount?: number;
   },
 ) {
   const { data } = await apiClient.post<ApiResponse<UnifiedTaskDetail>>(`/tasks/${kind}/${id}/retry`, options ?? {});

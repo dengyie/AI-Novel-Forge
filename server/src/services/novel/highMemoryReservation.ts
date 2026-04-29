@@ -218,39 +218,44 @@ export async function acquireHighMemoryReservation(input: {
     metadata: input.metadata,
   });
 
-  try {
-    await withSqliteRetry(
-      () => prisma.appSetting.create({
-        data: {
+  let existing = await prisma.appSetting.findUnique({
+    where: { key },
+  });
+  if (!existing) {
+    try {
+      await withSqliteRetry(
+        () => prisma.appSetting.create({
+          data: {
+            key,
+            value,
+          },
+        }),
+        { label: "high-memory-reservation-create" },
+      );
+      return {
+        acquired: true,
+        handle: createHandle({
           key,
+          namespace,
+          scopeKey,
+          ownerId,
+          token,
+          acquiredAt,
+          ttlMs: input.ttlMs,
           value,
-        },
-      }),
-      { label: "high-memory-reservation-create" },
-    );
-    return {
-      acquired: true,
-      handle: createHandle({
-        key,
-        namespace,
-        scopeKey,
-        ownerId,
-        token,
-        acquiredAt,
-        ttlMs: input.ttlMs,
-        value,
-        metadata: input.metadata,
-      }),
-    };
-  } catch (error) {
-    if (!isUniqueConstraintError(error)) {
-      throw error;
+          metadata: input.metadata,
+        }),
+      };
+    } catch (error) {
+      if (!isUniqueConstraintError(error)) {
+        throw error;
+      }
+      existing = await prisma.appSetting.findUnique({
+        where: { key },
+      });
     }
   }
 
-  const existing = await prisma.appSetting.findUnique({
-    where: { key },
-  });
   const existingRecord = parseReservationValue(existing?.value);
   const canReplace = existing
     && (

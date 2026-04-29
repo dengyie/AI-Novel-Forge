@@ -36,6 +36,7 @@ export interface UnifiedTaskSummary {
   kind: TaskKind;
   title: string;
   status: TaskStatus;
+  pendingManualRecovery?: boolean;
   progress: number;
   currentStage?: string | null;
   currentItemKey?: string | null;

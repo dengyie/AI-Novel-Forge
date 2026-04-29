@@ -10,7 +10,7 @@ import type { NovelWorkflowCheckpoint } from "@ai-novel/shared/types/novelWorkfl
 import { prisma } from "../../../db/prisma";
 import { AppError } from "../../../middleware/errorHandler";
 import { resolveModel, type TaskType } from "../../../llm/modelRouter";
-import { NovelDirectorService } from "../../novel/director/NovelDirectorService";
+import { DirectorCommandService } from "../../novel/director/DirectorCommandService";
 import { AutoDirectorValidationService } from "../../novel/director/autoDirectorValidationService";
 import type { DirectorWorkflowSeedPayload } from "../../novel/director/novelDirectorHelpers";
 import { NovelWorkflowService } from "../../novel/workflow/NovelWorkflowService";
@@ -164,7 +164,12 @@ function summarizeBatchResult(input: {
 export class AutoDirectorFollowUpActionExecutor {
   readonly workflowService = new NovelWorkflowService();
 
-  readonly novelDirectorService = new NovelDirectorService();
+  readonly directorCommandService = new DirectorCommandService(this.workflowService);
+
+  readonly novelDirectorService = {
+    continueTask: (taskId: string, input?: Parameters<DirectorCommandService["enqueueContinueCommand"]>[1]) =>
+      this.directorCommandService.enqueueContinueCommand(taskId, input).then(() => undefined),
+  };
 
   readonly workflowTaskAdapter = new NovelWorkflowTaskAdapter();
 

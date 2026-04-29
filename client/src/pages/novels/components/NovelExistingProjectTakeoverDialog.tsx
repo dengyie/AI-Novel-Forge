@@ -242,7 +242,7 @@ export default function NovelExistingProjectTakeoverDialog({
     }),
     onSuccess: async (response) => {
       const data = response.data;
-      if (!data?.workflowTaskId) {
+      if (!data?.taskId) {
         toast.error("启动自动导演失败，未返回任务信息。");
         return;
       }
@@ -253,15 +253,13 @@ export default function NovelExistingProjectTakeoverDialog({
       setOpen(false);
       toast.success(
         runMode === "auto_to_execution"
-          ? `自动导演已接管当前项目，会继续自动执行 ${buildDirectorAutoExecutionPlanLabel(autoExecutionPlan)}。`
-          : "自动导演已接管当前项目，会继续推进到下一可交付阶段。",
+          ? `自动导演接管任务已提交，任务中心会显示 ${buildDirectorAutoExecutionPlanLabel(autoExecutionPlan)} 的执行进度。`
+          : "自动导演接管任务已提交，任务中心会显示排队和执行进度。",
       );
       navigate(buildEditRoute({
         novelId,
-        workflowTaskId: data.workflowTaskId,
-        stage: data.resumeTarget?.stage ?? "story_macro",
-        chapterId: data.resumeTarget?.chapterId ?? null,
-        volumeId: data.resumeTarget?.volumeId ?? null,
+        workflowTaskId: data.taskId,
+        stage: selectedEntryStep === "basic" ? "basic" : selectedEntryStep,
       }));
     },
     onError: (error) => {

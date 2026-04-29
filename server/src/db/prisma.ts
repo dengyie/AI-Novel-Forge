@@ -5,17 +5,16 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
 import { getDatabaseUrl } from "../config/database";
 import { resolveDatabaseFilePath } from "../runtime/appPaths";
+import { configureSqliteRuntimePragmas } from "./sqlitePragmas";
 
 declare global {
   // eslint-disable-next-line no-var
   var prisma: PrismaClient | undefined;
 }
 
-function resolveSqliteDatabaseUrl(databaseUrl: string): string {
+function resolveSqliteDatabasePath(databaseUrl: string): string {
   const filePath = databaseUrl.slice("file:".length) || "./dev.db";
-  const resolvedFilePath = path.isAbsolute(filePath) ? filePath : resolveDatabaseFilePath(filePath);
-  fs.mkdirSync(path.dirname(resolvedFilePath), { recursive: true });
-  return `file:${resolvedFilePath}`;
+  return path.isAbsolute(filePath) ? filePath : resolveDatabaseFilePath(filePath);
 }
 
 function resolveSqliteBusyTimeout(timeoutValue?: string): number {
@@ -28,10 +27,18 @@ function resolveSqliteBusyTimeout(timeoutValue?: string): number {
 
 const databaseUrl = getDatabaseUrl();
 const adapter = databaseUrl.startsWith("file:")
-  ? new PrismaBetterSqlite3({
-      url: resolveSqliteDatabaseUrl(databaseUrl),
-      timeout: resolveSqliteBusyTimeout(process.env.SQLITE_BUSY_TIMEOUT_MS),
-    })
+  ? (() => {
+      const timeout = resolveSqliteBusyTimeout(process.env.SQLITE_BUSY_TIMEOUT_MS);
+      const sqlitePath = resolveSqliteDatabasePath(databaseUrl);
+      fs.mkdirSync(path.dirname(sqlitePath), { recursive: true });
+      configureSqliteRuntimePragmas(sqlitePath, {
+        busyTimeoutMs: timeout,
+      });
+      return new PrismaBetterSqlite3({
+        url: `file:${sqlitePath}`,
+        timeout,
+      });
+    })()
   : new PrismaPg({
       connectionString: databaseUrl,
     });

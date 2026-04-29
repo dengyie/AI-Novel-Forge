@@ -15,6 +15,8 @@ import {
 } from "@/components/ui/dialog";
 import type { NovelTaskDrawerState } from "./NovelEditView.types";
 
+type DrawerTask = NonNullable<NovelTaskDrawerState["task"]>;
+
 function formatStatus(status: TaskStatus): string {
   if (status === "queued") {
     return "排队中";
@@ -34,6 +36,13 @@ function formatStatus(status: TaskStatus): string {
   return "已取消";
 }
 
+function formatTaskStatus(task: DrawerTask): string {
+  if (task.pendingManualRecovery) {
+    return "待恢复";
+  }
+  return formatStatus(task.status);
+}
+
 function toStatusVariant(status: TaskStatus): "default" | "outline" | "secondary" | "destructive" {
   if (status === "running") {
     return "default";
@@ -45,6 +54,13 @@ function toStatusVariant(status: TaskStatus): "default" | "outline" | "secondary
     return "secondary";
   }
   return "outline";
+}
+
+function toTaskStatusVariant(task: DrawerTask): "default" | "outline" | "secondary" | "destructive" {
+  if (task.pendingManualRecovery) {
+    return "secondary";
+  }
+  return toStatusVariant(task.status);
 }
 
 function formatCheckpoint(checkpoint: NovelWorkflowMilestoneType | null | undefined, scopeLabel?: string | null): string {
@@ -276,7 +292,7 @@ export default function NovelTaskDrawer({
               <section className="space-y-3 rounded-2xl border border-border/70 bg-muted/15 p-4">
                 <div className="flex flex-wrap items-center gap-2">
                   <div className="text-base font-semibold text-foreground">{task.title}</div>
-                  <Badge variant={toStatusVariant(task.status)}>{formatStatus(task.status)}</Badge>
+                  <Badge variant={toTaskStatusVariant(task)}>{formatTaskStatus(task)}</Badge>
                   <Badge variant="outline">进度 {progressPercent}%</Badge>
                 </div>
                 <div className="grid gap-3 sm:grid-cols-2">

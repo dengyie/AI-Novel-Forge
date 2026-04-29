@@ -34,6 +34,7 @@ export interface NovelWorkflowResumeTarget {
   route: "/novels/create" | "/novels/:id/edit";
   novelId?: string | null;
   taskId?: string | null;
+  lane?: NovelWorkflowLane | null;
   stage?: "basic" | "story_macro" | "character" | "outline" | "structured" | "chapter" | "pipeline";
   chapterId?: string | null;
   volumeId?: string | null;

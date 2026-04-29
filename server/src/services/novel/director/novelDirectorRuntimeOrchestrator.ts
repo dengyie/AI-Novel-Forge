@@ -1,5 +1,6 @@
 import type {
   DirectorArtifactRef,
+  DirectorStepRun,
 } from "@ai-novel/shared/types/directorRuntime";
 import type {
   DirectorAutoExecutionState,
@@ -10,6 +11,7 @@ import { AppError } from "../../../middleware/errorHandler";
 import type { NovelWorkflowService } from "../workflow/NovelWorkflowService";
 import type { DirectorPolicyRequest } from "./runtime/DirectorPolicyEngine";
 import type { DirectorRuntimeService } from "./runtime/DirectorRuntimeService";
+import { buildDefaultDirectorPolicy } from "./runtime/directorRuntimeDefaults";
 import type { NovelDirectorAutoExecutionRuntime } from "./novelDirectorAutoExecutionRuntime";
 import type { DirectorProgressItemKey } from "./novelDirectorProgress";
 import type { WorkflowStepModuleDescriptor } from "./workflowStepRuntime/WorkflowStepModule";
@@ -97,6 +99,7 @@ export class NovelDirectorRuntimeOrchestrator {
     mayModifyUserContent?: boolean;
     requiresApprovalByDefault?: boolean;
     supportsAutoRetry?: boolean;
+    approveCurrentGate?: boolean;
     targetType?: DirectorArtifactRef["targetType"] | null;
     targetId?: string | null;
     waitingState?: {
@@ -117,6 +120,14 @@ export class NovelDirectorRuntimeOrchestrator {
         targetId: input.targetId ?? null,
       })
       : [];
+    const policy = await this.resolveNodePolicyOverride({
+      taskId: input.taskId,
+      nodeKey: input.nodeKey,
+      targetType: input.targetType ?? "global",
+      targetId: input.targetId ?? null,
+      affectedArtifacts,
+      approveCurrentGate: input.approveCurrentGate ?? false,
+    });
     const result = await this.deps.directorRuntime.runNode<void, {
       output: T;
       artifacts: DirectorArtifactRef[];
@@ -147,7 +158,7 @@ export class NovelDirectorRuntimeOrchestrator {
         targetType: input.targetType ?? "global",
         targetId: input.targetId ?? null,
         payload: undefined,
-        policy: affectedArtifacts.length > 0 ? { affectedArtifacts } : undefined,
+        policy,
       },
       (output) => output.artifacts,
     );
@@ -175,6 +186,7 @@ export class NovelDirectorRuntimeOrchestrator {
     novelId?: string | null;
     targetType?: DirectorArtifactRef["targetType"] | null;
     targetId?: string | null;
+    approveCurrentGate?: boolean;
     runner: () => Promise<T>;
     collectArtifacts?: (output: T) => Promise<DirectorArtifactRef[]> | DirectorArtifactRef[];
   }): Promise<T> {
@@ -187,6 +199,7 @@ export class NovelDirectorRuntimeOrchestrator {
       mayModifyUserContent: input.module.mayModifyUserContent,
       requiresApprovalByDefault: input.module.requiresApprovalByDefault,
       supportsAutoRetry: input.module.supportsAutoRetry,
+      approveCurrentGate: input.approveCurrentGate,
       targetType: input.targetType ?? input.module.targetType,
       targetId: input.targetId,
       waitingState: input.module.defaultWaitingState,
@@ -207,6 +220,7 @@ export class NovelDirectorRuntimeOrchestrator {
     resumeStage?: "chapter" | "pipeline";
     previousFailureMessage?: string | null;
     allowSkipReviewBlockedChapter?: boolean;
+    approveCurrentGate?: boolean;
   }): Promise<void> {
     const isQualityRepair = input.resumeCheckpointType === "replan_required";
     const workflowPlan = buildChapterPipelineWorkflowTemplate(
@@ -224,6 +238,7 @@ export class NovelDirectorRuntimeOrchestrator {
       taskId: input.taskId,
       novelId: input.novelId,
       targetId: input.novelId,
+      approveCurrentGate: input.approveCurrentGate,
       runner: () => this.deps.autoExecutionRuntime.runFromReady(input),
     });
 
@@ -241,6 +256,7 @@ export class NovelDirectorRuntimeOrchestrator {
         taskId: input.taskId,
         novelId: input.novelId,
         targetId: input.novelId,
+        approveCurrentGate: input.approveCurrentGate,
         runner: async () => undefined,
         collectArtifacts: () => artifacts,
       });
@@ -296,5 +312,59 @@ export class NovelDirectorRuntimeOrchestrator {
       }
       return artifact.status === "active";
     });
+  }
+
+  private async resolveNodePolicyOverride(input: {
+    taskId: string;
+    nodeKey: string;
+    targetType: DirectorArtifactRef["targetType"];
+    targetId?: string | null;
+    affectedArtifacts: DirectorArtifactRef[];
+    approveCurrentGate: boolean;
+  }): Promise<Omit<Partial<DirectorPolicyRequest>, "action"> | undefined> {
+    const affectedPolicy = input.affectedArtifacts.length > 0
+      ? { affectedArtifacts: input.affectedArtifacts }
+      : undefined;
+    if (!input.approveCurrentGate) {
+      return affectedPolicy;
+    }
+
+    const snapshot = await this.deps.directorRuntime.getSnapshot(input.taskId).catch(() => null);
+    const approvedGate = [...(snapshot?.steps ?? [])]
+      .reverse()
+      .find((step) => this.matchesPendingApprovedGate(step, input));
+    if (!approvedGate) {
+      return affectedPolicy;
+    }
+
+    const basePolicy = snapshot?.policy ?? buildDefaultDirectorPolicy();
+    return {
+      affectedArtifacts: input.affectedArtifacts,
+      policy: {
+        ...basePolicy,
+        mode: "auto_safe_scope",
+        updatedAt: new Date().toISOString(),
+      },
+    };
+  }
+
+  private matchesPendingApprovedGate(
+    step: DirectorStepRun,
+    input: {
+      nodeKey: string;
+      targetType: DirectorArtifactRef["targetType"];
+      targetId?: string | null;
+    },
+  ): boolean {
+    if (step.status !== "waiting_approval" || step.nodeKey !== input.nodeKey) {
+      return false;
+    }
+    if (step.targetType && step.targetType !== input.targetType) {
+      return false;
+    }
+    if (step.targetId && input.targetId && step.targetId !== input.targetId) {
+      return false;
+    }
+    return true;
   }
 }

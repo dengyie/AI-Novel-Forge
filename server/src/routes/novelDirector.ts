@@ -30,10 +30,12 @@ import { DIRECTOR_AUTO_APPROVAL_POINTS } from "@ai-novel/shared/types/autoDirect
 import { validate } from "../middleware/validate";
 import { llmProviderSchema } from "../llm/providerSchema";
 import { NovelDirectorService } from "../services/novel/director/NovelDirectorService";
+import { DirectorCommandService } from "../services/novel/director/DirectorCommandService";
 import { directorPersistedCandidateSchema } from "../services/novel/director/novelDirectorSchemas";
 
 const router = Router();
 const novelDirectorService = new NovelDirectorService();
+const directorCommandService = new DirectorCommandService();
 
 const correctionPresetValues = DIRECTOR_CORRECTION_PRESETS.map((item) => item.value) as [string, ...string[]];
 const takeoverStartPhaseValues = [...DIRECTOR_TAKEOVER_START_PHASES] as [string, ...string[]];
@@ -347,6 +349,21 @@ router.get("/runtime/:taskId", validate({ params: runtimeTaskParamsSchema }), as
   }
 });
 
+router.get("/runtime/:taskId/projection", validate({ params: runtimeTaskParamsSchema }), async (req, res, next) => {
+  try {
+    const { taskId } = req.params as z.infer<typeof runtimeTaskParamsSchema>;
+    const projection = await novelDirectorService.getRuntimeProjection(taskId);
+    const data = { projection };
+    res.status(200).json({
+      success: true,
+      data,
+      message: "Director runtime projection loaded.",
+    } satisfies ApiResponse<typeof data>);
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.post(
   "/runtime/:taskId/policy",
   validate({ params: runtimeTaskParamsSchema, body: runtimePolicySchema }),
@@ -391,15 +408,15 @@ router.post(
           },
         });
       }
-      await novelDirectorService.continueTask(taskId, {
+      const data = await directorCommandService.enqueueContinueCommand(taskId, {
         continuationMode: body.continuationMode,
         batchAlreadyStartedCount: body.batchAlreadyStartedCount,
       });
       res.status(202).json({
         success: true,
-        data: { taskId },
+        data,
         message: "Director runtime continue accepted.",
-      } satisfies ApiResponse<{ taskId: string }>);
+      } satisfies ApiResponse<typeof data>);
     } catch (error) {
       next(error);
     }
@@ -408,11 +425,11 @@ router.post(
 
 router.post("/takeover", validate({ body: takeoverSchema }), async (req, res, next) => {
   try {
-    const data = await novelDirectorService.startTakeover(req.body as DirectorTakeoverRequest);
-    res.status(200).json({
+    const data = await directorCommandService.enqueueTakeoverCommand(req.body as DirectorTakeoverRequest);
+    res.status(202).json({
       success: true,
       data,
-      message: "Director takeover started.",
+      message: "Director takeover accepted.",
     } satisfies ApiResponse<typeof data>);
   } catch (error) {
     next(error);

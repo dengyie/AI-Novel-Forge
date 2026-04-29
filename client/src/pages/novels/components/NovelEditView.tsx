@@ -87,6 +87,9 @@ function DesktopNovelEditView(props: NovelEditViewProps) {
     if (!taskDrawer?.task) {
       return null;
     }
+    if (taskDrawer.task.pendingManualRecovery) {
+      return "待恢复";
+    }
     if (taskDrawer.task.status === "failed") {
       return "异常";
     }

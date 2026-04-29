@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { AutoDirectorAction, AutoDirectorMutationActionCode } from "@ai-novel/shared/types/autoDirectorFollowUp";
+import type { DirectorContinuationMode } from "@ai-novel/shared/types/novelDirector";
 import type { TaskKind, TaskStatus } from "@ai-novel/shared/types/task";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import type { NovelWorkflowMilestone } from "@ai-novel/shared/types/novelWorkflow";
@@ -211,14 +212,14 @@ export default function TaskCenterPage() {
   });
 
   const continueWorkflowMutation = useMutation({
-    mutationFn: (payload: { taskId: string; mode?: "auto_execute_range" }) => continueNovelWorkflow(
+    mutationFn: (payload: { taskId: string; mode?: DirectorContinuationMode }) => continueNovelWorkflow(
       payload.taskId,
       payload.mode ? { continuationMode: payload.mode } : undefined,
     ),
     onSuccess: async (response, variables) => {
       await invalidateTaskQueries();
-      const task = response.data;
-      const feedback = resolveWorkflowContinuationFeedback(task, {
+      const command = response.data;
+      const feedback = resolveWorkflowContinuationFeedback(command, {
         mode: variables.mode,
       });
       if (feedback.tone === "error") {
@@ -229,14 +230,14 @@ export default function TaskCenterPage() {
         toast.success(feedback.message);
         return;
       }
-      if (task?.kind && task.id) {
+      if (selectedTask?.kind && selectedTask.id) {
         setSearchParams((prev) => {
           const next = new URLSearchParams(prev);
-          next.set("kind", task.kind);
-          next.set("id", task.id);
+          next.set("kind", selectedTask.kind);
+          next.set("id", selectedTask.id);
           return next;
         });
-        navigate(task.sourceRoute);
+        navigate(selectedTask.sourceRoute);
         return;
       }
       toast.success(feedback.message);
@@ -331,6 +332,10 @@ export default function TaskCenterPage() {
   });
   const selectedDirectorRuntimeSnapshot = directorRuntimeQuery.data?.data?.snapshot ?? null;
   const selectedDirectorRuntimeProjection = directorRuntimeQuery.data?.data?.projection ?? null;
+  const runtimeHardBlocked = selectedDirectorRuntimeProjection?.status === "blocked";
+  const runtimeBlockedReason = selectedDirectorRuntimeProjection?.blockedReason?.trim()
+    || selectedDirectorRuntimeProjection?.detail?.trim()
+    || null;
 
   useEffect(() => {
     setRetryOverride({
@@ -371,6 +376,10 @@ export default function TaskCenterPage() {
     }
     if (action.kind === "navigation") {
       navigate(action.targetUrl ?? selectedTask.sourceRoute);
+      return;
+    }
+    if (runtimeHardBlocked) {
+      toast.error(runtimeBlockedReason ?? "请先处理当前导演停留点。");
       return;
     }
     if (action.requiresConfirm) {
@@ -542,7 +551,7 @@ export default function TaskCenterPage() {
                           size="sm"
                           variant={followUpActionVariant(action)}
                           onClick={() => handleFollowUpAction(action)}
-                          disabled={executeFollowUpActionMutation.isPending}
+                          disabled={executeFollowUpActionMutation.isPending || (runtimeHardBlocked && action.kind !== "navigation")}
                         >
                           {action.label}
                         </Button>
@@ -596,12 +605,21 @@ export default function TaskCenterPage() {
                   {!selectedAutoDirectorFollowUp && canResumeFront10AutoExecution ? (
                     <Button
                       size="sm"
-                      onClick={() =>
+                      onClick={() => {
+                        if (selectedTask.status === "failed" || selectedTask.status === "cancelled") {
+                          retryMutation.mutate({
+                            kind: selectedTask.kind,
+                            id: selectedTask.id,
+                            resume: true,
+                          });
+                          return;
+                        }
                         continueWorkflowMutation.mutate({
                           taskId: selectedTask.id,
                           mode: "auto_execute_range",
-                        })}
-                      disabled={continueWorkflowMutation.isPending}
+                        });
+                      }}
+                      disabled={continueWorkflowMutation.isPending || retryMutation.isPending || runtimeHardBlocked}
                     >
                       {selectedTask.resumeAction ?? `继续自动执行${selectedTask.executionScopeLabel ?? "当前章节范围"}`}
                     </Button>
@@ -616,8 +634,9 @@ export default function TaskCenterPage() {
                       onClick={() =>
                         continueWorkflowMutation.mutate({
                           taskId: selectedTask.id,
+                          mode: selectedTask.status === "waiting_approval" ? "resume" : undefined,
                         })}
-                      disabled={continueWorkflowMutation.isPending}
+                      disabled={continueWorkflowMutation.isPending || runtimeHardBlocked}
                     >
                       {selectedTask.resumeAction ?? (isActiveAutoDirectorTask ? "查看进度" : "继续")}
                     </Button>

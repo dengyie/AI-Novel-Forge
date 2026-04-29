@@ -192,14 +192,8 @@ export function resolveAutoDirectorFollowUpReason(
       priority: "P1",
       availableActions: [
         mutationAction({
-          code: "continue_generic",
-          label: getContinueLabel(input, "继续当前任务"),
-          riskLevel: "low",
-          requiresConfirm: false,
-        }),
-        mutationAction({
           code: "retry_with_task_model",
-          label: "按任务模型重试",
+          label: getContinueLabel(input, "从最近检查点恢复"),
           riskLevel: "low",
           requiresConfirm: false,
         }),

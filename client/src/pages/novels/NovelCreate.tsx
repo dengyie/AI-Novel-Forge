@@ -162,7 +162,7 @@ export default function NovelCreate() {
         const search = new URLSearchParams();
         search.set("stage", "basic");
         if (workflowTaskId) {
-          search.set("taskId", workflowTaskId);
+          search.set("workspaceTaskId", workflowTaskId);
         }
         navigate(`/novels/${response.data.id}/edit?${search.toString()}`);
       }

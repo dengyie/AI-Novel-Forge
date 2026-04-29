@@ -1,5 +1,4 @@
 import { isDirectorRecoveryNotNeededError } from "../director/novelDirectorErrors";
-import type { NovelDirectorService } from "../director/NovelDirectorService";
 import type { NovelWorkflowService } from "./NovelWorkflowService";
 
 const SERVER_RESTART_RECOVERY_MESSAGE = "自动导演任务因服务重启中断，正在尝试恢复。";
@@ -13,7 +12,7 @@ interface WorkflowRecoveryPort {
 }
 
 interface DirectorRecoveryPort {
-  continueTask(taskId: string): Promise<void>;
+  enqueueRecoveryCommand(taskId: string): Promise<unknown>;
 }
 
 function createWorkflowService(): WorkflowRecoveryPort {
@@ -22,8 +21,8 @@ function createWorkflowService(): WorkflowRecoveryPort {
 }
 
 function createDirectorService(): DirectorRecoveryPort {
-  const { NovelDirectorService } = require("../director/NovelDirectorService") as typeof import("../director/NovelDirectorService");
-  return new NovelDirectorService();
+  const { DirectorCommandService } = require("../director/DirectorCommandService") as typeof import("../director/DirectorCommandService");
+  return new DirectorCommandService();
 }
 
 export class NovelWorkflowRuntimeService {
@@ -39,7 +38,7 @@ export class NovelWorkflowRuntimeService {
         if (row.status === "running") {
           await this.workflowService.requeueTaskForRecovery(row.id, SERVER_RESTART_RECOVERY_MESSAGE);
         }
-        await this.directorService.continueTask(row.id);
+        await this.directorService.enqueueRecoveryCommand(row.id);
       } catch (error) {
         if (isDirectorRecoveryNotNeededError(error)) {
           await this.workflowService.restoreTaskToCheckpoint(row.id);

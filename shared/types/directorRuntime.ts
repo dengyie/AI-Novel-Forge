@@ -124,9 +124,22 @@ export interface DirectorEvent {
 export interface DirectorPolicyDecision {
   canRun: boolean;
   requiresApproval: boolean;
+  gateType: "none" | "approval" | "blocked_scope";
   reason: string;
   mayOverwriteUserContent: boolean;
   affectedArtifacts: string[];
+  riskTags: Array<
+    | "suggest_only"
+    | "protected_user_content"
+    | "default_approval"
+    | "expensive_review"
+    | "downstream_recompute"
+    | "large_scope_auto_run"
+    | "quality_repair"
+    | "quality_manual_repair"
+    | "quality_blocked_scope"
+    | "continue_with_risk"
+  >;
   autoRetryBudget: number;
   onQualityFailure: "repair_once" | "pause_for_manual" | "continue_with_risk" | "block_scope";
 }
@@ -198,6 +211,37 @@ export interface DirectorRuntimeProjection {
 export interface DirectorRuntimeSnapshotResponse {
   snapshot: DirectorRuntimeSnapshot | null;
   projection?: DirectorRuntimeProjection | null;
+}
+
+export const DIRECTOR_RUN_COMMAND_TYPES = [
+  "continue",
+  "resume_from_checkpoint",
+  "retry",
+  "takeover",
+  "cancel",
+] as const;
+
+export type DirectorRunCommandType = typeof DIRECTOR_RUN_COMMAND_TYPES[number];
+
+export const DIRECTOR_RUN_COMMAND_STATUSES = [
+  "queued",
+  "leased",
+  "running",
+  "succeeded",
+  "failed",
+  "cancelled",
+  "stale",
+] as const;
+
+export type DirectorRunCommandStatus = typeof DIRECTOR_RUN_COMMAND_STATUSES[number];
+
+export interface DirectorCommandAcceptedResponse {
+  commandId: string;
+  taskId: string;
+  novelId?: string | null;
+  commandType: DirectorRunCommandType;
+  status: DirectorRunCommandStatus;
+  leaseExpiresAt?: string | null;
 }
 
 export interface DirectorWorkspaceAnalysisResponse {

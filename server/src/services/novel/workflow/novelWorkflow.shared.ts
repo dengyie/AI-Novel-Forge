@@ -51,6 +51,7 @@ export function buildNovelCreateResumeTarget(taskId: string, mode: "director" | 
 export function buildNovelEditResumeTarget(params: {
   novelId: string;
   taskId?: string | null;
+  lane?: NovelWorkflowResumeTarget["lane"];
   stage: NovelWorkflowResumeTarget["stage"];
   chapterId?: string | null;
   volumeId?: string | null;
@@ -59,6 +60,7 @@ export function buildNovelEditResumeTarget(params: {
     route: "/novels/:id/edit",
     novelId: params.novelId,
     taskId: params.taskId ?? null,
+    lane: params.lane ?? null,
     stage: params.stage,
     chapterId: params.chapterId ?? null,
     volumeId: params.volumeId ?? null,
@@ -90,7 +92,11 @@ export function resumeTargetToRoute(target: NovelWorkflowResumeTarget | null | u
     searchParams.set("stage", target.stage);
   }
   if (target.taskId) {
-    searchParams.set("taskId", target.taskId);
+    if (target.lane === "manual_create") {
+      searchParams.set("workspaceTaskId", target.taskId);
+    } else {
+      searchParams.set("taskId", target.taskId);
+    }
   }
   if (target.chapterId) {
     searchParams.set("chapterId", target.chapterId);

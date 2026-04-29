@@ -284,6 +284,18 @@ function isStructuredOutlineItemKey(itemKey: string | null | undefined): boolean
     || itemKey === "chapter_detail_bundle";
 }
 
+function parseRuntimeGateReason(policyDecisionJson: string | null | undefined): string | null {
+  if (!policyDecisionJson?.trim()) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(policyDecisionJson) as { reason?: unknown };
+    return typeof parsed.reason === "string" && parsed.reason.trim() ? parsed.reason.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
 export class NovelWorkflowService {
   private readonly volumeService = new NovelVolumeService();
 
@@ -467,6 +479,10 @@ export class NovelWorkflowService {
   async findLatestVisibleTaskByNovelId(novelId: string, lane?: NovelWorkflowLane) {
     const rows = await this.getVisibleRowsByNovelId(novelId, lane);
     return rows[0] ?? null;
+  }
+
+  async listVisibleTasksByNovelAndLane(novelId: string, lane: NovelWorkflowLane) {
+    return this.getVisibleRowsByNovelId(novelId, lane);
   }
 
   async findActiveTaskByNovelAndLane(novelId: string, lane: NovelWorkflowLane) {
@@ -685,9 +701,13 @@ export class NovelWorkflowService {
         milestonesJson?: string | null;
         lastError?: string | null;
         cancelRequestedAt?: Date | null;
+        pendingManualRecovery?: boolean | null;
       } | null,
     ): Promise<boolean> {
       if (isTaskCancellationRequested(row)) {
+        return false;
+      }
+      if (row?.pendingManualRecovery) {
         return false;
       }
       const brokenSeedHealed = await this.healBrokenAutoDirectorCandidateSeedPayload(taskId, row);
@@ -700,8 +720,10 @@ export class NovelWorkflowService {
       const front10Healed = await this.healHistoricalAutoDirectorFront10RecoveryFailure(taskId, normalizedRow);
       const titleDiversityHealed = await this.healChapterTitleDiversitySoftFailure(taskId, normalizedRow);
       const structuredOutlineHealed = await this.healStaleAutoDirectorStructuredOutlineProgress(taskId, normalizedRow);
+      const runtimeGateHealed = await this.healRuntimeGateApprovalState(taskId, normalizedRow);
+      const runtimeFailureHealed = await this.healRuntimeFailedState(taskId, normalizedRow);
       const staleRunningHealed = await this.healStaleAutoDirectorRunningTask(taskId, normalizedRow);
-      const checkpointRow = (brokenSeedHealed || queuedHealed || historicalHealed || front10Healed || titleDiversityHealed || structuredOutlineHealed || staleRunningHealed)
+      const checkpointRow = (brokenSeedHealed || queuedHealed || historicalHealed || front10Healed || titleDiversityHealed || structuredOutlineHealed || runtimeGateHealed || runtimeFailureHealed || staleRunningHealed)
         ? await this.getVisibleRowByIdRaw(taskId)
         : (normalizedRow ?? await this.getVisibleRowByIdRaw(taskId));
     const checkpointHealed = isChapterBatchCheckpointRow(checkpointRow)
@@ -710,7 +732,132 @@ export class NovelWorkflowService {
         row: checkpointRow,
       })
       : false;
-    return brokenSeedHealed || queuedHealed || historicalHealed || front10Healed || titleDiversityHealed || structuredOutlineHealed || staleRunningHealed || checkpointHealed;
+    return brokenSeedHealed || queuedHealed || historicalHealed || front10Healed || titleDiversityHealed || structuredOutlineHealed || runtimeGateHealed || runtimeFailureHealed || staleRunningHealed || checkpointHealed;
+  }
+
+  async healRuntimeGateApprovalState(
+    taskId: string,
+    row = null as {
+      lane?: string | null;
+      status?: string | null;
+      currentItemLabel?: string | null;
+      checkpointSummary?: string | null;
+      pendingManualRecovery?: boolean | null;
+      cancelRequestedAt?: Date | null;
+    } | null,
+  ): Promise<boolean> {
+    const candidate = row ?? await this.getVisibleRowByIdRaw(taskId);
+    if (
+      !candidate
+      || candidate.lane !== "auto_director"
+      || candidate.status !== "running"
+      || candidate.pendingManualRecovery
+      || isTaskCancellationRequested(candidate)
+    ) {
+      return false;
+    }
+    const activeCommand = await prisma.directorRunCommand.findFirst({
+      where: {
+        taskId,
+        status: { in: ["queued", "leased", "running"] },
+      },
+      select: { id: true },
+    });
+    if (activeCommand) {
+      return false;
+    }
+    const latestStep = await prisma.directorStepRun.findFirst({
+      where: { taskId },
+      orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+      select: {
+        status: true,
+        label: true,
+        policyDecisionJson: true,
+      },
+    });
+    if (!latestStep || (latestStep.status !== "waiting_approval" && latestStep.status !== "blocked_scope")) {
+      return false;
+    }
+    const reason = parseRuntimeGateReason(latestStep.policyDecisionJson)
+      ?? candidate.checkpointSummary
+      ?? "当前自动导演步骤需要确认后继续。";
+    await this.updateTaskWithRetry({
+      where: { id: taskId },
+      data: {
+        status: "waiting_approval",
+        currentItemLabel: candidate.currentItemLabel?.trim() || latestStep.label,
+        checkpointSummary: reason,
+        heartbeatAt: new Date(),
+        finishedAt: null,
+        lastError: null,
+        cancelRequestedAt: null,
+      },
+    });
+    return true;
+  }
+
+  async healRuntimeFailedState(
+    taskId: string,
+    row = null as {
+      lane?: string | null;
+      status?: string | null;
+      currentItemLabel?: string | null;
+      checkpointSummary?: string | null;
+      lastError?: string | null;
+      pendingManualRecovery?: boolean | null;
+      cancelRequestedAt?: Date | null;
+    } | null,
+  ): Promise<boolean> {
+    const candidate = row ?? await this.getVisibleRowByIdRaw(taskId);
+    if (
+      !candidate
+      || candidate.lane !== "auto_director"
+      || candidate.status !== "running"
+      || candidate.pendingManualRecovery
+      || isTaskCancellationRequested(candidate)
+    ) {
+      return false;
+    }
+    const activeCommand = await prisma.directorRunCommand.findFirst({
+      where: {
+        taskId,
+        status: { in: ["queued", "leased", "running"] },
+      },
+      select: { id: true },
+    });
+    if (activeCommand) {
+      return false;
+    }
+    const latestStep = await prisma.directorStepRun.findFirst({
+      where: { taskId },
+      orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+      select: {
+        status: true,
+        label: true,
+        error: true,
+        finishedAt: true,
+      },
+    });
+    if (!latestStep || latestStep.status !== "failed") {
+      return false;
+    }
+    const message = latestStep.error?.trim()
+      || candidate.lastError?.trim()
+      || candidate.checkpointSummary?.trim()
+      || "自动导演步骤失败，请检查后重试或继续。";
+    await this.updateTaskWithRetry({
+      where: { id: taskId },
+      data: {
+        status: "failed",
+        currentItemLabel: candidate.currentItemLabel?.trim() || latestStep.label,
+        checkpointSummary: message,
+        heartbeatAt: new Date(),
+        finishedAt: latestStep.finishedAt ?? new Date(),
+        lastError: message,
+        cancelRequestedAt: null,
+      },
+    });
+    return true;
   }
 
   async healStaleAutoDirectorRunningTask(
@@ -1079,6 +1226,7 @@ export class NovelWorkflowService {
     return buildNovelEditResumeTarget({
       novelId: input.novelId,
       taskId: input.taskId,
+      lane: input.lane,
       stage: mapStageToTab(input.stage),
       chapterId: input.chapterId,
       volumeId: input.volumeId,
@@ -1143,6 +1291,13 @@ export class NovelWorkflowService {
     if (input.workflowTaskId?.trim()) {
       const existing = await this.getVisibleRowById(input.workflowTaskId.trim());
       if (existing) {
+        if (existing.lane !== input.lane) {
+          throw new AppError("Workflow task lane mismatch.", 409, {
+            taskId: existing.id,
+            existingLane: existing.lane,
+            requestedLane: input.lane,
+          });
+        }
         if (input.novelId?.trim() && existing.novelId !== input.novelId.trim()) {
           if (isPreNovelAutoDirectorCandidateTask(existing)) {
             return existing;

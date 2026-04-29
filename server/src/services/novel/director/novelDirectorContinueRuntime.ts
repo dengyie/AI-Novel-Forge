@@ -123,6 +123,7 @@ export class NovelDirectorContinueRuntime {
   async continueTask(taskId: string, input?: {
     continuationMode?: DirectorContinuationMode;
     batchAlreadyStartedCount?: number;
+    forceResume?: boolean;
   }): Promise<void> {
     const row = await this.deps.workflowService.getTaskById(taskId);
     if (!row) {
@@ -132,7 +133,7 @@ export class NovelDirectorContinueRuntime {
       await this.deps.workflowService.continueTask(taskId);
       return;
     }
-    if (row.status === "running" && !row.pendingManualRecovery) {
+    if (row.status === "running" && !row.pendingManualRecovery && input?.forceResume !== true) {
       return;
     }
 
@@ -154,13 +155,6 @@ export class NovelDirectorContinueRuntime {
         : "自动导演按当前任务状态继续运行。",
       reason: row.pendingManualRecovery ? "manual_recovery_confirmed" : "continue_requested",
     });
-    if (novelId) {
-      await this.deps.directorRuntime.analyzeWorkspace({
-        novelId,
-        workflowTaskId: taskId,
-        includeAiInterpretation: false,
-      }).catch(() => null);
-    }
     const resumedCandidateStage = await this.continueCandidateStageTask(taskId, {
       novelId,
       status: row.status,
@@ -192,6 +186,7 @@ export class NovelDirectorContinueRuntime {
       input?.continuationMode === "auto_execute_range"
       || input?.continuationMode === "auto_execute_front10"
     );
+    const approveCurrentGate = input?.continuationMode === "resume";
     if (
       assetFirstRecovery?.type === "auto_execution"
       || shouldResumeStoredBatchCheckpoint
@@ -242,6 +237,7 @@ export class NovelDirectorContinueRuntime {
           resumeCheckpointType,
           previousFailureMessage: row.lastError ?? null,
           allowSkipReviewBlockedChapter: canSkipReviewBlockedChapter,
+          approveCurrentGate,
         });
       });
       return;
@@ -310,6 +306,7 @@ export class NovelDirectorContinueRuntime {
           fallback: recoveryResumeTarget?.volumeId || recoveryResumeTarget?.chapterId ? null : "book",
         }),
         batchAlreadyStartedCount: input?.batchAlreadyStartedCount,
+        approveCurrentGate,
       });
     });
   }

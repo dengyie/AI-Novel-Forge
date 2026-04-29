@@ -2,7 +2,9 @@ import type { ApiResponse } from "@ai-novel/shared/types/api";
 import type {
   DirectorRuntimePolicyUpdateRequest,
   DirectorRuntimePolicyUpdateResponse,
+  DirectorRuntimeProjection,
   DirectorRuntimeSnapshotResponse,
+  DirectorCommandAcceptedResponse,
   DirectorManualEditImpactResponse,
   DirectorWorkspaceAnalysisResponse,
 } from "@ai-novel/shared/types/directorRuntime";
@@ -19,7 +21,6 @@ import type {
   DirectorRefinementRequest,
   DirectorTakeoverReadinessResponse,
   DirectorTakeoverRequest,
-  DirectorTakeoverResponse,
 } from "@ai-novel/shared/types/novelDirector";
 import { apiClient } from "./client";
 
@@ -54,7 +55,7 @@ export async function getDirectorTakeoverReadiness(novelId: string) {
 }
 
 export async function startDirectorTakeover(payload: DirectorTakeoverRequest) {
-  const { data } = await apiClient.post<ApiResponse<DirectorTakeoverResponse>>("/novels/director/takeover", payload);
+  const { data } = await apiClient.post<ApiResponse<DirectorCommandAcceptedResponse>>("/novels/director/takeover", payload);
   return data;
 }
 
@@ -79,6 +80,13 @@ export async function getDirectorWorkspaceAnalysis(
 
 export async function getDirectorRuntimeSnapshot(taskId: string) {
   const { data } = await apiClient.get<ApiResponse<DirectorRuntimeSnapshotResponse>>(`/novels/director/runtime/${taskId}`);
+  return data;
+}
+
+export async function getDirectorRuntimeProjection(taskId: string) {
+  const { data } = await apiClient.get<ApiResponse<{ projection: DirectorRuntimeProjection | null }>>(
+    `/novels/director/runtime/${taskId}/projection`,
+  );
   return data;
 }
 
@@ -121,7 +129,7 @@ export async function continueDirectorRuntime(
     batchAlreadyStartedCount?: number;
   },
 ) {
-  const { data } = await apiClient.post<ApiResponse<{ taskId: string }>>(
+  const { data } = await apiClient.post<ApiResponse<DirectorCommandAcceptedResponse>>(
     `/novels/director/runtime/${taskId}/continue`,
     payload ?? {},
   );

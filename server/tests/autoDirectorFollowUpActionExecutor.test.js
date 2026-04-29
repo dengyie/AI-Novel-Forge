@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 
 require("../dist/app.js");
 const { AutoDirectorFollowUpActionExecutor } = require("../dist/services/task/autoDirectorFollowUps/AutoDirectorFollowUpActionExecutor.js");
+const { NovelWorkflowTaskAdapter } = require("../dist/services/task/adapters/NovelWorkflowTaskAdapter.js");
 const { prisma } = require("../dist/db/prisma.js");
 
 function buildWorkflowRow(overrides = {}) {
@@ -235,6 +236,52 @@ test("auto director follow-up action executor retries with the route model and r
   prisma.autoDirectorFollowUpActionLog.findUnique = originals.actionLogFindUnique;
   prisma.autoDirectorFollowUpActionLog.create = originals.actionLogCreate;
   prisma.novelWorkflowTask.update = originals.workflowUpdate;
+});
+
+test("novel workflow retry forces auto director resume after retry state healing", async () => {
+  const adapter = new NovelWorkflowTaskAdapter();
+  const calls = [];
+  const retryCalls = [];
+  const originalArchiveFindUnique = prisma.taskCenterArchive.findUnique;
+
+  prisma.taskCenterArchive.findUnique = async () => null;
+  adapter.workflowService.getTaskById = async () => buildWorkflowRow({
+    id: "task_cancelled_structured",
+    status: "cancelled",
+    checkpointType: null,
+    currentStage: "节奏 / 拆章",
+    currentItemKey: "chapter_list",
+    currentItemLabel: "正在生成第 1 卷节奏段：开卷抓手",
+  });
+  adapter.workflowService.retryTask = async (taskId) => {
+    retryCalls.push(taskId);
+  };
+  adapter.novelDirectorService.continueTask = async (taskId, input) => {
+    calls.push({ taskId, input });
+  };
+  adapter.detail = async (taskId) => buildTaskDetail(taskId, {
+    status: "running",
+    currentStage: "节奏 / 拆章",
+    currentItemKey: "chapter_list",
+    currentItemLabel: "正在生成第 1 卷节奏段：开卷抓手",
+  });
+
+  const result = await adapter.retry({
+    id: "task_cancelled_structured",
+    resume: true,
+  });
+
+  assert.equal(result.id, "task_cancelled_structured");
+  assert.deepEqual(retryCalls, ["task_cancelled_structured"]);
+  assert.deepEqual(calls, [{
+    taskId: "task_cancelled_structured",
+    input: {
+      batchAlreadyStartedCount: undefined,
+      forceResume: true,
+    },
+  }]);
+
+  prisma.taskCenterArchive.findUnique = originalArchiveFindUnique;
 });
 
 test("auto director follow-up action executor returns forbidden when the action is not allowed for the current reason", async () => {

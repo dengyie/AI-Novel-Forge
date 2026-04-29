@@ -49,6 +49,8 @@ export default function TaskCenterRuntimePolicyCard({
   const queryClient = useQueryClient();
   const currentMode = snapshot?.policy.mode ?? "run_until_gate";
   const [selectedMode, setSelectedMode] = useState<DirectorPolicyMode>(currentMode);
+  const [allowExpensiveReview, setAllowExpensiveReview] = useState(false);
+  const [mayOverwriteUserContent, setMayOverwriteUserContent] = useState(false);
   const selectedOption = useMemo(
     () => POLICY_OPTIONS.find((item) => item.value === selectedMode) ?? POLICY_OPTIONS[2],
     [selectedMode],
@@ -56,6 +58,8 @@ export default function TaskCenterRuntimePolicyCard({
   const mutation = useMutation({
     mutationFn: () => updateDirectorRuntimePolicy(taskId, {
       mode: selectedMode,
+      allowExpensiveReview,
+      mayOverwriteUserContent,
     }),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: queryKeys.tasks.directorRuntime(taskId) });
@@ -68,7 +72,9 @@ export default function TaskCenterRuntimePolicyCard({
 
   useEffect(() => {
     setSelectedMode(currentMode);
-  }, [currentMode]);
+    setAllowExpensiveReview(Boolean(snapshot?.policy.allowExpensiveReview));
+    setMayOverwriteUserContent(Boolean(snapshot?.policy.mayOverwriteUserContent));
+  }, [currentMode, snapshot?.policy.allowExpensiveReview, snapshot?.policy.mayOverwriteUserContent]);
 
   if (!snapshot) {
     return null;
@@ -97,11 +103,48 @@ export default function TaskCenterRuntimePolicyCard({
         </select>
         <div className="text-xs leading-5 text-muted-foreground">{selectedOption.description}</div>
       </div>
+      <div className="mt-3 space-y-2 rounded-md border bg-background/70 p-3">
+        <label className="flex items-start gap-2 text-sm">
+          <input
+            type="checkbox"
+            className="mt-1"
+            checked={allowExpensiveReview}
+            onChange={(event) => setAllowExpensiveReview(event.target.checked)}
+          />
+          <span>
+            <span className="block font-medium">允许执行更完整的审校</span>
+            <span className="block text-xs leading-5 text-muted-foreground">
+              用于章节质量检查、近期章节复盘等步骤，系统会在执行前记录策略。
+            </span>
+          </span>
+        </label>
+        <label className="flex items-start gap-2 text-sm">
+          <input
+            type="checkbox"
+            className="mt-1"
+            checked={mayOverwriteUserContent}
+            onChange={(event) => setMayOverwriteUserContent(event.target.checked)}
+          />
+          <span>
+            <span className="block font-medium">允许改写受保护的内容</span>
+            <span className="block text-xs leading-5 text-muted-foreground">
+              仅在你确认要让系统处理已编辑正文或关键设定时开启。
+            </span>
+          </span>
+        </label>
+      </div>
       <div className="mt-3 flex flex-wrap gap-2">
         <Button
           size="sm"
           onClick={() => mutation.mutate()}
-          disabled={mutation.isPending || selectedMode === snapshot.policy.mode}
+          disabled={
+            mutation.isPending
+            || (
+              selectedMode === snapshot.policy.mode
+              && allowExpensiveReview === Boolean(snapshot.policy.allowExpensiveReview)
+              && mayOverwriteUserContent === Boolean(snapshot.policy.mayOverwriteUserContent)
+            )
+          }
         >
           {mutation.isPending ? "保存中..." : "保存推进方式"}
         </Button>

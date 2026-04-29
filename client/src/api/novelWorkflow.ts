@@ -1,4 +1,5 @@
 import type { ApiResponse } from "@ai-novel/shared/types/api";
+import type { DirectorCommandAcceptedResponse } from "@ai-novel/shared/types/directorRuntime";
 import type { DirectorContinuationMode } from "@ai-novel/shared/types/novelDirector";
 import type {
   NovelWorkflowCheckpoint,
@@ -21,7 +22,7 @@ export async function bootstrapNovelWorkflow(payload: {
 export async function continueNovelWorkflow(taskId: string, payload?: {
   continuationMode?: DirectorContinuationMode;
 }) {
-  const { data } = await apiClient.post<ApiResponse<UnifiedTaskDetail | null>>(`/novel-workflows/${taskId}/continue`, payload ?? {});
+  const { data } = await apiClient.post<ApiResponse<DirectorCommandAcceptedResponse>>(`/novel-workflows/${taskId}/continue`, payload ?? {});
   return data;
 }
 

@@ -6,6 +6,7 @@ import type {
   DirectorWorkspaceAnalysis,
 } from "@ai-novel/shared/types/directorRuntime";
 import type { NovelDirectorService } from "../../services/novel/director/NovelDirectorService";
+import type { DirectorCommandService } from "../../services/novel/director/DirectorCommandService";
 import type { NovelWorkflowService } from "../../services/novel/workflow/NovelWorkflowService";
 import { AgentToolError, type AgentToolName, type ToolExecutionContext } from "../types";
 import type { AgentToolDefinition } from "./toolTypes";
@@ -26,6 +27,7 @@ import {
 
 let serviceCache: {
   novelDirectorService: NovelDirectorService;
+  directorCommandService: DirectorCommandService;
   workflowService: NovelWorkflowService;
 } | null = null;
 
@@ -35,14 +37,18 @@ async function getServices() {
   }
   const [
     { NovelDirectorService },
+    { DirectorCommandService },
     { NovelWorkflowService },
   ] = await Promise.all([
     import("../../services/novel/director/NovelDirectorService"),
+    import("../../services/novel/director/DirectorCommandService"),
     import("../../services/novel/workflow/NovelWorkflowService"),
   ]);
+  const workflowService = new NovelWorkflowService();
   serviceCache = {
     novelDirectorService: new NovelDirectorService(),
-    workflowService: new NovelWorkflowService(),
+    directorCommandService: new DirectorCommandService(workflowService),
+    workflowService,
   };
   return serviceCache;
 }
@@ -154,8 +160,7 @@ function buildProjectionSummary(projection: DirectorRuntimeProjection): string {
 
 async function loadRuntimeProjection(scope: ResolvedDirectorRuntimeScope): Promise<DirectorRuntimeProjection> {
   const { novelDirectorService } = await getServices();
-  const snapshot = await novelDirectorService.getRuntimeSnapshot(scope.taskId);
-  const projection = novelDirectorService.buildRuntimeProjection(snapshot);
+  const projection = await novelDirectorService.getRuntimeProjection(scope.taskId);
   if (!projection) {
     throw new AgentToolError("NOT_FOUND", "当前自动导演任务还没有运行时快照。");
   }
@@ -278,7 +283,7 @@ async function runDirectorWithMode(
   },
   mode: DirectorPolicyMode,
 ) {
-  const { novelDirectorService } = await getServices();
+  const { novelDirectorService, directorCommandService } = await getServices();
   const scope = await resolveDirectorRuntimeScope(context, input);
   const modeLabel = describeDirectorPolicyMode(mode);
   if (context.dryRun || input.dryRun) {
@@ -291,7 +296,7 @@ async function runDirectorWithMode(
     };
   }
   await novelDirectorService.updateRuntimePolicy(scope.taskId, { mode });
-  await novelDirectorService.continueTask(scope.taskId, {});
+  await directorCommandService.enqueueContinueCommand(scope.taskId, {});
   return {
     taskId: scope.taskId,
     novelId: scope.novelId,

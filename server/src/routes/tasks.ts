@@ -37,6 +37,7 @@ const retryBodySchema = z.object({
     temperature: z.number().finite().min(0).max(2).optional(),
   }).optional(),
   resume: z.boolean().optional(),
+  batchAlreadyStartedCount: z.number().int().min(0).optional(),
 });
 
 const recoveryTaskKindSchema = z.enum(["book_analysis", "novel_pipeline", "image_generation", "novel_workflow", "style_extraction"]);
@@ -104,12 +105,13 @@ router.post("/recovery-candidates/resume-all", async (_req, res, next) => {
 router.post("/recovery-candidates/:kind/:id/resume", validate({ params: recoveryTaskParamsSchema }), async (req, res, next) => {
   try {
     const { kind, id } = req.params as z.infer<typeof recoveryTaskParamsSchema>;
-    await recoveryTaskService.startResumeRecoveryCandidate(kind, id);
+    const command = await recoveryTaskService.startResumeRecoveryCandidate(kind, id);
+    const data = { kind, id, command };
     res.status(202).json({
       success: true,
-      data: { kind, id },
+      data,
       message: "Recovery candidate resume accepted.",
-    } satisfies ApiResponse<{ kind: typeof kind; id: string }>);
+    } satisfies ApiResponse<typeof data>);
   } catch (error) {
     next(error);
   }
@@ -211,6 +213,7 @@ router.post("/:kind/:id/retry", validate({ params: taskParamsSchema, body: retry
     const data = await taskCenterService.retryTask(kind, id, {
       llmOverride: body.llmOverride,
       resume: body.resume,
+      batchAlreadyStartedCount: body.batchAlreadyStartedCount,
     });
     res.status(200).json({
       success: true,

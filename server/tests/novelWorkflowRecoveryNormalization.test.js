@@ -144,6 +144,132 @@ test("healAutoDirectorTaskState completes chapter batch checkpoints when every c
   }
 });
 
+test("healRuntimeGateApprovalState mirrors blocked runtime gates into waiting approval task state", async () => {
+  const originals = {
+    commandFindFirst: prisma.directorRunCommand.findFirst,
+    stepFindFirst: prisma.directorStepRun.findFirst,
+    update: prisma.novelWorkflowTask.update,
+  };
+
+  let currentRow = {
+    id: "task_runtime_gate",
+    novelId: "novel_demo",
+    lane: "auto_director",
+    status: "running",
+    progress: 0.978,
+    currentStage: "章节执行",
+    currentItemKey: "chapter_execution",
+    currentItemLabel: "等待确认章节执行",
+    checkpointType: null,
+    checkpointSummary: null,
+    resumeTargetJson: "{\"stage\":\"chapter\"}",
+    seedPayloadJson: "{}",
+    lastError: null,
+    finishedAt: null,
+    heartbeatAt: new Date("2026-04-29T07:57:23.000Z"),
+    cancelRequestedAt: null,
+    pendingManualRecovery: false,
+  };
+
+  prisma.directorRunCommand.findFirst = async () => null;
+  prisma.directorStepRun.findFirst = async () => ({
+    status: "blocked_scope",
+    label: "执行章节生成批次",
+    policyDecisionJson: JSON.stringify({
+      reason: "该动作可能覆盖用户手写内容，需要确认后继续。",
+    }),
+  });
+  prisma.novelWorkflowTask.update = async ({ data }) => {
+    currentRow = {
+      ...currentRow,
+      status: data.status ?? currentRow.status,
+      currentItemLabel: data.currentItemLabel ?? currentRow.currentItemLabel,
+      checkpointSummary: data.checkpointSummary ?? currentRow.checkpointSummary,
+      heartbeatAt: data.heartbeatAt ?? currentRow.heartbeatAt,
+      finishedAt: data.finishedAt ?? currentRow.finishedAt,
+      lastError: data.lastError ?? currentRow.lastError,
+      cancelRequestedAt: data.cancelRequestedAt ?? currentRow.cancelRequestedAt,
+    };
+    return currentRow;
+  };
+
+  try {
+    const service = new NovelWorkflowService();
+    const healed = await service.healRuntimeGateApprovalState("task_runtime_gate", currentRow);
+    assert.equal(healed, true);
+    assert.equal(currentRow.status, "waiting_approval");
+    assert.equal(currentRow.currentItemLabel, "等待确认章节执行");
+    assert.equal(currentRow.checkpointSummary, "该动作可能覆盖用户手写内容，需要确认后继续。");
+  } finally {
+    prisma.directorRunCommand.findFirst = originals.commandFindFirst;
+    prisma.directorStepRun.findFirst = originals.stepFindFirst;
+    prisma.novelWorkflowTask.update = originals.update;
+  }
+});
+
+test("healRuntimeFailedState mirrors failed runtime steps out of false running task state", async () => {
+  const originals = {
+    commandFindFirst: prisma.directorRunCommand.findFirst,
+    stepFindFirst: prisma.directorStepRun.findFirst,
+    update: prisma.novelWorkflowTask.update,
+  };
+
+  let currentRow = {
+    id: "task_runtime_failed",
+    novelId: "novel_demo",
+    lane: "auto_director",
+    status: "running",
+    progress: 0.78,
+    currentStage: "节奏 / 拆章",
+    currentItemKey: "chapter_list",
+    currentItemLabel: "正在生成第 1 卷节奏段：开卷抓手",
+    checkpointType: null,
+    checkpointSummary: null,
+    resumeTargetJson: "{\"stage\":\"structured\"}",
+    seedPayloadJson: "{}",
+    lastError: null,
+    finishedAt: null,
+    heartbeatAt: new Date("2026-04-29T08:37:12.000Z"),
+    cancelRequestedAt: null,
+    pendingManualRecovery: false,
+  };
+
+  prisma.directorRunCommand.findFirst = async () => null;
+  prisma.directorStepRun.findFirst = async () => ({
+    status: "failed",
+    label: "生成章节任务单",
+    error: "[STRUCTURED_OUTPUT:transport_error] Connection error.",
+    finishedAt: new Date("2026-04-29T06:30:16.000Z"),
+  });
+  prisma.novelWorkflowTask.update = async ({ data }) => {
+    currentRow = {
+      ...currentRow,
+      status: data.status ?? currentRow.status,
+      currentItemLabel: data.currentItemLabel ?? currentRow.currentItemLabel,
+      checkpointSummary: data.checkpointSummary ?? currentRow.checkpointSummary,
+      heartbeatAt: data.heartbeatAt ?? currentRow.heartbeatAt,
+      finishedAt: data.finishedAt ?? currentRow.finishedAt,
+      lastError: data.lastError ?? currentRow.lastError,
+      cancelRequestedAt: data.cancelRequestedAt ?? currentRow.cancelRequestedAt,
+    };
+    return currentRow;
+  };
+
+  try {
+    const service = new NovelWorkflowService();
+    const healed = await service.healRuntimeFailedState("task_runtime_failed", currentRow);
+    assert.equal(healed, true);
+    assert.equal(currentRow.status, "failed");
+    assert.equal(currentRow.currentItemLabel, "正在生成第 1 卷节奏段：开卷抓手");
+    assert.equal(currentRow.lastError, "[STRUCTURED_OUTPUT:transport_error] Connection error.");
+    assert.equal(currentRow.checkpointSummary, "[STRUCTURED_OUTPUT:transport_error] Connection error.");
+  } finally {
+    prisma.directorRunCommand.findFirst = originals.commandFindFirst;
+    prisma.directorStepRun.findFirst = originals.stepFindFirst;
+    prisma.novelWorkflowTask.update = originals.update;
+  }
+});
+
 test("healAutoDirectorTaskState revives front10 auto execution tasks that only failed during restart recovery while pipeline is still running", async () => {
   const originals = {
     findUnique: prisma.novelWorkflowTask.findUnique,

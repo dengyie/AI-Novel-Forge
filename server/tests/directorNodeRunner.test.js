@@ -79,10 +79,10 @@ test("director node runner blocks writes when runtime policy is suggest-only", a
   });
 
   assert.equal(executed, false);
-  assert.equal(result.status, "blocked_scope");
+  assert.equal(result.status, "needs_approval");
   assert.equal(store.calls.length, 1);
   assert.equal(store.calls[0].type, "gate");
-  assert.equal(store.calls[0].input.status, "blocked_scope");
+  assert.equal(store.calls[0].input.status, "waiting_approval");
   assert.equal(store.calls[0].input.targetType, "chapter");
   assert.equal(store.calls[0].input.targetId, "chapter-1");
 });
@@ -203,9 +203,11 @@ test("director node runner passes contract policy action into policy decisions",
       return {
         canRun: true,
         requiresApproval: false,
+        gateType: "none",
         reason: "ok",
         mayOverwriteUserContent: false,
         affectedArtifacts: [],
+        riskTags: [],
         autoRetryBudget: input.action === "repair" ? 1 : 0,
         onQualityFailure: input.action === "repair" ? "repair_once" : "continue_with_risk",
       };
@@ -227,4 +229,84 @@ test("director node runner passes contract policy action into policy decisions",
   assert.equal(result.status, "completed");
   assert.equal(decisions.length, 1);
   assert.equal(decisions[0].action, "repair");
+});
+
+test("director node runner passes contract reads writes and target into policy decisions", async () => {
+  const store = buildStore(buildSnapshot({
+    mode: "run_until_gate",
+    mayOverwriteUserContent: false,
+    maxAutoRepairAttempts: 1,
+    allowExpensiveReview: false,
+    modelTier: "balanced",
+    updatedAt: "2026-04-28T00:00:00.000Z",
+  }));
+  const decisions = [];
+  const runner = new DirectorNodeRunner(store, {
+    decide: (input) => {
+      decisions.push(input);
+      return {
+        canRun: false,
+        requiresApproval: true,
+        gateType: "approval",
+        reason: "large scope",
+        mayOverwriteUserContent: false,
+        affectedArtifacts: [],
+        riskTags: ["large_scope_auto_run"],
+        autoRetryBudget: 0,
+        onQualityFailure: "pause_for_manual",
+      };
+    },
+  });
+
+  const result = await runner.run(buildContract(async () => ({ ok: true })), {
+    taskId: "task-1",
+    novelId: "novel-1",
+    targetType: "novel",
+    targetId: "novel-1",
+    input: undefined,
+  });
+
+  assert.equal(result.status, "needs_approval");
+  assert.equal(store.calls[0].type, "gate");
+  assert.equal(store.calls[0].input.status, "waiting_approval");
+  assert.deepEqual(decisions[0].reads, ["chapter_task_sheet"]);
+  assert.deepEqual(decisions[0].writes, ["chapter_draft"]);
+  assert.equal(decisions[0].targetType, "novel");
+  assert.equal(decisions[0].targetId, "novel-1");
+});
+
+test("director node runner records blocked scope gates separately from approval gates", async () => {
+  const store = buildStore(buildSnapshot({
+    mode: "auto_safe_scope",
+    mayOverwriteUserContent: false,
+    maxAutoRepairAttempts: 1,
+    allowExpensiveReview: true,
+    modelTier: "balanced",
+    updatedAt: "2026-04-28T00:00:00.000Z",
+  }));
+  const runner = new DirectorNodeRunner(store, {
+    decide: () => ({
+      canRun: false,
+      requiresApproval: true,
+      gateType: "blocked_scope",
+      reason: "chapter blocked",
+      mayOverwriteUserContent: false,
+      affectedArtifacts: [],
+      riskTags: ["quality_blocked_scope"],
+      autoRetryBudget: 0,
+      onQualityFailure: "block_scope",
+    }),
+  });
+
+  const result = await runner.run(buildContract(async () => ({ ok: true })), {
+    taskId: "task-1",
+    novelId: "novel-1",
+    targetType: "chapter",
+    targetId: "chapter-1",
+    input: undefined,
+  });
+
+  assert.equal(result.status, "blocked_scope");
+  assert.equal(store.calls[0].type, "gate");
+  assert.equal(store.calls[0].input.status, "blocked_scope");
 });

@@ -93,7 +93,9 @@
 - 2026-04-28 自动导演统一运行时 MVP 底座约完成 `80%`；按完整统一运行时目标衡量约完成 `60%-65%`
 - 自动导演主执行链当前仍不是 LangGraph；LangGraph 已进入 `DirectorLangGraphPilot` 低风险试点，后续只作为编排、interrupt、resume、trace 外壳接入
 - 服务重启后的自动导演策略已调整为“标记待手动恢复 -> 用户确认 -> 从真实资产断点继续”，不做后台静默自动续跑
-- 下一轮自动导演重点不是继续扩入口，而是把所有写入动作收口到 `Step Module / NodeRunner / PolicyEngine`，并用真实 Prisma 数据验证旧项目接管、手动恢复、章节批量执行和改文后局部修复
+- 小说实体链路与自动导演执行链路已完成首轮边界收口：小说编辑页 `taskId` 专属自动导演任务，手动编辑工作流改用 `workspaceTaskId`，后端 bootstrap 会拒绝跨 lane 复用同一个 workflow task，避免 manual_create 与 auto_director 互相污染状态
+- 2026-04-29 已确认自动导演恢复/继续挂起属于架构级问题：Web API 控制面与自动导演执行面没有隔离，重型 `structured_outline / chapter_list` 链路会拖住普通 API；同时运行态活动任务接口不能再返回完整 `seedPayload / directorSession` 大对象；专项方案见 `docs/plans/auto-director-execution-plane-isolation-plan.md`
+- 下一轮自动导演重点不是继续扩入口，而是先完成执行面隔离与 API 保活，再把所有写入动作收口到 `Step Module / NodeRunner / PolicyEngine`，并用真实 Prisma 数据验证旧项目接管、手动恢复、章节批量执行和改文后局部修复
 
 当前唯一主线仍然是 `P0`：
 
@@ -167,21 +169,22 @@ P0 的默认主链统一为：
 
 ### 当前未完成待做清单（按优先级）
 
-以下 13 项作为下一轮即将开发项目，优先级高于本节后续历史条目：
+以下 14 项作为下一轮即将开发项目，优先级高于本节后续历史条目：
 
-1. `P0-E1 / 恢复链`：规划恢复链继续稳定，补齐 `volume_strategy` 幂等重放、持久化卷规划恢复到 `structured_outline` 的真实数据回归。
-2. `P0-A / 真实数据`：真实 Prisma 抽样回归，覆盖旧项目接管、服务重启手动恢复、失败重试、章节批量执行、候选变更、状态版本。
-3. `P0-E1 / Artifact Ledger`：Artifact Ledger 真相层，从 wrapper 索引推进到跨任务可查询、版本生命周期、stale、用户内容保护、局部恢复。
-4. `P0-E1 / PolicyEngine`：PolicyEngine 硬 gate 深化，覆盖高成本审校、高风险修复、大范围自动执行、覆盖用户内容等场景。
-5. `P0-B / 质量闭环`：`reader_promise / chapter_retention_contract / continuity_state / rolling_window_review / character_governance_state` 形成评估、失效、局部修复、再评估闭环。
-6. `P0-E / Replan`：`PlannerService.replan` 的窗口决策、触发理由、章节选择切到 canonical/state-driven 主判断。
-7. `P0-B / 任务单门禁`：为 `purpose / boundary / taskSheet` 增加 schema + 语义可用性双门禁，拦截坏细化产物进入同步和执行链。
-8. `P0-B / 修复策略`：补章节 repair 的 `patch_first` 默认策略，并把动态角色系统推进到执行期角色筛选、修复边界与 replan 判断。
-9. `P0-B / 模型路由`：把模型路由从 `planner / writer / review / repair` 粗粒度推进到小说生产阶段级路由与 fallback。
-10. `P0-C / P0-D`：卷级工作台消费链，继续把 `critique / rebalance / uncertainty / canonical payoff ledger` 接成默认消费链，并让卷级账本视图成为主视图。
-11. `P0-F`：新手入口收敛，首页、创建页、空状态统一为“AI 自动导演推荐入口 + 手动高级入口”，关键节点只保留一个推荐下一步。
-12. `P0-G`：拆书任务合同，补齐 `scope / pause / resume / coverage`，形成“前 N 片段试跑 -> 扩范围继续”的渐进式流程。
-13. `P0-TechDebt`：技术债收口，拆 `workflowRegistry.ts`，继续瘦身 `NovelDirectorService` 和 `DirectorRuntimeStore`。
+1. `P0-E0 / 执行面隔离`：完成自动导演命令化入口、独立 Director Worker、轻量 runtime projection、活动任务轻量详情和 API 保活回归；禁止 Web API route 直接执行自动导演重型链路，也禁止运行态轮询返回完整执行面大对象。2026-04-29 已补充：Worker 命令强制真实恢复，stale lease 同步清理残留 running step，continue 默认不再触发完整 workspace / Artifact Ledger 分析，待手动恢复状态优先覆盖“运行中”展示；二次收口必须同时完成 SQLite WAL、运行态 delta 持久化和前端运行态按可见工作区刷新，否则不得视为执行面隔离完成。
+2. `P0-E1 / 恢复链`：在 Worker 语义下继续稳定规划恢复链，补齐 `volume_strategy` 幂等重放、持久化卷规划恢复到 `structured_outline` 的真实数据回归。
+3. `P0-A / 真实数据`：真实 Prisma 抽样回归，覆盖旧项目接管、服务重启手动恢复、失败重试、章节批量执行、候选变更、状态版本。
+4. `P0-E1 / Artifact Ledger`：Artifact Ledger 真相层，从 wrapper 索引推进到跨任务可查询、版本生命周期、stale、用户内容保护、局部恢复。
+5. `P0-E1 / PolicyEngine`：PolicyEngine 硬 gate 深化，覆盖高成本审校、高风险修复、大范围自动执行、覆盖用户内容等场景。
+6. `P0-B / 质量闭环`：`reader_promise / chapter_retention_contract / continuity_state / rolling_window_review / character_governance_state` 形成评估、失效、局部修复、再评估闭环。
+7. `P0-E / Replan`：`PlannerService.replan` 的窗口决策、触发理由、章节选择切到 canonical/state-driven 主判断。
+8. `P0-B / 任务单门禁`：为 `purpose / boundary / taskSheet` 增加 schema + 语义可用性双门禁，拦截坏细化产物进入同步和执行链。
+9. `P0-B / 修复策略`：补章节 repair 的 `patch_first` 默认策略，并把动态角色系统推进到执行期角色筛选、修复边界与 replan 判断。
+10. `P0-B / 模型路由`：把模型路由从 `planner / writer / review / repair` 粗粒度推进到小说生产阶段级路由与 fallback。
+11. `P0-C / P0-D`：卷级工作台消费链，继续把 `critique / rebalance / uncertainty / canonical payoff ledger` 接成默认消费链，并让卷级账本视图成为主视图。
+12. `P0-F`：新手入口收敛，首页、创建页、空状态统一为“AI 自动导演推荐入口 + 手动高级入口”，关键节点只保留一个推荐下一步。
+13. `P0-G`：拆书任务合同，补齐 `scope / pause / resume / coverage`，形成“前 N 片段试跑 -> 扩范围继续”的渐进式流程。
+14. `P0-TechDebt`：技术债收口，拆 `workflowRegistry.ts`，继续瘦身 `NovelDirectorService` 和 `DirectorRuntimeStore`。
 
 ### P0-A 真实 Prisma 数据端到端验收（暂缓单列）
 
@@ -377,8 +380,9 @@ P0 的默认主链统一为：
 - `replanNovel` 虽然已走统一编排器入口，且内部会复用新的 `generateChapterPlan`，但 `PlannerService.replan` 的窗口决策、触发理由整形、章节选择策略仍未完全改成 canonical/state-driven 主判断
 - `StateCommitService` 当前采取保守提交：
   - 低风险的 `character_state_update / event_record / payoff_progression / conflict_update` 已能提交与版本落账
-  - `relation_state_update / information_disclosure / world_rule_change / book_contract_change` 仍停留在 `pending_review`
+- `relation_state_update / information_disclosure / world_rule_change / book_contract_change` 仍停留在 `pending_review`
 - 自动导演前半段还没有完全复用 canonical state 与同一组参考知识消费链，导演链与手动主链仍有剩余分叉
+- URL 任务绑定与 workflow bootstrap 的链路边界已收口：编辑页不会再把 `manual_create` task 当成自动导演任务，也不会把自动导演 task 传入手动 workflow bootstrap
 - 前端还没有把 `当前阶段 / 当前状态 / 当前下一动作 / pending_review` 显式展示出来
 
 下一步重点：
@@ -1138,7 +1142,7 @@ P2 重点解决：
 ### 自动导演完整统一运行时
 - 标识：`task-87bf3232fd`
 - 状态：开发中
-- 最近更新：2026-04-29 19:40
+- 最近更新：2026-04-29 21:14
 - 概要：优先完成自动导演正常主流程：新建确认、规划、拆章、章节执行、服务重启恢复、失败重试与用户内容保护先跑稳；创作中枢闭环暂后置。
 
 计划清单：
@@ -1148,7 +1152,8 @@ P2 重点解决：
 - [x] 章节批次恢复：chapter_batch_ready 对账按首个未完成章节恢复，不把缺正文的 repaired 章节误判为完成。
 - [x] Artifact Ledger 幂等恢复：DirectorArtifactDependency 写入先规整依赖、仅删除过期边，并对 Artifact/Dependency upsert 竞争做 P2002 回退；历史任务重复恢复同一依赖不得触发唯一约束。
 - [ ] 章节标题质量门禁：章名结构集中会进入语义重试；标题修复可兼容 workflow service 读取差异，并在仍集中时保留任务提示。
-- [ ] PolicyEngine 硬 gate：正常流程内的写入、覆盖用户内容、高风险修复和高成本审校先过策略判断，自动修复预算保持一次。
+- [x] PolicyEngine 硬 gate：正常流程内的写入、覆盖用户内容、高风险修复、高成本审校、大范围章节自动执行和上游重算已先过策略判断；等待确认与范围阻断会分别写入 runtime step。
+- [x] 小说实体链路与自动导演执行链路分离：编辑页 URL `taskId` 只代表自动导演任务，手动编辑工作流改用 `workspaceTaskId`，后端 workflow bootstrap 会按 lane 拒绝错用任务 id。
 - [ ] Artifact Ledger 正常流真相：DirectorRun/StepRun/Event/Artifact/Dependency 已落 additive schema 与双写，Workspace Analyzer 已优先合并持久化 ledger，再用旧表 backfill。
 - [ ] 质量闭环：reader_promise、chapter_retention_contract、continuity_state、rolling_window_review、character_governance_state 先服务正常章节执行与局部修复闭环。
 - [ ] LangGraph 低风险接入暂保持试点，不改主执行链；业务真相仍在 Runtime/Policy/Ledger/NodeRunner。
@@ -1165,6 +1170,14 @@ P2 重点解决：
 - 2026-04-29 19:20 [已完成] 修复待恢复任务入口长时间阻塞页面的问题：`recovery-candidates` 单个/批量恢复现在快速返回 accepted，再由后台恢复任务继续执行；服务端 build 与 32 条恢复路由/恢复链相关回归通过。
 - 2026-04-29 19:30 [已完成] 修正小说工作台左侧流程状态：自动导演有当前阶段时，步骤完成态优先跟随任务阶段，不再因已有旧卷战略资产把后续“卷战略 / 卷骨架”误标为已完成；客户端 typecheck 与 build 已通过。
 - 2026-04-29 19:40 [已完成] 优化待恢复任务弹窗体验：恢复请求被后台接受后，弹窗会先隐藏已接受恢复的任务并异步刷新任务状态，不再让按钮停留在“恢复中”；客户端 typecheck 与 build 已通过。
+- 2026-04-29 20:35 [已完成] 完成 PolicyEngine 硬 gate 深化：策略决策新增 gateType 与风险标签，NodeRunner 将等待确认和 blocked_scope 分开记录；覆盖用户内容、高成本审校、大范围章节自动执行、上游重算和质量阻断均在写入前被策略拦截。任务中心新增高成本审校/覆盖保护内容策略开关，客户端 typecheck、服务端 build 与 30 条 director runtime 定向回归已通过。
+- 2026-04-29 20:45 [已完成] 修正已取消自动导演任务的恢复入口：待处理动作中的“从最近检查点恢复”改走 retry/resume 路径，不再对 cancelled 任务直接调用 continue；任务中心兜底恢复按钮也按失败/已取消状态改走恢复重试。服务端 build、客户端 typecheck 与 37 条 follow-up/runtime 定向回归已通过。
+- 2026-04-29 20:55 [已完成] 修复恢复重试后假 running 的恢复调度缺口：retry/resume 会强制重新进入自动导演 continue，不再被 queued 状态自愈成 running 后提前返回吞掉后台 runner；已用真实任务 `cmojhl0gs0001rwv1kvtpptm5` 验证 LLM 调用、token 与 runtime heartbeat 恢复增长。
+- 2026-04-29 21:14 [已完成] 收口小说实体链路与自动导演执行链路边界：编辑页 `taskId` 专用于自动导演，手动工作流绑定迁到 `workspaceTaskId`；后端 bootstrap 增加 lane mismatch 409 硬拦截。已验证真实任务 `cmojhl0gs0001rwv1kvtpptm5` 为 `auto_director/running`，旧任务 `cmoii1oys0007bkv1o8vbtgmz` 为 `manual_create/waiting_approval` 且不会再被当成导演任务。
+- 2026-04-29 [架构阻塞] 确认“继续导演后大量接口挂起”不是普通慢请求，而是自动导演重型执行面仍运行在 Web API 主进程内；已新增 `P0-E0 / 执行面隔离` 与专项文档 `docs/plans/auto-director-execution-plane-isolation-plan.md`，后续不得再把 route 内 fire-and-forget 视为完成态。
+- 2026-04-29 [开发中] 完成第一版执行面隔离落地：新增 `DirectorRunCommand` 命令队列表与独立 `Director Worker` 入口，`continue`、恢复、任务中心重试、follow-up 继续动作和旧项目接管已改为写入命令队列；前端运行态移除 2 秒强刷 `volumes`，改为轻量 runtime projection 轮询；新增 command 幂等/租约与控制面边界回归测试。候选确认和标题修复等旧入口仍需继续迁移到可序列化 command。
+- 2026-04-29 [开发中] 二次收口 Worker 化后仍出现 pending XHR 的根因：SQLite 默认 DELETE journal 仍会让 Worker 写锁阻塞 API 读请求，运行态持久化全量重放 steps/events/artifacts 会放大写锁窗口，前端运行态批量刷新完整 workspace 资源会放大浏览器 pending。已改为启动时配置 SQLite WAL、DirectorRuntime delta 持久化、运行态只按可见工作区刷新，并补充控制面边界测试。
+- 2026-04-29 [开发中] 收口 waiting_approval 继续协议：小说页和任务中心的等待确认继续会提交 `resume`，Worker 执行时只对当前匹配的等待确认节点做一次性 gate 放行，不再出现空 continue 命令成功但又停回同一 gate 的状态循环；后续高风险 gate 仍由 PolicyEngine 拦截。
 <!-- task-md-sync:item:task-87bf3232fd:end -->
 <!-- task-md-sync:item:task-7efc49bcdc:start -->
 ### 自动导演接管状态投影恢复
@@ -1247,4 +1260,23 @@ P2 重点解决：
 进度记录：
 - 2026-04-29 00:59 [已计划] 已把 13 项剩余功能更新为 TASK 最高优先级，并同步到自动导演完整执行计划文档。
 <!-- task-md-sync:item:task-42d07ce43a:end -->
+<!-- task-md-sync:item:task-e2d6b4a9d8:start -->
+### 小说副本创建与分支创作
+- 标识：`task-e2d6b4a9d8`
+- 状态：已计划
+- 最近更新：2026-04-29 19:45
+- 前置条件：自动导演运行时迁移完成，小说实体链路与自动导演执行链路边界稳定。
+- 概要：基于当前小说已有资源创建新的小说副本，只复制小说本体资产，不复制自动导演任务、运行时状态、checkpoint 或旧 Artifact Ledger；副本创建后可由新的自动导演任务重新接管。
+
+计划清单：
+- [ ] 梳理小说实体复制边界，区分基础设定、写法 / 世界观 / 知识库绑定、故事规划、书级约定、角色、卷规划、章节规划、正文、审校 / 修复结果和运行时任务数据。
+- [ ] 实现规划副本：复制基础信息、写法 / 世界观 / 知识库绑定、story macro、book contract、角色、卷规划、节奏板和章节任务单，不复制正文与旧审校结果。
+- [ ] 实现完整副本：在用户明确选择时复制章节正文、章节摘要、章节状态和必要版本快照，作为大改前备份或平行版本起点。
+- [ ] 副本创建后提供“打开副本”和“让 AI 自动导演接管副本”入口，新建运行时任务重新分析副本资产。
+- [ ] 补充副本创建回归测试，确认新副本不会引用旧小说章节、旧任务、旧 checkpoint 或旧 Artifact Ledger。
+- [ ] 后续扩展副本对比与选择性合并能力，所有合并动作必须走用户确认和 PolicyEngine，不做静默覆盖。
+
+进度记录：
+- 2026-04-29 19:45 [已计划] 已确认小说副本复制应发生在小说实体链路，不复制自动导演执行现场；该能力排入运行时迁移完成后的后续计划。
+<!-- task-md-sync:item:task-e2d6b4a9d8:end -->
 <!-- task-md-sync:end -->

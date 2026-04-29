@@ -92,7 +92,9 @@ function normalizeChapterContentForReconciliation(chapter: DirectorAutoExecution
     return "";
   }
   return (
-    chapter.generationState === "approved"
+    chapter.generationState === "reviewed"
+    || chapter.generationState === "repaired"
+    || chapter.generationState === "approved"
     || chapter.generationState === "published"
     || chapter.chapterStatus === "completed"
       ? "status-confirmed"

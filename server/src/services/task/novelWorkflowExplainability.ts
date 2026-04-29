@@ -9,6 +9,7 @@ import { NOVEL_WORKFLOW_STAGE_LABELS } from "../novel/workflow/novelWorkflow.sha
 
 interface WorkflowExplainabilityInput {
   status: TaskStatus;
+  pendingManualRecovery?: boolean | null;
   currentStage?: string | null;
   currentItemKey?: string | null;
   checkpointType?: NovelWorkflowCheckpoint | null;
@@ -143,8 +144,14 @@ export function buildWorkflowResumeAction(
   status: TaskStatus,
   checkpointType: NovelWorkflowCheckpoint | null,
   executionScopeLabel?: string | null,
+  pendingManualRecovery?: boolean | null,
 ): string | null {
-  const explainabilityInput = { status, checkpointType, executionScopeLabel } satisfies WorkflowExplainabilityInput;
+  const explainabilityInput = {
+    status,
+    checkpointType,
+    executionScopeLabel,
+    pendingManualRecovery,
+  } satisfies WorkflowExplainabilityInput;
   if (status === "waiting_approval") {
     if (checkpointType === "candidate_selection_required") {
       return "继续确认书级方向";
@@ -172,6 +179,9 @@ export function buildWorkflowResumeAction(
     }
     return "继续小说主流程";
   }
+  if (explainabilityInput.pendingManualRecovery) {
+    return "从最近检查点恢复";
+  }
   if (status === "failed" || status === "cancelled") {
     if (checkpointType === "front10_ready") {
       return buildAutoExecutionResumeAction(explainabilityInput);
@@ -194,6 +204,9 @@ export function buildWorkflowResumeAction(
 }
 
 function buildDisplayStatus(input: WorkflowExplainabilityInput): string | null {
+  if (input.pendingManualRecovery) {
+    return "等待手动恢复";
+  }
   if (isAutoDirectorRecoveryInProgress(input)) {
     const currentStageLabel = getCurrentStageLabel(input);
     return currentStageLabel
@@ -245,6 +258,9 @@ function buildDisplayStatus(input: WorkflowExplainabilityInput): string | null {
 }
 
 function buildBlockingReason(input: WorkflowExplainabilityInput): string | null {
+  if (input.pendingManualRecovery) {
+    return input.lastError?.trim() || "服务重启后任务已暂停，等待手动恢复。";
+  }
   if (isAutoDirectorRecoveryInProgress(input)) {
     return input.lastError?.trim() || "自动导演任务正在从服务重启中恢复。";
   }
@@ -284,7 +300,12 @@ export function buildWorkflowExplainability(input: WorkflowExplainabilityInput):
   return {
     displayStatus: buildDisplayStatus(input),
     blockingReason: buildBlockingReason(input),
-    resumeAction: buildWorkflowResumeAction(input.status, input.checkpointType ?? null, input.executionScopeLabel),
+    resumeAction: buildWorkflowResumeAction(
+      input.status,
+      input.checkpointType ?? null,
+      input.executionScopeLabel,
+      input.pendingManualRecovery,
+    ),
     lastHealthyStage: getLastHealthyStage(input),
   };
 }

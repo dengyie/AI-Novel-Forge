@@ -79,6 +79,7 @@ export function buildNovelWorkflowDetailSteps(input: {
   lane: string;
   novelId: string | null;
   status: TaskStatus;
+  pendingManualRecovery?: boolean | null;
   currentItemKey: string | null;
   checkpointType: NovelWorkflowCheckpoint | null;
   directorSessionPhase?: unknown;
@@ -86,6 +87,15 @@ export function buildNovelWorkflowDetailSteps(input: {
   updatedAt: string;
 }): UnifiedTaskStep[] {
   const currentStage = resolveWorkflowDisplayStage(input);
+  if (input.pendingManualRecovery) {
+    return buildSteps(
+      NOVEL_WORKFLOW_STAGE_STEPS,
+      "failed",
+      currentStage,
+      input.createdAt,
+      input.updatedAt,
+    );
+  }
   const steps = buildSteps(
     NOVEL_WORKFLOW_STAGE_STEPS,
     input.status,

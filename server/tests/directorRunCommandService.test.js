@@ -1,0 +1,297 @@
+const test = require("node:test");
+const assert = require("node:assert/strict");
+
+const { DirectorCommandService } = require("../dist/services/novel/director/DirectorCommandService.js");
+const { prisma } = require("../dist/db/prisma.js");
+
+function createTask(overrides = {}) {
+  return {
+    id: "task-1",
+    novelId: "novel-1",
+    lane: "auto_director",
+    status: "waiting_approval",
+    updatedAt: new Date("2026-04-29T12:00:00.000Z"),
+    ...overrides,
+  };
+}
+
+function createHarness(task = createTask()) {
+  const commands = [];
+  const requeued = [];
+  const stepUpdates = [];
+  const taskUpdates = [];
+  const originalDirectorRunCommand = {
+    findFirst: prisma.directorRunCommand.findFirst,
+    create: prisma.directorRunCommand.create,
+    findUnique: prisma.directorRunCommand.findUnique,
+    updateMany: prisma.directorRunCommand.updateMany,
+    findMany: prisma.directorRunCommand.findMany,
+  };
+  const originalNovelWorkflowTask = {
+    updateMany: prisma.novelWorkflowTask.updateMany,
+  };
+  const originalDirectorStepRun = {
+    updateMany: prisma.directorStepRun.updateMany,
+  };
+  const workflowService = {
+    async getTaskById(taskId) {
+      return taskId === task.id ? task : null;
+    },
+    async retryTask() {
+      task.status = "queued";
+      task.updatedAt = new Date(task.updatedAt.getTime() + 1);
+      return task;
+    },
+    async applyAutoDirectorLlmOverride() {},
+    async cancelTask() {
+      task.status = "cancelled";
+      task.cancelRequestedAt = new Date();
+      task.updatedAt = new Date(task.updatedAt.getTime() + 1);
+      return task;
+    },
+    async requeueTaskForRecovery(taskId, message) {
+      requeued.push({ taskId, message });
+      return null;
+    },
+    async bootstrapTask(input) {
+      task.id = `takeover-task-${commands.length + 1}`;
+      task.novelId = input.novelId;
+      task.lane = input.lane;
+      task.status = "queued";
+      task.updatedAt = new Date(task.updatedAt.getTime() + 1);
+      return task;
+    },
+  };
+
+  prisma.directorRunCommand.findFirst = async ({ where }) => {
+    let rows = commands;
+    if (where?.novelId) {
+      rows = rows.filter((row) => row.novelId === where.novelId);
+    }
+    if (where?.taskId) {
+      rows = rows.filter((row) => row.taskId === where.taskId);
+    }
+    if (where?.commandType) {
+      if (typeof where.commandType === "string") {
+        rows = rows.filter((row) => row.commandType === where.commandType);
+      } else if (Array.isArray(where.commandType.in)) {
+        rows = rows.filter((row) => where.commandType.in.includes(row.commandType));
+      }
+    }
+    if (where?.status) {
+      if (typeof where.status === "string") {
+        rows = rows.filter((row) => row.status === where.status);
+      } else if (Array.isArray(where.status.in)) {
+        rows = rows.filter((row) => where.status.in.includes(row.status));
+      }
+    }
+    if (where?.runAfter?.lte) {
+      rows = rows.filter((row) => row.runAfter <= where.runAfter.lte);
+    }
+    return rows[0] ?? null;
+  };
+  prisma.directorRunCommand.create = async ({ data }) => {
+    const row = {
+      id: `command-${commands.length + 1}`,
+      novelId: data.novelId ?? null,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      attempt: 0,
+      runAfter: new Date(),
+      errorMessage: null,
+      startedAt: null,
+      finishedAt: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      ...data,
+    };
+    commands.push(row);
+    return row;
+  };
+  prisma.directorRunCommand.findUnique = async ({ where }) => (
+    commands.find((row) => row.id === where.id) ?? null
+  );
+  prisma.directorRunCommand.findMany = async ({ where }) => {
+    let rows = commands;
+    if (where?.status?.in) {
+      rows = rows.filter((row) => where.status.in.includes(row.status));
+    }
+    if (where?.leaseExpiresAt?.lt) {
+      rows = rows.filter((row) => row.leaseExpiresAt && row.leaseExpiresAt < where.leaseExpiresAt.lt);
+    }
+    return rows.map((row) => ({ id: row.id, taskId: row.taskId }));
+  };
+  prisma.directorRunCommand.updateMany = async ({ where, data }) => {
+    let count = 0;
+    for (const row of commands) {
+      if (where?.id) {
+        if (typeof where.id === "string" && row.id !== where.id) {
+          continue;
+        }
+        if (Array.isArray(where.id.in) && !where.id.in.includes(row.id)) {
+          continue;
+        }
+      }
+      if (where?.taskId && row.taskId !== where.taskId) {
+        continue;
+      }
+      if (where?.leaseOwner && row.leaseOwner !== where.leaseOwner) {
+        continue;
+      }
+      if (where?.status) {
+        if (typeof where.status === "string" && row.status !== where.status) {
+          continue;
+        }
+        if (Array.isArray(where.status.in) && !where.status.in.includes(row.status)) {
+          continue;
+        }
+      }
+      if (data?.attempt?.increment) {
+        row.attempt += data.attempt.increment;
+      }
+      for (const [key, value] of Object.entries(data ?? {})) {
+        if (key !== "attempt") {
+          row[key] = value;
+        }
+      }
+      row.updatedAt = new Date();
+      count += 1;
+    }
+    return { count };
+  };
+  prisma.novelWorkflowTask.updateMany = async (args) => {
+    taskUpdates.push(args);
+    if (args?.where?.id && args.where.id !== task.id) {
+      return { count: 0 };
+    }
+    Object.assign(task, args?.data ?? {});
+    task.updatedAt = new Date(task.updatedAt.getTime() + 1);
+    return { count: 1 };
+  };
+  prisma.directorStepRun.updateMany = async (args) => {
+    stepUpdates.push(args);
+    return { count: 1 };
+  };
+
+  return {
+    commands,
+    requeued,
+    task,
+    stepUpdates,
+    taskUpdates,
+    service: new DirectorCommandService(workflowService),
+    restore() {
+      Object.assign(prisma.directorRunCommand, originalDirectorRunCommand);
+      Object.assign(prisma.novelWorkflowTask, originalNovelWorkflowTask);
+      Object.assign(prisma.directorStepRun, originalDirectorStepRun);
+    },
+  };
+}
+
+test("director command service reuses active continue commands", async () => {
+  const harness = createHarness();
+  try {
+    const first = await harness.service.enqueueContinueCommand("task-1", {
+      continuationMode: "auto_execute_range",
+    });
+    const second = await harness.service.enqueueContinueCommand("task-1", {
+      continuationMode: "auto_execute_range",
+    });
+    assert.equal(first.commandId, second.commandId);
+    assert.equal(harness.commands.length, 1);
+    assert.equal(first.status, "queued");
+  } finally {
+    harness.restore();
+  }
+});
+
+test("director command service clears manual recovery state when a stale running task is continued", async () => {
+  const harness = createHarness(createTask({
+    status: "running",
+    pendingManualRecovery: true,
+    lastError: "Director Worker 已中断，任务已暂停，等待手动恢复。",
+  }));
+  try {
+    const accepted = await harness.service.enqueueContinueCommand("task-1", {
+      forceResume: true,
+    });
+
+    assert.equal(accepted.status, "queued");
+    assert.equal(harness.commands.length, 1);
+    assert.equal(harness.task.status, "queued");
+    assert.equal(harness.task.pendingManualRecovery, false);
+    assert.equal(harness.task.lastError, null);
+    assert.equal(harness.task.finishedAt, null);
+    assert.equal(harness.task.cancelRequestedAt, null);
+    assert.deepEqual(harness.taskUpdates[0].where.OR, [
+      { status: { in: ["queued", "running", "waiting_approval", "failed"] } },
+      { pendingManualRecovery: true },
+    ]);
+  } finally {
+    harness.restore();
+  }
+});
+
+test("director command service reuses active takeover command by novel", async () => {
+  const harness = createHarness();
+  try {
+    const first = await harness.service.enqueueTakeoverCommand({
+      novelId: "novel-1",
+      entryStep: "structured",
+      strategy: "continue_existing",
+    });
+    const second = await harness.service.enqueueTakeoverCommand({
+      novelId: "novel-1",
+      entryStep: "structured",
+      strategy: "continue_existing",
+    });
+    assert.equal(first.commandId, second.commandId);
+    assert.equal(first.commandType, "takeover");
+    assert.equal(harness.commands.length, 1);
+  } finally {
+    harness.restore();
+  }
+});
+
+test("director command service leases a queued command once", async () => {
+  const harness = createHarness();
+  try {
+    await harness.service.enqueueContinueCommand("task-1");
+    const leased = await harness.service.leaseNextCommand({
+      workerId: "worker-a",
+      leaseMs: 30_000,
+    });
+    assert.equal(leased.id, "command-1");
+    assert.equal(leased.status, "leased");
+    assert.equal(leased.leaseOwner, "worker-a");
+    assert.equal(leased.attempt, 1);
+    const next = await harness.service.leaseNextCommand({
+      workerId: "worker-b",
+      leaseMs: 30_000,
+    });
+    assert.equal(next, null);
+  } finally {
+    harness.restore();
+  }
+});
+
+test("director command service marks expired leases stale and requeues task recovery", async () => {
+  const harness = createHarness();
+  try {
+    await harness.service.enqueueContinueCommand("task-1");
+    harness.commands[0].status = "running";
+    harness.commands[0].leaseOwner = "worker-a";
+    harness.commands[0].leaseExpiresAt = new Date("2026-04-29T12:00:00.000Z");
+    const count = await harness.service.recoverStaleLeases(new Date("2026-04-29T12:01:00.000Z"));
+    assert.equal(count, 1);
+    assert.equal(harness.commands[0].status, "stale");
+    assert.equal(harness.requeued.length, 1);
+    assert.equal(harness.requeued[0].taskId, "task-1");
+    assert.equal(harness.stepUpdates.length, 1);
+    assert.equal(harness.stepUpdates[0].where.taskId, "task-1");
+    assert.equal(harness.stepUpdates[0].where.status, "running");
+    assert.equal(harness.stepUpdates[0].data.status, "failed");
+  } finally {
+    harness.restore();
+  }
+});

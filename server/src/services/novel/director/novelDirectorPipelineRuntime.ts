@@ -39,6 +39,7 @@ export interface DirectorPipelineRunInput {
   startPhase: Exclude<DirectorPipelinePhase, "book_contract">;
   scope?: string | null;
   batchAlreadyStartedCount?: number;
+  approveCurrentGate?: boolean;
 }
 
 export class NovelDirectorPipelineRuntime {
@@ -81,6 +82,7 @@ export class NovelDirectorPipelineRuntime {
         taskId: input.taskId,
         novelId: input.novelId,
         targetId: input.novelId,
+        approveCurrentGate: input.approveCurrentGate,
         runner: () => this.runStoryMacroPhase(input.taskId, input.novelId, input.input),
       });
     }
@@ -92,6 +94,7 @@ export class NovelDirectorPipelineRuntime {
         taskId: input.taskId,
         novelId: input.novelId,
         targetId: input.novelId,
+        approveCurrentGate: input.approveCurrentGate,
         runner: () => this.runBookContractPhase(input.taskId, input.novelId, input.input),
       });
     }
@@ -107,6 +110,7 @@ export class NovelDirectorPipelineRuntime {
         taskId: input.taskId,
         novelId: input.novelId,
         targetId: input.novelId,
+        approveCurrentGate: input.approveCurrentGate,
         runner: () => this.runCharacterSetupPhase(input.taskId, input.novelId, input.input),
       });
       if (paused) {
@@ -134,6 +138,7 @@ export class NovelDirectorPipelineRuntime {
       taskId: input.taskId,
       novelId: input.novelId,
       targetId: input.novelId,
+      approveCurrentGate: input.approveCurrentGate,
       runner: () => this.runVolumeStrategyPhase(input.taskId, input.novelId, input.input),
     });
     if (volumeStepOutput === null) {
@@ -183,6 +188,7 @@ export class NovelDirectorPipelineRuntime {
       taskId: input.taskId,
       novelId: input.novelId,
       targetId: input.novelId,
+      approveCurrentGate: input.approveCurrentGate,
       runner: () => this.runStructuredOutlinePhase(input.taskId, input.novelId, input.input, workspace),
     });
   }
@@ -208,6 +214,7 @@ export class NovelDirectorPipelineRuntime {
       novelId: input.novelId,
       request: input.input,
       resumeCheckpointType: "front10_ready",
+      approveCurrentGate: input.approveCurrentGate,
     });
   }
 

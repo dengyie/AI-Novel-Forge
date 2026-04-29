@@ -12,7 +12,7 @@ import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import type { DirectorLockScope } from "@ai-novel/shared/types/novelDirector";
 import type { VolumePlan } from "@ai-novel/shared/types/novel";
 import { getNovelDetail, getNovelQualityReport, getNovelVolumeWorkspace } from "@/api/novel";
-import { getDirectorRuntimeSnapshot } from "@/api/novelDirector";
+import { getDirectorRuntimeProjection } from "@/api/novelDirector";
 import { getActiveAutoDirectorTask } from "@/api/novelWorkflow";
 import { queryKeys } from "@/api/queryKeys";
 import { Badge } from "@/components/ui/badge";
@@ -82,6 +82,14 @@ export default function NovelWorkspaceRail(props: NovelWorkspaceRailProps) {
   const navigate = useNavigate();
   const location = useLocation();
   const [searchParams] = useSearchParams();
+  const activeTab = useMemo<NovelWorkspaceTab>(() => {
+    if (location.pathname.includes("/chapters/")) {
+      return "chapter";
+    }
+    return normalizeNovelWorkspaceTab(searchParams.get("stage"));
+  }, [location.pathname, searchParams]);
+  const shouldLoadVolumeWorkspace = activeTab === "outline" || activeTab === "structured";
+  const shouldLoadQualityReport = activeTab === "pipeline";
 
   const novelDetailQuery = useQuery({
     queryKey: queryKeys.novels.detail(novelId),
@@ -91,12 +99,12 @@ export default function NovelWorkspaceRail(props: NovelWorkspaceRailProps) {
   const volumeWorkspaceQuery = useQuery({
     queryKey: queryKeys.novels.volumeWorkspace(novelId),
     queryFn: () => getNovelVolumeWorkspace(novelId),
-    enabled: Boolean(novelId),
+    enabled: Boolean(novelId && shouldLoadVolumeWorkspace),
   });
   const qualityReportQuery = useQuery({
     queryKey: queryKeys.novels.qualityReport(novelId),
     queryFn: () => getNovelQualityReport(novelId),
-    enabled: Boolean(novelId),
+    enabled: Boolean(novelId && shouldLoadQualityReport),
   });
   const activeTaskQuery = useQuery({
     queryKey: queryKeys.novels.autoDirectorTask(novelId),
@@ -104,8 +112,8 @@ export default function NovelWorkspaceRail(props: NovelWorkspaceRailProps) {
     enabled: Boolean(novelId),
     refetchInterval: (query) => {
       const task = query.state.data?.data;
-      return task && (task.status === "queued" || task.status === "running" || task.status === "waiting_approval")
-        ? 2000
+      return task && (task.status === "queued" || task.status === "running")
+        ? 4000
         : false;
     },
   });
@@ -116,11 +124,11 @@ export default function NovelWorkspaceRail(props: NovelWorkspaceRailProps) {
   const activeTask = activeTaskQuery.data?.data ?? null;
   const runtimeProjectionQuery = useQuery({
     queryKey: queryKeys.tasks.directorRuntime(activeTask?.id ?? "none"),
-    queryFn: () => getDirectorRuntimeSnapshot(activeTask?.id as string),
+    queryFn: () => getDirectorRuntimeProjection(activeTask?.id as string),
     enabled: Boolean(activeTask?.id),
     retry: false,
     refetchInterval: () => (
-      activeTask && (activeTask.status === "queued" || activeTask.status === "running" || activeTask.status === "waiting_approval")
+      activeTask && (activeTask.status === "queued" || activeTask.status === "running")
         ? 4000
         : false
     ),
@@ -152,13 +160,6 @@ export default function NovelWorkspaceRail(props: NovelWorkspaceRailProps) {
       reviewScope,
     ],
   );
-
-  const activeTab = useMemo<NovelWorkspaceTab>(() => {
-    if (location.pathname.includes("/chapters/")) {
-      return "chapter";
-    }
-    return normalizeNovelWorkspaceTab(searchParams.get("stage"));
-  }, [location.pathname, searchParams]);
 
   const stepReadiness = useMemo(() => {
     const basicReady = Boolean(novelDetail?.title?.trim());

@@ -70,6 +70,30 @@ test("structured auto-director tasks fall back to seed resume target when row re
   assert.equal(resumeTarget.volumeId, "volume-1");
 });
 
+test("edit resume routes keep manual workspace tasks separate from director task ids", () => {
+  assert.equal(
+    resumeTargetToRoute({
+      route: "/novels/:id/edit",
+      novelId: "novel-1",
+      taskId: "manual-task",
+      lane: "manual_create",
+      stage: "basic",
+    }),
+    "/novels/novel-1/edit?stage=basic&workspaceTaskId=manual-task",
+  );
+
+  assert.equal(
+    resumeTargetToRoute({
+      route: "/novels/:id/edit",
+      novelId: "novel-1",
+      taskId: "director-task",
+      lane: "auto_director",
+      stage: "structured",
+    }),
+    "/novels/novel-1/edit?stage=structured&taskId=director-task",
+  );
+});
+
 test("auto-director takeover bootstrap derives initial progress from runtime resume metadata", () => {
   const initialState = resolveAutoDirectorBootstrapInitialState({
     lane: "auto_director",
@@ -116,7 +140,7 @@ test("auto-director candidate bootstrap keeps candidate-stage default before a n
   assert.equal(initialState, null);
 });
 
-test("bootstrapTask does not auto-attach a pre-confirmation auto-director task to a novel", async () => {
+test("bootstrapTask rejects workflowTaskId reuse across workflow lanes", async () => {
   const service = new NovelWorkflowService();
   const originalGetVisibleRowById = service.getVisibleRowById;
   const originalAttachNovelToTask = service.attachNovelToTask;
@@ -140,15 +164,21 @@ test("bootstrapTask does not auto-attach a pre-confirmation auto-director task t
   };
 
   try {
-    const row = await service.bootstrapTask({
-      workflowTaskId: "task_pre_novel_candidate",
-      novelId: "novel_should_not_bind",
-      lane: "manual_create",
-    });
-
+    await assert.rejects(
+      () => service.bootstrapTask({
+        workflowTaskId: "task_pre_novel_candidate",
+        novelId: "novel_should_not_bind",
+        lane: "manual_create",
+      }),
+      (error) => {
+        assert.equal(error.name, "AppError");
+        assert.equal(error.statusCode, 409);
+        assert.equal(error.details.existingLane, "auto_director");
+        assert.equal(error.details.requestedLane, "manual_create");
+        return true;
+      },
+    );
     assert.equal(attachCalled, false);
-    assert.equal(row.id, "task_pre_novel_candidate");
-    assert.equal(row.novelId, null);
   } finally {
     service.getVisibleRowById = originalGetVisibleRowById;
     service.attachNovelToTask = originalAttachNovelToTask;

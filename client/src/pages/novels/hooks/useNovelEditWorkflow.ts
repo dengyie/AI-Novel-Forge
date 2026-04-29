@@ -1,13 +1,18 @@
-import { useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { bootstrapNovelWorkflow } from "@/api/novelWorkflow";
 import { normalizeNovelWorkspaceTab } from "../novelWorkspaceNavigation";
+import {
+  readNovelEditWorkflowTaskIds,
+  withNovelEditDirectorTaskId,
+  withNovelEditWorkspaceTaskId,
+} from "./novelEditWorkflowParams";
 
 export function useNovelEditWorkflow(novelId: string) {
   const [searchParams, setSearchParams] = useSearchParams();
 
-  const workflowTaskId = searchParams.get("taskId") ?? "";
+  const { directorTaskId, workspaceTaskId: workflowTaskId } = readNovelEditWorkflowTaskIds(searchParams);
   const selectedVolumeId = searchParams.get("volumeId") ?? "";
 
   const bootstrapMutation = useMutation({
@@ -26,8 +31,7 @@ export function useNovelEditWorkflow(novelId: string) {
         return;
       }
       setSearchParams((prev) => {
-        const next = new URLSearchParams(prev);
-        next.set("taskId", nextTaskId);
+        const next = withNovelEditWorkspaceTaskId(prev, nextTaskId);
         if (!next.get("stage")) {
           next.set("stage", normalizeNovelWorkspaceTab(searchParams.get("stage")));
         }
@@ -85,9 +89,17 @@ export function useNovelEditWorkflow(novelId: string) {
     }, { replace: true });
   };
 
+  const setDirectorTaskId = useCallback((value: string) => {
+    setSearchParams((prev) => {
+      return withNovelEditDirectorTaskId(prev, value);
+    }, { replace: true });
+  }, [setSearchParams]);
+
   return {
     activeTab,
     setActiveTab,
+    directorTaskId,
+    setDirectorTaskId,
     selectedChapterId,
     setSelectedChapterId,
     selectedVolumeId,

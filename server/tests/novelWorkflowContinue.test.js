@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const http = require("node:http");
 
 const { createApp } = require("../dist/app.js");
-const { NovelDirectorService } = require("../dist/services/novel/director/NovelDirectorService.js");
+const { DirectorCommandService } = require("../dist/services/novel/director/DirectorCommandService.js");
 const { NovelWorkflowService } = require("../dist/services/novel/workflow/NovelWorkflowService.js");
 const { NovelWorkflowTaskAdapter } = require("../dist/services/task/adapters/NovelWorkflowTaskAdapter.js");
 
@@ -35,6 +35,7 @@ test("novel workflow auto director route prefers the active auto director task o
     };
   };
   NovelWorkflowTaskAdapter.prototype.detail = async function detailMock(taskId) {
+    calls.push(["detail", taskId, arguments[1]]);
     return {
       id: taskId,
       lane: "auto_director",
@@ -56,6 +57,7 @@ test("novel workflow auto director route prefers the active auto director task o
     assert.equal(payload.data.id, "workflow-active");
     assert.deepEqual(calls, [
       ["active", "novel-active", "auto_director"],
+      ["detail", "workflow-active", { seedPayloadMode: "compact" }],
     ]);
   } finally {
     NovelWorkflowService.prototype.findActiveTaskByNovelAndLane = originalFindActive;
@@ -65,13 +67,21 @@ test("novel workflow auto director route prefers the active auto director task o
   }
 });
 
-test("novel workflow continue route forwards auto_execute_front10 continuation mode", async () => {
+test("novel workflow continue route enqueues auto_execute_front10 continuation mode", async () => {
   const calls = [];
-  const originalContinue = NovelDirectorService.prototype.continueTask;
+  const originalEnqueue = DirectorCommandService.prototype.enqueueContinueCommand;
   const originalDetail = NovelWorkflowTaskAdapter.prototype.detail;
 
-  NovelDirectorService.prototype.continueTask = async function continueTaskMock(taskId, input) {
+  DirectorCommandService.prototype.enqueueContinueCommand = async function enqueueContinueCommandMock(taskId, input) {
     calls.push({ taskId, input });
+    return {
+      commandId: "command-1",
+      taskId,
+      novelId: "novel-1",
+      commandType: "continue",
+      status: "queued",
+      leaseExpiresAt: null,
+    };
   };
   NovelWorkflowTaskAdapter.prototype.detail = async function detailMock(taskId) {
     return {
@@ -96,10 +106,10 @@ test("novel workflow continue route forwards auto_execute_front10 continuation m
         continuationMode: "auto_execute_front10",
       }),
     });
-    assert.equal(response.status, 200);
+    assert.equal(response.status, 202);
     const payload = await response.json();
     assert.equal(payload.success, true);
-    assert.equal(payload.data.id, "workflow-auto-exec");
+    assert.equal(payload.data.commandId, "command-1");
     assert.deepEqual(calls, [
       {
         taskId: "workflow-auto-exec",
@@ -109,7 +119,7 @@ test("novel workflow continue route forwards auto_execute_front10 continuation m
       },
     ]);
   } finally {
-    NovelDirectorService.prototype.continueTask = originalContinue;
+    DirectorCommandService.prototype.enqueueContinueCommand = originalEnqueue;
     NovelWorkflowTaskAdapter.prototype.detail = originalDetail;
     await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
   }

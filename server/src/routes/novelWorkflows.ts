@@ -4,6 +4,7 @@ import { z } from "zod";
 import { authMiddleware } from "../middleware/auth";
 import { validate } from "../middleware/validate";
 import { NovelDirectorService } from "../services/novel/director/NovelDirectorService";
+import { DirectorCommandService } from "../services/novel/director/DirectorCommandService";
 import { NovelWorkflowService } from "../services/novel/workflow/NovelWorkflowService";
 import { NovelWorkflowTaskAdapter } from "../services/task/adapters/NovelWorkflowTaskAdapter";
 
@@ -11,6 +12,7 @@ const router = Router();
 const workflowService = new NovelWorkflowService();
 const workflowAdapter = new NovelWorkflowTaskAdapter();
 const novelDirectorService = new NovelDirectorService();
+const directorCommandService = new DirectorCommandService(workflowService);
 
 const stageSchema = z.enum([
   "project_setup",
@@ -93,7 +95,7 @@ router.get("/novels/:novelId/auto-director", validate({ params: novelParamsSchem
     const { novelId } = req.params as z.infer<typeof novelParamsSchema>;
     const row = await workflowService.findActiveTaskByNovelAndLane(novelId, "auto_director")
       ?? await workflowService.findLatestVisibleTaskByNovelId(novelId, "auto_director");
-    const data = row ? await workflowAdapter.detail(row.id) : null;
+    const data = row ? await workflowAdapter.detail(row.id, { seedPayloadMode: "compact" }) : null;
     res.status(200).json({
       success: true,
       data,
@@ -108,14 +110,13 @@ router.post("/:id/continue", validate({ params: continueParamsSchema, body: cont
   try {
     const { id } = req.params as z.infer<typeof continueParamsSchema>;
     const body = req.body as z.infer<typeof continueBodySchema>;
-    await novelDirectorService.continueTask(id, {
+    const data = await directorCommandService.enqueueContinueCommand(id, {
       continuationMode: body.continuationMode,
     });
-    const data = await workflowAdapter.detail(id);
-    res.status(200).json({
+    res.status(202).json({
       success: true,
       data,
-      message: "Novel workflow continued.",
+      message: "Novel workflow continue accepted.",
     } satisfies ApiResponse<typeof data>);
   } catch (error) {
     next(error);

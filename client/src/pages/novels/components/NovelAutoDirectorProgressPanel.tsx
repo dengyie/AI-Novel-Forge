@@ -8,7 +8,7 @@ import {
 } from "@ai-novel/shared/types/novelDirector";
 import type { UnifiedTaskDetail } from "@ai-novel/shared/types/task";
 import { useQuery } from "@tanstack/react-query";
-import { getDirectorRuntimeSnapshot } from "@/api/novelDirector";
+import { getDirectorRuntimeProjection } from "@/api/novelDirector";
 import { queryKeys } from "@/api/queryKeys";
 import DirectorRuntimeProjectionCard from "@/components/autoDirector/DirectorRuntimeProjectionCard";
 import { Badge } from "@/components/ui/badge";
@@ -56,8 +56,6 @@ const AUTO_DIRECTOR_PLACEHOLDER_TITLES = new Set([
   "AI 自动导演小说",
   "小说流程任务",
 ]);
-
-const ACTIVE_DIRECTOR_TASK_STATUSES = new Set(["queued", "running", "waiting_approval"]);
 
 function formatDate(value: string | null | undefined): string {
   if (!value) {
@@ -212,7 +210,7 @@ function resolveDirectorStepStatuses(
       return "completed";
     }
     if (index === currentIndex) {
-      return mode === "execution_failed" ? "failed" : "running";
+      return mode === "execution_failed" || task?.pendingManualRecovery ? "failed" : "running";
     }
     return "pending";
   });
@@ -269,16 +267,23 @@ export default function NovelAutoDirectorProgressPanel({
   const taskChapterTitleWarning = resolveChapterTitleWarning(task);
   const chapterTitleRepairMutation = useDirectorChapterTitleRepair();
   const runtimeTaskId = task?.id ?? taskId;
-  const runtimeSnapshotQuery = useQuery({
+  const runtimeProjectionQuery = useQuery({
     queryKey: queryKeys.tasks.directorRuntime(runtimeTaskId || "none"),
-    queryFn: () => getDirectorRuntimeSnapshot(runtimeTaskId),
+    queryFn: () => getDirectorRuntimeProjection(runtimeTaskId),
     enabled: Boolean(runtimeTaskId),
     retry: false,
     refetchInterval: () => (
-      task && ACTIVE_DIRECTOR_TASK_STATUSES.has(task.status) ? 4000 : false
+      task && !task.pendingManualRecovery && (task.status === "queued" || task.status === "running") ? 4000 : false
     ),
   });
-  const runtimeProjection = runtimeSnapshotQuery.data?.data?.projection ?? null;
+  const runtimeProjection = runtimeProjectionQuery.data?.data?.projection ?? null;
+  const isPendingManualRecovery = Boolean(task?.pendingManualRecovery);
+  const runtimeProjectionForDisplay = isPendingManualRecovery ? null : runtimeProjection;
+  const runtimeRequiresUserAction = Boolean(
+    runtimeProjectionForDisplay?.requiresUserAction
+    || runtimeProjectionForDisplay?.status === "blocked"
+    || runtimeProjectionForDisplay?.status === "waiting_approval",
+  );
   const fallbackChapterTitleWarning = !taskChapterTitleWarning && isChapterTitleDiversitySummary(fallbackError)
     ? {
       summary: fallbackError?.trim() ?? "",
@@ -290,13 +295,20 @@ export default function NovelAutoDirectorProgressPanel({
   const visualMode: DirectorExecutionViewMode = mode === "execution_failed" && !chapterTitleWarning
     ? "execution_failed"
     : "execution_progress";
-  const projectedCurrentAction = runtimeProjection?.currentLabel?.trim();
+  const projectedCurrentAction = runtimeProjectionForDisplay?.currentLabel?.trim();
   const isContinuingExecution = Boolean(
     task?.status === "running"
     && task?.checkpointType === "chapter_batch_ready"
     && task.currentItemLabel?.includes("已暂停"),
   );
-  const currentAction = projectedCurrentAction
+  const currentAction = isPendingManualRecovery
+    ? (
+      task?.blockingReason?.trim()
+      || task?.recoveryHint?.trim()
+      || task?.lastError?.trim()
+      || "任务已暂停，等待从最近检查点恢复。"
+    )
+    : projectedCurrentAction
     || (isContinuingExecution
       ? `正在继续自动执行${resolveAutoExecutionScopeLabel(task)}`
       : (
@@ -325,11 +337,13 @@ export default function NovelAutoDirectorProgressPanel({
   const tokenUsage = task?.tokenUsage ?? null;
   const styleSeed = resolveDirectorStyleSeed(task);
   const containerMode: AITakeoverMode = visualMode === "execution_failed"
-    || runtimeProjection?.status === "failed"
+    || runtimeProjectionForDisplay?.status === "failed"
     ? "failed"
     : !task
       ? "loading"
-      : (task.status === "waiting_approval" || runtimeProjection?.requiresUserAction || chapterTitleWarning)
+      : isPendingManualRecovery
+        ? "action_required"
+        : (task.status === "waiting_approval" || runtimeProjectionForDisplay?.requiresUserAction || chapterTitleWarning)
         ? "waiting"
         : "running";
   const description = candidateSetupFlow
@@ -341,14 +355,16 @@ export default function NovelAutoDirectorProgressPanel({
     : (
       visualMode === "execution_failed"
         ? "任务已经停在最近一步，你可以先去任务中心查看详情，再决定是否恢复。"
-        : chapterTitleWarning
+        : isPendingManualRecovery
+          ? "任务已暂停在当前进度，你可以到任务中心从最近检查点恢复。"
+          : chapterTitleWarning
           ? "章节列表已经保留，这是一条可直接处理的结构提醒。你可以快速修复标题，再决定是否继续后续导演流程。"
           : task?.status === "waiting_approval"
             ? "当前导演流程已经停在审核点，你可以先检查产物，再决定是否继续自动推进。"
             : "可离开当前页面，任务会继续运行，并且可以在任务中心恢复查看。"
     );
   const actions = [
-    ...(visualMode === "execution_progress" && task?.status !== "waiting_approval" && !chapterTitleWarning
+    ...(visualMode === "execution_progress" && !isPendingManualRecovery && task?.status !== "waiting_approval" && !runtimeRequiresUserAction && !chapterTitleWarning
       ? [{
         label: "后台继续",
         onClick: onBackgroundContinue,
@@ -368,6 +384,8 @@ export default function NovelAutoDirectorProgressPanel({
         mode={containerMode}
         title={visualMode === "execution_failed"
           ? (candidateSetupFlow ? "候选方案生成失败" : "导演执行失败")
+          : isPendingManualRecovery
+            ? `《${taskTitle}》等待恢复`
           : candidateSetupFlow
             ? "正在生成导演候选方案"
             : `正在导演《${taskTitle}》`}
@@ -375,7 +393,7 @@ export default function NovelAutoDirectorProgressPanel({
         progress={task ? task.progress : null}
         currentAction={currentAction}
         checkpointLabel={formatCheckpoint(task?.checkpointType, task)}
-        taskId={taskId || task?.id}
+        taskId={task?.id || taskId}
         actions={actions}
       >
         <div className={`grid gap-3 ${candidateSetupFlow ? "md:grid-cols-4" : "md:grid-cols-6"}`}>
@@ -404,7 +422,7 @@ export default function NovelAutoDirectorProgressPanel({
         ) : null}
 
         <DirectorRuntimeProjectionCard
-          projection={runtimeProjection}
+          projection={runtimeProjectionForDisplay}
           className="mt-4"
         />
 

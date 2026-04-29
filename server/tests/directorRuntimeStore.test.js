@@ -104,7 +104,7 @@ test("director runtime store dual-writes runtime snapshot into persistent ledger
     seedPayloadJson: JSON.stringify({ novelId: "novel-1" }),
   });
   prisma.novelWorkflowTask.update = async ({ data }) => {
-    calls.push(["workflow.update", JSON.parse(data.seedPayloadJson).directorRuntime.runId]);
+    calls.push(["workflow.update", data.seedPayloadJson]);
     return {};
   };
   prisma.directorRun.upsert = async ({ create, update }) => {
@@ -197,6 +197,11 @@ test("director runtime store dual-writes runtime snapshot into persistent ledger
       call[0] === "dependency.upsert"
       && call[1] === "audit_report:chapter:chapter-1:AuditReport:audit-1"
     )));
+    assert.equal(
+      calls.some((call) => call[0] === "workflow.update"),
+      false,
+      "runtime snapshot updates must not rewrite NovelWorkflowTask.seedPayloadJson on every step",
+    );
   } finally {
     prisma.novelWorkflowTask.findUnique = originals.workflowFindUnique;
     prisma.novelWorkflowTask.update = originals.workflowUpdate;

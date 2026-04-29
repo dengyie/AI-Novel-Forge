@@ -89,7 +89,23 @@ function isWorkflowTaskCancelledError(error: unknown): boolean {
     && error.message === "WORKFLOW_TASK_CANCELLED";
 }
 
+function parseJsonOrNull<T>(value: string | null | undefined): T | null {
+  if (!value?.trim()) {
+    return null;
+  }
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return null;
+  }
+}
+
+type BackgroundRunMode = "detached" | "inline";
+type InlineBackgroundRunner = () => Promise<void>;
+
 export class NovelDirectorService {
+  private readonly backgroundRunMode: BackgroundRunMode;
+  private inlineBackgroundRuns: InlineBackgroundRunner[] | null = null;
   private readonly novelContextService = new NovelContextService();
   private readonly characterPreparationService = new CharacterPreparationService();
   private readonly storyMacroService = new StoryMacroPlanService();
@@ -186,6 +202,10 @@ export class NovelDirectorService {
     scheduleBackgroundRun: (taskId, runner) => this.scheduleBackgroundRun(taskId, runner),
   });
 
+  constructor(options?: { backgroundRunMode?: BackgroundRunMode }) {
+    this.backgroundRunMode = options?.backgroundRunMode ?? "detached";
+  }
+
   private async assertHighMemoryDirectorStartAllowed(input: {
     taskId: string;
     novelId: string;
@@ -200,18 +220,28 @@ export class NovelDirectorService {
   }
 
   private scheduleBackgroundRun(taskId: string, runner: () => Promise<void>) {
-    void Promise.resolve()
-      .then(() => runWithLlmUsageTracking({ workflowTaskId: taskId }, runner))
-      .catch(async (error) => {
-        if (isWorkflowTaskCancelledError(error) || isDirectorRuntimeGateError(error)) {
-          return;
-        }
-        const message = error instanceof Error ? error.message : "自动导演后台任务执行失败。";
-        await this.workflowService.markTaskFailed(taskId, message);
-      })
-      .finally(async () => {
-        await releaseHighMemoryDirectorReservations(taskId);
-      });
+    if (this.backgroundRunMode === "inline" && this.inlineBackgroundRuns) {
+      this.inlineBackgroundRuns.push(() => this.runScheduledBackgroundRun(taskId, runner));
+      return;
+    }
+    setImmediate(() => {
+      void this.runScheduledBackgroundRun(taskId, runner);
+    });
+  }
+
+  private async runScheduledBackgroundRun(taskId: string, runner: () => Promise<void>): Promise<void> {
+    try {
+      await runWithLlmUsageTracking({ workflowTaskId: taskId }, runner);
+    } catch (error) {
+      if (isWorkflowTaskCancelledError(error) || isDirectorRuntimeGateError(error)) {
+        return;
+      }
+      const message = error instanceof Error ? error.message : "自动导演后台任务执行失败。";
+      await this.workflowService.markTaskFailed(taskId, message);
+      throw error;
+    } finally {
+      await releaseHighMemoryDirectorReservations(taskId);
+    }
   }
 
   private withWorkflowTaskUsage<T>(workflowTaskId: string | null | undefined, runner: () => Promise<T>): Promise<T> {
@@ -327,8 +357,30 @@ export class NovelDirectorService {
   async continueTask(taskId: string, input?: {
     continuationMode?: DirectorContinuationMode;
     batchAlreadyStartedCount?: number;
+    forceResume?: boolean;
   }): Promise<void> {
     return this.continueRuntime.continueTask(taskId, input);
+  }
+
+  async executeContinueTask(taskId: string, input?: {
+    continuationMode?: DirectorContinuationMode;
+    batchAlreadyStartedCount?: number;
+    forceResume?: boolean;
+  }): Promise<void> {
+    const scheduledRuns: InlineBackgroundRunner[] = [];
+    const previousRuns = this.inlineBackgroundRuns;
+    this.inlineBackgroundRuns = scheduledRuns;
+    try {
+      await this.continueRuntime.continueTask(taskId, input);
+      while (scheduledRuns.length > 0) {
+        const nextRun = scheduledRuns.shift();
+        if (nextRun) {
+          await nextRun();
+        }
+      }
+    } finally {
+      this.inlineBackgroundRuns = previousRuns;
+    }
   }
 
   async continueCandidateStageTask(
@@ -412,6 +464,98 @@ export class NovelDirectorService {
     return this.directorEventProjectionService.buildSnapshotProjection(snapshot);
   }
 
+  async getRuntimeProjection(taskId: string): Promise<DirectorRuntimeProjection | null> {
+    const run = await prisma.directorRun.findUnique({
+      where: { taskId },
+      select: {
+        id: true,
+        novelId: true,
+        entrypoint: true,
+        policyJson: true,
+        updatedAt: true,
+        steps: {
+          orderBy: [{ updatedAt: "desc" }, { startedAt: "desc" }],
+          take: 30,
+          select: {
+            idempotencyKey: true,
+            nodeKey: true,
+            label: true,
+            status: true,
+            targetType: true,
+            targetId: true,
+            startedAt: true,
+            finishedAt: true,
+            error: true,
+            policyDecisionJson: true,
+          },
+        },
+        events: {
+          orderBy: { occurredAt: "desc" },
+          take: 30,
+          select: {
+            id: true,
+            type: true,
+            taskId: true,
+            novelId: true,
+            nodeKey: true,
+            artifactId: true,
+            artifactType: true,
+            summary: true,
+            affectedScope: true,
+            severity: true,
+            occurredAt: true,
+          },
+        },
+      },
+    });
+    if (!run) {
+      return this.buildRuntimeProjection(await this.getRuntimeSnapshot(taskId));
+    }
+    const snapshot: DirectorRuntimeSnapshot = {
+      schemaVersion: 1,
+      runId: run.id,
+      novelId: run.novelId,
+      entrypoint: run.entrypoint,
+      policy: parseJsonOrNull<DirectorRuntimeSnapshot["policy"]>(run.policyJson)
+        ?? {
+          mode: "run_until_gate",
+          mayOverwriteUserContent: false,
+          maxAutoRepairAttempts: 1,
+          allowExpensiveReview: false,
+          modelTier: "balanced",
+          updatedAt: run.updatedAt.toISOString(),
+        },
+      steps: [...run.steps].reverse().map((step) => ({
+        idempotencyKey: step.idempotencyKey,
+        nodeKey: step.nodeKey,
+        label: step.label,
+        status: step.status as DirectorRuntimeSnapshot["steps"][number]["status"],
+        targetType: step.targetType as DirectorRuntimeSnapshot["steps"][number]["targetType"],
+        targetId: step.targetId,
+        startedAt: step.startedAt.toISOString(),
+        finishedAt: step.finishedAt?.toISOString() ?? null,
+        error: step.error,
+        policyDecision: parseJsonOrNull<DirectorRuntimeSnapshot["steps"][number]["policyDecision"]>(step.policyDecisionJson),
+      })),
+      events: [...run.events].reverse().map((event) => ({
+        eventId: event.id,
+        type: event.type as DirectorRuntimeSnapshot["events"][number]["type"],
+        taskId: event.taskId,
+        novelId: event.novelId,
+        nodeKey: event.nodeKey,
+        artifactId: event.artifactId,
+        artifactType: event.artifactType as DirectorRuntimeSnapshot["events"][number]["artifactType"],
+        summary: event.summary,
+        affectedScope: event.affectedScope,
+        severity: event.severity as DirectorRuntimeSnapshot["events"][number]["severity"],
+        occurredAt: event.occurredAt.toISOString(),
+      })),
+      artifacts: [],
+      updatedAt: run.updatedAt.toISOString(),
+    };
+    return this.buildRuntimeProjection(snapshot);
+  }
+
   async updateRuntimePolicy(taskId: string, input: {
     mode: DirectorPolicyMode;
     patch?: Partial<Omit<DirectorRuntimePolicySnapshot, "mode" | "updatedAt">>;
@@ -423,15 +567,30 @@ export class NovelDirectorService {
     });
   }
 
-  async startTakeover(input: DirectorTakeoverRequest): Promise<DirectorTakeoverResponse> {
+  async startTakeover(input: DirectorTakeoverRequest, options: {
+    workflowTaskId?: string | null;
+  } = {}): Promise<DirectorTakeoverResponse> {
+    const commandTaskId = options.workflowTaskId?.trim() || null;
     const takeoverState = await loadDirectorTakeoverState({
       novelId: input.novelId,
       autoExecutionPlan: input.autoExecutionPlan,
       getStoryMacroPlan: (targetNovelId) => this.storyMacroService.getPlan(targetNovelId),
       getDirectorAssetSnapshot: (targetNovelId) => this.getDirectorAssetSnapshot(targetNovelId),
       getVolumeWorkspace: (targetNovelId) => this.volumeService.getVolumes(targetNovelId),
-      findActiveAutoDirectorTask: (targetNovelId) => this.workflowService.findActiveTaskByNovelAndLane(targetNovelId, "auto_director"),
-      findLatestAutoDirectorTask: (targetNovelId) => this.workflowService.findLatestVisibleTaskByNovelId(targetNovelId, "auto_director"),
+      findActiveAutoDirectorTask: async (targetNovelId) => {
+        if (!commandTaskId) {
+          return this.workflowService.findActiveTaskByNovelAndLane(targetNovelId, "auto_director");
+        }
+        const rows = await this.workflowService.listVisibleTasksByNovelAndLane(targetNovelId, "auto_director");
+        return rows.find((row) => row.id !== commandTaskId && ["queued", "running", "waiting_approval"].includes(row.status)) ?? null;
+      },
+      findLatestAutoDirectorTask: async (targetNovelId) => {
+        if (!commandTaskId) {
+          return this.workflowService.findLatestVisibleTaskByNovelId(targetNovelId, "auto_director");
+        }
+        const rows = await this.workflowService.listVisibleTasksByNovelAndLane(targetNovelId, "auto_director");
+        return rows.find((row) => row.id !== commandTaskId) ?? null;
+      },
     });
     const takeoverStrategy = input.strategy ?? (input.startPhase ? "restart_current_step" : "continue_existing");
     if (takeoverState.hasActiveTask && takeoverStrategy !== "continue_existing") {
@@ -522,6 +681,7 @@ export class NovelDirectorService {
       recordRewriteSnapshotMilestone: ({ taskId, summary }) => this.workflowService.recordRewriteSnapshotMilestone(taskId, {
         summary,
       }),
+      workflowTaskId: commandTaskId,
       prepareRestartStep: async ({ plan, takeoverState: currentTakeoverState, directorInput }) => {
         await resetDirectorTakeoverCurrentStep({
           novelId: input.novelId,

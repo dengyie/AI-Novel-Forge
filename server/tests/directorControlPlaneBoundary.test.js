@@ -1,0 +1,139 @@
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+
+const repoRoot = path.resolve(__dirname, "..", "..");
+
+function readSource(relativePath) {
+  return fs.readFileSync(path.join(repoRoot, relativePath), "utf8");
+}
+
+test("auto director control-plane routes enqueue commands instead of executing heavy director chains", () => {
+  const routeFiles = [
+    "server/src/routes/novelWorkflows.ts",
+    "server/src/routes/novelDirector.ts",
+    "server/src/routes/tasks.ts",
+  ];
+  const forbiddenCalls = [
+    [/\.continueTask\s*\(/, "NovelDirectorService.continueTask"],
+    [/\.startTakeover\s*\(/, "NovelDirectorService.startTakeover"],
+    [/runDirectorStructuredOutlinePhase\s*\(/, "runDirectorStructuredOutlinePhase"],
+    [/runChapterExecutionNode\s*\(/, "runChapterExecutionNode"],
+    [/invokeStructuredLlm\s*\(/, "invokeStructuredLlm"],
+  ];
+  for (const relativePath of routeFiles) {
+    const source = readSource(relativePath);
+    for (const [pattern, label] of forbiddenCalls) {
+      assert.equal(
+        pattern.test(source),
+        false,
+        `${relativePath} must not call ${label} directly`,
+      );
+    }
+  }
+});
+
+test("director worker remains a separate entrypoint from the web api", () => {
+  const rootPackage = JSON.parse(readSource("package.json"));
+  const serverPackage = JSON.parse(readSource("server/package.json"));
+  assert.match(rootPackage.scripts["dev:raw"], /dev:director-worker:wait/);
+  assert.match(rootPackage.scripts["dev:desktop:raw"], /dev:director-worker:wait/);
+  assert.match(serverPackage.scripts["dev:director-worker"], /src\/workers\/directorWorker\.ts/);
+  assert.match(serverPackage.scripts["start:director-worker"], /dist\/workers\/directorWorker\.js/);
+});
+
+test("director worker commands force a real continuation instead of trusting stale running task state", () => {
+  const source = readSource("server/src/services/novel/director/DirectorExecutionService.ts");
+  assert.doesNotMatch(
+    source,
+    /executeContinueTask\s*\(\s*command\.taskId\s*,\s*payload\s*\)/,
+    "Director Worker must not pass command payload through unchanged because stale running tasks can swallow the command.",
+  );
+  assert.match(
+    source,
+    /executeContinueTask\s*\(\s*command\.taskId\s*,\s*\{[\s\S]*\.\.\.payload[\s\S]*forceResume:\s*true[\s\S]*\}\s*\)/,
+    "Director Worker command execution must force continuation after a command has been leased.",
+  );
+});
+
+test("director continue command does not run workspace artifact analysis as a default preflight", () => {
+  const source = readSource("server/src/services/novel/director/novelDirectorContinueRuntime.ts");
+  assert.doesNotMatch(
+    source,
+    /analyzeWorkspace\s*\(/,
+    "Continue/resume must not run full workspace analysis by default because it rewrites the artifact ledger and can block API reads on SQLite.",
+  );
+});
+
+test("sqlite runtime is configured for reader-friendly worker writes", () => {
+  const prismaSource = readSource("server/src/db/prisma.ts");
+  const pragmaSource = readSource("server/src/db/sqlitePragmas.ts");
+  assert.match(prismaSource, /configureSqliteRuntimePragmas/);
+  assert.match(pragmaSource, /journal_mode\s*=\s*WAL/);
+  assert.match(pragmaSource, /synchronous\s*=\s*NORMAL/);
+});
+
+test("director runtime persistence writes deltas instead of replaying full snapshots", () => {
+  const storeSource = readSource("server/src/services/novel/director/runtime/DirectorRuntimeStore.ts");
+  const persistenceSource = readSource("server/src/services/novel/director/runtime/DirectorRuntimePersistence.ts");
+  assert.doesNotMatch(
+    storeSource,
+    /seedPayloadJson:\s*stringifySeedPayload/,
+    "Runtime progress must not rewrite the workflow task seed payload on every node update.",
+  );
+  assert.match(persistenceSource, /buildDirectorRuntimePersistenceDelta/);
+  assert.match(persistenceSource, /for \(const step of delta\.steps\)/);
+  assert.match(persistenceSource, /for \(const event of delta\.events\)/);
+  assert.match(persistenceSource, /for \(const artifact of delta\.artifacts\)/);
+  assert.doesNotMatch(
+    persistenceSource,
+    /for \(const step of snapshot\.steps\)/,
+    "Persistent runtime writes must not replay every known step on each heartbeat.",
+  );
+});
+
+test("novel edit page avoids bulk workspace refresh during director execution", () => {
+  const source = readSource("client/src/pages/novels/NovelEdit.tsx");
+  assert.doesNotMatch(
+    source,
+    /Promise\.all\(\[[\s\S]*queryKeys\.novels\.volumeWorkspace\(id\)[\s\S]*queryKeys\.novels\.worldSlice\(id\)[\s\S]*\]\)/,
+    "Director status changes must not bulk-refresh all novel workspace resources in parallel.",
+  );
+  assert.match(source, /activeAutoDirectorTask\.status === "queued" \|\| activeAutoDirectorTask\.status === "running"/);
+  assert.match(source, /invalidateVisibleWorkspaceData/);
+});
+
+test("waiting approval continue is an explicit one-shot gate confirmation", () => {
+  const novelEditSource = readSource("client/src/pages/novels/NovelEdit.tsx");
+  const taskCenterSource = readSource("client/src/pages/tasks/TaskCenterPage.tsx");
+  const continueRuntimeSource = readSource("server/src/services/novel/director/novelDirectorContinueRuntime.ts");
+  const pipelineSource = readSource("server/src/services/novel/director/novelDirectorPipelineRuntime.ts");
+  const orchestratorSource = readSource("server/src/services/novel/director/novelDirectorRuntimeOrchestrator.ts");
+
+  assert.match(
+    novelEditSource,
+    /activeAutoDirectorTask\.status === "waiting_approval"[\s\S]*continuationMode:\s*"resume"/,
+    "Novel edit waiting approval continue must send resume instead of an empty continue command.",
+  );
+  assert.match(
+    taskCenterSource,
+    /selectedTask\.status === "waiting_approval" \? "resume" : undefined/,
+    "Task Center waiting approval continue must send resume instead of an empty continue command.",
+  );
+  assert.match(
+    continueRuntimeSource,
+    /approveCurrentGate\s*=\s*input\?\.continuationMode === "resume"/,
+    "Director continue runtime must turn resume into a current-gate approval signal.",
+  );
+  assert.match(pipelineSource, /approveCurrentGate\?: boolean/);
+  assert.match(orchestratorSource, /approveCurrentGate\?: boolean/);
+  assert.match(orchestratorSource, /matchesPendingApprovedGate/);
+  assert.match(orchestratorSource, /status !== "waiting_approval"/);
+  assert.match(orchestratorSource, /mode:\s*"auto_safe_scope"/);
+  assert.doesNotMatch(
+    orchestratorSource,
+    /updatePolicy\s*\(/,
+    "One-shot gate confirmation must not persistently switch the whole runtime policy.",
+  );
+});

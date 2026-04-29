@@ -11,6 +11,8 @@ client/.env.local
 server/.env
 server/.env.local
 server/dev.db
+server/dev.db-shm
+server/dev.db-wal
 server/tmp_*.js
 server/tmp/**/*.db
 server/tmp/**/*.db*

@@ -386,6 +386,7 @@ model Novel {
   workflowTasks      NovelWorkflowTask[]
   autoApprovalRecords AutoDirectorAutoApprovalRecord[]
   directorRuns       DirectorRun[]
+  directorCommands   DirectorRunCommand[]
   directorEvents     DirectorEvent[]
   directorArtifacts  DirectorArtifact[]
   createdAt          DateTime    @default(now())
@@ -1632,6 +1633,7 @@ model NovelWorkflowTask {
   novel              Novel?                  @relation(fields: [novelId], references: [id], onDelete: SetNull)
   autoApprovalRecords AutoDirectorAutoApprovalRecord[]
   directorRun        DirectorRun?
+  directorCommands   DirectorRunCommand[]
   directorSteps      DirectorStepRun[]
   directorEvents     DirectorEvent[]
   directorArtifacts  DirectorArtifact[]
@@ -1641,6 +1643,33 @@ model NovelWorkflowTask {
   @@index([novelId, status, updatedAt])
   @@index([status, updatedAt])
   @@index([lane, updatedAt])
+}
+
+model DirectorRunCommand {
+  id              String             @id @default(cuid())
+  taskId          String
+  novelId         String?
+  commandType     String
+  idempotencyKey  String
+  status          String             @default("queued")
+  leaseOwner      String?
+  leaseExpiresAt  DateTime?
+  attempt         Int                @default(0)
+  runAfter        DateTime           @default(now())
+  payloadJson     String?
+  errorMessage    String?
+  startedAt       DateTime?
+  finishedAt      DateTime?
+  task            NovelWorkflowTask  @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  novel           Novel?             @relation(fields: [novelId], references: [id], onDelete: SetNull)
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+
+  @@unique([taskId, commandType, idempotencyKey])
+  @@index([status, runAfter, updatedAt])
+  @@index([taskId, status, updatedAt])
+  @@index([novelId, updatedAt])
+  @@index([leaseOwner, leaseExpiresAt])
 }
 
 model DirectorRun {

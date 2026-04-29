@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const http = require("node:http");
 const { createApp } = require("../dist/app.js");
 const { NovelDirectorService } = require("../dist/services/novel/director/NovelDirectorService.js");
+const { DirectorCommandService } = require("../dist/services/novel/director/DirectorCommandService.js");
 
 function listen(server) {
   return new Promise((resolve) => {
@@ -230,7 +231,7 @@ test("novel director routes support candidates, refine and takeover flows", asyn
   const originalRefineTitles = NovelDirectorService.prototype.refineCandidateTitleOptions;
   const originalConfirm = NovelDirectorService.prototype.confirmCandidate;
   const originalGetTakeoverReadiness = NovelDirectorService.prototype.getTakeoverReadiness;
-  const originalStartTakeover = NovelDirectorService.prototype.startTakeover;
+  const originalEnqueueTakeoverCommand = DirectorCommandService.prototype.enqueueTakeoverCommand;
 
   NovelDirectorService.prototype.generateCandidates = async function generateCandidatesMock() {
     return { batch: buildBatch(1) };
@@ -344,28 +345,15 @@ test("novel director routes support candidates, refine and takeover flows", asyn
   NovelDirectorService.prototype.getTakeoverReadiness = async function getTakeoverReadinessMock() {
     return buildTakeoverReadiness();
   };
-  NovelDirectorService.prototype.startTakeover = async function startTakeoverMock(input) {
+  DirectorCommandService.prototype.enqueueTakeoverCommand = async function enqueueTakeoverCommandMock(input) {
     takeoverCalls.push(input);
     return {
+      commandId: "command_takeover_demo",
+      taskId: "workflow_takeover_demo",
       novelId: "novel_director_demo",
-      workflowTaskId: "workflow_takeover_demo",
-      startPhase: input.startPhase ?? "volume_strategy",
-      entryStep: input.entryStep ?? "outline",
-      strategy: input.strategy ?? (input.startPhase ? "restart_current_step" : "continue_existing"),
-      effectiveStage: input.entryStep === "pipeline" ? "quality_repair" : "volume_strategy",
-      directorSession: {
-        runMode: input.runMode ?? "stage_review",
-        isBackgroundRunning: true,
-        lockedScopes: ["basic", "story_macro", "character", "outline", "structured", "chapter", "pipeline"],
-        phase: input.entryStep === "pipeline" ? "front10_ready" : "volume_strategy",
-        reviewScope: null,
-      },
-      resumeTarget: {
-        route: "/novels/:id/edit",
-        novelId: "novel_director_demo",
-        taskId: "workflow_takeover_demo",
-        stage: input.entryStep === "pipeline" ? "pipeline" : "outline",
-      },
+      commandType: "takeover",
+      status: "queued",
+      leaseExpiresAt: null,
     };
   };
 
@@ -522,14 +510,11 @@ test("novel director routes support candidates, refine and takeover flows", asyn
         },
       }),
     });
-    assert.equal(takeoverResponse.status, 200);
+    assert.equal(takeoverResponse.status, 202);
     const takeoverPayload = await takeoverResponse.json();
     assert.equal(takeoverPayload.success, true);
-    assert.equal(takeoverPayload.data.workflowTaskId, "workflow_takeover_demo");
-    assert.equal(takeoverPayload.data.resumeTarget.stage, "pipeline");
-    assert.equal(takeoverPayload.data.entryStep, "pipeline");
-    assert.equal(takeoverPayload.data.strategy, "continue_existing");
-    assert.equal(takeoverPayload.data.directorSession.runMode, "auto_to_execution");
+    assert.equal(takeoverPayload.data.taskId, "workflow_takeover_demo");
+    assert.equal(takeoverPayload.data.commandType, "takeover");
     assert.equal(takeoverCalls.at(-1)?.entryStep, "pipeline");
     assert.equal(takeoverCalls.at(-1)?.strategy, "continue_existing");
     assert.deepEqual(takeoverCalls.at(-1)?.autoExecutionPlan, {
@@ -550,7 +535,7 @@ test("novel director routes support candidates, refine and takeover flows", asyn
         },
       }),
     });
-    assert.equal(bookScopeTakeoverResponse.status, 200);
+    assert.equal(bookScopeTakeoverResponse.status, 202);
     const bookScopeTakeoverPayload = await bookScopeTakeoverResponse.json();
     assert.equal(bookScopeTakeoverPayload.success, true);
     assert.deepEqual(takeoverCalls.at(-1)?.autoExecutionPlan, {
@@ -565,10 +550,10 @@ test("novel director routes support candidates, refine and takeover flows", asyn
         startPhase: "volume_strategy",
       }),
     });
-    assert.equal(legacyTakeoverResponse.status, 200);
+    assert.equal(legacyTakeoverResponse.status, 202);
     const legacyTakeoverPayload = await legacyTakeoverResponse.json();
     assert.equal(legacyTakeoverPayload.success, true);
-    assert.equal(legacyTakeoverPayload.data.startPhase, "volume_strategy");
+    assert.equal(legacyTakeoverPayload.data.commandType, "takeover");
     assert.equal(takeoverCalls.at(-1)?.startPhase, "volume_strategy");
   } finally {
     NovelDirectorService.prototype.generateCandidates = originalGenerate;
@@ -577,7 +562,7 @@ test("novel director routes support candidates, refine and takeover flows", asyn
     NovelDirectorService.prototype.refineCandidateTitleOptions = originalRefineTitles;
     NovelDirectorService.prototype.confirmCandidate = originalConfirm;
     NovelDirectorService.prototype.getTakeoverReadiness = originalGetTakeoverReadiness;
-    NovelDirectorService.prototype.startTakeover = originalStartTakeover;
+    DirectorCommandService.prototype.enqueueTakeoverCommand = originalEnqueueTakeoverCommand;
     await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
   }
 });

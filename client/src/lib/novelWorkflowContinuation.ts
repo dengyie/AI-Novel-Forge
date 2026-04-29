@@ -1,9 +1,11 @@
+import type { DirectorCommandAcceptedResponse } from "@ai-novel/shared/types/directorRuntime";
+import type { DirectorContinuationMode } from "@ai-novel/shared/types/novelDirector";
 import type { UnifiedTaskDetail } from "@ai-novel/shared/types/task";
 
 export function resolveWorkflowContinuationFeedback(
-  task: UnifiedTaskDetail | null | undefined,
+  task: UnifiedTaskDetail | DirectorCommandAcceptedResponse | null | undefined,
   options?: {
-    mode?: "auto_execute_range";
+    mode?: DirectorContinuationMode;
     scopeLabel?: string | null;
   },
 ): {
@@ -11,10 +13,10 @@ export function resolveWorkflowContinuationFeedback(
   message: string;
 } {
   const requestedScopeLabel = options?.scopeLabel?.trim();
-  const taskScopeLabel = task?.executionScopeLabel?.trim();
+  const taskScopeLabel = task && "executionScopeLabel" in task ? task.executionScopeLabel?.trim() : undefined;
   const scopeLabel = requestedScopeLabel || taskScopeLabel || "当前章节范围";
 
-  if (task?.status === "failed") {
+  if (task && "kind" in task && task.status === "failed") {
     return {
       tone: "error",
       message: task.failureSummary?.trim()

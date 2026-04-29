@@ -10,7 +10,7 @@ import { bookAnalysisService } from "../bookAnalysis/BookAnalysisService";
 import { imageGenerationService } from "../image/ImageGenerationService";
 import { NovelPipelineRuntimeService } from "../novel/NovelPipelineRuntimeService";
 import { NovelService } from "../novel/NovelService";
-import { NovelDirectorService } from "../novel/director/NovelDirectorService";
+import { DirectorCommandService } from "../novel/director/DirectorCommandService";
 import { NovelWorkflowRuntimeService } from "../novel/workflow/NovelWorkflowRuntimeService";
 import { styleExtractionTaskService } from "../styleEngine/StyleExtractionTaskService";
 import { taskCenterService } from "./TaskCenterService";
@@ -21,6 +21,11 @@ interface RecoveryInitializationDeps {
   markPendingAutoDirectorTasksForManualRecovery(): Promise<unknown>;
   markPendingPipelineJobsForManualRecovery(): Promise<unknown>;
   markPendingStyleTasksForManualRecovery(): Promise<unknown>;
+}
+
+interface AutoDirectorRecoveryCommandPort {
+  enqueueRecoveryCommand?: (taskId: string) => Promise<unknown>;
+  continueTask?: (taskId: string) => Promise<void>;
 }
 
 function toRecoverableTaskSummary(detail: UnifiedTaskDetail | null): RecoverableTaskSummary | null {
@@ -47,7 +52,7 @@ export class RecoveryTaskService {
   constructor(
     private readonly novelWorkflowRuntimeService = new NovelWorkflowRuntimeService(),
     private readonly novelPipelineRuntimeService = new NovelPipelineRuntimeService(),
-    private readonly novelDirectorService = new NovelDirectorService(),
+    private readonly directorCommandService: AutoDirectorRecoveryCommandPort = new DirectorCommandService(),
     private readonly novelService = new NovelService(),
     private readonly initializationDeps: RecoveryInitializationDeps = {
       markPendingBookAnalysesForManualRecovery: () => bookAnalysisService.markPendingAnalysesForManualRecovery(),
@@ -153,34 +158,41 @@ export class RecoveryTaskService {
     return { items };
   }
 
-  async resumeRecoveryCandidate(kind: TaskKind, id: string): Promise<void> {
+  async resumeRecoveryCandidate(kind: TaskKind, id: string): Promise<unknown> {
     await this.waitUntilReady();
     if (kind === "novel_workflow") {
-      await this.novelDirectorService.continueTask(id);
-      return;
+      return this.resumeAutoDirectorWorkflow(id);
     }
     if (kind === "novel_pipeline") {
       await this.novelService.resumePipelineJob(id);
-      return;
+      return null;
     }
     if (kind === "book_analysis") {
       await bookAnalysisService.resumePendingAnalysis(id);
-      return;
+      return null;
     }
     if (kind === "image_generation") {
       await imageGenerationService.resumeTask(id);
-      return;
+      return null;
     }
     if (kind === "style_extraction") {
       await styleExtractionTaskService.resumeTask(id);
-      return;
+      return null;
     }
     throw new AppError(`Unsupported recovery task kind: ${kind}`, 400);
   }
 
-  async startResumeRecoveryCandidate(kind: TaskKind, id: string): Promise<void> {
+  async startResumeRecoveryCandidate(kind: TaskKind, id: string): Promise<unknown> {
     await this.waitUntilReady();
+    if (kind === "novel_workflow") {
+      if (this.directorCommandService.enqueueRecoveryCommand) {
+        return this.directorCommandService.enqueueRecoveryCommand(id);
+      }
+      this.scheduleAutoDirectorRecovery(id);
+      return null;
+    }
     this.scheduleRecoveryResume(kind, id);
+    return null;
   }
 
   async startResumeAllRecoveryCandidates(): Promise<Array<{ kind: TaskKind; id: string }>> {
@@ -231,6 +243,26 @@ export class RecoveryTaskService {
       .catch((error) => {
         console.error(`[recovery] resume background task failed: ${kind}/${id}`, error);
       });
+  }
+
+  private resumeAutoDirectorWorkflow(id: string): Promise<unknown> {
+    if (this.directorCommandService.enqueueRecoveryCommand) {
+      return this.directorCommandService.enqueueRecoveryCommand(id);
+    }
+    if (this.directorCommandService.continueTask) {
+      return this.directorCommandService.continueTask(id);
+    }
+    throw new AppError("Auto director recovery command service is unavailable.", 500);
+  }
+
+  private scheduleAutoDirectorRecovery(id: string): void {
+    if (this.directorCommandService.enqueueRecoveryCommand) {
+      void this.directorCommandService.enqueueRecoveryCommand(id).catch((error) => {
+        console.error(`[recovery] auto director command enqueue failed: novel_workflow/${id}`, error);
+      });
+      return;
+    }
+    this.scheduleRecoveryResume("novel_workflow", id);
   }
 }
 

@@ -78,6 +78,10 @@ export class DirectorNodeRunner {
       };
     }
     const policyDecision = this.policyEngine.decide({
+      reads: contract.reads,
+      writes: contract.writes,
+      targetType: input.targetType,
+      targetId: input.targetId,
       mayOverwriteUserContent: contract.mayModifyUserContent,
       requiresApprovalByDefault: contract.requiresApprovalByDefault,
       ...input.policy,
@@ -94,13 +98,13 @@ export class DirectorNodeRunner {
           label: contract.label,
           targetType: input.targetType,
           targetId: input.targetId,
-          status: policyDecision.canRun ? "waiting_approval" : "blocked_scope",
+          status: policyDecision.gateType === "blocked_scope" ? "blocked_scope" : "waiting_approval",
           decision: policyDecision,
         });
         runtimeSnapshot = await this.runtimeStore.getSnapshot(input.taskId.trim());
       }
       return {
-        status: policyDecision.canRun ? "needs_approval" : "blocked_scope",
+        status: policyDecision.gateType === "blocked_scope" ? "blocked_scope" : "needs_approval",
         runtimeSnapshot,
         producedArtifacts: [],
         reason: policyDecision.reason,

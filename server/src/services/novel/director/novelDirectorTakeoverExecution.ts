@@ -31,10 +31,11 @@ interface RewriteSnapshotReference {
 
 interface TakeoverExecutionWorkflowPort {
   bootstrapTask(input: {
+    workflowTaskId?: string | null;
     novelId: string;
     lane: "auto_director";
     title: string;
-    forceNew: true;
+    forceNew?: true;
     seedPayload: Record<string, unknown>;
     initialState?: {
       stage: "story_macro" | "character_setup" | "volume_strategy" | "structured_outline" | "chapter_execution" | "quality_repair";
@@ -75,6 +76,7 @@ interface TakeoverExecutionAutoRuntimePort {
 
 interface StartDirectorTakeoverExecutionInput {
   request: DirectorTakeoverRequest;
+  workflowTaskId?: string | null;
   takeoverState: DirectorTakeoverLoadedState;
   directorInput: DirectorConfirmRequest;
   workflowService: TakeoverExecutionWorkflowPort;
@@ -329,10 +331,11 @@ export async function startDirectorTakeoverExecution(
 
   const initialState = buildTakeoverInitialState({ plan, takeoverState: input.takeoverState });
   const workflowTask = await input.workflowService.bootstrapTask({
+    workflowTaskId: input.workflowTaskId ?? undefined,
     novelId: input.request.novelId,
     lane: "auto_director",
     title: input.takeoverState.novel.title,
-    forceNew: true,
+    forceNew: input.workflowTaskId ? undefined : true,
     initialState,
     seedPayload: input.buildDirectorSeedPayload(input.directorInput, input.request.novelId, buildTakeoverSeedPayloadExtra({
       directorSession,

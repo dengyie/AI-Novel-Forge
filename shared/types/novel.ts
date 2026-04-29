@@ -106,6 +106,7 @@ export type PipelineRepairMode =
 export interface NovelAutoDirectorTaskSummary {
   id: string;
   status: TaskStatus;
+  pendingManualRecovery?: boolean;
   progress: number;
   currentStage?: string | null;
   currentItemLabel?: string | null;

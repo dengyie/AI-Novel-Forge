@@ -173,7 +173,7 @@ test("auto director follow-up reason resolver only marks replaced for inactive t
   assert.deepEqual(actionCodes(cancelledReplaced), ["open_detail"]);
 });
 
-test("auto director follow-up reason resolver allows cancelled tasks to resume or retry", () => {
+test("auto director follow-up reason resolver resumes cancelled tasks through retry path", () => {
   const result = resolveAutoDirectorFollowUpReason({
     status: "cancelled",
     checkpointType: "front10_ready",
@@ -184,7 +184,6 @@ test("auto director follow-up reason resolver allows cancelled tasks to resume o
   assert.equal(result.reason, "runtime_cancelled");
   assert.equal(result.priority, "P1");
   assert.deepEqual(actionCodes(result), [
-    "continue_generic",
     "retry_with_task_model",
     "retry_with_route_model",
     "open_detail",

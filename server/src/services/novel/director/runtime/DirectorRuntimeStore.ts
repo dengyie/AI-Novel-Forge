@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type {
   DirectorArtifactRef,
-  DirectorArtifactType,
   DirectorEvent,
   DirectorEventType,
   DirectorPolicyDecision,
@@ -12,7 +11,6 @@ import type {
   DirectorWorkspaceAnalysis,
 } from "@ai-novel/shared/types/directorRuntime";
 import { prisma } from "../../../../db/prisma";
-import { withSqliteRetry } from "../../../../db/sqliteRetry";
 import { parseSeedPayload } from "../../workflow/novelWorkflow.shared";
 import type { DirectorWorkflowSeedPayload } from "../novelDirectorHelpers";
 import {
@@ -20,18 +18,15 @@ import {
   reconcileDirectorArtifactLedger,
 } from "./DirectorArtifactLedger";
 import { buildDefaultDirectorPolicy, buildEmptyDirectorRuntimeSnapshot } from "./directorRuntimeDefaults";
+import {
+  buildArtifactIndexedEvents,
+  buildDirectorRuntimePersistenceDelta,
+  persistDirectorRuntimeSnapshot,
+} from "./DirectorRuntimePersistence";
 
 const MAX_RUNTIME_EVENTS = 120;
 const MAX_RUNTIME_STEPS = 120;
 const MAX_RUNTIME_ARTIFACTS = 160;
-
-function stringifySeedPayload(payload: DirectorWorkflowSeedPayload): string {
-  return JSON.stringify(payload);
-}
-
-function stringifyJson(value: unknown): string {
-  return JSON.stringify(value);
-}
 
 function parseJson<T>(value: string | null | undefined, fallback: T): T {
   if (!value?.trim()) {
@@ -55,25 +50,11 @@ function parseNullableJson<T>(value: string | null | undefined): T | null {
   }
 }
 
-function dateFromIso(value: string | null | undefined): Date | null {
-  if (!value) {
-    return null;
-  }
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? null : date;
-}
-
 function isoFromDate(value: Date | string | null | undefined): string | null {
   if (!value) {
     return null;
   }
   return value instanceof Date ? value.toISOString() : value;
-}
-
-function isPrismaUniqueConstraintError(error: unknown): boolean {
-  return typeof error === "object"
-    && error !== null
-    && (error as { code?: unknown }).code === "P2002";
 }
 
 function normalizeRuntimeSnapshot(input: {
@@ -140,28 +121,9 @@ function compactPolicyPatch(
   ) as Partial<Omit<DirectorRuntimePolicySnapshot, "mode" | "updatedAt">>;
 }
 
-function artifactTypeLabel(type: DirectorArtifactType): string {
-  const labels: Record<DirectorArtifactType, string> = {
-    book_contract: "书级创作约定",
-    story_macro: "故事宏观规划",
-    character_cast: "角色阵容",
-    volume_strategy: "分卷策略",
-    chapter_task_sheet: "章节任务单",
-    chapter_draft: "章节正文",
-    audit_report: "审校报告",
-    repair_ticket: "修复任务",
-    reader_promise: "读者承诺",
-    character_governance_state: "角色治理状态",
-    world_skeleton: "世界框架",
-    source_knowledge_pack: "续写资料包",
-    chapter_retention_contract: "章节留存约定",
-    continuity_state: "连续性状态",
-    rolling_window_review: "近期章节复盘",
-  };
-  return labels[type];
-}
-
 export class DirectorRuntimeStore {
+  private readonly snapshotCache = new Map<string, DirectorRuntimeSnapshot>();
+
   async getSnapshot(taskId: string): Promise<DirectorRuntimeSnapshot | null> {
     const row = await prisma.novelWorkflowTask.findUnique({
       where: { id: taskId },
@@ -176,6 +138,7 @@ export class DirectorRuntimeStore {
     }
     const persisted = await this.getPersistentSnapshot(taskId);
     if (persisted) {
+      this.snapshotCache.set(taskId, persisted);
       return persisted;
     }
     const seedPayload = parseSeedPayload<DirectorWorkflowSeedPayload>(row.seedPayloadJson) ?? {};
@@ -202,33 +165,25 @@ export class DirectorRuntimeStore {
       return null;
     }
     const seedPayload = parseSeedPayload<DirectorWorkflowSeedPayload>(row.seedPayloadJson) ?? {};
-    const current = normalizeRuntimeSnapshot({
-      taskId: row.id,
-      novelId: row.novelId,
-      seedPayload,
-    });
+    const current = this.snapshotCache.get(taskId)
+      ?? await this.getPersistentSnapshot(taskId)
+      ?? normalizeRuntimeSnapshot({
+        taskId: row.id,
+        novelId: row.novelId,
+        seedPayload,
+      });
     const nextRuntime = trimRuntimeSnapshot({
       ...mutator(current, seedPayload),
       updatedAt: new Date().toISOString(),
     });
-    const nextPayload: DirectorWorkflowSeedPayload = {
-      ...seedPayload,
-      directorRuntime: nextRuntime,
-    };
-    await withSqliteRetry(
-      () => prisma.novelWorkflowTask.update({
-        where: { id: taskId },
-        data: {
-          seedPayloadJson: stringifySeedPayload(nextPayload),
-        },
-      }),
-      { label: "directorRuntime.seedPayload.update" },
-    );
-    await this.persistSnapshot({
+    const delta = buildDirectorRuntimePersistenceDelta(current, nextRuntime);
+    await persistDirectorRuntimeSnapshot({
       taskId,
       novelId: row.novelId,
       snapshot: nextRuntime,
+      delta,
     });
+    this.snapshotCache.set(taskId, nextRuntime);
     return nextRuntime;
   }
 
@@ -478,14 +433,14 @@ export class DirectorRuntimeStore {
             summary: `${input.label}完成。`,
             occurredAt: now,
           }),
-          ...this.buildArtifactIndexedEvents({
+          ...buildArtifactIndexedEvents({
             taskId: input.taskId,
             novelId: input.novelId ?? snapshot.novelId ?? null,
             nodeKey: input.nodeKey,
             artifacts: artifacts.indexedArtifacts,
             occurredAt: now,
           }),
-          ...this.buildArtifactIndexedEvents({
+          ...buildArtifactIndexedEvents({
             taskId: input.taskId,
             novelId: input.novelId ?? snapshot.novelId ?? null,
             nodeKey: input.nodeKey,
@@ -613,13 +568,13 @@ export class DirectorRuntimeStore {
             summary: input.analysis.interpretation?.summary ?? "工作区分析已完成。",
             occurredAt: input.analysis.generatedAt,
           }),
-          ...this.buildArtifactIndexedEvents({
+          ...buildArtifactIndexedEvents({
             taskId: input.taskId,
             novelId: input.analysis.novelId,
             artifacts: artifacts.indexedArtifacts,
             occurredAt: input.analysis.generatedAt,
           }),
-          ...this.buildArtifactIndexedEvents({
+          ...buildArtifactIndexedEvents({
             taskId: input.taskId,
             novelId: input.analysis.novelId,
             artifacts: artifacts.staleArtifacts,
@@ -659,267 +614,6 @@ export class DirectorRuntimeStore {
         ],
       };
     });
-  }
-
-  private async persistSnapshot(input: {
-    taskId: string;
-    novelId?: string | null;
-    snapshot: DirectorRuntimeSnapshot;
-  }): Promise<void> {
-    const snapshot = trimRuntimeSnapshot(input.snapshot);
-    const novelId = snapshot.novelId ?? input.novelId ?? null;
-    await withSqliteRetry(
-      async () => {
-        await prisma.directorRun.upsert({
-          where: { taskId: input.taskId },
-          create: {
-            id: snapshot.runId,
-            taskId: input.taskId,
-            novelId,
-            entrypoint: snapshot.entrypoint ?? null,
-            policyJson: stringifyJson(snapshot.policy),
-            lastWorkspaceAnalysisJson: snapshot.lastWorkspaceAnalysis
-              ? stringifyJson(snapshot.lastWorkspaceAnalysis)
-              : null,
-          },
-          update: {
-            novelId,
-            entrypoint: snapshot.entrypoint ?? null,
-            policyJson: stringifyJson(snapshot.policy),
-            lastWorkspaceAnalysisJson: snapshot.lastWorkspaceAnalysis
-              ? stringifyJson(snapshot.lastWorkspaceAnalysis)
-              : null,
-          },
-        });
-
-        for (const step of snapshot.steps) {
-          await prisma.directorStepRun.upsert({
-            where: { idempotencyKey: step.idempotencyKey },
-            create: {
-              runId: snapshot.runId,
-              taskId: input.taskId,
-              novelId,
-              idempotencyKey: step.idempotencyKey,
-              nodeKey: step.nodeKey,
-              label: step.label,
-              status: step.status,
-              targetType: step.targetType ?? null,
-              targetId: step.targetId ?? null,
-              startedAt: dateFromIso(step.startedAt) ?? new Date(),
-              finishedAt: dateFromIso(step.finishedAt),
-              error: step.error ?? null,
-              producedArtifactsJson: step.producedArtifacts
-                ? stringifyJson(step.producedArtifacts)
-                : null,
-              policyDecisionJson: step.policyDecision
-                ? stringifyJson(step.policyDecision)
-                : null,
-            },
-            update: {
-              runId: snapshot.runId,
-              novelId,
-              nodeKey: step.nodeKey,
-              label: step.label,
-              status: step.status,
-              targetType: step.targetType ?? null,
-              targetId: step.targetId ?? null,
-              startedAt: dateFromIso(step.startedAt) ?? new Date(),
-              finishedAt: dateFromIso(step.finishedAt),
-              error: step.error ?? null,
-              producedArtifactsJson: step.producedArtifacts
-                ? stringifyJson(step.producedArtifacts)
-                : null,
-              policyDecisionJson: step.policyDecision
-                ? stringifyJson(step.policyDecision)
-                : null,
-            },
-          });
-        }
-
-        for (const event of snapshot.events) {
-          await prisma.directorEvent.upsert({
-            where: { id: event.eventId },
-            create: {
-              id: event.eventId,
-              runId: snapshot.runId,
-              taskId: input.taskId,
-              novelId: event.novelId ?? novelId,
-              type: event.type,
-              nodeKey: event.nodeKey ?? null,
-              artifactId: event.artifactId ?? null,
-              artifactType: event.artifactType ?? null,
-              summary: event.summary,
-              affectedScope: event.affectedScope ?? null,
-              severity: event.severity ?? null,
-              metadataJson: event.metadata ? stringifyJson(event.metadata) : null,
-              occurredAt: dateFromIso(event.occurredAt) ?? new Date(),
-            },
-            update: {
-              runId: snapshot.runId,
-              novelId: event.novelId ?? novelId,
-              type: event.type,
-              nodeKey: event.nodeKey ?? null,
-              artifactId: event.artifactId ?? null,
-              artifactType: event.artifactType ?? null,
-              summary: event.summary,
-              affectedScope: event.affectedScope ?? null,
-              severity: event.severity ?? null,
-              metadataJson: event.metadata ? stringifyJson(event.metadata) : null,
-              occurredAt: dateFromIso(event.occurredAt) ?? new Date(),
-            },
-          });
-        }
-
-        const artifactIds = new Set(snapshot.artifacts.map((artifact) => artifact.id));
-        for (const artifact of snapshot.artifacts) {
-          const normalized = normalizeDirectorArtifactRef({
-            ...artifact,
-            runId: artifact.runId ?? snapshot.runId,
-          });
-          const create = {
-            id: normalized.id,
-            runId: normalized.runId ?? snapshot.runId,
-            novelId: normalized.novelId,
-            taskId: input.taskId,
-            artifactType: normalized.artifactType,
-            targetType: normalized.targetType,
-            targetId: normalized.targetId ?? null,
-            version: normalized.version,
-            status: normalized.status,
-            source: normalized.source,
-            contentTable: normalized.contentRef.table,
-            contentId: normalized.contentRef.id,
-            contentHash: normalized.contentHash ?? null,
-            schemaVersion: normalized.schemaVersion,
-            promptAssetKey: normalized.promptAssetKey ?? null,
-            promptVersion: normalized.promptVersion ?? null,
-            modelRoute: normalized.modelRoute ?? null,
-            sourceStepRunId: normalized.sourceStepRunId ?? null,
-            protectedUserContent: normalized.protectedUserContent ?? null,
-            artifactUpdatedAt: dateFromIso(normalized.updatedAt),
-          };
-          const update = {
-            runId: normalized.runId ?? snapshot.runId,
-            taskId: input.taskId,
-            version: normalized.version,
-            status: normalized.status,
-            source: normalized.source,
-            contentHash: normalized.contentHash ?? null,
-            schemaVersion: normalized.schemaVersion,
-            promptAssetKey: normalized.promptAssetKey ?? null,
-            promptVersion: normalized.promptVersion ?? null,
-            modelRoute: normalized.modelRoute ?? null,
-            sourceStepRunId: normalized.sourceStepRunId ?? null,
-            protectedUserContent: normalized.protectedUserContent ?? null,
-            artifactUpdatedAt: dateFromIso(normalized.updatedAt),
-          };
-          try {
-            await prisma.directorArtifact.upsert({
-              where: { id: normalized.id },
-              create,
-              update,
-            });
-          } catch (error) {
-            if (!isPrismaUniqueConstraintError(error)) {
-              throw error;
-            }
-            await prisma.directorArtifact.update({
-              where: { id: normalized.id },
-              data: update,
-            });
-          }
-        }
-
-        for (const artifact of snapshot.artifacts) {
-          const normalized = normalizeDirectorArtifactRef(artifact);
-          const dependencyMap = new Map<string, NonNullable<typeof normalized.dependsOn>[number]>();
-          for (const dependency of normalized.dependsOn ?? []) {
-            if (!artifactIds.has(dependency.artifactId)) {
-              continue;
-            }
-            dependencyMap.set(dependency.artifactId, dependency);
-          }
-          const dependencies = [...dependencyMap.values()];
-          if (dependencies.length > 0) {
-            await prisma.directorArtifactDependency.deleteMany({
-              where: {
-                artifactId: normalized.id,
-                dependsOnArtifactId: {
-                  notIn: dependencies.map((dependency) => dependency.artifactId),
-                },
-              },
-            });
-          } else {
-            await prisma.directorArtifactDependency.deleteMany({
-              where: { artifactId: normalized.id },
-            });
-          }
-          for (const dependency of dependencies) {
-            const where = {
-              artifactId_dependsOnArtifactId: {
-                artifactId: normalized.id,
-                dependsOnArtifactId: dependency.artifactId,
-              },
-            };
-            const data = {
-              dependsOnVersion: dependency.version ?? null,
-            };
-            try {
-              await prisma.directorArtifactDependency.upsert({
-                where,
-                create: {
-                  artifactId: normalized.id,
-                  dependsOnArtifactId: dependency.artifactId,
-                  ...data,
-                },
-                update: data,
-              });
-            } catch (error) {
-              if (!isPrismaUniqueConstraintError(error)) {
-                throw error;
-              }
-              await prisma.directorArtifactDependency.update({
-                where,
-                data,
-              });
-            }
-          }
-        }
-      },
-      { label: "directorRuntime.persistent.upsert" },
-    );
-  }
-
-  private buildArtifactIndexedEvents(input: {
-    taskId: string;
-    novelId?: string | null;
-    nodeKey?: string | null;
-    artifacts: DirectorArtifactRef[];
-    occurredAt: string;
-    stale?: boolean;
-  }): DirectorEvent[] {
-    return input.artifacts.map((artifact) => this.buildEvent({
-      type: "artifact_indexed",
-      taskId: input.taskId,
-      novelId: input.novelId ?? artifact.novelId,
-      nodeKey: input.nodeKey,
-      artifactId: artifact.id,
-      artifactType: artifact.artifactType,
-      summary: input.stale
-        ? `${artifactTypeLabel(artifact.artifactType)}需要重新确认。`
-        : `${artifactTypeLabel(artifact.artifactType)}已纳入自动导演记录。`,
-      affectedScope: `${artifact.targetType}:${artifact.targetId ?? artifact.novelId}`,
-      severity: input.stale ? "medium" : "low",
-      occurredAt: input.occurredAt,
-      metadata: {
-        targetType: artifact.targetType,
-        targetId: artifact.targetId ?? null,
-        version: artifact.version,
-        status: artifact.status,
-        source: artifact.source,
-        sourceStepRunId: artifact.sourceStepRunId ?? null,
-      },
-    }));
   }
 
   buildStepIdempotencyKey(input: {
