@@ -788,6 +788,7 @@ test("continueTask upgrades an explicit auto-execution continuation to execution
     assert.equal(runtimeCalls[0].resumeCheckpointType, "front10_ready");
     assert.equal(runtimeNodeInputs[0]?.nodeKey, "chapter_execution_node");
     assert.equal(runtimeNodeInputs[0]?.input?.policy?.policy?.mode, "auto_safe_scope");
+    assert.equal(runtimeNodeInputs[0]?.input?.policy?.policy?.allowExpensiveReview, true);
   } finally {
     service.continueCandidateStageTask = originalContinueCandidateStageTask;
     service.workflowService.getTaskById = originalGetTaskById;

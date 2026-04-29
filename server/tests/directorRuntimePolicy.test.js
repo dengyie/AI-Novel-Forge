@@ -136,6 +136,26 @@ test("director runtime policy gates expensive review unless explicitly allowed",
   assert.deepEqual(decision.riskTags, ["expensive_review"]);
 });
 
+test("director runtime policy allows approved auto execution review scope", () => {
+  const engine = new DirectorPolicyEngine();
+  const decision = engine.decide({
+    action: "run_node",
+    policy: {
+      mode: "auto_safe_scope",
+      mayOverwriteUserContent: false,
+      maxAutoRepairAttempts: 1,
+      allowExpensiveReview: true,
+      modelTier: "balanced",
+      updatedAt: "2026-04-29T00:00:00.000Z",
+    },
+    writes: ["audit_report", "rolling_window_review"],
+  });
+
+  assert.equal(decision.canRun, true);
+  assert.equal(decision.requiresApproval, false);
+  assert.equal(decision.gateType, "none");
+});
+
 test("director runtime policy gates downstream recompute for existing upstream artifacts", () => {
   const engine = new DirectorPolicyEngine();
   const decision = engine.decide({

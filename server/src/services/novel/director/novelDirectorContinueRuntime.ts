@@ -251,6 +251,7 @@ export class NovelDirectorContinueRuntime {
           previousFailureMessage: row.lastError ?? null,
           allowSkipReviewBlockedChapter: canSkipReviewBlockedChapter,
           approveCurrentGate: approveAutoExecutionGate,
+          approveAutoExecutionScope: requestedAutoExecutionContinue,
         });
       });
       return;

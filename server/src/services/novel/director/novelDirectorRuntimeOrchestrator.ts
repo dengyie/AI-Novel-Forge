@@ -111,6 +111,7 @@ export class NovelDirectorRuntimeOrchestrator {
     requiresApprovalByDefault?: boolean;
     supportsAutoRetry?: boolean;
     approveCurrentGate?: boolean;
+    approveAutoExecutionScope?: boolean;
     targetType?: DirectorArtifactRef["targetType"] | null;
     targetId?: string | null;
     waitingState?: {
@@ -138,6 +139,7 @@ export class NovelDirectorRuntimeOrchestrator {
       targetId: input.targetId ?? null,
       affectedArtifacts,
       approveCurrentGate: input.approveCurrentGate ?? false,
+      approveAutoExecutionScope: input.approveAutoExecutionScope ?? false,
     });
     const result = await this.deps.directorRuntime.runNode<void, {
       output: T;
@@ -198,6 +200,7 @@ export class NovelDirectorRuntimeOrchestrator {
     targetType?: DirectorArtifactRef["targetType"] | null;
     targetId?: string | null;
     approveCurrentGate?: boolean;
+    approveAutoExecutionScope?: boolean;
     runner: () => Promise<T>;
     collectArtifacts?: (output: T) => Promise<DirectorArtifactRef[]> | DirectorArtifactRef[];
   }): Promise<T> {
@@ -211,6 +214,7 @@ export class NovelDirectorRuntimeOrchestrator {
       requiresApprovalByDefault: input.module.requiresApprovalByDefault,
       supportsAutoRetry: input.module.supportsAutoRetry,
       approveCurrentGate: input.approveCurrentGate,
+      approveAutoExecutionScope: input.approveAutoExecutionScope,
       targetType: input.targetType ?? input.module.targetType,
       targetId: input.targetId,
       waitingState: input.module.defaultWaitingState,
@@ -232,6 +236,7 @@ export class NovelDirectorRuntimeOrchestrator {
     previousFailureMessage?: string | null;
     allowSkipReviewBlockedChapter?: boolean;
     approveCurrentGate?: boolean;
+    approveAutoExecutionScope?: boolean;
   }): Promise<void> {
     const isQualityRepair = input.resumeCheckpointType === "replan_required";
     const workflowPlan = buildChapterPipelineWorkflowTemplate(
@@ -250,6 +255,7 @@ export class NovelDirectorRuntimeOrchestrator {
       novelId: input.novelId,
       targetId: input.novelId,
       approveCurrentGate: input.approveCurrentGate,
+      approveAutoExecutionScope: input.approveAutoExecutionScope,
       runner: () => this.deps.autoExecutionRuntime.runFromReady(input),
     });
 
@@ -268,6 +274,7 @@ export class NovelDirectorRuntimeOrchestrator {
         novelId: input.novelId,
         targetId: input.novelId,
         approveCurrentGate: input.approveCurrentGate,
+        approveAutoExecutionScope: input.approveAutoExecutionScope,
         runner: async () => undefined,
         collectArtifacts: () => artifacts,
       });
@@ -332,11 +339,12 @@ export class NovelDirectorRuntimeOrchestrator {
     targetId?: string | null;
     affectedArtifacts: DirectorArtifactRef[];
     approveCurrentGate: boolean;
+    approveAutoExecutionScope: boolean;
   }): Promise<Omit<Partial<DirectorPolicyRequest>, "action"> | undefined> {
     const affectedPolicy = input.affectedArtifacts.length > 0
       ? { affectedArtifacts: input.affectedArtifacts }
       : undefined;
-    if (!input.approveCurrentGate) {
+    if (!input.approveCurrentGate && !input.approveAutoExecutionScope) {
       return affectedPolicy;
     }
 
@@ -344,7 +352,7 @@ export class NovelDirectorRuntimeOrchestrator {
     const approvedGate = [...(snapshot?.steps ?? [])]
       .reverse()
       .find((step) => this.matchesPendingApprovedGate(step, input));
-    if (!approvedGate) {
+    if (!approvedGate && !input.approveAutoExecutionScope) {
       return affectedPolicy;
     }
 
@@ -354,6 +362,9 @@ export class NovelDirectorRuntimeOrchestrator {
       policy: {
         ...basePolicy,
         mode: "auto_safe_scope",
+        allowExpensiveReview: input.approveAutoExecutionScope
+          ? true
+          : basePolicy.allowExpensiveReview,
         updatedAt: new Date().toISOString(),
       },
     };
