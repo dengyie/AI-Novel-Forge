@@ -7,7 +7,7 @@ const {
   resolveAutoDirectorFollowUpSection,
 } = require("../dist/services/novel/director/autoDirectorValidationService.js");
 
-test("validateAutoDirectorTakeoverRequest blocks chapter ranges before structured outline support exists", () => {
+test("validateAutoDirectorTakeoverRequest lets continue recovery backfill structured outline before chapter execution", () => {
   const result = validateAutoDirectorTakeoverRequest({
     source: "takeover",
     request: {
@@ -32,14 +32,44 @@ test("validateAutoDirectorTakeoverRequest blocks chapter ranges before structure
     },
   });
 
-  assert.equal(result.allowed, false);
+  assert.equal(result.allowed, true);
   assert.deepEqual(result.affectedScope, {
     type: "chapter_range",
     label: "第 1-10 章",
     startOrder: 1,
     endOrder: 10,
   });
-  assert.ok(result.blockingReasons.some((reason) => reason.includes("节奏拆章")));
+  assert.deepEqual(result.blockingReasons, []);
+  assert.equal(result.nextAction, "continue_structured_outline");
+});
+
+test("validateAutoDirectorTakeoverRequest still blocks chapter restarts before structured outline exists", () => {
+  const result = validateAutoDirectorTakeoverRequest({
+    source: "takeover",
+    request: {
+      novelId: "novel-1",
+      entryStep: "chapter",
+      strategy: "restart_current_step",
+      autoExecutionPlan: {
+        mode: "chapter_range",
+        startOrder: 1,
+        endOrder: 10,
+      },
+    },
+    assets: {
+      hasProjectSetup: true,
+      hasStoryMacroPlan: true,
+      hasBookContract: true,
+      characterCount: 3,
+      volumeCount: 1,
+      hasVolumeStrategyPlan: true,
+      hasStructuredOutline: false,
+      totalChapterCount: 20,
+    },
+  });
+
+  assert.equal(result.allowed, false);
+  assert.ok(result.blockingReasons.length > 0);
   assert.equal(result.nextAction, "blocked");
 });
 
@@ -208,7 +238,7 @@ test("validateAutoDirectorTakeoverRequest blocks chapter execution when structur
     request: {
       novelId: "novel-1",
       entryStep: "chapter",
-      strategy: "continue_existing",
+      strategy: "restart_current_step",
       autoExecutionPlan: {
         mode: "chapter_range",
         startOrder: 1,

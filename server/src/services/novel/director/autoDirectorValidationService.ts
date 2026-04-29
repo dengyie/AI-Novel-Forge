@@ -138,6 +138,16 @@ function isVolumeScope(
   return scope.type === "volume";
 }
 
+function shouldAllowStructuredBackfill(input: {
+  entryStep: DirectorTakeoverEntryStep;
+  request: AutoDirectorTakeoverValidationInput["request"];
+  assets: AutoDirectorTakeoverValidationInput["assets"];
+}): boolean {
+  return input.request.strategy === "continue_existing"
+    && isEntryAtOrAfter(input.entryStep, "chapter")
+    && Boolean(input.assets.hasVolumeStrategyPlan);
+}
+
 function resolvePlannedChapterCount(input: {
   assets: AutoDirectorTakeoverValidationInput["assets"];
   volumeChapterRanges: Array<{ volumeOrder: number; startOrder: number; endOrder: number }>;
@@ -156,6 +166,7 @@ function validateScopeAgainstAssets(input: {
   affectedScope: AutoDirectorAffectedScope;
   assets: AutoDirectorTakeoverValidationInput["assets"];
   entryStep: DirectorTakeoverEntryStep;
+  allowStructuredBackfill?: boolean;
 }): string[] {
   const reasons: string[] = [];
   const volumeChapterRanges = Array.isArray(input.assets.volumeChapterRanges)
@@ -204,7 +215,7 @@ function validateScopeAgainstAssets(input: {
       reasons.push("目标章节范围没有被当前卷战略完整覆盖，请先调整卷战略或缩小目标范围。");
     }
   }
-  if (isEntryAtOrAfter(input.entryStep, "chapter") && !input.assets.hasStructuredOutline) {
+  if (isEntryAtOrAfter(input.entryStep, "chapter") && !input.assets.hasStructuredOutline && !input.allowStructuredBackfill) {
     reasons.push("目标范围缺少节奏拆章，需要先完成或重新校验拆章结果。");
   }
   if (isEntryAtOrAfter(input.entryStep, "chapter") && structuredOutlineChapterOrders.size > 0) {
@@ -226,7 +237,7 @@ function validateScopeAgainstAssets(input: {
         }
       }
     }
-    if (missingOrders.length > 0) {
+    if (missingOrders.length > 0 && !input.allowStructuredBackfill) {
       reasons.push(`目标范围缺少节奏拆章明细：第 ${missingOrders.slice(0, 5).join("、")} 章需要先完成或重新校验。`);
     }
   }
@@ -239,6 +250,11 @@ export function validateAutoDirectorTakeoverRequest(
   const entryStep = input.request.entryStep ?? "basic";
   const affectedScope = resolveScopeFromPlan(input.request.autoExecutionPlan);
   const blockingReasons: string[] = [];
+  const allowStructuredBackfill = shouldAllowStructuredBackfill({
+    entryStep,
+    request: input.request,
+    assets: input.assets,
+  });
 
   if (entryStep === "story_macro" && !input.assets.hasProjectSetup) {
     blockingReasons.push("项目设定不完整，不能直接从故事宏观规划开始。");
@@ -256,6 +272,7 @@ export function validateAutoDirectorTakeoverRequest(
     affectedScope,
     assets: input.assets,
     entryStep,
+    allowStructuredBackfill,
   }));
 
   return buildResult({
@@ -284,6 +301,8 @@ export function validateAutoDirectorTakeoverRequest(
     nextCheckpoint: "front10_ready",
     nextAction: blockingReasons.length > 0
       ? "blocked"
+      : allowStructuredBackfill && !input.assets.hasStructuredOutline
+        ? "continue_structured_outline"
       : entryStep === "chapter" || entryStep === "pipeline"
         ? "continue_auto_execution"
         : "continue_structured_outline",
