@@ -29,6 +29,17 @@ export function isDirectorRuntimeGateError(error: unknown): boolean {
   return error instanceof DirectorRuntimeGateError;
 }
 
+function filterArtifactsByWrites(
+  artifacts: DirectorArtifactRef[],
+  writes: string[],
+): DirectorArtifactRef[] {
+  if (writes.length === 0 || artifacts.length === 0) {
+    return [];
+  }
+  const writeTypes = new Set(writes);
+  return artifacts.filter((artifact) => writeTypes.has(artifact.artifactType));
+}
+
 export class NovelDirectorRuntimeOrchestrator {
   constructor(private readonly deps: {
     directorRuntime: DirectorRuntimeService;
@@ -149,7 +160,7 @@ export class NovelDirectorRuntimeOrchestrator {
               taskId: input.taskId,
               novelId: input.novelId,
             });
-          return { output, artifacts };
+          return { output, artifacts: filterArtifactsByWrites(artifacts, input.writes) };
         },
       },
       {
