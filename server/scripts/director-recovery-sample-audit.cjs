@@ -58,6 +58,7 @@ async function main() {
         novelId: true,
         commandType: true,
         status: true,
+        payloadJson: true,
         updatedAt: true,
       },
     }),

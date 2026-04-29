@@ -384,6 +384,20 @@ export class DirectorCommandService {
     return parsePayload(command.payloadJson);
   }
 
+  async getLatestTakeoverRequestForTask(taskId: string): Promise<DirectorTakeoverRequest | null> {
+    const command = await prisma.directorRunCommand.findFirst({
+      where: {
+        taskId,
+        commandType: "takeover",
+      },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    });
+    if (!command) {
+      return null;
+    }
+    return parsePayload(command.payloadJson).takeoverRequest ?? null;
+  }
+
   private async enqueueExecutionCommand(input: {
     taskId: string;
     commandType: DirectorRunCommandType;

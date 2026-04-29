@@ -51,6 +51,12 @@ test("director recovery sample audit classifies real-data recovery fixtures", ()
         novelId: "novel-1",
         commandType: "takeover",
         status: "failed",
+        payloadJson: JSON.stringify({
+          takeoverRequest: {
+            novelId: "novel-1",
+            entryStep: "structured",
+          },
+        }),
         updatedAt: "2026-04-29T00:02:00.000Z",
       },
     ],
@@ -120,11 +126,13 @@ test("director recovery sample audit classifies real-data recovery fixtures", ()
   assert.equal(audit.counts.recoveryTasks, 1);
   assert.equal(audit.counts.chapterBatchTasks, 1);
   assert.equal(audit.counts.waitingTasks, 1);
+  assert.equal(audit.counts.contextlessTakeoverRecoveryTasks, 1);
   assert.equal(audit.counts.manualEditCandidates, 1);
   assert.equal(audit.counts.manualEditHashChanged, 1);
   assert.equal(audit.counts.draftBaselineArtifacts, 1);
   assert.equal(audit.counts.untrackedDraftChapters, 1);
   assert.equal(audit.samples.recoveryTasks[0].id, "task-takeover-recovery");
+  assert.equal(audit.samples.contextlessTakeoverRecoveryTasks[0].id, "task-takeover-recovery");
   assert.equal(audit.samples.chapterBatchTasks[0].runMode, "auto_to_execution");
   assert.equal(audit.samples.manualEditCandidates[0].hashChanged, true);
   assert.equal(audit.samples.untrackedDraftChapters[0].chapterId, "chapter-2");

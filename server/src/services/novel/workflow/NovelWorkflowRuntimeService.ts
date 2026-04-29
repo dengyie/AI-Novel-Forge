@@ -12,7 +12,8 @@ interface WorkflowRecoveryPort {
 }
 
 interface DirectorRecoveryPort {
-  enqueueRecoveryCommand(taskId: string): Promise<unknown>;
+  enqueueRecoveryCommand?: (taskId: string) => Promise<unknown>;
+  continueTask?: (taskId: string) => Promise<unknown>;
 }
 
 function createWorkflowService(): WorkflowRecoveryPort {
@@ -38,7 +39,7 @@ export class NovelWorkflowRuntimeService {
         if (row.status === "running") {
           await this.workflowService.requeueTaskForRecovery(row.id, SERVER_RESTART_RECOVERY_MESSAGE);
         }
-        await this.directorService.enqueueRecoveryCommand(row.id);
+        await this.enqueueRecoveryCommand(row.id);
       } catch (error) {
         if (isDirectorRecoveryNotNeededError(error)) {
           await this.workflowService.restoreTaskToCheckpoint(row.id);
@@ -63,5 +64,15 @@ export class NovelWorkflowRuntimeService {
       }
       await this.workflowService.requeueTaskForRecovery(row.id, "服务重启后任务已暂停，等待手动恢复。");
     }
+  }
+
+  private enqueueRecoveryCommand(taskId: string): Promise<unknown> {
+    if (this.directorService.enqueueRecoveryCommand) {
+      return this.directorService.enqueueRecoveryCommand(taskId);
+    }
+    if (this.directorService.continueTask) {
+      return this.directorService.continueTask(taskId);
+    }
+    throw new Error("Auto director recovery command service is unavailable.");
   }
 }

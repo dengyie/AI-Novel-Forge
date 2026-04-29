@@ -23,6 +23,7 @@ export interface DirectorRecoverySampleCommandRow {
   novelId?: string | null;
   commandType: string;
   status: string;
+  payloadJson?: string | null;
   updatedAt?: Date | string | null;
 }
 
@@ -99,6 +100,7 @@ export interface DirectorRecoverySampleAudit {
     recoveryTasks: number;
     chapterBatchTasks: number;
     waitingTasks: number;
+    contextlessTakeoverRecoveryTasks: number;
     protectedOrStaleArtifacts: number;
     manualEditCandidates: number;
     manualEditHashChanged: number;
@@ -117,6 +119,7 @@ export interface DirectorRecoverySampleAudit {
     recoveryTasks: DirectorRecoverySampleTask[];
     chapterBatchTasks: DirectorRecoverySampleTask[];
     waitingTasks: DirectorRecoverySampleTask[];
+    contextlessTakeoverRecoveryTasks: DirectorRecoverySampleTask[];
     activeOrRecentJobs: Array<{
       id: string;
       novelId: string | null;
@@ -184,6 +187,10 @@ function readNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+function hasObjectValue(value: unknown): boolean {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
 function stableContentHash(value: Nullable<string>): string | null {
   const normalized = value?.trim();
   if (!normalized) {
@@ -239,6 +246,19 @@ export function buildDirectorRecoverySampleAudit(
   const recoveryTasks = tasks.filter(isRecoveryTask);
   const chapterBatchTasks = tasks.filter(isChapterBatchTask);
   const waitingTasks = tasks.filter((task) => task.status === "waiting_approval");
+  const takeoverRequestTaskIds = new Set(
+    input.commands
+      .filter((command) => command.commandType === "takeover")
+      .filter((command) => hasObjectValue(parseJson(command.payloadJson).takeoverRequest))
+      .map((command) => command.taskId),
+  );
+  const contextlessTakeoverTaskIds = new Set(
+    input.tasks
+      .filter((task) => takeoverRequestTaskIds.has(task.id))
+      .filter((task) => !hasObjectValue(parseJson(task.seedPayloadJson).directorInput))
+      .map((task) => task.id),
+  );
+  const contextlessTakeoverRecoveryTasks = tasks.filter((task) => contextlessTakeoverTaskIds.has(task.id));
   const chapterById = new Map(input.chapters.map((chapter) => [chapter.id, chapter]));
   const manualEditCandidates = input.artifacts
     .filter((artifact) => artifact.contentTable === "Chapter" && artifact.contentId)
@@ -283,6 +303,7 @@ export function buildDirectorRecoverySampleAudit(
       recoveryTasks: recoveryTasks.length,
       chapterBatchTasks: chapterBatchTasks.length,
       waitingTasks: waitingTasks.length,
+      contextlessTakeoverRecoveryTasks: contextlessTakeoverRecoveryTasks.length,
       protectedOrStaleArtifacts: input.artifacts.length,
       manualEditCandidates: manualEditCandidates.length,
       manualEditHashChanged: manualEditCandidates.filter((candidate) => candidate.hashChanged).length,
@@ -301,6 +322,7 @@ export function buildDirectorRecoverySampleAudit(
       recoveryTasks: recoveryTasks.slice(0, 8),
       chapterBatchTasks: chapterBatchTasks.slice(0, 8),
       waitingTasks: waitingTasks.slice(0, 8),
+      contextlessTakeoverRecoveryTasks: contextlessTakeoverRecoveryTasks.slice(0, 8),
       activeOrRecentJobs: input.jobs.slice(0, 8).map((job) => ({
         id: job.id,
         novelId: job.novelId ?? null,

@@ -1,7 +1,13 @@
 import { AppError } from "../../../middleware/errorHandler";
 import { NovelWorkflowService } from "../workflow/NovelWorkflowService";
+import { parseSeedPayload } from "../workflow/novelWorkflow.shared";
 import { DirectorCommandService, type DirectorRunCommandRow } from "./DirectorCommandService";
 import { NovelDirectorService } from "./NovelDirectorService";
+import {
+  getDirectorInputFromSeedPayload,
+  type DirectorWorkflowSeedPayload,
+} from "./novelDirectorHelpers";
+import type { DirectorTakeoverRequest } from "@ai-novel/shared/types/novelDirector";
 
 export class DirectorExecutionService {
   private readonly directorService = new NovelDirectorService({ backgroundRunMode: "inline" });
@@ -11,6 +17,15 @@ export class DirectorExecutionService {
   async executeCommand(command: NonNullable<DirectorRunCommandRow>): Promise<void> {
     const payload = this.commandService.parseCommandPayload(command);
     if (command.commandType === "continue" || command.commandType === "resume_from_checkpoint" || command.commandType === "retry") {
+      const takeoverRequest = command.commandType === "resume_from_checkpoint"
+        ? await this.resolveContextlessTakeoverRecovery(command.taskId)
+        : null;
+      if (takeoverRequest) {
+        await this.directorService.startTakeover(takeoverRequest, {
+          workflowTaskId: command.taskId,
+        });
+        return;
+      }
       await this.directorService.executeContinueTask(command.taskId, {
         ...payload,
         forceResume: true,
@@ -37,5 +52,14 @@ export class DirectorExecutionService {
       return;
     }
     throw new AppError(`Unsupported director command type: ${command.commandType}`, 400);
+  }
+
+  private async resolveContextlessTakeoverRecovery(taskId: string): Promise<DirectorTakeoverRequest | null> {
+    const row = await this.workflowService.getTaskByIdWithoutHealing(taskId);
+    const seedPayload = parseSeedPayload<DirectorWorkflowSeedPayload>(row?.seedPayloadJson) ?? {};
+    if (getDirectorInputFromSeedPayload(seedPayload)) {
+      return null;
+    }
+    return this.commandService.getLatestTakeoverRequestForTask(taskId);
   }
 }
