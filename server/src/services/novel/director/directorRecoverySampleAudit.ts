@@ -93,6 +93,25 @@ export interface DirectorRecoverySampleTask {
   updatedAt: string | null;
 }
 
+export type DirectorRecoveryDiagnosisCategory =
+  | "manual_gate"
+  | "runtime_interruption"
+  | "historical_compatibility"
+  | "external_transport"
+  | "implementation_risk";
+
+export interface DirectorRecoverySampleTaskDiagnosis {
+  taskId: string;
+  novelId: string | null;
+  status: string;
+  code: string;
+  category: DirectorRecoveryDiagnosisCategory;
+  priority: "high" | "medium" | "low";
+  evidence: string;
+  nextAction: string;
+  updatedAt: string | null;
+}
+
 export interface DirectorRecoverySampleAudit {
   counts: {
     autoDirectorTasks: number;
@@ -107,6 +126,7 @@ export interface DirectorRecoverySampleAudit {
     draftBaselineArtifacts: number;
     untrackedDraftChapters: number;
     generationJobs: number;
+    diagnosedTasks: number;
   };
   samples: {
     takeoverCommands: Array<{
@@ -153,6 +173,7 @@ export interface DirectorRecoverySampleAudit {
       reason: string;
       updatedAt: string | null;
     }>;
+    taskDiagnostics: DirectorRecoverySampleTaskDiagnosis[];
   };
 }
 
@@ -238,6 +259,102 @@ function isChapterBatchTask(task: DirectorRecoverySampleTask): boolean {
     || task.checkpointType === "replan_required";
 }
 
+function hasErrorText(task: DirectorRecoverySampleTask, pattern: RegExp): boolean {
+  return Boolean(task.lastError && pattern.test(task.lastError));
+}
+
+function diagnoseTask(
+  task: DirectorRecoverySampleTask,
+  contextlessTakeoverTaskIds: Set<string>,
+): DirectorRecoverySampleTaskDiagnosis | null {
+  if (contextlessTakeoverTaskIds.has(task.id)) {
+    return {
+      taskId: task.id,
+      novelId: task.novelId,
+      status: task.status,
+      code: "contextless_takeover_recovery",
+      category: "historical_compatibility",
+      priority: "high",
+      evidence: "takeover command has takeoverRequest but task seed has no directorInput",
+      nextAction: "resume with the saved takeover request on the current build",
+      updatedAt: task.updatedAt,
+    };
+  }
+  if (
+    hasErrorText(task, /directorArtifactDependency\.upsert/)
+    || hasErrorText(task, /Foreign key constraint violated/)
+  ) {
+    return {
+      taskId: task.id,
+      novelId: task.novelId,
+      status: task.status,
+      code: "artifact_dependency_fk_failure",
+      category: "historical_compatibility",
+      priority: "high",
+      evidence: "last error points to director artifact dependency persistence",
+      nextAction: "rerun recovery on the current build before adding another fix",
+      updatedAt: task.updatedAt,
+    };
+  }
+  if (task.status === "waiting_approval") {
+    return {
+      taskId: task.id,
+      novelId: task.novelId,
+      status: task.status,
+      code: "manual_approval_gate",
+      category: "manual_gate",
+      priority: "medium",
+      evidence: task.checkpointType ?? task.currentItemKey ?? "waiting approval",
+      nextAction: "confirm the gate or continue with an explicit resume command",
+      updatedAt: task.updatedAt,
+    };
+  }
+  if (task.pendingManualRecovery) {
+    return {
+      taskId: task.id,
+      novelId: task.novelId,
+      status: task.status,
+      code: "pending_manual_recovery",
+      category: "runtime_interruption",
+      priority: task.status === "running" ? "high" : "medium",
+      evidence: task.lastError ?? "pendingManualRecovery is true",
+      nextAction: "enqueue a recovery command and let the worker resume from persisted assets",
+      updatedAt: task.updatedAt,
+    };
+  }
+  if (
+    hasErrorText(task, /STRUCTURED_OUTPUT/)
+    || hasErrorText(task, /Request timed out/i)
+    || hasErrorText(task, /transport_error/i)
+  ) {
+    return {
+      taskId: task.id,
+      novelId: task.novelId,
+      status: task.status,
+      code: "llm_transport_failure",
+      category: "external_transport",
+      priority: "medium",
+      evidence: task.lastError ?? "transport failure",
+      nextAction: "retry with the current model route or inspect provider stability",
+      updatedAt: task.updatedAt,
+    };
+  }
+  if (task.status === "failed" || task.status === "cancelled") {
+    return {
+      taskId: task.id,
+      novelId: task.novelId,
+      status: task.status,
+      code: "unclassified_recovery_task",
+      category: "implementation_risk",
+      priority: "medium",
+      evidence: task.lastError ?? task.currentItemKey ?? task.status,
+      nextAction: "inspect the task state before deciding whether to fix code or resume",
+      updatedAt: task.updatedAt,
+    };
+  }
+  return null;
+}
+
 export function buildDirectorRecoverySampleAudit(
   input: DirectorRecoverySampleAuditInput,
 ): DirectorRecoverySampleAudit {
@@ -259,6 +376,14 @@ export function buildDirectorRecoverySampleAudit(
       .map((task) => task.id),
   );
   const contextlessTakeoverRecoveryTasks = tasks.filter((task) => contextlessTakeoverTaskIds.has(task.id));
+  const taskDiagnostics = tasks
+    .map((task) => diagnoseTask(task, contextlessTakeoverTaskIds))
+    .filter((diagnosis): diagnosis is DirectorRecoverySampleTaskDiagnosis => Boolean(diagnosis))
+    .sort((left, right) => {
+      const priorityRank = { high: 0, medium: 1, low: 2 };
+      return priorityRank[left.priority] - priorityRank[right.priority]
+        || String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? ""));
+    });
   const chapterById = new Map(input.chapters.map((chapter) => [chapter.id, chapter]));
   const manualEditCandidates = input.artifacts
     .filter((artifact) => artifact.contentTable === "Chapter" && artifact.contentId)
@@ -310,6 +435,7 @@ export function buildDirectorRecoverySampleAudit(
       draftBaselineArtifacts: draftBaselineArtifacts.length,
       untrackedDraftChapters: untrackedDraftChapters.length,
       generationJobs: input.jobs.length,
+      diagnosedTasks: taskDiagnostics.length,
     },
     samples: {
       takeoverCommands: takeoverCommands.slice(0, 5).map((command) => ({
@@ -337,6 +463,7 @@ export function buildDirectorRecoverySampleAudit(
       })),
       manualEditCandidates: manualEditCandidates.slice(0, 12),
       untrackedDraftChapters: untrackedDraftChapters.slice(0, 12),
+      taskDiagnostics: taskDiagnostics.slice(0, 12),
     },
   };
 }
