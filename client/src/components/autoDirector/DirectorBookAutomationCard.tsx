@@ -23,6 +23,8 @@ interface DirectorBookAutomationCardProps {
   projection: DirectorBookAutomationProjection | null | undefined;
   fallbackSummary?: string | null;
   fallbackStatusLabel?: string | null;
+  compact?: boolean;
+  onOpenProgress?: () => void;
   onOpenTaskCenter: () => void;
   onSwitchToProjectNav?: () => void;
 }
@@ -170,6 +172,8 @@ export default function DirectorBookAutomationCard({
   projection,
   fallbackSummary,
   fallbackStatusLabel,
+  compact = false,
+  onOpenProgress,
   onOpenTaskCenter,
   onSwitchToProjectNav,
 }: DirectorBookAutomationCardProps) {
@@ -200,6 +204,56 @@ export default function DirectorBookAutomationCard({
       ? `${projection.artifactSummary.recentVersionedArtifacts.length} 个产物有新版本`
       : null,
   ].filter((line): line is string => Boolean(line));
+
+  if (compact) {
+    return (
+      <div className={cn("rounded-lg border p-3", statusClassName(status))}>
+        <div className="flex items-start justify-between gap-2">
+          <div className="flex min-w-0 items-start gap-2">
+            <span className="mt-0.5 shrink-0 text-foreground">{statusIcon(status)}</span>
+            <div className="min-w-0">
+              <div className="text-sm font-semibold text-foreground">AI 驾驶舱</div>
+              <div className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">{headline}</div>
+            </div>
+          </div>
+          <Badge variant={projection ? statusBadgeVariant(status) : "secondary"} className="shrink-0">
+            {projection ? formatStatus(status) : fallbackStatusLabel ?? "空闲"}
+          </Badge>
+        </div>
+
+        {detail || summary ? (
+          <div className="mt-2 line-clamp-2 rounded-md border bg-background/70 px-3 py-2 text-xs leading-5 text-muted-foreground">
+            {projection?.requiresUserAction ? "需要处理：" : null}
+            {detail || summary}
+          </div>
+        ) : null}
+
+        {usageSummary ? (
+          <div className="mt-2 text-[11px] leading-5 text-muted-foreground">
+            {formatTokenCount(usageSummary.llmCallCount)} 次调用 · {formatTokenCount(usageSummary.totalTokens)} Tokens
+            {usageSummary.durationMs ? ` · ${formatDuration(usageSummary.durationMs)}` : null}
+          </div>
+        ) : null}
+
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          <Button type="button" size="sm" onClick={onOpenProgress ?? onOpenTaskCenter}>
+            <Activity className="h-4 w-4" />
+            查看进度
+          </Button>
+          <Button type="button" size="sm" variant="outline" onClick={onOpenTaskCenter}>
+            <ListTodo className="h-4 w-4" />
+            执行详情
+          </Button>
+        </div>
+
+        {onSwitchToProjectNav ? (
+          <Button type="button" size="sm" variant="ghost" className="mt-2 w-full" onClick={onSwitchToProjectNav}>
+            项目导航
+          </Button>
+        ) : null}
+      </div>
+    );
+  }
 
   return (
     <div className={cn("rounded-lg border p-3", statusClassName(status))}>
