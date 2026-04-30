@@ -3,7 +3,10 @@ import type {
   DirectorConfirmRequest,
   DirectorTaskNotice,
 } from "@ai-novel/shared/types/novelDirector";
-import { isDirectorAutoExecutionRunMode } from "@ai-novel/shared/types/novelDirector";
+import {
+  isDirectorAutoExecutionRunMode,
+  isFullBookAutopilotRunMode,
+} from "@ai-novel/shared/types/novelDirector";
 import type { VolumeGenerationPhaseEvent } from "../volume/volumeModels";
 import { getChapterTitleDiversityIssue } from "../volume/chapterTitleDiversity";
 import { buildNovelEditResumeTarget } from "../workflow/novelWorkflow.shared";
@@ -363,6 +366,9 @@ export async function runDirectorStructuredOutlinePhase(input: {
           targetVolumeId,
           targetChapterId,
           detailMode: targetDetailMode,
+          chapterTaskSheetQualityMode: isFullBookAutopilotRunMode(request.runMode)
+            ? "full_book_autopilot"
+            : "ai_copilot",
           draftWorkspace: workspace,
           taskId,
           entrypoint: "auto_director",

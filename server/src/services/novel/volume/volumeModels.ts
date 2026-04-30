@@ -1,4 +1,5 @@
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
+import type { ChapterTaskSheetQualityMode } from "@ai-novel/shared/types/chapterTaskSheetQuality";
 import type {
   VolumeChapterListGenerationMode,
   VolumeBeatSheet,
@@ -90,6 +91,7 @@ export interface VolumeGenerateOptions {
   draftWorkspace?: unknown;
   taskId?: string;
   entrypoint?: string;
+  chapterTaskSheetQualityMode?: ChapterTaskSheetQualityMode;
   signal?: AbortSignal;
   persistIntermediateDocuments?: boolean;
   onPhaseStart?: (event: VolumeGenerationPhaseEvent) => void | Promise<void>;

@@ -87,7 +87,7 @@
 
 - 执行面隔离仍需二次收口：SQLite WAL / busy timeout、运行态 delta 持久化、可见工作区刷新边界，以及候选确认、标题修复等旧入口 command 化。
 - 真实 Prisma 抽样回归仍需覆盖旧项目接管、服务重启恢复、章节批次恢复、取消后重试、章节执行和状态版本。
-- 章节细化质量门禁、`patch_first` 修复策略、阶段级模型路由、质量产物闭环和新手入口收敛仍是完整 P0 产品目标的主要缺口。
+- 章节细化质量门禁已完成第一刀，`purpose / boundary / taskSheet / sceneCards` 会先经过结构校验和 AI 语义可用性评估，坏任务单不得直接进入章节同步或执行链。`patch_first` 修复策略、阶段级模型路由、质量产物闭环和新手入口收敛仍是完整 P0 产品目标的主要缺口。
 
 ## 2.1 下一轮最高优先级开发队列
 
@@ -100,7 +100,7 @@
 5. **PolicyEngine 硬 gate 深化**：高成本审校、高风险修复、大范围自动执行、覆盖用户内容等场景必须在写入前经过策略判断和审批边界。
 6. **质量产物闭环**：`reader_promise / chapter_retention_contract / continuity_state / rolling_window_review / character_governance_state` 从记录型产物推进为评估、失效、局部修复、再评估闭环。
 7. **Planner / Replan 状态驱动化**：`PlannerService.replan` 的窗口决策、触发理由和章节选择切到 `CanonicalStateService / ContextAssemblyService / ChapterStateGoal`。
-8. **章节任务单质量门禁**：为 `purpose / boundary / taskSheet` 增加 schema + 语义可用性双门禁，拦截坏细化产物进入同步和执行链。
+8. **章节任务单质量门禁**：第一刀已完成。`purpose / boundary / taskSheet / sceneCards` 已有 shared 合同、服务端结构校验、AI 语义可用性评估和同步前阻断；后续把质量结论写入 Ledger 真相层，并接入局部修复闭环。
 9. **章节修复策略**：补 `patch_first` 默认策略；动态角色系统进入执行期角色筛选、修复边界和 replan 判断。
 10. **模型路由细化**：从 `planner / writer / review / repair` 粗粒度推进到小说生产阶段级路由与 fallback。
 11. **卷级工作台消费链**：把 `critique / rebalance / uncertainty / canonical payoff ledger` 接成卷级工作台默认消费链，并让卷级账本视图成为主视图。

@@ -97,6 +97,7 @@
 - 2026-04-29 已确认自动导演恢复/继续挂起属于架构级问题：Web API 控制面与自动导演执行面没有隔离，重型 `structured_outline / chapter_list` 链路会拖住普通 API；同时运行态活动任务接口不能再返回完整 `seedPayload / directorSession` 大对象；专项方案见 `docs/plans/auto-director-execution-plane-isolation-plan.md`
 - 2026-04-30 当前分支已完成第一版执行面隔离、命令队列、独立 Director Worker、轻量 projection 轮询、stale lease 自动重排、等待恢复优先展示和章节执行侧栏状态同步；下一轮重点不再扩入口，而是继续收口执行面二次隔离、真实数据回归、质量门禁和局部修复闭环
 - 2026-04-30 已补齐书级自动化状态投影第一版：书页可按小说聚合自动导演任务、命令、运行事件、自动确认记录和产物概况，左侧 AI 驾驶舱开始以“这本书的推进状态”为主语展示进展，任务中心继续保留执行详情入口
+- 2026-04-30 已完成 P0-B 章节任务单质量门禁第一刀：`purpose / boundary / taskSheet / sceneCards` 进入 shared 合同、服务端结构校验和 AI 语义可用性评估；全书自动模式下坏任务单会自动重生或修复，AI 副驾模式才进入确认边界；卷规划同步到章节执行区前会阻断无效执行合同
 
 当前唯一主线仍然是 `P0`：
 
@@ -179,7 +180,7 @@ P0 的默认主链统一为：
 5. `P0-E1 / PolicyEngine`：PolicyEngine 硬 gate 深化，覆盖高成本审校、高风险修复、大范围自动执行、覆盖用户内容等场景。
 6. `P0-B / 质量闭环`：`reader_promise / chapter_retention_contract / continuity_state / rolling_window_review / character_governance_state` 形成评估、失效、局部修复、再评估闭环。
 7. `P0-E / Replan`：`PlannerService.replan` 的窗口决策、触发理由、章节选择切到 canonical/state-driven 主判断。
-8. `P0-B / 任务单门禁`：为 `purpose / boundary / taskSheet` 增加 schema + 语义可用性双门禁，拦截坏细化产物进入同步和执行链。
+8. `P0-B / 任务单门禁`：已完成第一刀，`purpose / boundary / taskSheet / sceneCards` 具备 shared 合同、schema 校验、AI 语义可用性门禁和同步前阻断；后续继续把质量结果写入 Ledger 真相层。
 9. `P0-B / 修复策略`：补章节 repair 的 `patch_first` 默认策略，并把动态角色系统推进到执行期角色筛选、修复边界与 replan 判断。
 10. `P0-B / 模型路由`：把模型路由从 `planner / writer / review / repair` 粗粒度推进到小说生产阶段级路由与 fallback。
 11. `P0-C / P0-D`：卷级工作台消费链，继续把 `critique / rebalance / uncertainty / canonical payoff ledger` 接成默认消费链，并让卷级账本视图成为主视图。
