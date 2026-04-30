@@ -100,6 +100,7 @@
 - 2026-04-30 已完成 P0-B 章节任务单质量门禁第一刀：`purpose / boundary / taskSheet / sceneCards` 进入 shared 合同、服务端结构校验和 AI 语义可用性评估；全书自动模式下坏任务单会自动重生或修复，AI 副驾模式才进入确认边界；卷规划同步到章节执行区前会阻断无效执行合同
 - 2026-04-30 已完成 P0-B Patch-First 修复策略第一刀：章节自动修复和手动修复入口默认先生成可安全应用的局部补丁，只有 `heavy_repair` 等明确重写边界才进入整章修复；歧义片段、空结果和整章重写计划会被阻断，避免普通质量问题直接升级为大范围覆盖
 - 2026-04-30 已完成 P0-B 质量闭环 MVP 第一刀：章节审校和批量 pipeline 会把 `chapter_retention_contract / continuity_state / rolling_window_review` 评估成统一质量闭环状态，记录到章节风险标记，并用 `patch_repair / replan / continue` 驱动后续处理
+- 2026-04-30 已完成 P0-E1 Artifact Ledger 查询真相层第一刀：书级 AI 驾驶舱开始消费持久化产物账本，展示活跃、过期、受保护、修复项、依赖数量、按类型汇总和最近产物记录
 
 当前唯一主线仍然是 `P0`：
 
@@ -178,7 +179,7 @@ P0 的默认主链统一为：
 1. `P0-E0 / 执行面隔离`：第一版命令化入口、独立 Director Worker、轻量 runtime projection、活动任务轻量详情和 API 保活回归已落地；Web API route 不得再新增直接执行自动导演重型链路的入口，运行态轮询不得返回完整执行面大对象。2026-04-30 已补充：Worker 命令强制真实恢复，stale lease 会先自动重排安全的继续/恢复命令并清理残留 running step，重复过期再进入手动恢复；continue 默认不再触发完整 workspace / Artifact Ledger 分析，待手动恢复状态优先覆盖“运行中”展示，章节执行开始后左侧流程会跟随真实执行阶段。后续二次收口继续聚焦 SQLite WAL、运行态 delta 持久化、前端按可见工作区刷新，以及候选确认/标题修复等旧入口的 command 化。
 2. `P0-E1 / 恢复链`：在 Worker 语义下继续稳定规划恢复链，补齐 `volume_strategy` 幂等重放、持久化卷规划恢复到 `structured_outline` 的真实数据回归。
 3. `P0-A / 真实数据`：真实 Prisma 抽样回归，覆盖旧项目接管、服务重启手动恢复、失败重试、章节批量执行、候选变更、状态版本。
-4. `P0-E1 / Artifact Ledger`：Artifact Ledger 真相层，从 wrapper 索引推进到跨任务可查询、版本生命周期、stale、用户内容保护、局部恢复。
+4. `P0-E1 / Artifact Ledger`：已完成查询真相层第一刀，书级投影可直接读取持久化账本的 active/stale/protected/dependency/content hash 基础状态；后续补齐写入事件全覆盖、legacy backfill 审计和局部恢复操作。
 5. `P0-E1 / PolicyEngine`：PolicyEngine 硬 gate 深化，覆盖高成本审校、高风险修复、大范围自动执行、覆盖用户内容等场景。
 6. `P0-B / 质量闭环`：已完成 MVP 第一刀，`chapter_retention_contract / continuity_state / rolling_window_review` 会在审校后形成统一评估状态并记录到章节风险标记；后续接入 Ledger 真相层、连续修复失败计数和 `character_governance_state`。
 7. `P0-E / Replan`：`PlannerService.replan` 的窗口决策、触发理由、章节选择切到 canonical/state-driven 主判断。

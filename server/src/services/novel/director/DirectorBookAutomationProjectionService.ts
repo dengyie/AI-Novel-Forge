@@ -7,6 +7,7 @@ import type {
 } from "@ai-novel/shared/types/directorRuntime";
 import { prisma } from "../../../db/prisma";
 import { loadPersistentDirectorRuntimeProjection } from "./novelDirectorRuntimeProjection";
+import { directorArtifactLedgerQueryService } from "./runtime/DirectorArtifactLedgerQueryService";
 
 type RuntimeProjectionLoader = (taskId: string) => Promise<DirectorRuntimeProjection | null>;
 
@@ -241,6 +242,9 @@ function buildAutomationSummary(input: {
   if (input.artifactSummary.protectedUserContentCount > 0) {
     parts.push(`${input.artifactSummary.protectedUserContentCount} 个用户内容受保护`);
   }
+  if ((input.artifactSummary.dependencyCount ?? 0) > 0) {
+    parts.push(`${input.artifactSummary.dependencyCount} 条产物依赖`);
+  }
   return parts.length > 0 ? parts.join("，") : "暂无自动化动作";
 }
 
@@ -292,10 +296,7 @@ export class DirectorBookAutomationProjectionService {
       events,
       steps,
       approvalRecords,
-      activeArtifactCount,
-      staleArtifactCount,
-      protectedUserContentCount,
-      repairTicketCount,
+      artifactSummary,
     ] = await Promise.all([
       runtimeTaskId ? this.runtimeProjectionLoader(runtimeTaskId) : Promise.resolve(null),
       prisma.directorRunCommand.findMany({
@@ -366,42 +367,12 @@ export class DirectorBookAutomationProjectionService {
           createdAt: true,
         },
       }),
-      prisma.directorArtifact.count({
-        where: {
-          novelId,
-          status: "active",
-        },
-      }),
-      prisma.directorArtifact.count({
-        where: {
-          novelId,
-          status: "stale",
-        },
-      }),
-      prisma.directorArtifact.count({
-        where: {
-          novelId,
-          protectedUserContent: true,
-        },
-      }),
-      prisma.directorArtifact.count({
-        where: {
-          novelId,
-          artifactType: "repair_ticket",
-          status: { not: "rejected" },
-        },
-      }),
+      directorArtifactLedgerQueryService.getBookSummary(novelId),
     ]);
 
     const activeCommandCount = commands.filter((item) => item.status === "running" || item.status === "leased").length;
     const pendingCommandCount = commands.filter((item) => item.status === "queued").length;
     const autoApprovalRecordCount = approvalRecords.length;
-    const artifactSummary = {
-      activeCount: activeArtifactCount,
-      staleCount: staleArtifactCount,
-      protectedUserContentCount,
-      repairTicketCount,
-    };
     const policyMode = runtimeProjection?.policyMode
       ?? parseJsonOrNull<{ mode?: DirectorPolicyMode }>(latestRun?.policyJson)?.mode
       ?? null;

@@ -261,6 +261,31 @@ export interface DirectorBookAutomationArtifactSummary {
   staleCount: number;
   protectedUserContentCount: number;
   repairTicketCount: number;
+  dependencyCount?: number;
+  byType?: DirectorBookAutomationArtifactTypeSummary[];
+  recentArtifacts?: DirectorBookAutomationRecentArtifact[];
+}
+
+export interface DirectorBookAutomationArtifactTypeSummary {
+  artifactType: DirectorArtifactType | string;
+  totalCount: number;
+  activeCount: number;
+  staleCount: number;
+  protectedUserContentCount: number;
+  dependencyCount: number;
+  latestUpdatedAt?: string | null;
+}
+
+export interface DirectorBookAutomationRecentArtifact {
+  id: string;
+  artifactType: DirectorArtifactType | string;
+  targetType: DirectorArtifactTargetType | string;
+  targetId?: string | null;
+  status: DirectorArtifactStatus | string;
+  protectedUserContent?: boolean | null;
+  dependencyCount: number;
+  contentHash?: string | null;
+  updatedAt?: string | null;
 }
 
 export interface DirectorBookAutomationProjection {

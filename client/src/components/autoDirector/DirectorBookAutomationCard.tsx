@@ -7,6 +7,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   Clock3,
+  Database,
   History,
   ListTodo,
   PauseCircle,
@@ -106,6 +107,27 @@ function statusIcon(status: DirectorBookAutomationStatus) {
   return <ShieldCheck className="h-4 w-4" />;
 }
 
+function artifactTypeLabel(type: string): string {
+  const labels: Record<string, string> = {
+    book_contract: "书级约定",
+    story_macro: "故事规划",
+    character_cast: "角色",
+    volume_strategy: "分卷",
+    chapter_task_sheet: "任务单",
+    chapter_draft: "正文",
+    audit_report: "审校",
+    repair_ticket: "修复",
+    reader_promise: "读者承诺",
+    character_governance_state: "角色状态",
+    world_skeleton: "世界框架",
+    source_knowledge_pack: "资料包",
+    chapter_retention_contract: "留存约定",
+    continuity_state: "连续性",
+    rolling_window_review: "近期复盘",
+  };
+  return labels[type] ?? type;
+}
+
 export default function DirectorBookAutomationCard({
   projection,
   fallbackSummary,
@@ -123,6 +145,7 @@ export default function DirectorBookAutomationCard({
     || fallbackSummary?.trim()
     || "当前没有后台导演任务，可以直接继续手动创作。";
   const recentItems = projection?.timeline.slice(0, 2) ?? [];
+  const artifactRows = projection?.artifactSummary.byType?.slice(0, 3) ?? [];
 
   return (
     <div className={cn("rounded-lg border p-3", statusClassName(status))}>
@@ -148,6 +171,23 @@ export default function DirectorBookAutomationCard({
 
       {summary ? (
         <div className="mt-3 text-xs leading-5 text-muted-foreground">{summary}</div>
+      ) : null}
+
+      {artifactRows.length > 0 ? (
+        <div className="mt-3 rounded-md border bg-background/70 px-3 py-2">
+          <div className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
+            <Database className="h-3.5 w-3.5" />
+            产物记录
+          </div>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {artifactRows.map((item) => (
+              <Badge key={item.artifactType} variant={item.staleCount > 0 ? "outline" : "secondary"} className="text-[11px]">
+                {artifactTypeLabel(String(item.artifactType))}
+                <span className="ml-1 text-muted-foreground">{item.activeCount}/{item.totalCount}</span>
+              </Badge>
+            ))}
+          </div>
+        </div>
       ) : null}
 
       {projection?.nextActionLabel ? (
