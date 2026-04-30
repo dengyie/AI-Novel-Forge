@@ -15,8 +15,41 @@ function createTask(overrides = {}) {
   };
 }
 
+function createConfirmRequest(overrides = {}) {
+  return {
+    idea: "A college girl accidentally enters a supernatural organization.",
+    title: "Neon Archive",
+    narrativePov: "third_person",
+    pacePreference: "balanced",
+    emotionIntensity: "medium",
+    aiFreedom: "medium",
+    projectMode: "ai_led",
+    writingMode: "original",
+    estimatedChapterCount: 30,
+    runMode: "auto_to_execution",
+    workflowTaskId: "task-1",
+    candidate: {
+      id: "candidate-1",
+      workingTitle: "Neon Archive",
+      logline: "A college girl enters a hidden power network.",
+      positioning: "Urban supernatural growth thriller.",
+      sellingPoint: "An ordinary girl levels up inside a dangerous secret organization.",
+      coreConflict: "The organization pushes back as she gets closer to the truth.",
+      protagonistPath: "She grows from cautious student into an active operator.",
+      endingDirection: "Hopeful victory with a meaningful cost.",
+      hookStrategy: "Each arc reveals a deeper layer of the conspiracy.",
+      progressionLoop: "Find clue, face pressure, pay cost, gain leverage.",
+      whyItFits: "It keeps the urban premise clear and easy to continue.",
+      toneKeywords: ["urban", "thriller"],
+      targetChapterCount: 30,
+    },
+    ...overrides,
+  };
+}
+
 function createHarness(task = createTask()) {
   const commands = [];
+  const bootstraps = [];
   const requeued = [];
   const stepUpdates = [];
   const taskUpdates = [];
@@ -54,7 +87,8 @@ function createHarness(task = createTask()) {
       return null;
     },
     async bootstrapTask(input) {
-      task.id = `takeover-task-${commands.length + 1}`;
+      bootstraps.push(input);
+      task.id = input.workflowTaskId?.trim() || (input.novelId ? `takeover-task-${commands.length + 1}` : task.id);
       task.novelId = input.novelId;
       task.lane = input.lane;
       task.status = "queued";
@@ -104,6 +138,7 @@ function createHarness(task = createTask()) {
       createdAt: new Date(),
       updatedAt: new Date(),
       ...data,
+      novelId: data.novelId ?? null,
     };
     commands.push(row);
     return row;
@@ -185,6 +220,7 @@ function createHarness(task = createTask()) {
 
   return {
     commands,
+    bootstraps,
     requeued,
     task,
     stepUpdates,
@@ -210,6 +246,74 @@ test("director command service reuses active continue commands", async () => {
     assert.equal(first.commandId, second.commandId);
     assert.equal(harness.commands.length, 1);
     assert.equal(first.status, "queued");
+  } finally {
+    harness.restore();
+  }
+});
+
+test("director command service queues candidate confirmation as a serialized command", async () => {
+  const harness = createHarness(createTask({
+    novelId: null,
+    status: "waiting_approval",
+  }));
+  try {
+    const accepted = await harness.service.enqueueConfirmCandidateCommand(createConfirmRequest());
+
+    assert.equal(accepted.status, "queued");
+    assert.equal(accepted.commandType, "confirm_candidate");
+    assert.equal(accepted.taskId, "task-1");
+    assert.equal(accepted.novelId, null);
+    assert.equal(harness.commands.length, 1);
+    assert.equal(harness.bootstraps.length, 1);
+    assert.equal(harness.bootstraps[0].lane, "auto_director");
+    assert.equal(harness.bootstraps[0].initialState.itemKey, "candidate_confirm");
+    const payload = JSON.parse(harness.commands[0].payloadJson);
+    assert.equal(payload.confirmRequest.workflowTaskId, "task-1");
+    assert.equal(payload.confirmRequest.runMode, "auto_to_execution");
+    assert.equal(payload.confirmRequest.candidate.workingTitle, "Neon Archive");
+    assert.equal(harness.task.status, "queued");
+    assert.equal(harness.task.pendingManualRecovery, false);
+  } finally {
+    harness.restore();
+  }
+});
+
+test("director command service applies the full-book autopilot contract before queueing confirmation", async () => {
+  const harness = createHarness(createTask({
+    novelId: null,
+    status: "waiting_approval",
+  }));
+  try {
+    await harness.service.enqueueConfirmCandidateCommand(createConfirmRequest({
+      runMode: "full_book_autopilot",
+      autoExecutionPlan: {
+        mode: "front10",
+        endOrder: 10,
+        autoReview: false,
+        autoRepair: false,
+      },
+      autoApproval: {
+        enabled: false,
+        approvalPointCodes: ["candidate_direction_confirmed"],
+      },
+    }));
+
+    const payload = JSON.parse(harness.commands[0].payloadJson);
+    assert.equal(payload.confirmRequest.runMode, "full_book_autopilot");
+    assert.deepEqual(payload.confirmRequest.autoExecutionPlan, {
+      mode: "book",
+      autoReview: true,
+      autoRepair: true,
+    });
+    assert.equal(payload.confirmRequest.autoApproval.enabled, true);
+    assert.ok(payload.confirmRequest.autoApproval.approvalPointCodes.includes("chapter_execution_continue"));
+    assert.ok(payload.confirmRequest.autoApproval.approvalPointCodes.includes("replan_continue"));
+    assert.deepEqual(harness.bootstraps[0].seedPayload.autoExecutionPlan, {
+      mode: "book",
+      autoReview: true,
+      autoRepair: true,
+    });
+    assert.equal(harness.bootstraps[0].seedPayload.autoApproval.enabled, true);
   } finally {
     harness.restore();
   }

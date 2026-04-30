@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
+  ALL_DIRECTOR_AUTO_APPROVAL_POINT_CODES,
   DEFAULT_DIRECTOR_AUTO_APPROVAL_POINT_CODES,
+  buildFullDirectorAutoApprovalConfig,
   normalizeDirectorAutoApprovalConfig,
   type DirectorAutoApprovalConfig,
 } from "@ai-novel/shared/types/autoDirectorApproval";
@@ -17,6 +19,14 @@ function areCodeListsEqual(left: readonly string[] | undefined, right: readonly 
     return false;
   }
   return left.every((item, index) => item === right[index]);
+}
+
+function hasAllApprovalPoints(values: readonly string[]): boolean {
+  const normalized = normalizeDirectorAutoApprovalConfig({
+    enabled: true,
+    approvalPointCodes: values,
+  }).approvalPointCodes;
+  return ALL_DIRECTOR_AUTO_APPROVAL_POINT_CODES.every((code) => normalized.includes(code));
 }
 
 export function useDirectorAutoApprovalDraft(open: boolean) {
@@ -51,7 +61,8 @@ export function useDirectorAutoApprovalDraft(open: boolean) {
       return;
     }
     const normalized = normalizeDirectorAutoApprovalConfig(value);
-    setEnabled((current) => (current === normalized.enabled ? current : normalized.enabled));
+    const isFullAuto = normalized.enabled && hasAllApprovalPoints(normalized.approvalPointCodes);
+    setEnabled((current) => (current === isFullAuto ? current : isFullAuto));
     setCodes((current) => (
       areCodeListsEqual(current, normalized.approvalPointCodes)
         ? current
@@ -65,13 +76,27 @@ export function useDirectorAutoApprovalDraft(open: boolean) {
     setCodes((current) => (areCodeListsEqual(current, nextCodes) ? current : [...nextCodes]));
   }, [defaultCodes]);
 
-  const buildPayload = useCallback((runMode: DirectorRunMode): DirectorAutoApprovalConfig => ({
-    enabled: runMode === "auto_to_execution" && enabled,
-    approvalPointCodes: normalizeDirectorAutoApprovalConfig({
+  const buildPayload = useCallback((runMode: DirectorRunMode): DirectorAutoApprovalConfig => {
+    const boundaryCodes = normalizeDirectorAutoApprovalConfig({
       enabled,
       approvalPointCodes: codes,
-    }).approvalPointCodes,
-  }), [codes, enabled]);
+    }).approvalPointCodes;
+    if (runMode === "full_book_autopilot") {
+      return buildFullDirectorAutoApprovalConfig();
+    }
+    if (runMode !== "auto_to_execution") {
+      return {
+        enabled: false,
+        approvalPointCodes: boundaryCodes,
+      };
+    }
+    return {
+      enabled: true,
+      approvalPointCodes: enabled
+        ? [...ALL_DIRECTOR_AUTO_APPROVAL_POINT_CODES]
+        : boundaryCodes,
+    };
+  }, [codes, enabled]);
 
   return useMemo(() => ({
     enabled,

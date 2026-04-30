@@ -208,12 +208,98 @@ export interface DirectorRuntimeProjection {
   recentEvents: DirectorRuntimeProjectionEvent[];
 }
 
+export type DirectorBookAutomationStatus =
+  | "idle"
+  | "queued"
+  | "running"
+  | "waiting_approval"
+  | "waiting_recovery"
+  | "blocked"
+  | "failed"
+  | "cancelled"
+  | "completed";
+
+export type DirectorBookAutomationTimelineItemType =
+  | "task"
+  | "command"
+  | "step"
+  | "event"
+  | "approval";
+
+export interface DirectorBookAutomationTimelineItem {
+  id: string;
+  type: DirectorBookAutomationTimelineItemType;
+  title: string;
+  detail?: string | null;
+  status?: string | null;
+  taskId?: string | null;
+  runId?: string | null;
+  nodeKey?: string | null;
+  commandType?: DirectorRunCommandType | string | null;
+  artifactType?: DirectorArtifactType | string | null;
+  severity?: DirectorEvent["severity"];
+  occurredAt: string;
+}
+
+export interface DirectorBookAutomationTaskSummary {
+  id: string;
+  title: string;
+  status: string;
+  progress: number;
+  currentStage?: string | null;
+  currentItemKey?: string | null;
+  currentItemLabel?: string | null;
+  checkpointType?: string | null;
+  checkpointSummary?: string | null;
+  pendingManualRecovery: boolean;
+  lastError?: string | null;
+  updatedAt: string;
+}
+
+export interface DirectorBookAutomationArtifactSummary {
+  activeCount: number;
+  staleCount: number;
+  protectedUserContentCount: number;
+  repairTicketCount: number;
+}
+
+export interface DirectorBookAutomationProjection {
+  novelId: string;
+  latestTask?: DirectorBookAutomationTaskSummary | null;
+  latestRunId?: string | null;
+  status: DirectorBookAutomationStatus;
+  runMode?: string | null;
+  policyMode?: DirectorPolicyMode | null;
+  headline: string;
+  detail?: string | null;
+  currentStage?: string | null;
+  currentLabel?: string | null;
+  requiresUserAction: boolean;
+  blockedReason?: string | null;
+  nextActionLabel?: string | null;
+  automationSummary?: string | null;
+  progressSummary?: string | null;
+  artifactSummary: DirectorBookAutomationArtifactSummary;
+  activeCommandCount: number;
+  pendingCommandCount: number;
+  autoApprovalRecordCount: number;
+  latestEventAt?: string | null;
+  updatedAt: string;
+  runtimeProjection?: DirectorRuntimeProjection | null;
+  timeline: DirectorBookAutomationTimelineItem[];
+}
+
+export interface DirectorBookAutomationProjectionResponse {
+  projection: DirectorBookAutomationProjection;
+}
+
 export interface DirectorRuntimeSnapshotResponse {
   snapshot: DirectorRuntimeSnapshot | null;
   projection?: DirectorRuntimeProjection | null;
 }
 
 export const DIRECTOR_RUN_COMMAND_TYPES = [
+  "confirm_candidate",
   "continue",
   "resume_from_checkpoint",
   "retry",

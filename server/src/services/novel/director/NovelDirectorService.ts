@@ -26,6 +26,7 @@ import type {
   DirectorTakeoverRequest,
   DirectorTakeoverResponse,
 } from "@ai-novel/shared/types/novelDirector";
+import { isFullBookAutopilotRunMode } from "@ai-novel/shared/types/novelDirector";
 import { BookContractService } from "../BookContractService";
 import { CharacterPreparationService } from "../characterPrep/CharacterPreparationService";
 import { CharacterDynamicsService } from "../dynamics/CharacterDynamicsService";
@@ -38,6 +39,7 @@ import { NovelWorkflowService } from "../workflow/NovelWorkflowService";
 import { NovelDirectorCandidateStageService } from "./novelDirectorCandidateStage";
 import { resolveDirectorBookFraming } from "./novelDirectorFraming";
 import {
+  applyDirectorRunModeContract,
   buildDirectorWorkflowSeedPayload,
 } from "./novelDirectorHelpers";
 import {
@@ -542,7 +544,7 @@ export class NovelDirectorService {
       bookContract: takeoverState.bookContract,
       runMode: input.runMode,
     });
-    const directorInput = await this.enrichDirectorStyleContext({
+    const directorInput = applyDirectorRunModeContract(await this.enrichDirectorStyleContext({
       ...takeoverDirectorInput,
       styleProfileId: input.styleProfileId ?? takeoverDirectorInput.styleProfileId,
       autoExecutionPlan: input.autoExecutionPlan,
@@ -550,7 +552,8 @@ export class NovelDirectorService {
       provider: input.provider ?? takeoverDirectorInput.provider,
       model: input.model?.trim() || takeoverDirectorInput.model,
       temperature: typeof input.temperature === "number" ? input.temperature : takeoverDirectorInput.temperature,
-    });
+    }));
+    const isFullBookAutopilot = isFullBookAutopilotRunMode(directorInput.runMode);
     await this.ensurePrimaryNovelStyleBinding(input.novelId, directorInput.styleProfileId);
     const takeoverWorkspaceAnalysis = await this.directorRuntime.analyzeWorkspace({
       novelId: input.novelId,
@@ -573,7 +576,7 @@ export class NovelDirectorService {
           taskId,
           novelId: input.novelId,
           entrypoint: "takeover",
-          policyMode: "run_until_gate",
+          policyMode: isFullBookAutopilot ? "auto_safe_scope" : "run_until_gate",
           summary: "AI 自动导演接管已并入统一运行时。",
         });
         await this.directorRuntime.recordWorkspaceAnalysis({
@@ -584,6 +587,8 @@ export class NovelDirectorService {
           module,
           taskId,
           novelId: input.novelId,
+          approveCurrentGate: isFullBookAutopilot,
+          approveAutoExecutionScope: isFullBookAutopilot,
           runner,
         });
       }),

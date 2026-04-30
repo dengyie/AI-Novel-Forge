@@ -12,12 +12,11 @@ import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import type { DirectorLockScope } from "@ai-novel/shared/types/novelDirector";
 import type { VolumePlan } from "@ai-novel/shared/types/novel";
 import { getNovelDetail, getNovelQualityReport, getNovelVolumeWorkspace } from "@/api/novel";
-import { getDirectorRuntimeProjection } from "@/api/novelDirector";
+import { getDirectorBookAutomationProjection, getDirectorRuntimeProjection } from "@/api/novelDirector";
 import { getActiveAutoDirectorTask } from "@/api/novelWorkflow";
 import { queryKeys } from "@/api/queryKeys";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { extractWorkflowActivityTags } from "@/lib/novelWorkflowActivityTags";
+import DirectorBookAutomationCard from "@/components/autoDirector/DirectorBookAutomationCard";
 import { cn } from "@/lib/utils";
 import {
   applyAutoDirectorResetStepReadiness,
@@ -117,11 +116,22 @@ export default function NovelWorkspaceRail(props: NovelWorkspaceRailProps) {
         : false;
     },
   });
+  const bookAutomationQuery = useQuery({
+    queryKey: queryKeys.novels.directorBookAutomation(novelId),
+    queryFn: () => getDirectorBookAutomationProjection(novelId),
+    enabled: Boolean(novelId),
+    retry: false,
+    refetchInterval: (query) => {
+      const status = query.state.data?.data?.projection.status;
+      return status === "queued" || status === "running" ? 4000 : false;
+    },
+  });
 
   const novelDetail = novelDetailQuery.data?.data;
   const workspace = volumeWorkspaceQuery.data?.data;
   const qualitySummary = qualityReportQuery.data?.data?.summary;
   const activeTask = activeTaskQuery.data?.data ?? null;
+  const bookAutomationProjection = bookAutomationQuery.data?.data?.projection ?? null;
   const runtimeProjectionQuery = useQuery({
     queryKey: queryKeys.tasks.directorRuntime(activeTask?.id ?? "none"),
     queryFn: () => getDirectorRuntimeProjection(activeTask?.id as string),
@@ -242,12 +252,6 @@ export default function NovelWorkspaceRail(props: NovelWorkspaceRailProps) {
         ? `等待处理：${getNovelWorkspaceTabLabel(workflowCurrentTab ?? activeTab)}`
         : activeTask.currentItemLabel || `AI 正在推进 ${getNovelWorkspaceTabLabel(workflowCurrentTab ?? activeTab)}`)
     : "当前没有后台导演任务，可以直接继续手动创作。";
-  const cockpitActivityTags = extractWorkflowActivityTags(activeTask?.currentItemLabel);
-  const cockpitVariant = activeTask?.status === "failed"
-    ? "destructive"
-    : activeTask?.status === "running" || activeTask?.status === "queued"
-      ? "default"
-      : "secondary";
 
   const goToTab = (tab: NovelWorkspaceTab) => {
     const next = new URLSearchParams(searchParams);
@@ -261,7 +265,7 @@ export default function NovelWorkspaceRail(props: NovelWorkspaceRailProps) {
   };
 
   const openTaskCenter = () => {
-    const taskId = activeTask?.id;
+    const taskId = activeTask?.id ?? bookAutomationProjection?.latestTask?.id;
     if (taskId) {
       navigate(`/tasks?kind=novel_workflow&id=${taskId}`);
       return;
@@ -414,32 +418,13 @@ export default function NovelWorkspaceRail(props: NovelWorkspaceRailProps) {
           </button>
 
           {!collapsed ? (
-            <div className="rounded-2xl border border-border/70 bg-muted/20 p-3">
-              <div className="flex items-center justify-between gap-2">
-                <div className="text-sm font-semibold text-foreground">AI 驾驶舱</div>
-                <Badge variant={cockpitVariant}>{formatTaskStatus(activeTask?.status)}</Badge>
-              </div>
-              <div className="mt-2 text-xs leading-5 text-muted-foreground">
-                {cockpitSummary}
-              </div>
-              {cockpitActivityTags.length > 0 ? (
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {cockpitActivityTags.map((tag) => (
-                    <Badge key={tag} variant="secondary">{tag}</Badge>
-                  ))}
-                </div>
-              ) : null}
-              <div className="mt-3 flex gap-2">
-                <Button type="button" size="sm" className="flex-1" onClick={openTaskCenter}>
-                  任务中心
-                </Button>
-                {onSwitchToProjectNav ? (
-                  <Button type="button" size="sm" variant="outline" onClick={onSwitchToProjectNav}>
-                    项目导航
-                  </Button>
-                ) : null}
-              </div>
-            </div>
+            <DirectorBookAutomationCard
+              projection={bookAutomationProjection}
+              fallbackStatusLabel={formatTaskStatus(activeTask?.status)}
+              fallbackSummary={cockpitSummary}
+              onOpenTaskCenter={openTaskCenter}
+              onSwitchToProjectNav={onSwitchToProjectNav}
+            />
           ) : (
             <div className="flex flex-col items-center gap-2">
               <Button

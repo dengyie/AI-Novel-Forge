@@ -17,6 +17,7 @@ test("auto director control-plane routes enqueue commands instead of executing h
   ];
   const forbiddenCalls = [
     [/\.continueTask\s*\(/, "NovelDirectorService.continueTask"],
+    [/\.confirmCandidate\s*\(/, "NovelDirectorService.confirmCandidate"],
     [/\.startTakeover\s*\(/, "NovelDirectorService.startTakeover"],
     [/\.repairChapterTitles\s*\(/, "NovelDirectorService.repairChapterTitles"],
     [/\.executeChapterTitleRepair\s*\(/, "NovelDirectorService.executeChapterTitleRepair"],
@@ -34,6 +35,25 @@ test("auto director control-plane routes enqueue commands instead of executing h
       );
     }
   }
+});
+
+test("candidate confirmation is queued through director commands", () => {
+  const routeSource = readSource("server/src/routes/novelDirector.ts");
+  const commandSource = readSource("server/src/services/novel/director/DirectorCommandService.ts");
+  const executionSource = readSource("server/src/services/novel/director/DirectorExecutionService.ts");
+  const apiSource = readSource("client/src/api/novelDirector.ts");
+
+  assert.match(
+    routeSource,
+    /"\/confirm"[\s\S]*enqueueConfirmCandidateCommand[\s\S]*res\.status\(202\)/,
+  );
+  assert.match(commandSource, /commandType:\s*"confirm_candidate"/);
+  assert.match(commandSource, /buildDirectorWorkflowSeedPayload/);
+  assert.match(
+    executionSource,
+    /command\.commandType === "confirm_candidate"[\s\S]*confirmCandidate/,
+  );
+  assert.match(apiSource, /ApiResponse<DirectorCommandAcceptedResponse>/);
 });
 
 test("chapter title repair is queued through director commands", () => {

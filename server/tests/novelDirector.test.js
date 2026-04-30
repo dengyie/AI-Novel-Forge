@@ -231,6 +231,7 @@ test("novel director routes support candidates, refine and takeover flows", asyn
   const originalRefineTitles = NovelDirectorService.prototype.refineCandidateTitleOptions;
   const originalConfirm = NovelDirectorService.prototype.confirmCandidate;
   const originalGetTakeoverReadiness = NovelDirectorService.prototype.getTakeoverReadiness;
+  const originalEnqueueConfirmCommand = DirectorCommandService.prototype.enqueueConfirmCandidateCommand;
   const originalEnqueueTakeoverCommand = DirectorCommandService.prototype.enqueueTakeoverCommand;
 
   NovelDirectorService.prototype.generateCandidates = async function generateCandidatesMock() {
@@ -344,6 +345,17 @@ test("novel director routes support candidates, refine and takeover flows", asyn
   };
   NovelDirectorService.prototype.getTakeoverReadiness = async function getTakeoverReadinessMock() {
     return buildTakeoverReadiness();
+  };
+  DirectorCommandService.prototype.enqueueConfirmCandidateCommand = async function enqueueConfirmCandidateCommandMock(input) {
+    confirmCalls.push(input);
+    return {
+      commandId: "command_confirm_demo",
+      taskId: input.workflowTaskId ?? "workflow_confirm_demo",
+      novelId: null,
+      commandType: "confirm_candidate",
+      status: "queued",
+      leaseExpiresAt: null,
+    };
   };
   DirectorCommandService.prototype.enqueueTakeoverCommand = async function enqueueTakeoverCommandMock(input) {
     takeoverCalls.push(input);
@@ -475,12 +487,11 @@ test("novel director routes support candidates, refine and takeover flows", asyn
         candidate: buildCandidate(),
       }),
     });
-    assert.equal(confirmResponse.status, 200);
+    assert.equal(confirmResponse.status, 202);
     const confirmPayload = await confirmResponse.json();
     assert.equal(confirmPayload.success, true);
-    assert.equal(confirmPayload.data.novel.id, "novel_director_demo");
-    assert.equal(confirmPayload.data.createdChapterCount, 30);
-    assert.equal(confirmPayload.data.bookSpec.targetChapterCount, 30);
+    assert.equal(confirmPayload.data.commandType, "confirm_candidate");
+    assert.equal(confirmPayload.data.taskId, "workflow_confirm_demo");
     assert.equal(confirmCalls.at(-1)?.runMode, "auto_to_execution");
     assert.deepEqual(confirmCalls.at(-1)?.autoExecutionPlan, {
       mode: "chapter_range",
@@ -562,6 +573,7 @@ test("novel director routes support candidates, refine and takeover flows", asyn
     NovelDirectorService.prototype.refineCandidateTitleOptions = originalRefineTitles;
     NovelDirectorService.prototype.confirmCandidate = originalConfirm;
     NovelDirectorService.prototype.getTakeoverReadiness = originalGetTakeoverReadiness;
+    DirectorCommandService.prototype.enqueueConfirmCandidateCommand = originalEnqueueConfirmCommand;
     DirectorCommandService.prototype.enqueueTakeoverCommand = originalEnqueueTakeoverCommand;
     await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
   }

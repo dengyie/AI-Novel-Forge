@@ -96,6 +96,7 @@
 - 小说实体链路与自动导演执行链路已完成首轮边界收口：小说编辑页 `taskId` 专属自动导演任务，手动编辑工作流改用 `workspaceTaskId`，后端 bootstrap 会拒绝跨 lane 复用同一个 workflow task，避免 manual_create 与 auto_director 互相污染状态
 - 2026-04-29 已确认自动导演恢复/继续挂起属于架构级问题：Web API 控制面与自动导演执行面没有隔离，重型 `structured_outline / chapter_list` 链路会拖住普通 API；同时运行态活动任务接口不能再返回完整 `seedPayload / directorSession` 大对象；专项方案见 `docs/plans/auto-director-execution-plane-isolation-plan.md`
 - 2026-04-30 当前分支已完成第一版执行面隔离、命令队列、独立 Director Worker、轻量 projection 轮询、stale lease 自动重排、等待恢复优先展示和章节执行侧栏状态同步；下一轮重点不再扩入口，而是继续收口执行面二次隔离、真实数据回归、质量门禁和局部修复闭环
+- 2026-04-30 已补齐书级自动化状态投影第一版：书页可按小说聚合自动导演任务、命令、运行事件、自动确认记录和产物概况，左侧 AI 驾驶舱开始以“这本书的推进状态”为主语展示进展，任务中心继续保留执行详情入口
 
 当前唯一主线仍然是 `P0`：
 

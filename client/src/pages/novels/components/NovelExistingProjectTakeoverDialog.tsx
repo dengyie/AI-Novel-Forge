@@ -10,6 +10,7 @@ import type {
   DirectorTakeoverEntryStep,
   DirectorTakeoverStrategy,
 } from "@ai-novel/shared/types/novelDirector";
+import { buildFullBookAutopilotExecutionPlan } from "@ai-novel/shared/types/novelDirector";
 import { getDirectorTakeoverReadiness, startDirectorTakeover } from "@/api/novelDirector";
 import { queryKeys } from "@/api/queryKeys";
 import { getStyleBindings, getStyleProfiles } from "@/api/styleEngine";
@@ -47,6 +48,11 @@ interface NovelExistingProjectTakeoverDialogProps {
 }
 
 const RUN_MODE_OPTIONS: Array<{ value: DirectorRunMode; label: string; description: string }> = [
+  {
+    value: "full_book_autopilot",
+    label: "全书自动接管",
+    description: "AI 会按整本书目标补齐规划、继续写作、审校和修复。",
+  },
   {
     value: "auto_to_ready",
     label: "推进到可开写",
@@ -179,10 +185,12 @@ export default function NovelExistingProjectTakeoverDialog({
   );
   const selectedEntry = readiness?.entrySteps.find((item) => item.step === selectedEntryStep) ?? null;
   const selectedPreview = selectedEntry?.previews.find((item) => item.strategy === selectedStrategy) ?? null;
-  const autoExecutionPlan: DirectorAutoExecutionPlan | undefined = runMode === "auto_to_execution"
-    ? buildDirectorAutoExecutionPlanFromDraft(autoExecutionDraft, { usage: "takeover" })
-    : undefined;
-  const selectedScopeMode = runMode === "auto_to_execution"
+  const autoExecutionPlan: DirectorAutoExecutionPlan | undefined = runMode === "full_book_autopilot"
+    ? buildFullBookAutopilotExecutionPlan()
+    : runMode === "auto_to_execution"
+      ? buildDirectorAutoExecutionPlanFromDraft(autoExecutionDraft, { usage: "takeover" })
+      : undefined;
+  const selectedScopeMode = runMode === "auto_to_execution" || runMode === "full_book_autopilot"
     ? autoExecutionPlan?.mode ?? autoExecutionDraft.mode
     : "book";
   const selectedEntryAllowedForScope = isEntryStepAllowedForScope(selectedEntryStep, selectedScopeMode);
@@ -247,12 +255,15 @@ export default function NovelExistingProjectTakeoverDialog({
         return;
       }
       await queryClient.invalidateQueries({ queryKey: queryKeys.novels.autoDirectorTask(novelId) });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.novels.directorBookAutomation(novelId) });
       await queryClient.invalidateQueries({ queryKey: queryKeys.novels.autoDirectorTakeoverReadiness(novelId) });
       await queryClient.invalidateQueries({ queryKey: queryKeys.styleEngine.bindings(`novel-${novelId}`) });
       await queryClient.invalidateQueries({ queryKey: ["tasks"] });
       setOpen(false);
       toast.success(
-        runMode === "auto_to_execution"
+        runMode === "full_book_autopilot"
+          ? "自动导演接管任务已提交，任务中心会显示全书执行进度。"
+          : runMode === "auto_to_execution"
           ? `自动导演接管任务已提交，任务中心会显示 ${buildDirectorAutoExecutionPlanLabel(autoExecutionPlan)} 的执行进度。`
           : "自动导演接管任务已提交，任务中心会显示排队和执行进度。",
       );
@@ -335,6 +346,14 @@ export default function NovelExistingProjectTakeoverDialog({
                       onApprovalPointCodesChange={autoApprovalDraft.setCodes}
                     />
                   </>
+                ) : null}
+                {runMode === "full_book_autopilot" ? (
+                  <div className={`mt-3 rounded-md border border-primary/15 bg-primary/5 p-3 text-xs leading-5 text-muted-foreground ${AUTO_DIRECTOR_MOBILE_CLASSES.wrapText}`}>
+                    <div className="text-sm font-medium text-foreground">全书自动接管</div>
+                    <div className="mt-1">
+                      系统会以整本书为目标接管当前项目，继续补齐规划、章节执行、审校和修复。只有模型不可用、服务异常、正文保护或不可恢复风险会停下。
+                    </div>
+                  </div>
                 ) : null}
               </div>
 

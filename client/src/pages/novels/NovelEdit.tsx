@@ -703,6 +703,7 @@ export default function NovelEdit() {
   const invalidateAutoDirectorTaskState = async (taskId?: string) => {
     const invalidations: Array<Promise<unknown>> = [
       queryClient.invalidateQueries({ queryKey: queryKeys.novels.autoDirectorTask(id) }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.novels.directorBookAutomation(id) }),
       queryClient.invalidateQueries({ queryKey: queryKeys.tasks.overview }),
       queryClient.invalidateQueries({ queryKey: queryKeys.tasks.recoveryCandidates }),
     ];

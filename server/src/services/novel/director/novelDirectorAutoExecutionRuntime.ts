@@ -3,6 +3,7 @@ import type {
   DirectorConfirmRequest,
   DirectorQualityRepairRisk,
 } from "@ai-novel/shared/types/novelDirector";
+import { isFullBookAutopilotRunMode } from "@ai-novel/shared/types/novelDirector";
 import type { NovelControlPolicy } from "@ai-novel/shared/types/canonicalState";
 import type { PipelineJobStatus, VolumePlanDocument } from "@ai-novel/shared/types/novel";
 import type { NovelWorkflowCheckpoint } from "@ai-novel/shared/types/novelWorkflow";
@@ -344,6 +345,9 @@ export class NovelDirectorAutoExecutionRuntime {
               temperature: input.request.temperature,
               workflowTaskId: input.taskId,
               taskStyleProfileId: input.request.styleProfileId,
+              controlAdvanceMode: isFullBookAutopilotRunMode(input.request.runMode)
+                ? "full_book_autopilot"
+                : "auto_to_execution",
               ...resolveSingleChapterExecutionRange(range, autoExecution),
               autoReview: autoExecution.autoReview,
               autoRepair: autoExecution.autoRepair,
@@ -444,7 +448,7 @@ export class NovelDirectorAutoExecutionRuntime {
           });
           if (
             noticeAction.checkpointType === "replan_required"
-            && input.request.runMode === "auto_to_execution"
+            && (input.request.runMode === "auto_to_execution" || isFullBookAutopilotRunMode(input.request.runMode))
           ) {
             await this.deps.recordAutoApproval?.({
               taskId: input.taskId,

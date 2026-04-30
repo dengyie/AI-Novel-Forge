@@ -5,6 +5,8 @@ import { buildStyleIntentSummary } from "@ai-novel/shared/types/styleEngine";
 import type { UnifiedTaskDetail } from "@ai-novel/shared/types/task";
 import {
   extractDirectorTaskSeedPayloadFromMeta,
+  DIRECTOR_RUN_MODES,
+  buildFullBookAutopilotExecutionPlan,
   mergeDirectorCandidateBatches,
   type DirectorCandidate,
   type DirectorCandidateBatch,
@@ -40,7 +42,6 @@ import {
 } from "../novelBasicInfo.shared";
 import {
   buildDirectorAutoExecutionPlanFromDraft,
-  buildDirectorAutoExecutionPlanLabel,
   createDefaultDirectorAutoExecutionDraftState,
   normalizeDirectorAutoExecutionDraftState,
 } from "./directorAutoExecutionPlan.shared";
@@ -118,6 +119,7 @@ export default function NovelAutoDirectorDialog({
   const [candidatePatchFeedbacks, setCandidatePatchFeedbacks] = useState<Record<string, string>>({});
   const [titlePatchFeedbacks, setTitlePatchFeedbacks] = useState<Record<string, string>>({});
   const confirmSubmitLockedRef = useRef(false);
+  const confirmedTaskHandledRef = useRef<string | null>(null);
   const autoApprovalDraft = useDirectorAutoApprovalDraft(open);
   const { applySnapshot: applyAutoApprovalSnapshot } = autoApprovalDraft;
 
@@ -149,11 +151,7 @@ export default function NovelAutoDirectorDialog({
     if (Array.isArray(seedPayload?.batches) && seedPayload.batches.length > 0) {
       setBatches(seedPayload.batches);
     }
-    if (
-      seedPayload?.runMode === "auto_to_ready"
-      || seedPayload?.runMode === "auto_to_execution"
-      || seedPayload?.runMode === "stage_review"
-    ) {
+    if (typeof seedPayload?.runMode === "string" && (DIRECTOR_RUN_MODES as readonly string[]).includes(seedPayload.runMode)) {
       setRunMode(seedPayload.runMode === "stage_review" ? DEFAULT_VISIBLE_RUN_MODE : seedPayload.runMode);
     }
     if (seedPayload?.autoExecutionPlan) {
@@ -177,6 +175,19 @@ export default function NovelAutoDirectorDialog({
     }),
     [basicForm],
   );
+
+  const buildAutoExecutionPlanForRunMode = (): DirectorAutoExecutionPlan | undefined => {
+    if (runMode === "full_book_autopilot") {
+      return buildFullBookAutopilotExecutionPlan();
+    }
+    if (runMode === "auto_to_execution") {
+      return buildDirectorAutoExecutionPlanFromDraft(autoExecutionDraft, {
+        usage: "new_book",
+        maxChapterCount: directorBasicForm.estimatedChapterCount,
+      });
+    }
+    return undefined;
+  };
 
   useEffect(() => {
     if (!open || idea.trim()) {
@@ -274,12 +285,7 @@ export default function NovelAutoDirectorDialog({
       return workflowTaskId;
     }
 
-    const autoExecutionPlan = runMode === "auto_to_execution"
-      ? buildDirectorAutoExecutionPlanFromDraft(autoExecutionDraft, {
-        usage: "new_book",
-        maxChapterCount: directorBasicForm.estimatedChapterCount,
-      })
-      : undefined;
+    const autoExecutionPlan = buildAutoExecutionPlanForRunMode();
     const response = await bootstrapNovelWorkflow({
       lane: "auto_director",
       title: directorBasicForm.title.trim() || undefined,
@@ -446,12 +452,7 @@ export default function NovelAutoDirectorDialog({
   const confirmMutation = useMutation({
     mutationFn: async (payload: { candidate: DirectorCandidate; workflowTaskId?: string }) => {
       const currentWorkflowTaskId = payload.workflowTaskId || await ensureWorkflowTask();
-      const autoExecutionPlan: DirectorAutoExecutionPlan | undefined = runMode === "auto_to_execution"
-        ? buildDirectorAutoExecutionPlanFromDraft(autoExecutionDraft, {
-          usage: "new_book",
-          maxChapterCount: directorBasicForm.estimatedChapterCount,
-        })
-        : undefined;
+      const autoExecutionPlan = buildAutoExecutionPlanForRunMode();
       const response = await confirmDirectorCandidate({
         ...buildAutoDirectorRequestPayload(directorBasicForm, idea, llm, runMode, currentWorkflowTaskId, {
           styleProfileId: selectedStyleProfileId,
@@ -465,38 +466,31 @@ export default function NovelAutoDirectorDialog({
         },
       });
       return {
-        data: response.data ?? null,
-        workflowTaskId: response.data?.workflowTaskId ?? currentWorkflowTaskId,
+        command: response.data ?? null,
+        workflowTaskId: response.data?.taskId ?? currentWorkflowTaskId,
       };
     },
-    onSuccess: async ({ data, workflowTaskId: nextWorkflowTaskId }) => {
-      const novelId = data?.novel?.id;
-      if (!novelId) {
+    onSuccess: async ({ command, workflowTaskId: nextWorkflowTaskId }) => {
+      if (!command) {
         setDialogMode("execution_failed");
-        setExecutionError("确认方案失败，未返回小说项目。");
-        toast.error("确认方案失败，未返回小说项目。");
+        setExecutionError("确认方案失败，未返回导演命令。");
+        toast.error("确认方案失败，未返回导演命令。");
         return;
       }
       if (nextWorkflowTaskId) {
         setWorkflowTaskId(nextWorkflowTaskId);
         onWorkflowTaskChange?.(nextWorkflowTaskId);
       }
-      await queryClient.invalidateQueries({ queryKey: queryKeys.novels.all });
+      setDialogMode("execution_progress");
+      setExecutionRequested(true);
+      setExecutionError("");
       await queryClient.invalidateQueries({ queryKey: ["tasks"] });
-      toast.success(
-        data.directorSession?.runMode === "auto_to_execution"
-          ? `已创建《${data.novel.title}》，自动导演会继续自动执行${buildDirectorAutoExecutionPlanLabel(buildDirectorAutoExecutionPlanFromDraft(autoExecutionDraft, {
-            usage: "new_book",
-            maxChapterCount: directorBasicForm.estimatedChapterCount,
-          }))}。`
-          : `已创建《${data.novel.title}》，自动导演会继续在后台推进到可开写。`,
-      );
-      resetDialogState();
-      onConfirmed({
-        novelId,
-        workflowTaskId: data.workflowTaskId ?? workflowTaskId,
-        resumeTarget: data.resumeTarget ?? null,
-      });
+      if (nextWorkflowTaskId) {
+        await queryClient.invalidateQueries({
+          queryKey: queryKeys.tasks.detail("novel_workflow", nextWorkflowTaskId),
+        });
+      }
+      toast.success("系统收到书级方向，会创建小说项目并继续推进规划。");
     },
     onError: async (error, payload) => {
       setDialogMode("execution_failed");
@@ -539,6 +533,33 @@ export default function NovelAutoDirectorDialog({
     setCandidatePatchFeedbacks({});
     setTitlePatchFeedbacks({});
   };
+
+  useEffect(() => {
+    const resumeTarget = directorTask?.resumeTarget ?? null;
+    const confirmedNovelId = resumeTarget?.novelId?.trim() || "";
+    if (!executionRequested || !directorTask || !confirmedNovelId) {
+      return;
+    }
+    if (workflowTaskId && directorTask.id !== workflowTaskId) {
+      return;
+    }
+    if (confirmedTaskHandledRef.current === directorTask.id) {
+      return;
+    }
+    confirmedTaskHandledRef.current = directorTask.id;
+    setExecutionRequested(false);
+    void Promise.all([
+      queryClient.invalidateQueries({ queryKey: queryKeys.novels.all }),
+      queryClient.invalidateQueries({ queryKey: ["tasks"] }),
+    ]);
+    toast.success("自动导演创建小说项目，并继续推进规划。");
+    resetDialogState();
+    onConfirmed({
+      novelId: confirmedNovelId,
+      workflowTaskId: directorTask.id,
+      resumeTarget,
+    });
+  }, [directorTask, executionRequested, onConfirmed, queryClient, resetDialogState, workflowTaskId]);
 
   const canGenerate = idea.trim().length > 0 && !generateMutation.isPending;
 

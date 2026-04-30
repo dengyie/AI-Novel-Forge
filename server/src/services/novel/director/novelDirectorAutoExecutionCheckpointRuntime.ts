@@ -3,6 +3,7 @@ import type {
   DirectorConfirmRequest,
   DirectorQualityRepairRisk,
 } from "@ai-novel/shared/types/novelDirector";
+import { isDirectorAutoExecutionRunMode } from "@ai-novel/shared/types/novelDirector";
 import type { PipelineJobStatus } from "@ai-novel/shared/types/novel";
 import type { NovelWorkflowCheckpoint } from "@ai-novel/shared/types/novelWorkflow";
 import { buildNovelEditResumeTarget } from "../workflow/novelWorkflow.shared";
@@ -221,7 +222,7 @@ export async function resolveQualityRepairNoticeAction(
     qualityRepairRisk,
   };
   const remainingChapterCount = checkpointState.remainingChapterCount ?? 0;
-  const isAiDriverExecution = input.request.runMode === "auto_to_execution";
+  const isAiDriverExecution = isDirectorAutoExecutionRunMode(input.request.runMode);
   const hasQualityAlertDetails = (parsePipelinePayload(input.payload).qualityAlertDetails?.length ?? 0) > 0;
   const shouldNotifyAndContinueAiDriverQualityNotice = checkpointType === "chapter_batch_ready"
     && qualityRepairRisk.autoContinuable

@@ -1,4 +1,5 @@
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
+import type { NovelControlPolicy } from "@ai-novel/shared/types/canonicalState";
 import type {
   ChapterGenerationState,
   PipelineJobStatus,
@@ -371,6 +372,7 @@ export function buildDirectorAutoExecutionPipelineOptions(input: {
   temperature?: number;
   workflowTaskId?: string;
   taskStyleProfileId?: string;
+  controlAdvanceMode?: NovelControlPolicy["advanceMode"];
   startOrder: number;
   endOrder: number;
   runMode?: PipelineRunMode;
@@ -381,7 +383,7 @@ export function buildDirectorAutoExecutionPipelineOptions(input: {
   return {
     startOrder: input.startOrder,
     endOrder: input.endOrder,
-    controlPolicy: buildPipelineExecutionControlPolicy("director_start"),
+    controlPolicy: buildPipelineExecutionControlPolicy("director_start", input.controlAdvanceMode),
     maxRetries: 1,
     runMode: input.runMode ?? "fast",
     autoReview,

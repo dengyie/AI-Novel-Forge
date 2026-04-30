@@ -9,7 +9,10 @@ import { withSqliteRetry } from "../../../db/sqliteRetry";
 import type { TaskStatus } from "@ai-novel/shared/types/task";
 import { AppError } from "../../../middleware/errorHandler";
 import { getArchivedTaskIdSet, isTaskArchived } from "../../task/taskArchive";
-import type { DirectorLLMOptions } from "@ai-novel/shared/types/novelDirector";
+import {
+  isDirectorAutoExecutionRunMode,
+  type DirectorLLMOptions,
+} from "@ai-novel/shared/types/novelDirector";
 import {
   applyDirectorLlmOverride,
   normalizeDirectorRunMode,
@@ -556,7 +559,7 @@ export class NovelWorkflowService {
       ?? seedPayload?.runMode,
     );
     const plan = normalizeDirectorAutoExecutionPlan(
-      runMode === "auto_to_execution"
+      isDirectorAutoExecutionRunMode(runMode)
         ? (seedPayload?.autoExecutionPlan ?? seedPayload?.directorInput?.autoExecutionPlan)
         : undefined,
     );
