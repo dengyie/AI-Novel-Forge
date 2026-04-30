@@ -1074,7 +1074,14 @@ export default function NovelEdit() {
         variant: "outline",
       });
     }
-    if (mode === "waiting" && task.checkpointType === "front10_ready") {
+    if (task.pendingManualRecovery) {
+      actions.push({
+        label: continueAutoDirectorMutation.isPending ? "继续中..." : "继续自动导演",
+        onClick: () => continueAutoDirectorMutation.mutate(),
+        variant: "default",
+        disabled: continueAutoDirectorMutation.isPending,
+      });
+    } else if (mode === "waiting" && task.checkpointType === "front10_ready") {
       actions.push({
         label: buildContinueAutoExecutionActionLabel(autoExecutionScopeLabel, continueAutoExecutionMutation.isPending),
         onClick: () => continueAutoExecutionMutation.mutate(),
@@ -1302,6 +1309,13 @@ export default function NovelEdit() {
           variant: "outline",
         });
       }
+    } else if (task.pendingManualRecovery) {
+      actions.push({
+        label: continueAutoDirectorMutation.isPending ? "继续中..." : "继续自动导演",
+        onClick: () => continueAutoDirectorMutation.mutate(),
+        variant: "default",
+        disabled: continueAutoDirectorMutation.isPending,
+      });
     } else if (task.status === "waiting_approval" && task.checkpointType === "front10_ready") {
       const autoExecutionScopeLabel = resolveAutoExecutionScopeLabel(task);
       actions.push({
