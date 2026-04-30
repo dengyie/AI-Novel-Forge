@@ -134,6 +134,7 @@ export class NovelDirectorService {
         checkpointSummary,
       });
     },
+    replanNovel: (novelId, input) => this.novelService.replanNovel(novelId, input),
   });
   private readonly directorRuntimeOrchestrator = new NovelDirectorRuntimeOrchestrator({
     directorRuntime: this.directorRuntime,

@@ -33,6 +33,7 @@ import {
   ChapterPatchRepairService,
 } from "./chapterPatchRepairService";
 import { chapterQualityLoopService } from "./quality/ChapterQualityLoopService";
+import { directorAutomationLedgerEventService } from "./director/runtime/DirectorAutomationLedgerEventService";
 
 type AuditContextOperation = "review" | "audit" | "repair";
 
@@ -310,7 +311,19 @@ export class NovelCoreReviewService {
       reason: string;
     } & LLMGenerateOptions,
   ) {
-    return plannerService.replan(novelId, input);
+    const result = await plannerService.replan(novelId, input);
+    if (result.run) {
+      await directorAutomationLedgerEventService.recordReplanRunCreated({
+        novelId,
+        replanRunId: result.run.id,
+        affectedChapterIds: result.affectedChapterIds,
+        affectedChapterOrders: result.affectedChapterOrders,
+        generatedPlanIds: result.generatedPlans.map((plan) => plan.id),
+        blockingLedgerKeys: result.blockingLedgerKeys ?? [],
+        triggerReason: result.triggerReason || result.reason,
+      }).catch(() => null);
+    }
+    return result;
   }
 
   async auditChapter(

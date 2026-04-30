@@ -20,6 +20,7 @@ import {
   isDirectorCircuitBreakerOpen,
   recordModelFailureSignal,
   recordPatchFailureSignal,
+  recordReplanLoopSignal,
   recordUsageAnomalySignal,
   withCircuitBreakerState,
 } from "./runtime/DirectorCircuitBreakerService";
@@ -38,6 +39,19 @@ interface CircuitBreakerWorkflowPort extends AutoExecutionCheckpointRuntimeDeps 
       progress?: number;
     }): Promise<unknown>;
   };
+}
+
+interface ReplanNoticeRuntimePort extends CircuitBreakerWorkflowPort {
+  replanNovel?: (novelId: string, input: {
+    chapterId?: string;
+    triggerType?: string;
+    reason: string;
+    sourceIssueIds?: string[];
+    windowSize?: number;
+    provider?: DirectorConfirmRequest["provider"];
+    model?: string;
+    temperature?: number;
+  }) => Promise<unknown>;
 }
 
 export async function stopAutoExecutionForCircuitBreaker(
@@ -131,6 +145,70 @@ export function buildFailureCircuitBreaker(input: {
     message: input.message,
     nodeKey: "chapter_execution_node",
   });
+}
+
+export async function runFullBookAutopilotReplanNotice(input: {
+  deps: ReplanNoticeRuntimePort;
+  taskId: string;
+  novelId: string;
+  request: DirectorConfirmRequest;
+  range: DirectorAutoExecutionRange;
+  autoExecution: DirectorAutoExecutionState;
+  checkpointState: DirectorAutoExecutionState;
+  noticeSummary: string;
+}): Promise<{ stopped: true } | { stopped: false; circuitBreaker: DirectorCircuitBreakerState }> {
+  const replanCircuitBreaker = recordReplanLoopSignal({
+    previous: input.autoExecution.circuitBreaker,
+    chapterId: input.autoExecution.nextChapterId,
+    chapterOrder: input.autoExecution.nextChapterOrder,
+    message: input.noticeSummary,
+  });
+  if (isDirectorCircuitBreakerOpen(replanCircuitBreaker)) {
+    await stopAutoExecutionForCircuitBreaker(input.deps, {
+      taskId: input.taskId,
+      novelId: input.novelId,
+      request: input.request,
+      range: input.range,
+      autoExecution: withCircuitBreakerState(input.checkpointState, replanCircuitBreaker),
+      circuitBreaker: replanCircuitBreaker,
+      resumeStage: "pipeline",
+    });
+    return { stopped: true };
+  }
+  if (input.deps.replanNovel) {
+    try {
+      await input.deps.replanNovel(input.novelId, {
+        chapterId: input.autoExecution.nextChapterId ?? undefined,
+        triggerType: "audit_failure",
+        reason: input.noticeSummary,
+        provider: input.request.provider,
+        model: input.request.model,
+        temperature: input.request.temperature,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const replanFailureBreaker = recordModelFailureSignal({
+        previous: replanCircuitBreaker,
+        reason: "service_unavailable",
+        message,
+        nodeKey: "planner.replan",
+      });
+      if (isDirectorCircuitBreakerOpen(replanFailureBreaker)) {
+        await stopAutoExecutionForCircuitBreaker(input.deps, {
+          taskId: input.taskId,
+          novelId: input.novelId,
+          request: input.request,
+          range: input.range,
+          autoExecution: withCircuitBreakerState(input.checkpointState, replanFailureBreaker),
+          circuitBreaker: replanFailureBreaker,
+          resumeStage: "pipeline",
+        });
+        return { stopped: true };
+      }
+      throw error;
+    }
+  }
+  return { stopped: false, circuitBreaker: replanCircuitBreaker };
 }
 
 export { isDirectorCircuitBreakerOpen, withCircuitBreakerState };

@@ -30,15 +30,18 @@ import {
 } from "./novelDirectorAutoExecutionScopeRuntime";
 import { isSkippableAutoExecutionReviewFailure } from "./novelDirectorAutoExecutionFailure";
 import {
-  recordReplanLoopSignal,
-} from "./runtime/DirectorCircuitBreakerService";
-import {
   buildFailureCircuitBreaker,
   isDirectorCircuitBreakerOpen,
   resolveUsageCircuitBreaker,
+  runFullBookAutopilotReplanNotice,
   stopAutoExecutionForCircuitBreaker,
   withCircuitBreakerState,
 } from "./novelDirectorAutoExecutionCircuitBreakerRuntime";
+import {
+  isNoChaptersToGenerateError,
+  resolveSingleChapterExecutionRange,
+  shouldClearAutoExecutionCheckpoint,
+} from "./novelDirectorAutoExecutionRuntimeUtils";
 import { directorAutomationLedgerEventService } from "./runtime/DirectorAutomationLedgerEventService";
 
 interface NovelDirectorAutoExecutionWorkflowPort {
@@ -143,35 +146,16 @@ interface NovelDirectorAutoExecutionRuntimeDeps {
     qualityRepairRisk: DirectorQualityRepairRisk;
     checkpointSummary?: string | null;
   }) => Promise<unknown>;
-}
-
-function isNoChaptersToGenerateError(error: unknown): boolean {
-  return error instanceof Error && error.message.includes("指定区间内没有可生成的章节");
-}
-
-function shouldClearAutoExecutionCheckpoint(checkpointType?: "front10_ready" | "chapter_batch_ready" | "replan_required" | null): boolean {
-  return checkpointType === "front10_ready"
-    || checkpointType === "chapter_batch_ready"
-    || checkpointType === "replan_required";
-}
-
-function resolveNextChapterExecutionOrder(
-  range: DirectorAutoExecutionRange,
-  autoExecution: DirectorAutoExecutionState,
-): number {
-  const nextOrder = autoExecution.nextChapterOrder ?? range.startOrder;
-  return Math.max(range.startOrder, Math.min(nextOrder, range.endOrder));
-}
-
-function resolveSingleChapterExecutionRange(
-  range: DirectorAutoExecutionRange,
-  autoExecution: DirectorAutoExecutionState,
-): { startOrder: number; endOrder: number } {
-  const order = resolveNextChapterExecutionOrder(range, autoExecution);
-  return {
-    startOrder: order,
-    endOrder: order,
-  };
+  replanNovel?: (novelId: string, input: {
+    chapterId?: string;
+    triggerType?: string;
+    reason: string;
+    sourceIssueIds?: string[];
+    windowSize?: number;
+    provider?: DirectorConfirmRequest["provider"];
+    model?: string;
+    temperature?: number;
+  }) => Promise<unknown>;
 }
 
 export class NovelDirectorAutoExecutionRuntime {
@@ -502,23 +486,19 @@ export class NovelDirectorAutoExecutionRuntime {
             noticeAction.checkpointType === "replan_required"
             && (input.request.runMode === "auto_to_execution" || isFullBookAutopilotRunMode(input.request.runMode))
           ) {
-            const replanCircuitBreaker = recordReplanLoopSignal({
-              previous: autoExecution.circuitBreaker,
-              chapterId: autoExecution.nextChapterId,
-              chapterOrder: autoExecution.nextChapterOrder,
-              qualityRepairRisk: noticeAction.qualityRepairRisk,
-              message: job.noticeSummary.trim(),
-            });
-            if (isDirectorCircuitBreakerOpen(replanCircuitBreaker)) {
-              await stopAutoExecutionForCircuitBreaker(this.deps, {
+            const replanNoticeResult = isFullBookAutopilotRunMode(input.request.runMode)
+              ? await runFullBookAutopilotReplanNotice({
+                deps: this.deps,
                 taskId: input.taskId,
                 novelId: input.novelId,
                 request: input.request,
                 range,
-                autoExecution: withCircuitBreakerState(noticeAction.checkpointState, replanCircuitBreaker),
-                circuitBreaker: replanCircuitBreaker,
-                resumeStage: "pipeline",
-              });
+                autoExecution,
+                checkpointState: noticeAction.checkpointState,
+                noticeSummary: job.noticeSummary.trim(),
+              })
+              : { stopped: false as const, circuitBreaker: autoExecution.circuitBreaker ?? null };
+            if (replanNoticeResult.stopped) {
               return;
             }
             await this.deps.recordAutoApproval?.({
@@ -530,7 +510,7 @@ export class NovelDirectorAutoExecutionRuntime {
             pipelineJobId = "";
             ({ range, autoExecution } = await this.resolveRangeAndState({
               novelId: input.novelId,
-              existingState: withCircuitBreakerState(noticeAction.checkpointState, replanCircuitBreaker),
+              existingState: withCircuitBreakerState(noticeAction.checkpointState, replanNoticeResult.circuitBreaker),
               pipelineJobId: null,
               pipelineStatus: "queued",
             }));

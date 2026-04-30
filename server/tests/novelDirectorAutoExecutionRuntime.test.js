@@ -930,6 +930,10 @@ test("runFromReady keeps replan notices automatic in full-book autopilot", async
     async recordAutoApproval(input) {
       calls.push(["recordAutoApproval", input.checkpointType, input.qualityRepairRisk.riskLevel]);
     },
+    async replanNovel(novelId, input) {
+      calls.push(["replanNovel", novelId, input.chapterId ?? null, input.triggerType, input.reason]);
+      return {};
+    },
   });
 
   await runtime.runFromReady({
@@ -953,6 +957,7 @@ test("runFromReady keeps replan notices automatic in full-book autopilot", async
     [2, 2, "full_book_autopilot"],
   ]);
   assert.ok(calls.some((call) => call[0] === "recordAutoApproval" && call[1] === "replan_required" && call[2] === "replan"));
+  assert.ok(calls.some((call) => call[0] === "replanNovel" && call[1] === "novel-1" && call[3] === "audit_failure"));
   assert.equal(calls.some((call) => call[0] === "recordCheckpoint" && call[2] === "replan_required"), false);
   assert.ok(calls.some((call) => call[0] === "recordCheckpoint" && call[2] === "workflow_completed"));
 });
