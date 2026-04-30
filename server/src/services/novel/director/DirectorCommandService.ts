@@ -285,9 +285,12 @@ export class DirectorCommandService {
     });
   }
 
-  async recoverStaleLeases(now = new Date()): Promise<number> {
+  async recoverStaleLeases(now = new Date(), options: {
+    taskId?: string;
+  } = {}): Promise<number> {
     const staleCommands = await prisma.directorRunCommand.findMany({
       where: {
+        ...(options.taskId ? { taskId: options.taskId } : {}),
         status: { in: ["leased", "running"] },
         leaseExpiresAt: { lt: now },
       },
@@ -505,12 +508,19 @@ export class DirectorCommandService {
     allowTerminalReuse?: boolean;
     preserveLastError?: boolean;
   }): Promise<DirectorCommandAcceptedResponse> {
-    const row = await this.workflowService.getTaskById(input.taskId);
+    let row = await this.workflowService.getTaskById(input.taskId);
     if (!row) {
       throw new AppError("Task not found.", 404);
     }
     if (row.lane !== "auto_director") {
       throw new AppError("Only auto director workflow tasks can be queued as director commands.", 400);
+    }
+    const recoveredStaleLeaseCount = await this.recoverStaleLeases(new Date(), { taskId: input.taskId });
+    if (recoveredStaleLeaseCount > 0) {
+      row = await this.workflowService.getTaskById(input.taskId);
+      if (!row) {
+        throw new AppError("Task not found.", 404);
+      }
     }
     const reusableCommand = await prisma.directorRunCommand.findFirst({
       where: {

@@ -84,7 +84,12 @@ function createHarness(task = createTask()) {
     },
     async requeueTaskForRecovery(taskId, message) {
       requeued.push({ taskId, message });
-      return null;
+      task.status = "queued";
+      task.pendingManualRecovery = true;
+      task.lastError = message;
+      task.heartbeatAt = null;
+      task.updatedAt = new Date(task.updatedAt.getTime() + 1);
+      return task;
     },
     async bootstrapTask(input) {
       bootstraps.push(input);
@@ -148,6 +153,9 @@ function createHarness(task = createTask()) {
   );
   prisma.directorRunCommand.findMany = async ({ where }) => {
     let rows = commands;
+    if (where?.taskId) {
+      rows = rows.filter((row) => row.taskId === where.taskId);
+    }
     if (where?.status?.in) {
       rows = rows.filter((row) => where.status.in.includes(row.status));
     }
@@ -476,6 +484,37 @@ test("director command service marks exhausted expired leases stale and requeues
     assert.equal(harness.stepUpdates[0].where.status, "running");
     assert.equal(harness.stepUpdates[0].data.status, "failed");
     assert.match(harness.stepUpdates[0].data.error, /\u79df\u7ea6\u8fc7\u671f/);
+  } finally {
+    harness.restore();
+  }
+});
+
+test("director command service clears exhausted stale command before accepting a new continue", async () => {
+  const harness = createHarness(createTask({
+    status: "running",
+    pendingManualRecovery: true,
+    lastError: "服务重启后任务已暂停，等待手动恢复。",
+  }));
+  try {
+    await harness.service.enqueueContinueCommand("task-1");
+    harness.commands[0].status = "running";
+    harness.commands[0].leaseOwner = "worker-a";
+    harness.commands[0].attempt = 2;
+    harness.commands[0].leaseExpiresAt = new Date("2026-04-29T12:00:00.000Z");
+    harness.task.status = "running";
+    harness.task.pendingManualRecovery = true;
+    harness.task.lastError = "服务重启后任务已暂停，等待手动恢复。";
+
+    const accepted = await harness.service.enqueueContinueCommand("task-1");
+
+    assert.equal(harness.commands[0].status, "stale");
+    assert.equal(harness.commands.length, 2);
+    assert.notEqual(harness.commands[0].idempotencyKey, harness.commands[1].idempotencyKey);
+    assert.equal(accepted.commandId, "command-2");
+    assert.equal(accepted.status, "queued");
+    assert.equal(harness.task.status, "queued");
+    assert.equal(harness.task.pendingManualRecovery, false);
+    assert.equal(harness.task.lastError, null);
   } finally {
     harness.restore();
   }
