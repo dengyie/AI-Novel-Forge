@@ -3,6 +3,7 @@ import type {
   DirectorRuntimeSnapshot,
   DirectorStepRun,
 } from "@ai-novel/shared/types/directorRuntime";
+import { runWithLlmUsageTracking } from "../../../../llm/usageTracking";
 import { DirectorPolicyEngine, type DirectorPolicyRequest } from "./DirectorPolicyEngine";
 import { DirectorRuntimeStore } from "./DirectorRuntimeStore";
 
@@ -123,7 +124,16 @@ export class DirectorNodeRunner {
     }
 
     try {
-      const output = await contract.run(input.input);
+      const output = input.taskId?.trim()
+        ? await runWithLlmUsageTracking({
+          workflowTaskId: input.taskId.trim(),
+          directorTelemetry: true,
+          novelId: input.novelId,
+          directorRunId: snapshot?.runId ?? input.taskId.trim(),
+          directorStepIdempotencyKey: idempotencyKey,
+          directorNodeKey: contract.nodeKey,
+        }, () => contract.run(input.input))
+        : await contract.run(input.input);
       const producedArtifacts = collectArtifacts?.(output) ?? [];
       let runtimeSnapshot: DirectorRuntimeSnapshot | null = null;
       if (input.taskId?.trim()) {

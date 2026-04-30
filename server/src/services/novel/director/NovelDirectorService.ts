@@ -1,6 +1,9 @@
 import { buildStyleIntentSummary } from "@ai-novel/shared/types/styleEngine";
 import { AppError } from "../../../middleware/errorHandler";
-import { runWithLlmUsageTracking } from "../../../llm/usageTracking";
+import {
+  runWithLlmUsageTracking,
+  type LlmUsageTrackingContext,
+} from "../../../llm/usageTracking";
 import type {
   DirectorPolicyMode,
   DirectorRuntimeProjection,
@@ -223,7 +226,10 @@ export class NovelDirectorService {
 
   private async runScheduledBackgroundRun(taskId: string, runner: () => Promise<void>): Promise<void> {
     try {
-      await runWithLlmUsageTracking({ workflowTaskId: taskId }, runner);
+      await runWithLlmUsageTracking(
+        await this.buildDirectorUsageContext(taskId),
+        runner,
+      );
     } catch (error) {
       if (isWorkflowTaskCancelledError(error) || isDirectorRuntimeGateError(error)) {
         return;
@@ -254,10 +260,33 @@ export class NovelDirectorService {
   }
 
   private withWorkflowTaskUsage<T>(workflowTaskId: string | null | undefined, runner: () => Promise<T>): Promise<T> {
-    if (!workflowTaskId?.trim()) {
+    const normalizedTaskId = workflowTaskId?.trim();
+    if (!normalizedTaskId) {
       return runner();
     }
-    return runWithLlmUsageTracking({ workflowTaskId: workflowTaskId.trim() }, runner);
+    return this.buildDirectorUsageContext(normalizedTaskId)
+      .then((context) => runWithLlmUsageTracking(context, runner));
+  }
+
+  private async buildDirectorUsageContext(taskId: string): Promise<LlmUsageTrackingContext> {
+    const normalizedTaskId = taskId.trim();
+    const task = normalizedTaskId
+      ? await prisma.novelWorkflowTask.findUnique({
+        where: { id: normalizedTaskId },
+        select: {
+          novelId: true,
+          directorRun: {
+            select: { id: true },
+          },
+        },
+      }).catch(() => null)
+      : null;
+    return {
+      workflowTaskId: normalizedTaskId || null,
+      directorTelemetry: true,
+      novelId: task?.novelId ?? null,
+      directorRunId: task?.directorRun?.id ?? (normalizedTaskId || null),
+    };
   }
 
   private async enrichDirectorStyleContext<T extends { styleProfileId?: string; styleTone?: string; styleIntentSummary?: unknown }>(

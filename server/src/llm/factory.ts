@@ -368,7 +368,7 @@ export function createLLMFromResolvedOptions(resolved: ResolvedLLMClientOptions)
     baseURL: resolved.baseURL,
     promptMeta: resolved.promptMeta,
   };
-  const decorated = attachLLMDebugLogging(attachLLMUsageTracking(attachLLMRequestGuard(llm, meta)), meta);
+  const decorated = attachLLMDebugLogging(attachLLMUsageTracking(attachLLMRequestGuard(llm, meta), meta), meta);
   const limited = attachLLMRequestLimiter(decorated, {
     provider: resolved.provider,
     model: resolved.model,
