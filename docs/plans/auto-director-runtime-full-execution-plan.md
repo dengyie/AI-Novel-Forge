@@ -95,7 +95,7 @@
 
 1. **执行面隔离与 API 保活二次收口**：在第一版命令化入口、独立 Director Worker 和轻量 runtime projection 基础上，继续收口 SQLite WAL / busy timeout、运行态 delta 持久化、可见工作区刷新边界，以及候选确认、标题修复等旧入口 command 化；禁止 Web API route 新增直接执行自动导演重型链路。
 2. **规划恢复链稳定**：在 Worker 语义下补齐 `volume_strategy` 幂等重放、持久化卷规划恢复到 `structured_outline` 的真实数据回归；确保已有资产不会被重复生成或跳过。
-3. **真实 Prisma 抽样回归**：覆盖旧项目接管、服务重启手动恢复、失败重试、章节批量执行、候选变更和状态版本，重点验证 `migration -> 章节写入 -> 候选变更 -> 状态版本`。
+3. **真实 Prisma 抽样回归**：只读审计已覆盖旧项目接管、服务重启手动恢复、章节批量执行、候选确认、标题修复失败隔离、retry/resume/continue/cancel 命令、手动改文影响和缺正文账本基线；后续补真实副本 E2E 样本执行记录，重点验证 `migration -> 章节写入 -> 候选变更 -> 状态版本`。
 4. **Artifact Ledger 真相层**：第一刀已完成。书级投影可直接读取持久化账本的 active/stale/protected/dependency/content hash 基础状态，并向 AI 驾驶舱提供按类型汇总和最近产物记录；后续补齐写入事件全覆盖、legacy backfill 审计和局部恢复能力。
 5. **PolicyEngine 硬 gate 深化**：高成本审校、高风险修复、大范围自动执行、覆盖用户内容等场景必须在写入前经过策略判断和审批边界。
 6. **质量产物闭环**：第一刀已完成。`chapter_retention_contract / continuity_state / rolling_window_review` 会在章节审校和批量执行后形成统一评估状态并写入章节风险标记；后续把该状态写入 Ledger 真相层，补齐连续修复失败计数、角色治理状态和自动再评估触发。

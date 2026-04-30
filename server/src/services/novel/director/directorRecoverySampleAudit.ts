@@ -113,10 +113,28 @@ export interface DirectorRecoverySampleTaskDiagnosis {
   updatedAt: string | null;
 }
 
+export interface DirectorRecoverySampleCommandDiagnosis {
+  commandId: string;
+  taskId: string;
+  novelId: string | null;
+  commandType: string;
+  status: string;
+  code: string;
+  priority: "high" | "medium" | "low";
+  evidence: string;
+  nextAction: string;
+  updatedAt: string | null;
+}
+
 export interface DirectorRecoverySampleAudit {
   counts: {
     autoDirectorTasks: number;
     takeoverCommands: number;
+    confirmCandidateCommands: number;
+    titleRepairCommands: number;
+    retryOrResumeCommands: number;
+    cancelCommands: number;
+    failedOrStaleCommands: number;
     recoveryTasks: number;
     chapterBatchTasks: number;
     waitingTasks: number;
@@ -128,6 +146,7 @@ export interface DirectorRecoverySampleAudit {
     untrackedDraftChapters: number;
     generationJobs: number;
     diagnosedTasks: number;
+    diagnosedCommands: number;
   };
   samples: {
     takeoverCommands: Array<{
@@ -175,6 +194,7 @@ export interface DirectorRecoverySampleAudit {
       updatedAt: string | null;
     }>;
     taskDiagnostics: DirectorRecoverySampleTaskDiagnosis[];
+    commandDiagnostics: DirectorRecoverySampleCommandDiagnosis[];
   };
 }
 
@@ -394,11 +414,77 @@ function diagnoseTask(
   return null;
 }
 
+function diagnoseCommand(command: DirectorRecoverySampleCommandRow): DirectorRecoverySampleCommandDiagnosis | null {
+  if (command.status !== "failed" && command.status !== "stale") {
+    return null;
+  }
+  const base = {
+    commandId: command.id,
+    taskId: command.taskId,
+    novelId: command.novelId ?? null,
+    commandType: command.commandType,
+    status: command.status,
+    updatedAt: iso(command.updatedAt),
+  };
+  if (command.commandType === "confirm_candidate") {
+    return {
+      ...base,
+      code: "candidate_confirmation_command_needs_recovery",
+      priority: "high",
+      evidence: "candidate confirmation command did not complete",
+      nextAction: "check idempotency result first; if no novel was bound, enqueue confirm_candidate again",
+    };
+  }
+  if (command.commandType === "repair_chapter_titles") {
+    return {
+      ...base,
+      code: "title_repair_failure_isolated",
+      priority: "medium",
+      evidence: "title repair command failed or became stale",
+      nextAction: "keep the director task recoverable and rerun title repair without blocking unrelated chapter execution",
+    };
+  }
+  if (command.commandType === "retry" || command.commandType === "resume_from_checkpoint" || command.commandType === "continue") {
+    return {
+      ...base,
+      code: "recovery_command_failed",
+      priority: "medium",
+      evidence: `${command.commandType} command did not complete`,
+      nextAction: "inspect the latest task checkpoint and enqueue one explicit recovery command",
+    };
+  }
+  if (command.commandType === "takeover") {
+    return {
+      ...base,
+      code: "takeover_command_failed",
+      priority: "high",
+      evidence: "takeover command did not complete",
+      nextAction: "verify takeoverRequest payload and rerun takeover on the current build",
+    };
+  }
+  return {
+    ...base,
+    code: "unclassified_command_failure",
+    priority: "low",
+    evidence: `${command.commandType} command is ${command.status}`,
+    nextAction: "inspect command payload and task state before rerunning",
+  };
+}
+
 export function buildDirectorRecoverySampleAudit(
   input: DirectorRecoverySampleAuditInput,
 ): DirectorRecoverySampleAudit {
   const tasks = input.tasks.map(compactTask);
   const takeoverCommands = input.commands.filter((command) => command.commandType === "takeover");
+  const confirmCandidateCommands = input.commands.filter((command) => command.commandType === "confirm_candidate");
+  const titleRepairCommands = input.commands.filter((command) => command.commandType === "repair_chapter_titles");
+  const retryOrResumeCommands = input.commands.filter((command) => (
+    command.commandType === "retry"
+    || command.commandType === "resume_from_checkpoint"
+    || command.commandType === "continue"
+  ));
+  const cancelCommands = input.commands.filter((command) => command.commandType === "cancel");
+  const failedOrStaleCommands = input.commands.filter((command) => command.status === "failed" || command.status === "stale");
   const recoveryTasks = tasks.filter(isRecoveryTask);
   const chapterBatchTasks = tasks.filter(isChapterBatchTask);
   const waitingTasks = tasks.filter((task) => task.status === "waiting_approval");
@@ -439,6 +525,14 @@ export function buildDirectorRecoverySampleAudit(
   const taskDiagnostics = tasks
     .map((task) => diagnoseTask(task, contextlessTakeoverTaskIds, supersedingTasks))
     .filter((diagnosis): diagnosis is DirectorRecoverySampleTaskDiagnosis => Boolean(diagnosis))
+    .sort((left, right) => {
+      const priorityRank = { high: 0, medium: 1, low: 2 };
+      return priorityRank[left.priority] - priorityRank[right.priority]
+      || String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? ""));
+    });
+  const commandDiagnostics = input.commands
+    .map(diagnoseCommand)
+    .filter((diagnosis): diagnosis is DirectorRecoverySampleCommandDiagnosis => Boolean(diagnosis))
     .sort((left, right) => {
       const priorityRank = { high: 0, medium: 1, low: 2 };
       return priorityRank[left.priority] - priorityRank[right.priority]
@@ -485,6 +579,11 @@ export function buildDirectorRecoverySampleAudit(
     counts: {
       autoDirectorTasks: tasks.length,
       takeoverCommands: takeoverCommands.length,
+      confirmCandidateCommands: confirmCandidateCommands.length,
+      titleRepairCommands: titleRepairCommands.length,
+      retryOrResumeCommands: retryOrResumeCommands.length,
+      cancelCommands: cancelCommands.length,
+      failedOrStaleCommands: failedOrStaleCommands.length,
       recoveryTasks: recoveryTasks.length,
       chapterBatchTasks: chapterBatchTasks.length,
       waitingTasks: waitingTasks.length,
@@ -496,6 +595,7 @@ export function buildDirectorRecoverySampleAudit(
       untrackedDraftChapters: untrackedDraftChapters.length,
       generationJobs: input.jobs.length,
       diagnosedTasks: taskDiagnostics.length,
+      diagnosedCommands: commandDiagnostics.length,
     },
     samples: {
       takeoverCommands: takeoverCommands.slice(0, 5).map((command) => ({
@@ -524,6 +624,7 @@ export function buildDirectorRecoverySampleAudit(
       manualEditCandidates: manualEditCandidates.slice(0, 12),
       untrackedDraftChapters: untrackedDraftChapters.slice(0, 12),
       taskDiagnostics: taskDiagnostics.slice(0, 12),
+      commandDiagnostics: commandDiagnostics.slice(0, 12),
     },
   };
 }

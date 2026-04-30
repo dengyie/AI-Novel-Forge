@@ -106,6 +106,42 @@ test("director recovery sample audit classifies real-data recovery fixtures", ()
         }),
         updatedAt: "2026-04-29T00:02:00.000Z",
       },
+      {
+        id: "cmd-confirm",
+        taskId: "task-front10",
+        novelId: "novel-2",
+        commandType: "confirm_candidate",
+        status: "failed",
+        payloadJson: JSON.stringify({ candidateId: "candidate-1" }),
+        updatedAt: "2026-04-29T00:09:00.000Z",
+      },
+      {
+        id: "cmd-title",
+        taskId: "task-front10",
+        novelId: "novel-2",
+        commandType: "repair_chapter_titles",
+        status: "stale",
+        payloadJson: JSON.stringify({}),
+        updatedAt: "2026-04-29T00:10:00.000Z",
+      },
+      {
+        id: "cmd-retry",
+        taskId: "task-timeout",
+        novelId: "novel-3",
+        commandType: "retry",
+        status: "failed",
+        payloadJson: JSON.stringify({}),
+        updatedAt: "2026-04-29T00:11:00.000Z",
+      },
+      {
+        id: "cmd-cancel",
+        taskId: "task-timeout",
+        novelId: "novel-3",
+        commandType: "cancel",
+        status: "succeeded",
+        payloadJson: JSON.stringify({}),
+        updatedAt: "2026-04-29T00:12:00.000Z",
+      },
     ],
     jobs: [
       {
@@ -170,11 +206,17 @@ test("director recovery sample audit classifies real-data recovery fixtures", ()
 
   assert.equal(audit.counts.autoDirectorTasks, 5);
   assert.equal(audit.counts.takeoverCommands, 1);
+  assert.equal(audit.counts.confirmCandidateCommands, 1);
+  assert.equal(audit.counts.titleRepairCommands, 1);
+  assert.equal(audit.counts.retryOrResumeCommands, 1);
+  assert.equal(audit.counts.cancelCommands, 1);
+  assert.equal(audit.counts.failedOrStaleCommands, 4);
   assert.equal(audit.counts.recoveryTasks, 4);
   assert.equal(audit.counts.chapterBatchTasks, 1);
   assert.equal(audit.counts.waitingTasks, 1);
   assert.equal(audit.counts.contextlessTakeoverRecoveryTasks, 1);
   assert.equal(audit.counts.diagnosedTasks, 5);
+  assert.equal(audit.counts.diagnosedCommands, 4);
   assert.equal(audit.counts.manualEditCandidates, 1);
   assert.equal(audit.counts.manualEditHashChanged, 1);
   assert.equal(audit.counts.draftBaselineArtifacts, 1);
@@ -199,6 +241,15 @@ test("director recovery sample audit classifies real-data recovery fixtures", ()
   assert.equal(
     audit.samples.taskDiagnostics.find((diagnosis) => diagnosis.taskId === "task-old-fk").supersededByTaskId,
     "task-front10",
+  );
+  assert.deepEqual(
+    audit.samples.commandDiagnostics.map((diagnosis) => diagnosis.code),
+    [
+      "candidate_confirmation_command_needs_recovery",
+      "takeover_command_failed",
+      "recovery_command_failed",
+      "title_repair_failure_isolated",
+    ],
   );
   assert.equal(audit.samples.manualEditCandidates[0].hashChanged, true);
   assert.equal(audit.samples.untrackedDraftChapters[0].chapterId, "chapter-2");
