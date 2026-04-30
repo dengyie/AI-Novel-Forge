@@ -102,6 +102,7 @@
 - 2026-04-30 已完成 P0-B 质量闭环 MVP 第一刀：章节审校和批量 pipeline 会把 `chapter_retention_contract / continuity_state / rolling_window_review` 评估成统一质量闭环状态，记录到章节风险标记，并用 `patch_repair / replan / continue` 驱动后续处理
 - 2026-04-30 已完成 P0-E1 Artifact Ledger 查询真相层第一刀：书级 AI 驾驶舱开始消费持久化产物账本，展示活跃、过期、受保护、修复项、依赖数量、按类型汇总和最近产物记录
 - 2026-04-30 已扩展真实数据只读抽样审计：除旧项目接管、恢复任务、章节批次、手动改文和缺正文账本基线外，新增候选确认、标题修复、retry/resume/continue、cancel 与失败/过期命令诊断
+- 2026-04-30 已完成 P0-E 状态驱动 Replan 第一刀：`PlannerService.replan` 的实际重规划窗口改由 PromptAsset 结构化 AI 输出决定触发理由、章节选择、窗口理由和修复意图，确定性代码只做可用章节过滤与窗口上限校验
 
 当前唯一主线仍然是 `P0`：
 
@@ -183,7 +184,7 @@ P0 的默认主链统一为：
 4. `P0-E1 / Artifact Ledger`：已完成查询真相层第一刀，书级投影可直接读取持久化账本的 active/stale/protected/dependency/content hash 基础状态；后续补齐写入事件全覆盖、legacy backfill 审计和局部恢复操作。
 5. `P0-E1 / PolicyEngine`：PolicyEngine 硬 gate 深化，覆盖高成本审校、高风险修复、大范围自动执行、覆盖用户内容等场景。
 6. `P0-B / 质量闭环`：已完成 MVP 第一刀，`chapter_retention_contract / continuity_state / rolling_window_review` 会在审校后形成统一评估状态并记录到章节风险标记；后续接入 Ledger 真相层、连续修复失败计数和 `character_governance_state`。
-7. `P0-E / Replan`：`PlannerService.replan` 的窗口决策、触发理由、章节选择切到 canonical/state-driven 主判断。
+7. `P0-E / Replan`：已完成第一刀，`PlannerService.replan` 的实际执行窗口由 AI 结构化决策消费 canonical state、章节目标、审校报告和伏笔账本；确定性代码只做安全过滤、范围校验和窗口上限控制。后续把 Replan 结果写入 Ledger 事件并驱动后续批次自动续跑。
 8. `P0-B / 任务单门禁`：已完成第一刀，`purpose / boundary / taskSheet / sceneCards` 具备 shared 合同、schema 校验、AI 语义可用性门禁和同步前阻断；后续继续把质量结果写入 Ledger 真相层。
 9. `P0-B / 修复策略`：已完成第一刀，章节 repair 默认先走 `patch_first` 局部补丁，`heavy_repair` 才允许整章修复；后续把补丁失败次数、保护正文和动态角色边界接入质量闭环与 Ledger。
 10. `P0-B / 模型路由`：把模型路由从 `planner / writer / review / repair` 粗粒度推进到小说生产阶段级路由与 fallback。
