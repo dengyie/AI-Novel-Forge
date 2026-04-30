@@ -186,6 +186,20 @@ export default function DirectorBookAutomationCard({
   const artifactRows = projection?.artifactSummary.byType?.slice(0, 3) ?? [];
   const usageSummary = projection?.usageSummary ?? null;
   const stepUsage = projection?.stepUsage?.slice(0, 2) ?? [];
+  const artifactInsightLines = [
+    projection?.artifactSummary.affectedChapterCount
+      ? `影响 ${projection.artifactSummary.affectedChapterCount} 个章节`
+      : null,
+    projection?.artifactSummary.recentStaleArtifacts?.length
+      ? `${projection.artifactSummary.recentStaleArtifacts.length} 个产物需复核`
+      : null,
+    projection?.artifactSummary.recentRepairArtifacts?.length
+      ? `${projection.artifactSummary.recentRepairArtifacts.length} 条修复记录`
+      : null,
+    projection?.artifactSummary.recentVersionedArtifacts?.length
+      ? `${projection.artifactSummary.recentVersionedArtifacts.length} 个产物有新版本`
+      : null,
+  ].filter((line): line is string => Boolean(line));
 
   return (
     <div className={cn("rounded-lg border p-3", statusClassName(status))}>
@@ -244,6 +258,13 @@ export default function DirectorBookAutomationCard({
               </Badge>
             ))}
           </div>
+          {artifactInsightLines.length > 0 ? (
+            <div className="mt-2 flex flex-wrap gap-1.5 text-[11px] text-muted-foreground">
+              {artifactInsightLines.map((line) => (
+                <span key={line} className="rounded-full bg-muted/40 px-2 py-0.5">{line}</span>
+              ))}
+            </div>
+          ) : null}
         </div>
       ) : null}
 

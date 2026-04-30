@@ -311,8 +311,13 @@ export interface DirectorBookAutomationArtifactSummary {
   protectedUserContentCount: number;
   repairTicketCount: number;
   dependencyCount?: number;
+  affectedChapterCount?: number;
+  affectedChapterIds?: string[];
   byType?: DirectorBookAutomationArtifactTypeSummary[];
   recentArtifacts?: DirectorBookAutomationRecentArtifact[];
+  recentStaleArtifacts?: DirectorBookAutomationRecentArtifact[];
+  recentRepairArtifacts?: DirectorBookAutomationRecentArtifact[];
+  recentVersionedArtifacts?: DirectorBookAutomationRecentArtifact[];
 }
 
 export interface DirectorBookAutomationArtifactTypeSummary {
@@ -331,6 +336,8 @@ export interface DirectorBookAutomationRecentArtifact {
   targetType: DirectorArtifactTargetType | string;
   targetId?: string | null;
   status: DirectorArtifactStatus | string;
+  source?: DirectorArtifactSource | string | null;
+  version?: number | null;
   protectedUserContent?: boolean | null;
   dependencyCount: number;
   contentHash?: string | null;

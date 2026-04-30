@@ -9,6 +9,9 @@ const {
   stableDirectorContentHash,
   summarizeDirectorArtifactLedger,
 } = require("../dist/services/novel/director/runtime/DirectorArtifactLedger.js");
+const {
+  buildDirectorArtifactBookSummary,
+} = require("../dist/services/novel/director/runtime/DirectorArtifactLedgerQueryService.js");
 
 function chapterDraft(hash, version = 1) {
   return {
@@ -171,4 +174,54 @@ test("director artifact ledger summary exposes missing, stale and protected cont
   assert.deepEqual(summary.staleArtifacts.map((artifact) => artifact.id), [staleAudit.id]);
   assert.deepEqual(summary.protectedUserContentArtifacts.map((artifact) => artifact.id), [protectedDraft.id]);
   assert.deepEqual(summary.needsRepairArtifacts, []);
+});
+
+test("director artifact book summary exposes affected chapters and repair signals", () => {
+  const summary = buildDirectorArtifactBookSummary([
+    {
+      id: "draft-1",
+      artifactType: "chapter_draft",
+      targetType: "chapter",
+      targetId: "chapter-1",
+      version: 2,
+      status: "active",
+      source: "auto_repaired",
+      protectedUserContent: false,
+      contentHash: "hash-1",
+      updatedAt: new Date("2026-04-30T05:00:00.000Z"),
+      dependencies: [],
+    },
+    {
+      id: "audit-1",
+      artifactType: "audit_report",
+      targetType: "chapter",
+      targetId: "chapter-1",
+      version: 1,
+      status: "stale",
+      source: "ai_generated",
+      protectedUserContent: false,
+      contentHash: "hash-2",
+      updatedAt: new Date("2026-04-30T05:01:00.000Z"),
+      dependencies: [{ id: "dep-1" }],
+    },
+    {
+      id: "repair-1",
+      artifactType: "repair_ticket",
+      targetType: "chapter",
+      targetId: "chapter-2",
+      version: 1,
+      status: "active",
+      source: "ai_generated",
+      protectedUserContent: false,
+      contentHash: "hash-3",
+      updatedAt: new Date("2026-04-30T05:02:00.000Z"),
+      dependencies: [],
+    },
+  ]);
+
+  assert.equal(summary.affectedChapterCount, 2);
+  assert.deepEqual(summary.affectedChapterIds, ["chapter-1", "chapter-2"]);
+  assert.deepEqual(summary.recentStaleArtifacts.map((item) => item.id), ["audit-1"]);
+  assert.deepEqual(summary.recentRepairArtifacts.map((item) => item.id), ["repair-1", "draft-1"]);
+  assert.deepEqual(summary.recentVersionedArtifacts.map((item) => item.id), ["draft-1"]);
 });

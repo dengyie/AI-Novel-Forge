@@ -10,7 +10,9 @@ export interface DirectorArtifactLedgerQueryRow {
   artifactType: string;
   targetType: string;
   targetId: string | null;
+  version: number;
   status: string;
+  source: string;
   protectedUserContent: boolean | null;
   contentHash: string | null;
   updatedAt: Date | string;
@@ -82,6 +84,8 @@ function mapRecentArtifact(row: DirectorArtifactLedgerQueryRow): DirectorBookAut
     targetType: row.targetType,
     targetId: row.targetId,
     status: row.status,
+    source: row.source,
+    version: row.version,
     protectedUserContent: row.protectedUserContent,
     dependencyCount: row.dependencies.length,
     contentHash: row.contentHash,
@@ -97,17 +101,35 @@ export function buildDirectorArtifactBookSummary(
   const protectedUserContentCount = rows.filter((row) => row.protectedUserContent === true).length;
   const repairTicketCount = rows.filter((row) => row.artifactType === "repair_ticket" && row.status !== "rejected").length;
   const dependencyCount = rows.reduce((sum, row) => sum + row.dependencies.length, 0);
+  const affectedChapterIds = Array.from(new Set(
+    rows
+      .filter((row) => row.targetType === "chapter" && row.targetId)
+      .map((row) => row.targetId as string),
+  ));
+  const recentRows = rows.slice().sort(compareUpdatedDesc);
   return {
     activeCount,
     staleCount,
     protectedUserContentCount,
     repairTicketCount,
     dependencyCount,
+    affectedChapterCount: affectedChapterIds.length,
+    affectedChapterIds: affectedChapterIds.slice(0, 12),
     byType: summarizeTypeRows(rows),
-    recentArtifacts: rows
-      .slice()
-      .sort(compareUpdatedDesc)
+    recentArtifacts: recentRows
       .slice(0, 8)
+      .map(mapRecentArtifact),
+    recentStaleArtifacts: recentRows
+      .filter((row) => row.status === "stale")
+      .slice(0, 6)
+      .map(mapRecentArtifact),
+    recentRepairArtifacts: recentRows
+      .filter((row) => row.source === "auto_repaired" || row.artifactType === "repair_ticket")
+      .slice(0, 6)
+      .map(mapRecentArtifact),
+    recentVersionedArtifacts: recentRows
+      .filter((row) => row.version > 1)
+      .slice(0, 6)
       .map(mapRecentArtifact),
   };
 }
@@ -122,7 +144,9 @@ export class DirectorArtifactLedgerQueryService {
         artifactType: true,
         targetType: true,
         targetId: true,
+        version: true,
         status: true,
+        source: true,
         protectedUserContent: true,
         contentHash: true,
         updatedAt: true,
