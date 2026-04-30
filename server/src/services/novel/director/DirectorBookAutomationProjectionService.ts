@@ -136,6 +136,25 @@ function extractRunMode(seedPayloadJson: string | null | undefined): string | nu
   return null;
 }
 
+function extractCircuitBreaker(
+  seedPayloadJson: string | null | undefined,
+): DirectorBookAutomationProjection["circuitBreaker"] {
+  const seedPayload = parseJsonOrNull<Record<string, unknown>>(seedPayloadJson);
+  const autoExecution = seedPayload?.autoExecution;
+  if (!autoExecution || typeof autoExecution !== "object") {
+    return null;
+  }
+  const circuitBreaker = (autoExecution as { circuitBreaker?: unknown }).circuitBreaker;
+  if (!circuitBreaker || typeof circuitBreaker !== "object") {
+    return null;
+  }
+  const status = (circuitBreaker as { status?: unknown }).status;
+  if (status !== "open" && status !== "closed") {
+    return null;
+  }
+  return circuitBreaker as DirectorBookAutomationProjection["circuitBreaker"];
+}
+
 function buildWhereByNovelOrTask(novelId: string, taskIds: string[]) {
   const uniqueTaskIds = Array.from(new Set(taskIds.filter(Boolean)));
   if (uniqueTaskIds.length === 0) {
@@ -414,6 +433,7 @@ export class DirectorBookAutomationProjectionService {
     const policyMode = runtimeProjection?.policyMode
       ?? parseJsonOrNull<{ mode?: DirectorPolicyMode }>(latestRun?.policyJson)?.mode
       ?? null;
+    const circuitBreaker = extractCircuitBreaker(latestTask?.seedPayloadJson);
     const taskStatus = latestTask?.pendingManualRecovery
       ? "waiting_recovery"
       : workflowStatusToBookStatus(latestTask?.status);
@@ -427,7 +447,8 @@ export class DirectorBookAutomationProjectionService {
           : runtimeStatus !== "idle"
             ? runtimeStatus
             : taskStatus;
-    const requiresUserAction = status === "waiting_approval"
+    const requiresUserAction = circuitBreaker?.status === "open"
+      || status === "waiting_approval"
       || status === "waiting_recovery"
       || status === "blocked"
       || status === "failed";
@@ -565,6 +586,7 @@ export class DirectorBookAutomationProjectionService {
       usageSummary: usageTelemetry.summary,
       recentUsage: usageTelemetry.recentUsage,
       stepUsage: usageTelemetry.stepUsage,
+      circuitBreaker,
       activeCommandCount,
       pendingCommandCount,
       autoApprovalRecordCount,

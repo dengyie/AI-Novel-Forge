@@ -707,6 +707,7 @@ export class NovelCorePipelineService {
               issues: final.issues,
               runtimePackage: chapterResult.runtimePackage,
               source: chapterResult.retryCountUsed > 0 ? "repair_recheck" : "pipeline_review",
+              taskId: runtimePayload.workflowTaskId,
             }).catch((error) => {
               logPipelineError("记录章节质量闭环状态失败", {
                 jobId,

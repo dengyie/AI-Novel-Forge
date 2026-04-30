@@ -168,6 +168,17 @@ function artifactTypeLabel(type: string): string {
   return labels[type] ?? type;
 }
 
+function recoveryActionLabel(action: NonNullable<DirectorBookAutomationProjection["circuitBreaker"]>["recoveryAction"]): string | null {
+  const labels: Record<string, string> = {
+    retry: "重试当前步骤",
+    resume_after_review: "查看原因后继续",
+    switch_model: "切换模型后继续",
+    confirm_protected_content: "确认保护内容边界",
+    manual_repair: "先处理章节问题",
+  };
+  return action ? labels[action] ?? null : null;
+}
+
 export default function DirectorBookAutomationCard({
   projection,
   fallbackSummary,
@@ -190,6 +201,8 @@ export default function DirectorBookAutomationCard({
   const artifactRows = projection?.artifactSummary.byType?.slice(0, 3) ?? [];
   const usageSummary = projection?.usageSummary ?? null;
   const stepUsage = projection?.stepUsage?.slice(0, 2) ?? [];
+  const circuitBreaker = projection?.circuitBreaker?.status === "open" ? projection.circuitBreaker : null;
+  const circuitRecovery = recoveryActionLabel(circuitBreaker?.recoveryAction ?? null);
   const artifactInsightLines = [
     projection?.artifactSummary.affectedChapterCount
       ? `影响 ${projection.artifactSummary.affectedChapterCount} 个章节`
@@ -225,6 +238,13 @@ export default function DirectorBookAutomationCard({
           <div className="mt-2 line-clamp-2 rounded-md border bg-background/70 px-3 py-2 text-xs leading-5 text-muted-foreground">
             {projection?.requiresUserAction ? "需要处理：" : null}
             {detail || summary}
+          </div>
+        ) : null}
+
+        {circuitBreaker ? (
+          <div className="mt-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs leading-5 text-destructive">
+            {circuitBreaker.message || "自动推进已暂停，处理后可以继续。"}
+            {circuitRecovery ? ` 建议：${circuitRecovery}。` : null}
           </div>
         ) : null}
 
@@ -279,6 +299,14 @@ export default function DirectorBookAutomationCard({
 
       {summary ? (
         <div className="mt-3 text-xs leading-5 text-muted-foreground">{summary}</div>
+      ) : null}
+
+      {circuitBreaker ? (
+        <div className="mt-3 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs leading-5 text-destructive">
+          <div className="font-medium">自动推进已暂停</div>
+          <div className="mt-1">{circuitBreaker.message || "系统检测到继续自动推进可能反复失败。"}</div>
+          {circuitRecovery ? <div className="mt-1">建议：{circuitRecovery}。</div> : null}
+        </div>
       ) : null}
 
       {usageSummary ? (

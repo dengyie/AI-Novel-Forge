@@ -132,6 +132,7 @@ export interface DirectorCircuitBreakerState {
   replanLoopCount?: number;
   modelFailureCount?: number;
   usageAnomalyCount?: number;
+  lastUsageRecordId?: string | null;
   lastEventAt?: string | null;
   recoveryAction?: "retry" | "resume_after_review" | "switch_model" | "confirm_protected_content" | "manual_repair" | null;
 }

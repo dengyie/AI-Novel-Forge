@@ -5,6 +5,7 @@ import {
   type ChapterQualityLoopAssessment,
 } from "@ai-novel/shared/types/chapterQualityLoop";
 import { prisma } from "../../../db/prisma";
+import { directorAutomationLedgerEventService } from "../director/runtime/DirectorAutomationLedgerEventService";
 
 interface RecordChapterQualityLoopInput {
   novelId: string;
@@ -14,6 +15,8 @@ interface RecordChapterQualityLoopInput {
   issues: ReviewIssue[];
   runtimePackage?: ChapterRuntimePackage | null;
   source: "manual_review" | "pipeline_review" | "repair_recheck";
+  taskId?: string | null;
+  runId?: string | null;
 }
 
 function parseJsonObject(value: string | null | undefined): Record<string, unknown> {
@@ -102,6 +105,12 @@ export class ChapterQualityLoopService {
           : { chapterStatus: "needs_repair" }),
       },
     });
+    await directorAutomationLedgerEventService.recordQualityLoopAssessment({
+      taskId: input.taskId,
+      runId: input.runId,
+      novelId: input.novelId,
+      assessment,
+    }).catch(() => null);
     return assessment;
   }
 }
