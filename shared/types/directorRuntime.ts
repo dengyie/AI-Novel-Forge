@@ -1,5 +1,6 @@
 import type { LLMProvider } from "./llm";
 import type { NovelWorkflowStage } from "./novelWorkflow";
+import type { DirectorCircuitBreakerState } from "./novelDirector";
 
 export const DIRECTOR_POLICY_MODES = [
   "suggest_only",
@@ -144,7 +145,11 @@ export type DirectorEventType =
   | "policy_changed"
   | "approval_required"
   | "quality_issue_found"
+  | "quality_loop_assessed"
   | "repair_ticket_created"
+  | "replan_run_created"
+  | "circuit_breaker_opened"
+  | "circuit_breaker_reset"
   | "continue_with_risk";
 
 export interface DirectorEvent {
@@ -251,6 +256,7 @@ export interface DirectorRuntimeProjection {
   usageSummary?: DirectorLlmUsageSummary | null;
   recentUsage?: DirectorLlmUsageRecordSummary[];
   stepUsage?: DirectorStepUsageSummary[];
+  circuitBreaker?: DirectorCircuitBreakerState | null;
 }
 
 export interface DirectorRuntimeEventHistoryResponse {
@@ -370,6 +376,7 @@ export interface DirectorBookAutomationProjection {
   usageSummary?: DirectorLlmUsageSummary | null;
   recentUsage?: DirectorLlmUsageRecordSummary[];
   stepUsage?: DirectorStepUsageSummary[];
+  circuitBreaker?: DirectorCircuitBreakerState | null;
   activeCommandCount: number;
   pendingCommandCount: number;
   autoApprovalRecordCount: number;

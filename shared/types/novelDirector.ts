@@ -106,6 +106,36 @@ export const DIRECTOR_FULL_BOOK_AUTOPILOT_INTERRUPT_REASONS = [
 
 export type DirectorFullBookAutopilotInterruptReason = typeof DIRECTOR_FULL_BOOK_AUTOPILOT_INTERRUPT_REASONS[number];
 
+export const DIRECTOR_CIRCUIT_BREAKER_REASONS = [
+  "auto_repair_exhausted",
+  "replan_loop",
+  "model_unavailable",
+  "service_unavailable",
+  "protected_user_content",
+  "unrecoverable_data_risk",
+  "usage_anomaly",
+] as const;
+
+export type DirectorCircuitBreakerReason = typeof DIRECTOR_CIRCUIT_BREAKER_REASONS[number];
+
+export interface DirectorCircuitBreakerState {
+  status: "closed" | "open";
+  reason?: DirectorCircuitBreakerReason | null;
+  message?: string | null;
+  openedAt?: string | null;
+  resetAt?: string | null;
+  chapterId?: string | null;
+  chapterOrder?: number | null;
+  nodeKey?: string | null;
+  failureCount?: number;
+  patchFailureCount?: number;
+  replanLoopCount?: number;
+  modelFailureCount?: number;
+  usageAnomalyCount?: number;
+  lastEventAt?: string | null;
+  recoveryAction?: "retry" | "resume_after_review" | "switch_model" | "confirm_protected_content" | "manual_repair" | null;
+}
+
 export const DIRECTOR_MIN_TARGET_CHAPTER_COUNT = 12;
 export const DIRECTOR_MAX_TARGET_CHAPTER_COUNT = 2000;
 
@@ -190,6 +220,7 @@ export interface DirectorAutoExecutionState extends DirectorAutoExecutionPlan {
   pipelineJobId?: string | null;
   pipelineStatus?: PipelineJobStatus | null;
   qualityRepairRisk?: DirectorQualityRepairRisk | null;
+  circuitBreaker?: DirectorCircuitBreakerState | null;
 }
 
 export type DirectorQualityRepairRiskLevel = "low" | "large_scope" | "replan";
