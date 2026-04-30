@@ -5,6 +5,10 @@ import { runTextPrompt } from "../../../prompting/core/promptRunner";
 import { buildChapterRepairContextBlocks } from "../../../prompting/prompts/novel/chapterLayeredContext";
 import { chapterRepairPrompt } from "../../../prompting/prompts/novel/review.prompts";
 import type { ChapterRuntimeRequestInput } from "./chapterRuntimeSchema";
+import {
+  ChapterPatchRepairFailedError,
+  ChapterPatchRepairService,
+} from "../chapterPatchRepairService";
 
 export interface PipelineRuntimeHooks {
   onCheckCancelled?: () => Promise<void>;
@@ -255,6 +259,32 @@ async function repairDraftContent(input: {
     input.options.repairMode,
     input.runtimePackage.audit.openIssues.map((issue) => issue.code),
   );
+  const patchRepairService = new ChapterPatchRepairService();
+  try {
+    const patched = await patchRepairService.repair({
+      novelId: input.runtimePackage.novelId,
+      chapterId: input.runtimePackage.chapterId,
+      novelTitle: input.novelTitle,
+      chapterTitle: input.chapterTitle,
+      content: input.content,
+      issues,
+      runtimePackage: input.runtimePackage,
+      provider: input.options.provider,
+      model: input.options.model,
+      temperature: input.options.temperature,
+      repairMode: input.options.repairMode,
+      modeHint,
+    });
+    return patched.content;
+  } catch (error) {
+    if (input.options.repairMode !== "heavy_repair") {
+      throw error;
+    }
+    if (!(error instanceof ChapterPatchRepairFailedError)) {
+      throw error;
+    }
+  }
+
   const repairContextBlocks = input.runtimePackage.context.chapterRepairContext
     ? buildChapterRepairContextBlocks(input.runtimePackage.context.chapterRepairContext)
     : undefined;

@@ -159,15 +159,27 @@ test("runPipelineChapterWithRuntime does not save a generated draft twice when w
 });
 
 test("runPipelineChapterWithRuntime defaults to a single repair pass before stopping", async () => {
-  const originalRunTextPrompt = promptRunner.runTextPrompt;
+  const originalRunStructuredPrompt = promptRunner.runStructuredPrompt;
   const stages = [];
   const finalizeInputs = [];
   const savedDrafts = [];
   const generationStates = [];
   let reviewCount = 0;
 
-  promptRunner.runTextPrompt = async () => ({
-    output: "修后正文",
+  promptRunner.runStructuredPrompt = async () => ({
+    output: {
+      strategy: "patch_first",
+      summary: "补足承接。",
+      patches: [{
+        id: "patch-1",
+        targetExcerpt: "初审正文需要承接。",
+        replacement: "修后正文补足承接。",
+        reason: "补足承接。",
+        issueIds: [],
+      }],
+      requiresFullRewrite: false,
+      escalationReason: null,
+    },
   });
 
   try {
@@ -200,7 +212,7 @@ test("runPipelineChapterWithRuntime defaults to a single repair pass before stop
           reviewCount += 1;
           finalizeInputs.push(content);
           return {
-            finalContent: reviewCount === 1 ? "初审正文" : "修后复审正文",
+            finalContent: reviewCount === 1 ? "初审正文需要承接。" : "修后复审正文",
             runtimePackage: createRuntimePackage(reviewCount === 1 ? 72 : 73),
           };
         },
@@ -222,7 +234,7 @@ test("runPipelineChapterWithRuntime defaults to a single repair pass before stop
     );
 
     assert.deepEqual(stages, ["generating_chapters", "reviewing", "repairing", "reviewing"]);
-    assert.deepEqual(finalizeInputs, ["生成后的正文", "修后正文"]);
+    assert.deepEqual(finalizeInputs, ["生成后的正文", "修后正文补足承接。"]);
     assert.equal(reviewCount, 2);
     assert.equal(result.retryCountUsed, 1);
     assert.equal(result.pass, false);
@@ -233,11 +245,11 @@ test("runPipelineChapterWithRuntime defaults to a single repair pass before stop
         generationState: "drafted",
       },
       {
-        content: "修后正文",
+        content: "修后正文补足承接。",
         generationState: "repaired",
       },
     ]);
   } finally {
-    promptRunner.runTextPrompt = originalRunTextPrompt;
+    promptRunner.runStructuredPrompt = originalRunStructuredPrompt;
   }
 });

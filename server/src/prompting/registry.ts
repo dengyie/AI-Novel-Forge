@@ -282,6 +282,10 @@ const promptAssetLoaderEntries: PromptAssetLoaderEntry[] = [
     load: () => require("./prompts/novel/review.prompts").chapterRepairPrompt as UnknownPromptAsset,
   },
   {
+    key: "novel.review.patch@v1",
+    load: () => require("./prompts/novel/chapterPatchRepair.prompts").chapterPatchRepairPrompt as UnknownPromptAsset,
+  },
+  {
     key: "novel.framing.suggest@v1",
     load: () => require("./prompts/novel/framing.prompts").novelFramingSuggestionPrompt as UnknownPromptAsset,
   },

@@ -217,6 +217,7 @@ export interface ReviewOptions extends LLMGenerateOptions {
 export interface RepairOptions extends LLMGenerateOptions {
   reviewIssues?: ReviewIssue[];
   auditIssueIds?: string[];
+  repairMode?: "detect_only" | "light_repair" | "heavy_repair" | "continuity_only" | "character_only" | "ending_only";
 }
 
 export interface HookGenerateOptions extends LLMGenerateOptions {

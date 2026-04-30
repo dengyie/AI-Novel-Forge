@@ -98,6 +98,7 @@
 - 2026-04-30 当前分支已完成第一版执行面隔离、命令队列、独立 Director Worker、轻量 projection 轮询、stale lease 自动重排、等待恢复优先展示和章节执行侧栏状态同步；下一轮重点不再扩入口，而是继续收口执行面二次隔离、真实数据回归、质量门禁和局部修复闭环
 - 2026-04-30 已补齐书级自动化状态投影第一版：书页可按小说聚合自动导演任务、命令、运行事件、自动确认记录和产物概况，左侧 AI 驾驶舱开始以“这本书的推进状态”为主语展示进展，任务中心继续保留执行详情入口
 - 2026-04-30 已完成 P0-B 章节任务单质量门禁第一刀：`purpose / boundary / taskSheet / sceneCards` 进入 shared 合同、服务端结构校验和 AI 语义可用性评估；全书自动模式下坏任务单会自动重生或修复，AI 副驾模式才进入确认边界；卷规划同步到章节执行区前会阻断无效执行合同
+- 2026-04-30 已完成 P0-B Patch-First 修复策略第一刀：章节自动修复和手动修复入口默认先生成可安全应用的局部补丁，只有 `heavy_repair` 等明确重写边界才进入整章修复；歧义片段、空结果和整章重写计划会被阻断，避免普通质量问题直接升级为大范围覆盖
 
 当前唯一主线仍然是 `P0`：
 
@@ -181,7 +182,7 @@ P0 的默认主链统一为：
 6. `P0-B / 质量闭环`：`reader_promise / chapter_retention_contract / continuity_state / rolling_window_review / character_governance_state` 形成评估、失效、局部修复、再评估闭环。
 7. `P0-E / Replan`：`PlannerService.replan` 的窗口决策、触发理由、章节选择切到 canonical/state-driven 主判断。
 8. `P0-B / 任务单门禁`：已完成第一刀，`purpose / boundary / taskSheet / sceneCards` 具备 shared 合同、schema 校验、AI 语义可用性门禁和同步前阻断；后续继续把质量结果写入 Ledger 真相层。
-9. `P0-B / 修复策略`：补章节 repair 的 `patch_first` 默认策略，并把动态角色系统推进到执行期角色筛选、修复边界与 replan 判断。
+9. `P0-B / 修复策略`：已完成第一刀，章节 repair 默认先走 `patch_first` 局部补丁，`heavy_repair` 才允许整章修复；后续把补丁失败次数、保护正文和动态角色边界接入质量闭环与 Ledger。
 10. `P0-B / 模型路由`：把模型路由从 `planner / writer / review / repair` 粗粒度推进到小说生产阶段级路由与 fallback。
 11. `P0-C / P0-D`：卷级工作台消费链，继续把 `critique / rebalance / uncertainty / canonical payoff ledger` 接成默认消费链，并让卷级账本视图成为主视图。
 12. `P0-F`：新手入口收敛，首页、创建页、空状态统一为“AI 自动导演推荐入口 + 手动高级入口”，关键节点只保留一个推荐下一步。
@@ -240,7 +241,7 @@ P0 的默认主链统一为：
 - 章节细化虽然已有结构校验与字段别名兼容，但 `purpose / taskSheet` 仍偏“非空即过”，坏文本和低可用产物仍可能进入同步与后续消费
 - `taskSheet` 仍是单文本字段，当前更适合继续收口为“轻量执行摘要”而不是重型分段合同；`artifactHealth` 也更适合作为诊断与提醒，而不是新的正文生成阻塞点
 - 模型路由仍以 `planner / writer / review / repair` 为粗粒度，尚未升级到小说生产阶段级主路由与 fallback 链
-- 章节 repair 已共用统一上下文，但默认仍缺 `patch_first` 策略与“局部修补优先、整章重写升级触发”的明确合同
+- 章节 repair 已共用统一上下文，并完成默认 `patch_first` 第一刀；后续缺口转为补丁失败计数、保护正文 gate、修复记录入 Ledger 和再评估闭环
 - 动态角色系统虽然已进入 planner，但在执行期角色筛选、repair 边界、缺席风险提示和 replan 判断中的行为驱动仍不够深
 - 批量执行、异常恢复、旧资产兼容路径下，书级 / 卷级 / 角色 / payoff ledger 资产仍可能出现残余分叉
 - 章节正文默认已经回退为整章一次性生成；`sceneCards` 与执行合同刷新不再适合作为正文热路径的默认硬依赖，但仍可保留为细化、诊断、局部修复和可解释性辅助资产
@@ -254,7 +255,7 @@ P0 的默认主链统一为：
 - 把 `taskSheet` 收口为“轻量执行摘要”，优先稳定 `推进目标 / 必保事项 / 结尾要求 / 风险提示` 这类高价值字段；`sceneCards` 退回辅助资产，不再把分段合同刷新与按场景正文生成放进默认热路径
 - 给章节细化补 `artifactHealth / artifactHealthSummary`，但默认只用于诊断、提醒与任务可解释性，不把它抬成新的正文生成阻塞链；`front10_ready` 继续以“细化可用且健康基本通过”为目标，而不是追求重型合同完备
 - 将模型路由从粗粒度任务类型推进到小说阶段级路由与 fallback，优先覆盖 `chapter_purpose / chapter_boundary / chapter_task_sheet / chapter_write / chapter_review / chapter_patch`
-- 把章节 repair 的默认策略收口为 `patch_first`，只在跨段大面积损坏或用户明确要求时升级为整章重写
+- 把章节 repair 的默认策略继续收口到完整闭环：局部补丁失败要记录原因与次数，只有结构性缺章、连续补丁失败、受保护内容授权或用户明确要求时才升级整章重写
 - 为自动导演和任务中心补齐 `displayStatus / blockingReason / resumeAction / lastHealthyStage` 这类可解释状态合同，减少“看得到进度但不知道为什么停”的黑盒感
 - 让动态角色系统进一步进入执行期行为判断，尤其是参与角色筛选、结构 obligations、修复边界和后续 replan 决策
 - 把卷级工作台、章节细化 bundle、动态角色系统和新的 payoff ledger 继续压成同一套默认数据流，收掉剩余断点

@@ -87,7 +87,7 @@
 
 - 执行面隔离仍需二次收口：SQLite WAL / busy timeout、运行态 delta 持久化、可见工作区刷新边界，以及候选确认、标题修复等旧入口 command 化。
 - 真实 Prisma 抽样回归仍需覆盖旧项目接管、服务重启恢复、章节批次恢复、取消后重试、章节执行和状态版本。
-- 章节细化质量门禁已完成第一刀，`purpose / boundary / taskSheet / sceneCards` 会先经过结构校验和 AI 语义可用性评估，坏任务单不得直接进入章节同步或执行链。`patch_first` 修复策略、阶段级模型路由、质量产物闭环和新手入口收敛仍是完整 P0 产品目标的主要缺口。
+- 章节细化质量门禁已完成第一刀，`purpose / boundary / taskSheet / sceneCards` 会先经过结构校验和 AI 语义可用性评估，坏任务单不得直接进入章节同步或执行链。章节修复策略也已完成 `patch_first` 第一刀，默认先走可安全应用的局部补丁；后续缺口转为补丁失败计数、保护正文 gate、Ledger 入账、阶段级模型路由、质量产物闭环和新手入口收敛。
 
 ## 2.1 下一轮最高优先级开发队列
 
@@ -101,7 +101,7 @@
 6. **质量产物闭环**：`reader_promise / chapter_retention_contract / continuity_state / rolling_window_review / character_governance_state` 从记录型产物推进为评估、失效、局部修复、再评估闭环。
 7. **Planner / Replan 状态驱动化**：`PlannerService.replan` 的窗口决策、触发理由和章节选择切到 `CanonicalStateService / ContextAssemblyService / ChapterStateGoal`。
 8. **章节任务单质量门禁**：第一刀已完成。`purpose / boundary / taskSheet / sceneCards` 已有 shared 合同、服务端结构校验、AI 语义可用性评估和同步前阻断；后续把质量结论写入 Ledger 真相层，并接入局部修复闭环。
-9. **章节修复策略**：补 `patch_first` 默认策略；动态角色系统进入执行期角色筛选、修复边界和 replan 判断。
+9. **章节修复策略**：第一刀已完成。章节自动修复和手动修复入口默认先走 `patch_first` 局部补丁，`heavy_repair` 才进入整章修复；后续补齐连续补丁失败升级、保护正文 gate、修复记录入 Ledger，以及动态角色系统进入执行期角色筛选、修复边界和 replan 判断。
 10. **模型路由细化**：从 `planner / writer / review / repair` 粗粒度推进到小说生产阶段级路由与 fallback。
 11. **卷级工作台消费链**：把 `critique / rebalance / uncertainty / canonical payoff ledger` 接成卷级工作台默认消费链，并让卷级账本视图成为主视图。
 12. **新手入口收敛**：首页、创建页、空状态统一为“AI 自动导演推荐入口 + 手动高级入口”；关键节点只保留一个推荐下一步。

@@ -28,6 +28,10 @@ import {
   buildChapterRepairContextBlocks,
   withChapterRepairContext,
 } from "../../prompting/prompts/novel/chapterLayeredContext";
+import {
+  ChapterPatchRepairFailedError,
+  ChapterPatchRepairService,
+} from "./chapterPatchRepairService";
 
 type AuditContextOperation = "review" | "audit" | "repair";
 
@@ -183,6 +187,37 @@ export class NovelCoreReviewService {
       throw new ChapterContextAssemblyError(novelId, chapterId, "repair", error);
     }
     const repairContextBlocks = buildChapterRepairContextBlocks(repairContextPackage.chapterRepairContext);
+    const modeHint = this.getRepairModeHint(options.repairMode);
+    if (options.repairMode !== "heavy_repair") {
+      const patchRepairService = new ChapterPatchRepairService();
+      const patched = await patchRepairService.repair({
+        novelId,
+        chapterId,
+        novelTitle: novel.title,
+        chapterTitle: chapter.title,
+        content: chapter.content ?? "",
+        issues,
+        repairContext: repairContextPackage.chapterRepairContext,
+        provider: options.provider ?? "deepseek",
+        model: options.model,
+        temperature: options.temperature,
+        repairMode: options.repairMode ?? "light_repair",
+        modeHint,
+      });
+
+      return {
+        stream: createSingleChunkStream(patched.content),
+        onDone: async (fullContent: string, helpers: StreamDoneHelpers) => {
+          await this.finalizeRepairResult({
+            novelId,
+            chapterId,
+            options,
+            content: patched.content.trim() || fullContent,
+            helpers,
+          });
+        },
+      };
+    }
 
     const streamed = await streamTextPrompt({
       asset: chapterRepairPrompt,
@@ -193,6 +228,7 @@ export class NovelCoreReviewService {
         chapterContent: chapter.content ?? "",
         issuesJson: JSON.stringify(issues, null, 2),
         ragContext: ragContext || "",
+        modeHint,
       },
       contextBlocks: repairContextBlocks,
       options: {
@@ -205,37 +241,13 @@ export class NovelCoreReviewService {
     return {
       stream: streamed.stream as AsyncIterable<BaseMessageChunk>,
       onDone: async (fullContent: string, helpers: StreamDoneHelpers) => {
-        const runId = `chapter-repair:${chapterId}`;
-        helpers.writeFrame({
-          type: "run_status",
-          runId,
-          status: "running",
-          phase: "finalizing",
-          message: "修复稿已生成，正在保存正文并重新审校。",
-        });
         const completed = await streamed.complete;
-        const repairedContent = completed.output.trim() || fullContent;
-        await prisma.chapter.update({
-          where: { id: chapterId },
-          data: { content: repairedContent, generationState: "repaired" },
-        });
-        await syncChapterArtifacts(novelId, chapterId, repairedContent);
-
-        const review = await this.reviewChapter(novelId, chapterId, { ...options, content: repairedContent });
-        if (isPass(review.score)) {
-          await prisma.chapter.update({ where: { id: chapterId }, data: { generationState: "approved" } });
-          if (options.auditIssueIds?.length) {
-            await auditService.resolveIssues(novelId, options.auditIssueIds).catch(() => null);
-          }
-        }
-        helpers.writeFrame({
-          type: "run_status",
-          runId,
-          status: "succeeded",
-          phase: "completed",
-          message: isPass(review.score)
-            ? "章节修复已完成，本章已达到可继续推进状态。"
-            : "修复稿已保存，但仍有问题待继续处理。",
+        await this.finalizeRepairResult({
+          novelId,
+          chapterId,
+          options,
+          content: completed.output.trim() || fullContent,
+          helpers,
         });
       },
     };
@@ -472,4 +484,76 @@ export class NovelCoreReviewService {
       throw new ChapterContextAssemblyError(novelId, chapterId, operation, error);
     }
   }
+
+  private async finalizeRepairResult(input: {
+    novelId: string;
+    chapterId: string;
+    options: RepairOptions;
+    content: string;
+    helpers: StreamDoneHelpers;
+  }): Promise<void> {
+    const runId = `chapter-repair:${input.chapterId}`;
+    input.helpers.writeFrame({
+      type: "run_status",
+      runId,
+      status: "running",
+      phase: "finalizing",
+      message: "修复稿已生成，正在保存正文并重新审校。",
+    });
+
+    const repairedContent = input.content.trim();
+    if (!repairedContent) {
+      throw new ChapterPatchRepairFailedError("修复结果为空，未保存章节正文。");
+    }
+
+    await prisma.chapter.update({
+      where: { id: input.chapterId },
+      data: { content: repairedContent, generationState: "repaired" },
+    });
+    await syncChapterArtifacts(input.novelId, input.chapterId, repairedContent);
+
+    const review = await this.reviewChapter(input.novelId, input.chapterId, {
+      ...input.options,
+      content: repairedContent,
+    });
+    if (isPass(review.score)) {
+      await prisma.chapter.update({ where: { id: input.chapterId }, data: { generationState: "approved" } });
+      if (input.options.auditIssueIds?.length) {
+        await auditService.resolveIssues(input.novelId, input.options.auditIssueIds).catch(() => null);
+      }
+    }
+    input.helpers.writeFrame({
+      type: "run_status",
+      runId,
+      status: "succeeded",
+      phase: "completed",
+      message: isPass(review.score)
+        ? "章节修复已完成，本章已达到可继续推进状态。"
+        : "修复稿已保存，但仍有问题待继续处理。",
+    });
+  }
+
+  private getRepairModeHint(
+    repairMode: RepairOptions["repairMode"],
+  ): string {
+    switch (repairMode) {
+      case "continuity_only":
+        return "优先修连续性、时间线和事件承接，不做大幅风格重写。";
+      case "character_only":
+        return "优先修人物言行一致性、动机和关系表现，不改变主线任务。";
+      case "ending_only":
+        return "优先修章节收束、钩子和结尾决断感，让章节尾部更有拉力。";
+      case "heavy_repair":
+        return "允许较大幅度重写句段，只要剧情方向不变即可。";
+      case "detect_only":
+        return "仅输出可安全应用的局部补丁建议，不要整章重写。";
+      case "light_repair":
+      default:
+        return "以局部补丁为主，优先保持原有内容框架和事件顺序。";
+    }
+  }
+}
+
+async function* createSingleChunkStream(content: string): AsyncIterable<BaseMessageChunk> {
+  yield { content } as BaseMessageChunk;
 }
