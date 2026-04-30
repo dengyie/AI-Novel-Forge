@@ -91,6 +91,47 @@ export interface DirectorStepRun {
   policyDecision?: DirectorPolicyDecision | null;
 }
 
+export type DirectorUsageAttributionStatus =
+  | "step_attributed"
+  | "task_only"
+  | "unattributed";
+
+export interface DirectorLlmUsageSummary {
+  llmCallCount: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  durationMs?: number | null;
+  lastRecordedAt?: string | null;
+}
+
+export interface DirectorLlmUsageRecordSummary extends DirectorLlmUsageSummary {
+  id: string;
+  novelId?: string | null;
+  taskId?: string | null;
+  runId?: string | null;
+  stepIdempotencyKey?: string | null;
+  nodeKey?: string | null;
+  promptAssetKey?: string | null;
+  promptVersion?: string | null;
+  modelRoute?: string | null;
+  provider?: string | null;
+  model?: string | null;
+  status: string;
+  attributionStatus: DirectorUsageAttributionStatus | string;
+  recordedAt: string;
+}
+
+export interface DirectorStepUsageSummary extends DirectorLlmUsageSummary {
+  stepIdempotencyKey: string;
+  nodeKey: string;
+  label?: string | null;
+  status?: DirectorStepRunStatus | string | null;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  attributionStatus: DirectorUsageAttributionStatus | string;
+}
+
 export type DirectorEventType =
   | "run_started"
   | "run_resumed"
@@ -187,6 +228,7 @@ export interface DirectorRuntimeProjectionEvent {
   artifactType?: DirectorArtifactType | null;
   severity?: DirectorEvent["severity"];
   occurredAt: string;
+  usage?: DirectorLlmUsageSummary | null;
 }
 
 export interface DirectorRuntimeProjection {
@@ -206,6 +248,9 @@ export interface DirectorRuntimeProjection {
   policyMode: DirectorPolicyMode;
   updatedAt: string;
   recentEvents: DirectorRuntimeProjectionEvent[];
+  usageSummary?: DirectorLlmUsageSummary | null;
+  recentUsage?: DirectorLlmUsageRecordSummary[];
+  stepUsage?: DirectorStepUsageSummary[];
 }
 
 export type DirectorBookAutomationStatus =
@@ -224,7 +269,8 @@ export type DirectorBookAutomationTimelineItemType =
   | "command"
   | "step"
   | "event"
-  | "approval";
+  | "approval"
+  | "usage";
 
 export interface DirectorBookAutomationTimelineItem {
   id: string;
@@ -238,6 +284,9 @@ export interface DirectorBookAutomationTimelineItem {
   commandType?: DirectorRunCommandType | string | null;
   artifactType?: DirectorArtifactType | string | null;
   severity?: DirectorEvent["severity"];
+  durationMs?: number | null;
+  usage?: DirectorLlmUsageSummary | null;
+  attributionStatus?: DirectorUsageAttributionStatus | string | null;
   occurredAt: string;
 }
 
@@ -305,6 +354,9 @@ export interface DirectorBookAutomationProjection {
   automationSummary?: string | null;
   progressSummary?: string | null;
   artifactSummary: DirectorBookAutomationArtifactSummary;
+  usageSummary?: DirectorLlmUsageSummary | null;
+  recentUsage?: DirectorLlmUsageRecordSummary[];
+  stepUsage?: DirectorStepUsageSummary[];
   activeCommandCount: number;
   pendingCommandCount: number;
   autoApprovalRecordCount: number;
