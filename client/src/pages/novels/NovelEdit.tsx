@@ -17,6 +17,7 @@ import type {
 import NovelEditView from "./components/NovelEditView";
 import { getBaseCharacterList } from "@/api/character";
 import { flattenGenreTreeOptions, getGenreTree } from "@/api/genre";
+import { getDirectorBookAutomationProjection } from "@/api/novelDirector";
 import { continueNovelWorkflow, getActiveAutoDirectorTask } from "@/api/novelWorkflow";
 import { cancelTask, retryTask } from "@/api/tasks";
 import {
@@ -79,6 +80,11 @@ import {
   formatTakeoverCheckpoint,
   resolveAutoExecutionScopeLabel,
 } from "./novelEditTakeover.shared";
+import {
+  buildDisplayAutoDirectorTask,
+  resolveAutomationActionText,
+  resolveTakeoverModeFromAutomation,
+} from "./novelEditAutomationStatus";
 
 function parsePipelineBackgroundActivities(payload: string | null | undefined): ChapterExecutionBackgroundActivity[] {
   if (!payload?.trim()) {
@@ -323,6 +329,16 @@ export default function NovelEdit() {
         : false;
     },
   });
+  const bookAutomationQuery = useQuery({
+    queryKey: queryKeys.novels.directorBookAutomation(id),
+    queryFn: () => getDirectorBookAutomationProjection(id),
+    enabled: Boolean(id),
+    retry: false,
+    refetchInterval: (query) => {
+      const status = query.state.data?.data?.projection.status;
+      return status === "queued" || status === "running" ? 4000 : false;
+    },
+  });
   const chapterPlanQuery = useQuery({
     queryKey: queryKeys.novels.chapterPlan(id, selectedChapterId || "none"),
     queryFn: () => getChapterPlan(id, selectedChapterId),
@@ -561,6 +577,11 @@ export default function NovelEdit() {
   const activeAutoDirectorTask = latestAutoDirectorTask?.status === "cancelled"
     ? null
     : latestAutoDirectorTask;
+  const bookAutomationProjection = bookAutomationQuery.data?.data?.projection ?? null;
+  const displayAutoDirectorTask = useMemo(
+    () => buildDisplayAutoDirectorTask(activeAutoDirectorTask, bookAutomationProjection),
+    [activeAutoDirectorTask, bookAutomationProjection],
+  );
   useEffect(() => {
     if (!id || !activeAutoDirectorTaskQuery.isSuccess) {
       return;
@@ -993,7 +1014,7 @@ export default function NovelEdit() {
     setDismissedTakeoverSignature(storedDismissedSignature);
   }, [activeAutoDirectorRefreshSignature, id]);
   const takeover = useMemo<NovelEditTakeoverState | null>(() => {
-    const task = activeAutoDirectorTask;
+    const task = displayAutoDirectorTask;
     if (!task) {
       return null;
     }
@@ -1002,15 +1023,14 @@ export default function NovelEdit() {
       characterCount: characters.length,
       chapterCount: chapters.length,
     });
-    const mode: NovelEditTakeoverState["mode"] = task.pendingManualRecovery
-      ? "waiting"
-      : task.status === "failed" || task.status === "cancelled"
-      ? "failed"
-      : task.status === "waiting_approval" && task.checkpointType === "replan_required"
-        ? "action_required"
-        : task.status === "queued" || task.status === "running"
-          ? "running"
-          : "waiting";
+    const mode = resolveTakeoverModeFromAutomation({
+      task,
+      projection: bookAutomationProjection,
+    });
+    const automationActionText = resolveAutomationActionText({
+      task,
+      projection: bookAutomationProjection,
+    });
     const novelTitle = novelDetailQuery.data?.data?.title?.trim() || task.title?.trim() || "当前项目";
     const reviewScope = activeDirectorSession?.reviewScope ?? null;
     const autoExecutionScopeLabel = resolveAutoExecutionScopeLabel(task);
@@ -1206,6 +1226,8 @@ export default function NovelEdit() {
               || task.lastError?.trim()
               || "任务已暂停，等待从最近检查点恢复。"
             )
+          : automationActionText
+            ? automationActionText
           : mode === "running" && task.checkpointType === "chapter_batch_ready" && task.currentItemLabel?.includes("已暂停")
             ? `正在继续自动执行${autoExecutionScopeLabel}`
             : task.currentItemLabel ?? null,
@@ -1224,6 +1246,7 @@ export default function NovelEdit() {
     activeChapterTitleWarning,
     activeDirectorSession,
     activeTab,
+    bookAutomationProjection,
     chapters.length,
     chapterTitleRepairMutation,
     characters.length,
@@ -1236,11 +1259,12 @@ export default function NovelEdit() {
     novelDetailQuery.data?.data?.title,
     openCandidateSelection,
     openQualityRepair,
+    displayAutoDirectorTask,
     setActiveTab,
     setSelectedChapterId,
   ]);
   const taskDrawerActions = useMemo<NovelTaskDrawerState["actions"]>(() => {
-    const task = activeAutoDirectorTask;
+    const task = displayAutoDirectorTask;
     if (!task) {
       return [];
     }
@@ -1366,13 +1390,13 @@ export default function NovelEdit() {
     }
     return actions;
   }, [
-    activeAutoDirectorTask,
     activeChapterTitleWarning,
     cancelAutoDirectorMutation,
     chapterTitleRepairMutation,
     consistencyIssue,
     continueAutoDirectorMutation,
     continueAutoExecutionMutation,
+    displayAutoDirectorTask,
     hasUnsavedVolumeDraft,
     openCandidateSelection,
     openReviewStage,
@@ -2067,7 +2091,7 @@ export default function NovelEdit() {
       taskDrawer={{
         open: isTaskDrawerOpen,
         onOpenChange: setIsTaskDrawerOpen,
-        task: activeAutoDirectorTask,
+        task: displayAutoDirectorTask,
         currentUiModel: {
           provider: llm.provider,
           model: llm.model,
