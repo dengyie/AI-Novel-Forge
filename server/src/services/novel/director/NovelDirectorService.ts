@@ -141,6 +141,23 @@ function parseResumeTargetLike(value: unknown) {
   return null;
 }
 
+function shouldForceAutoExecutionContinuation(mode?: DirectorContinuationMode): boolean {
+  return mode === "auto_execute_range" || mode === "auto_execute_front10";
+}
+
+function resolveContinuationDirectorInput(
+  input: DirectorConfirmRequest,
+  continuationMode?: DirectorContinuationMode,
+): DirectorConfirmRequest {
+  if (!shouldForceAutoExecutionContinuation(continuationMode) || input.runMode === "auto_to_execution") {
+    return input;
+  }
+  return {
+    ...input,
+    runMode: "auto_to_execution",
+  };
+}
+
 function isWorkflowTaskCancelledError(error: unknown): boolean {
   return error instanceof AppError
     && error.statusCode === 409
@@ -662,7 +679,10 @@ export class NovelDirectorService {
     }
 
     const seedPayload = parseSeedPayload<DirectorWorkflowSeedPayload>(row.seedPayloadJson) ?? {};
-    const directorInput = getDirectorInputFromSeedPayload(seedPayload);
+    const storedDirectorInput = getDirectorInputFromSeedPayload(seedPayload);
+    const directorInput = storedDirectorInput
+      ? resolveContinuationDirectorInput(storedDirectorInput, input?.continuationMode)
+      : null;
     const novelId = row.novelId ?? seedPayload.novelId ?? null;
     const resumedCandidateStage = await this.continueCandidateStageTask(taskId, {
       novelId,

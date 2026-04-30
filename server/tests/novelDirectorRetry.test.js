@@ -760,10 +760,10 @@ test("continueTask resumes structured outline when stale front10 checkpoint lack
     seedPayloadJson: JSON.stringify({
       directorInput: buildDirectorInput({
         workflowTaskId: "task_stale_front10_resume",
-        runMode: "auto_to_execution",
+        runMode: "auto_to_ready",
       }),
       directorSession: {
-        runMode: "auto_to_execution",
+        runMode: "auto_to_ready",
         phase: "front10_ready",
         isBackgroundRunning: false,
         lockedScopes: ["basic", "story_macro", "character", "outline", "structured", "chapter", "pipeline"],
@@ -816,6 +816,7 @@ test("continueTask resumes structured outline when stale front10 checkpoint lack
     assert.equal(pipelineRuns[0].taskId, "task_stale_front10_resume");
     assert.equal(pipelineRuns[0].novelId, "novel_stale_front10_resume");
     assert.equal(pipelineRuns[0].startPhase, "structured_outline");
+    assert.equal(pipelineRuns[0].input.runMode, "auto_to_execution");
     assert.equal(runtimeCalls.length, 0);
   } finally {
     service.continueCandidateStageTask = originalContinueCandidateStageTask;
