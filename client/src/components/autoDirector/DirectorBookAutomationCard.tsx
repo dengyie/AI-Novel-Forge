@@ -38,6 +38,44 @@ function formatDate(value: string | null | undefined): string {
   return date.toLocaleString();
 }
 
+function formatTokenCount(value: number | null | undefined): string {
+  const count = Math.max(0, Math.round(Number(value ?? 0)));
+  return count.toLocaleString();
+}
+
+function formatDuration(value: number | null | undefined): string | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return null;
+  }
+  const seconds = Math.round(value / 1000);
+  if (seconds <= 0) {
+    return "<1 秒";
+  }
+  if (seconds < 60) {
+    return `${seconds} 秒`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  const restSeconds = seconds % 60;
+  return restSeconds > 0 ? `${minutes} 分 ${restSeconds} 秒` : `${minutes} 分`;
+}
+
+function formatUsageLine(usage: {
+  llmCallCount: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  durationMs?: number | null;
+}): string {
+  const duration = formatDuration(usage.durationMs);
+  return [
+    `${formatTokenCount(usage.llmCallCount)} 次调用`,
+    `输入 ${formatTokenCount(usage.promptTokens)}`,
+    `输出 ${formatTokenCount(usage.completionTokens)}`,
+    `总计 ${formatTokenCount(usage.totalTokens)} Tokens`,
+    duration ? `耗时 ${duration}` : null,
+  ].filter(Boolean).join(" · ");
+}
+
 function formatStatus(status: DirectorBookAutomationStatus): string {
   const labels: Record<DirectorBookAutomationStatus, string> = {
     idle: "空闲",
@@ -146,6 +184,8 @@ export default function DirectorBookAutomationCard({
     || "当前没有后台导演任务，可以直接继续手动创作。";
   const recentItems = projection?.timeline.slice(0, 2) ?? [];
   const artifactRows = projection?.artifactSummary.byType?.slice(0, 3) ?? [];
+  const usageSummary = projection?.usageSummary ?? null;
+  const stepUsage = projection?.stepUsage?.slice(0, 2) ?? [];
 
   return (
     <div className={cn("rounded-lg border p-3", statusClassName(status))}>
@@ -171,6 +211,23 @@ export default function DirectorBookAutomationCard({
 
       {summary ? (
         <div className="mt-3 text-xs leading-5 text-muted-foreground">{summary}</div>
+      ) : null}
+
+      {usageSummary ? (
+        <div className="mt-3 rounded-md border bg-background/70 px-3 py-2 text-xs leading-5 text-muted-foreground">
+          <div className="font-medium text-foreground">AI 用量</div>
+          <div className="mt-1">{formatUsageLine(usageSummary)}</div>
+          {stepUsage.length > 0 ? (
+            <div className="mt-2 space-y-1">
+              {stepUsage.map((item) => (
+                <div key={item.stepIdempotencyKey} className="flex flex-wrap items-center justify-between gap-2 border-t pt-1">
+                  <span className="min-w-0 truncate text-foreground">{item.label || item.nodeKey}</span>
+                  <span className="shrink-0">{formatUsageLine(item)}</span>
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </div>
       ) : null}
 
       {artifactRows.length > 0 ? (
@@ -205,6 +262,11 @@ export default function DirectorBookAutomationCard({
           {recentItems.map((item) => (
             <div key={item.id} className="rounded-md border bg-background/70 px-3 py-2 text-xs leading-5">
               <div className="line-clamp-2 text-foreground">{item.title}</div>
+              {item.usage ? (
+                <div className="mt-1 text-muted-foreground">{formatUsageLine(item.usage)}</div>
+              ) : item.durationMs ? (
+                <div className="mt-1 text-muted-foreground">耗时 {formatDuration(item.durationMs)}</div>
+              ) : null}
               <div className="mt-1 text-muted-foreground">{formatDate(item.occurredAt)}</div>
             </div>
           ))}

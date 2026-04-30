@@ -6,6 +6,7 @@ import type {
 import { prisma } from "../../../db/prisma";
 import { buildDefaultDirectorPolicy } from "./runtime/directorRuntimeDefaults";
 import { DirectorEventProjectionService } from "./runtime/DirectorEventProjectionService";
+import { directorUsageTelemetryQueryService } from "./runtime/DirectorUsageTelemetryQueryService";
 
 function parseJsonOrNull<T>(value: string | null | undefined): T | null {
   if (!value?.trim()) {
@@ -107,5 +108,18 @@ export async function loadPersistentDirectorRuntimeProjection(
     artifacts: [],
     updatedAt: run.updatedAt.toISOString(),
   };
-  return projectionService.buildSnapshotProjection(snapshot);
+  const projection = projectionService.buildSnapshotProjection(snapshot);
+  if (!projection) {
+    return null;
+  }
+  const usageTelemetry = await directorUsageTelemetryQueryService.getTaskUsage(
+    taskId,
+    snapshot.steps,
+  );
+  return {
+    ...projection,
+    usageSummary: usageTelemetry.summary,
+    recentUsage: usageTelemetry.recentUsage,
+    stepUsage: usageTelemetry.stepUsage,
+  };
 }

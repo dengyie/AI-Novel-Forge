@@ -4,10 +4,12 @@ import type {
   DirectorBookAutomationTimelineItem,
   DirectorPolicyMode,
   DirectorRuntimeProjection,
+  DirectorStepRun,
 } from "@ai-novel/shared/types/directorRuntime";
 import { prisma } from "../../../db/prisma";
 import { loadPersistentDirectorRuntimeProjection } from "./novelDirectorRuntimeProjection";
 import { directorArtifactLedgerQueryService } from "./runtime/DirectorArtifactLedgerQueryService";
+import { directorUsageTelemetryQueryService } from "./runtime/DirectorUsageTelemetryQueryService";
 
 type RuntimeProjectionLoader = (taskId: string) => Promise<DirectorRuntimeProjection | null>;
 
@@ -219,6 +221,7 @@ function buildAutomationSummary(input: {
   pendingCommandCount: number;
   artifactSummary: DirectorBookAutomationProjection["artifactSummary"];
   autoApprovalRecordCount: number;
+  usageSummary?: DirectorBookAutomationProjection["usageSummary"];
 }): string {
   const parts: string[] = [];
   if (input.activeCommandCount > 0) {
@@ -242,10 +245,40 @@ function buildAutomationSummary(input: {
   if (input.artifactSummary.protectedUserContentCount > 0) {
     parts.push(`${input.artifactSummary.protectedUserContentCount} 个用户内容受保护`);
   }
+  if (input.usageSummary && input.usageSummary.llmCallCount > 0) {
+    parts.push(`${input.usageSummary.llmCallCount} 次 AI 调用`);
+  }
+  if (input.usageSummary && input.usageSummary.totalTokens > 0) {
+    parts.push(`${input.usageSummary.totalTokens} Tokens`);
+  }
   if ((input.artifactSummary.dependencyCount ?? 0) > 0) {
     parts.push(`${input.artifactSummary.dependencyCount} 条产物依赖`);
   }
   return parts.length > 0 ? parts.join("，") : "暂无自动化动作";
+}
+
+function mapStepForUsage(step: {
+  idempotencyKey: string;
+  nodeKey: string;
+  label: string;
+  status: string;
+  targetType?: string | null;
+  targetId?: string | null;
+  startedAt: Date;
+  finishedAt: Date | null;
+  error: string | null;
+}): DirectorStepRun {
+  return {
+    idempotencyKey: step.idempotencyKey,
+    nodeKey: step.nodeKey,
+    label: step.label,
+    status: step.status as DirectorStepRun["status"],
+    targetType: step.targetType as DirectorStepRun["targetType"],
+    targetId: step.targetId,
+    startedAt: step.startedAt.toISOString(),
+    finishedAt: step.finishedAt?.toISOString() ?? null,
+    error: step.error,
+  };
 }
 
 export class DirectorBookAutomationProjectionService {
@@ -369,6 +402,11 @@ export class DirectorBookAutomationProjectionService {
       }),
       directorArtifactLedgerQueryService.getBookSummary(novelId),
     ]);
+    const usageTelemetry = await directorUsageTelemetryQueryService.getBookUsage({
+      novelId,
+      taskIds,
+      steps: steps.map(mapStepForUsage),
+    });
 
     const activeCommandCount = commands.filter((item) => item.status === "running" || item.status === "leased").length;
     const pendingCommandCount = commands.filter((item) => item.status === "queued").length;
@@ -403,6 +441,7 @@ export class DirectorBookAutomationProjectionService {
       events[0]?.occurredAt,
       steps[0]?.updatedAt,
       approvalRecords[0]?.createdAt,
+      usageTelemetry.recentUsage[0]?.recordedAt,
     ]
       .map(toIso)
       .sort((left, right) => timestampOf(right) - timestampOf(left))[0]
@@ -442,6 +481,26 @@ export class DirectorBookAutomationProjectionService {
         runId: step.runId,
         nodeKey: step.nodeKey,
         occurredAt: toIso(step.finishedAt ?? step.updatedAt ?? step.startedAt),
+        durationMs: step.finishedAt
+          ? Math.max(0, step.finishedAt.getTime() - step.startedAt.getTime())
+          : null,
+        usage: usageTelemetry.stepUsage.find((usage) => usage.stepIdempotencyKey === step.idempotencyKey) ?? null,
+      })),
+      ...usageTelemetry.recentUsage.slice(0, 8).map((usage) => ({
+        id: `usage:${usage.id}`,
+        type: "usage" as const,
+        title: usage.nodeKey ? `AI 用量：${usage.nodeKey}` : "AI 用量记录",
+        detail: usage.promptAssetKey
+          ? `${usage.promptAssetKey}${usage.promptVersion ? `@${usage.promptVersion}` : ""}`
+          : usage.model ?? usage.provider,
+        status: usage.status,
+        taskId: usage.taskId,
+        runId: usage.runId,
+        nodeKey: usage.nodeKey,
+        occurredAt: usage.recordedAt,
+        durationMs: usage.durationMs,
+        usage,
+        attributionStatus: usage.attributionStatus,
       })),
       ...approvalRecords.map((record) => ({
         id: `approval:${record.id}`,
@@ -499,9 +558,13 @@ export class DirectorBookAutomationProjectionService {
         pendingCommandCount,
         artifactSummary,
         autoApprovalRecordCount,
+        usageSummary: usageTelemetry.summary,
       }),
       progressSummary: runtimeProjection?.progressSummary ?? null,
       artifactSummary,
+      usageSummary: usageTelemetry.summary,
+      recentUsage: usageTelemetry.recentUsage,
+      stepUsage: usageTelemetry.stepUsage,
       activeCommandCount,
       pendingCommandCount,
       autoApprovalRecordCount,
