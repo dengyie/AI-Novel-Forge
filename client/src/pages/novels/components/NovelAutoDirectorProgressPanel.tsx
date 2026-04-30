@@ -8,7 +8,10 @@ import {
 } from "@ai-novel/shared/types/novelDirector";
 import type { UnifiedTaskDetail } from "@ai-novel/shared/types/task";
 import { useQuery } from "@tanstack/react-query";
-import { getDirectorRuntimeProjection } from "@/api/novelDirector";
+import {
+  getDirectorRuntimeEventHistory,
+  getDirectorRuntimeProjection,
+} from "@/api/novelDirector";
 import { queryKeys } from "@/api/queryKeys";
 import DirectorRuntimeProjectionCard from "@/components/autoDirector/DirectorRuntimeProjectionCard";
 import { Badge } from "@/components/ui/badge";
@@ -276,7 +279,18 @@ export default function NovelAutoDirectorProgressPanel({
       task && !task.pendingManualRecovery && (task.status === "queued" || task.status === "running") ? 4000 : false
     ),
   });
+  const eventHistoryQuery = useQuery({
+    queryKey: ["director-runtime-events", runtimeTaskId],
+    queryFn: () => getDirectorRuntimeEventHistory(runtimeTaskId, { limit: 200 }),
+    enabled: Boolean(runtimeTaskId),
+    retry: false,
+    refetchInterval: () => (
+      task && !task.pendingManualRecovery && (task.status === "queued" || task.status === "running") ? 10000 : false
+    ),
+  });
   const runtimeProjection = runtimeProjectionQuery.data?.data?.projection ?? null;
+  const eventHistory = eventHistoryQuery.data?.data ?? null;
+  const historyEvents = eventHistory?.events ?? [];
   const isPendingManualRecovery = Boolean(task?.pendingManualRecovery);
   const runtimeProjectionForDisplay = isPendingManualRecovery ? null : runtimeProjection;
   const runtimeRequiresUserAction = Boolean(
@@ -425,6 +439,45 @@ export default function NovelAutoDirectorProgressPanel({
           projection={runtimeProjectionForDisplay}
           className="mt-4"
         />
+
+        <div className="mt-4 rounded-xl border bg-background/80 p-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="text-sm font-medium text-foreground">全部进展</div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                {eventHistory
+                  ? `显示 ${historyEvents.length}/${eventHistory.totalCount} 条进展`
+                  : "正在读取进展记录"}
+              </div>
+            </div>
+            {eventHistory && eventHistory.totalCount > historyEvents.length ? (
+              <Badge variant="outline">显示最近 {eventHistory.limit} 条</Badge>
+            ) : null}
+          </div>
+
+          {eventHistoryQuery.isLoading ? (
+            <div className="mt-3 rounded-lg border bg-muted/15 px-3 py-2 text-sm text-muted-foreground">
+              正在读取进展记录。
+            </div>
+          ) : historyEvents.length > 0 ? (
+            <div className="mt-3 max-h-80 space-y-2 overflow-y-auto pr-1">
+              {historyEvents.map((event) => (
+                <div key={event.eventId} className="rounded-lg border bg-muted/15 p-3 text-sm">
+                  <div className="font-medium text-foreground">{event.summary}</div>
+                  <div className="mt-2 flex flex-wrap gap-2 text-xs text-muted-foreground">
+                    <span>记录时间：{formatDate(event.occurredAt)}</span>
+                    {event.nodeKey ? <span>步骤：{event.nodeKey}</span> : null}
+                    {event.artifactType ? <span>产物：{event.artifactType}</span> : null}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="mt-3 rounded-lg border bg-muted/15 px-3 py-2 text-sm text-muted-foreground">
+              任务运行后会在这里写入进展记录。
+            </div>
+          )}
+        </div>
 
         {styleSeed ? (
           <div className="mt-4 rounded-xl border bg-background/80 p-4">

@@ -253,6 +253,12 @@ export interface DirectorRuntimeProjection {
   stepUsage?: DirectorStepUsageSummary[];
 }
 
+export interface DirectorRuntimeEventHistoryResponse {
+  events: DirectorRuntimeProjectionEvent[];
+  totalCount: number;
+  limit: number;
+}
+
 export type DirectorBookAutomationStatus =
   | "idle"
   | "queued"

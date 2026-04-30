@@ -3,6 +3,7 @@ import type {
   DirectorBookAutomationProjectionResponse,
   DirectorRuntimePolicyUpdateRequest,
   DirectorRuntimePolicyUpdateResponse,
+  DirectorRuntimeEventHistoryResponse,
   DirectorRuntimeProjection,
   DirectorRuntimeSnapshotResponse,
   DirectorCommandAcceptedResponse,
@@ -93,6 +94,14 @@ export async function getDirectorRuntimeSnapshot(taskId: string) {
 export async function getDirectorRuntimeProjection(taskId: string) {
   const { data } = await apiClient.get<ApiResponse<{ projection: DirectorRuntimeProjection | null }>>(
     `/novels/director/runtime/${taskId}/projection`,
+  );
+  return data;
+}
+
+export async function getDirectorRuntimeEventHistory(taskId: string, options?: { limit?: number }) {
+  const { data } = await apiClient.get<ApiResponse<DirectorRuntimeEventHistoryResponse>>(
+    `/novels/director/runtime/${taskId}/events`,
+    { params: { limit: options?.limit } },
   );
   return data;
 }

@@ -7,6 +7,7 @@ import {
   type DirectorBookAutomationProjectionResponse,
   type DirectorRuntimePolicyUpdateRequest,
   type DirectorRuntimePolicyUpdateResponse,
+  type DirectorRuntimeEventHistoryResponse,
   type DirectorRuntimeSnapshotResponse,
   type DirectorManualEditImpactResponse,
   type DirectorWorkspaceAnalysisResponse,
@@ -36,6 +37,7 @@ import { NovelDirectorService } from "../services/novel/director/NovelDirectorSe
 import { DirectorCommandService } from "../services/novel/director/DirectorCommandService";
 import { DirectorBookAutomationProjectionService } from "../services/novel/director/DirectorBookAutomationProjectionService";
 import { directorPersistedCandidateSchema } from "../services/novel/director/novelDirectorSchemas";
+import { loadPersistentDirectorRuntimeEventHistory } from "../services/novel/director/novelDirectorRuntimeProjection";
 
 const router = Router();
 const novelDirectorService = new NovelDirectorService();
@@ -175,6 +177,10 @@ const takeoverParamsSchema = z.object({
 
 const runtimeTaskParamsSchema = z.object({
   taskId: z.string().trim().min(1),
+});
+
+const runtimeEventHistoryQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(500).optional(),
 });
 
 const workspaceAnalysisQuerySchema = z.object({
@@ -384,6 +390,25 @@ router.get("/runtime/:taskId/projection", validate({ params: runtimeTaskParamsSc
     next(error);
   }
 });
+
+router.get(
+  "/runtime/:taskId/events",
+  validate({ params: runtimeTaskParamsSchema, query: runtimeEventHistoryQuerySchema }),
+  async (req, res, next) => {
+    try {
+      const { taskId } = req.params as z.infer<typeof runtimeTaskParamsSchema>;
+      const query = req.query as z.infer<typeof runtimeEventHistoryQuerySchema>;
+      const data: DirectorRuntimeEventHistoryResponse = await loadPersistentDirectorRuntimeEventHistory(taskId, query.limit);
+      res.status(200).json({
+        success: true,
+        data,
+        message: "Director runtime event history loaded.",
+      } satisfies ApiResponse<typeof data>);
+    } catch (error) {
+      next(error);
+    }
+  },
+);
 
 router.post(
   "/runtime/:taskId/policy",

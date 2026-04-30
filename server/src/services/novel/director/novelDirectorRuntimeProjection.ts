@@ -1,5 +1,6 @@
 import type {
   DirectorRuntimePolicySnapshot,
+  DirectorRuntimeProjectionEvent,
   DirectorRuntimeProjection,
   DirectorRuntimeSnapshot,
 } from "@ai-novel/shared/types/directorRuntime";
@@ -121,5 +122,47 @@ export async function loadPersistentDirectorRuntimeProjection(
     usageSummary: usageTelemetry.summary,
     recentUsage: usageTelemetry.recentUsage,
     stepUsage: usageTelemetry.stepUsage,
+  };
+}
+
+export async function loadPersistentDirectorRuntimeEventHistory(
+  taskId: string,
+  limit = 200,
+): Promise<{
+  events: DirectorRuntimeProjectionEvent[];
+  totalCount: number;
+  limit: number;
+}> {
+  const normalizedLimit = Math.max(1, Math.min(500, Math.round(limit)));
+  const [totalCount, events] = await Promise.all([
+    prisma.directorEvent.count({ where: { taskId } }),
+    prisma.directorEvent.findMany({
+      where: { taskId },
+      orderBy: { occurredAt: "desc" },
+      take: normalizedLimit,
+      select: {
+        id: true,
+        type: true,
+        nodeKey: true,
+        artifactType: true,
+        summary: true,
+        severity: true,
+        occurredAt: true,
+      },
+    }),
+  ]);
+
+  return {
+    events: events.map((event) => ({
+      eventId: event.id,
+      type: event.type as DirectorRuntimeProjectionEvent["type"],
+      summary: event.summary,
+      nodeKey: event.nodeKey,
+      artifactType: event.artifactType as DirectorRuntimeProjectionEvent["artifactType"],
+      severity: event.severity as DirectorRuntimeProjectionEvent["severity"],
+      occurredAt: event.occurredAt.toISOString(),
+    })),
+    totalCount,
+    limit: normalizedLimit,
   };
 }
