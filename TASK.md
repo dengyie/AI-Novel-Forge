@@ -99,6 +99,7 @@
 - 2026-04-30 已补齐书级自动化状态投影第一版：书页可按小说聚合自动导演任务、命令、运行事件、自动确认记录和产物概况，左侧 AI 驾驶舱开始以“这本书的推进状态”为主语展示进展，任务中心继续保留执行详情入口
 - 2026-04-30 已完成 P0-B 章节任务单质量门禁第一刀：`purpose / boundary / taskSheet / sceneCards` 进入 shared 合同、服务端结构校验和 AI 语义可用性评估；全书自动模式下坏任务单会自动重生或修复，AI 副驾模式才进入确认边界；卷规划同步到章节执行区前会阻断无效执行合同
 - 2026-04-30 已完成 P0-B Patch-First 修复策略第一刀：章节自动修复和手动修复入口默认先生成可安全应用的局部补丁，只有 `heavy_repair` 等明确重写边界才进入整章修复；歧义片段、空结果和整章重写计划会被阻断，避免普通质量问题直接升级为大范围覆盖
+- 2026-04-30 已完成 P0-B 质量闭环 MVP 第一刀：章节审校和批量 pipeline 会把 `chapter_retention_contract / continuity_state / rolling_window_review` 评估成统一质量闭环状态，记录到章节风险标记，并用 `patch_repair / replan / continue` 驱动后续处理
 
 当前唯一主线仍然是 `P0`：
 
@@ -179,7 +180,7 @@ P0 的默认主链统一为：
 3. `P0-A / 真实数据`：真实 Prisma 抽样回归，覆盖旧项目接管、服务重启手动恢复、失败重试、章节批量执行、候选变更、状态版本。
 4. `P0-E1 / Artifact Ledger`：Artifact Ledger 真相层，从 wrapper 索引推进到跨任务可查询、版本生命周期、stale、用户内容保护、局部恢复。
 5. `P0-E1 / PolicyEngine`：PolicyEngine 硬 gate 深化，覆盖高成本审校、高风险修复、大范围自动执行、覆盖用户内容等场景。
-6. `P0-B / 质量闭环`：`reader_promise / chapter_retention_contract / continuity_state / rolling_window_review / character_governance_state` 形成评估、失效、局部修复、再评估闭环。
+6. `P0-B / 质量闭环`：已完成 MVP 第一刀，`chapter_retention_contract / continuity_state / rolling_window_review` 会在审校后形成统一评估状态并记录到章节风险标记；后续接入 Ledger 真相层、连续修复失败计数和 `character_governance_state`。
 7. `P0-E / Replan`：`PlannerService.replan` 的窗口决策、触发理由、章节选择切到 canonical/state-driven 主判断。
 8. `P0-B / 任务单门禁`：已完成第一刀，`purpose / boundary / taskSheet / sceneCards` 具备 shared 合同、schema 校验、AI 语义可用性门禁和同步前阻断；后续继续把质量结果写入 Ledger 真相层。
 9. `P0-B / 修复策略`：已完成第一刀，章节 repair 默认先走 `patch_first` 局部补丁，`heavy_repair` 才允许整章修复；后续把补丁失败次数、保护正文和动态角色边界接入质量闭环与 Ledger。
@@ -241,7 +242,7 @@ P0 的默认主链统一为：
 - 章节细化虽然已有结构校验与字段别名兼容，但 `purpose / taskSheet` 仍偏“非空即过”，坏文本和低可用产物仍可能进入同步与后续消费
 - `taskSheet` 仍是单文本字段，当前更适合继续收口为“轻量执行摘要”而不是重型分段合同；`artifactHealth` 也更适合作为诊断与提醒，而不是新的正文生成阻塞点
 - 模型路由仍以 `planner / writer / review / repair` 为粗粒度，尚未升级到小说生产阶段级主路由与 fallback 链
-- 章节 repair 已共用统一上下文，并完成默认 `patch_first` 第一刀；后续缺口转为补丁失败计数、保护正文 gate、修复记录入 Ledger 和再评估闭环
+- 章节 repair 已共用统一上下文，并完成默认 `patch_first` 与质量闭环记录第一刀；后续缺口转为补丁失败计数、保护正文 gate、修复记录入 Ledger、角色治理状态和更强的自动再评估触发
 - 动态角色系统虽然已进入 planner，但在执行期角色筛选、repair 边界、缺席风险提示和 replan 判断中的行为驱动仍不够深
 - 批量执行、异常恢复、旧资产兼容路径下，书级 / 卷级 / 角色 / payoff ledger 资产仍可能出现残余分叉
 - 章节正文默认已经回退为整章一次性生成；`sceneCards` 与执行合同刷新不再适合作为正文热路径的默认硬依赖，但仍可保留为细化、诊断、局部修复和可解释性辅助资产

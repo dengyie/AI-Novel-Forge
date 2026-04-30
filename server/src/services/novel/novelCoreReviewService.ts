@@ -32,6 +32,7 @@ import {
   ChapterPatchRepairFailedError,
   ChapterPatchRepairService,
 } from "./chapterPatchRepairService";
+import { chapterQualityLoopService } from "./quality/ChapterQualityLoopService";
 
 type AuditContextOperation = "review" | "audit" | "repair";
 
@@ -112,6 +113,20 @@ export class NovelCoreReviewService {
       },
     });
     await createQualityReport(novelId, chapterId, review.score, review.issues);
+    await chapterQualityLoopService.recordAssessment({
+      novelId,
+      chapterId,
+      chapterOrder: chapter.order,
+      score: review.score,
+      issues: review.issues,
+      source: options.content ? "repair_recheck" : "manual_review",
+    }).catch((error) => {
+      logPipelineError("Failed to record chapter quality loop assessment.", {
+        novelId,
+        chapterId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
     const replanRecommendation = plannerService.buildReplanRecommendation({
       auditReports: review.auditReports ?? [],
       ledgerSummary: review.contextPackage?.ledgerSummary ?? null,

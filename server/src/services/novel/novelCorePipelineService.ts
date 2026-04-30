@@ -14,6 +14,7 @@ import {
 } from "./novelCoreShared";
 import { ensureNovelCharacters } from "./novelCoreSupport";
 import { createQualityReport } from "./novelCoreReviewService";
+import { chapterQualityLoopService } from "./quality/ChapterQualityLoopService";
 import { selectPrimaryPipelineJob } from "./pipelineJobDedup";
 import { buildPipelineCurrentItemLabel, buildPipelineStageProgress, decoratePipelineJob as decoratePipelineJobRow, isPipelineActiveStage, parsePipelinePayload as parsePipelineJobPayload, stringifyPipelinePayload as stringifyPipelineJobPayload, type DecoratedPipelineJob, type PipelineActiveStage, type PipelineJobLike } from "./pipelineJobState";
 
@@ -698,6 +699,22 @@ export class NovelCorePipelineService {
           final = { score: chapterResult.score, issues: chapterResult.issues };
           if (chapterResult.reviewExecuted) {
             await createQualityReport(novelId, chapter.id, final.score, final.issues);
+            await chapterQualityLoopService.recordAssessment({
+              novelId,
+              chapterId: chapter.id,
+              chapterOrder: chapter.order,
+              score: final.score,
+              issues: final.issues,
+              runtimePackage: chapterResult.runtimePackage,
+              source: chapterResult.retryCountUsed > 0 ? "repair_recheck" : "pipeline_review",
+            }).catch((error) => {
+              logPipelineError("记录章节质量闭环状态失败", {
+                jobId,
+                novelId,
+                chapterId: chapter.id,
+                error: error instanceof Error ? error.message : String(error),
+              });
+            });
           }
 
           if (chapterResult.reviewExecuted && !chapterResult.pass) {
