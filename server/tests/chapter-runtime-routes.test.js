@@ -171,7 +171,7 @@ function buildRuntimePackage(novelId, chapterId) {
     audit: {
       score: {
         coherence: 88,
-        repetition: 10,
+        repetition: 90,
         pacing: 84,
         voice: 82,
         engagement: 86,

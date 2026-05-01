@@ -67,6 +67,9 @@ function appendRepairHistory(
     `[quality_loop ${assessment.evaluatedAt}]`,
     `status=${assessment.overallStatus}`,
     `action=${assessment.recommendedAction}`,
+    assessment.budget?.signature ? `signature=${assessment.budget.signature}` : "",
+    assessment.budget ? `attempt=${assessment.budget.attempt}/${assessment.budget.maxAttempts}` : "",
+    assessment.budget?.nextAction ? `budget=${assessment.budget.nextAction}` : "",
     assessment.signals
       .filter((signal) => signal.status !== "valid")
       .map((signal) => `${signal.artifactType}:${signal.status}`)
@@ -128,6 +131,7 @@ export class ChapterQualityLoopService {
       score: input.score,
       issues: input.issues,
       runtimePackage: input.runtimePackage,
+      previousRepairHistory: chapter.repairHistory,
     });
     await prisma.chapter.update({
       where: { id: input.chapterId },

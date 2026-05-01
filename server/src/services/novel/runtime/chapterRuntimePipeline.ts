@@ -96,7 +96,7 @@ interface RunPipelineChapterDeps {
   markChapterNeedsRepair: (chapterId: string) => Promise<void>;
 }
 
-const QUALITY_THRESHOLD = { coherence: 80, repetition: 20, engagement: 75 };
+const QUALITY_THRESHOLD = { coherence: 80, repetition: 75, engagement: 75 };
 
 const AUDIT_CATEGORY_MAP: Record<"continuity" | "character" | "plot" | "mode_fit", ReviewIssue["category"]> = {
   continuity: "coherence",
@@ -164,7 +164,7 @@ export async function runPipelineChapterWithRuntime(
         score: {
           coherence: 100,
           pacing: 100,
-          repetition: 0,
+          repetition: 100,
           engagement: 100,
           voice: 100,
           overall: 100,
@@ -258,7 +258,7 @@ async function syncFinalRetainedChapterArtifacts(
 
 function isQualityPass(score: QualityScore, qualityThreshold: number): boolean {
   return score.coherence >= QUALITY_THRESHOLD.coherence
-    && score.repetition <= QUALITY_THRESHOLD.repetition
+    && score.repetition >= QUALITY_THRESHOLD.repetition
     && score.engagement >= QUALITY_THRESHOLD.engagement
     && score.overall >= qualityThreshold;
 }

@@ -14,7 +14,7 @@ function createRuntimePackage(overallScore) {
       score: {
         coherence: overallScore,
         pacing: overallScore,
-        repetition: 10,
+        repetition: overallScore,
         engagement: overallScore,
         voice: overallScore,
         overall: overallScore,
@@ -110,7 +110,7 @@ test("runPipelineChapterWithRuntime skips review and repair when autoReview is d
   assert.deepEqual(result.score, {
     coherence: 100,
     pacing: 100,
-    repetition: 0,
+    repetition: 100,
     engagement: 100,
     voice: 100,
     overall: 100,

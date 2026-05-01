@@ -254,7 +254,7 @@ test("manual review and manual audit pass assembled chapter review context into 
     return {
       score: {
         coherence: 85,
-        repetition: 10,
+        repetition: 90,
         pacing: 82,
         voice: 81,
         engagement: 84,
@@ -333,6 +333,7 @@ test("repair stream builds prompt blocks from the assembled repair context packa
         evidence: "第一次反压没有实际落地。",
         fixSuggestion: "让主角在本章拿到明确反压结果。",
       }],
+      repairMode: "heavy_repair",
     });
 
     assert.ok(Array.isArray(capturedContextBlocks));

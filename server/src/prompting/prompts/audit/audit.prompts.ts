@@ -43,7 +43,7 @@ const AUDIT_CHAPTER_EXAMPLE = {
 const LIGHT_AUDIT_EXAMPLE = {
   score: {
     coherence: 84,
-    repetition: 18,
+    repetition: 82,
     pacing: 82,
     voice: 85,
     engagement: 83,
@@ -177,6 +177,7 @@ export const auditChapterPrompt: PromptAsset<AuditChapterPromptInput, z.infer<ty
   outputSchema: fullAuditOutputSchema,
   render: (input, context) => [
     new SystemMessage([
+      "repetition scoring: 0 means heavily repetitive, 100 means repetition is well controlled; higher is better.",
       "你是中文长篇小说章节审校助手。",
       "你的任务是基于章节正文、分层上下文、故事模式约束和检索补充，输出可被系统直接消费的严格 JSON 审校结果。",
       "",
