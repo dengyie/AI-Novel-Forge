@@ -157,11 +157,29 @@ function isCandidateSetupFlow(task: UnifiedTaskDetail | null): boolean {
 
 function resolveDirectorExecutionStepIndex(task: UnifiedTaskDetail | null): number {
   const itemKey = task?.currentItemKey ?? "";
+  const chapterExecutionKeys = new Set([
+    "chapter_execution",
+    "chapter_execution_node",
+    "chapter.draft.write",
+    "chapter.write",
+  ]);
+  const qualityRepairKeys = new Set([
+    "reviewing",
+    "repairing",
+    "quality_repair",
+    "chapter_quality_review_node",
+    "chapter.quality.review",
+    "chapter_state_commit_node",
+    "chapter.state.commit",
+  ]);
+  if (qualityRepairKeys.has(itemKey)) {
+    return 5;
+  }
   if (
     task?.checkpointType === "front10_ready"
     || (task?.status === "running" && task?.checkpointType === "chapter_batch_ready")
     || itemKey === "chapter_detail_bundle"
-    || itemKey === "chapter_execution"
+    || chapterExecutionKeys.has(itemKey)
   ) {
     return 5;
   }

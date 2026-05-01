@@ -117,7 +117,7 @@ test("runPipelineChapterWithRuntime skips review and repair when autoReview is d
   });
 });
 
-test("runPipelineChapterWithRuntime records recoverable patch failures without failing the batch chapter", async () => {
+test("runPipelineChapterWithRuntime escalates patch failures to heavy repair and rechecks the chapter", async () => {
   const originalRunStructuredPrompt = promptRunner.runStructuredPrompt;
   const stages = [];
   const savedDrafts = [];
@@ -140,6 +140,11 @@ test("runPipelineChapterWithRuntime records recoverable patch failures without f
       escalationReason: null,
     },
   });
+  promptRunner.setPromptRunnerLLMFactoryForTests(async () => ({
+    invoke: async () => ({
+      content: "rewritten chapter after safe full repair",
+    }),
+  }));
 
   try {
     const result = await runPipelineChapterWithRuntime(
@@ -174,7 +179,7 @@ test("runPipelineChapterWithRuntime records recoverable patch failures without f
           reviewCount += 1;
           return {
             finalContent: content,
-            runtimePackage: createRuntimePackage(72),
+            runtimePackage: createRuntimePackage(reviewCount === 1 ? 72 : 90),
           };
         },
         async markChapterGenerationState() {},
@@ -195,20 +200,23 @@ test("runPipelineChapterWithRuntime records recoverable patch failures without f
       },
     );
 
-    assert.deepEqual(stages, ["generating_chapters", "reviewing", "repairing"]);
-    assert.equal(reviewCount, 1);
-    assert.equal(result.pass, false);
-    assert.equal(result.retryCountUsed, 0);
-    assert.equal(result.recoverableRepairFailure.message, "patch-missing: 目标片段不存在，不能安全应用局部补丁。");
-    assert.deepEqual(result.recoverableRepairFailure.failureTypes, ["missing_target"]);
-    assert.equal(needsRepairMarked, true);
+    assert.deepEqual(stages, ["generating_chapters", "reviewing", "repairing", "reviewing"]);
+    assert.equal(reviewCount, 2);
+    assert.equal(result.pass, true);
+    assert.equal(result.retryCountUsed, 1);
+    assert.equal(result.recoverableRepairFailure, null);
+    assert.equal(needsRepairMarked, false);
     assert.equal(finalSyncs.length, 1);
     assert.deepEqual(savedDrafts, [{
       content: "生成后的正文需要承接。",
       generationState: "drafted",
+    }, {
+      content: "rewritten chapter after safe full repair",
+      generationState: "repaired",
     }]);
   } finally {
     promptRunner.runStructuredPrompt = originalRunStructuredPrompt;
+    promptRunner.setPromptRunnerLLMFactoryForTests();
   }
 });
 

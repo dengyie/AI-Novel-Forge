@@ -189,7 +189,7 @@ export function resolveChapterExecutionFlow(input: ResolveChapterExecutionFlowIn
         return {
           key,
           label,
-          status: chapter.taskSheet?.trim() || chapter.sceneCards?.trim() || chapter.expectation?.trim()
+          status: chapter.taskSheet?.trim() || chapter.sceneCards?.trim()
             ? "done"
             : "not_started",
         };
@@ -197,7 +197,7 @@ export function resolveChapterExecutionFlow(input: ResolveChapterExecutionFlowIn
         return {
           key,
           label,
-          status: isCurrentChapterWriting
+          status: isCurrentChapterWriting || chapter.chapterStatus === "generating"
             ? "in_progress"
             : chapter.content?.trim()
               ? "done"
@@ -365,9 +365,98 @@ export function shouldShowGenerationStateBadge(state?: Chapter["generationState"
   return Boolean(state && state !== "planned");
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function stringifyRiskLabel(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function qualityLoopActionLabel(value: unknown): string | null {
+  switch (value) {
+    case "continue":
+      return "质量可继续";
+    case "patch_repair":
+      return "建议补写修复";
+    case "replan":
+      return "建议重规划";
+    case "manual_gate":
+      return "需要确认修复边界";
+    default:
+      return null;
+  }
+}
+
+function qualityLoopStatusLabel(value: unknown): string | null {
+  switch (value) {
+    case "risk":
+      return "质量有风险";
+    case "invalid":
+      return "质量需修复";
+    case "missing":
+      return "质量信息缺失";
+    default:
+      return null;
+  }
+}
+
+function qualityLoopArtifactLabel(value: unknown): string | null {
+  switch (value) {
+    case "chapter_retention_contract":
+      return "留存风险";
+    case "continuity_state":
+      return "连贯性风险";
+    case "rolling_window_review":
+      return "章节衔接风险";
+    default:
+      return null;
+  }
+}
+
+function parseStructuredRiskFlags(input: string): string[] | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(input);
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed)) {
+    return null;
+  }
+  const labels: string[] = [];
+  const qualityLoop = parsed.qualityLoop;
+  if (isRecord(qualityLoop)) {
+    const actionLabel = qualityLoopActionLabel(qualityLoop.recommendedAction);
+    const statusLabel = qualityLoopStatusLabel(qualityLoop.overallStatus);
+    if (actionLabel) labels.push(actionLabel);
+    if (statusLabel) labels.push(statusLabel);
+    const signals = Array.isArray(qualityLoop.signals) ? qualityLoop.signals : [];
+    signals.forEach((signal) => {
+      if (!isRecord(signal) || signal.status === "valid") {
+        return;
+      }
+      const label = qualityLoopArtifactLabel(signal.artifactType);
+      if (label) {
+        labels.push(label);
+      }
+    });
+  }
+  const extraLabels = Object.entries(parsed)
+    .filter(([key]) => key !== "qualityLoop")
+    .flatMap(([, value]) => Array.isArray(value) ? value : [value])
+    .map(stringifyRiskLabel)
+    .filter((value): value is string => Boolean(value));
+  return Array.from(new Set([...labels, ...extraLabels])).slice(0, 4);
+}
+
 export function parseRiskFlags(input: string | null | undefined): string[] {
   if (!input?.trim()) {
     return [];
+  }
+  const structured = parseStructuredRiskFlags(input.trim());
+  if (structured) {
+    return structured;
   }
   return input
     .split(/[\n,，;；|]/g)

@@ -402,6 +402,7 @@ export class GenerationContextAssembler {
       chapterId,
       chapterOrder: chapter.order,
       includeCurrentChapterState: false,
+      policy: request.controlPolicy,
       pendingReviewProposalCount,
       openAuditIssueCount: openAuditIssues.length,
       hasRepairableDraft: Boolean(chapter.content?.trim()),

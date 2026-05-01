@@ -680,6 +680,7 @@ export class NovelCorePipelineService {
               model: options.model,
               temperature: options.temperature,
               taskStyleProfileId: runtimePayload.taskStyleProfileId,
+              controlPolicy: runtimePayload.controlPolicy,
               maxRetries,
               autoReview: options.autoReview,
               autoRepair: options.autoRepair,

@@ -12,6 +12,24 @@ test("running chapter execution uses the active item over a stale front10 checkp
   }), "chapter");
 });
 
+test("running chapter execution accepts runtime node keys over stale checkpoints", () => {
+  assert.equal(tabFromDirectorProgress({
+    status: "running",
+    currentStage: "chapter_execution",
+    currentItemKey: "chapter_execution_node",
+    checkpointType: "front10_ready",
+  }), "chapter");
+});
+
+test("chapter quality node keeps the rail on chapter execution instead of regressing", () => {
+  assert.equal(tabFromDirectorProgress({
+    status: "running",
+    currentStage: "quality_repair",
+    currentItemKey: "chapter_quality_review_node",
+    checkpointType: "front10_ready",
+  }), "pipeline");
+});
+
 test("waiting front10 checkpoint stays on structured outline before execution starts", () => {
   assert.equal(tabFromDirectorProgress({
     status: "waiting_approval",

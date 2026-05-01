@@ -144,7 +144,11 @@ test("quality repair execution starts with a repair policy node", async () => {
 });
 
 test("approved auto execution scope carries a safe policy through chapter run and review nodes", async () => {
-  const { orchestrator, runtimeCalls, getPipelineRuns } = buildOrchestrator([artifact], {
+  const protectedDraft = {
+    ...artifact,
+    protectedUserContent: true,
+  };
+  const { orchestrator, runtimeCalls, getPipelineRuns } = buildOrchestrator([protectedDraft], {
     snapshot: {
       policy: {
         mode: "run_until_gate",
@@ -184,6 +188,7 @@ test("approved auto execution scope carries a safe policy through chapter run an
     "character_resource_sync_node",
   ]);
   assert.ok(runtimeCalls.every((call) => call.policy?.mode === "auto_safe_scope"));
+  assert.ok(runtimeCalls.every((call) => call.policy?.mayOverwriteUserContent === false));
   assert.ok(runtimeCalls.every((call) => call.policy?.allowExpensiveReview === true));
 });
 

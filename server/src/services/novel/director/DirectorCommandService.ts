@@ -104,13 +104,27 @@ function resolveNumberEnv(name: string, fallback: number): number {
 function isAutoRecoverableStaleCommand(command: {
   commandType: string;
   attempt: number;
+  payloadJson?: string | null;
 }): boolean {
-  const maxAttempts = resolveNumberEnv(
+  const defaultMaxAttempts = resolveNumberEnv(
     "DIRECTOR_WORKER_STALE_AUTO_RECOVERY_MAX_ATTEMPTS",
     DEFAULT_STALE_AUTO_RECOVERY_MAX_ATTEMPTS,
   );
+  const payload = parsePayload(command.payloadJson ?? null);
+  const payloadRunMode = payload.confirmRequest?.runMode ?? payload.takeoverRequest?.runMode ?? null;
+  const isFullBookAutopilot = payloadRunMode === "full_book_autopilot";
+  const maxAttempts = isFullBookAutopilot
+    ? resolveNumberEnv(
+      "DIRECTOR_WORKER_FULL_BOOK_STALE_AUTO_RECOVERY_MAX_ATTEMPTS",
+      Math.max(defaultMaxAttempts, 5),
+    )
+    : defaultMaxAttempts;
   return command.attempt < maxAttempts
-    && (command.commandType === "continue" || command.commandType === "resume_from_checkpoint");
+    && (
+      isFullBookAutopilot
+      || command.commandType === "continue"
+      || command.commandType === "resume_from_checkpoint"
+    );
 }
 
 export class DirectorCommandService {
@@ -299,6 +313,7 @@ export class DirectorCommandService {
         taskId: true,
         commandType: true,
         attempt: true,
+        payloadJson: true,
       },
     });
     if (staleCommands.length === 0) {

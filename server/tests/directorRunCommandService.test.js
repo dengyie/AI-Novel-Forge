@@ -167,6 +167,7 @@ function createHarness(task = createTask()) {
       taskId: row.taskId,
       commandType: row.commandType,
       attempt: row.attempt,
+      payloadJson: row.payloadJson,
     }));
   };
   prisma.directorRunCommand.updateMany = async ({ where, data }) => {
@@ -484,6 +485,35 @@ test("director command service marks exhausted expired leases stale and requeues
     assert.equal(harness.stepUpdates[0].where.status, "running");
     assert.equal(harness.stepUpdates[0].data.status, "failed");
     assert.match(harness.stepUpdates[0].data.error, /\u79df\u7ea6\u8fc7\u671f/);
+  } finally {
+    harness.restore();
+  }
+});
+
+test("director command service auto requeues full-book autopilot stale leases before manual recovery", async () => {
+  const harness = createHarness(createTask({
+    status: "running",
+    pendingManualRecovery: false,
+    lastError: null,
+  }));
+  try {
+    await harness.service.enqueueConfirmCandidateCommand(createConfirmRequest({
+      runMode: "full_book_autopilot",
+    }));
+    harness.commands[0].status = "running";
+    harness.commands[0].leaseOwner = "worker-a";
+    harness.commands[0].attempt = 2;
+    harness.commands[0].leaseExpiresAt = new Date("2026-04-29T12:00:00.000Z");
+
+    const count = await harness.service.recoverStaleLeases(new Date("2026-04-29T12:01:00.000Z"));
+
+    assert.equal(count, 1);
+    assert.equal(harness.commands[0].status, "queued");
+    assert.equal(harness.commands[0].leaseOwner, null);
+    assert.equal(harness.commands[0].leaseExpiresAt, null);
+    assert.equal(harness.requeued.length, 0);
+    assert.equal(harness.task.status, "queued");
+    assert.equal(harness.task.pendingManualRecovery, false);
   } finally {
     harness.restore();
   }

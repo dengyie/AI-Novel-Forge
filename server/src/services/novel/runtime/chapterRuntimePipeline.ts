@@ -304,8 +304,9 @@ async function repairDraftContent(input: {
         evidence: "Pipeline quality threshold not met.",
         fixSuggestion: "Tighten continuity, sharpen conflict progression, and improve readability.",
       }];
-  const modeHint = getRepairModeHint(
-    input.options.repairMode,
+  let activeRepairMode = input.options.repairMode ?? "light_repair";
+  let modeHint = getRepairModeHint(
+    activeRepairMode,
     input.runtimePackage.audit.openIssues.map((issue) => issue.code),
   );
   const patchRepairService = new ChapterPatchRepairService();
@@ -321,9 +322,9 @@ async function repairDraftContent(input: {
       provider: input.options.provider,
       model: input.options.model,
       temperature: input.options.temperature,
-      repairMode: input.options.repairMode,
-      modeHint,
-    });
+        repairMode: activeRepairMode,
+        modeHint,
+      });
     return {
       content: patched.content,
       recoverableFailure: null,
@@ -332,21 +333,12 @@ async function repairDraftContent(input: {
     if (!(error instanceof ChapterPatchRepairFailedError)) {
       throw error;
     }
-    if (input.options.repairMode !== "heavy_repair") {
-      return {
-        content: input.content,
-        recoverableFailure: {
-          chapterId: input.runtimePackage.chapterId,
-          message: error.message,
-          repairMode: input.options.repairMode ?? "light_repair",
-          failureTypes: Array.from(new Set(
-            error.applyResult?.failures
-              .map((failure) => failure.failureType)
-              .filter(Boolean) ?? [],
-          )),
-          occurredAt: new Date().toISOString(),
-        },
-      };
+    if (activeRepairMode !== "heavy_repair") {
+      activeRepairMode = "heavy_repair";
+      modeHint = getRepairModeHint(
+        activeRepairMode,
+        input.runtimePackage.audit.openIssues.map((issue) => issue.code),
+      );
     }
   }
 
@@ -372,7 +364,7 @@ async function repairDraftContent(input: {
       novelId: input.runtimePackage.novelId,
       chapterId: input.runtimePackage.chapterId,
       stage: "chapter_repair",
-      triggerReason: input.options.repairMode ?? "light_repair",
+      triggerReason: activeRepairMode,
     },
   });
   const nextContent = repaired.output.trim();

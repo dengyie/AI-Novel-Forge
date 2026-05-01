@@ -367,6 +367,9 @@ export class NovelDirectorRuntimeOrchestrator {
       policy: {
         ...basePolicy,
         mode: "auto_safe_scope",
+        mayOverwriteUserContent: input.affectedArtifacts.some((artifact) => artifact.protectedUserContent === true)
+          ? false
+          : basePolicy.mayOverwriteUserContent,
         allowExpensiveReview: input.approveAutoExecutionScope
           ? true
           : basePolicy.allowExpensiveReview,
