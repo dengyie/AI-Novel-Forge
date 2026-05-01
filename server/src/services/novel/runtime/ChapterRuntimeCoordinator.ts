@@ -182,7 +182,7 @@ export class ChapterRuntimeCoordinator {
     await this.deps.ensureNovelCharacters(novelId, "generate chapter content");
 
     const assembled = await this.deps.assembler.assemble(novelId, chapterId, request);
-    this.assertStateDrivenReady(assembled.contextPackage);
+    this.assertStateDrivenReady(assembled.contextPackage, request);
     await this.markChapterStatus(chapterId, "generating");
     const agentRuntime = this.getAgentRuntime();
 
@@ -260,7 +260,7 @@ export class ChapterRuntimeCoordinator {
   ): Promise<PipelineRuntimeResult> {
     const request = this.deps.validateRequest(options);
     const assembled = await this.deps.assembler.assemble(novelId, chapterId, request);
-    this.assertStateDrivenReady(assembled.contextPackage);
+    this.assertStateDrivenReady(assembled.contextPackage, request);
     await this.markChapterStatus(chapterId, "generating");
     return runPipelineChapterWithRuntime(
       {
@@ -310,8 +310,14 @@ export class ChapterRuntimeCoordinator {
     return (this.deps.agentRuntime ?? require("../../../agents").agentRuntime) as AgentRuntimeLike;
   }
 
-  private assertStateDrivenReady(contextPackage: GenerationContextPackage): void {
+  private assertStateDrivenReady(contextPackage: GenerationContextPackage, request: ChapterRuntimeRequestInput): void {
     if (contextPackage.nextAction === "hold_for_review") {
+      const isFullBookAutopilot = request.controlPolicy?.advanceMode === "full_book_autopilot";
+      const hasPendingStateProposals = contextPackage.pendingReviewProposalCount > 0;
+      const hasOpenAuditIssues = contextPackage.openAuditIssues.length > 0;
+      if (isFullBookAutopilot && hasPendingStateProposals && !hasOpenAuditIssues) {
+        return;
+      }
       const reasons = [
         contextPackage.pendingReviewProposalCount > 0
           ? `${contextPackage.pendingReviewProposalCount} pending state proposal(s)`

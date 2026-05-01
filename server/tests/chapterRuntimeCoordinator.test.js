@@ -170,6 +170,48 @@ test("createChapterStream blocks when state-driven decision requires review firs
   assert.deepEqual(statusCalls, []);
 });
 
+test("createChapterStream lets full_book_autopilot continue past pending state proposals", async () => {
+  const assembled = createAssembledChapter();
+  assembled.contextPackage.nextAction = "hold_for_review";
+  assembled.contextPackage.pendingReviewProposalCount = 2;
+  assembled.contextPackage.openAuditIssues = [];
+  const statusCalls = [];
+  const writerCalls = [];
+
+  const coordinator = new ChapterRuntimeCoordinator({
+    validateRequest: (input) => input,
+    ensureNovelCharacters: async () => undefined,
+    assembler: {
+      assemble: async () => assembled,
+    },
+    chapterWritingGraph: {
+      createChapterStream: async (input) => {
+        writerCalls.push(input);
+        return {
+          stream: createEmptyStream(),
+          onDone: async () => ({ finalContent: "chapter draft" }),
+        };
+      },
+    },
+    agentRuntime: createAgentRuntime(),
+  });
+  coordinator.markChapterStatus = async (...args) => {
+    statusCalls.push(args);
+  };
+
+  await coordinator.createChapterStream("novel-1", "chapter-1", {
+    controlPolicy: {
+      kickoffMode: "director_start",
+      advanceMode: "full_book_autopilot",
+      reviewCheckpoints: [],
+      autoExecutionRange: { mode: "book" },
+    },
+  });
+
+  assert.equal(writerCalls.length, 1);
+  assert.deepEqual(statusCalls, [["chapter-1", "generating"]]);
+});
+
 test("runPipelineChapter does not leave a blocked chapter in generating status", async () => {
   const assembled = createAssembledChapter();
   assembled.contextPackage.nextAction = "hold_for_review";
