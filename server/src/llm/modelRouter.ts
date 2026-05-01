@@ -31,7 +31,11 @@ export const MODEL_ROUTE_TASK_TYPES: ModelRouteTaskType[] = [
   "planner",
   "writer",
   "review",
+  "light_review",
+  "critical_review",
   "repair",
+  "replan",
+  "state_resolution",
   "summary",
   "fact_extraction",
   "chat",
@@ -44,9 +48,17 @@ export interface ResolvedModel {
   maxTokens?: number;
   requestProtocol: ModelRouteRequestProtocol;
   structuredResponseFormat: ModelRouteStructuredResponseFormat;
+  routeKey: ModelRouteTaskType | "default";
+  routeDegraded: boolean;
 }
 
-const DEFAULT_ROUTES: Record<ModelRouteTaskType | "default", ResolvedModel> = {
+const STRICT_ROUTE_TASK_TYPES = new Set<ModelRouteTaskType>([
+  "critical_review",
+  "replan",
+  "state_resolution",
+]);
+
+const DEFAULT_ROUTES: Record<ModelRouteTaskType | "default", Omit<ResolvedModel, "routeKey" | "routeDegraded">> = {
   planner: {
     provider: "deepseek",
     model: PROVIDERS.deepseek.defaultModel,
@@ -68,10 +80,38 @@ const DEFAULT_ROUTES: Record<ModelRouteTaskType | "default", ResolvedModel> = {
     requestProtocol: "auto",
     structuredResponseFormat: "auto",
   },
+  light_review: {
+    provider: "deepseek",
+    model: PROVIDERS.deepseek.defaultModel,
+    temperature: 0.2,
+    requestProtocol: "auto",
+    structuredResponseFormat: "auto",
+  },
+  critical_review: {
+    provider: "deepseek",
+    model: PROVIDERS.deepseek.defaultModel,
+    temperature: 0.1,
+    requestProtocol: "auto",
+    structuredResponseFormat: "auto",
+  },
   repair: {
     provider: "deepseek",
     model: PROVIDERS.deepseek.defaultModel,
     temperature: 0.4,
+    requestProtocol: "auto",
+    structuredResponseFormat: "auto",
+  },
+  replan: {
+    provider: "deepseek",
+    model: PROVIDERS.deepseek.defaultModel,
+    temperature: 0.2,
+    requestProtocol: "auto",
+    structuredResponseFormat: "auto",
+  },
+  state_resolution: {
+    provider: "deepseek",
+    model: PROVIDERS.deepseek.defaultModel,
+    temperature: 0.1,
     requestProtocol: "auto",
     structuredResponseFormat: "auto",
   },
@@ -199,6 +239,8 @@ function applyOverrides(
     ...merged,
     ...routePreferences,
     maxTokens: normalizeMaxTokens(merged.provider, merged.maxTokens),
+    routeKey: merged.routeKey,
+    routeDegraded: merged.routeDegraded,
   };
 }
 
@@ -246,6 +288,8 @@ export async function resolveModel(
         temperature: row.temperature,
         maxTokens: normalizeMaxTokens(provider, row.maxTokens ?? undefined),
         ...routePreferences,
+        routeKey: normalizedTaskType,
+        routeDegraded: false,
       };
       return applyOverrides(resolved, userOverride);
     }
@@ -253,7 +297,12 @@ export async function resolveModel(
     // table may not exist yet
   }
 
-  return applyOverrides(base, userOverride);
+  return applyOverrides({
+    ...base,
+    routeKey: normalizedTaskType,
+    routeDegraded: normalizedTaskType !== "default"
+      && STRICT_ROUTE_TASK_TYPES.has(normalizedTaskType),
+  }, userOverride);
 }
 
 export async function listModelRouteConfigs(): Promise<Array<{

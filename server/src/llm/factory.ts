@@ -41,6 +41,8 @@ interface LLMOptions {
   fallbackProvider?: LLMProvider;
   taskType?: TaskType;
   promptMeta?: PromptInvocationMeta;
+  modelRoute?: string;
+  routeDegraded?: boolean;
 }
 
 export interface ProviderSecret {
@@ -74,6 +76,8 @@ export interface ResolvedLLMClientOptions {
   reasoningForcedOff: boolean;
   taskType?: TaskType;
   promptMeta?: PromptInvocationMeta;
+  modelRoute?: string;
+  routeDegraded?: boolean;
 }
 
 const providerSecrets = new Map<LLMProvider, ProviderSecret>();
@@ -199,6 +203,8 @@ export async function resolveLLMClientOptions(
   let resolvedModel = normalizeOptionalText(options.model);
   let resolvedTemperature: number | undefined = options.temperature;
   let resolvedMaxTokens: number | undefined = options.maxTokens;
+  let resolvedModelRoute: string | undefined;
+  let resolvedRouteDegraded = false;
 
   if (options.taskType) {
     const hasExplicitProvider = provider != null;
@@ -231,6 +237,8 @@ export async function resolveLLMClientOptions(
         options.structuredStrategy = routeStructuredStrategy;
       }
     }
+    resolvedModelRoute = route.routeKey;
+    resolvedRouteDegraded = route.routeDegraded;
   }
 
   const dbSecret = await resolveProviderSecret(resolvedProvider);
@@ -332,6 +340,8 @@ export async function resolveLLMClientOptions(
     reasoningForcedOff: shouldForceDisableReasoning && requestedReasoningEnabled,
     taskType: options.taskType,
     promptMeta: options.promptMeta,
+    modelRoute: resolvedModelRoute,
+    routeDegraded: resolvedRouteDegraded,
   };
 }
 
@@ -365,6 +375,8 @@ export function createLLMFromResolvedOptions(resolved: ResolvedLLMClientOptions)
     maxTokens: resolved.maxTokens,
     timeoutMs: resolved.timeoutMs,
     taskType: resolved.taskType,
+    modelRoute: resolved.modelRoute,
+    routeDegraded: resolved.routeDegraded,
     baseURL: resolved.baseURL,
     promptMeta: resolved.promptMeta,
   };

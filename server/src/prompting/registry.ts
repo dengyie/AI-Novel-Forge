@@ -369,6 +369,10 @@ const promptAssetLoaderEntries: PromptAssetLoaderEntry[] = [
       key: "style.profile.select_anti_ai@v1",
       load: () => require("./prompts/style/style.prompts").styleProfileAntiAiSelectionPrompt as UnknownPromptAsset,
     },
+    {
+      key: "style.profile.sanitize_for_generation@v1",
+      load: () => require("./prompts/style/style.prompts").styleProfileSanitizeForGenerationPrompt as UnknownPromptAsset,
+    },
   {
     key: "world.reference.inspiration@v1",
     load: () => require("./prompts/world/world.prompts").worldReferenceInspirationPrompt as UnknownPromptAsset,

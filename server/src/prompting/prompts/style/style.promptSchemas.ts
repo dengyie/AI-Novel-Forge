@@ -90,3 +90,9 @@ export const styleProfileMetadataSchema = z.object({
 export const styleProfileAntiAiSelectionSchema = z.object({
   antiAiRuleKeys: z.array(z.string().trim()).optional().default([]),
 }).passthrough();
+
+export const styleProfileSanitizeForGenerationSchema = z.object({
+  writingGuidance: z.array(z.string().trim().min(1)).default([]),
+  forbiddenEntities: z.array(z.string().trim().min(1)).default([]),
+  sourceRiskSummary: z.string().trim().optional().nullable(),
+}).passthrough();

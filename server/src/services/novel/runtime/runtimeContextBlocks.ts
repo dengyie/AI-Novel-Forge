@@ -138,12 +138,22 @@ export function buildDecisionsBlock(
 }
 
 export function buildStyleEngineBlock(styleContext: GenerationContextPackage["styleContext"]): string {
+  const sanitizedGuidance = styleContext?.sanitizedGenerationProfile?.writingGuidance
+    ?.map((line) => line.trim())
+    .filter(Boolean) ?? [];
+  if (sanitizedGuidance.length > 0) {
+    return [
+      "Writing style guidance:",
+      "Use only transferable writing guidance. Do not copy source-work names, places, titles, catchphrases, plot turns, or iconic scenes.",
+      sanitizedGuidance.join("\n"),
+    ].filter(Boolean).join("\n\n");
+  }
   const contract = styleContext?.compiledBlocks?.contract;
   if (!contract) {
     return "";
   }
   return [
-    "写法引擎约束：",
+    "Writing style guidance:",
     buildWriterStyleContractText(contract),
   ].filter(Boolean).join("\n\n");
 }

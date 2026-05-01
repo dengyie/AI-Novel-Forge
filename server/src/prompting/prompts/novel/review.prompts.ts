@@ -84,7 +84,7 @@ export const chapterReviewPrompt: PromptAsset<
 > = {
   id: "novel.review.chapter",
   version: "v1",
-  taskType: "review",
+  taskType: "critical_review",
   mode: "structured",
   language: "zh",
   contextPolicy: {

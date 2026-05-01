@@ -125,7 +125,11 @@ export type ModelRouteTaskType =
   | "planner"
   | "writer"
   | "review"
+  | "light_review"
+  | "critical_review"
   | "repair"
+  | "replan"
+  | "state_resolution"
   | "summary"
   | "fact_extraction"
   | "chat";
