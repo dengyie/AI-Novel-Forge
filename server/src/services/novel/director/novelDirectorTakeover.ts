@@ -288,8 +288,13 @@ function isOutlineReady(snapshot: DirectorTakeoverAssetSnapshot): boolean {
   return snapshot.volumeCount > 0 && Boolean(snapshot.hasVolumeStrategyPlan);
 }
 
+export function isTakeoverStructuredOutlineReadyForValidation(snapshot: Pick<DirectorTakeoverAssetSnapshot, "structuredOutlineRecoveryStep">): boolean {
+  return snapshot.structuredOutlineRecoveryStep === "chapter_sync"
+    || snapshot.structuredOutlineRecoveryStep === "completed";
+}
+
 function isStructuredReady(snapshot: DirectorTakeoverAssetSnapshot): boolean {
-  return snapshot.structuredOutlineRecoveryStep === "completed";
+  return isTakeoverStructuredOutlineReadyForValidation(snapshot);
 }
 
 function isStructuredSyncPending(snapshot: DirectorTakeoverAssetSnapshot): boolean {
