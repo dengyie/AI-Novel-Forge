@@ -208,6 +208,15 @@ export interface DirectorAutoExecutionState extends DirectorAutoExecutionPlan {
   preparedVolumeIds?: string[];
   skippedChapterIds?: string[];
   skippedChapterOrders?: number[];
+  qualityDebtChapterIds?: string[];
+  qualityDebtChapterOrders?: number[];
+  qualityDebtSummaries?: Array<{
+    chapterId?: string | null;
+    chapterOrder?: number | null;
+    reason: string;
+    source: "quality_loop" | "replan_loop" | "repair_failure" | "review_skip";
+    deferredAt: string;
+  }>;
   firstChapterId?: string | null;
   startOrder?: number;
   endOrder?: number;

@@ -147,6 +147,16 @@ function riskBadgeClassName(level: NonNullable<DirectorRuntimeProjection["visibl
   return "border-sky-200 bg-sky-50 text-sky-700";
 }
 
+function formatQualityDebtSummary(summary: DirectorRuntimeProjection["qualityDebtSummary"] | null | undefined): string | null {
+  if (!summary || summary.deferredChapterCount <= 0) {
+    return null;
+  }
+  const orderText = summary.deferredChapterOrders.length > 0
+    ? `：第 ${summary.deferredChapterOrders.join("、")} 章`
+    : "";
+  return `质量待回收${orderText}。系统会先继续写后续章节，并在质量修复阶段回收这些问题。`;
+}
+
 function formatPercent(value: number | null | undefined): string {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return "0%";
@@ -176,10 +186,12 @@ export default function DirectorRuntimeProjectionCard({
   const progressLine = projection.progressBreakdown?.explanation?.trim()
     || projection.progressSummary?.trim()
     || null;
+  const qualityDebtLine = formatQualityDebtSummary(projection.qualityDebtSummary);
   const helperLines = [
     projection.nextActionLabel ? `下一步：${projection.nextActionLabel}` : null,
     projection.recommendedAction?.reason ? `推荐原因：${projection.recommendedAction.reason}` : null,
     projection.isAutopilotRecoverable ? "AI 可以从当前进度继续处理。" : null,
+    qualityDebtLine,
     projection.scopeSummary,
     progressLine,
   ].filter((line): line is string => Boolean(line?.trim()));

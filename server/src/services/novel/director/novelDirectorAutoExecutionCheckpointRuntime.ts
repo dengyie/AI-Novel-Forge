@@ -233,7 +233,6 @@ export async function resolveQualityRepairNoticeAction(
     && remainingChapterCount > 0
     && (
       isFullBookAutopilot
-      || qualityRepairRisk.autoContinuable
       || shouldNotifyAndContinueAiDriverQualityNotice
       || await deps.shouldAutoContinueQualityRepair?.({
         request: input.request,

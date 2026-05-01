@@ -5,6 +5,7 @@ import type {
 } from "@ai-novel/shared/types/novelDirector";
 import type { PipelineJobStatus } from "@ai-novel/shared/types/novel";
 import {
+  buildDirectorAutoExecutionDeferredQualityState,
   buildDirectorAutoExecutionPausedLabel,
   buildDirectorAutoExecutionPausedSummary,
   buildDirectorAutoExecutionScopeLabelFromState,
@@ -27,6 +28,11 @@ import {
 import { directorAutomationLedgerEventService } from "./runtime/DirectorAutomationLedgerEventService";
 import { directorUsageTelemetryQueryService } from "./runtime/DirectorUsageTelemetryQueryService";
 
+type AutomationLedgerEventPort = Pick<
+  typeof directorAutomationLedgerEventService,
+  "recordCircuitBreakerOpened" | "recordEvent"
+>;
+
 interface CircuitBreakerWorkflowPort extends AutoExecutionCheckpointRuntimeDeps {
   workflowService: AutoExecutionCheckpointRuntimeDeps["workflowService"] & {
     markTaskFailed(taskId: string, message: string, patch?: {
@@ -39,6 +45,7 @@ interface CircuitBreakerWorkflowPort extends AutoExecutionCheckpointRuntimeDeps 
       progress?: number;
     }): Promise<unknown>;
   };
+  automationLedgerEventService?: AutomationLedgerEventPort;
 }
 
 interface ReplanNoticeRuntimePort extends CircuitBreakerWorkflowPort {
@@ -66,11 +73,12 @@ export async function stopAutoExecutionForCircuitBreaker(
     resumeStage?: AutoExecutionResumeStage;
   },
 ): Promise<void> {
+  const ledgerEventService = deps.automationLedgerEventService ?? directorAutomationLedgerEventService;
   const autoExecution = withCircuitBreakerState(input.autoExecution, input.circuitBreaker);
   const scopeLabel = buildDirectorAutoExecutionScopeLabelFromState(autoExecution, input.range.totalChapterCount);
   const message = input.circuitBreaker.message?.trim()
     || `${scopeLabel}已暂停，等待处理后再继续。`;
-  await directorAutomationLedgerEventService.recordCircuitBreakerOpened({
+  await ledgerEventService.recordCircuitBreakerOpened({
     taskId: input.taskId,
     novelId: input.novelId,
     state: input.circuitBreaker,
@@ -156,7 +164,15 @@ export async function runFullBookAutopilotReplanNotice(input: {
   autoExecution: DirectorAutoExecutionState;
   checkpointState: DirectorAutoExecutionState;
   noticeSummary: string;
-}): Promise<{ stopped: true } | { stopped: false; circuitBreaker: DirectorCircuitBreakerState }> {
+}): Promise<
+  | { stopped: true }
+  | {
+    stopped: false;
+    circuitBreaker: DirectorCircuitBreakerState;
+    autoExecution?: DirectorAutoExecutionState;
+    decision?: "auto_replan_window" | "defer_and_continue";
+  }
+> {
   const replanCircuitBreaker = recordReplanLoopSignal({
     previous: input.autoExecution.circuitBreaker,
     chapterId: input.autoExecution.nextChapterId,
@@ -164,16 +180,43 @@ export async function runFullBookAutopilotReplanNotice(input: {
     message: input.noticeSummary,
   });
   if (isDirectorCircuitBreakerOpen(replanCircuitBreaker)) {
-    await stopAutoExecutionForCircuitBreaker(input.deps, {
+    const ledgerEventService = input.deps.automationLedgerEventService ?? directorAutomationLedgerEventService;
+    const closedCircuitBreaker = buildClosedDirectorCircuitBreakerState(replanCircuitBreaker);
+    const deferredState = buildDirectorAutoExecutionDeferredQualityState({
+      state: withCircuitBreakerState(input.checkpointState, closedCircuitBreaker),
+      reason: input.noticeSummary,
+      source: "replan_loop",
+    });
+    await ledgerEventService.recordEvent({
+      type: "continue_with_risk",
+      idempotencyKey: [
+        input.taskId,
+        input.novelId,
+        deferredState.nextChapterId ?? input.autoExecution.nextChapterId ?? "unknown",
+        deferredState.nextChapterOrder ?? input.autoExecution.nextChapterOrder ?? "unknown",
+        replanCircuitBreaker.replanLoopCount ?? "replan",
+      ].join(":"),
       taskId: input.taskId,
       novelId: input.novelId,
-      request: input.request,
-      range: input.range,
-      autoExecution: withCircuitBreakerState(input.checkpointState, replanCircuitBreaker),
-      circuitBreaker: replanCircuitBreaker,
-      resumeStage: "pipeline",
-    });
-    return { stopped: true };
+      nodeKey: "planner.replan",
+      summary: "全书自动成书已暂存重复重规划问题，并继续推进后续章节。",
+      affectedScope: input.autoExecution.nextChapterId
+        ? `chapter:${input.autoExecution.nextChapterId}`
+        : (typeof input.autoExecution.nextChapterOrder === "number" ? `chapter_order:${input.autoExecution.nextChapterOrder}` : null),
+      severity: "medium",
+      metadata: {
+        decision: "defer_and_continue",
+        circuitBreaker: replanCircuitBreaker,
+        noticeSummary: input.noticeSummary,
+        chapterOrder: input.autoExecution.nextChapterOrder ?? null,
+      },
+    }).catch(() => null);
+    return {
+      stopped: false,
+      circuitBreaker: closedCircuitBreaker,
+      autoExecution: deferredState,
+      decision: "defer_and_continue",
+    };
   }
   if (input.deps.replanNovel) {
     try {
@@ -208,7 +251,7 @@ export async function runFullBookAutopilotReplanNotice(input: {
       throw error;
     }
   }
-  return { stopped: false, circuitBreaker: replanCircuitBreaker };
+  return { stopped: false, circuitBreaker: replanCircuitBreaker, decision: "auto_replan_window" };
 }
 
 export { isDirectorCircuitBreakerOpen, withCircuitBreakerState };

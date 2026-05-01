@@ -345,6 +345,7 @@ function buildRecoveryDecision(input: {
   status: DirectorRuntimeProjectionStatus;
   inventory: DirectorWorkspaceInventory | null | undefined;
   blockedReason: string | null;
+  qualityDebtCount?: number;
 }): DirectorAutopilotRecoveryDecision {
   const protectedCount = input.inventory?.protectedUserContentArtifacts.length ?? 0;
   if (protectedCount > 0 && (input.status === "waiting_approval" || input.status === "blocked" || input.status === "failed")) {
@@ -359,6 +360,9 @@ function buildRecoveryDecision(input: {
   const missingArtifacts = input.inventory?.missingArtifactTypes ?? [];
   if (missingArtifacts.some((type) => PLANNING_ARTIFACT_TYPES.includes(type))) {
     return "auto_replan_window";
+  }
+  if ((input.qualityDebtCount ?? 0) > 0) {
+    return "defer_and_continue";
   }
   if (input.status === "waiting_approval" || input.status === "blocked") {
     return input.blockedReason ? "auto_resume_from_checkpoint" : "continue";
@@ -413,7 +417,39 @@ function buildVisibleRiskBadges(input: {
       push({ label: "连续失败保护", level: "danger", source: "event" });
     }
   }
+  for (const event of input.events) {
+    if (event.type === "continue_with_risk") {
+      push({ label: "已暂存质量债", level: "info", source: "event" });
+    }
+  }
   return badges.slice(0, 6);
+}
+
+function buildQualityDebtSummary(
+  events: DirectorEvent[],
+): DirectorRuntimeProjection["qualityDebtSummary"] {
+  const debtEvents = events
+    .filter((event) => event.type === "continue_with_risk")
+    .sort((left, right) => timestampOf(right.occurredAt) - timestampOf(left.occurredAt));
+  if (debtEvents.length === 0) {
+    return null;
+  }
+  const deferredChapterOrders = Array.from(new Set(debtEvents
+    .map((event) => {
+      const order = event.metadata?.chapterOrder;
+      if (typeof order === "number" && Number.isFinite(order)) {
+        return order;
+      }
+      const match = /chapter_order:(\d+)/.exec(event.affectedScope ?? "");
+      return match ? Number(match[1]) : null;
+    })
+    .filter((order): order is number => typeof order === "number" && Number.isFinite(order))))
+    .sort((left, right) => left - right);
+  return {
+    deferredChapterCount: debtEvents.length,
+    deferredChapterOrders,
+    latestReason: debtEvents[0]?.summary ?? null,
+  };
 }
 
 export class DirectorEventProjectionService {
@@ -432,7 +468,13 @@ export class DirectorEventProjectionService {
       ?? null;
     const headline = buildHeadline({ status, step, event });
     const progressBreakdown = buildProgressBreakdown(snapshot, inventory);
-    const recoveryDecision = buildRecoveryDecision({ status, inventory, blockedReason });
+    const qualityDebtSummary = buildQualityDebtSummary(snapshot.events);
+    const recoveryDecision = buildRecoveryDecision({
+      status,
+      inventory,
+      blockedReason,
+      qualityDebtCount: qualityDebtSummary?.deferredChapterCount ?? 0,
+    });
     const isAutopilotRecoverable = isAutomaticPolicy(snapshot)
       && recoveryDecision !== "requires_manual_recovery"
       && status !== "completed"
@@ -476,6 +518,7 @@ export class DirectorEventProjectionService {
       progressSummary: buildProgressSummary(snapshot, inventory),
       progressBreakdown,
       visibleRiskBadges,
+      qualityDebtSummary,
       policyMode: snapshot.policy.mode,
       updatedAt: snapshot.updatedAt,
       recentEvents,

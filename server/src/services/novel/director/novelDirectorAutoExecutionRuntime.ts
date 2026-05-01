@@ -11,6 +11,7 @@ import {
   buildDirectorAutoExecutionPausedLabel,
   buildDirectorAutoExecutionPausedSummary,
   buildDirectorAutoExecutionScopeLabelFromState,
+  buildDirectorAutoExecutionDeferredQualityState,
   buildDirectorAutoExecutionPipelineOptions,
   resolveDirectorAutoExecutionWorkflowState,
   type DirectorAutoExecutionChapterRef,
@@ -43,6 +44,11 @@ import {
   shouldClearAutoExecutionCheckpoint,
 } from "./novelDirectorAutoExecutionRuntimeUtils";
 import { directorAutomationLedgerEventService } from "./runtime/DirectorAutomationLedgerEventService";
+
+type AutomationLedgerEventPort = Pick<
+  typeof directorAutomationLedgerEventService,
+  "recordEvent" | "recordRepairTicketCreated" | "recordCircuitBreakerOpened"
+>;
 
 interface NovelDirectorAutoExecutionWorkflowPort {
   bootstrapTask(input: {
@@ -158,6 +164,7 @@ interface NovelDirectorAutoExecutionRuntimeDeps {
     model?: string;
     temperature?: number;
   }) => Promise<unknown>;
+  automationLedgerEventService?: AutomationLedgerEventPort;
 }
 
 export class NovelDirectorAutoExecutionRuntime {
@@ -529,9 +536,12 @@ export class NovelDirectorAutoExecutionRuntime {
               checkpointSummary: job.noticeSummary.trim(),
             });
             pipelineJobId = "";
+            const replanExistingState = "autoExecution" in replanNoticeResult && replanNoticeResult.autoExecution
+              ? replanNoticeResult.autoExecution
+              : withCircuitBreakerState(noticeAction.checkpointState, replanNoticeResult.circuitBreaker);
             ({ range, autoExecution } = await this.resolveRangeAndState({
               novelId: input.novelId,
-              existingState: withCircuitBreakerState(noticeAction.checkpointState, replanNoticeResult.circuitBreaker),
+              existingState: replanExistingState,
               pipelineJobId: null,
               pipelineStatus: "queued",
             }));
@@ -646,7 +656,8 @@ export class NovelDirectorAutoExecutionRuntime {
           pipelineStatus: job.status,
         }, failureCircuitBreaker);
         if (autoExecution.autoRepair && job.status !== "cancelled") {
-          await directorAutomationLedgerEventService.recordRepairTicketCreated({
+          const ledgerEventService = this.deps.automationLedgerEventService ?? directorAutomationLedgerEventService;
+          await ledgerEventService.recordRepairTicketCreated({
             taskId: input.taskId,
             novelId: input.novelId,
             chapterId: autoExecution.nextChapterId ?? null,
@@ -658,6 +669,69 @@ export class NovelDirectorAutoExecutionRuntime {
               chapterOrder: autoExecution.nextChapterOrder ?? null,
             },
           }).catch(() => null);
+        }
+        if (
+          isDirectorCircuitBreakerOpen(failureCircuitBreaker)
+          && isFullBookAutopilotRunMode(input.request.runMode)
+          && (failureCircuitBreaker.reason === "auto_repair_exhausted" || failureCircuitBreaker.reason === "replan_loop")
+        ) {
+          const deferredState = buildDirectorAutoExecutionDeferredQualityState({
+            state: withCircuitBreakerState(failedAutoExecution, null),
+            reason: failureMessage,
+            source: failureCircuitBreaker.reason === "replan_loop" ? "replan_loop" : "repair_failure",
+          });
+          const ledgerEventService = this.deps.automationLedgerEventService ?? directorAutomationLedgerEventService;
+          await ledgerEventService.recordEvent({
+            type: "continue_with_risk",
+            idempotencyKey: [
+              input.taskId,
+              input.novelId,
+              autoExecution.nextChapterId ?? "unknown",
+              autoExecution.nextChapterOrder ?? "unknown",
+              failureCircuitBreaker.reason,
+              failureCircuitBreaker.failureCount ?? "failure",
+            ].join(":"),
+            taskId: input.taskId,
+            novelId: input.novelId,
+            nodeKey: failureCircuitBreaker.nodeKey ?? "chapter_repair_node",
+            summary: "全书自动成书已暂存本章质量问题，并继续推进后续章节。",
+            affectedScope: autoExecution.nextChapterId
+              ? `chapter:${autoExecution.nextChapterId}`
+              : (typeof autoExecution.nextChapterOrder === "number" ? `chapter_order:${autoExecution.nextChapterOrder}` : null),
+            severity: "medium",
+            metadata: {
+              decision: "defer_and_continue",
+              circuitBreaker: failureCircuitBreaker,
+              failureMessage,
+              chapterOrder: autoExecution.nextChapterOrder ?? null,
+            },
+          }).catch(() => null);
+          const previousNextChapterId = autoExecution.nextChapterId ?? null;
+          const previousNextChapterOrder = autoExecution.nextChapterOrder ?? null;
+          pipelineJobId = "";
+          ({ range, autoExecution } = await this.resolveRangeAndState({
+            novelId: input.novelId,
+            existingState: deferredState,
+            pipelineJobId: null,
+            pipelineStatus: "queued",
+          }));
+          const deferredWasPreserved = (
+            autoExecution.nextChapterId !== previousNextChapterId
+            || autoExecution.nextChapterOrder !== previousNextChapterOrder
+            || (autoExecution.remainingChapterCount ?? 0) === 0
+          );
+          if (deferredWasPreserved) {
+            await syncAutoExecutionTaskState(this.deps, {
+              taskId: input.taskId,
+              novelId: input.novelId,
+              request: input.request,
+              range,
+              autoExecution,
+              isBackgroundRunning: true,
+              resumeStage: "pipeline",
+            });
+            continue autoExecutionLoop;
+          }
         }
         if (isDirectorCircuitBreakerOpen(failureCircuitBreaker)) {
           await stopAutoExecutionForCircuitBreaker(this.deps, {

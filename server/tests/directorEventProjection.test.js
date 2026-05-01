@@ -107,6 +107,50 @@ test("director event projection keeps latest event first", () => {
   assert.equal(projection.recentEvents[0].eventId, "event-new");
 });
 
+test("director event projection exposes deferred quality debt", () => {
+  const service = new DirectorEventProjectionService();
+  const projection = service.buildSnapshotProjection(buildSnapshot({
+    policy: {
+      mode: "auto_safe_scope",
+      mayOverwriteUserContent: false,
+      maxAutoRepairAttempts: 1,
+      allowExpensiveReview: false,
+      modelTier: "balanced",
+      updatedAt: "2026-04-28T00:00:00.000Z",
+    },
+    steps: [{
+      idempotencyKey: "task-1:chapter_execution_node:novel:novel-1",
+      nodeKey: "chapter_execution_node",
+      label: "继续章节生成",
+      status: "running",
+      targetType: "novel",
+      targetId: "novel-1",
+      startedAt: "2026-04-28T00:00:01.000Z",
+    }],
+    events: [{
+      eventId: "event-quality-debt",
+      type: "continue_with_risk",
+      taskId: "task-1",
+      novelId: "novel-1",
+      nodeKey: "planner.replan",
+      summary: "全书自动成书已暂存重复重规划问题，并继续推进后续章节。",
+      affectedScope: "chapter_order:6",
+      severity: "medium",
+      metadata: { chapterOrder: 6 },
+      occurredAt: "2026-04-28T00:00:02.000Z",
+    }],
+  }));
+
+  assert.equal(projection.recoveryDecision, "defer_and_continue");
+  assert.equal(projection.isAutopilotRecoverable, true);
+  assert.deepEqual(projection.qualityDebtSummary, {
+    deferredChapterCount: 1,
+    deferredChapterOrders: [6],
+    latestReason: "全书自动成书已暂存重复重规划问题，并继续推进后续章节。",
+  });
+  assert.ok(projection.visibleRiskBadges.some((badge) => badge.label === "已暂存质量债"));
+});
+
 test("director event projection summarizes workspace progress and next action", () => {
   const service = new DirectorEventProjectionService();
   const projection = service.buildSnapshotProjection(buildSnapshot({

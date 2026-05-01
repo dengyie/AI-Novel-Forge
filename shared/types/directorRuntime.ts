@@ -339,8 +339,10 @@ export interface DirectorRuntimeProjectionEvent {
 export type DirectorAutopilotRecoveryDecision =
   | "continue"
   | "auto_repair_chapter"
+  | "auto_rewrite_chapter"
   | "auto_replan_window"
   | "auto_resume_from_checkpoint"
+  | "defer_and_continue"
   | "requires_manual_recovery";
 
 export interface DirectorRuntimeProgressBreakdown {
@@ -367,6 +369,12 @@ export interface DirectorRuntimeVisibleRiskBadge {
   source?: "status" | "artifact" | "event" | "policy";
 }
 
+export interface DirectorRuntimeQualityDebtSummary {
+  deferredChapterCount: number;
+  deferredChapterOrders: number[];
+  latestReason?: string | null;
+}
+
 export interface DirectorRuntimeProjection {
   runId: string;
   novelId?: string | null;
@@ -387,6 +395,7 @@ export interface DirectorRuntimeProjection {
   progressSummary?: string | null;
   progressBreakdown?: DirectorRuntimeProgressBreakdown;
   visibleRiskBadges?: DirectorRuntimeVisibleRiskBadge[];
+  qualityDebtSummary?: DirectorRuntimeQualityDebtSummary | null;
   policyMode: DirectorPolicyMode;
   updatedAt: string;
   recentEvents: DirectorRuntimeProjectionEvent[];
