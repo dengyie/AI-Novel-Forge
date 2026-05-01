@@ -180,10 +180,10 @@ export class ChapterRuntimeCoordinator {
   }> {
     const request = this.deps.validateRequest(options);
     await this.deps.ensureNovelCharacters(novelId, "generate chapter content");
-    await this.markChapterStatus(chapterId, "generating");
 
     const assembled = await this.deps.assembler.assemble(novelId, chapterId, request);
     this.assertStateDrivenReady(assembled.contextPackage);
+    await this.markChapterStatus(chapterId, "generating");
     const agentRuntime = this.getAgentRuntime();
 
     let traceRunId: string | null = null;
@@ -259,9 +259,9 @@ export class ChapterRuntimeCoordinator {
     hooks: PipelineRuntimeHooks = {},
   ): Promise<PipelineRuntimeResult> {
     const request = this.deps.validateRequest(options);
-    await this.markChapterStatus(chapterId, "generating");
     const assembled = await this.deps.assembler.assemble(novelId, chapterId, request);
     this.assertStateDrivenReady(assembled.contextPackage);
+    await this.markChapterStatus(chapterId, "generating");
     return runPipelineChapterWithRuntime(
       {
         validateRequest: () => request,

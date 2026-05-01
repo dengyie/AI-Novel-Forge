@@ -5,6 +5,7 @@ import type {
   PipelineBackgroundSyncState,
   PipelinePayload,
 } from "./novelCoreShared";
+import type { NovelControlPolicy } from "@ai-novel/shared/types/canonicalState";
 
 const PIPELINE_ACTIVE_STAGES = ["queued", "generating_chapters", "reviewing", "repairing", "finalizing"] as const;
 const PIPELINE_STAGE_PROGRESS = {
@@ -103,6 +104,45 @@ function normalizePipelineBackgroundSync(value: unknown): PipelineBackgroundSync
   return activities.length > 0 ? { activities } : undefined;
 }
 
+function normalizeControlPolicy(value: unknown): NovelControlPolicy | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const raw = value as Record<string, unknown>;
+  const kickoffMode = raw.kickoffMode;
+  const advanceMode = raw.advanceMode;
+  if (
+    (
+      kickoffMode !== "manual_start"
+      && kickoffMode !== "director_start"
+      && kickoffMode !== "takeover_start"
+    )
+    || (
+      advanceMode !== "manual"
+      && advanceMode !== "stage_review"
+      && advanceMode !== "auto_to_ready"
+      && advanceMode !== "auto_to_execution"
+      && advanceMode !== "full_book_autopilot"
+    )
+  ) {
+    return undefined;
+  }
+  const reviewCheckpoints = Array.isArray(raw.reviewCheckpoints)
+    ? raw.reviewCheckpoints
+      .filter((item): item is string => typeof item === "string")
+      .map((item) => item.trim())
+      .filter(Boolean)
+    : [];
+  return {
+    kickoffMode,
+    advanceMode,
+    reviewCheckpoints,
+    ...(raw.autoExecutionRange && typeof raw.autoExecutionRange === "object"
+      ? { autoExecutionRange: raw.autoExecutionRange as NovelControlPolicy["autoExecutionRange"] }
+      : {}),
+  };
+}
+
 export function buildPipelineBackgroundActivityLabels(
   backgroundSync: PipelineBackgroundSyncState | null | undefined,
 ): string[] {
@@ -177,6 +217,7 @@ export function parsePipelinePayload(payload: string | null | undefined): Pipeli
       model: typeof parsed.model === "string" ? parsed.model : undefined,
       temperature: typeof parsed.temperature === "number" ? parsed.temperature : undefined,
       workflowTaskId: typeof parsed.workflowTaskId === "string" ? parsed.workflowTaskId : undefined,
+      taskStyleProfileId: typeof parsed.taskStyleProfileId === "string" ? parsed.taskStyleProfileId : undefined,
       maxRetries: typeof parsed.maxRetries === "number" ? parsed.maxRetries : undefined,
       runMode: parsed.runMode === "polish" ? "polish" : parsed.runMode === "fast" ? "fast" : undefined,
       autoReview: typeof parsed.autoReview === "boolean" ? parsed.autoReview : undefined,
@@ -192,6 +233,7 @@ export function parsePipelinePayload(payload: string | null | undefined): Pipeli
         || parsed.repairMode === "ending_only"
           ? parsed.repairMode
           : undefined,
+      controlPolicy: normalizeControlPolicy(parsed.controlPolicy),
       qualityAlertDetails: normalizeStringList(parsed.qualityAlertDetails ?? parsed.failedDetails),
       replanAlertDetails: normalizeStringList(parsed.replanAlertDetails),
       recoverableRepairDetails: normalizeStringList(parsed.recoverableRepairDetails),
@@ -212,6 +254,7 @@ export function stringifyPipelinePayload(input: PipelinePayload): string {
     model: input.model ?? "",
     temperature: input.temperature ?? 0.8,
     ...(input.workflowTaskId?.trim() ? { workflowTaskId: input.workflowTaskId.trim() } : {}),
+    ...(input.taskStyleProfileId?.trim() ? { taskStyleProfileId: input.taskStyleProfileId.trim() } : {}),
     ...(typeof input.maxRetries === "number" ? { maxRetries: input.maxRetries } : {}),
     runMode: input.runMode ?? "fast",
     autoReview: input.autoReview ?? true,
@@ -219,6 +262,7 @@ export function stringifyPipelinePayload(input: PipelinePayload): string {
     skipCompleted: input.skipCompleted ?? true,
     qualityThreshold: input.qualityThreshold ?? null,
     repairMode: input.repairMode ?? "light_repair",
+    ...(input.controlPolicy ? { controlPolicy: normalizeControlPolicy(input.controlPolicy) ?? input.controlPolicy } : {}),
     ...(qualityAlertDetails.length > 0 ? { qualityAlertDetails } : {}),
     ...(replanAlertDetails.length > 0 ? { replanAlertDetails } : {}),
     ...(recoverableRepairDetails.length > 0 ? { recoverableRepairDetails } : {}),

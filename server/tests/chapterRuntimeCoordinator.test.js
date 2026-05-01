@@ -144,6 +144,7 @@ test("createChapterStream blocks when state-driven decision requires review firs
   assembled.contextPackage.openAuditIssues = [{
     description: "pending review issue",
   }];
+  const statusCalls = [];
 
   const coordinator = new ChapterRuntimeCoordinator({
     validateRequest: (input) => input,
@@ -158,10 +159,46 @@ test("createChapterStream blocks when state-driven decision requires review firs
     },
     agentRuntime: createAgentRuntime(),
   });
-  coordinator.markChapterStatus = async () => undefined;
+  coordinator.markChapterStatus = async (...args) => {
+    statusCalls.push(args);
+  };
 
   await assert.rejects(
     () => coordinator.createChapterStream("novel-1", "chapter-1", {}),
     /blocked until review is resolved/i,
   );
+  assert.deepEqual(statusCalls, []);
+});
+
+test("runPipelineChapter does not leave a blocked chapter in generating status", async () => {
+  const assembled = createAssembledChapter();
+  assembled.contextPackage.nextAction = "hold_for_review";
+  assembled.contextPackage.pendingReviewProposalCount = 1;
+  assembled.contextPackage.openAuditIssues = [{
+    description: "chapter needs review",
+  }];
+  const statusCalls = [];
+
+  const coordinator = new ChapterRuntimeCoordinator({
+    validateRequest: (input) => input,
+    ensureNovelCharacters: async () => undefined,
+    assembler: {
+      assemble: async () => assembled,
+    },
+    chapterWritingGraph: {
+      createChapterStream: async () => {
+        throw new Error("writer should not run");
+      },
+    },
+    agentRuntime: createAgentRuntime(),
+  });
+  coordinator.markChapterStatus = async (...args) => {
+    statusCalls.push(args);
+  };
+
+  await assert.rejects(
+    () => coordinator.runPipelineChapter("novel-1", "chapter-1", {}),
+    /blocked until review is resolved/i,
+  );
+  assert.deepEqual(statusCalls, []);
 });
