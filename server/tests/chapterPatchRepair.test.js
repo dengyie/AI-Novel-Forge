@@ -48,6 +48,68 @@ test("applyChapterPatchRepairPlan rejects ambiguous target excerpts", () => {
   assert.equal(result.success, false);
   assert.equal(result.content, "重复承接片段。重复承接片段。");
   assert.equal(result.failures[0].patchId, "patch-dup");
+  assert.equal(result.failures[0].failureType, "ambiguous_target");
+});
+
+test("applyChapterPatchRepairPlan applies unique whitespace-normalized patches", () => {
+  const result = applyChapterPatchRepairPlan("殿下？\n\n苏哲猛地抬头，目光扫过屋内陈设。", {
+    strategy: "patch_first",
+    summary: "修复跨段补丁。",
+    patches: [{
+      id: "patch-space",
+      targetExcerpt: "殿下？苏哲猛地抬头，目光扫过屋内陈设。",
+      replacement: "殿下？\n\n苏哲猛地抬头，终于意识到这具身体的身份不简单。",
+      reason: "目标片段只存在换行差异。",
+      issueIds: [],
+    }],
+    requiresFullRewrite: false,
+    escalationReason: null,
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(result.content, "殿下？\n\n苏哲猛地抬头，终于意识到这具身体的身份不简单。");
+  assert.deepEqual(result.appliedPatchIds, ["patch-space"]);
+  assert.equal(result.appliedPatches[0].matchedBy, "normalized_whitespace");
+});
+
+test("applyChapterPatchRepairPlan rejects ambiguous whitespace-normalized matches", () => {
+  const result = applyChapterPatchRepairPlan("殿下？\n\n苏哲醒来。殿下？ 苏哲醒来。", {
+    strategy: "patch_first",
+    summary: "尝试修复重复跨段。",
+    patches: [{
+      id: "patch-space-dup",
+      targetExcerpt: "殿下？苏哲醒来。",
+      replacement: "殿下？苏哲彻底醒来。",
+      reason: "目标片段去除空白后重复。",
+      issueIds: [],
+    }],
+    requiresFullRewrite: false,
+    escalationReason: null,
+  });
+
+  assert.equal(result.success, false);
+  assert.equal(result.content, "殿下？\n\n苏哲醒来。殿下？ 苏哲醒来。");
+  assert.equal(result.failures[0].failureType, "ambiguous_target");
+  assert.equal(result.failures[0].matchedBy, "normalized_whitespace");
+});
+
+test("applyChapterPatchRepairPlan reports no_effect when replacement keeps content unchanged", () => {
+  const result = applyChapterPatchRepairPlan("正文保持不变。", {
+    strategy: "patch_first",
+    summary: "无变化补丁。",
+    patches: [{
+      id: "patch-no-effect",
+      targetExcerpt: "正文保持不变。",
+      replacement: "正文保持不变。",
+      reason: "替换后无变化。",
+      issueIds: [],
+    }],
+    requiresFullRewrite: false,
+    escalationReason: null,
+  });
+
+  assert.equal(result.success, false);
+  assert.equal(result.failures[0].failureType, "no_effect");
 });
 
 test("applyChapterPatchRepairPlan rejects full rewrite plans", () => {

@@ -80,6 +80,9 @@ function withExecutionDetail(chapter) {
   const order = chapter.order ?? chapter.chapterOrder ?? 1;
   return {
     purpose: `第${order}章目标`,
+    exclusiveEvent: `第${order}章独占事件`,
+    endingState: `第${order}章结尾状态`,
+    nextChapterEntryState: `第${order + 1}章入场状态`,
     conflictLevel: 5,
     revealLevel: 3,
     targetWordCount: 2800,
@@ -281,8 +284,8 @@ test("runFromReady reuses an existing active range job before starting a new pip
   });
 
   assert.deepEqual(calls, [
-    ["bootstrapTask", "job-stale", "running"],
     ["getPipelineJobById", "job-stale"],
+    ["bootstrapTask", null, "queued"],
     ["findActivePipelineJobForRange", "novel-1", 1, 1, null],
     ["bootstrapTask", "job-active", "running"],
     ["getPipelineJobById", "job-active"],

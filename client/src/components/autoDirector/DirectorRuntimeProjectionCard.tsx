@@ -3,6 +3,7 @@ import type {
   DirectorRuntimeProjection,
   DirectorRuntimeProjectionStatus,
 } from "@ai-novel/shared/types/directorRuntime";
+import { getDirectorNodeDisplayLabel } from "@ai-novel/shared/types/directorRuntime";
 import {
   Activity,
   AlertTriangle,
@@ -65,7 +66,7 @@ function formatUsageLine(usage: {
     `输入 ${formatTokenCount(usage.promptTokens)}`,
     `输出 ${formatTokenCount(usage.completionTokens)}`,
     `总计 ${formatTokenCount(usage.totalTokens)} Tokens`,
-    duration ? `耗时 ${duration}` : null,
+    duration ? `累计调用耗时 ${duration}` : null,
   ].filter(Boolean).join(" · ");
 }
 
@@ -160,6 +161,7 @@ export default function DirectorRuntimeProjectionCard({
   const recentEvents = projection.recentEvents.slice(0, compact ? 2 : 4);
   const usageSummary = projection.usageSummary ?? null;
   const stepUsage = projection.stepUsage?.slice(0, compact ? 2 : 4) ?? [];
+  const promptUsage = projection.promptUsage?.slice(0, compact ? 2 : 6) ?? [];
 
   return (
     <div className={cn("rounded-lg border bg-background/80 p-3", statusClassName(projection.status), className)}>
@@ -202,11 +204,27 @@ export default function DirectorRuntimeProjectionCard({
         <div className="mt-3 rounded-md border bg-background/70 px-3 py-2 text-xs leading-5 text-muted-foreground">
           <div className="font-medium text-foreground">AI 用量</div>
           <div className="mt-1">{formatUsageLine(usageSummary)}</div>
+          {promptUsage.length > 0 && !compact ? (
+            <div className="mt-2 space-y-1">
+              <div className="text-[11px] font-medium text-muted-foreground">阶段用量</div>
+              {promptUsage.map((item) => (
+                <div key={`${item.promptAssetKey}:${item.promptVersion ?? ""}:${item.nodeKey ?? ""}`} className="flex flex-wrap items-center justify-between gap-2 border-t pt-1">
+                  <span className="min-w-0 truncate text-foreground">
+                    {getDirectorNodeDisplayLabel({ label: item.label ?? item.promptAssetKey, nodeKey: item.nodeKey })}
+                  </span>
+                  <span className="shrink-0">{formatUsageLine(item)}</span>
+                </div>
+              ))}
+            </div>
+          ) : null}
           {stepUsage.length > 0 && !compact ? (
             <div className="mt-2 space-y-1">
+              <div className="text-[11px] font-medium text-muted-foreground">推进步骤</div>
               {stepUsage.map((item) => (
                 <div key={item.stepIdempotencyKey} className="flex flex-wrap items-center justify-between gap-2 border-t pt-1">
-                  <span className="min-w-0 truncate text-foreground">{item.label || item.nodeKey}</span>
+                  <span className="min-w-0 truncate text-foreground">
+                    {getDirectorNodeDisplayLabel({ label: item.label, nodeKey: item.nodeKey })}
+                  </span>
                   <span className="shrink-0">{formatUsageLine(item)}</span>
                 </div>
               ))}

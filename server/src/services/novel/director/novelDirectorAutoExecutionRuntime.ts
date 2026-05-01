@@ -118,6 +118,8 @@ interface NovelDirectorAutoExecutionNovelPort {
   cancelPipelineJob(jobId: string): Promise<unknown>;
 }
 
+type PipelineJobSnapshot = Awaited<ReturnType<NovelDirectorAutoExecutionNovelPort["getPipelineJobById"]>>;
+
 interface NovelDirectorAutoExecutionVolumeWorkspacePort {
   getVolumes(novelId: string): Promise<VolumePlanDocument>;
 }
@@ -256,6 +258,24 @@ export class NovelDirectorAutoExecutionRuntime {
       previousFailureMessage: input.previousFailureMessage,
       allowSkipReviewBlockedChapter: input.allowSkipReviewBlockedChapter,
     });
+    let knownPipelineJob: PipelineJobSnapshot = null;
+    if (pipelineJobId) {
+      knownPipelineJob = await this.deps.novelService.getPipelineJobById(pipelineJobId);
+      if (!knownPipelineJob || ["failed", "cancelled"].includes(knownPipelineJob.status)) {
+        pipelineJobId = "";
+        ({ range, autoExecution } = await this.resolveRangeAndState({
+          novelId: input.novelId,
+          existingState: {
+            ...autoExecution,
+            pipelineJobId: null,
+            pipelineStatus: null,
+            circuitBreaker: null,
+          },
+          pipelineJobId: null,
+          pipelineStatus: "queued",
+        }));
+      }
+    }
     if (isDirectorCircuitBreakerOpen(autoExecution.circuitBreaker)) {
       await stopAutoExecutionForCircuitBreaker(this.deps, {
         taskId: input.taskId,
@@ -284,7 +304,8 @@ export class NovelDirectorAutoExecutionRuntime {
       }
 
       if (pipelineJobId) {
-        const existingJob = await this.deps.novelService.getPipelineJobById(pipelineJobId);
+        const existingJob = knownPipelineJob ?? await this.deps.novelService.getPipelineJobById(pipelineJobId);
+        knownPipelineJob = existingJob;
         if (!existingJob || ["failed", "cancelled"].includes(existingJob.status)) {
           pipelineJobId = "";
         }

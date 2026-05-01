@@ -45,9 +45,10 @@ export function buildDirectorQualityRepairRisk(
   const repairMode = payload.repairMode ?? null;
   const replanCount = normalizeCount(payload.replanAlertDetails?.length);
   const qualityCount = normalizeCount(payload.qualityAlertDetails?.length);
+  const recoverableRepairCount = normalizeCount(payload.recoverableRepairDetails?.length);
   const affectedChapterCount = noticeCode === PIPELINE_REPLAN_NOTICE_CODE
     ? replanCount
-    : qualityCount;
+    : Math.max(qualityCount, recoverableRepairCount);
   const remainingChapterCount = normalizeCount(input.remainingChapterCount);
   const totalChapterCount = Math.max(1, normalizeCount(input.totalChapterCount) || remainingChapterCount || 1);
   const largeScopeThreshold = Math.max(3, Math.ceil(totalChapterCount * 0.25));

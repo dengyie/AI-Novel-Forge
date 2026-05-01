@@ -129,9 +129,9 @@ export function buildTakeoverDescription(input: {
   }
   if (input.mode === "failed") {
     if (input.checkpointType === "chapter_batch_ready") {
-      return `${input.scopeLabel}自动执行已暂停。建议先查看任务中心或质量修复区，再决定是否继续自动执行。`;
+      return `${input.scopeLabel}自动执行已暂停。可以先查看执行详情或质量修复区，再决定是否继续自动执行。`;
     }
-    return "后台导演流程已中断。建议先去任务中心查看失败原因，再决定是否从最近检查点恢复。";
+    return "后台导演流程已中断。可以先查看执行详情，再决定是否从最近进度点恢复。";
   }
   if (input.mode === "loading") {
     return "正在同步当前自动导演状态。";

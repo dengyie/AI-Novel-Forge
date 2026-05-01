@@ -35,6 +35,7 @@ export interface DirectorNodeRunInput<TInput> {
   targetId?: string | null;
   input: TInput;
   policy?: Omit<Partial<DirectorPolicyRequest>, "action">;
+  reuseCompletedStep?: boolean;
 }
 
 export interface DirectorNodeRunResult<TOutput> {
@@ -67,7 +68,8 @@ export class DirectorNodeRunner {
         targetId: input.targetId,
       })
       : null;
-    const completedStep = idempotencyKey
+    const shouldReuseCompletedStep = input.reuseCompletedStep !== false;
+    const completedStep = shouldReuseCompletedStep && idempotencyKey
       ? snapshot?.steps.find((step) => step.idempotencyKey === idempotencyKey && step.status === "succeeded")
       : null;
     if (completedStep) {

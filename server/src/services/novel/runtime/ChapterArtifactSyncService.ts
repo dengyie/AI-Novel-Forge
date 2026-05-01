@@ -5,12 +5,17 @@ import { ragServices } from "../../rag";
 import { briefSummary, extractFacts } from "../novelP0Utils";
 import { chapterArtifactBackgroundSyncService } from "./ChapterArtifactBackgroundSyncService";
 
+export interface ChapterArtifactSyncOptions {
+  scheduleBackgroundSync?: boolean;
+}
+
 export class ChapterArtifactSyncService {
   async saveDraftAndArtifacts(
     novelId: string,
     chapterId: string,
     content: string,
     generationState: "drafted" | "repaired",
+    options: ChapterArtifactSyncOptions = {},
   ): Promise<void> {
     await withSqliteRetry(
       () => prisma.chapter.update({
@@ -23,10 +28,15 @@ export class ChapterArtifactSyncService {
       }),
       { label: "chapterArtifactSync.chapter.update" },
     );
-    await this.syncChapterArtifacts(novelId, chapterId, content);
+    await this.syncChapterArtifacts(novelId, chapterId, content, options);
   }
 
-  private async syncChapterArtifacts(novelId: string, chapterId: string, content: string): Promise<void> {
+  async syncChapterArtifacts(
+    novelId: string,
+    chapterId: string,
+    content: string,
+    options: ChapterArtifactSyncOptions = {},
+  ): Promise<void> {
     const facts = extractFacts(content);
     const summary = briefSummary(content, facts);
 
@@ -65,7 +75,9 @@ export class ChapterArtifactSyncService {
     );
 
     await this.syncCharacterTimelineForChapter(novelId, chapterId, content);
-    chapterArtifactBackgroundSyncService.scheduleChapterSync(novelId, chapterId, content);
+    if (options.scheduleBackgroundSync !== false) {
+      chapterArtifactBackgroundSyncService.scheduleChapterSync(novelId, chapterId, content);
+    }
     this.queueRagUpsert("chapter", chapterId);
     this.queueRagUpsert("chapter_summary", chapterId);
     this.queueRagUpsert("novel", novelId);

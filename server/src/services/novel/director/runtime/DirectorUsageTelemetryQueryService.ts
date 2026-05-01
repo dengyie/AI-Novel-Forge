@@ -1,6 +1,7 @@
 import type {
   DirectorLlmUsageRecordSummary,
   DirectorLlmUsageSummary,
+  DirectorPromptUsageSummary,
   DirectorStepRun,
   DirectorStepUsageSummary,
 } from "@ai-novel/shared/types/directorRuntime";
@@ -31,6 +32,7 @@ export interface DirectorUsageTelemetryProjection {
   summary: DirectorLlmUsageSummary | null;
   recentUsage: DirectorLlmUsageRecordSummary[];
   stepUsage: DirectorStepUsageSummary[];
+  promptUsage: DirectorPromptUsageSummary[];
 }
 
 function toIso(value: Date | string | null | undefined): string | null {
@@ -149,6 +151,42 @@ function buildStepUsage(
     .slice(0, 12);
 }
 
+function buildPromptUsage(rows: DirectorUsageRow[]): DirectorPromptUsageSummary[] {
+  const grouped = new Map<string, DirectorUsageRow[]>();
+  for (const row of rows) {
+    const promptAssetKey = row.promptAssetKey?.trim();
+    if (!promptAssetKey) {
+      continue;
+    }
+    const groupKey = [
+      promptAssetKey,
+      row.promptVersion?.trim() ?? "",
+      row.nodeKey?.trim() ?? "",
+    ].join("|");
+    grouped.set(groupKey, [
+      ...(grouped.get(groupKey) ?? []),
+      row,
+    ]);
+  }
+
+  return [...grouped.values()]
+    .map((promptRows) => {
+      const first = promptRows[0]!;
+      const summary = summarizeRows(promptRows) ?? emptySummary();
+      return {
+        ...summary,
+        promptAssetKey: first.promptAssetKey ?? "unknown",
+        promptVersion: first.promptVersion,
+        nodeKey: first.nodeKey,
+        stepIdempotencyKey: first.stepIdempotencyKey,
+        label: first.promptAssetKey,
+        attributionStatus: first.attributionStatus,
+      };
+    })
+    .sort((left, right) => toTimestamp(right.lastRecordedAt) - toTimestamp(left.lastRecordedAt))
+    .slice(0, 16);
+}
+
 function normalizeWhereByNovelOrTask(novelId: string, taskIds: string[]) {
   const uniqueTaskIds = Array.from(new Set(taskIds.filter((id) => id.trim().length > 0)));
   if (uniqueTaskIds.length === 0) {
@@ -201,6 +239,7 @@ export class DirectorUsageTelemetryQueryService {
       summary: summarizeRows(sortedRows),
       recentUsage: sortedRows.slice(0, 12).map(mapUsageRecord),
       stepUsage: buildStepUsage(sortedRows, steps),
+      promptUsage: buildPromptUsage(sortedRows),
     };
   }
 

@@ -4,301 +4,36 @@ import type {
   DirectorBookAutomationTimelineItem,
   DirectorPolicyMode,
   DirectorRuntimeProjection,
-  DirectorStepRun,
 } from "@ai-novel/shared/types/directorRuntime";
+import { getDirectorNodeDisplayLabel } from "@ai-novel/shared/types/directorRuntime";
 import { prisma } from "../../../db/prisma";
 import { loadPersistentDirectorRuntimeProjection } from "./novelDirectorRuntimeProjection";
 import { directorArtifactLedgerQueryService } from "./runtime/DirectorArtifactLedgerQueryService";
 import { directorUsageTelemetryQueryService } from "./runtime/DirectorUsageTelemetryQueryService";
+import {
+  buildAutomationSummary,
+  buildDetail,
+  buildDisplayState,
+  buildFocusNovel,
+  buildHeadline,
+  buildPrimaryAction,
+  buildSecondaryActions,
+  buildUserHeadline,
+  buildUserReason,
+  buildWhereByNovelOrTask,
+  commandLabel,
+  commandStatusLabel,
+  extractCircuitBreaker,
+  extractRunMode,
+  mapStepForUsage,
+  parseJsonOrNull,
+  runtimeStatusToBookStatus,
+  timestampOf,
+  toIso,
+  workflowStatusToBookStatus,
+} from "./DirectorBookAutomationProjectionModel";
 
 type RuntimeProjectionLoader = (taskId: string) => Promise<DirectorRuntimeProjection | null>;
-
-function parseJsonOrNull<T>(value: string | null | undefined): T | null {
-  if (!value?.trim()) {
-    return null;
-  }
-  try {
-    return JSON.parse(value) as T;
-  } catch {
-    return null;
-  }
-}
-
-function toIso(value: Date | string | null | undefined): string {
-  if (!value) {
-    return new Date(0).toISOString();
-  }
-  if (value instanceof Date) {
-    return value.toISOString();
-  }
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? new Date(0).toISOString() : parsed.toISOString();
-}
-
-function timestampOf(value: string | null | undefined): number {
-  if (!value) {
-    return 0;
-  }
-  const timestamp = Date.parse(value);
-  return Number.isFinite(timestamp) ? timestamp : 0;
-}
-
-function commandLabel(commandType: string): string {
-  const labels: Record<string, string> = {
-    confirm_candidate: "确认开书方向",
-    continue: "继续自动导演",
-    resume_from_checkpoint: "从进度点恢复",
-    retry: "重试自动导演",
-    takeover: "接管这本书",
-    repair_chapter_titles: "修复章节标题",
-    cancel: "取消自动导演",
-  };
-  return labels[commandType] ?? commandType;
-}
-
-function commandStatusLabel(status: string): string {
-  const labels: Record<string, string> = {
-    queued: "排队中",
-    leased: "准备执行",
-    running: "执行中",
-    succeeded: "完成",
-    failed: "失败",
-    cancelled: "已取消",
-    stale: "需要恢复",
-  };
-  return labels[status] ?? status;
-}
-
-function workflowStatusToBookStatus(status: string | null | undefined): DirectorBookAutomationStatus {
-  if (status === "queued") {
-    return "queued";
-  }
-  if (status === "running") {
-    return "running";
-  }
-  if (status === "waiting_approval") {
-    return "waiting_approval";
-  }
-  if (status === "failed") {
-    return "failed";
-  }
-  if (status === "cancelled") {
-    return "cancelled";
-  }
-  if (status === "succeeded") {
-    return "completed";
-  }
-  return "idle";
-}
-
-function runtimeStatusToBookStatus(status: DirectorRuntimeProjection["status"]): DirectorBookAutomationStatus {
-  if (status === "waiting_approval") {
-    return "waiting_approval";
-  }
-  if (status === "blocked") {
-    return "blocked";
-  }
-  if (status === "failed") {
-    return "failed";
-  }
-  if (status === "running") {
-    return "running";
-  }
-  if (status === "completed") {
-    return "completed";
-  }
-  return "idle";
-}
-
-function extractRunMode(seedPayloadJson: string | null | undefined): string | null {
-  const seedPayload = parseJsonOrNull<Record<string, unknown>>(seedPayloadJson);
-  if (!seedPayload) {
-    return null;
-  }
-  const direct = seedPayload.runMode;
-  if (typeof direct === "string") {
-    return direct;
-  }
-  const directorInput = seedPayload.directorInput;
-  if (directorInput && typeof directorInput === "object") {
-    const value = (directorInput as { runMode?: unknown }).runMode;
-    if (typeof value === "string") {
-      return value;
-    }
-  }
-  const directorSession = seedPayload.directorSession;
-  if (directorSession && typeof directorSession === "object") {
-    const value = (directorSession as { runMode?: unknown }).runMode;
-    if (typeof value === "string") {
-      return value;
-    }
-  }
-  return null;
-}
-
-function extractCircuitBreaker(
-  seedPayloadJson: string | null | undefined,
-): DirectorBookAutomationProjection["circuitBreaker"] {
-  const seedPayload = parseJsonOrNull<Record<string, unknown>>(seedPayloadJson);
-  const autoExecution = seedPayload?.autoExecution;
-  if (!autoExecution || typeof autoExecution !== "object") {
-    return null;
-  }
-  const circuitBreaker = (autoExecution as { circuitBreaker?: unknown }).circuitBreaker;
-  if (!circuitBreaker || typeof circuitBreaker !== "object") {
-    return null;
-  }
-  const status = (circuitBreaker as { status?: unknown }).status;
-  if (status !== "open" && status !== "closed") {
-    return null;
-  }
-  return circuitBreaker as DirectorBookAutomationProjection["circuitBreaker"];
-}
-
-function buildWhereByNovelOrTask(novelId: string, taskIds: string[]) {
-  const uniqueTaskIds = Array.from(new Set(taskIds.filter(Boolean)));
-  if (uniqueTaskIds.length === 0) {
-    return { novelId };
-  }
-  return {
-    OR: [
-      { novelId },
-      { taskId: { in: uniqueTaskIds } },
-    ],
-  };
-}
-
-function buildHeadline(input: {
-  status: DirectorBookAutomationStatus;
-  runtimeProjection: DirectorRuntimeProjection | null;
-  task: {
-    currentItemLabel?: string | null;
-    checkpointSummary?: string | null;
-    lastError?: string | null;
-  } | null;
-}): string {
-  if (input.status === "waiting_recovery") {
-    return "等待恢复自动导演";
-  }
-  if (input.runtimeProjection?.headline?.trim()) {
-    return input.runtimeProjection.headline.trim();
-  }
-  if (input.status === "queued") {
-    return "AI 自动导演已排队";
-  }
-  if (input.status === "running") {
-    const label = input.task?.currentItemLabel?.trim();
-    return label ? `AI 正在推进：${label}` : "AI 正在推进这本书";
-  }
-  if (input.status === "waiting_approval") {
-    return "等待你的确认";
-  }
-  if (input.status === "blocked") {
-    return "自动导演已暂停";
-  }
-  if (input.status === "failed") {
-    return "自动导演遇到问题";
-  }
-  if (input.status === "cancelled") {
-    return "自动导演已取消";
-  }
-  if (input.status === "completed") {
-    return "自动导演完成最近一次推进";
-  }
-  return "这本书还没有自动导演记录";
-}
-
-function buildDetail(input: {
-  status: DirectorBookAutomationStatus;
-  runtimeProjection: DirectorRuntimeProjection | null;
-  task: {
-    checkpointSummary?: string | null;
-    lastError?: string | null;
-    currentItemLabel?: string | null;
-  } | null;
-}): string | null {
-  if (input.status === "waiting_recovery") {
-    return input.task?.lastError?.trim() || "后台执行中断后保留了进度点，确认恢复后会从最近进展继续。";
-  }
-  if (input.runtimeProjection?.detail?.trim()) {
-    return input.runtimeProjection.detail.trim();
-  }
-  if (input.task?.checkpointSummary?.trim()) {
-    return input.task.checkpointSummary.trim();
-  }
-  if (input.status === "failed") {
-    return input.task?.lastError?.trim() || "查看执行详情后可选择恢复或重试。";
-  }
-  if (input.status === "idle") {
-    return "可以从 AI 自动导演开始，让系统根据这本书的资产推荐下一步。";
-  }
-  return input.task?.currentItemLabel?.trim() ?? null;
-}
-
-function buildAutomationSummary(input: {
-  activeCommandCount: number;
-  pendingCommandCount: number;
-  artifactSummary: DirectorBookAutomationProjection["artifactSummary"];
-  autoApprovalRecordCount: number;
-  usageSummary?: DirectorBookAutomationProjection["usageSummary"];
-}): string {
-  const parts: string[] = [];
-  if (input.activeCommandCount > 0) {
-    parts.push(`${input.activeCommandCount} 个动作执行中`);
-  }
-  if (input.pendingCommandCount > 0) {
-    parts.push(`${input.pendingCommandCount} 个动作排队中`);
-  }
-  if (input.autoApprovalRecordCount > 0) {
-    parts.push(`${input.autoApprovalRecordCount} 个确认由 AI 自动处理`);
-  }
-  if (input.artifactSummary.activeCount > 0) {
-    parts.push(`${input.artifactSummary.activeCount} 个可用产物`);
-  }
-  if (input.artifactSummary.staleCount > 0) {
-    parts.push(`${input.artifactSummary.staleCount} 个产物需复核`);
-  }
-  if (input.artifactSummary.repairTicketCount > 0) {
-    parts.push(`${input.artifactSummary.repairTicketCount} 个修复项`);
-  }
-  if (input.artifactSummary.protectedUserContentCount > 0) {
-    parts.push(`${input.artifactSummary.protectedUserContentCount} 个用户内容受保护`);
-  }
-  if (input.usageSummary && input.usageSummary.llmCallCount > 0) {
-    parts.push(`${input.usageSummary.llmCallCount} 次 AI 调用`);
-  }
-  if (input.usageSummary && input.usageSummary.totalTokens > 0) {
-    parts.push(`${input.usageSummary.totalTokens} Tokens`);
-  }
-  if ((input.artifactSummary.dependencyCount ?? 0) > 0) {
-    parts.push(`${input.artifactSummary.dependencyCount} 条产物依赖`);
-  }
-  return parts.length > 0 ? parts.join("，") : "暂无自动化动作";
-}
-
-function mapStepForUsage(step: {
-  idempotencyKey: string;
-  nodeKey: string;
-  label: string;
-  status: string;
-  targetType?: string | null;
-  targetId?: string | null;
-  startedAt: Date;
-  finishedAt: Date | null;
-  error: string | null;
-}): DirectorStepRun {
-  return {
-    idempotencyKey: step.idempotencyKey,
-    nodeKey: step.nodeKey,
-    label: step.label,
-    status: step.status as DirectorStepRun["status"],
-    targetType: step.targetType as DirectorStepRun["targetType"],
-    targetId: step.targetId,
-    startedAt: step.startedAt.toISOString(),
-    finishedAt: step.finishedAt?.toISOString() ?? null,
-    error: step.error,
-  };
-}
 
 export class DirectorBookAutomationProjectionService {
   constructor(
@@ -306,6 +41,13 @@ export class DirectorBookAutomationProjectionService {
   ) {}
 
   async getProjection(novelId: string): Promise<DirectorBookAutomationProjection> {
+    const novel = await prisma.novel.findUnique({
+      where: { id: novelId },
+      select: {
+        id: true,
+        title: true,
+      },
+    });
     const latestTask = await prisma.novelWorkflowTask.findFirst({
       where: {
         novelId,
@@ -338,7 +80,9 @@ export class DirectorBookAutomationProjectionService {
         updatedAt: true,
       },
     });
-    const taskIds = [latestTask?.id, latestRun?.taskId].filter((value): value is string => Boolean(value));
+    const taskIds = Array.from(new Set(
+      [latestTask?.id, latestRun?.taskId].filter((value): value is string => Boolean(value)),
+    ));
     const whereByNovelOrTask = buildWhereByNovelOrTask(novelId, taskIds);
     const runtimeTaskId = latestTask?.id ?? latestRun?.taskId ?? null;
 
@@ -447,6 +191,7 @@ export class DirectorBookAutomationProjectionService {
           : runtimeStatus !== "idle"
             ? runtimeStatus
             : taskStatus;
+    const displayState = buildDisplayState(status);
     const requiresUserAction = circuitBreaker?.status === "open"
       || status === "waiting_approval"
       || status === "waiting_recovery"
@@ -455,6 +200,26 @@ export class DirectorBookAutomationProjectionService {
     const blockedReason = status === "waiting_recovery"
       ? latestTask?.lastError ?? runtimeProjection?.blockedReason ?? null
       : runtimeProjection?.blockedReason ?? (status === "failed" ? latestTask?.lastError ?? null : null);
+    const headline = buildHeadline({ status, runtimeProjection, task: latestTask });
+    const detail = buildDetail({ status, runtimeProjection, task: latestTask });
+    const userHeadline = buildUserHeadline({ status, task: latestTask });
+    const userReason = buildUserReason({
+      status,
+      runtimeProjection,
+      task: latestTask,
+      blockedReason,
+      detail,
+    });
+    const primaryAction = buildPrimaryAction({
+      novelId,
+      status,
+      task: latestTask ? { id: latestTask.id, checkpointType: latestTask.checkpointType } : null,
+    });
+    const secondaryActions = buildSecondaryActions({
+      novelId,
+      status,
+      taskId: latestTask?.id ?? runtimeTaskId,
+    });
     const updatedAt = [
       latestTask?.updatedAt,
       latestRun?.updatedAt,
@@ -510,7 +275,11 @@ export class DirectorBookAutomationProjectionService {
       ...usageTelemetry.recentUsage.slice(0, 8).map((usage) => ({
         id: `usage:${usage.id}`,
         type: "usage" as const,
-        title: usage.nodeKey ? `AI 用量：${usage.nodeKey}` : "AI 用量记录",
+        title: `AI 用量：${getDirectorNodeDisplayLabel({
+          label: usage.promptAssetKey,
+          nodeKey: usage.nodeKey,
+          fallback: "推进步骤",
+        })}`,
         detail: usage.promptAssetKey
           ? `${usage.promptAssetKey}${usage.promptVersion ? `@${usage.promptVersion}` : ""}`
           : usage.model ?? usage.provider,
@@ -547,6 +316,10 @@ export class DirectorBookAutomationProjectionService {
 
     return {
       novelId,
+      focusNovel: buildFocusNovel({
+        id: novelId,
+        title: novel?.title,
+      }),
       latestTask: latestTask
         ? {
           id: latestTask.id,
@@ -565,15 +338,20 @@ export class DirectorBookAutomationProjectionService {
         : null,
       latestRunId: latestRun?.id ?? runtimeProjection?.runId ?? null,
       status,
+      displayState,
       runMode: extractRunMode(latestTask?.seedPayloadJson),
       policyMode,
-      headline: buildHeadline({ status, runtimeProjection, task: latestTask }),
-      detail: buildDetail({ status, runtimeProjection, task: latestTask }),
+      headline,
+      userHeadline,
+      detail,
+      userReason,
       currentStage: latestTask?.currentStage ?? runtimeProjection?.currentNodeKey ?? null,
       currentLabel: latestTask?.currentItemLabel ?? runtimeProjection?.currentLabel ?? null,
       requiresUserAction,
       blockedReason,
       nextActionLabel: runtimeProjection?.nextActionLabel ?? null,
+      primaryAction,
+      secondaryActions,
       automationSummary: buildAutomationSummary({
         activeCommandCount,
         pendingCommandCount,
@@ -586,6 +364,7 @@ export class DirectorBookAutomationProjectionService {
       usageSummary: usageTelemetry.summary,
       recentUsage: usageTelemetry.recentUsage,
       stepUsage: usageTelemetry.stepUsage,
+      promptUsage: usageTelemetry.promptUsage,
       circuitBreaker,
       activeCommandCount,
       pendingCommandCount,
@@ -596,4 +375,5 @@ export class DirectorBookAutomationProjectionService {
       timeline,
     };
   }
+
 }

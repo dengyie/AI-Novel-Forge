@@ -38,6 +38,7 @@ export interface PipelineJobDecorations {
   noticeCode: string | null;
   noticeSummary: string | null;
   qualityAlertDetails: string[];
+  recoverableRepairDetails: string[];
   backgroundActivityLabels: string[];
 }
 
@@ -193,6 +194,7 @@ export function parsePipelinePayload(payload: string | null | undefined): Pipeli
           : undefined,
       qualityAlertDetails: normalizeStringList(parsed.qualityAlertDetails ?? parsed.failedDetails),
       replanAlertDetails: normalizeStringList(parsed.replanAlertDetails),
+      recoverableRepairDetails: normalizeStringList(parsed.recoverableRepairDetails),
       backgroundSync: normalizePipelineBackgroundSync(parsed.backgroundSync),
     };
   } catch {
@@ -203,6 +205,7 @@ export function parsePipelinePayload(payload: string | null | undefined): Pipeli
 export function stringifyPipelinePayload(input: PipelinePayload): string {
   const qualityAlertDetails = normalizeStringList(input.qualityAlertDetails) ?? [];
   const replanAlertDetails = normalizeStringList(input.replanAlertDetails) ?? [];
+  const recoverableRepairDetails = normalizeStringList(input.recoverableRepairDetails) ?? [];
   const backgroundSync = normalizePipelineBackgroundSync(input.backgroundSync);
   return JSON.stringify({
     provider: input.provider ?? "deepseek",
@@ -218,26 +221,36 @@ export function stringifyPipelinePayload(input: PipelinePayload): string {
     repairMode: input.repairMode ?? "light_repair",
     ...(qualityAlertDetails.length > 0 ? { qualityAlertDetails } : {}),
     ...(replanAlertDetails.length > 0 ? { replanAlertDetails } : {}),
+    ...(recoverableRepairDetails.length > 0 ? { recoverableRepairDetails } : {}),
     ...(backgroundSync?.activities?.length ? { backgroundSync } : {}),
   });
 }
 
-export function getPipelineQualityNotice(details: string[] | undefined): PipelineJobDecorations {
+export function getPipelineQualityNotice(
+  details: string[] | undefined,
+  repairDetails?: string[] | undefined,
+): PipelineJobDecorations {
   const qualityAlertDetails = normalizeStringList(details) ?? [];
-  if (qualityAlertDetails.length === 0) {
+  const recoverableRepairDetails = normalizeStringList(repairDetails) ?? [];
+  if (qualityAlertDetails.length === 0 && recoverableRepairDetails.length === 0) {
     return {
       displayStatus: null,
       noticeCode: null,
       noticeSummary: null,
       qualityAlertDetails: [],
+      recoverableRepairDetails: [],
       backgroundActivityLabels: [],
     };
   }
   return {
     displayStatus: "Completed with quality alerts",
     noticeCode: PIPELINE_QUALITY_NOTICE_CODE,
-    noticeSummary: `Some chapters finished below the configured quality threshold: ${qualityAlertDetails.join("; ")}`,
+    noticeSummary: [
+      qualityAlertDetails.length > 0 ? `部分章节未通过质量阈值：${qualityAlertDetails.join("; ")}` : null,
+      recoverableRepairDetails.length > 0 ? `部分章节保留正文并记录待修复：${recoverableRepairDetails.join("; ")}` : null,
+    ].filter(Boolean).join("。"),
     qualityAlertDetails,
+    recoverableRepairDetails,
     backgroundActivityLabels: [],
   };
 }
@@ -250,6 +263,7 @@ export function getPipelineReplanNotice(details: string[] | undefined): Pipeline
       noticeCode: null,
       noticeSummary: null,
       qualityAlertDetails: [],
+      recoverableRepairDetails: [],
       backgroundActivityLabels: [],
     };
   }
@@ -258,6 +272,7 @@ export function getPipelineReplanNotice(details: string[] | undefined): Pipeline
     noticeCode: PIPELINE_REPLAN_NOTICE_CODE,
     noticeSummary: `State-driven replan is required before continuing: ${replanAlertDetails.join("; ")}`,
     qualityAlertDetails: [],
+    recoverableRepairDetails: [],
     backgroundActivityLabels: [],
   };
 }
@@ -267,12 +282,13 @@ export function decoratePipelineJob<T extends PipelineJobLike>(job: T): Decorate
   const notice = job.status === "succeeded"
     ? (getPipelineReplanNotice(payload.replanAlertDetails).noticeCode
       ? getPipelineReplanNotice(payload.replanAlertDetails)
-      : getPipelineQualityNotice(payload.qualityAlertDetails))
+      : getPipelineQualityNotice(payload.qualityAlertDetails, payload.recoverableRepairDetails))
     : {
       displayStatus: null,
       noticeCode: null,
       noticeSummary: null,
       qualityAlertDetails: payload.qualityAlertDetails ?? [],
+      recoverableRepairDetails: payload.recoverableRepairDetails ?? [],
       backgroundActivityLabels: [],
     };
   return {
@@ -281,6 +297,7 @@ export function decoratePipelineJob<T extends PipelineJobLike>(job: T): Decorate
     noticeCode: notice.noticeCode,
     noticeSummary: notice.noticeSummary,
     qualityAlertDetails: notice.qualityAlertDetails,
+    recoverableRepairDetails: notice.recoverableRepairDetails,
     backgroundActivityLabels: buildPipelineBackgroundActivityLabels(payload.backgroundSync),
   };
 }

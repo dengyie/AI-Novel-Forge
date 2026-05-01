@@ -5,6 +5,12 @@ const { prisma } = require("../dist/db/prisma.js");
 const {
   DirectorBookAutomationProjectionService,
 } = require("../dist/services/novel/director/DirectorBookAutomationProjectionService.js");
+const {
+  directorArtifactLedgerQueryService,
+} = require("../dist/services/novel/director/runtime/DirectorArtifactLedgerQueryService.js");
+const {
+  directorUsageTelemetryQueryService,
+} = require("../dist/services/novel/director/runtime/DirectorUsageTelemetryQueryService.js");
 
 function createHarness(overrides = {}) {
   const latestTask = {
@@ -95,16 +101,36 @@ function createHarness(overrides = {}) {
     repair: 1,
     ...overrides.counts,
   };
+  const artifactSummary = overrides.artifactSummary ?? {
+    activeCount: counts.active,
+    staleCount: counts.stale,
+    protectedUserContentCount: counts.protected,
+    repairTicketCount: counts.repair,
+  };
+  const usageTelemetry = overrides.usageTelemetry ?? {
+    summary: null,
+    recentUsage: [],
+    stepUsage: [],
+  };
   const originals = {
+    novelFindUnique: prisma.novel.findUnique,
     taskFindFirst: prisma.novelWorkflowTask.findFirst,
     runFindFirst: prisma.directorRun.findFirst,
     commandFindMany: prisma.directorRunCommand.findMany,
     eventFindMany: prisma.directorEvent.findMany,
     stepFindMany: prisma.directorStepRun.findMany,
     approvalFindMany: prisma.autoDirectorAutoApprovalRecord.findMany,
-    artifactCount: prisma.directorArtifact.count,
+    artifactGetBookSummary: directorArtifactLedgerQueryService.getBookSummary,
+    usageGetBookUsage: directorUsageTelemetryQueryService.getBookUsage,
   };
 
+  prisma.novel.findUnique = async ({ where }) => {
+    assert.equal(where.id, "novel-1");
+    return overrides.novel ?? {
+      id: "novel-1",
+      title: "测试小说",
+    };
+  };
   prisma.novelWorkflowTask.findFirst = async ({ where }) => {
     assert.equal(where.novelId, "novel-1");
     assert.equal(where.lane, "auto_director");
@@ -127,20 +153,14 @@ function createHarness(overrides = {}) {
     assert.equal(where.novelId, "novel-1");
     return approvals;
   };
-  prisma.directorArtifact.count = async ({ where }) => {
-    if (where.status === "active") {
-      return counts.active;
-    }
-    if (where.status === "stale") {
-      return counts.stale;
-    }
-    if (where.protectedUserContent === true) {
-      return counts.protected;
-    }
-    if (where.artifactType === "repair_ticket") {
-      return counts.repair;
-    }
-    return 0;
+  directorArtifactLedgerQueryService.getBookSummary = async (novelId) => {
+    assert.equal(novelId, "novel-1");
+    return artifactSummary;
+  };
+  directorUsageTelemetryQueryService.getBookUsage = async (input) => {
+    assert.equal(input.novelId, "novel-1");
+    assert.deepEqual(input.taskIds, ["task-1"]);
+    return usageTelemetry;
   };
 
   return {
@@ -162,13 +182,15 @@ function createHarness(overrides = {}) {
       recentEvents: [],
     }),
     restore() {
+      prisma.novel.findUnique = originals.novelFindUnique;
       prisma.novelWorkflowTask.findFirst = originals.taskFindFirst;
       prisma.directorRun.findFirst = originals.runFindFirst;
       prisma.directorRunCommand.findMany = originals.commandFindMany;
       prisma.directorEvent.findMany = originals.eventFindMany;
       prisma.directorStepRun.findMany = originals.stepFindMany;
       prisma.autoDirectorAutoApprovalRecord.findMany = originals.approvalFindMany;
-      prisma.directorArtifact.count = originals.artifactCount;
+      directorArtifactLedgerQueryService.getBookSummary = originals.artifactGetBookSummary;
+      directorUsageTelemetryQueryService.getBookUsage = originals.usageGetBookUsage;
     },
   };
 }
@@ -179,6 +201,9 @@ test("book automation projection aggregates task, command, event, approval and a
     const projection = await harness.service.getProjection("novel-1");
 
     assert.equal(projection.novelId, "novel-1");
+    assert.equal(projection.focusNovel.title, "测试小说");
+    assert.equal(projection.displayState, "processing");
+    assert.equal(projection.userHeadline, "AI 正在处理：生成章节任务单");
     assert.equal(projection.latestTask.id, "task-1");
     assert.equal(projection.latestRunId, "run-1");
     assert.equal(projection.status, "running");
@@ -194,6 +219,9 @@ test("book automation projection aggregates task, command, event, approval and a
       protectedUserContentCount: 2,
       repairTicketCount: 1,
     });
+    assert.equal(projection.primaryAction.label, "查看推进状态");
+    assert.equal(projection.primaryAction.target.href, "/novels/novel-1/edit?taskId=task-1");
+    assert.equal(projection.secondaryActions[0].target.href, "/novels/novel-1/edit?taskId=task-1&taskPanel=1");
     assert.equal(projection.timeline[0].id, "event:event-1");
     assert.ok(projection.timeline.some((item) => item.id === "command:command-1"));
     assert.ok(projection.timeline.some((item) => item.id === "approval:approval-1"));
@@ -226,9 +254,13 @@ test("book automation projection treats manual recovery as a book-level user act
     const projection = await harness.service.getProjection("novel-1");
 
     assert.equal(projection.status, "waiting_recovery");
+    assert.equal(projection.displayState, "paused");
     assert.equal(projection.requiresUserAction, true);
     assert.equal(projection.blockedReason, "后台执行中断，点击恢复后继续。");
     assert.equal(projection.headline, "等待恢复自动导演");
+    assert.equal(projection.userHeadline, "AI 已暂停在可处理的位置");
+    assert.equal(projection.primaryAction.label, "从进度点继续");
+    assert.equal(projection.primaryAction.commandPayload.continuationMode, "resume");
   } finally {
     harness.restore();
   }

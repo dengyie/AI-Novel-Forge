@@ -566,6 +566,7 @@ export class NovelCorePipelineService {
     let totalRetryCount = Math.max(existingJob?.retryCount ?? 0, 0);
     const qualityAlertDetails = [...(persistedPayload.qualityAlertDetails ?? [])];
     const replanAlertDetails = [...(persistedPayload.replanAlertDetails ?? [])];
+    const recoverableRepairDetails = [...(persistedPayload.recoverableRepairDetails ?? [])];
 
     try {
       await runWithLlmUsageTracking({
@@ -697,6 +698,17 @@ export class NovelCorePipelineService {
 
           totalRetryCount += chapterResult.retryCountUsed;
           final = { score: chapterResult.score, issues: chapterResult.issues };
+          if (chapterResult.recoverableRepairFailure) {
+            recoverableRepairDetails.push(
+              `第${chapter.order}章需要后续修复：${chapterResult.recoverableRepairFailure.message}`,
+            );
+            logPipelineWarn("章节局部修复未安全应用，已记录并继续后续章节", {
+              jobId,
+              order: chapter.order,
+              reason: chapterResult.recoverableRepairFailure.message,
+              failureTypes: chapterResult.recoverableRepairFailure.failureTypes,
+            });
+          }
           if (chapterResult.reviewExecuted) {
             await createQualityReport(novelId, chapter.id, final.score, final.issues);
             await chapterQualityLoopService.recordAssessment({
@@ -749,6 +761,7 @@ export class NovelCorePipelineService {
               ...runtimePayload,
               qualityAlertDetails,
               replanAlertDetails,
+              recoverableRepairDetails,
             }),
           });
           logPipelineInfo("任务进度更新", {
@@ -785,6 +798,7 @@ export class NovelCorePipelineService {
             ...runtimePayload,
             qualityAlertDetails,
             replanAlertDetails,
+            recoverableRepairDetails,
           }),
         });
         logPipelineInfo("任务执行结束", {
@@ -811,6 +825,7 @@ export class NovelCorePipelineService {
             ...runtimePayload,
             qualityAlertDetails,
             replanAlertDetails,
+            recoverableRepairDetails,
           }),
         });
         void novelEventBus.emit({
@@ -829,6 +844,7 @@ export class NovelCorePipelineService {
           ...runtimePayload,
           qualityAlertDetails,
           replanAlertDetails,
+          recoverableRepairDetails,
         }),
       });
       logPipelineError("任务执行异常", {

@@ -1,23 +1,10 @@
 import type {
+  DirectorBookAutomationAction,
   DirectorBookAutomationProjection,
-  DirectorBookAutomationStatus,
 } from "@ai-novel/shared/types/directorRuntime";
-import {
-  Activity,
-  AlertTriangle,
-  CheckCircle2,
-  Clock3,
-  Database,
-  History,
-  ListTodo,
-  PauseCircle,
-  RotateCcw,
-  ShieldCheck,
-  XCircle,
-} from "lucide-react";
-import { Badge } from "@/components/ui/badge";
+import { LayoutDashboard } from "lucide-react";
+import AICockpit from "./AICockpit";
 import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
 
 interface DirectorBookAutomationCardProps {
   projection: DirectorBookAutomationProjection | null | undefined;
@@ -29,156 +16,6 @@ interface DirectorBookAutomationCardProps {
   onSwitchToProjectNav?: () => void;
 }
 
-function formatDate(value: string | null | undefined): string {
-  if (!value) {
-    return "暂无";
-  }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return "暂无";
-  }
-  return date.toLocaleString();
-}
-
-function formatTokenCount(value: number | null | undefined): string {
-  const count = Math.max(0, Math.round(Number(value ?? 0)));
-  return count.toLocaleString();
-}
-
-function formatDuration(value: number | null | undefined): string | null {
-  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
-    return null;
-  }
-  const seconds = Math.round(value / 1000);
-  if (seconds <= 0) {
-    return "<1 秒";
-  }
-  if (seconds < 60) {
-    return `${seconds} 秒`;
-  }
-  const minutes = Math.floor(seconds / 60);
-  const restSeconds = seconds % 60;
-  return restSeconds > 0 ? `${minutes} 分 ${restSeconds} 秒` : `${minutes} 分`;
-}
-
-function formatUsageLine(usage: {
-  llmCallCount: number;
-  promptTokens: number;
-  completionTokens: number;
-  totalTokens: number;
-  durationMs?: number | null;
-}): string {
-  const duration = formatDuration(usage.durationMs);
-  return [
-    `${formatTokenCount(usage.llmCallCount)} 次调用`,
-    `输入 ${formatTokenCount(usage.promptTokens)}`,
-    `输出 ${formatTokenCount(usage.completionTokens)}`,
-    `总计 ${formatTokenCount(usage.totalTokens)} Tokens`,
-    duration ? `耗时 ${duration}` : null,
-  ].filter(Boolean).join(" · ");
-}
-
-function formatStatus(status: DirectorBookAutomationStatus): string {
-  const labels: Record<DirectorBookAutomationStatus, string> = {
-    idle: "空闲",
-    queued: "排队中",
-    running: "推进中",
-    waiting_approval: "等待确认",
-    waiting_recovery: "待恢复",
-    blocked: "已暂停",
-    failed: "异常",
-    cancelled: "已取消",
-    completed: "已完成",
-  };
-  return labels[status];
-}
-
-function statusBadgeVariant(status: DirectorBookAutomationStatus): "default" | "secondary" | "outline" | "destructive" {
-  if (status === "failed" || status === "blocked") {
-    return "destructive";
-  }
-  if (status === "running" || status === "queued") {
-    return "default";
-  }
-  if (status === "waiting_approval" || status === "waiting_recovery") {
-    return "outline";
-  }
-  return "secondary";
-}
-
-function statusClassName(status: DirectorBookAutomationStatus): string {
-  if (status === "running" || status === "queued") {
-    return "border-sky-200 bg-sky-50/70";
-  }
-  if (status === "waiting_approval" || status === "waiting_recovery") {
-    return "border-amber-200 bg-amber-50/70";
-  }
-  if (status === "blocked" || status === "failed") {
-    return "border-destructive/30 bg-destructive/5";
-  }
-  if (status === "completed") {
-    return "border-emerald-200 bg-emerald-50/60";
-  }
-  return "border-border/70 bg-muted/20";
-}
-
-function statusIcon(status: DirectorBookAutomationStatus) {
-  if (status === "running") {
-    return <Activity className="h-4 w-4" />;
-  }
-  if (status === "queued") {
-    return <Clock3 className="h-4 w-4" />;
-  }
-  if (status === "waiting_recovery") {
-    return <RotateCcw className="h-4 w-4" />;
-  }
-  if (status === "waiting_approval") {
-    return <PauseCircle className="h-4 w-4" />;
-  }
-  if (status === "blocked") {
-    return <AlertTriangle className="h-4 w-4" />;
-  }
-  if (status === "failed") {
-    return <XCircle className="h-4 w-4" />;
-  }
-  if (status === "completed") {
-    return <CheckCircle2 className="h-4 w-4" />;
-  }
-  return <ShieldCheck className="h-4 w-4" />;
-}
-
-function artifactTypeLabel(type: string): string {
-  const labels: Record<string, string> = {
-    book_contract: "书级约定",
-    story_macro: "故事规划",
-    character_cast: "角色",
-    volume_strategy: "分卷",
-    chapter_task_sheet: "任务单",
-    chapter_draft: "正文",
-    audit_report: "审校",
-    repair_ticket: "修复",
-    reader_promise: "读者承诺",
-    character_governance_state: "角色状态",
-    world_skeleton: "世界框架",
-    source_knowledge_pack: "资料包",
-    chapter_retention_contract: "留存约定",
-    continuity_state: "连续性",
-    rolling_window_review: "近期复盘",
-  };
-  return labels[type] ?? type;
-}
-
-function recoveryActionLabel(action: NonNullable<DirectorBookAutomationProjection["circuitBreaker"]>["recoveryAction"]): string | null {
-  const labels: Record<string, string> = {
-    retry: "重试当前步骤",
-    resume_after_review: "查看原因后继续",
-    switch_model: "切换模型后继续",
-    confirm_protected_content: "确认保护内容边界",
-    manual_repair: "先处理章节问题",
-  };
-  return action ? labels[action] ?? null : null;
-}
-
 export default function DirectorBookAutomationCard({
   projection,
   fallbackSummary,
@@ -188,205 +25,32 @@ export default function DirectorBookAutomationCard({
   onOpenTaskCenter,
   onSwitchToProjectNav,
 }: DirectorBookAutomationCardProps) {
-  const status = projection?.status ?? "idle";
-  const headline = projection?.headline?.trim() || "AI 驾驶舱";
-  const detail = projection?.requiresUserAction
-    ? projection.blockedReason?.trim() || projection.detail?.trim()
-    : projection?.detail?.trim();
-  const summary = projection?.automationSummary?.trim()
-    || projection?.progressSummary?.trim()
-    || fallbackSummary?.trim()
-    || "当前没有后台导演任务，可以直接继续手动创作。";
-  const recentItems = projection?.timeline.slice(0, 2) ?? [];
-  const artifactRows = projection?.artifactSummary.byType?.slice(0, 3) ?? [];
-  const usageSummary = projection?.usageSummary ?? null;
-  const stepUsage = projection?.stepUsage?.slice(0, 2) ?? [];
-  const circuitBreaker = projection?.circuitBreaker?.status === "open" ? projection.circuitBreaker : null;
-  const circuitRecovery = recoveryActionLabel(circuitBreaker?.recoveryAction ?? null);
-  const artifactInsightLines = [
-    projection?.artifactSummary.affectedChapterCount
-      ? `影响 ${projection.artifactSummary.affectedChapterCount} 个章节`
-      : null,
-    projection?.artifactSummary.recentStaleArtifacts?.length
-      ? `${projection.artifactSummary.recentStaleArtifacts.length} 个产物需复核`
-      : null,
-    projection?.artifactSummary.recentRepairArtifacts?.length
-      ? `${projection.artifactSummary.recentRepairArtifacts.length} 条修复记录`
-      : null,
-    projection?.artifactSummary.recentVersionedArtifacts?.length
-      ? `${projection.artifactSummary.recentVersionedArtifacts.length} 个产物有新版本`
-      : null,
-  ].filter((line): line is string => Boolean(line));
-
-  if (compact) {
-    return (
-      <div className={cn("rounded-lg border p-3", statusClassName(status))}>
-        <div className="flex items-start justify-between gap-2">
-          <div className="flex min-w-0 items-start gap-2">
-            <span className="mt-0.5 shrink-0 text-foreground">{statusIcon(status)}</span>
-            <div className="min-w-0">
-              <div className="text-sm font-semibold text-foreground">AI 驾驶舱</div>
-              <div className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">{headline}</div>
-            </div>
-          </div>
-          <Badge variant={projection ? statusBadgeVariant(status) : "secondary"} className="shrink-0">
-            {projection ? formatStatus(status) : fallbackStatusLabel ?? "空闲"}
-          </Badge>
-        </div>
-
-        {detail || summary ? (
-          <div className="mt-2 line-clamp-2 rounded-md border bg-background/70 px-3 py-2 text-xs leading-5 text-muted-foreground">
-            {projection?.requiresUserAction ? "需要处理：" : null}
-            {detail || summary}
-          </div>
-        ) : null}
-
-        {circuitBreaker ? (
-          <div className="mt-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs leading-5 text-destructive">
-            {circuitBreaker.message || "自动推进已暂停，处理后可以继续。"}
-            {circuitRecovery ? ` 建议：${circuitRecovery}。` : null}
-          </div>
-        ) : null}
-
-        {usageSummary ? (
-          <div className="mt-2 text-[11px] leading-5 text-muted-foreground">
-            {formatTokenCount(usageSummary.llmCallCount)} 次调用 · {formatTokenCount(usageSummary.totalTokens)} Tokens
-            {usageSummary.durationMs ? ` · ${formatDuration(usageSummary.durationMs)}` : null}
-          </div>
-        ) : null}
-
-        <div className="mt-3 grid grid-cols-2 gap-2">
-          <Button type="button" size="sm" onClick={onOpenProgress ?? onOpenTaskCenter}>
-            <Activity className="h-4 w-4" />
-            查看进度
-          </Button>
-          <Button type="button" size="sm" variant="outline" onClick={onOpenTaskCenter}>
-            <ListTodo className="h-4 w-4" />
-            执行详情
-          </Button>
-        </div>
-
-        {onSwitchToProjectNav ? (
-          <Button type="button" size="sm" variant="ghost" className="mt-2 w-full" onClick={onSwitchToProjectNav}>
-            项目导航
-          </Button>
-        ) : null}
-      </div>
-    );
-  }
+  const handleAction = (_projection: DirectorBookAutomationProjection, action: DirectorBookAutomationAction) => {
+    if (action.type === "open_details") {
+      onOpenTaskCenter();
+      return;
+    }
+    onOpenProgress?.();
+  };
 
   return (
-    <div className={cn("rounded-lg border p-3", statusClassName(status))}>
-      <div className="flex items-start justify-between gap-2">
-        <div className="flex min-w-0 items-start gap-2">
-          <span className="mt-0.5 shrink-0 text-foreground">{statusIcon(status)}</span>
-          <div className="min-w-0">
-            <div className="text-sm font-semibold text-foreground">AI 驾驶舱</div>
-            <div className="mt-1 text-xs leading-5 text-muted-foreground">{headline}</div>
-          </div>
-        </div>
-        <Badge variant={projection ? statusBadgeVariant(status) : "secondary"} className="shrink-0">
-          {projection ? formatStatus(status) : fallbackStatusLabel ?? "空闲"}
-        </Badge>
-      </div>
-
-      {detail ? (
-        <div className="mt-3 rounded-md border bg-background/70 px-3 py-2 text-xs leading-5 text-muted-foreground">
-          {projection?.requiresUserAction ? "需要处理：" : null}
-          {detail}
-        </div>
-      ) : null}
-
-      {summary ? (
-        <div className="mt-3 text-xs leading-5 text-muted-foreground">{summary}</div>
-      ) : null}
-
-      {circuitBreaker ? (
-        <div className="mt-3 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs leading-5 text-destructive">
-          <div className="font-medium">自动推进已暂停</div>
-          <div className="mt-1">{circuitBreaker.message || "系统检测到继续自动推进可能反复失败。"}</div>
-          {circuitRecovery ? <div className="mt-1">建议：{circuitRecovery}。</div> : null}
-        </div>
-      ) : null}
-
-      {usageSummary ? (
-        <div className="mt-3 rounded-md border bg-background/70 px-3 py-2 text-xs leading-5 text-muted-foreground">
-          <div className="font-medium text-foreground">AI 用量</div>
-          <div className="mt-1">{formatUsageLine(usageSummary)}</div>
-          {stepUsage.length > 0 ? (
-            <div className="mt-2 space-y-1">
-              {stepUsage.map((item) => (
-                <div key={item.stepIdempotencyKey} className="flex flex-wrap items-center justify-between gap-2 border-t pt-1">
-                  <span className="min-w-0 truncate text-foreground">{item.label || item.nodeKey}</span>
-                  <span className="shrink-0">{formatUsageLine(item)}</span>
-                </div>
-              ))}
-            </div>
-          ) : null}
-        </div>
-      ) : null}
-
-      {artifactRows.length > 0 ? (
-        <div className="mt-3 rounded-md border bg-background/70 px-3 py-2">
-          <div className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
-            <Database className="h-3.5 w-3.5" />
-            产物记录
-          </div>
-          <div className="mt-2 flex flex-wrap gap-1.5">
-            {artifactRows.map((item) => (
-              <Badge key={item.artifactType} variant={item.staleCount > 0 ? "outline" : "secondary"} className="text-[11px]">
-                {artifactTypeLabel(String(item.artifactType))}
-                <span className="ml-1 text-muted-foreground">{item.activeCount}/{item.totalCount}</span>
-              </Badge>
-            ))}
-          </div>
-          {artifactInsightLines.length > 0 ? (
-            <div className="mt-2 flex flex-wrap gap-1.5 text-[11px] text-muted-foreground">
-              {artifactInsightLines.map((line) => (
-                <span key={line} className="rounded-full bg-muted/40 px-2 py-0.5">{line}</span>
-              ))}
-            </div>
-          ) : null}
-        </div>
-      ) : null}
-
-      {projection?.nextActionLabel ? (
-        <div className="mt-2 rounded-md border bg-background/70 px-3 py-2 text-xs leading-5 text-muted-foreground">
-          下一步：{projection.nextActionLabel}
-        </div>
-      ) : null}
-
-      {recentItems.length > 0 ? (
-        <div className="mt-3 space-y-2">
-          <div className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
-            <History className="h-3.5 w-3.5" />
-            自动化记录
-          </div>
-          {recentItems.map((item) => (
-            <div key={item.id} className="rounded-md border bg-background/70 px-3 py-2 text-xs leading-5">
-              <div className="line-clamp-2 text-foreground">{item.title}</div>
-              {item.usage ? (
-                <div className="mt-1 text-muted-foreground">{formatUsageLine(item.usage)}</div>
-              ) : item.durationMs ? (
-                <div className="mt-1 text-muted-foreground">耗时 {formatDuration(item.durationMs)}</div>
-              ) : null}
-              <div className="mt-1 text-muted-foreground">{formatDate(item.occurredAt)}</div>
-            </div>
-          ))}
-        </div>
-      ) : null}
-
-      <div className="mt-3 flex gap-2">
-        <Button type="button" size="sm" className="flex-1" onClick={onOpenTaskCenter}>
-          <ListTodo className="h-4 w-4" />
-          执行详情
+    <div className="space-y-2">
+      <AICockpit
+        projection={projection}
+        mode={compact ? "compact" : "focusedNovel"}
+        fallbackSummary={fallbackSummary}
+        fallbackStatusLabel={fallbackStatusLabel}
+        onAction={handleAction}
+        onOpenDetails={projection?.latestTask ? () => onOpenTaskCenter() : undefined}
+        onOpenNovel={() => onOpenProgress?.()}
+        onOpenFallbackDetails={onOpenProgress ?? onOpenTaskCenter}
+      />
+      {onSwitchToProjectNav ? (
+        <Button type="button" size="sm" variant="ghost" className="w-full" onClick={onSwitchToProjectNav}>
+          <LayoutDashboard className="h-4 w-4" />
+          项目导航
         </Button>
-        {onSwitchToProjectNav ? (
-          <Button type="button" size="sm" variant="outline" onClick={onSwitchToProjectNav}>
-            项目导航
-          </Button>
-        ) : null}
-      </div>
+      ) : null}
     </div>
   );
 }

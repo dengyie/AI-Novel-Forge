@@ -187,6 +187,49 @@ test("director node runner reuses completed idempotent step without rerunning", 
   assert.equal(store.calls.length, 0);
 });
 
+test("director node runner can ignore a completed idempotent step for forced reruns", async () => {
+  let executed = false;
+  const completedSnapshot = {
+    ...buildSnapshot({
+      mode: "run_until_gate",
+      mayOverwriteUserContent: false,
+      maxAutoRepairAttempts: 1,
+      allowExpensiveReview: false,
+      modelTier: "balanced",
+      updatedAt: "2026-04-28T00:00:00.000Z",
+    }),
+    steps: [{
+      idempotencyKey: "task-1:chapter_execution_node:chapter:chapter-1",
+      nodeKey: "chapter_execution_node",
+      label: "鎵ц绔犺妭鑺傜偣",
+      status: "succeeded",
+      targetType: "chapter",
+      targetId: "chapter-1",
+      startedAt: "2026-04-28T00:00:01.000Z",
+      finishedAt: "2026-04-28T00:00:02.000Z",
+      producedArtifacts: [],
+    }],
+  };
+  const store = buildStore(completedSnapshot);
+  const runner = new DirectorNodeRunner(store, new DirectorPolicyEngine());
+
+  const result = await runner.run(buildContract(async () => {
+    executed = true;
+    return { ok: true };
+  }), {
+    taskId: "task-1",
+    novelId: "novel-1",
+    targetType: "chapter",
+    targetId: "chapter-1",
+    input: undefined,
+    reuseCompletedStep: false,
+  });
+
+  assert.equal(executed, true);
+  assert.equal(result.status, "completed");
+  assert.deepEqual(store.calls.map((call) => call.type), ["started", "completed"]);
+});
+
 test("director node runner passes contract policy action into policy decisions", async () => {
   const store = buildStore(buildSnapshot({
     mode: "run_until_gate",

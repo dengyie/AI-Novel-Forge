@@ -50,6 +50,10 @@ import type {
 } from "@ai-novel/shared/types/characterResource";
 import type { StoryWorldSliceOverrides, StoryWorldSliceView } from "@ai-novel/shared/types/storyWorldSlice";
 import type { UnifiedTaskDetail } from "@ai-novel/shared/types/task";
+import type {
+  DirectorBookAutomationAction,
+  DirectorBookAutomationProjection,
+} from "@ai-novel/shared/types/directorRuntime";
 import type { ChapterExecutionBackgroundActivity } from "./chapterExecution.shared";
 import type { QuickCharacterCreatePayload } from "./characterPanel.utils";
 import type { ChapterReviewResult } from "../chapterPlanning.shared";
@@ -510,12 +514,14 @@ export interface NovelTaskDrawerState {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   task: UnifiedTaskDetail | null;
+  projection?: DirectorBookAutomationProjection | null;
   currentUiModel: {
     provider: string;
     model: string;
     temperature: number;
   };
   actions: AITakeoverAction[];
+  onProjectionAction?: (action: DirectorBookAutomationAction) => void;
   resourceProposals?: CharacterResourceProposalSummary[];
   onOpenResourceProposalSource?: (proposal: CharacterResourceProposalSummary) => void;
   onConfirmResourceProposal?: (proposalId: string) => void;

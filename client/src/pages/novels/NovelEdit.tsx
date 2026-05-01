@@ -3,6 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { BOOK_ANALYSIS_SECTIONS } from "@ai-novel/shared/types/bookAnalysis";
 import type { DirectorLockScope, DirectorSessionState } from "@ai-novel/shared/types/novelDirector";
+import type { DirectorBookAutomationAction } from "@ai-novel/shared/types/directorRuntime";
 import type { NovelExportDownloadFormat, NovelExportScope } from "@ai-novel/shared/types/novelExport";
 import type {
   PipelineRepairMode,
@@ -71,6 +72,11 @@ import { syncNovelWorkflowStageSilently, workflowStageFromTab } from "./novelWor
 import { isNovelWorkspaceFlowTab, scopeFromWorkspaceTab, tabFromDirectorProgress, tabFromScope } from "./novelWorkspaceNavigation";
 import { resolveChapterTitleWarning } from "@/lib/directorTaskNotice";
 import { resolveWorkflowContinuationFeedback } from "@/lib/novelWorkflowContinuation";
+import {
+  getDirectorCockpitActionHref,
+  getDirectorCockpitContinuationMode,
+  isDirectorCockpitContinuationAction,
+} from "@/lib/directorCockpitActions";
 import { getCandidateSelectionLink } from "@/lib/novelWorkflowTaskUi";
 import { syncAutoDirectorTaskCache } from "@/lib/taskQueryCache";
 import {
@@ -203,6 +209,8 @@ export default function NovelEdit() {
     setSelectedChapterId,
     selectedVolumeId,
     setSelectedVolumeId,
+    taskPanelOpen,
+    clearTaskPanelOpen,
   } = useNovelEditWorkflow(id);
   const [isTaskDrawerOpen, setIsTaskDrawerOpen] = useState(false);
   const [autoOpenedFailedTaskId, setAutoOpenedFailedTaskId] = useState("");
@@ -858,6 +866,36 @@ export default function NovelEdit() {
       toast.error(message);
     },
   });
+  const continueProjectedDirectorActionMutation = useMutation({
+    mutationFn: async (input: {
+      taskId: string;
+      mode?: "resume" | "auto_execute_range" | "auto_execute_front10";
+    }) => continueNovelWorkflow(
+      input.taskId,
+      input.mode ? { continuationMode: input.mode } : undefined,
+    ),
+    onSuccess: async (response, input) => {
+      void invalidateAutoDirectorTaskState(response.data?.taskId ?? input.taskId);
+      const feedback = resolveWorkflowContinuationFeedback(response.data, {
+        mode: input.mode,
+        scopeLabel: activeAutoExecutionScopeLabel,
+      });
+      if (feedback.tone === "error") {
+        toast.error(feedback.message);
+        return;
+      }
+      alignToAutoDirectorResumeTarget();
+      toast.success(feedback.message);
+    },
+    onError: (error, input) => {
+      const message = error instanceof Error
+        ? error.message
+        : input.mode === "auto_execute_range"
+          ? `继续自动执行${activeAutoExecutionScopeLabel}失败。`
+          : "继续自动导演失败。";
+      toast.error(message);
+    },
+  });
   const consistencyIssue = useMemo(
     () => resolveDirectorConsistencyIssue({
       checkpointType: activeAutoDirectorTask?.checkpointType,
@@ -910,6 +948,40 @@ export default function NovelEdit() {
       return;
     }
     toast.success(targetVolumeId ? "已定位到当前卷拆章，可直接修复标题。" : "已切到节奏 / 拆章，可直接修复标题。");
+  };
+  const handleTaskDrawerProjectionAction = (action: DirectorBookAutomationAction) => {
+    if (!bookAutomationProjection) {
+      return;
+    }
+    const taskId = action.commandPayload?.taskId
+      ?? action.target.taskId
+      ?? bookAutomationProjection.latestTask?.id
+      ?? activeAutoDirectorTask?.id;
+    if (taskId && isDirectorCockpitContinuationAction(action)) {
+      continueProjectedDirectorActionMutation.mutate({
+        taskId,
+        mode: getDirectorCockpitContinuationMode(action),
+      });
+      return;
+    }
+    if (action.type === "confirm_candidate") {
+      openCandidateSelection();
+      return;
+    }
+    if (action.type === "open_chapter") {
+      openChapterExecution();
+      return;
+    }
+    if (action.type === "open_quality_repair") {
+      openQualityRepair();
+      return;
+    }
+    if (action.type === "open_details") {
+      openAutoDirectorTaskCenter();
+      return;
+    }
+    setIsTaskDrawerOpen(false);
+    navigate(getDirectorCockpitActionHref(bookAutomationProjection, action));
   };
   const chapterTitleRepairMutation = useDirectorChapterTitleRepair({
     navigateOnSuccess: false,
@@ -991,6 +1063,12 @@ export default function NovelEdit() {
     setIsTaskDrawerOpen(true);
     setAutoOpenedFailedTaskId(activeAutoDirectorTask.id);
   }, [activeAutoDirectorTask?.id, activeAutoDirectorTask?.status, autoOpenedFailedTaskId]);
+  useEffect(() => {
+    if (!taskPanelOpen || !displayAutoDirectorTask?.id) {
+      return;
+    }
+    setIsTaskDrawerOpen(true);
+  }, [displayAutoDirectorTask?.id, taskPanelOpen]);
   useEffect(() => {
     if (!activeAutoDirectorTask) {
       setIsDirectorExitActionExpanded(false);
@@ -1190,7 +1268,7 @@ export default function NovelEdit() {
       });
     }
     actions.push({
-      label: "任务中心",
+      label: "执行详情",
       onClick: () => setIsTaskDrawerOpen(true),
       variant: mode === "running" ? "outline" : "secondary",
     });
@@ -1214,7 +1292,7 @@ export default function NovelEdit() {
         : consistencyIssue === "missing_chapters"
           ? "任务记录显示前几章已经可开写，但当前章节执行区还是空的，说明导演产物还没有完整落库。可以直接补齐导演产物继续修复。"
           : task.pendingManualRecovery
-            ? "任务已停在当前进度。你可以先查看任务中心，再从最近检查点继续。"
+            ? "任务已停在当前进度。你可以查看执行详情，再从最近进度点继续。"
           : buildTakeoverDescription({
             mode,
             checkpointType: task.checkpointType,
@@ -1316,7 +1394,10 @@ export default function NovelEdit() {
         variant: "default",
         disabled: continueAutoDirectorMutation.isPending,
       });
-    } else if (task.status === "waiting_approval" && task.checkpointType === "front10_ready") {
+    } else if (
+      task.status === "waiting_approval"
+      && (task.checkpointType === "front10_ready" || task.checkpointType === "chapter_batch_ready")
+    ) {
       const autoExecutionScopeLabel = resolveAutoExecutionScopeLabel(task);
       actions.push({
         label: buildContinueAutoExecutionActionLabel(autoExecutionScopeLabel, continueAutoExecutionMutation.isPending),
@@ -2104,14 +2185,21 @@ export default function NovelEdit() {
       activeStepTakeoverEntry={activeStepTakeoverEntry}
       taskDrawer={{
         open: isTaskDrawerOpen,
-        onOpenChange: setIsTaskDrawerOpen,
+        onOpenChange: (open) => {
+          setIsTaskDrawerOpen(open);
+          if (!open && taskPanelOpen) {
+            clearTaskPanelOpen();
+          }
+        },
         task: displayAutoDirectorTask,
+        projection: bookAutomationProjection,
         currentUiModel: {
           provider: llm.provider,
           model: llm.model,
           temperature: llm.temperature,
         },
         actions: taskDrawerActions,
+        onProjectionAction: handleTaskDrawerProjectionAction,
         resourceProposals: pendingCharacterResourceProposals,
         onOpenResourceProposalSource: (proposal) => {
           if (proposal.chapterId) {

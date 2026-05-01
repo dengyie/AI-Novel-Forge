@@ -196,6 +196,7 @@ export interface PipelinePayload extends LLMGenerateOptions {
   repairMode?: "detect_only" | "light_repair" | "heavy_repair" | "continuity_only" | "character_only" | "ending_only";
   qualityAlertDetails?: string[];
   replanAlertDetails?: string[];
+  recoverableRepairDetails?: string[];
   backgroundSync?: PipelineBackgroundSyncState;
 }
 

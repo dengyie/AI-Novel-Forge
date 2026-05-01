@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   BookOpenText,
   ChevronLeft,
@@ -13,9 +13,10 @@ import type { DirectorLockScope } from "@ai-novel/shared/types/novelDirector";
 import type { VolumePlan } from "@ai-novel/shared/types/novel";
 import { getNovelDetail, getNovelQualityReport, getNovelVolumeWorkspace } from "@/api/novel";
 import { getDirectorBookAutomationProjection, getDirectorRuntimeProjection } from "@/api/novelDirector";
-import { getActiveAutoDirectorTask } from "@/api/novelWorkflow";
+import { continueNovelWorkflow, getActiveAutoDirectorTask } from "@/api/novelWorkflow";
 import { queryKeys } from "@/api/queryKeys";
 import { Button } from "@/components/ui/button";
+import { toast } from "@/components/ui/toast";
 import {
   Dialog,
   DialogContent,
@@ -26,6 +27,7 @@ import {
 import DirectorBookAutomationCard from "@/components/autoDirector/DirectorBookAutomationCard";
 import NovelAutoDirectorProgressPanel from "@/pages/novels/components/NovelAutoDirectorProgressPanel";
 import { cn } from "@/lib/utils";
+import { resolveWorkflowContinuationFeedback } from "@/lib/novelWorkflowContinuation";
 import {
   applyAutoDirectorResetStepReadiness,
   extractAutoDirectorResetStepsFromMeta,
@@ -87,6 +89,7 @@ function formatTaskStatus(status: string | null | undefined): string {
 export default function NovelWorkspaceRail(props: NovelWorkspaceRailProps) {
   const { novelId, chapterId = "", collapsed, onToggle, onSwitchToProjectNav } = props;
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const location = useLocation();
   const [searchParams] = useSearchParams();
   const [progressDialogOpen, setProgressDialogOpen] = useState(false);
@@ -256,7 +259,7 @@ export default function NovelWorkspaceRail(props: NovelWorkspaceRailProps) {
   const cockpitSummary = activeTask
     ? runtimeSummary
       || (activeTask.status === "failed"
-      ? activeTask.lastError || "后台任务已中断，建议先查看任务中心。"
+      ? activeTask.lastError || "后台任务已中断，可打开执行详情查看原因。"
       : activeTask.status === "waiting_approval"
         ? `等待处理：${getNovelWorkspaceTabLabel(workflowCurrentTab ?? activeTab)}`
         : activeTask.currentItemLabel || `AI 正在推进 ${getNovelWorkspaceTabLabel(workflowCurrentTab ?? activeTab)}`)
@@ -277,10 +280,13 @@ export default function NovelWorkspaceRail(props: NovelWorkspaceRailProps) {
     setProgressDialogOpen(false);
     const taskId = activeTask?.id ?? bookAutomationProjection?.latestTask?.id;
     if (taskId) {
-      navigate(`/tasks?kind=novel_workflow&id=${taskId}`);
+      const next = new URLSearchParams(searchParams);
+      next.set("taskId", taskId);
+      next.set("taskPanel", "1");
+      navigate(`/novels/${novelId}/edit?${next.toString()}`);
       return;
     }
-    navigate("/tasks");
+    navigate(`/novels/${novelId}/edit`);
   };
 
   const openProgressDialog = () => {
@@ -294,6 +300,32 @@ export default function NovelWorkspaceRail(props: NovelWorkspaceRailProps) {
   const progressDialogMode = activeTask?.status === "failed" || activeTask?.status === "cancelled"
     ? "execution_failed"
     : "execution_progress";
+  const continueDirectorMutation = useMutation({
+    mutationFn: async () => {
+      if (!activeTask?.id) {
+        throw new Error("当前没有可继续的自动导演任务。");
+      }
+      return continueNovelWorkflow(activeTask.id, { continuationMode: "resume" });
+    },
+    onSuccess: async (response) => {
+      await Promise.allSettled([
+        queryClient.invalidateQueries({ queryKey: queryKeys.novels.autoDirectorTask(novelId) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.novels.directorBookAutomation(novelId) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.tasks.detail("novel_workflow", activeTask?.id ?? "") }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.tasks.directorRuntime(activeTask?.id ?? "") }),
+        queryClient.invalidateQueries({ queryKey: ["tasks"] }),
+      ]);
+      const feedback = resolveWorkflowContinuationFeedback(response.data, { mode: "resume" });
+      if (feedback.tone === "error") {
+        toast.error(feedback.message);
+        return;
+      }
+      toast.success(feedback.message);
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : "继续自动导演失败。");
+    },
+  });
 
   return (
     <>
@@ -498,6 +530,8 @@ export default function NovelWorkspaceRail(props: NovelWorkspaceRailProps) {
               titleHint={novelTitle}
               fallbackError={activeTask?.lastError ?? null}
               onBackgroundContinue={() => setProgressDialogOpen(false)}
+              onConfirmAndContinue={() => continueDirectorMutation.mutate()}
+              isConfirmingAndContinuing={continueDirectorMutation.isPending}
               onOpenTaskCenter={openTaskCenter}
             />
           </div>

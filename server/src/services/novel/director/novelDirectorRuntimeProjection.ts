@@ -122,6 +122,7 @@ export async function loadPersistentDirectorRuntimeProjection(
     usageSummary: usageTelemetry.summary,
     recentUsage: usageTelemetry.recentUsage,
     stepUsage: usageTelemetry.stepUsage,
+    promptUsage: usageTelemetry.promptUsage,
   };
 }
 

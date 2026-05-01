@@ -14,7 +14,7 @@ import {
   type DirectorCorrectionPreset,
   type DirectorRunMode,
 } from "@ai-novel/shared/types/novelDirector";
-import { bootstrapNovelWorkflow } from "@/api/novelWorkflow";
+import { bootstrapNovelWorkflow, continueNovelWorkflow } from "@/api/novelWorkflow";
 import {
   confirmDirectorCandidate,
   generateDirectorCandidates,
@@ -507,6 +507,43 @@ export default function NovelAutoDirectorDialog({
     },
   });
 
+  const continueMutation = useMutation({
+    mutationFn: async () => {
+      const taskId = directorTask?.id || workflowTaskId;
+      if (!taskId) {
+        throw new Error("当前没有可继续的自动导演任务。");
+      }
+      return continueNovelWorkflow(taskId, { continuationMode: "resume" });
+    },
+    onSuccess: async (response) => {
+      const nextWorkflowTaskId = response.data?.taskId ?? directorTask?.id ?? workflowTaskId;
+      if (nextWorkflowTaskId && nextWorkflowTaskId !== workflowTaskId) {
+        setWorkflowTaskId(nextWorkflowTaskId);
+        onWorkflowTaskChange?.(nextWorkflowTaskId);
+      }
+      const invalidations = [
+        queryClient.invalidateQueries({ queryKey: ["tasks"] }),
+      ];
+      if (nextWorkflowTaskId) {
+        invalidations.push(
+          queryClient.invalidateQueries({
+            queryKey: queryKeys.tasks.detail("novel_workflow", nextWorkflowTaskId),
+          }),
+          queryClient.invalidateQueries({
+            queryKey: queryKeys.tasks.directorRuntime(nextWorkflowTaskId),
+          }),
+        );
+      }
+      await Promise.allSettled(invalidations);
+      setDialogMode("execution_progress");
+      setExecutionError("");
+      toast.success("已确认，AI 会继续推进。");
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : "继续自动导演失败。");
+    },
+  });
+
   const togglePreset = (preset: DirectorCorrectionPreset) => {
     setSelectedPresets((prev) => toggleDirectorCorrectionPreset(prev, preset));
   };
@@ -596,7 +633,7 @@ export default function NovelAutoDirectorDialog({
 
   const handleBackgroundContinue = () => {
     setOpen(false);
-    toast.success("导演任务会继续在后台运行，可在任务中心恢复查看。");
+    toast.success("导演任务会继续在后台运行，可在 AI 驾驶舱查看进度。");
   };
 
   const handleOpenTaskCenter = () => {
@@ -710,6 +747,8 @@ export default function NovelAutoDirectorDialog({
                 titleHint={pendingTitleHint}
                 fallbackError={executionError}
                 onBackgroundContinue={handleBackgroundContinue}
+                onConfirmAndContinue={() => continueMutation.mutate()}
+                isConfirmingAndContinuing={continueMutation.isPending}
                 onOpenTaskCenter={handleOpenTaskCenter}
               />
             )}

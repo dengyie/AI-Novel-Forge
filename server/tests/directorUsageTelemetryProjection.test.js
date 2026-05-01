@@ -4,6 +4,9 @@ const assert = require("node:assert/strict");
 const {
   DirectorUsageTelemetryQueryService,
 } = require("../dist/services/novel/director/runtime/DirectorUsageTelemetryQueryService.js");
+const {
+  getDirectorNodeDisplayLabel,
+} = require("../../shared/dist/types/directorRuntime.js");
 const { prisma } = require("../dist/db/prisma.js");
 
 function usageRow(overrides = {}) {
@@ -78,9 +81,23 @@ test("director usage telemetry projection summarizes task and step records", asy
     assert.equal(result.stepUsage.length, 1);
     assert.equal(result.stepUsage[0].label, "生成章节任务单");
     assert.equal(result.stepUsage[0].llmCallCount, 2);
+    assert.equal(result.promptUsage.length, 1);
+    assert.equal(result.promptUsage[0].promptAssetKey, "asset-a");
+    assert.equal(result.promptUsage[0].llmCallCount, 2);
   } finally {
     spies.restore();
   }
+});
+
+test("director usage labels distinguish chapter workflow from draft writing", () => {
+  assert.equal(
+    getDirectorNodeDisplayLabel({ nodeKey: "chapter_execution_node" }),
+    "章节执行流程",
+  );
+  assert.equal(
+    getDirectorNodeDisplayLabel({ label: "novel.chapter.writer", nodeKey: "chapter_execution_node" }),
+    "章节正文生成",
+  );
 });
 
 test("director usage telemetry projection can query a book by novel or task ids", async () => {

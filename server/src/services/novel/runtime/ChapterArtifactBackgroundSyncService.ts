@@ -1,4 +1,5 @@
 import { prisma } from "../../../db/prisma";
+import { createHash } from "node:crypto";
 import type { StateChangeProposal } from "@ai-novel/shared/types/canonicalState";
 import { CharacterDynamicsService } from "../dynamics/CharacterDynamicsService";
 import { characterResourceExtractionService } from "../characterResource/CharacterResourceExtractionService";
@@ -40,15 +41,34 @@ function detectChapterChangeFlags(content: string, taskSheet: string | null | un
 
 export class ChapterArtifactBackgroundSyncService {
   private readonly characterDynamicsService = new CharacterDynamicsService();
+  private readonly activeSyncKeys = new Set<string>();
+  private readonly latestSyncedContentHashByChapter = new Map<string, string>();
 
   scheduleChapterSync(novelId: string, chapterId: string, content: string): void {
-    void this.runChapterSync(novelId, chapterId, content).catch((error) => {
-      console.warn("[chapter-artifact-background-sync] background sync failed", {
-        novelId,
-        chapterId,
-        error: error instanceof Error ? error.message : String(error),
+    const contentHash = createHash("sha1").update(content).digest("hex");
+    const chapterKey = `${novelId}:${chapterId}`;
+    const syncKey = `${chapterKey}:${contentHash}`;
+    if (
+      this.activeSyncKeys.has(syncKey)
+      || this.latestSyncedContentHashByChapter.get(chapterKey) === contentHash
+    ) {
+      return;
+    }
+    this.activeSyncKeys.add(syncKey);
+    void this.runChapterSync(novelId, chapterId, content)
+      .then(() => {
+        this.latestSyncedContentHashByChapter.set(chapterKey, contentHash);
+      })
+      .catch((error) => {
+        console.warn("[chapter-artifact-background-sync] background sync failed", {
+          novelId,
+          chapterId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      })
+      .finally(() => {
+        this.activeSyncKeys.delete(syncKey);
       });
-    });
   }
 
   private async runChapterSync(novelId: string, chapterId: string, content: string): Promise<void> {

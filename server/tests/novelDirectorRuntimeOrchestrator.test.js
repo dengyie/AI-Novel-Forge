@@ -53,6 +53,7 @@ function buildOrchestrator(artifacts = [artifact], options = {}) {
           targetId: input.targetId,
           policy: input.policy?.policy ?? null,
           affectedArtifacts: input.policy?.affectedArtifacts ?? [],
+          reuseCompletedStep: input.reuseCompletedStep,
           producedArtifacts,
         });
         return {
@@ -107,6 +108,8 @@ test("chapter execution records the standard node sequence without rerunning the
   ]);
   assert.ok(runtimeCalls.every((call) => call.targetType === "novel"));
   assert.ok(runtimeCalls.every((call) => call.targetId === "novel-1"));
+  assert.equal(runtimeCalls[0].reuseCompletedStep, false);
+  assert.ok(runtimeCalls.slice(1).every((call) => call.reuseCompletedStep !== false));
   assert.deepEqual(runtimeCalls[0].affectedArtifacts.map((item) => item.id), [artifact.id]);
   assert.deepEqual(runtimeCalls.slice(1).map((call) => call.affectedArtifacts.length), [0, 0, 0, 0]);
   assert.deepEqual(runtimeCalls.map((call) => call.producedArtifacts.map((item) => item.artifactType).sort()), [

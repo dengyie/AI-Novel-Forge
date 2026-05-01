@@ -262,10 +262,10 @@ export default function NovelExistingProjectTakeoverDialog({
       setOpen(false);
       toast.success(
         runMode === "full_book_autopilot"
-          ? "自动导演接管任务已提交，任务中心会显示全书执行进度。"
+          ? "自动导演接管任务已提交，可在 AI 驾驶舱查看全书执行进度。"
           : runMode === "auto_to_execution"
-          ? `自动导演接管任务已提交，任务中心会显示 ${buildDirectorAutoExecutionPlanLabel(autoExecutionPlan)} 的执行进度。`
-          : "自动导演接管任务已提交，任务中心会显示排队和执行进度。",
+          ? `自动导演接管任务已提交，可在 AI 驾驶舱查看 ${buildDirectorAutoExecutionPlanLabel(autoExecutionPlan)} 的执行进度。`
+          : "自动导演接管任务已提交，可在 AI 驾驶舱查看排队和执行进度。",
       );
       navigate(buildEditRoute({
         novelId,
@@ -423,7 +423,7 @@ export default function NovelExistingProjectTakeoverDialog({
                     {readiness.hasActiveTask ? (
                       <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/10 p-4">
                         <div className="text-sm font-medium text-foreground">当前已有自动导演任务</div>
-                        <div className="mt-1 text-sm text-muted-foreground">为避免重复接管，请先去任务中心继续或取消当前自动导演任务。</div>
+                        <div className="mt-1 text-sm text-muted-foreground">为避免重复接管，请先处理当前自动导演任务。</div>
                         <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:justify-end">
                           <Button
                             type="button"
@@ -431,10 +431,20 @@ export default function NovelExistingProjectTakeoverDialog({
                             className="w-full sm:w-auto"
                             onClick={() => {
                               setOpen(false);
-                              navigate(readiness.activeTaskId ? `/tasks?kind=novel_workflow&id=${readiness.activeTaskId}` : "/tasks");
+                              if (readiness.activeTaskId) {
+                                navigate(buildEditRoute({
+                                  novelId,
+                                  workflowTaskId: readiness.activeTaskId,
+                                  stage: selectedEntryStep === "basic" ? "basic" : selectedEntryStep,
+                                }));
+                                return;
+                              }
+                              const search = new URLSearchParams();
+                              search.set("stage", selectedEntryStep === "basic" ? "basic" : selectedEntryStep);
+                              navigate(`/novels/${novelId}/edit?${search.toString()}`);
                             }}
                           >
-                            去任务中心
+                            处理当前任务
                           </Button>
                         </div>
                       </div>

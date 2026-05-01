@@ -15,7 +15,6 @@ import {
   canContinueFront10AutoExecution,
   canEnterChapterExecution,
   getCandidateSelectionLink,
-  getTaskCenterLink,
   getWorkflowBadge,
   getWorkflowDescription,
   isWorkflowRunningInBackground,
@@ -121,7 +120,7 @@ export default function Home() {
   const continueWorkflowMutation = useMutation({
     mutationFn: async (input: {
       taskId: string;
-      mode?: "auto_execute_range";
+      mode?: "resume" | "auto_execute_range" | "auto_execute_front10";
     }) => continueNovelWorkflow(input.taskId, input.mode ? { continuationMode: input.mode } : undefined),
     onSuccess: async (response, input) => {
       await Promise.all([
@@ -282,10 +281,10 @@ export default function Home() {
       return (
         <Button asChild size={size}>
           <Link
-            to={getTaskCenterLink(task.id)}
+            to={`/novels/${novel.id}/edit?taskId=${task.id}`}
             onClick={stopPropagation ? stopCardClick : undefined}
           >
-            查看任务
+            查看推进状态
           </Link>
         </Button>
       );
@@ -433,7 +432,7 @@ export default function Home() {
                   {renderNovelPrimaryAction(primaryNovel, { size: "lg" })}
                   {primaryNovel.latestAutoDirectorTask ? (
                     <Button asChild size="lg" variant="outline">
-                      <Link to={getTaskCenterLink(primaryNovel.latestAutoDirectorTask.id)}>任务中心</Link>
+                      <Link to={`/novels/${primaryNovel.id}/edit?taskId=${primaryNovel.latestAutoDirectorTask.id}&taskPanel=1`}>执行详情</Link>
                     </Button>
                   ) : (
                     <Button asChild size="lg" variant="outline">
@@ -477,7 +476,7 @@ export default function Home() {
             <Link to="/book-analysis">新建拆书</Link>
           </Button>
           <Button asChild variant="outline">
-            <Link to="/tasks">打开任务中心</Link>
+            <Link to="/tasks">后台任务</Link>
           </Button>
         </CardContent>
       </Card>
@@ -574,7 +573,7 @@ export default function Home() {
                         {renderNovelPrimaryAction(novel, { stopPropagation: true })}
                         {workflowTask ? (
                           <Button asChild size="sm" variant="outline">
-                            <Link to={getTaskCenterLink(workflowTask.id)} onClick={stopCardClick}>任务中心</Link>
+                            <Link to={`/novels/${novel.id}/edit?taskId=${workflowTask.id}&taskPanel=1`} onClick={stopCardClick}>执行详情</Link>
                           </Button>
                         ) : (
                           <Button asChild size="sm" variant="outline">

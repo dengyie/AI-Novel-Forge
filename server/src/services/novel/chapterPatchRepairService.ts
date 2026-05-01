@@ -3,6 +3,7 @@ import type { ReviewIssue } from "@ai-novel/shared/types/novel";
 import type { ChapterRepairContext, ChapterRuntimePackage } from "@ai-novel/shared/types/chapterRuntime";
 import {
   applyChapterPatchRepairPlan,
+  type ChapterPatchApplyResult,
   type ChapterPatchRepairPlan,
 } from "@ai-novel/shared/types/chapterPatchRepair";
 import { runStructuredPrompt } from "../../prompting/core/promptRunner";
@@ -40,7 +41,11 @@ export interface ChapterPatchRepairResult {
 }
 
 export class ChapterPatchRepairFailedError extends Error {
-  constructor(message: string, readonly plan?: ChapterPatchRepairPlan) {
+  constructor(
+    message: string,
+    readonly plan?: ChapterPatchRepairPlan,
+    readonly applyResult?: ChapterPatchApplyResult,
+  ) {
     super(message);
     this.name = "ChapterPatchRepairFailedError";
   }
@@ -88,7 +93,7 @@ export class ChapterPatchRepairService {
       const reason = applied.failures.map((failure) => `${failure.patchId}: ${failure.reason}`).join("；")
         || generated.output.escalationReason
         || "局部补丁没有产生有效正文变化。";
-      throw new ChapterPatchRepairFailedError(reason, generated.output);
+      throw new ChapterPatchRepairFailedError(reason, generated.output, applied);
     }
 
     return {

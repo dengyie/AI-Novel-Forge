@@ -25,6 +25,7 @@ interface AuditOptions {
   content?: string;
   contextPackage?: GenerationContextPackage;
   lengthControl?: ChapterRuntimePackage["lengthControl"];
+  skipPayoffLedgerSync?: boolean;
 }
 
 interface AuditIssueOutput {
@@ -218,13 +219,15 @@ export class AuditService {
       sourceSnapshotId: sourceSnapshot?.id ?? null,
       auditReports: persistedReports,
     });
-    const ledger = await payoffLedgerSyncService.syncLedger(novelId, {
-      chapterOrder,
-      sourceChapterId: chapterId,
-      provider: options.provider,
-      model: options.model,
-      temperature: options.temperature,
-    }).catch(() => null);
+    const ledger = options.skipPayoffLedgerSync
+      ? null
+      : await payoffLedgerSyncService.syncLedger(novelId, {
+        chapterOrder,
+        sourceChapterId: chapterId,
+        provider: options.provider,
+        model: options.model,
+        temperature: options.temperature,
+      }).catch(() => null);
     const syntheticPayoffReports = ledger
       ? payoffLedgerSyncService.buildSyntheticAuditReports(novelId, chapterId, chapterOrder, ledger)
       : [];

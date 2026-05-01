@@ -31,11 +31,20 @@ export interface PipelineRuntimeResult {
   issues: ReviewIssue[];
   runtimePackage: ChapterRuntimePackage | null;
   retryCountUsed: number;
+  recoverableRepairFailure?: PipelineRecoverableRepairFailure | null;
 }
 
 export interface FinalizedRuntimeResult {
   finalContent: string;
   runtimePackage: ChapterRuntimePackage;
+}
+
+export interface PipelineRecoverableRepairFailure {
+  chapterId: string;
+  message: string;
+  repairMode: NonNullable<PipelineRuntimeInput["repairMode"]>;
+  failureTypes: string[];
+  occurredAt: string;
 }
 
 export interface AssembledRuntimeChapter {
@@ -63,6 +72,12 @@ interface RunPipelineChapterDeps {
     chapterId: string,
     content: string,
     generationState: "drafted" | "repaired",
+    options?: { scheduleBackgroundSync?: boolean },
+  ) => Promise<void>;
+  syncFinalChapterArtifacts: (
+    novelId: string,
+    chapterId: string,
+    content: string,
   ) => Promise<void>;
   finalizeChapterContent: (input: {
     novelId: string;
@@ -78,6 +93,7 @@ interface RunPipelineChapterDeps {
     chapterId: string,
     generationState: "reviewed" | "approved",
   ) => Promise<void>;
+  markChapterNeedsRepair: (chapterId: string) => Promise<void>;
 }
 
 const QUALITY_THRESHOLD = { coherence: 80, repetition: 20, engagement: 75 };
@@ -114,6 +130,7 @@ export async function runPipelineChapterWithRuntime(
   let latestIssues: ReviewIssue[] = [];
   let pass = false;
   let latestLengthControl: ChapterRuntimePackage["lengthControl"] | undefined;
+  let recoverableRepairFailure: PipelineRecoverableRepairFailure | null = null;
 
   for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
     await hooks.onCheckCancelled?.();
@@ -128,14 +145,19 @@ export async function runPipelineChapterWithRuntime(
       content = generatedDraft.content;
       latestLengthControl = generatedDraft.lengthControl;
       if (!generatedDraft.artifactsAlreadySynced) {
-        await deps.saveDraftAndArtifacts(novelId, chapterId, content, "drafted");
+        await deps.saveDraftAndArtifacts(novelId, chapterId, content, "drafted", {
+          scheduleBackgroundSync: false,
+        });
       }
     } else if (attempt === 0) {
-      await deps.saveDraftAndArtifacts(novelId, chapterId, content, "drafted");
+      await deps.saveDraftAndArtifacts(novelId, chapterId, content, "drafted", {
+        scheduleBackgroundSync: false,
+      });
     }
 
     if (!autoReview) {
       await deps.markChapterGenerationState(chapterId, "approved");
+      await syncFinalRetainedChapterArtifacts(deps, novelId, chapterId, content);
       return {
         reviewExecuted: false,
         pass: true,
@@ -150,6 +172,7 @@ export async function runPipelineChapterWithRuntime(
         issues: [],
         runtimePackage: null,
         retryCountUsed,
+        recoverableRepairFailure: null,
       };
     }
 
@@ -179,7 +202,7 @@ export async function runPipelineChapterWithRuntime(
     }
 
     await hooks.onStageChange?.("repairing");
-    content = await repairDraftContent({
+    const repairResult = await repairDraftContent({
       novelTitle: assembled.novel.title,
       chapterTitle: assembled.chapter.title,
       content,
@@ -192,13 +215,23 @@ export async function runPipelineChapterWithRuntime(
         repairMode,
       },
     });
+    if (repairResult.recoverableFailure) {
+      recoverableRepairFailure = repairResult.recoverableFailure;
+      await deps.markChapterNeedsRepair(chapterId);
+      break;
+    }
+    content = repairResult.content;
     retryCountUsed += 1;
-    await deps.saveDraftAndArtifacts(novelId, chapterId, content, "repaired");
+    await deps.saveDraftAndArtifacts(novelId, chapterId, content, "repaired", {
+      scheduleBackgroundSync: false,
+    });
   }
 
   if (!latestResult) {
     throw new Error("Pipeline chapter runtime did not produce a result.");
   }
+
+  await syncFinalRetainedChapterArtifacts(deps, novelId, chapterId, latestResult.finalContent);
 
   return {
     reviewExecuted: true,
@@ -207,7 +240,20 @@ export async function runPipelineChapterWithRuntime(
     issues: latestIssues,
     runtimePackage: latestResult.runtimePackage,
     retryCountUsed,
+    recoverableRepairFailure,
   };
+}
+
+async function syncFinalRetainedChapterArtifacts(
+  deps: RunPipelineChapterDeps,
+  novelId: string,
+  chapterId: string,
+  content: string,
+): Promise<void> {
+  if (!content.trim()) {
+    return;
+  }
+  await deps.syncFinalChapterArtifacts(novelId, chapterId, content);
 }
 
 function isQualityPass(score: QualityScore, qualityThreshold: number): boolean {
@@ -246,7 +292,10 @@ async function repairDraftContent(input: {
     temperature?: number;
     repairMode?: "detect_only" | "light_repair" | "heavy_repair" | "continuity_only" | "character_only" | "ending_only";
   };
-}): Promise<string> {
+}): Promise<{
+  content: string;
+  recoverableFailure?: PipelineRecoverableRepairFailure | null;
+}> {
   const issues = input.issues.length > 0
     ? input.issues
     : [{
@@ -275,13 +324,29 @@ async function repairDraftContent(input: {
       repairMode: input.options.repairMode,
       modeHint,
     });
-    return patched.content;
+    return {
+      content: patched.content,
+      recoverableFailure: null,
+    };
   } catch (error) {
-    if (input.options.repairMode !== "heavy_repair") {
-      throw error;
-    }
     if (!(error instanceof ChapterPatchRepairFailedError)) {
       throw error;
+    }
+    if (input.options.repairMode !== "heavy_repair") {
+      return {
+        content: input.content,
+        recoverableFailure: {
+          chapterId: input.runtimePackage.chapterId,
+          message: error.message,
+          repairMode: input.options.repairMode ?? "light_repair",
+          failureTypes: Array.from(new Set(
+            error.applyResult?.failures
+              .map((failure) => failure.failureType)
+              .filter(Boolean) ?? [],
+          )),
+          occurredAt: new Date().toISOString(),
+        },
+      };
     }
   }
 
@@ -311,7 +376,10 @@ async function repairDraftContent(input: {
     },
   });
   const nextContent = repaired.output.trim();
-  return nextContent || input.content;
+  return {
+    content: nextContent || input.content,
+    recoverableFailure: null,
+  };
 }
 
 function buildRepairBibleFallback(runtimePackage: ChapterRuntimePackage): string {
