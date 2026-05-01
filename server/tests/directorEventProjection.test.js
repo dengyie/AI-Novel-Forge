@@ -239,9 +239,14 @@ test("director event projection summarizes workspace progress and next action", 
   assert.equal(projection.progressSummary, "进展：0/1 个步骤完成，2 个产物记录，1 个用户内容受保护，1 个产物需确认，1 个修复任务。");
   assert.equal(projection.recoveryDecision, "auto_repair_chapter");
   assert.equal(projection.progressBreakdown.planningPercent, 100);
-  assert.equal(projection.progressBreakdown.chapterExecutionPercent, 33);
+  assert.equal(projection.progressBreakdown.chapterExecutionPercent, 25);
   assert.equal(projection.progressBreakdown.qualityRepairPercent, 75);
-  assert.equal(projection.progressBreakdown.totalPercent, 63);
+  assert.equal(projection.progressBreakdown.totalPercent, 59);
+  assert.equal(projection.progressBreakdown.planningProgress, 100);
+  assert.equal(projection.progressBreakdown.chapterProgress, 25);
+  assert.equal(projection.progressBreakdown.qualityProgress, 75);
+  assert.equal(projection.progressBreakdown.activeJobProgress, 1);
+  assert.equal(projection.progressBreakdown.continuableChapters, 3);
   assert.deepEqual(
     projection.visibleRiskBadges.map((badge) => badge.label),
     ["受保护正文", "1 章待修复", "1 项需复核", "缺少规划资源"],

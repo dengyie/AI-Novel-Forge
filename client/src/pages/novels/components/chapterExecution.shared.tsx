@@ -279,6 +279,15 @@ export function resolveDisplayedChapterStatus(chapter: Chapter): Chapter["chapte
   if (chapter.generationState === "approved" || chapter.generationState === "published") {
     return "completed";
   }
+  if (
+    chapterHasContinuableQualityLoop(chapter)
+    && (chapter.generationState === "reviewed" || chapter.generationState === "repaired")
+  ) {
+    return "pending_review";
+  }
+  if (status === "generating" && (chapter.generationState === "reviewed" || chapter.generationState === "repaired")) {
+    return "pending_review";
+  }
   if (status === "needs_repair" && chapterHasContinuableQualityLoop(chapter)) {
     return "pending_review";
   }

@@ -344,6 +344,10 @@ export type DirectorAutopilotRecoveryDecision =
   | "requires_manual_recovery";
 
 export interface DirectorRuntimeProgressBreakdown {
+  planningProgress: number;
+  chapterProgress: number;
+  qualityProgress: number;
+  activeJobProgress: number;
   planningPercent: number;
   chapterExecutionPercent: number;
   qualityRepairPercent: number;
@@ -351,6 +355,7 @@ export interface DirectorRuntimeProgressBreakdown {
   completedSteps: number;
   totalSteps: number;
   draftedChapters: number;
+  continuableChapters: number;
   totalChapters: number;
   pendingRepairChapters: number;
   explanation: string;

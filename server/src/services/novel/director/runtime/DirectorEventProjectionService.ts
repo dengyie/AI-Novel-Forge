@@ -260,7 +260,11 @@ function buildPlanningPercent(snapshot: DirectorRuntimeSnapshot, inventory: Dire
 
 function buildChapterExecutionPercent(snapshot: DirectorRuntimeSnapshot, inventory: DirectorWorkspaceInventory | null | undefined): number {
   if (inventory?.chapterCount) {
-    return percentFromCount(inventory.draftedChapterCount, inventory.chapterCount);
+    const continuableChapters = Math.max(
+      inventory.approvedChapterCount,
+      inventory.draftedChapterCount - inventory.pendingRepairChapterCount,
+    );
+    return percentFromCount(continuableChapters, inventory.chapterCount);
   }
   return stepProgressPercent(snapshot.steps, CHAPTER_EXECUTION_NODE_HINTS);
 }
@@ -279,6 +283,20 @@ function buildQualityRepairPercent(snapshot: DirectorRuntimeSnapshot, inventory:
   return percent > 0 ? percent : 100;
 }
 
+function buildActiveJobPercent(snapshot: DirectorRuntimeSnapshot): number {
+  const step = latestStep(snapshot.steps);
+  if (!step) {
+    return 0;
+  }
+  if (step.status === "succeeded") {
+    return 100;
+  }
+  if (step.status === "running") {
+    return 1;
+  }
+  return 0;
+}
+
 function buildProgressBreakdown(
   snapshot: DirectorRuntimeSnapshot,
   inventory: DirectorWorkspaceInventory | null | undefined,
@@ -287,15 +305,26 @@ function buildProgressBreakdown(
   const planningPercent = buildPlanningPercent(snapshot, inventory);
   const chapterExecutionPercent = buildChapterExecutionPercent(snapshot, inventory);
   const qualityRepairPercent = buildQualityRepairPercent(snapshot, inventory);
+  const activeJobProgress = buildActiveJobPercent(snapshot);
   const totalPercent = clampPercent(
     planningPercent * 0.35
     + chapterExecutionPercent * 0.5
     + qualityRepairPercent * 0.15,
   );
   const draftedChapters = inventory?.draftedChapterCount ?? 0;
+  const continuableChapters = inventory
+    ? Math.max(
+      inventory.approvedChapterCount,
+      inventory.draftedChapterCount - inventory.pendingRepairChapterCount,
+    )
+    : 0;
   const totalChapters = inventory?.chapterCount ?? 0;
   const pendingRepairChapters = inventory?.pendingRepairChapterCount ?? 0;
   return {
+    planningProgress: planningPercent,
+    chapterProgress: chapterExecutionPercent,
+    qualityProgress: qualityRepairPercent,
+    activeJobProgress,
     planningPercent,
     chapterExecutionPercent,
     qualityRepairPercent,
@@ -303,9 +332,12 @@ function buildProgressBreakdown(
     completedSteps,
     totalSteps: snapshot.steps.length,
     draftedChapters,
+    continuableChapters,
     totalChapters,
     pendingRepairChapters,
-    explanation: `规划完成度 ${planningPercent}%，章节执行完成度 ${chapterExecutionPercent}%，质量修复完成度 ${qualityRepairPercent}%，综合进度 ${totalPercent}%。`,
+    explanation: totalChapters > 0
+      ? `章节进度 ${continuableChapters}/${totalChapters}，规划 ${planningPercent}%，质量修复 ${qualityRepairPercent}%，综合进度 ${totalPercent}%。`
+      : `规划 ${planningPercent}%，章节执行 ${chapterExecutionPercent}%，质量修复 ${qualityRepairPercent}%，综合进度 ${totalPercent}%。`,
   };
 }
 

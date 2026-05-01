@@ -147,6 +147,13 @@ function riskBadgeClassName(level: NonNullable<DirectorRuntimeProjection["visibl
   return "border-sky-200 bg-sky-50 text-sky-700";
 }
 
+function formatPercent(value: number | null | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return "0%";
+  }
+  return `${Math.max(0, Math.min(100, Math.round(value)))}%`;
+}
+
 export default function DirectorRuntimeProjectionCard({
   projection,
   className,
@@ -181,6 +188,7 @@ export default function DirectorRuntimeProjectionCard({
   const stepUsage = projection.stepUsage?.slice(0, compact ? 2 : 4) ?? [];
   const promptUsage = projection.promptUsage?.slice(0, compact ? 2 : 6) ?? [];
   const visibleRiskBadges = projection.visibleRiskBadges?.slice(0, compact ? 3 : 6) ?? [];
+  const progressBreakdown = projection.progressBreakdown ?? null;
 
   return (
     <div className={cn("rounded-lg border bg-background/80 p-3", statusClassName(projection.status), className)}>
@@ -204,6 +212,27 @@ export default function DirectorRuntimeProjectionCard({
               {badge.label}
             </Badge>
           ))}
+        </div>
+      ) : null}
+
+      {progressBreakdown && !compact ? (
+        <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <div className="rounded-md border bg-background/70 px-3 py-2">
+            <div className="text-[11px] text-muted-foreground">规划</div>
+            <div className="mt-1 text-sm font-semibold text-foreground">{formatPercent(progressBreakdown.planningProgress ?? progressBreakdown.planningPercent)}</div>
+          </div>
+          <div className="rounded-md border bg-background/70 px-3 py-2">
+            <div className="text-[11px] text-muted-foreground">章节</div>
+            <div className="mt-1 text-sm font-semibold text-foreground">{progressBreakdown.continuableChapters}/{progressBreakdown.totalChapters}</div>
+          </div>
+          <div className="rounded-md border bg-background/70 px-3 py-2">
+            <div className="text-[11px] text-muted-foreground">质量</div>
+            <div className="mt-1 text-sm font-semibold text-foreground">{formatPercent(progressBreakdown.qualityProgress ?? progressBreakdown.qualityRepairPercent)}</div>
+          </div>
+          <div className="rounded-md border bg-background/70 px-3 py-2">
+            <div className="text-[11px] text-muted-foreground">当前动作</div>
+            <div className="mt-1 text-sm font-semibold text-foreground">{formatPercent(progressBreakdown.activeJobProgress)}</div>
+          </div>
         </div>
       ) : null}
 

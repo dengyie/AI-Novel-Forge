@@ -316,6 +316,10 @@ export default function NovelAutoDirectorProgressPanel({
   const historyEvents = eventHistory?.events ?? [];
   const isPendingManualRecovery = Boolean(task?.pendingManualRecovery);
   const runtimeProjectionForDisplay = isPendingManualRecovery ? null : runtimeProjection;
+  const projectedProgressPercent = runtimeProjectionForDisplay?.progressBreakdown?.totalPercent;
+  const displayProgress = typeof projectedProgressPercent === "number"
+    ? projectedProgressPercent
+    : task ? task.progress : null;
   const runtimeRequiresUserAction = Boolean(
     runtimeProjectionForDisplay?.requiresUserAction
     || runtimeProjectionForDisplay?.status === "blocked"
@@ -439,7 +443,7 @@ export default function NovelAutoDirectorProgressPanel({
             ? "正在生成导演候选方案"
             : `正在导演《${taskTitle}》`}
         description={description}
-        progress={task ? task.progress : null}
+        progress={displayProgress}
         currentAction={currentAction}
         checkpointLabel={formatCheckpoint(task?.checkpointType, task)}
         taskId={task?.id || taskId}
