@@ -336,6 +336,32 @@ export interface DirectorRuntimeProjectionEvent {
   usage?: DirectorLlmUsageSummary | null;
 }
 
+export type DirectorAutopilotRecoveryDecision =
+  | "continue"
+  | "auto_repair_chapter"
+  | "auto_replan_window"
+  | "auto_resume_from_checkpoint"
+  | "requires_manual_recovery";
+
+export interface DirectorRuntimeProgressBreakdown {
+  planningPercent: number;
+  chapterExecutionPercent: number;
+  qualityRepairPercent: number;
+  totalPercent: number;
+  completedSteps: number;
+  totalSteps: number;
+  draftedChapters: number;
+  totalChapters: number;
+  pendingRepairChapters: number;
+  explanation: string;
+}
+
+export interface DirectorRuntimeVisibleRiskBadge {
+  label: string;
+  level: "info" | "warning" | "danger";
+  source?: "status" | "artifact" | "event" | "policy";
+}
+
 export interface DirectorRuntimeProjection {
   runId: string;
   novelId?: string | null;
@@ -347,9 +373,15 @@ export interface DirectorRuntimeProjection {
   lastEventSummary?: string | null;
   requiresUserAction: boolean;
   blockedReason?: string | null;
+  blockingReason?: string | null;
   nextActionLabel?: string | null;
+  recommendedAction?: DirectorNextAction | null;
+  recoveryDecision?: DirectorAutopilotRecoveryDecision;
+  isAutopilotRecoverable?: boolean;
   scopeSummary?: string | null;
   progressSummary?: string | null;
+  progressBreakdown?: DirectorRuntimeProgressBreakdown;
+  visibleRiskBadges?: DirectorRuntimeVisibleRiskBadge[];
   policyMode: DirectorPolicyMode;
   updatedAt: string;
   recentEvents: DirectorRuntimeProjectionEvent[];

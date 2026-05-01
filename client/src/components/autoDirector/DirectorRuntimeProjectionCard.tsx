@@ -137,6 +137,16 @@ function statusIcon(status: DirectorRuntimeProjectionStatus) {
   return <ShieldCheck className="h-4 w-4" />;
 }
 
+function riskBadgeClassName(level: NonNullable<DirectorRuntimeProjection["visibleRiskBadges"]>[number]["level"]) {
+  if (level === "danger") {
+    return "border-red-200 bg-red-50 text-red-700";
+  }
+  if (level === "warning") {
+    return "border-amber-200 bg-amber-50 text-amber-700";
+  }
+  return "border-sky-200 bg-sky-50 text-sky-700";
+}
+
 export default function DirectorRuntimeProjectionCard({
   projection,
   className,
@@ -151,17 +161,26 @@ export default function DirectorRuntimeProjectionCard({
     || "等待同步当前推进状态";
   const detailText = projection.detail?.trim();
   const attentionText = projection.requiresUserAction
-    ? projection.blockedReason?.trim() || projection.lastEventSummary?.trim() || "请先处理当前停留点。"
-    : projection.blockedReason?.trim();
+    ? projection.blockingReason?.trim()
+      || projection.blockedReason?.trim()
+      || projection.lastEventSummary?.trim()
+      || "请先处理当前停留点。"
+    : projection.blockingReason?.trim() || projection.blockedReason?.trim();
+  const progressLine = projection.progressBreakdown?.explanation?.trim()
+    || projection.progressSummary?.trim()
+    || null;
   const helperLines = [
     projection.nextActionLabel ? `下一步：${projection.nextActionLabel}` : null,
+    projection.recommendedAction?.reason ? `推荐原因：${projection.recommendedAction.reason}` : null,
+    projection.isAutopilotRecoverable ? "AI 可以从当前进度继续处理。" : null,
     projection.scopeSummary,
-    projection.progressSummary,
+    progressLine,
   ].filter((line): line is string => Boolean(line?.trim()));
   const recentEvents = projection.recentEvents.slice(0, compact ? 2 : 4);
   const usageSummary = projection.usageSummary ?? null;
   const stepUsage = projection.stepUsage?.slice(0, compact ? 2 : 4) ?? [];
   const promptUsage = projection.promptUsage?.slice(0, compact ? 2 : 6) ?? [];
+  const visibleRiskBadges = projection.visibleRiskBadges?.slice(0, compact ? 3 : 6) ?? [];
 
   return (
     <div className={cn("rounded-lg border bg-background/80 p-3", statusClassName(projection.status), className)}>
@@ -177,6 +196,16 @@ export default function DirectorRuntimeProjectionCard({
           {formatStatus(projection.status)}
         </Badge>
       </div>
+
+      {visibleRiskBadges.length > 0 ? (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {visibleRiskBadges.map((badge) => (
+            <Badge key={`${badge.source ?? "risk"}:${badge.label}`} variant="outline" className={cn("bg-background/70", riskBadgeClassName(badge.level))}>
+              {badge.label}
+            </Badge>
+          ))}
+        </div>
+      ) : null}
 
       {attentionText ? (
         <div className="mt-3 rounded-md border bg-background/70 px-3 py-2 text-sm leading-5">

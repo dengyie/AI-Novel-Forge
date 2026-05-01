@@ -1,9 +1,13 @@
 import type {
+  DirectorArtifactType,
+  DirectorAutopilotRecoveryDecision,
   DirectorEvent,
   DirectorNextAction,
+  DirectorRuntimeProgressBreakdown,
   DirectorRuntimeProjection,
   DirectorRuntimeProjectionStatus,
   DirectorRuntimeSnapshot,
+  DirectorRuntimeVisibleRiskBadge,
   DirectorStepRun,
   DirectorWorkspaceInventory,
 } from "@ai-novel/shared/types/directorRuntime";
@@ -179,6 +183,207 @@ function buildProgressSummary(snapshot: DirectorRuntimeSnapshot, inventory: Dire
   return `进展：${parts.join("，")}。`;
 }
 
+const PLANNING_ARTIFACT_TYPES: DirectorArtifactType[] = [
+  "book_contract",
+  "story_macro",
+  "character_cast",
+  "volume_strategy",
+  "chapter_task_sheet",
+];
+
+const PLANNING_NODE_HINTS = [
+  "book_contract",
+  "story_macro",
+  "character",
+  "volume_strategy",
+  "chapter_task",
+  "structured",
+];
+
+const CHAPTER_EXECUTION_NODE_HINTS = [
+  "chapter_execution",
+  "chapter.write",
+  "chapter_draft",
+];
+
+const QUALITY_NODE_HINTS = [
+  "quality",
+  "review",
+  "repair",
+  "state_commit",
+];
+
+function clampPercent(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function percentFromCount(done: number, total: number): number {
+  if (total <= 0) {
+    return 0;
+  }
+  return clampPercent((done / total) * 100);
+}
+
+function stepMatches(step: DirectorStepRun, hints: string[]): boolean {
+  const nodeKey = step.nodeKey.toLowerCase();
+  return hints.some((hint) => nodeKey.includes(hint));
+}
+
+function stepProgressPercent(steps: DirectorStepRun[], hints: string[]): number {
+  const matched = steps.filter((step) => stepMatches(step, hints));
+  if (matched.length === 0) {
+    return 0;
+  }
+  const completed = matched.filter((step) => step.status === "succeeded").length;
+  const running = matched.some((step) => step.status === "running" || step.status === "waiting_approval")
+    ? 0.5
+    : 0;
+  return percentFromCount(completed + running, matched.length);
+}
+
+function buildPlanningPercent(snapshot: DirectorRuntimeSnapshot, inventory: DirectorWorkspaceInventory | null | undefined): number {
+  if (inventory) {
+    const completed = [
+      inventory.hasBookContract,
+      inventory.hasStoryMacro,
+      inventory.hasCharacters,
+      inventory.hasVolumeStrategy,
+      inventory.hasChapterPlan,
+    ].filter(Boolean).length;
+    return percentFromCount(completed, 5);
+  }
+  return stepProgressPercent(snapshot.steps, PLANNING_NODE_HINTS);
+}
+
+function buildChapterExecutionPercent(snapshot: DirectorRuntimeSnapshot, inventory: DirectorWorkspaceInventory | null | undefined): number {
+  if (inventory?.chapterCount) {
+    return percentFromCount(inventory.draftedChapterCount, inventory.chapterCount);
+  }
+  return stepProgressPercent(snapshot.steps, CHAPTER_EXECUTION_NODE_HINTS);
+}
+
+function buildQualityRepairPercent(snapshot: DirectorRuntimeSnapshot, inventory: DirectorWorkspaceInventory | null | undefined): number {
+  if (inventory) {
+    if (inventory.draftedChapterCount <= 0) {
+      return 0;
+    }
+    return percentFromCount(
+      Math.max(0, inventory.draftedChapterCount - inventory.pendingRepairChapterCount),
+      inventory.draftedChapterCount,
+    );
+  }
+  const percent = stepProgressPercent(snapshot.steps, QUALITY_NODE_HINTS);
+  return percent > 0 ? percent : 100;
+}
+
+function buildProgressBreakdown(
+  snapshot: DirectorRuntimeSnapshot,
+  inventory: DirectorWorkspaceInventory | null | undefined,
+): DirectorRuntimeProgressBreakdown {
+  const completedSteps = snapshot.steps.filter((step) => step.status === "succeeded").length;
+  const planningPercent = buildPlanningPercent(snapshot, inventory);
+  const chapterExecutionPercent = buildChapterExecutionPercent(snapshot, inventory);
+  const qualityRepairPercent = buildQualityRepairPercent(snapshot, inventory);
+  const totalPercent = clampPercent(
+    planningPercent * 0.35
+    + chapterExecutionPercent * 0.5
+    + qualityRepairPercent * 0.15,
+  );
+  const draftedChapters = inventory?.draftedChapterCount ?? 0;
+  const totalChapters = inventory?.chapterCount ?? 0;
+  const pendingRepairChapters = inventory?.pendingRepairChapterCount ?? 0;
+  return {
+    planningPercent,
+    chapterExecutionPercent,
+    qualityRepairPercent,
+    totalPercent,
+    completedSteps,
+    totalSteps: snapshot.steps.length,
+    draftedChapters,
+    totalChapters,
+    pendingRepairChapters,
+    explanation: `规划完成度 ${planningPercent}%，章节执行完成度 ${chapterExecutionPercent}%，质量修复完成度 ${qualityRepairPercent}%，综合进度 ${totalPercent}%。`,
+  };
+}
+
+function buildRecoveryDecision(input: {
+  status: DirectorRuntimeProjectionStatus;
+  inventory: DirectorWorkspaceInventory | null | undefined;
+  blockedReason: string | null;
+}): DirectorAutopilotRecoveryDecision {
+  const protectedCount = input.inventory?.protectedUserContentArtifacts.length ?? 0;
+  if (protectedCount > 0 && (input.status === "waiting_approval" || input.status === "blocked" || input.status === "failed")) {
+    return "requires_manual_recovery";
+  }
+  if (input.status === "failed") {
+    return "requires_manual_recovery";
+  }
+  if ((input.inventory?.pendingRepairChapterCount ?? 0) > 0) {
+    return "auto_repair_chapter";
+  }
+  const missingArtifacts = input.inventory?.missingArtifactTypes ?? [];
+  if (missingArtifacts.some((type) => PLANNING_ARTIFACT_TYPES.includes(type))) {
+    return "auto_replan_window";
+  }
+  if (input.status === "waiting_approval" || input.status === "blocked") {
+    return input.blockedReason ? "auto_resume_from_checkpoint" : "continue";
+  }
+  return "continue";
+}
+
+function isAutomaticPolicy(snapshot: DirectorRuntimeSnapshot): boolean {
+  return snapshot.policy.mode === "auto_safe_scope";
+}
+
+function buildVisibleRiskBadges(input: {
+  status: DirectorRuntimeProjectionStatus;
+  blockedReason: string | null;
+  inventory: DirectorWorkspaceInventory | null | undefined;
+  events: DirectorEvent[];
+}): DirectorRuntimeVisibleRiskBadge[] {
+  const badges: DirectorRuntimeVisibleRiskBadge[] = [];
+  const push = (badge: DirectorRuntimeVisibleRiskBadge) => {
+    if (!badges.some((item) => item.label === badge.label)) {
+      badges.push(badge);
+    }
+  };
+  if (input.status === "failed") {
+    push({ label: "执行失败", level: "danger", source: "status" });
+  } else if (input.status === "blocked" || input.status === "waiting_approval") {
+    push({ label: input.blockedReason ? "等待处理" : "等待确认", level: "warning", source: "status" });
+  }
+  const inventory = input.inventory;
+  if (inventory) {
+    if (inventory.protectedUserContentArtifacts.length > 0) {
+      push({ label: "受保护正文", level: "danger", source: "artifact" });
+    }
+    if (inventory.pendingRepairChapterCount > 0) {
+      push({ label: `${inventory.pendingRepairChapterCount} 章待修复`, level: "warning", source: "artifact" });
+    }
+    if (inventory.staleArtifacts.length > 0) {
+      push({ label: `${inventory.staleArtifacts.length} 项需复核`, level: "warning", source: "artifact" });
+    }
+    if (inventory.missingArtifactTypes.length > 0) {
+      push({ label: "缺少规划资源", level: "warning", source: "artifact" });
+    }
+  }
+  for (const event of input.events) {
+    if (event.type === "quality_issue_found" || event.type === "quality_loop_assessed") {
+      push({ label: "质量风险", level: event.severity === "high" ? "danger" : "warning", source: "event" });
+    }
+    if (event.type === "replan_run_created") {
+      push({ label: "已进入重规划", level: "info", source: "event" });
+    }
+    if (event.type === "circuit_breaker_opened") {
+      push({ label: "连续失败保护", level: "danger", source: "event" });
+    }
+  }
+  return badges.slice(0, 6);
+}
+
 export class DirectorEventProjectionService {
   buildSnapshotProjection(snapshot: DirectorRuntimeSnapshot | null): DirectorRuntimeProjection | null {
     if (!snapshot) {
@@ -194,6 +399,18 @@ export class DirectorEventProjectionService {
       ?? snapshot.lastWorkspaceAnalysis?.interpretation?.recommendedAction
       ?? null;
     const headline = buildHeadline({ status, step, event });
+    const progressBreakdown = buildProgressBreakdown(snapshot, inventory);
+    const recoveryDecision = buildRecoveryDecision({ status, inventory, blockedReason });
+    const isAutopilotRecoverable = isAutomaticPolicy(snapshot)
+      && recoveryDecision !== "requires_manual_recovery"
+      && status !== "completed"
+      && status !== "idle";
+    const visibleRiskBadges = buildVisibleRiskBadges({
+      status,
+      blockedReason,
+      inventory,
+      events: snapshot.events,
+    });
     const recentEvents = [...snapshot.events]
       .sort((left, right) => timestampOf(right.occurredAt) - timestampOf(left.occurredAt))
       .slice(0, 8)
@@ -218,9 +435,15 @@ export class DirectorEventProjectionService {
       lastEventSummary: event?.summary ?? null,
       requiresUserAction,
       blockedReason,
+      blockingReason: blockedReason,
       nextActionLabel: formatNextAction(recommendation),
+      recommendedAction: recommendation,
+      recoveryDecision,
+      isAutopilotRecoverable,
       scopeSummary: buildScopeSummary(inventory),
       progressSummary: buildProgressSummary(snapshot, inventory),
+      progressBreakdown,
+      visibleRiskBadges,
       policyMode: snapshot.policy.mode,
       updatedAt: snapshot.updatedAt,
       recentEvents,

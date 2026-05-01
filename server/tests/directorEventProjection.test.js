@@ -65,6 +65,9 @@ test("director event projection marks approval gates as user action", () => {
   assert.equal(projection.headline, "等待确认：执行章节生成批次");
   assert.equal(projection.detail, "当前策略需要确认后继续。");
   assert.equal(projection.blockedReason, "当前策略需要确认后继续。");
+  assert.equal(projection.blockingReason, "当前策略需要确认后继续。");
+  assert.equal(projection.recoveryDecision, "auto_resume_from_checkpoint");
+  assert.equal(projection.isAutopilotRecoverable, false);
   assert.equal(projection.recentEvents.length, 1);
 });
 
@@ -231,8 +234,18 @@ test("director event projection summarizes workspace progress and next action", 
   assert.equal(projection.headline, "推进任务：分析小说资产");
   assert.equal(projection.detail, "最近进展：工作区分析完成。");
   assert.equal(projection.nextActionLabel, "复查最近章节");
+  assert.equal(projection.recommendedAction.action, "review_recent_chapters");
   assert.equal(projection.scopeSummary, "工作区：12 章，4 章有正文，1 章待修复，1 类产物待补齐。");
   assert.equal(projection.progressSummary, "进展：0/1 个步骤完成，2 个产物记录，1 个用户内容受保护，1 个产物需确认，1 个修复任务。");
+  assert.equal(projection.recoveryDecision, "auto_repair_chapter");
+  assert.equal(projection.progressBreakdown.planningPercent, 100);
+  assert.equal(projection.progressBreakdown.chapterExecutionPercent, 33);
+  assert.equal(projection.progressBreakdown.qualityRepairPercent, 75);
+  assert.equal(projection.progressBreakdown.totalPercent, 63);
+  assert.deepEqual(
+    projection.visibleRiskBadges.map((badge) => badge.label),
+    ["受保护正文", "1 章待修复", "1 项需复核", "缺少规划资源"],
+  );
 });
 
 test("director event projection keeps heartbeat as latest running progress", () => {

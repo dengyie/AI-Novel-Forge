@@ -31,6 +31,7 @@ export async function loadPersistentDirectorRuntimeProjection(
       novelId: true,
       entrypoint: true,
       policyJson: true,
+      lastWorkspaceAnalysisJson: true,
       updatedAt: true,
       steps: {
         orderBy: [{ updatedAt: "desc" }, { startedAt: "desc" }],
@@ -107,6 +108,9 @@ export async function loadPersistentDirectorRuntimeProjection(
       occurredAt: event.occurredAt.toISOString(),
     })),
     artifacts: [],
+    lastWorkspaceAnalysis: parseJsonOrNull<DirectorRuntimeSnapshot["lastWorkspaceAnalysis"]>(
+      run.lastWorkspaceAnalysisJson,
+    ),
     updatedAt: run.updatedAt.toISOString(),
   };
   const projection = projectionService.buildSnapshotProjection(snapshot);

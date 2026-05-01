@@ -15,6 +15,7 @@
 - 自动导演继续策略：`full_book_autopilot` 遇到可修复的 pending state proposal 会进入章节修复链，不再直接阻断到人工确认。
 - 章节质量降级链：局部补丁失败后自动升级整章重修，重修后重新审校；避免“目标片段不存在”一类问题把整本书卡死。
 - Worker 租约恢复：整本自动推进任务的后台命令租约过期后会优先自动重新排队，从最近安全进度继续；连续失败超过阈值才进入待恢复。
+- Projection 可解释合同：运行投影已输出 `blockingReason`、`recommendedAction`、`isAutopilotRecoverable`、`progressBreakdown`、`visibleRiskBadges` 和恢复决策枚举，前端不再需要自己猜阻塞原因、风险标签和综合进度。
 - 前端状态同步：章节列表会把结构化 `riskFlags` 转成中文风险标签，不再显示原始 JSON；章节正文已经开始生成时，左侧流程会跟随后台真实节点显示“章节执行”进行中。
 - 受保护正文边界：涉及用户明确保护或手写正文的修复仍不允许自动覆盖，继续作为硬边界处理。
 
@@ -26,7 +27,6 @@
 
 剩余开发项：
 
-- 将 `blockingReason`、`recommendedAction`、`isAutopilotRecoverable`、`progressBreakdown`、`visibleRiskBadges` 作为更稳定的 projection 合同输出，减少前端自行推断。
 - 补齐“缺少节奏 / 拆章资源”时的一键自动补齐入口，让用户看到的是“AI 帮你补齐继续写”，而不是需要理解拆章资源。
 - 用真实样本跑通自动导演方向选择后无人值守连续生成前 10 章，并验证中途 Worker 重启不会重复生成已完成章节。
 - 继续压缩任务中心、工作台横幅、左侧流程之间的状态差异，确保同一本书只展示一个清晰主动作。
