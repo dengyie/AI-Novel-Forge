@@ -279,6 +279,9 @@ export function resolveDisplayedChapterStatus(chapter: Chapter): Chapter["chapte
   if (chapter.generationState === "approved" || chapter.generationState === "published") {
     return "completed";
   }
+  if (status === "needs_repair" && chapterHasContinuableQualityLoop(chapter)) {
+    return "pending_review";
+  }
   if (status === "pending_generation") {
     return "pending_review";
   }
@@ -414,16 +417,31 @@ function qualityLoopArtifactLabel(value: unknown): string | null {
   }
 }
 
-function parseStructuredRiskFlags(input: string): string[] | null {
+function parseStructuredRiskFlagsObject(input: string): Record<string, unknown> | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(input);
   } catch {
     return null;
   }
-  if (!isRecord(parsed)) {
-    return null;
-  }
+  return isRecord(parsed) ? parsed : null;
+}
+
+export function chapterHasContinuableQualityLoop(chapter: Pick<Chapter, "riskFlags">): boolean {
+  const parsed = chapter.riskFlags?.trim()
+    ? parseStructuredRiskFlagsObject(chapter.riskFlags.trim())
+    : null;
+  const qualityLoop = parsed?.qualityLoop;
+  return Boolean(
+    isRecord(qualityLoop)
+      && qualityLoop.overallStatus === "valid"
+      && qualityLoop.recommendedAction === "continue",
+  );
+}
+
+function parseStructuredRiskFlags(input: string): string[] | null {
+  const parsed = parseStructuredRiskFlagsObject(input);
+  if (!parsed) return null;
   const labels: string[] = [];
   const qualityLoop = parsed.qualityLoop;
   if (isRecord(qualityLoop)) {

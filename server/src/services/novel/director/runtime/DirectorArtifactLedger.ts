@@ -174,6 +174,7 @@ export function reconcileDirectorArtifactLedger(
   }));
   const indexedArtifacts: DirectorArtifactRef[] = [];
   const changedVersionById = new Map<string, number>();
+  const nextArtifactIds = new Set<string>();
 
   for (const rawNext of nextArtifacts) {
     const next = normalizeDirectorArtifactRef({
@@ -181,6 +182,7 @@ export function reconcileDirectorArtifactLedger(
       runId: rawNext.runId ?? options?.runId ?? null,
       sourceStepRunId: rawNext.sourceStepRunId ?? options?.sourceStepRunId ?? null,
     });
+    nextArtifactIds.add(next.id);
     const existing = byId.get(next.id);
     if (!existing) {
       byId.set(next.id, next);
@@ -216,9 +218,29 @@ export function reconcileDirectorArtifactLedger(
     }
   }
 
+  for (const artifact of byId.values()) {
+    if (
+      artifact.artifactType !== "repair_ticket"
+      || nextArtifactIds.has(artifact.id)
+      || artifact.status === "rejected"
+      || artifact.status === "superseded"
+    ) {
+      continue;
+    }
+    const resolvedRepairTicket = normalizeDirectorArtifactRef({
+      ...artifact,
+      status: "superseded",
+    });
+    byId.set(resolvedRepairTicket.id, resolvedRepairTicket);
+    indexedArtifacts.push(resolvedRepairTicket);
+  }
+
   const staleArtifacts: DirectorArtifactRef[] = [];
   for (const artifact of byId.values()) {
     if (changedVersionById.has(artifact.id)) {
+      continue;
+    }
+    if (artifact.status === "rejected" || artifact.status === "superseded") {
       continue;
     }
     const staleDependency = artifact.dependsOn?.find((dependency) => {
@@ -260,7 +282,7 @@ export function summarizeDirectorArtifactLedger(
       artifact.protectedUserContent === true
       || (artifact.source === "user_edited" && artifact.status === "active")
     )),
-    needsRepairArtifacts: normalized.filter((artifact) => artifact.artifactType === "repair_ticket" && artifact.status !== "rejected"),
+    needsRepairArtifacts: normalized.filter((artifact) => artifact.artifactType === "repair_ticket" && artifact.status === "active"),
   };
 }
 

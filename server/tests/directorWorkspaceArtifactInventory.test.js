@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 
 const {
   buildDirectorWorkspaceArtifactInventory,
+  hasContinuableQualityLoopRiskFlags,
 } = require("../dist/services/novel/director/runtime/DirectorWorkspaceArtifactInventory.js");
 
 function row(id) {
@@ -137,6 +138,8 @@ test("workspace artifact inventory links chapter task sheets to upstream plannin
   assert.ok(readerPromises.length >= 3);
   assert.ok(governance);
   assert.ok(continuity);
+  assert.equal(draft.source, "user_edited");
+  assert.equal(draft.protectedUserContent, true);
   assert.equal(retentionContracts.length, 2);
   assert.deepEqual(taskSheetDeps, [
     "character_cast:novel:novel-1:Character:novel:novel-1",
@@ -157,6 +160,55 @@ test("workspace artifact inventory links chapter task sheets to upstream plannin
     "chapter_retention_contract:chapter:chapter-1:VolumeChapterPlan:volume-chapter-1",
     "chapter_draft:chapter:chapter-1:Chapter:chapter-1",
   ].sort());
+});
+
+test("workspace artifact inventory does not protect AI generated chapter drafts", () => {
+  const result = buildDirectorWorkspaceArtifactInventory(emptyInventoryInput({
+    chapters: [{
+      id: "chapter-ai-1",
+      order: 1,
+      content: "AI generated draft content",
+      taskSheet: "task sheet",
+      generationState: "reviewed",
+      chapterStatus: "pending_review",
+      updatedAt: "2026-04-28T02:00:00.000Z",
+    }],
+  }));
+
+  const draft = result.artifacts.find((artifact) => artifact.artifactType === "chapter_draft");
+
+  assert.ok(draft);
+  assert.equal(draft.source, "ai_generated");
+  assert.equal(draft.protectedUserContent, false);
+  assert.equal(
+    result.ledgerSummary.protectedUserContentArtifacts.some((artifact) => artifact.id === draft.id),
+    false,
+  );
+});
+
+test("workspace artifact inventory skips repair tickets when the latest quality loop can continue", () => {
+  const riskFlags = JSON.stringify({
+    qualityLoop: {
+      overallStatus: "valid",
+      recommendedAction: "continue",
+    },
+  });
+  const result = buildDirectorWorkspaceArtifactInventory(emptyInventoryInput({
+    chapters: [{
+      id: "chapter-ai-2",
+      order: 2,
+      content: "AI repaired draft content",
+      taskSheet: "task sheet",
+      generationState: "reviewed",
+      chapterStatus: "needs_repair",
+      riskFlags,
+      updatedAt: "2026-04-28T02:00:00.000Z",
+    }],
+  }));
+
+  assert.equal(hasContinuableQualityLoopRiskFlags(riskFlags), true);
+  assert.equal(result.artifacts.some((artifact) => artifact.artifactType === "repair_ticket"), false);
+  assert.equal(result.ledgerSummary.needsRepairArtifacts.length, 0);
 });
 
 test("workspace artifact inventory uses persisted ledger artifacts before legacy backfill", () => {

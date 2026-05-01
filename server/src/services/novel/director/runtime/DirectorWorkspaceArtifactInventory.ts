@@ -90,6 +90,7 @@ export interface DirectorWorkspaceArtifactInventoryInput {
     riskFlags?: string | null;
     repairHistory?: string | null;
     chapterStatus?: string | null;
+    generationState?: string | null;
     updatedAt: Date | string;
   }>;
   qualityReports: Array<{
@@ -445,6 +446,53 @@ function pushVolumeStrategyArtifacts(
   }
 }
 
+const AI_GENERATED_CHAPTER_STATES = new Set([
+  "drafted",
+  "reviewed",
+  "repaired",
+  "approved",
+  "published",
+]);
+
+export function hasContinuableQualityLoopRiskFlags(riskFlags: string | null | undefined): boolean {
+  if (!riskFlags?.trim()) {
+    return false;
+  }
+  try {
+    const parsed = JSON.parse(riskFlags) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return false;
+    }
+    const qualityLoop = (parsed as { qualityLoop?: unknown }).qualityLoop;
+    return Boolean(
+      qualityLoop
+        && typeof qualityLoop === "object"
+        && !Array.isArray(qualityLoop)
+        && (qualityLoop as { overallStatus?: unknown }).overallStatus === "valid"
+        && (qualityLoop as { recommendedAction?: unknown }).recommendedAction === "continue",
+    );
+  } catch {
+    return false;
+  }
+}
+
+function resolveChapterDraftSource(
+  chapter: DirectorWorkspaceArtifactInventoryInput["chapters"][number],
+): DirectorArtifactRef["source"] {
+  if (chapter.generationState === "repaired") {
+    return "auto_repaired";
+  }
+  if (chapter.generationState && AI_GENERATED_CHAPTER_STATES.has(chapter.generationState)) {
+    return "ai_generated";
+  }
+  return "user_edited";
+}
+
+function chapterNeedsRepairTicket(chapter: DirectorWorkspaceArtifactInventoryInput["chapters"][number]): boolean {
+  return chapter.chapterStatus === "needs_repair"
+    && !hasContinuableQualityLoopRiskFlags(chapter.riskFlags);
+}
+
 function pushChapterArtifacts(
   artifactTargets: DirectorArtifactTarget[],
   input: DirectorWorkspaceArtifactInventoryInput,
@@ -489,22 +537,23 @@ function pushChapterArtifacts(
       });
     }
     if (chapter.content?.trim()) {
+      const draftSource = resolveChapterDraftSource(chapter);
       artifactTargets.push({
         artifactType: "chapter_draft",
         targetType: "chapter",
         targetId: chapter.id,
         contentRef: { table: "Chapter", id: chapter.id },
         updatedAt: chapter.updatedAt,
-        source: "user_edited",
+        source: draftSource,
         contentHash: stableDirectorContentHash(chapter.content),
-        protectedUserContent: true,
+        protectedUserContent: draftSource === "user_edited",
         dependsOn: compactDirectorArtifactDependencies([
           chapter.taskSheet?.trim() ? taskSheetArtifactId : null,
           ...(retentionArtifactIdsByChapter.get(chapter.id) ?? []),
         ]),
       });
     }
-    if (chapter.chapterStatus === "needs_repair") {
+    if (chapterNeedsRepairTicket(chapter)) {
       artifactTargets.push({
         artifactType: "repair_ticket",
         targetType: "chapter",

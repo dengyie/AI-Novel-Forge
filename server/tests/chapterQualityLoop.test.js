@@ -4,6 +4,9 @@ const assert = require("node:assert/strict");
 const {
   buildChapterQualityLoopAssessment,
 } = require("../../shared/dist/types/chapterQualityLoop.js");
+const {
+  buildChapterQualityLoopChapterUpdate,
+} = require("../dist/services/novel/quality/ChapterQualityLoopService.js");
 
 function score(overrides = {}) {
   return {
@@ -86,4 +89,27 @@ test("buildChapterQualityLoopAssessment routes rolling window failures to replan
     assessment.signals.find((signal) => signal.artifactType === "rolling_window_review").status,
     "invalid",
   );
+});
+
+test("buildChapterQualityLoopChapterUpdate clears stale repair state after a valid repair recheck", () => {
+  const assessment = buildChapterQualityLoopAssessment({
+    chapterId: "chapter-4",
+    chapterOrder: 4,
+    score: score(),
+    issues: [],
+    evaluatedAt: "2026-04-30T00:00:00.000Z",
+  });
+
+  const update = buildChapterQualityLoopChapterUpdate({
+    riskFlags: JSON.stringify({ qualityLoop: { recommendedAction: "patch_repair" } }),
+    repairHistory: "[quality_loop old] status=invalid action=replan",
+    chapterStatus: "needs_repair",
+    generationState: "reviewed",
+  }, assessment, "repair_recheck");
+
+  assert.equal(update.chapterStatus, "pending_review");
+  assert.equal(typeof update.riskFlags, "string");
+  const riskFlags = JSON.parse(update.riskFlags);
+  assert.equal(riskFlags.qualityLoop.recommendedAction, "continue");
+  assert.equal(riskFlags.qualityLoop.source, "repair_recheck");
 });
