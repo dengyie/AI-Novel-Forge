@@ -1,4 +1,7 @@
-import type { DirectorRunMode } from "@ai-novel/shared/types/novelDirector";
+import {
+  isDirectorAutoExecutionRunMode,
+  type DirectorRunMode,
+} from "@ai-novel/shared/types/novelDirector";
 import { normalizeDirectorRunMode } from "./novelDirectorHelpers";
 import type { StructuredOutlineRecoveryStep } from "./novelDirectorStructuredOutlineRecovery";
 
@@ -85,7 +88,7 @@ export function resolveAssetFirstRecoveryFromSnapshot(input: {
   }
   | null {
   if (
-    normalizeDirectorRunMode(input.runMode) === "auto_to_execution"
+    isDirectorAutoExecutionRunMode(normalizeDirectorRunMode(input.runMode))
     && input.hasVolumeStrategyPlan
     && input.structuredOutlineRecoveryStep
     && (
@@ -101,7 +104,7 @@ export function resolveAssetFirstRecoveryFromSnapshot(input: {
   }
 
   if (
-    normalizeDirectorRunMode(input.runMode) === "auto_to_execution"
+    isDirectorAutoExecutionRunMode(normalizeDirectorRunMode(input.runMode))
     && (
       input.hasActivePipelineJob
       || input.hasExecutableRange

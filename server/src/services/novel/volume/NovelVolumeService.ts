@@ -9,10 +9,6 @@ import type {
   VolumePlanVersionSummary,
   VolumeSyncPreview,
 } from "@ai-novel/shared/types/novel";
-import {
-  parseChapterScenePlan,
-  serializeChapterScenePlan,
-} from "@ai-novel/shared/types/chapterLengthControl";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "../../../db/prisma";
 import { novelEventBus } from "../../../events";
@@ -21,18 +17,17 @@ import { logMemoryUsage } from "../../../runtime/memoryTelemetry";
 import { payoffLedgerSyncService } from "../../payoff/PayoffLedgerSyncService";
 import { StoryMacroPlanService } from "../storyMacro/StoryMacroPlanService";
 import { StyleBindingService } from "../../styleEngine/StyleBindingService";
-import { buildWriterStyleContractText } from "../../styleEngine/styleContractText";
+import { ChapterExecutionContractService } from "./ChapterExecutionContractService";
 import {
   hasPayoffLedgerRelevantPlanChanges,
   hasPayoffLedgerSourceSignals,
   buildVolumeDiff,
   buildVolumeDiffSummary,
   buildVolumeImpactResult,
-  buildVolumeSyncPlan,
-  type ExistingChapterRecord,
-  type LegacyVolumeSource,
 } from "./volumePlanUtils";
 import { generateVolumePlanDocument } from "./volumeGenerationOrchestrator";
+import { VolumeChapterSyncService } from "./VolumeChapterSyncService";
+import { getLegacyVolumeSource } from "./legacyVolumeSource";
 import {
   type VolumeDraftInput,
   type VolumeGenerateOptions,
@@ -176,60 +171,10 @@ export class NovelVolumeService {
     return this.parseVersionDocument(novelId, contentJson).volumes;
   }
 
-  private async getLegacySource(novelId: string): Promise<LegacyVolumeSource> {
-    const [novel, arcPlans] = await Promise.all([
-      prisma.novel.findUnique({
-        where: { id: novelId },
-        select: {
-          id: true,
-          outline: true,
-          structuredOutline: true,
-          estimatedChapterCount: true,
-          chapters: {
-            orderBy: { order: "asc" },
-            select: {
-              order: true,
-              title: true,
-              expectation: true,
-              targetWordCount: true,
-              conflictLevel: true,
-              revealLevel: true,
-              mustAvoid: true,
-              taskSheet: true,
-              sceneCards: true,
-            },
-          },
-        },
-      }),
-      prisma.storyPlan.findMany({
-        where: { novelId, level: "arc" },
-        orderBy: [{ createdAt: "asc" }],
-        select: {
-          externalRef: true,
-          title: true,
-          objective: true,
-          phaseLabel: true,
-          hookTarget: true,
-          rawPlanJson: true,
-        },
-      }),
-    ]);
-    if (!novel) {
-      throw new Error("小说不存在。");
-    }
-    return {
-      outline: novel.outline,
-      structuredOutline: novel.structuredOutline,
-      estimatedChapterCount: novel.estimatedChapterCount,
-      chapters: novel.chapters,
-      arcPlans,
-    };
-  }
-
   private async ensureVolumeWorkspace(novelId: string): Promise<VolumePlanDocument> {
     return ensureVolumeWorkspaceDocument({
       novelId,
-      getLegacySource: () => this.getLegacySource(novelId),
+      getLegacySource: () => getLegacyVolumeSource(novelId),
     });
   }
 
@@ -551,244 +496,36 @@ export class NovelVolumeService {
       volumeUpdateReason?: VolumeUpdateReason;
     } = {},
   ): Promise<VolumeSyncPreview> {
-    const workspace = await this.ensureVolumeWorkspace(novelId);
-    const mergedDocument = mergeVolumeWorkspaceInput(novelId, workspace, { volumes: input.volumes });
-    const shouldSyncPayoffLedger = hasPayoffLedgerRelevantPlanChanges(workspace.volumes, mergedDocument.volumes);
-    const existingChapters = await prisma.chapter.findMany({
-      where: { novelId },
-      orderBy: { order: "asc" },
-      select: {
-        id: true,
-        order: true,
-        title: true,
-        content: true,
-        generationState: true,
-        chapterStatus: true,
-        expectation: true,
-        targetWordCount: true,
-        conflictLevel: true,
-        revealLevel: true,
-        mustAvoid: true,
-        taskSheet: true,
-        sceneCards: true,
-      },
-    });
-    const plan = buildVolumeSyncPlan(
-      mergedDocument.volumes,
-      existingChapters as ExistingChapterRecord[],
-      {
-        preserveContent: input.preserveContent !== false,
-        applyDeletes: input.applyDeletes === true,
-      },
-    );
-
-    await runVolumeWorkspaceTransaction(async (tx) => {
-      const { versionId } = await this.ensureActiveVersionRecord(tx, novelId, mergedDocument);
-      const persistedDocument = {
-        ...mergedDocument,
-        activeVersionId: versionId,
-        source: "volume" as const,
-      };
-      await tx.volumePlanVersion.update({
-        where: { id: versionId },
-        data: {
-          contentJson: serializeVolumeWorkspaceDocument(persistedDocument),
-        },
-      });
-      await persistActiveVolumeWorkspace(tx, novelId, persistedDocument, versionId);
-      for (const item of plan.creates) {
-        await tx.chapter.create({
-          data: {
-            novelId,
-            title: item.chapter.title,
-            order: item.chapter.chapterOrder,
-            content: "",
-            expectation: item.chapter.summary,
-            targetWordCount: item.chapter.targetWordCount ?? null,
-            conflictLevel: item.chapter.conflictLevel ?? null,
-            revealLevel: item.chapter.revealLevel ?? null,
-            mustAvoid: item.chapter.mustAvoid ?? null,
-            taskSheet: item.chapter.taskSheet?.trim() || null,
-            sceneCards: item.chapter.sceneCards ?? null,
-          },
-        });
-      }
-      for (const item of plan.updates) {
-        await tx.chapter.updateMany({
-          where: { id: item.chapterId, novelId },
-          data: {
-            title: item.chapter.title,
-            order: item.chapter.chapterOrder,
-            expectation: item.chapter.summary,
-            targetWordCount: item.chapter.targetWordCount ?? null,
-            conflictLevel: item.chapter.conflictLevel ?? null,
-            revealLevel: item.chapter.revealLevel ?? null,
-            mustAvoid: item.chapter.mustAvoid ?? null,
-            taskSheet: item.chapter.taskSheet?.trim() || null,
-            sceneCards: item.chapter.sceneCards ?? null,
-            ...(!item.preserveWorkflowState
-              ? {
-                generationState: "planned",
-                chapterStatus: "unplanned",
-              }
-              : {}),
-            ...(item.clearContent ? { content: "" } : {}),
-          },
-        });
-      }
-      if (plan.updates.length > 0) {
-        await tx.storyPlan.updateMany({
-          where: { novelId, level: "chapter", chapterId: { in: plan.updates.map((item) => item.chapterId) } },
-          data: { status: "stale" },
-        });
-      }
-      for (const item of plan.deletes) {
-        await tx.chapter.deleteMany({
-          where: { id: item.chapterId, novelId },
-        });
-      }
-    });
-
-    if (options.emitEvent !== false) {
-      this.emitVolumeUpdated(novelId, options.volumeUpdateReason ?? "chapter_sync");
-    }
-    if (options.syncPayoffLedger ?? shouldSyncPayoffLedger) {
-      this.syncPayoffLedger(novelId);
-    }
-    return plan.preview;
+    return new VolumeChapterSyncService({
+      ensureVolumeWorkspace: (targetNovelId) => this.ensureVolumeWorkspace(targetNovelId),
+      ensureActiveVersionRecord: (tx, targetNovelId, document, diffSummary) => (
+        this.ensureActiveVersionRecord(tx, targetNovelId, document, diffSummary)
+      ),
+      emitVolumeUpdated: (targetNovelId, reason) => this.emitVolumeUpdated(targetNovelId, reason),
+      syncPayoffLedger: (targetNovelId) => this.syncPayoffLedger(targetNovelId),
+    }).syncVolumeChaptersWithOptions(novelId, input, options);
   }
 
   async ensureChapterExecutionContract(
     novelId: string,
     chapterId: string,
-    options: Pick<VolumeGenerateOptions, "provider" | "model" | "temperature" | "guidance"> & {
+    options: Pick<
+      VolumeGenerateOptions,
+      "provider" | "model" | "temperature" | "guidance" | "chapterTaskSheetQualityMode" | "entrypoint" | "taskId" | "signal"
+    > & {
       taskStyleProfileId?: string;
     } = {},
   ) {
-    const chapter = await prisma.chapter.findFirst({
-      where: { id: chapterId, novelId },
-      select: {
-        id: true,
-        novelId: true,
-        title: true,
-        order: true,
-        targetWordCount: true,
-        conflictLevel: true,
-        revealLevel: true,
-        mustAvoid: true,
-        taskSheet: true,
-        sceneCards: true,
-        content: true,
-        expectation: true,
-        chapterStatus: true,
-        generationState: true,
-        repairHistory: true,
-        qualityScore: true,
-        continuityScore: true,
-        characterScore: true,
-        pacingScore: true,
-        riskFlags: true,
-        hook: true,
-        createdAt: true,
-        updatedAt: true,
-      },
-    });
-    if (!chapter) {
-      throw new Error("章节不存在。");
-    }
-
-    const existingScenePlan = parseChapterScenePlan(chapter.sceneCards, {
-      targetWordCount: chapter.targetWordCount ?? undefined,
-    });
-    if (chapter.taskSheet?.trim() && existingScenePlan) {
-      const resolvedStyleContext = await this.styleBindingService.resolveForGeneration({
-        novelId,
-        chapterId,
-        taskStyleProfileId: options.taskStyleProfileId,
-      }).catch(() => null);
-      return {
-        ...chapter,
-        styleContract: buildWriterStyleContractText(resolvedStyleContext?.compiledBlocks?.contract ?? null) || null,
-      };
-    }
-
-    const workspace = await this.ensureVolumeWorkspace(novelId);
-    const matched = this.findVolumeChapterMatch(workspace, {
-      order: chapter.order,
-      title: chapter.title,
-    });
-    const generatedDocument = await generateVolumePlanDocument({
-      novelId,
-      workspace,
-      options: {
-        ...options,
-        scope: "chapter_detail",
-        detailMode: "task_sheet",
-        targetVolumeId: matched.volumeId,
-        targetChapterId: matched.volumeChapterId,
-      },
+    return new ChapterExecutionContractService({
       storyMacroPlanService: this.storyMacroPlanService,
-    });
-
-    const targetVolume = generatedDocument.volumes.find((volume) => volume.id === matched.volumeId);
-    const targetChapter = targetVolume?.chapters.find((item) => item.id === matched.volumeChapterId);
-    if (!targetChapter?.taskSheet?.trim() || !targetChapter.sceneCards?.trim()) {
-      throw new Error("AI 未返回完整的章节执行合同。");
-    }
-    const resolvedStyleContext = await this.styleBindingService.resolveForGeneration({
-      novelId,
-      chapterId,
-      taskStyleProfileId: options.taskStyleProfileId,
-    }).catch(() => null);
-    const styleContract = buildWriterStyleContractText(resolvedStyleContext?.compiledBlocks?.contract ?? null) || null;
-    targetChapter.styleContract = styleContract;
-    const taskSheet = targetChapter.taskSheet.trim();
-    const scenePlan = parseChapterScenePlan(targetChapter.sceneCards, {
-      targetWordCount: targetChapter.targetWordCount ?? chapter.targetWordCount ?? undefined,
-    });
-    if (!scenePlan) {
-      throw new Error("章节执行合同中的场景预算无效。");
-    }
-
-    const persistedChapter = await runVolumeWorkspaceTransaction(async (tx) => {
-      const { versionId } = await this.ensureActiveVersionRecord(
-        tx,
-        novelId,
-        generatedDocument,
-        `刷新第${chapter.order}章执行合同。`,
-      );
-      const persistedDocument = {
-        ...generatedDocument,
-        activeVersionId: versionId,
-        source: "volume" as const,
-      };
-      await tx.volumePlanVersion.update({
-        where: { id: versionId },
-        data: {
-          contentJson: serializeVolumeWorkspaceDocument(persistedDocument),
-        },
-      });
-      await persistActiveVolumeWorkspace(tx, novelId, persistedDocument, versionId);
-      const updatedChapter = await tx.chapter.update({
-        where: { id: chapterId },
-        data: {
-          targetWordCount: targetChapter.targetWordCount ?? chapter.targetWordCount ?? null,
-          conflictLevel: targetChapter.conflictLevel ?? chapter.conflictLevel ?? null,
-          revealLevel: targetChapter.revealLevel ?? chapter.revealLevel ?? null,
-          mustAvoid: targetChapter.mustAvoid ?? chapter.mustAvoid ?? null,
-          taskSheet,
-          sceneCards: serializeChapterScenePlan(scenePlan),
-        },
-      });
-      return {
-        ...updatedChapter,
-        styleContract,
-      };
-    });
-
-    this.emitVolumeUpdated(novelId, "chapter_execution_contract_refined");
-    // Task sheet / scene card refresh should not re-run payoff ledger sync.
-    return persistedChapter;
+      styleBindingService: this.styleBindingService,
+      ensureVolumeWorkspace: (targetNovelId) => this.ensureVolumeWorkspace(targetNovelId),
+      findVolumeChapterMatch: (workspace, chapter) => this.findVolumeChapterMatch(workspace, chapter),
+      ensureActiveVersionRecord: (tx, targetNovelId, document, diffSummary) => (
+        this.ensureActiveVersionRecord(tx, targetNovelId, document, diffSummary)
+      ),
+      emitVolumeUpdated: (targetNovelId, reason) => this.emitVolumeUpdated(targetNovelId, reason),
+    }).ensureChapterExecutionContract(novelId, chapterId, options);
   }
 
   async migrateLegacyVolumes(novelId: string): Promise<VolumePlanDocument> {
@@ -890,7 +627,7 @@ export class NovelVolumeService {
     return createStorylineDraftCompat(
       {
         novelId,
-        getLegacySource: () => this.getLegacySource(novelId),
+        getLegacySource: () => getLegacyVolumeSource(novelId),
         createVolumeDraft: (draftInput) => this.createVolumeDraft(novelId, draftInput),
       },
       input,
@@ -934,7 +671,7 @@ export class NovelVolumeService {
     return analyzeStorylineImpactCompat(
       {
         novelId,
-        getLegacySource: () => this.getLegacySource(novelId),
+        getLegacySource: () => getLegacyVolumeSource(novelId),
         analyzeVolumeImpact: (impactInput) => this.analyzeVolumeImpact(novelId, impactInput),
       },
       input,

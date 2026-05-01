@@ -389,6 +389,7 @@ model Novel {
   directorCommands   DirectorRunCommand[]
   directorEvents     DirectorEvent[]
   directorArtifacts  DirectorArtifact[]
+  directorLlmUsageRecords DirectorLlmUsageRecord[]
   createdAt          DateTime    @default(now())
   updatedAt         DateTime    @updatedAt
 
@@ -1637,6 +1638,7 @@ model NovelWorkflowTask {
   directorSteps      DirectorStepRun[]
   directorEvents     DirectorEvent[]
   directorArtifacts  DirectorArtifact[]
+  directorLlmUsageRecords DirectorLlmUsageRecord[]
   createdAt          DateTime                @default(now())
   updatedAt          DateTime                @updatedAt
 
@@ -1684,6 +1686,7 @@ model DirectorRun {
   steps                      DirectorStepRun[]
   events                     DirectorEvent[]
   artifacts                  DirectorArtifact[]
+  llmUsageRecords            DirectorLlmUsageRecord[]
   createdAt                  DateTime           @default(now())
   updatedAt                  DateTime           @updatedAt
 
@@ -1708,12 +1711,47 @@ model DirectorStepRun {
   policyDecisionJson    String?
   run                   DirectorRun       @relation(fields: [runId], references: [id], onDelete: Cascade)
   task                  NovelWorkflowTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  llmUsageRecords       DirectorLlmUsageRecord[]
   createdAt             DateTime          @default(now())
   updatedAt             DateTime          @updatedAt
 
   @@index([runId, status, updatedAt])
   @@index([taskId, nodeKey])
   @@index([novelId, updatedAt])
+}
+
+model DirectorLlmUsageRecord {
+  id                   String             @id @default(cuid())
+  novelId              String?
+  taskId               String?
+  runId                String?
+  stepIdempotencyKey   String?
+  nodeKey              String?
+  promptAssetKey       String?
+  promptVersion        String?
+  modelRoute           String?
+  provider             String?
+  model                String?
+  status               String             @default("recorded")
+  attributionStatus    String             @default("unattributed")
+  durationMs           Int?
+  promptTokens         Int                @default(0)
+  completionTokens     Int                @default(0)
+  totalTokens          Int                @default(0)
+  metadataJson         String?
+  recordedAt           DateTime           @default(now())
+  novel                Novel?             @relation(fields: [novelId], references: [id], onDelete: SetNull)
+  task                 NovelWorkflowTask? @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  run                  DirectorRun?       @relation(fields: [runId], references: [id], onDelete: SetNull)
+  step                 DirectorStepRun?   @relation(fields: [stepIdempotencyKey], references: [idempotencyKey], onDelete: SetNull)
+  createdAt            DateTime           @default(now())
+
+  @@index([novelId, recordedAt])
+  @@index([taskId, recordedAt])
+  @@index([runId, recordedAt])
+  @@index([stepIdempotencyKey, recordedAt])
+  @@index([nodeKey, recordedAt])
+  @@index([attributionStatus, recordedAt])
 }
 
 model DirectorEvent {

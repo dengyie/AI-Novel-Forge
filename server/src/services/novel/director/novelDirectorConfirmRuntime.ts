@@ -1,3 +1,4 @@
+import { isFullBookAutopilotRunMode } from "@ai-novel/shared/types/novelDirector";
 import type {
   BookSpec,
   DirectorConfirmApiResponse,
@@ -13,6 +14,7 @@ import {
 import { novelFramingSuggestionService } from "../NovelFramingSuggestionService";
 import { resolveDirectorBookFraming } from "./novelDirectorFraming";
 import {
+  applyDirectorRunModeContract,
   buildDirectorSessionState,
   normalizeDirectorRunMode,
   toBookSpec,
@@ -52,8 +54,8 @@ export class NovelDirectorConfirmRuntime {
   }) {}
 
   async confirmCandidate(input: DirectorConfirmRequest): Promise<DirectorConfirmApiResponse> {
-    const resolvedInput = await this.deps.enrichDirectorStyleContext(input);
-    const runMode = normalizeDirectorRunMode(resolvedInput.runMode);
+    const resolvedInput = applyDirectorRunModeContract(await this.deps.enrichDirectorStyleContext(input));
+    const runMode = resolvedInput.runMode;
     const title = resolvedInput.candidate.workingTitle.trim() || resolvedInput.title?.trim() || "未命名项目";
     const description = resolvedInput.description?.trim() || resolvedInput.candidate.logline.trim();
     const bookSpec = toBookSpec(
@@ -77,7 +79,7 @@ export class NovelDirectorConfirmRuntime {
       taskId: workflowTask.id,
       novelId: workflowTask.novelId,
       entrypoint: "candidate_confirm",
-      policyMode: runMode === "stage_review" ? "run_next_step" : "run_until_gate",
+      policyMode: this.resolveInitialPolicyMode(runMode),
       summary: "自动导演确认方案后进入统一运行时。",
     });
 
@@ -100,7 +102,7 @@ export class NovelDirectorConfirmRuntime {
           taskId: workflowTask.id,
           novelId: attachedTask.novelId,
           entrypoint: "candidate_confirm",
-          policyMode: runMode === "stage_review" ? "run_next_step" : "run_until_gate",
+          policyMode: this.resolveInitialPolicyMode(runMode),
           summary: "自动导演复用已创建的小说项目并进入统一运行时。",
         });
         await this.deps.ensurePrimaryNovelStyleBinding(attachedTask.novelId, resolvedInput.styleProfileId);
@@ -114,7 +116,7 @@ export class NovelDirectorConfirmRuntime {
           taskId: workflowTask.id,
           novelId: existingTask.novelId,
           entrypoint: "candidate_confirm",
-          policyMode: runMode === "stage_review" ? "run_next_step" : "run_until_gate",
+          policyMode: this.resolveInitialPolicyMode(runMode),
           summary: "自动导演复用正在创建完成的小说项目并进入统一运行时。",
         });
         await this.deps.ensurePrimaryNovelStyleBinding(existingTask.novelId, resolvedInput.styleProfileId);
@@ -230,7 +232,7 @@ export class NovelDirectorConfirmRuntime {
           taskId: workflowTask.id,
           novelId: createdNovel.id,
           entrypoint: "candidate_confirm",
-          policyMode: runMode === "stage_review" ? "run_next_step" : "run_until_gate",
+          policyMode: this.resolveInitialPolicyMode(runMode),
           summary: "自动导演已创建小说项目并进入统一运行时。",
         });
         await this.deps.runtimeOrchestrator.markTaskRunning(
@@ -247,6 +249,8 @@ export class NovelDirectorConfirmRuntime {
             input: directorInput,
             startPhase: "story_macro",
             scope: "book",
+            approveCurrentGate: isFullBookAutopilotRunMode(runMode),
+            approveAutoExecutionScope: isFullBookAutopilotRunMode(runMode),
           });
         });
         const novel = await this.deps.novelContextService.getNovelById(createdNovel.id) as unknown as DirectorConfirmApiResponse["novel"];
@@ -278,6 +282,16 @@ export class NovelDirectorConfirmRuntime {
       await this.deps.workflowService.markTaskFailed(workflowTask.id, message);
       throw error;
     }
+  }
+
+  private resolveInitialPolicyMode(runMode: DirectorConfirmRequest["runMode"]) {
+    if (runMode === "stage_review") {
+      return "run_next_step" as const;
+    }
+    if (isFullBookAutopilotRunMode(runMode)) {
+      return "auto_safe_scope" as const;
+    }
+    return "run_until_gate" as const;
   }
 
   private async buildExistingConfirmResponse(

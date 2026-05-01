@@ -1,7 +1,9 @@
 import type { ApiResponse } from "@ai-novel/shared/types/api";
 import type {
+  DirectorBookAutomationProjectionResponse,
   DirectorRuntimePolicyUpdateRequest,
   DirectorRuntimePolicyUpdateResponse,
+  DirectorRuntimeEventHistoryResponse,
   DirectorRuntimeProjection,
   DirectorRuntimeSnapshotResponse,
   DirectorCommandAcceptedResponse,
@@ -15,7 +17,6 @@ import type {
   DirectorCandidateTitleRefineResponse,
   DirectorCandidatesRequest,
   DirectorCandidatesResponse,
-  DirectorConfirmApiResponse,
   DirectorConfirmRequest,
   DirectorRefineResponse,
   DirectorRefinementRequest,
@@ -45,12 +46,19 @@ export async function refineDirectorCandidateTitles(payload: DirectorCandidateTi
 }
 
 export async function confirmDirectorCandidate(payload: DirectorConfirmRequest) {
-  const { data } = await apiClient.post<ApiResponse<DirectorConfirmApiResponse>>("/novels/director/confirm", payload);
+  const { data } = await apiClient.post<ApiResponse<DirectorCommandAcceptedResponse>>("/novels/director/confirm", payload);
   return data;
 }
 
 export async function getDirectorTakeoverReadiness(novelId: string) {
   const { data } = await apiClient.get<ApiResponse<DirectorTakeoverReadinessResponse>>(`/novels/director/takeover-readiness/${novelId}`);
+  return data;
+}
+
+export async function getDirectorBookAutomationProjection(novelId: string) {
+  const { data } = await apiClient.get<ApiResponse<DirectorBookAutomationProjectionResponse>>(
+    `/novels/director/book-automation/${novelId}`,
+  );
   return data;
 }
 
@@ -86,6 +94,14 @@ export async function getDirectorRuntimeSnapshot(taskId: string) {
 export async function getDirectorRuntimeProjection(taskId: string) {
   const { data } = await apiClient.get<ApiResponse<{ projection: DirectorRuntimeProjection | null }>>(
     `/novels/director/runtime/${taskId}/projection`,
+  );
+  return data;
+}
+
+export async function getDirectorRuntimeEventHistory(taskId: string, options?: { limit?: number }) {
+  const { data } = await apiClient.get<ApiResponse<DirectorRuntimeEventHistoryResponse>>(
+    `/novels/director/runtime/${taskId}/events`,
+    { params: { limit: options?.limit } },
   );
   return data;
 }

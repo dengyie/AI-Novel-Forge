@@ -90,6 +90,17 @@ test("buildDirectorAutoExecutionPipelineOptions uses front10-safe defaults", () 
   assert.equal(options.controlPolicy?.advanceMode, "auto_to_execution");
 });
 
+test("buildDirectorAutoExecutionPipelineOptions can carry full-book autopilot policy", () => {
+  const options = buildDirectorAutoExecutionPipelineOptions({
+    startOrder: 1,
+    endOrder: 80,
+    controlAdvanceMode: "full_book_autopilot",
+  });
+
+  assert.equal(options.controlPolicy?.kickoffMode, "director_start");
+  assert.equal(options.controlPolicy?.advanceMode, "full_book_autopilot");
+});
+
 test("buildDirectorAutoExecutionPipelineOptions respects review and repair toggles", () => {
   const options = buildDirectorAutoExecutionPipelineOptions({
     startOrder: 11,

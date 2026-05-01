@@ -37,7 +37,7 @@ export default function AutoDirectorApprovalStrategyPanel({
         >
           <div className="text-sm font-medium text-foreground">AI 自动推进</div>
           <div className={`mt-1 text-xs leading-5 text-muted-foreground ${AUTO_DIRECTOR_MOBILE_CLASSES.wrapText}`}>
-            按推荐授权连续完成目标范围，遇到未授权或高风险节点会停下让你确认。
+            目标范围内全自动推进；只有模型不可用、服务异常、保护正文或不可恢复风险会停下。
           </div>
         </button>
         <button
@@ -49,31 +49,33 @@ export default function AutoDirectorApprovalStrategyPanel({
         >
           <div className="text-sm font-medium text-foreground">AI 副驾确认</div>
           <div className={`mt-1 text-xs leading-5 text-muted-foreground ${AUTO_DIRECTOR_MOBILE_CLASSES.wrapText}`}>
-            每个审批点都交给你判断，适合逐步审阅规划和正文推进结果。
+            按高级审批授权放行低风险节点，其余审批点交给你判断。
           </div>
         </button>
       </div>
 
       <div className={`mt-3 rounded-md border bg-background/80 p-3 text-xs leading-5 text-muted-foreground ${AUTO_DIRECTOR_MOBILE_CLASSES.wrapText}`}>
         {enabled
-          ? `已授权自动确认：${summarizeDirectorAutoApprovalPoints(approvalPointCodes)}。`
-          : "未开启自动确认；自动导演会在审批点等待你确认。切回自动推进时，会继续使用下方授权范围。"}
+          ? "自动推进：系统会在目标范围内自动确认规划、章节执行、质量修复和必要重规划。"
+          : `副驾确认边界：${summarizeDirectorAutoApprovalPoints(approvalPointCodes)}。未包含的审批点会等待你确认。`}
       </div>
 
-      <details className="mt-3 rounded-md border bg-background">
-        <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-foreground">
-          高级审批授权
-        </summary>
-        <div className="border-t p-3">
-          <AutoDirectorApprovalPointMultiSelect
-            value={approvalPointCodes}
-            onChange={onApprovalPointCodesChange}
-            groups={groups}
-            approvalPoints={approvalPoints}
-            compact
-          />
-        </div>
-      </details>
+      {!enabled ? (
+        <details className="mt-3 rounded-md border bg-background">
+          <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-foreground">
+            高级审批授权
+          </summary>
+          <div className="border-t p-3">
+            <AutoDirectorApprovalPointMultiSelect
+              value={approvalPointCodes}
+              onChange={onApprovalPointCodesChange}
+              groups={groups}
+              approvalPoints={approvalPoints}
+              compact
+            />
+          </div>
+        </details>
+      ) : null}
     </div>
   );
 }

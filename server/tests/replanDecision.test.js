@@ -1,6 +1,12 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { buildReplanDecision } = require("../dist/services/planner/replanDecision.js");
+const {
+  sanitizeAiReplanWindowDecision,
+} = require("../../shared/dist/types/replanWindowDecision.js");
+const {
+  hasRegisteredPromptAsset,
+} = require("../dist/prompting/registry.js");
 
 function createSnapshot(overrides = {}) {
   return {
@@ -170,4 +176,55 @@ test("buildReplanDecision stays idle when there are no blocking state signals", 
   assert.equal(decision.signal, "stable");
   assert.deepEqual(decision.affectedChapterOrders, []);
   assert.match(decision.reason, /无需重规划/);
+});
+
+test("sanitizeAiReplanWindowDecision filters AI-selected windows to available chapters", () => {
+  const decision = sanitizeAiReplanWindowDecision({
+    decision: {
+      recommended: true,
+      triggerReason: "连续性状态偏离。",
+      windowReason: "围绕第5章向后修正。",
+      whyTheseChapters: "这些章节承接同一组伏笔。",
+      anchorChapterOrder: 99,
+      affectedChapterOrders: [5, 6, 99, 7, 8, 9],
+      blockingIssueIds: ["issue-1", "issue-1"],
+      blockingLedgerKeys: ["ledger-1", "ledger-1"],
+      repairIntent: "state_realign",
+      confidence: 0.8,
+    },
+    availableChapterOrders: [4, 5, 6, 7, 8],
+    targetChapterOrder: 5,
+    maxWindowSize: 3,
+  });
+
+  assert.deepEqual(decision.affectedChapterOrders, [5, 6, 7]);
+  assert.equal(decision.anchorChapterOrder, 8);
+  assert.deepEqual(decision.blockingIssueIds, ["issue-1"]);
+  assert.deepEqual(decision.blockingLedgerKeys, ["ledger-1"]);
+});
+
+test("sanitizeAiReplanWindowDecision rejects empty AI-selected windows", () => {
+  assert.throws(
+    () => sanitizeAiReplanWindowDecision({
+      decision: {
+        recommended: true,
+        triggerReason: "需要重规划。",
+        windowReason: "无可用章节。",
+        whyTheseChapters: "AI 选择了不存在的章节。",
+        anchorChapterOrder: 99,
+        affectedChapterOrders: [99],
+        blockingIssueIds: [],
+        blockingLedgerKeys: [],
+        repairIntent: "state_realign",
+        confidence: 0.5,
+      },
+      availableChapterOrders: [1, 2, 3],
+      targetChapterOrder: 2,
+    }),
+    /did not select any available chapter/,
+  );
+});
+
+test("replan window decision prompt is registered as a product prompt asset", () => {
+  assert.equal(hasRegisteredPromptAsset("planner.replan.window_decision", "v1"), true);
 });

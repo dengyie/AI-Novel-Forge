@@ -79,12 +79,63 @@ export const DIRECTOR_CANDIDATE_SETUP_STEPS = [
 export type DirectorCandidateSetupStepKey = typeof DIRECTOR_CANDIDATE_SETUP_STEPS[number]["key"];
 
 export const DIRECTOR_RUN_MODES = [
+  "full_book_autopilot",
   "auto_to_ready",
   "auto_to_execution",
   "stage_review",
 ] as const;
 
 export type DirectorRunMode = typeof DIRECTOR_RUN_MODES[number];
+
+export const DIRECTOR_AUTO_EXECUTION_RUN_MODES = [
+  "auto_to_execution",
+  "full_book_autopilot",
+] as const;
+
+export type DirectorAutoExecutionRunMode = typeof DIRECTOR_AUTO_EXECUTION_RUN_MODES[number];
+
+export const DIRECTOR_FULL_BOOK_AUTOPILOT_RUN_MODE = "full_book_autopilot" as const;
+
+export const DIRECTOR_FULL_BOOK_AUTOPILOT_INTERRUPT_REASONS = [
+  "model_unavailable",
+  "service_unavailable",
+  "protected_user_content",
+  "unrecoverable_data_risk",
+  "auto_repair_exhausted",
+] as const;
+
+export type DirectorFullBookAutopilotInterruptReason = typeof DIRECTOR_FULL_BOOK_AUTOPILOT_INTERRUPT_REASONS[number];
+
+export const DIRECTOR_CIRCUIT_BREAKER_REASONS = [
+  "auto_repair_exhausted",
+  "replan_loop",
+  "model_unavailable",
+  "service_unavailable",
+  "protected_user_content",
+  "unrecoverable_data_risk",
+  "usage_anomaly",
+] as const;
+
+export type DirectorCircuitBreakerReason = typeof DIRECTOR_CIRCUIT_BREAKER_REASONS[number];
+
+export interface DirectorCircuitBreakerState {
+  status: "closed" | "open";
+  reason?: DirectorCircuitBreakerReason | null;
+  message?: string | null;
+  openedAt?: string | null;
+  resetAt?: string | null;
+  chapterId?: string | null;
+  chapterOrder?: number | null;
+  nodeKey?: string | null;
+  failureCount?: number;
+  patchFailureCount?: number;
+  replanLoopCount?: number;
+  modelFailureCount?: number;
+  usageAnomalyCount?: number;
+  lastUsageRecordId?: string | null;
+  lastEventAt?: string | null;
+  recoveryAction?: "retry" | "resume_after_review" | "switch_model" | "confirm_protected_content" | "manual_repair" | null;
+}
 
 export const DIRECTOR_MIN_TARGET_CHAPTER_COUNT = 12;
 export const DIRECTOR_MAX_TARGET_CHAPTER_COUNT = 2000;
@@ -105,6 +156,47 @@ export interface DirectorAutoExecutionPlan {
   volumeOrder?: number;
   autoReview?: boolean;
   autoRepair?: boolean;
+}
+
+export interface DirectorFullBookAutopilotContract {
+  runMode: typeof DIRECTOR_FULL_BOOK_AUTOPILOT_RUN_MODE;
+  autoExecutionPlan: DirectorAutoExecutionPlan & {
+    mode: "book";
+    autoReview: true;
+    autoRepair: true;
+  };
+  userApprovalBoundary: "infrastructure_or_data_risk";
+  interruptReasons: readonly DirectorFullBookAutopilotInterruptReason[];
+}
+
+export const DIRECTOR_FULL_BOOK_AUTOPILOT_CONTRACT = {
+  runMode: DIRECTOR_FULL_BOOK_AUTOPILOT_RUN_MODE,
+  autoExecutionPlan: {
+    mode: "book",
+    autoReview: true,
+    autoRepair: true,
+  },
+  userApprovalBoundary: "infrastructure_or_data_risk",
+  interruptReasons: DIRECTOR_FULL_BOOK_AUTOPILOT_INTERRUPT_REASONS,
+} as const satisfies DirectorFullBookAutopilotContract;
+
+export function isDirectorAutoExecutionRunMode(
+  runMode: DirectorRunMode | string | null | undefined,
+): runMode is DirectorAutoExecutionRunMode {
+  return typeof runMode === "string"
+    && (DIRECTOR_AUTO_EXECUTION_RUN_MODES as readonly string[]).includes(runMode);
+}
+
+export function isFullBookAutopilotRunMode(
+  runMode: DirectorRunMode | string | null | undefined,
+): runMode is typeof DIRECTOR_FULL_BOOK_AUTOPILOT_RUN_MODE {
+  return runMode === DIRECTOR_FULL_BOOK_AUTOPILOT_RUN_MODE;
+}
+
+export function buildFullBookAutopilotExecutionPlan(): DirectorAutoExecutionPlan {
+  return {
+    ...DIRECTOR_FULL_BOOK_AUTOPILOT_CONTRACT.autoExecutionPlan,
+  };
 }
 
 export type DirectorContinuationMode = "resume" | "auto_execute_range" | "auto_execute_front10";
@@ -129,6 +221,7 @@ export interface DirectorAutoExecutionState extends DirectorAutoExecutionPlan {
   pipelineJobId?: string | null;
   pipelineStatus?: PipelineJobStatus | null;
   qualityRepairRisk?: DirectorQualityRepairRisk | null;
+  circuitBreaker?: DirectorCircuitBreakerState | null;
 }
 
 export type DirectorQualityRepairRiskLevel = "low" | "large_scope" | "replan";

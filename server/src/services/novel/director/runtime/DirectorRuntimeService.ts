@@ -164,6 +164,7 @@ export class DirectorRuntimeService {
       targetId?: string | null;
       payload: TInput;
       policy?: Omit<Partial<DirectorPolicyRequest>, "action">;
+      reuseCompletedStep?: boolean;
     },
     collectArtifacts?: (output: TOutput) => DirectorArtifactRef[],
   ): Promise<DirectorNodeRunResult<TOutput>> {
@@ -176,6 +177,7 @@ export class DirectorRuntimeService {
         targetId: input.targetId,
         input: input.payload,
         policy: input.policy,
+        reuseCompletedStep: input.reuseCompletedStep,
       },
       collectArtifacts,
     );

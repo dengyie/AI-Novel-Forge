@@ -90,6 +90,10 @@ const promptAssetLoaderEntries: PromptAssetLoaderEntry[] = [
     load: () => require("./prompts/planner/plannerPlan.prompts").plannerChapterPlanPrompt as UnknownPromptAsset,
   },
   {
+    key: "planner.replan.window_decision@v1",
+    load: () => require("./prompts/planner/replanWindowDecision.prompts").replanWindowDecisionPrompt as UnknownPromptAsset,
+  },
+  {
     key: "novel.director.candidates@v1",
     load: () => require("./prompts/novel/directorPlanning.prompts").directorCandidatePrompt as UnknownPromptAsset,
   },
@@ -186,6 +190,10 @@ const promptAssetLoaderEntries: PromptAssetLoaderEntry[] = [
     load: () => require("./prompts/novel/volume/chapterDetail.prompts").volumeChapterExecutionContractPrompt as UnknownPromptAsset,
   },
   {
+    key: "novel.volume.chapter_task_sheet_quality@v1",
+    load: () => require("./prompts/novel/volume/chapterTaskSheetQuality.prompts").chapterTaskSheetQualityPrompt as UnknownPromptAsset,
+  },
+  {
     key: "novel.volume.rebalance.adjacent@v1",
     load: () => require("./prompts/novel/volume/rebalance.prompts").volumeRebalancePrompt as UnknownPromptAsset,
   },
@@ -276,6 +284,10 @@ const promptAssetLoaderEntries: PromptAssetLoaderEntry[] = [
   {
     key: "novel.review.repair@v1",
     load: () => require("./prompts/novel/review.prompts").chapterRepairPrompt as UnknownPromptAsset,
+  },
+  {
+    key: "novel.review.patch@v1",
+    load: () => require("./prompts/novel/chapterPatchRepair.prompts").chapterPatchRepairPrompt as UnknownPromptAsset,
   },
   {
     key: "novel.framing.suggest@v1",

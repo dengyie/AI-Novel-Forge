@@ -10,6 +10,7 @@ import type {
   DirectorTakeoverEntryStep,
   DirectorTakeoverStrategy,
 } from "@ai-novel/shared/types/novelDirector";
+import { buildFullBookAutopilotExecutionPlan } from "@ai-novel/shared/types/novelDirector";
 import { getDirectorTakeoverReadiness, startDirectorTakeover } from "@/api/novelDirector";
 import { queryKeys } from "@/api/queryKeys";
 import { getStyleBindings, getStyleProfiles } from "@/api/styleEngine";
@@ -47,6 +48,11 @@ interface NovelExistingProjectTakeoverDialogProps {
 }
 
 const RUN_MODE_OPTIONS: Array<{ value: DirectorRunMode; label: string; description: string }> = [
+  {
+    value: "full_book_autopilot",
+    label: "全书自动接管",
+    description: "AI 会按整本书目标补齐规划、继续写作、审校和修复。",
+  },
   {
     value: "auto_to_ready",
     label: "推进到可开写",
@@ -179,10 +185,12 @@ export default function NovelExistingProjectTakeoverDialog({
   );
   const selectedEntry = readiness?.entrySteps.find((item) => item.step === selectedEntryStep) ?? null;
   const selectedPreview = selectedEntry?.previews.find((item) => item.strategy === selectedStrategy) ?? null;
-  const autoExecutionPlan: DirectorAutoExecutionPlan | undefined = runMode === "auto_to_execution"
-    ? buildDirectorAutoExecutionPlanFromDraft(autoExecutionDraft, { usage: "takeover" })
-    : undefined;
-  const selectedScopeMode = runMode === "auto_to_execution"
+  const autoExecutionPlan: DirectorAutoExecutionPlan | undefined = runMode === "full_book_autopilot"
+    ? buildFullBookAutopilotExecutionPlan()
+    : runMode === "auto_to_execution"
+      ? buildDirectorAutoExecutionPlanFromDraft(autoExecutionDraft, { usage: "takeover" })
+      : undefined;
+  const selectedScopeMode = runMode === "auto_to_execution" || runMode === "full_book_autopilot"
     ? autoExecutionPlan?.mode ?? autoExecutionDraft.mode
     : "book";
   const selectedEntryAllowedForScope = isEntryStepAllowedForScope(selectedEntryStep, selectedScopeMode);
@@ -247,14 +255,17 @@ export default function NovelExistingProjectTakeoverDialog({
         return;
       }
       await queryClient.invalidateQueries({ queryKey: queryKeys.novels.autoDirectorTask(novelId) });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.novels.directorBookAutomation(novelId) });
       await queryClient.invalidateQueries({ queryKey: queryKeys.novels.autoDirectorTakeoverReadiness(novelId) });
       await queryClient.invalidateQueries({ queryKey: queryKeys.styleEngine.bindings(`novel-${novelId}`) });
       await queryClient.invalidateQueries({ queryKey: ["tasks"] });
       setOpen(false);
       toast.success(
-        runMode === "auto_to_execution"
-          ? `自动导演接管任务已提交，任务中心会显示 ${buildDirectorAutoExecutionPlanLabel(autoExecutionPlan)} 的执行进度。`
-          : "自动导演接管任务已提交，任务中心会显示排队和执行进度。",
+        runMode === "full_book_autopilot"
+          ? "自动导演接管任务已提交，可在 AI 驾驶舱查看全书执行进度。"
+          : runMode === "auto_to_execution"
+          ? `自动导演接管任务已提交，可在 AI 驾驶舱查看 ${buildDirectorAutoExecutionPlanLabel(autoExecutionPlan)} 的执行进度。`
+          : "自动导演接管任务已提交，可在 AI 驾驶舱查看排队和执行进度。",
       );
       navigate(buildEditRoute({
         novelId,
@@ -336,6 +347,14 @@ export default function NovelExistingProjectTakeoverDialog({
                     />
                   </>
                 ) : null}
+                {runMode === "full_book_autopilot" ? (
+                  <div className={`mt-3 rounded-md border border-primary/15 bg-primary/5 p-3 text-xs leading-5 text-muted-foreground ${AUTO_DIRECTOR_MOBILE_CLASSES.wrapText}`}>
+                    <div className="text-sm font-medium text-foreground">全书自动接管</div>
+                    <div className="mt-1">
+                      系统会以整本书为目标接管当前项目，继续补齐规划、章节执行、审校和修复。只有模型不可用、服务异常、正文保护或不可恢复风险会停下。
+                    </div>
+                  </div>
+                ) : null}
               </div>
 
               <div className="min-w-0 rounded-xl border bg-background/80 p-3 sm:p-4">
@@ -404,7 +423,7 @@ export default function NovelExistingProjectTakeoverDialog({
                     {readiness.hasActiveTask ? (
                       <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/10 p-4">
                         <div className="text-sm font-medium text-foreground">当前已有自动导演任务</div>
-                        <div className="mt-1 text-sm text-muted-foreground">为避免重复接管，请先去任务中心继续或取消当前自动导演任务。</div>
+                        <div className="mt-1 text-sm text-muted-foreground">为避免重复接管，请先处理当前自动导演任务。</div>
                         <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:justify-end">
                           <Button
                             type="button"
@@ -412,10 +431,20 @@ export default function NovelExistingProjectTakeoverDialog({
                             className="w-full sm:w-auto"
                             onClick={() => {
                               setOpen(false);
-                              navigate(readiness.activeTaskId ? `/tasks?kind=novel_workflow&id=${readiness.activeTaskId}` : "/tasks");
+                              if (readiness.activeTaskId) {
+                                navigate(buildEditRoute({
+                                  novelId,
+                                  workflowTaskId: readiness.activeTaskId,
+                                  stage: selectedEntryStep === "basic" ? "basic" : selectedEntryStep,
+                                }));
+                                return;
+                              }
+                              const search = new URLSearchParams();
+                              search.set("stage", selectedEntryStep === "basic" ? "basic" : selectedEntryStep);
+                              navigate(`/novels/${novelId}/edit?${search.toString()}`);
                             }}
                           >
-                            去任务中心
+                            处理当前任务
                           </Button>
                         </div>
                       </div>

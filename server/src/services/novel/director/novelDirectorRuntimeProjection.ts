@@ -1,11 +1,13 @@
 import type {
   DirectorRuntimePolicySnapshot,
+  DirectorRuntimeProjectionEvent,
   DirectorRuntimeProjection,
   DirectorRuntimeSnapshot,
 } from "@ai-novel/shared/types/directorRuntime";
 import { prisma } from "../../../db/prisma";
 import { buildDefaultDirectorPolicy } from "./runtime/directorRuntimeDefaults";
 import { DirectorEventProjectionService } from "./runtime/DirectorEventProjectionService";
+import { directorUsageTelemetryQueryService } from "./runtime/DirectorUsageTelemetryQueryService";
 
 function parseJsonOrNull<T>(value: string | null | undefined): T | null {
   if (!value?.trim()) {
@@ -107,5 +109,61 @@ export async function loadPersistentDirectorRuntimeProjection(
     artifacts: [],
     updatedAt: run.updatedAt.toISOString(),
   };
-  return projectionService.buildSnapshotProjection(snapshot);
+  const projection = projectionService.buildSnapshotProjection(snapshot);
+  if (!projection) {
+    return null;
+  }
+  const usageTelemetry = await directorUsageTelemetryQueryService.getTaskUsage(
+    taskId,
+    snapshot.steps,
+  );
+  return {
+    ...projection,
+    usageSummary: usageTelemetry.summary,
+    recentUsage: usageTelemetry.recentUsage,
+    stepUsage: usageTelemetry.stepUsage,
+    promptUsage: usageTelemetry.promptUsage,
+  };
+}
+
+export async function loadPersistentDirectorRuntimeEventHistory(
+  taskId: string,
+  limit = 200,
+): Promise<{
+  events: DirectorRuntimeProjectionEvent[];
+  totalCount: number;
+  limit: number;
+}> {
+  const normalizedLimit = Math.max(1, Math.min(500, Math.round(limit)));
+  const [totalCount, events] = await Promise.all([
+    prisma.directorEvent.count({ where: { taskId } }),
+    prisma.directorEvent.findMany({
+      where: { taskId },
+      orderBy: { occurredAt: "desc" },
+      take: normalizedLimit,
+      select: {
+        id: true,
+        type: true,
+        nodeKey: true,
+        artifactType: true,
+        summary: true,
+        severity: true,
+        occurredAt: true,
+      },
+    }),
+  ]);
+
+  return {
+    events: events.map((event) => ({
+      eventId: event.id,
+      type: event.type as DirectorRuntimeProjectionEvent["type"],
+      summary: event.summary,
+      nodeKey: event.nodeKey,
+      artifactType: event.artifactType as DirectorRuntimeProjectionEvent["artifactType"],
+      severity: event.severity as DirectorRuntimeProjectionEvent["severity"],
+      occurredAt: event.occurredAt.toISOString(),
+    })),
+    totalCount,
+    limit: normalizedLimit,
+  };
 }

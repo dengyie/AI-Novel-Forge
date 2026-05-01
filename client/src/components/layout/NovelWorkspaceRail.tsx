@@ -1,5 +1,5 @@
-import { useMemo } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMemo, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   BookOpenText,
   ChevronLeft,
@@ -12,13 +12,22 @@ import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import type { DirectorLockScope } from "@ai-novel/shared/types/novelDirector";
 import type { VolumePlan } from "@ai-novel/shared/types/novel";
 import { getNovelDetail, getNovelQualityReport, getNovelVolumeWorkspace } from "@/api/novel";
-import { getDirectorRuntimeProjection } from "@/api/novelDirector";
-import { getActiveAutoDirectorTask } from "@/api/novelWorkflow";
+import { getDirectorBookAutomationProjection, getDirectorRuntimeProjection } from "@/api/novelDirector";
+import { continueNovelWorkflow, getActiveAutoDirectorTask } from "@/api/novelWorkflow";
 import { queryKeys } from "@/api/queryKeys";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { extractWorkflowActivityTags } from "@/lib/novelWorkflowActivityTags";
+import { toast } from "@/components/ui/toast";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import DirectorBookAutomationCard from "@/components/autoDirector/DirectorBookAutomationCard";
+import NovelAutoDirectorProgressPanel from "@/pages/novels/components/NovelAutoDirectorProgressPanel";
 import { cn } from "@/lib/utils";
+import { resolveWorkflowContinuationFeedback } from "@/lib/novelWorkflowContinuation";
 import {
   applyAutoDirectorResetStepReadiness,
   extractAutoDirectorResetStepsFromMeta,
@@ -80,8 +89,10 @@ function formatTaskStatus(status: string | null | undefined): string {
 export default function NovelWorkspaceRail(props: NovelWorkspaceRailProps) {
   const { novelId, chapterId = "", collapsed, onToggle, onSwitchToProjectNav } = props;
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const location = useLocation();
   const [searchParams] = useSearchParams();
+  const [progressDialogOpen, setProgressDialogOpen] = useState(false);
   const activeTab = useMemo<NovelWorkspaceTab>(() => {
     if (location.pathname.includes("/chapters/")) {
       return "chapter";
@@ -117,11 +128,22 @@ export default function NovelWorkspaceRail(props: NovelWorkspaceRailProps) {
         : false;
     },
   });
+  const bookAutomationQuery = useQuery({
+    queryKey: queryKeys.novels.directorBookAutomation(novelId),
+    queryFn: () => getDirectorBookAutomationProjection(novelId),
+    enabled: Boolean(novelId),
+    retry: false,
+    refetchInterval: (query) => {
+      const status = query.state.data?.data?.projection.status;
+      return status === "queued" || status === "running" ? 4000 : false;
+    },
+  });
 
   const novelDetail = novelDetailQuery.data?.data;
   const workspace = volumeWorkspaceQuery.data?.data;
   const qualitySummary = qualityReportQuery.data?.data?.summary;
   const activeTask = activeTaskQuery.data?.data ?? null;
+  const bookAutomationProjection = bookAutomationQuery.data?.data?.projection ?? null;
   const runtimeProjectionQuery = useQuery({
     queryKey: queryKeys.tasks.directorRuntime(activeTask?.id ?? "none"),
     queryFn: () => getDirectorRuntimeProjection(activeTask?.id as string),
@@ -237,17 +259,11 @@ export default function NovelWorkspaceRail(props: NovelWorkspaceRailProps) {
   const cockpitSummary = activeTask
     ? runtimeSummary
       || (activeTask.status === "failed"
-      ? activeTask.lastError || "后台任务已中断，建议先查看任务中心。"
+      ? activeTask.lastError || "后台任务已中断，可打开执行详情查看原因。"
       : activeTask.status === "waiting_approval"
         ? `等待处理：${getNovelWorkspaceTabLabel(workflowCurrentTab ?? activeTab)}`
         : activeTask.currentItemLabel || `AI 正在推进 ${getNovelWorkspaceTabLabel(workflowCurrentTab ?? activeTab)}`)
     : "当前没有后台导演任务，可以直接继续手动创作。";
-  const cockpitActivityTags = extractWorkflowActivityTags(activeTask?.currentItemLabel);
-  const cockpitVariant = activeTask?.status === "failed"
-    ? "destructive"
-    : activeTask?.status === "running" || activeTask?.status === "queued"
-      ? "default"
-      : "secondary";
 
   const goToTab = (tab: NovelWorkspaceTab) => {
     const next = new URLSearchParams(searchParams);
@@ -261,48 +277,91 @@ export default function NovelWorkspaceRail(props: NovelWorkspaceRailProps) {
   };
 
   const openTaskCenter = () => {
-    const taskId = activeTask?.id;
+    setProgressDialogOpen(false);
+    const taskId = activeTask?.id ?? bookAutomationProjection?.latestTask?.id;
     if (taskId) {
-      navigate(`/tasks?kind=novel_workflow&id=${taskId}`);
+      const next = new URLSearchParams(searchParams);
+      next.set("taskId", taskId);
+      next.set("taskPanel", "1");
+      navigate(`/novels/${novelId}/edit?${next.toString()}`);
       return;
     }
-    navigate("/tasks");
+    navigate(`/novels/${novelId}/edit`);
   };
 
+  const openProgressDialog = () => {
+    if (!activeTask?.id) {
+      openTaskCenter();
+      return;
+    }
+    setProgressDialogOpen(true);
+  };
+
+  const progressDialogMode = activeTask?.status === "failed" || activeTask?.status === "cancelled"
+    ? "execution_failed"
+    : "execution_progress";
+  const continueDirectorMutation = useMutation({
+    mutationFn: async () => {
+      if (!activeTask?.id) {
+        throw new Error("当前没有可继续的自动导演任务。");
+      }
+      return continueNovelWorkflow(activeTask.id, { continuationMode: "resume" });
+    },
+    onSuccess: async (response) => {
+      await Promise.allSettled([
+        queryClient.invalidateQueries({ queryKey: queryKeys.novels.autoDirectorTask(novelId) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.novels.directorBookAutomation(novelId) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.tasks.detail("novel_workflow", activeTask?.id ?? "") }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.tasks.directorRuntime(activeTask?.id ?? "") }),
+        queryClient.invalidateQueries({ queryKey: ["tasks"] }),
+      ]);
+      const feedback = resolveWorkflowContinuationFeedback(response.data, { mode: "resume" });
+      if (feedback.tone === "error") {
+        toast.error(feedback.message);
+        return;
+      }
+      toast.success(feedback.message);
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : "继续自动导演失败。");
+    },
+  });
+
   return (
-    <aside
-      className={cn(
-        "border-r bg-background/95 backdrop-blur transition-[width] duration-200",
-        collapsed ? "w-[84px]" : "w-[248px]",
-      )}
-    >
-      <div className="flex h-[calc(100vh-4rem)] flex-col gap-3 p-3">
-        <div className={cn("flex items-center gap-2", collapsed ? "justify-center" : "justify-between")}>
-          {!collapsed ? (
-            <div className="flex min-w-0 items-center gap-2">
-              <div className="flex h-9 w-9 items-center justify-center rounded-2xl bg-primary/8 text-primary">
-                <BookOpenText className="h-4 w-4" />
-              </div>
-              <div className="min-w-0">
-                <div className="text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
-                  创作工作台
+    <>
+      <aside
+        className={cn(
+          "border-r bg-background/95 backdrop-blur transition-[width] duration-200",
+          collapsed ? "w-[84px]" : "w-[248px]",
+        )}
+      >
+        <div className="flex h-[calc(100vh-4rem)] flex-col gap-3 p-3">
+          <div className={cn("flex items-center gap-2", collapsed ? "justify-center" : "justify-between")}>
+            {!collapsed ? (
+              <div className="flex min-w-0 items-center gap-2">
+                <div className="flex h-9 w-9 items-center justify-center rounded-2xl bg-primary/8 text-primary">
+                  <BookOpenText className="h-4 w-4" />
                 </div>
-                <div className="truncate text-sm font-semibold text-foreground">{novelTitle}</div>
+                <div className="min-w-0">
+                  <div className="text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
+                    创作工作台
+                  </div>
+                  <div className="truncate text-sm font-semibold text-foreground">{novelTitle}</div>
+                </div>
               </div>
-            </div>
-          ) : null}
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className="h-8 w-8 shrink-0 text-muted-foreground"
-            onClick={onToggle}
-            aria-label={collapsed ? "展开创作导航" : "收起创作导航"}
-            title={collapsed ? "展开创作导航" : "收起创作导航"}
-          >
-            {collapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
-          </Button>
-        </div>
+            ) : null}
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 shrink-0 text-muted-foreground"
+              onClick={onToggle}
+              aria-label={collapsed ? "展开创作导航" : "收起创作导航"}
+              title={collapsed ? "展开创作导航" : "收起创作导航"}
+            >
+              {collapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
+            </Button>
+          </div>
 
         {!collapsed ? (
           <Button
@@ -414,32 +473,15 @@ export default function NovelWorkspaceRail(props: NovelWorkspaceRailProps) {
           </button>
 
           {!collapsed ? (
-            <div className="rounded-2xl border border-border/70 bg-muted/20 p-3">
-              <div className="flex items-center justify-between gap-2">
-                <div className="text-sm font-semibold text-foreground">AI 驾驶舱</div>
-                <Badge variant={cockpitVariant}>{formatTaskStatus(activeTask?.status)}</Badge>
-              </div>
-              <div className="mt-2 text-xs leading-5 text-muted-foreground">
-                {cockpitSummary}
-              </div>
-              {cockpitActivityTags.length > 0 ? (
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {cockpitActivityTags.map((tag) => (
-                    <Badge key={tag} variant="secondary">{tag}</Badge>
-                  ))}
-                </div>
-              ) : null}
-              <div className="mt-3 flex gap-2">
-                <Button type="button" size="sm" className="flex-1" onClick={openTaskCenter}>
-                  任务中心
-                </Button>
-                {onSwitchToProjectNav ? (
-                  <Button type="button" size="sm" variant="outline" onClick={onSwitchToProjectNav}>
-                    项目导航
-                  </Button>
-                ) : null}
-              </div>
-            </div>
+            <DirectorBookAutomationCard
+              projection={bookAutomationProjection}
+              fallbackStatusLabel={formatTaskStatus(activeTask?.status)}
+              fallbackSummary={cockpitSummary}
+              compact
+              onOpenProgress={openProgressDialog}
+              onOpenTaskCenter={openTaskCenter}
+              onSwitchToProjectNav={onSwitchToProjectNav}
+            />
           ) : (
             <div className="flex flex-col items-center gap-2">
               <Button
@@ -447,9 +489,9 @@ export default function NovelWorkspaceRail(props: NovelWorkspaceRailProps) {
                 size="icon"
                 variant="outline"
                 className="h-9 w-9"
-                onClick={openTaskCenter}
-                title={`AI 驾驶舱：${formatTaskStatus(activeTask?.status)}`}
-                aria-label="打开任务中心"
+                onClick={openProgressDialog}
+                title={`查看导演进度：${formatTaskStatus(activeTask?.status)}`}
+                aria-label="查看导演进度"
               >
                 <ListTodo className="h-4 w-4" />
               </Button>
@@ -470,6 +512,31 @@ export default function NovelWorkspaceRail(props: NovelWorkspaceRailProps) {
           )}
         </div>
       </div>
-    </aside>
+      </aside>
+
+      <Dialog open={progressDialogOpen} onOpenChange={setProgressDialogOpen}>
+        <DialogContent className="max-h-[88vh] overflow-hidden p-0 sm:max-w-5xl">
+          <DialogHeader className="border-b px-5 py-4 text-left">
+            <DialogTitle>AI 自动导演进度</DialogTitle>
+            <DialogDescription>
+              查看这本书的推进步骤、最近进展和 AI 用量。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="max-h-[calc(88vh-6.5rem)] overflow-y-auto p-4 sm:p-6">
+            <NovelAutoDirectorProgressPanel
+              mode={progressDialogMode}
+              task={activeTask}
+              taskId={activeTask?.id ?? ""}
+              titleHint={novelTitle}
+              fallbackError={activeTask?.lastError ?? null}
+              onBackgroundContinue={() => setProgressDialogOpen(false)}
+              onConfirmAndContinue={() => continueDirectorMutation.mutate()}
+              isConfirmingAndContinuing={continueDirectorMutation.isPending}
+              onOpenTaskCenter={openTaskCenter}
+            />
+          </div>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }

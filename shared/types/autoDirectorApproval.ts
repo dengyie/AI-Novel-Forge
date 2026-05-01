@@ -92,6 +92,10 @@ export const DIRECTOR_AUTO_APPROVAL_POINTS = [
 export type DirectorAutoApprovalPointCode = typeof DIRECTOR_AUTO_APPROVAL_POINTS[number]["code"];
 export type DirectorAutoApprovalRiskLevel = typeof DIRECTOR_AUTO_APPROVAL_POINTS[number]["riskLevel"];
 
+export const ALL_DIRECTOR_AUTO_APPROVAL_POINT_CODES: DirectorAutoApprovalPointCode[] = (
+  DIRECTOR_AUTO_APPROVAL_POINTS.map((item) => item.code)
+);
+
 export interface DirectorAutoApprovalPoint {
   code: DirectorAutoApprovalPointCode;
   groupId: DirectorAutoApprovalGroupId;
@@ -109,6 +113,13 @@ export interface DirectorAutoApprovalGroup {
 export interface DirectorAutoApprovalConfig {
   enabled: boolean;
   approvalPointCodes: DirectorAutoApprovalPointCode[];
+}
+
+export function buildFullDirectorAutoApprovalConfig(): DirectorAutoApprovalConfig {
+  return {
+    enabled: true,
+    approvalPointCodes: [...ALL_DIRECTOR_AUTO_APPROVAL_POINT_CODES],
+  };
 }
 
 export interface DirectorAutoApprovalPreferenceSettings {

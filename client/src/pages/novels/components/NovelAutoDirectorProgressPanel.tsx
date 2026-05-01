@@ -2,13 +2,17 @@ import type {
   NovelWorkflowMilestone,
   NovelWorkflowMilestoneType,
 } from "@ai-novel/shared/types/novelWorkflow";
+import { getDirectorNodeDisplayLabel } from "@ai-novel/shared/types/directorRuntime";
 import {
   DIRECTOR_CANDIDATE_SETUP_STEPS,
   extractDirectorTaskSeedPayloadFromMeta,
 } from "@ai-novel/shared/types/novelDirector";
 import type { UnifiedTaskDetail } from "@ai-novel/shared/types/task";
 import { useQuery } from "@tanstack/react-query";
-import { getDirectorRuntimeProjection } from "@/api/novelDirector";
+import {
+  getDirectorRuntimeEventHistory,
+  getDirectorRuntimeProjection,
+} from "@/api/novelDirector";
 import { queryKeys } from "@/api/queryKeys";
 import DirectorRuntimeProjectionCard from "@/components/autoDirector/DirectorRuntimeProjectionCard";
 import { Badge } from "@/components/ui/badge";
@@ -30,6 +34,8 @@ interface NovelAutoDirectorProgressPanelProps {
   titleHint?: string;
   fallbackError?: string | null;
   onBackgroundContinue: () => void;
+  onConfirmAndContinue?: () => void;
+  isConfirmingAndContinuing?: boolean;
   onOpenTaskCenter: () => void;
 }
 
@@ -262,6 +268,8 @@ export default function NovelAutoDirectorProgressPanel({
   titleHint,
   fallbackError,
   onBackgroundContinue,
+  onConfirmAndContinue,
+  isConfirmingAndContinuing = false,
   onOpenTaskCenter,
 }: NovelAutoDirectorProgressPanelProps) {
   const taskChapterTitleWarning = resolveChapterTitleWarning(task);
@@ -276,7 +284,18 @@ export default function NovelAutoDirectorProgressPanel({
       task && !task.pendingManualRecovery && (task.status === "queued" || task.status === "running") ? 4000 : false
     ),
   });
+  const eventHistoryQuery = useQuery({
+    queryKey: ["director-runtime-events", runtimeTaskId],
+    queryFn: () => getDirectorRuntimeEventHistory(runtimeTaskId, { limit: 200 }),
+    enabled: Boolean(runtimeTaskId),
+    retry: false,
+    refetchInterval: () => (
+      task && !task.pendingManualRecovery && (task.status === "queued" || task.status === "running") ? 10000 : false
+    ),
+  });
   const runtimeProjection = runtimeProjectionQuery.data?.data?.projection ?? null;
+  const eventHistory = eventHistoryQuery.data?.data ?? null;
+  const historyEvents = eventHistory?.events ?? [];
   const isPendingManualRecovery = Boolean(task?.pendingManualRecovery);
   const runtimeProjectionForDisplay = isPendingManualRecovery ? null : runtimeProjection;
   const runtimeRequiresUserAction = Boolean(
@@ -349,21 +368,33 @@ export default function NovelAutoDirectorProgressPanel({
   const description = candidateSetupFlow
     ? (
       visualMode === "execution_failed"
-        ? "候选方向生成链已中断，你可以先去任务中心查看详情，再决定是否重试。"
+        ? "候选方向生成链已中断，可以先查看执行详情，再决定是否重试。"
         : "系统会先整理项目设定、对齐书级 framing，再生成两套书级方案和对应标题组。"
     )
     : (
       visualMode === "execution_failed"
-        ? "任务已经停在最近一步，你可以先去任务中心查看详情，再决定是否恢复。"
+        ? "任务已停在最近一步，可以先查看执行详情，再决定是否恢复。"
         : isPendingManualRecovery
-          ? "任务已暂停在当前进度，你可以到任务中心从最近检查点恢复。"
+          ? "任务已暂停在当前进度，你可以从最近进度点恢复。"
           : chapterTitleWarning
           ? "章节列表已经保留，这是一条可直接处理的结构提醒。你可以快速修复标题，再决定是否继续后续导演流程。"
           : task?.status === "waiting_approval"
             ? "当前导演流程已经停在审核点，你可以先检查产物，再决定是否继续自动推进。"
-            : "可离开当前页面，任务会继续运行，并且可以在任务中心恢复查看。"
+            : "可离开当前页面，任务会继续运行；回来后可在 AI 驾驶舱查看进度。"
     );
+  const needsConfirmationAction = visualMode === "execution_progress"
+    && !isPendingManualRecovery
+    && !chapterTitleWarning
+    && (task?.status === "waiting_approval" || runtimeRequiresUserAction);
   const actions = [
+    ...(needsConfirmationAction && onConfirmAndContinue
+      ? [{
+        label: isConfirmingAndContinuing ? "继续中..." : "确认并继续",
+        onClick: onConfirmAndContinue,
+        variant: "default" as const,
+        disabled: isConfirmingAndContinuing,
+      }]
+      : []),
     ...(visualMode === "execution_progress" && !isPendingManualRecovery && task?.status !== "waiting_approval" && !runtimeRequiresUserAction && !chapterTitleWarning
       ? [{
         label: "后台继续",
@@ -372,9 +403,9 @@ export default function NovelAutoDirectorProgressPanel({
       }]
       : []),
     {
-      label: "去任务中心查看",
+      label: "查看执行详情",
       onClick: onOpenTaskCenter,
-      variant: "default" as const,
+      variant: needsConfirmationAction ? ("outline" as const) : ("default" as const),
     },
   ];
 
@@ -425,6 +456,45 @@ export default function NovelAutoDirectorProgressPanel({
           projection={runtimeProjectionForDisplay}
           className="mt-4"
         />
+
+        <div className="mt-4 rounded-xl border bg-background/80 p-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="text-sm font-medium text-foreground">全部进展</div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                {eventHistory
+                  ? `显示 ${historyEvents.length}/${eventHistory.totalCount} 条进展`
+                  : "正在读取进展记录"}
+              </div>
+            </div>
+            {eventHistory && eventHistory.totalCount > historyEvents.length ? (
+              <Badge variant="outline">显示最近 {eventHistory.limit} 条</Badge>
+            ) : null}
+          </div>
+
+          {eventHistoryQuery.isLoading ? (
+            <div className="mt-3 rounded-lg border bg-muted/15 px-3 py-2 text-sm text-muted-foreground">
+              正在读取进展记录。
+            </div>
+          ) : historyEvents.length > 0 ? (
+            <div className="mt-3 max-h-80 space-y-2 overflow-y-auto pr-1">
+              {historyEvents.map((event) => (
+                <div key={event.eventId} className="rounded-lg border bg-muted/15 p-3 text-sm">
+                  <div className="font-medium text-foreground">{event.summary}</div>
+                  <div className="mt-2 flex flex-wrap gap-2 text-xs text-muted-foreground">
+                    <span>记录时间：{formatDate(event.occurredAt)}</span>
+                    {event.nodeKey ? <span>步骤：{getDirectorNodeDisplayLabel({ nodeKey: event.nodeKey })}</span> : null}
+                    {event.artifactType ? <span>产物：{event.artifactType}</span> : null}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="mt-3 rounded-lg border bg-muted/15 px-3 py-2 text-sm text-muted-foreground">
+              任务运行后会在这里写入进展记录。
+            </div>
+          )}
+        </div>
 
         {styleSeed ? (
           <div className="mt-4 rounded-xl border bg-background/80 p-4">
@@ -489,7 +559,7 @@ export default function NovelAutoDirectorProgressPanel({
                 variant="outline"
                 onClick={onOpenTaskCenter}
               >
-                去任务中心查看
+                查看执行详情
               </Button>
             </div>
           </div>

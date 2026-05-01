@@ -5,6 +5,7 @@ import type {
   DirectorTakeoverRequest,
   DirectorTakeoverResponse,
 } from "@ai-novel/shared/types/novelDirector";
+import { isFullBookAutopilotRunMode } from "@ai-novel/shared/types/novelDirector";
 import { buildNovelEditResumeTarget } from "../workflow/novelWorkflow.shared";
 import type { DirectorConfirmRequest } from "@ai-novel/shared/types/novelDirector";
 import { buildDirectorSessionState } from "./novelDirectorHelpers";
@@ -71,6 +72,8 @@ interface TakeoverExecutionAutoRuntimePort {
     existingState?: DirectorAutoExecutionState | null;
     resumeCheckpointType?: "front10_ready" | "chapter_batch_ready" | "replan_required" | null;
     resumeStage?: "chapter" | "pipeline";
+    approveCurrentGate?: boolean;
+    approveAutoExecutionScope?: boolean;
   }): Promise<void>;
 }
 
@@ -92,6 +95,8 @@ interface StartDirectorTakeoverExecutionInput {
     novelId: string;
     input: DirectorConfirmRequest;
     startPhase: "story_macro" | "character_setup" | "volume_strategy" | "structured_outline";
+    approveCurrentGate?: boolean;
+    approveAutoExecutionScope?: boolean;
   }) => Promise<void>;
   assertHighMemoryStartAllowed?: (input: {
     taskId: string;
@@ -299,6 +304,7 @@ export async function startDirectorTakeoverExecution(
     phase: plan.executionMode === "phase" ? plan.phase ?? plan.startPhase : "front10_ready",
     isBackgroundRunning: true,
   });
+  const isFullBookAutopilot = isFullBookAutopilotRunMode(input.directorInput.runMode);
 
   let rewriteSnapshot: RewriteSnapshotReference | null = null;
   if (selection.strategy === "restart_current_step") {
@@ -393,6 +399,8 @@ export async function startDirectorTakeoverExecution(
           novelId: input.request.novelId,
           input: input.directorInput,
           startPhase: plan.phase ?? plan.startPhase,
+          approveCurrentGate: isFullBookAutopilot,
+          approveAutoExecutionScope: isFullBookAutopilot,
         });
       });
     } else {
@@ -412,6 +420,8 @@ export async function startDirectorTakeoverExecution(
           existingState: plan.usesCurrentBatch ? (input.takeoverState.latestAutoExecutionState ?? null) : null,
           resumeCheckpointType: plan.usesCurrentBatch ? (plan.resumeCheckpointType ?? null) : null,
           resumeStage: plan.resumeStage === "pipeline" ? "pipeline" : "chapter",
+          approveCurrentGate: isFullBookAutopilot,
+          approveAutoExecutionScope: isFullBookAutopilot,
         });
       });
     }

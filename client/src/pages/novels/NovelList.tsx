@@ -1,22 +1,34 @@
 import type { KeyboardEvent, MouseEvent } from "react";
 import { useMemo, useState } from "react";
 import type { ProjectProgressStatus } from "@ai-novel/shared/types/novel";
+import type {
+  DirectorBookAutomationAction,
+  DirectorBookAutomationProjection,
+} from "@ai-novel/shared/types/directorRuntime";
 import { Link, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { BookOpen } from "lucide-react";
+import { BookOpen, Gauge } from "lucide-react";
+import { getDirectorBookAutomationProjection } from "@/api/novelDirector";
 import { continueNovelWorkflow } from "@/api/novelWorkflow";
 import { deleteNovel, downloadNovelExport, getNovelList } from "@/api/novel";
 import { queryKeys } from "@/api/queryKeys";
+import AICockpit from "@/components/autoDirector/AICockpit";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import {
   canContinueDirector,
   canContinueFront10AutoExecution,
   canEnterChapterExecution,
   getCandidateSelectionLink,
-  getTaskCenterLink,
   getWorkflowBadge,
   getWorkflowDescription,
   isWorkflowRunningInBackground,
@@ -24,6 +36,11 @@ import {
 } from "@/lib/novelWorkflowTaskUi";
 import { toast } from "@/components/ui/toast";
 import { resolveWorkflowContinuationFeedback } from "@/lib/novelWorkflowContinuation";
+import {
+  getDirectorCockpitActionHref,
+  getDirectorCockpitContinuationMode,
+  isDirectorCockpitContinuationAction,
+} from "@/lib/directorCockpitActions";
 import NovelWorkflowRunningIndicator from "./components/NovelWorkflowRunningIndicator";
 
 type StatusFilter = "all" | "draft" | "published";
@@ -70,11 +87,24 @@ export default function NovelList() {
   const queryClient = useQueryClient();
   const [status, setStatus] = useState<StatusFilter>("all");
   const [writingMode, setWritingMode] = useState<WritingModeFilter>("all");
+  const [cockpitNovelId, setCockpitNovelId] = useState<string | null>(null);
 
   const novelListQuery = useQuery({
     queryKey: queryKeys.novels.list(1, 100),
     queryFn: () => getNovelList({ page: 1, limit: 100 }),
     staleTime: 30_000,
+  });
+
+  const cockpitProjectionQuery = useQuery({
+    queryKey: cockpitNovelId
+      ? queryKeys.novels.directorBookAutomation(cockpitNovelId)
+      : ["novels", "director-book-automation", "idle"],
+    queryFn: () => getDirectorBookAutomationProjection(cockpitNovelId ?? ""),
+    enabled: Boolean(cockpitNovelId),
+    staleTime: 10_000,
+    refetchInterval: (query) => {
+      return query.state.data?.data?.projection.displayState === "processing" ? 4000 : false;
+    },
   });
 
   const deleteNovelMutation = useMutation({
@@ -107,13 +137,19 @@ export default function NovelList() {
   const continueWorkflowMutation = useMutation({
     mutationFn: async (input: {
       taskId: string;
-      mode?: "auto_execute_range";
+      mode?: "resume" | "auto_execute_range" | "auto_execute_front10";
     }) => continueNovelWorkflow(input.taskId, input.mode ? { continuationMode: input.mode } : undefined),
     onSuccess: async (response, input) => {
-      await Promise.all([
+      const invalidations = [
         queryClient.invalidateQueries({ queryKey: queryKeys.novels.all }),
         queryClient.invalidateQueries({ queryKey: ["tasks"] }),
-      ]);
+      ];
+      if (cockpitNovelId) {
+        invalidations.push(
+          queryClient.invalidateQueries({ queryKey: queryKeys.novels.directorBookAutomation(cockpitNovelId) }),
+        );
+      }
+      await Promise.all(invalidations);
       const feedback = resolveWorkflowContinuationFeedback(response.data, {
         mode: input.mode,
       });
@@ -135,6 +171,8 @@ export default function NovelList() {
   });
 
   const allNovels = novelListQuery.data?.data?.items ?? [];
+  const selectedCockpitNovel = allNovels.find((item) => item.id === cockpitNovelId) ?? null;
+  const cockpitProjection = cockpitProjectionQuery.data?.data?.projection ?? null;
 
   const novels = useMemo(() => {
     return allNovels.filter((item) => {
@@ -162,6 +200,22 @@ export default function NovelList() {
 
   const openNovelEditor = (novelId: string) => {
     navigate(`/novels/${novelId}/edit`);
+  };
+
+  const handleCockpitAction = (
+    projection: DirectorBookAutomationProjection,
+    action: DirectorBookAutomationAction,
+  ) => {
+    const taskId = action.commandPayload?.taskId ?? action.target.taskId ?? projection.latestTask?.id;
+    if (taskId && isDirectorCockpitContinuationAction(action)) {
+      continueWorkflowMutation.mutate({
+        taskId,
+        mode: getDirectorCockpitContinuationMode(action),
+      });
+      return;
+    }
+    setCockpitNovelId(null);
+    navigate(getDirectorCockpitActionHref(projection, action));
   };
 
   return (
@@ -391,6 +445,18 @@ export default function NovelList() {
                   ) : null}
 
                   <div className="flex flex-wrap gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={(event) => {
+                        stopCardClick(event);
+                        setCockpitNovelId(novel.id);
+                      }}
+                    >
+                      <Gauge className="h-4 w-4" aria-hidden="true" />
+                      AI 驾驶舱
+                    </Button>
+
                     {canContinueFront10AutoExecution(workflowTask) ? (
                       <Button
                         size="sm"
@@ -436,13 +502,13 @@ export default function NovelList() {
                       </Button>
                     ) : workflowTask ? (
                       <Button asChild size="sm">
-                        <Link to={getTaskCenterLink(workflowTask.id)} onClick={stopCardClick}>查看任务</Link>
+                        <Link to={`/novels/${novel.id}/edit?taskId=${workflowTask.id}`} onClick={stopCardClick}>查看推进状态</Link>
                       </Button>
                     ) : null}
 
                     {workflowTask ? (
                       <Button asChild size="sm" variant="outline">
-                        <Link to={getTaskCenterLink(workflowTask.id)} onClick={stopCardClick}>任务中心</Link>
+                        <Link to={`/novels/${novel.id}/edit?taskId=${workflowTask.id}&taskPanel=1`} onClick={stopCardClick}>执行详情</Link>
                       </Button>
                     ) : null}
 
@@ -485,6 +551,58 @@ export default function NovelList() {
           })}
         </div>
       )}
+
+      <Dialog
+        open={Boolean(cockpitNovelId)}
+        onOpenChange={(open) => {
+          if (!open) {
+            setCockpitNovelId(null);
+          }
+        }}
+      >
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>AI 驾驶舱</DialogTitle>
+            <DialogDescription>
+              {selectedCockpitNovel?.title
+                ? `查看《${selectedCockpitNovel.title}》的 AI 推进状态和下一步动作。`
+                : "查看这本书的 AI 推进状态和下一步动作。"}
+            </DialogDescription>
+          </DialogHeader>
+
+          {cockpitProjectionQuery.isPending ? (
+            <div className="rounded-lg border p-3 text-sm text-muted-foreground">
+              读取这本书的 AI 状态...
+            </div>
+          ) : cockpitProjectionQuery.isError ? (
+            <div className="rounded-lg border p-3">
+              <div className="text-sm text-muted-foreground">无法读取这本书的 AI 状态，请稍后重试。</div>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="mt-3"
+                onClick={() => void cockpitProjectionQuery.refetch()}
+              >
+                重新读取
+              </Button>
+            </div>
+          ) : cockpitProjection ? (
+            <AICockpit
+              projection={cockpitProjection}
+              mode="focusedNovel"
+              isActionPending={continueWorkflowMutation.isPending}
+              onAction={handleCockpitAction}
+              onOpenNovel={(projection) => {
+                setCockpitNovelId(null);
+                navigate(projection.focusNovel.href);
+              }}
+            />
+          ) : (
+            <AICockpit fallbackSummary="这本书没有需要处理的 AI 自动推进任务。" />
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

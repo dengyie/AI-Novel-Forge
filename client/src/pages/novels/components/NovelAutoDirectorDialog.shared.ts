@@ -9,8 +9,13 @@ export const RUN_MODE_OPTIONS: Array<{
   description: string;
 }> = [
   {
+    value: "full_book_autopilot",
+    label: "全书自动成书（推荐）",
+    description: "你只在开始选择方向，系统会按整本书目标完成规划、写作、审校和修复。",
+  },
+  {
     value: "auto_to_ready",
-    label: "自动推进到可开写",
+    label: "先准备到可开写",
     description: "AI 会持续推进到章节执行资源准备好后再交给你。",
   },
   {
@@ -20,7 +25,7 @@ export const RUN_MODE_OPTIONS: Array<{
   },
 ];
 
-export const DEFAULT_VISIBLE_RUN_MODE: DirectorRunMode = "auto_to_ready";
+export const DEFAULT_VISIBLE_RUN_MODE: DirectorRunMode = "full_book_autopilot";
 
 export interface AutoDirectorRequestLlmOptions {
   provider: LLMProvider;

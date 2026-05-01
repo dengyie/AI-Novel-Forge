@@ -2,8 +2,10 @@ import type {
   NovelWorkflowMilestone,
   NovelWorkflowMilestoneType,
 } from "@ai-novel/shared/types/novelWorkflow";
+import type { DirectorBookAutomationAction } from "@ai-novel/shared/types/directorRuntime";
 import type { TaskStatus } from "@ai-novel/shared/types/task";
 import type { CharacterResourceProposalSummary } from "@ai-novel/shared/types/characterResource";
+import AICockpit from "@/components/autoDirector/AICockpit";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -228,8 +230,10 @@ export default function NovelTaskDrawer({
   open,
   onOpenChange,
   task,
+  projection,
   currentUiModel,
   actions,
+  onProjectionAction,
   resourceProposals = [],
   onOpenResourceProposalSource,
   onConfirmResourceProposal,
@@ -243,18 +247,67 @@ export default function NovelTaskDrawer({
     : [];
   const progressPercent = Math.max(0, Math.min(100, Math.round((task?.progress ?? 0) * 100)));
   const tokenUsage = task?.tokenUsage ?? null;
+  const primaryAction = projection?.primaryAction ?? null;
+  const primaryActionLabel = (
+    (primaryAction?.type === "continue" || primaryAction?.type === "auto_execute_range")
+    && projection?.displayState === "needs_confirmation"
+  )
+    ? "确认并继续"
+    : primaryAction?.label;
+  const runProjectedAction = (action: DirectorBookAutomationAction) => {
+    const matchedAction = actions.find((item) => {
+      if (item.label === action.label) {
+        return true;
+      }
+      if (action.type === "continue") {
+        return item.label.includes("继续");
+      }
+      if (action.type === "auto_execute_range") {
+        return item.label.includes("自动执行");
+      }
+      if (action.type === "confirm_candidate") {
+        return item.label.includes("书级方向");
+      }
+      if (action.type === "open_quality_repair") {
+        return item.label.includes("质量修复");
+      }
+      if (action.type === "open_chapter") {
+        return item.label.includes("章节执行");
+      }
+      return false;
+    });
+    matchedAction?.onClick();
+  };
+  const handleProjectionAction = (action: DirectorBookAutomationAction) => {
+    if (onProjectionAction) {
+      onProjectionAction(action);
+      return;
+    }
+    runProjectedAction(action);
+  };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="left-auto right-0 top-0 flex h-dvh max-h-dvh w-full max-w-[520px] translate-x-0 translate-y-0 flex-col gap-0 rounded-none border-y-0 border-r-0 border-l bg-background p-0 sm:max-w-[520px]">
         <DialogHeader className="border-b border-border/70 px-5 py-4">
-          <DialogTitle>任务面板</DialogTitle>
+          <DialogTitle>执行详情</DialogTitle>
           <DialogDescription>
-            优先查看当前小说的自动导演状态与快捷处理动作；更完整的筛选和历史仍在完整任务中心里。
+            查看本书 AI 推进记录、快捷处理动作和排查信息。
           </DialogDescription>
         </DialogHeader>
 
         <div className="flex-1 space-y-5 overflow-y-auto px-5 py-5">
+          {task || projection ? (
+            <AICockpit
+              projection={projection}
+              mode="focusedNovel"
+              fallbackSummary={task?.blockingReason || task?.currentItemLabel || "当前没有需要处理的 AI 推进动作。"}
+              fallbackStatusLabel={task ? formatTaskStatus(task) : "未开启"}
+              showDetailsAction={false}
+              onAction={(_projection, action) => handleProjectionAction(action)}
+            />
+          ) : null}
+
           {resourceProposals.length > 0 ? (
             <section className="space-y-3 rounded-2xl border border-amber-300/60 bg-amber-50/40 p-4 dark:border-amber-700/50 dark:bg-amber-950/15">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -444,14 +497,19 @@ export default function NovelTaskDrawer({
             </>
           ) : (
             <section className="rounded-2xl border border-dashed px-5 py-8 text-sm text-muted-foreground">
-              当前小说还没有可见的自动导演任务。你仍然可以继续手动创作，或打开完整任务中心查看其他后台任务。
+              当前小说还没有可见的自动导演任务。你可以继续手动创作，或在后台任务中心查看其他任务。
             </section>
           )}
         </div>
 
-        <div className="border-t border-border/70 px-5 py-4">
-          <Button type="button" variant="outline" className="w-full" onClick={onOpenFullTaskCenter}>
-            打开完整任务中心
+        <div className="space-y-2 border-t border-border/70 px-5 py-4">
+          {primaryAction ? (
+            <Button type="button" className="w-full" onClick={() => handleProjectionAction(primaryAction)}>
+              {primaryActionLabel || "继续处理"}
+            </Button>
+          ) : null}
+          <Button type="button" variant={primaryAction ? "ghost" : "outline"} className="w-full" onClick={onOpenFullTaskCenter}>
+            打开后台任务中心
           </Button>
         </div>
       </DialogContent>

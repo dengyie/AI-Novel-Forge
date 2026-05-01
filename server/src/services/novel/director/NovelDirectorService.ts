@@ -1,6 +1,9 @@
 import { buildStyleIntentSummary } from "@ai-novel/shared/types/styleEngine";
 import { AppError } from "../../../middleware/errorHandler";
-import { runWithLlmUsageTracking } from "../../../llm/usageTracking";
+import {
+  runWithLlmUsageTracking,
+  type LlmUsageTrackingContext,
+} from "../../../llm/usageTracking";
 import type {
   DirectorPolicyMode,
   DirectorRuntimeProjection,
@@ -26,6 +29,7 @@ import type {
   DirectorTakeoverRequest,
   DirectorTakeoverResponse,
 } from "@ai-novel/shared/types/novelDirector";
+import { isFullBookAutopilotRunMode } from "@ai-novel/shared/types/novelDirector";
 import { BookContractService } from "../BookContractService";
 import { CharacterPreparationService } from "../characterPrep/CharacterPreparationService";
 import { CharacterDynamicsService } from "../dynamics/CharacterDynamicsService";
@@ -38,6 +42,7 @@ import { NovelWorkflowService } from "../workflow/NovelWorkflowService";
 import { NovelDirectorCandidateStageService } from "./novelDirectorCandidateStage";
 import { resolveDirectorBookFraming } from "./novelDirectorFraming";
 import {
+  applyDirectorRunModeContract,
   buildDirectorWorkflowSeedPayload,
 } from "./novelDirectorHelpers";
 import {
@@ -130,6 +135,7 @@ export class NovelDirectorService {
         checkpointSummary,
       });
     },
+    replanNovel: (novelId, input) => this.novelService.replanNovel(novelId, input),
   });
   private readonly directorRuntimeOrchestrator = new NovelDirectorRuntimeOrchestrator({
     directorRuntime: this.directorRuntime,
@@ -222,7 +228,10 @@ export class NovelDirectorService {
 
   private async runScheduledBackgroundRun(taskId: string, runner: () => Promise<void>): Promise<void> {
     try {
-      await runWithLlmUsageTracking({ workflowTaskId: taskId }, runner);
+      await runWithLlmUsageTracking(
+        await this.buildDirectorUsageContext(taskId),
+        runner,
+      );
     } catch (error) {
       if (isWorkflowTaskCancelledError(error) || isDirectorRuntimeGateError(error)) {
         return;
@@ -253,10 +262,33 @@ export class NovelDirectorService {
   }
 
   private withWorkflowTaskUsage<T>(workflowTaskId: string | null | undefined, runner: () => Promise<T>): Promise<T> {
-    if (!workflowTaskId?.trim()) {
+    const normalizedTaskId = workflowTaskId?.trim();
+    if (!normalizedTaskId) {
       return runner();
     }
-    return runWithLlmUsageTracking({ workflowTaskId: workflowTaskId.trim() }, runner);
+    return this.buildDirectorUsageContext(normalizedTaskId)
+      .then((context) => runWithLlmUsageTracking(context, runner));
+  }
+
+  private async buildDirectorUsageContext(taskId: string): Promise<LlmUsageTrackingContext> {
+    const normalizedTaskId = taskId.trim();
+    const task = normalizedTaskId
+      ? await prisma.novelWorkflowTask.findUnique({
+        where: { id: normalizedTaskId },
+        select: {
+          novelId: true,
+          directorRun: {
+            select: { id: true },
+          },
+        },
+      }).catch(() => null)
+      : null;
+    return {
+      workflowTaskId: normalizedTaskId || null,
+      directorTelemetry: true,
+      novelId: task?.novelId ?? null,
+      directorRunId: task?.directorRun?.id ?? (normalizedTaskId || null),
+    };
   }
 
   private async enrichDirectorStyleContext<T extends { styleProfileId?: string; styleTone?: string; styleIntentSummary?: unknown }>(
@@ -543,7 +575,7 @@ export class NovelDirectorService {
       bookContract: takeoverState.bookContract,
       runMode: input.runMode,
     });
-    const directorInput = await this.enrichDirectorStyleContext({
+    const directorInput = applyDirectorRunModeContract(await this.enrichDirectorStyleContext({
       ...takeoverDirectorInput,
       styleProfileId: input.styleProfileId ?? takeoverDirectorInput.styleProfileId,
       autoExecutionPlan: input.autoExecutionPlan,
@@ -551,7 +583,8 @@ export class NovelDirectorService {
       provider: input.provider ?? takeoverDirectorInput.provider,
       model: input.model?.trim() || takeoverDirectorInput.model,
       temperature: typeof input.temperature === "number" ? input.temperature : takeoverDirectorInput.temperature,
-    });
+    }));
+    const isFullBookAutopilot = isFullBookAutopilotRunMode(directorInput.runMode);
     await this.ensurePrimaryNovelStyleBinding(input.novelId, directorInput.styleProfileId);
     const takeoverWorkspaceAnalysis = await this.directorRuntime.analyzeWorkspace({
       novelId: input.novelId,
@@ -574,7 +607,7 @@ export class NovelDirectorService {
           taskId,
           novelId: input.novelId,
           entrypoint: "takeover",
-          policyMode: "run_until_gate",
+          policyMode: isFullBookAutopilot ? "auto_safe_scope" : "run_until_gate",
           summary: "AI 自动导演接管已并入统一运行时。",
         });
         await this.directorRuntime.recordWorkspaceAnalysis({
@@ -585,6 +618,8 @@ export class NovelDirectorService {
           module,
           taskId,
           novelId: input.novelId,
+          approveCurrentGate: isFullBookAutopilot,
+          approveAutoExecutionScope: isFullBookAutopilot,
           runner,
         });
       }),

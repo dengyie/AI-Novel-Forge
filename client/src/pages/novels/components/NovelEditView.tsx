@@ -284,7 +284,7 @@ function DesktopNovelEditView(props: NovelEditViewProps) {
               variant={taskDrawer?.task?.status === "failed" ? "destructive" : "outline"}
               onClick={() => taskDrawer?.onOpenChange(true)}
             >
-              任务面板
+              执行详情
               {taskAttentionLabel ? <Badge variant="secondary">{taskAttentionLabel}</Badge> : null}
             </Button>
           </div>

@@ -23,6 +23,7 @@ import {
   buildChapterPlanContextBlocks,
 } from "./plannerContextBlocks";
 import { buildReplanDecision } from "./replanDecision";
+import { replanWindowDecisionService } from "./ReplanWindowDecisionService";
 import {
   buildCurrentVolumeWindowSummary,
   buildPlannerCharacterDynamicsContext,
@@ -781,8 +782,9 @@ export class PlannerService {
       createdAt: report.createdAt.toISOString(),
       updatedAt: report.updatedAt.toISOString(),
     }));
-    const replanDecision = buildReplanDecision({
-      requestedWindowSize: input.windowSize,
+    const requestedWindowSize = input.windowSize ?? 3;
+    const replanDecision = await replanWindowDecisionService.decide({
+      requestedWindowSize,
       availableChapterOrders: allChapters.map((item) => item.order),
       targetChapterOrder: targetChapter.order,
       triggerType: input.triggerType ?? "manual",
@@ -794,7 +796,9 @@ export class PlannerService {
       nextAction: resolvedStateDrivenContext.nextAction,
       chapterStateGoal: resolvedStateDrivenContext.chapterStateGoal,
       protectedSecrets: resolvedStateDrivenContext.protectedSecrets,
-      forceRecommended: true,
+      provider: input.provider,
+      model: input.model,
+      temperature: input.temperature,
     });
     const affectedChapterOrderSet = new Set(replanDecision.affectedChapterOrders);
     const affectedChapters = allChapters.filter((item) => affectedChapterOrderSet.has(item.order));
@@ -818,7 +822,9 @@ export class PlannerService {
           triggerReason: replanDecision.triggerReason,
           windowReason: replanDecision.windowReason,
           whyTheseChapters: replanDecision.whyTheseChapters,
-          sourceIssueIds: input.sourceIssueIds ?? [],
+          sourceIssueIds: replanDecision.blockingIssueIds.length > 0
+            ? replanDecision.blockingIssueIds
+            : input.sourceIssueIds ?? [],
           windowIndex: index,
           windowSize: affectedChapters.length,
           affectedChapterOrders: affectedOrders,
@@ -838,7 +844,9 @@ export class PlannerService {
       affectedChapterIds: affectedChapters.map((item) => item.id),
       affectedChapterOrders: affectedOrders,
       generatedPlanIds: generatedPlans.map((plan) => plan.id),
-      sourceIssueIds: input.sourceIssueIds ?? [],
+      sourceIssueIds: replanDecision.blockingIssueIds.length > 0
+        ? replanDecision.blockingIssueIds
+        : input.sourceIssueIds ?? [],
       triggerType: input.triggerType ?? "manual",
       reason: input.reason,
       triggerReason: replanDecision.triggerReason,
@@ -847,6 +855,8 @@ export class PlannerService {
       anchorChapterOrder: replanDecision.anchorChapterOrder,
       windowSize: affectedChapters.length,
       blockingLedgerKeys: replanDecision.blockingLedgerKeys,
+      repairIntent: replanDecision.repairIntent,
+      confidence: replanDecision.confidence,
     };
 
     const run = await prisma.replanRun.create({

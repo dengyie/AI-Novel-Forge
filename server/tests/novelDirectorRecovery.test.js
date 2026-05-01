@@ -95,6 +95,24 @@ test("asset-first recovery resumes auto execution from existing executable asset
   });
 });
 
+test("asset-first recovery treats full-book autopilot as auto execution", () => {
+  const recovery = resolveAssetFirstRecoveryFromSnapshot({
+    runMode: "full_book_autopilot",
+    structuredOutlineRecoveryStep: "completed",
+    volumeCount: 4,
+    hasVolumeStrategyPlan: true,
+    hasActivePipelineJob: false,
+    hasExecutableRange: true,
+    hasAutoExecutionState: true,
+    latestCheckpointType: "replan_required",
+  });
+
+  assert.deepEqual(recovery, {
+    type: "auto_execution",
+    resumeCheckpointType: "replan_required",
+  });
+});
+
 test("asset-first recovery keeps structured outline first when requested scope is not fully detailed", () => {
   const recovery = resolveAssetFirstRecoveryFromSnapshot({
     runMode: "auto_to_execution",

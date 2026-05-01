@@ -17,6 +17,58 @@ function recoveryCommand(commandType = "resume_from_checkpoint") {
   };
 }
 
+function confirmCommand() {
+  return {
+    id: "command-confirm",
+    taskId: "task-1",
+    novelId: null,
+    commandType: "confirm_candidate",
+    status: "running",
+    payloadJson: JSON.stringify({
+      confirmRequest: {
+        workflowTaskId: "old-task",
+        runMode: "auto_to_execution",
+        idea: "A college girl enters a hidden power network.",
+        candidate: {
+          id: "candidate-1",
+          workingTitle: "Neon Archive",
+          logline: "A student follows her missing father into a secret organization.",
+          positioning: "Urban supernatural growth thriller.",
+          sellingPoint: "A beginner-friendly direction for a full novel.",
+          coreConflict: "Truth-seeking versus organizational pressure.",
+          protagonistPath: "Cautious student to active operator.",
+          endingDirection: "Hopeful breakthrough with cost.",
+          hookStrategy: "Reveal one conspiracy layer at a time.",
+          progressionLoop: "Clue, pressure, cost, leverage.",
+          whyItFits: "Clear enough for automatic planning.",
+          toneKeywords: ["urban"],
+          targetChapterCount: 30,
+        },
+      },
+    }),
+  };
+}
+
+test("director execution confirms candidates through the worker command path", async () => {
+  const calls = [];
+  const originalConfirm = NovelDirectorService.prototype.confirmCandidate;
+  NovelDirectorService.prototype.confirmCandidate = async function confirmCandidateMock(input) {
+    calls.push(input);
+  };
+
+  try {
+    const service = new DirectorExecutionService();
+    await service.executeCommand(confirmCommand());
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].workflowTaskId, "task-1");
+    assert.equal(calls[0].runMode, "auto_to_execution");
+    assert.equal(calls[0].candidate.workingTitle, "Neon Archive");
+  } finally {
+    NovelDirectorService.prototype.confirmCandidate = originalConfirm;
+  }
+});
+
 test("director execution replays takeover request when recovery task lacks director input", async () => {
   const calls = [];
   const takeoverRequest = {

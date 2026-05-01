@@ -52,7 +52,7 @@
 
 当前未完成但必须纳入完整交付：
 
-- 自动导演执行面仍与 Web API 控制面运行在同一 Node 进程中；`structured_outline / chapter_list / chapter_detail_bundle / chapter_execution / quality_repair` 这类重型链路会拖住普通 API。该问题已在 2026-04-29 明确为架构级阻塞，必须按执行面隔离计划拆出独立 Worker，不能再用 route 内 fire-and-forget 作为完成态。
+- 自动导演执行面已完成第一版 Worker 化：`continue / resume_from_checkpoint / retry / takeover` 已进入 `DirectorRunCommand` 队列并由独立 Director Worker 执行，前端运行态也已改为轻量 projection 轮询。但候选确认、标题修复等旧入口仍有同步准备或旧式后台调度，SQLite 写锁、运行态 delta 持久化和真实 Prisma 长链路回归仍是后续收口重点，不能把 route 内 fire-and-forget 当作新增能力接入方式。
 - Step Module / NodeRunner / PolicyEngine 写入合同已覆盖自动导演关键写入面；下一步重点转为真实数据恢复、ledger 真相层、质量闭环和状态驱动 replan。
 - `PolicyEngine` 还不是所有写入动作、覆盖动作和高成本审校动作的硬 gate。
 - Artifact Ledger 仍是 seed payload wrapper 索引，缺独立持久化表、完整生命周期、跨任务依赖演进和可恢复查询能力。
@@ -66,23 +66,42 @@
 
 当前完成度判断：
 
-- 按 MVP 底座衡量：约 `80%` 已完成。
-- 按完整统一运行时衡量：约 `65%-70%` 已完成。
-- 剩余风险不在“是否使用 LangGraph”，而在产物真相是否可恢复、真实数据链路是否稳定、质量闭环是否能局部修复，以及状态驱动 replan 是否真正成为默认判断。
+- 按 MVP 底座衡量：约 `85%` 已完成。
+- 按完整统一运行时衡量：约 `70%` 已完成。
+- 按完整 P0“让新手稳定完成整本小说”产品目标衡量：约 `55%-60%` 已完成。
+- 剩余风险不在“是否使用 LangGraph”，而在执行面二次隔离是否彻底、产物真相是否可恢复、真实数据链路是否稳定、质量闭环是否能局部修复，以及状态驱动 replan 是否真正成为默认判断。
+
+## 2.0.1 2026-04-30 分支阶段总结
+
+当前 `codex/auto-director-runtime-mvp-plan` 分支相对优化前已经完成以下关键升级：
+
+- 从旧自动导演长流程函数推进为统一运行时边界：`DirectorRuntimeService / NodeRunner / PolicyEngine / Step Module / Runtime Projection / DirectorEvent` 已成为主骨架。
+- 从 Web API 直接执行重型链路推进为第一版执行面隔离：`DirectorRunCommand`、独立 `Director Worker`、租约、续租、失败落态和轻量 projection 轮询已落地。
+- 恢复链从“失败后人工猜测”推进为从真实资产断点恢复：服务重启、租约过期、残留 running step、缺失 outline、历史接管任务和上下文丢失继续都已有针对性处理。
+- 任务状态从后台字段推进到用户可解释状态：任务中心、编辑页、小说列表和恢复弹窗开始展示当前阶段、阻塞原因、恢复动作和最近健康阶段。
+- 书级自动化状态投影已落地第一版：自动导演任务、命令、运行事件、自动确认记录和产物概况可以按 `novelId` 聚合为书级驾驶舱，任务中心继续作为执行详情入口。
+- 章节执行交接从“拆章确认态”推进到真实执行态：正文开始生成后，侧栏流程和 checkpoint 会跟随章节执行阶段，避免用户看到“已经写正文但流程仍待拆章”的错位。
+- Artifact Ledger、Prompt Workbench、Context Broker 和 runtime tools 已进入统一运行时，后续可以继续承接产物真相、提示词治理和创作中枢控制。
+
+当前仍不视为完成的内容：
+
+- 执行面隔离仍需二次收口：SQLite WAL / busy timeout、运行态 delta 持久化、可见工作区刷新边界，以及候选确认、标题修复等旧入口 command 化。
+- 真实 Prisma 抽样回归仍需覆盖旧项目接管、服务重启恢复、章节批次恢复、取消后重试、章节执行和状态版本。
+- 章节细化质量门禁已完成第一刀，`purpose / boundary / taskSheet / sceneCards` 会先经过结构校验和 AI 语义可用性评估，坏任务单不得直接进入章节同步或执行链。章节修复策略也已完成 `patch_first` 第一刀，质量闭环 MVP 已能把留存、连续性和滚动窗口状态记录到章节风险标记；Artifact Ledger 查询真相层已能为书级驾驶舱提供 active/stale/protected/dependency/content hash 基础状态；实际 Replan 执行窗口已切到 AI 结构化决策。后续缺口转为补丁失败计数、保护正文 gate、写入事件全覆盖、阶段级模型路由、角色治理状态和新手入口收敛。
 
 ## 2.1 下一轮最高优先级开发队列
 
 以下 14 项作为 `codex/auto-director-runtime-mvp-plan` 分支的下一轮即将开发项目，优先级高于后续扩入口、创作中枢主导编排和 LangGraph 主链化。
 
-1. **执行面隔离与 API 保活**：按专项计划新增命令化入口、独立 Director Worker、轻量 runtime projection 和 API 保活回归；禁止 Web API route 直接执行自动导演重型链路。
+1. **执行面隔离与 API 保活二次收口**：在第一版命令化入口、独立 Director Worker 和轻量 runtime projection 基础上，继续收口 SQLite WAL / busy timeout、运行态 delta 持久化、可见工作区刷新边界，以及候选确认、标题修复等旧入口 command 化；禁止 Web API route 新增直接执行自动导演重型链路。
 2. **规划恢复链稳定**：在 Worker 语义下补齐 `volume_strategy` 幂等重放、持久化卷规划恢复到 `structured_outline` 的真实数据回归；确保已有资产不会被重复生成或跳过。
-3. **真实 Prisma 抽样回归**：覆盖旧项目接管、服务重启手动恢复、失败重试、章节批量执行、候选变更和状态版本，重点验证 `migration -> 章节写入 -> 候选变更 -> 状态版本`。
-4. **Artifact Ledger 真相层**：从 wrapper 索引推进到跨任务可查询、版本生命周期、stale、用户内容保护和局部恢复能力；保持 additive schema，不破坏旧数据。
+3. **真实 Prisma 抽样回归**：只读审计已覆盖旧项目接管、服务重启手动恢复、章节批量执行、候选确认、标题修复失败隔离、retry/resume/continue/cancel 命令、手动改文影响和缺正文账本基线；后续补真实副本 E2E 样本执行记录，重点验证 `migration -> 章节写入 -> 候选变更 -> 状态版本`。
+4. **Artifact Ledger 真相层**：第一刀已完成。书级投影可直接读取持久化账本的 active/stale/protected/dependency/content hash 基础状态，并向 AI 驾驶舱提供按类型汇总和最近产物记录；后续补齐写入事件全覆盖、legacy backfill 审计和局部恢复能力。
 5. **PolicyEngine 硬 gate 深化**：高成本审校、高风险修复、大范围自动执行、覆盖用户内容等场景必须在写入前经过策略判断和审批边界。
-6. **质量产物闭环**：`reader_promise / chapter_retention_contract / continuity_state / rolling_window_review / character_governance_state` 从记录型产物推进为评估、失效、局部修复、再评估闭环。
-7. **Planner / Replan 状态驱动化**：`PlannerService.replan` 的窗口决策、触发理由和章节选择切到 `CanonicalStateService / ContextAssemblyService / ChapterStateGoal`。
-8. **章节任务单质量门禁**：为 `purpose / boundary / taskSheet` 增加 schema + 语义可用性双门禁，拦截坏细化产物进入同步和执行链。
-9. **章节修复策略**：补 `patch_first` 默认策略；动态角色系统进入执行期角色筛选、修复边界和 replan 判断。
+6. **质量产物闭环**：第一刀已完成。`chapter_retention_contract / continuity_state / rolling_window_review` 会在章节审校和批量执行后形成统一评估状态并写入章节风险标记；后续把该状态写入 Ledger 真相层，补齐连续修复失败计数、角色治理状态和自动再评估触发。
+7. **Planner / Replan 状态驱动化**：第一刀已完成。`PlannerService.replan` 的实际执行窗口由 PromptAsset 结构化 AI 决策消费 canonical state、章节目标、审校报告和伏笔账本，确定性代码只做可用章节过滤和窗口上限校验；后续把 Replan 结果写入 Ledger 事件并驱动后续批次自动续跑。
+8. **章节任务单质量门禁**：第一刀已完成。`purpose / boundary / taskSheet / sceneCards` 已有 shared 合同、服务端结构校验、AI 语义可用性评估和同步前阻断；后续把质量结论写入 Ledger 真相层，并接入局部修复闭环。
+9. **章节修复策略**：第一刀已完成。章节自动修复和手动修复入口默认先走 `patch_first` 局部补丁，`heavy_repair` 才进入整章修复；后续补齐连续补丁失败升级、保护正文 gate、修复记录入 Ledger，以及动态角色系统进入执行期角色筛选、修复边界和 replan 判断。
 10. **模型路由细化**：从 `planner / writer / review / repair` 粗粒度推进到小说生产阶段级路由与 fallback。
 11. **卷级工作台消费链**：把 `critique / rebalance / uncertainty / canonical payoff ledger` 接成卷级工作台默认消费链，并让卷级账本视图成为主视图。
 12. **新手入口收敛**：首页、创建页、空状态统一为“AI 自动导演推荐入口 + 手动高级入口”；关键节点只保留一个推荐下一步。

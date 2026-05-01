@@ -26,6 +26,28 @@ test("runVolumeWorkspaceTransaction uses an explicit timeout for large volume wr
   }
 });
 
+test("runVolumeWorkspaceTransaction retries transient sqlite locks", async () => {
+  const originalTransaction = prisma.$transaction;
+  let attempts = 0;
+
+  prisma.$transaction = async (callback, options) => {
+    attempts += 1;
+    if (attempts === 1) {
+      throw new Error("database is locked");
+    }
+    assert.ok(options);
+    return callback({ ok: "recovered" });
+  };
+
+  try {
+    const result = await runVolumeWorkspaceTransaction((tx) => tx.ok);
+    assert.equal(result, "recovered");
+    assert.equal(attempts, 2);
+  } finally {
+    prisma.$transaction = originalTransaction;
+  }
+});
+
 test("persistActiveVolumeWorkspace updates existing planning rows instead of recreating the whole workspace", async () => {
   const {
     persistActiveVolumeWorkspace,

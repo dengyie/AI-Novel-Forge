@@ -1,5 +1,7 @@
 import {
   DIRECTOR_RUN_MODES,
+  isDirectorAutoExecutionRunMode,
+  isFullBookAutopilotRunMode,
   type DirectorConfirmRequest,
   type DirectorContinuationMode,
 } from "@ai-novel/shared/types/novelDirector";
@@ -17,6 +19,7 @@ import { DirectorRecoveryNotNeededError } from "./novelDirectorErrors";
 import {
   buildDirectorSessionState,
   getDirectorInputFromSeedPayload,
+  applyDirectorRunModeContract,
   normalizeDirectorRunMode,
   type DirectorWorkflowSeedPayload,
 } from "./novelDirectorHelpers";
@@ -140,11 +143,18 @@ export class NovelDirectorContinueRuntime {
     const seedPayload = parseSeedPayload<DirectorWorkflowSeedPayload>(row.seedPayloadJson) ?? {};
     const directorInput = getDirectorInputFromSeedPayload(seedPayload);
     const novelId = row.novelId ?? seedPayload.novelId ?? null;
+    const fallbackRunMode = typeof seedPayload.runMode === "string"
+      && (DIRECTOR_RUN_MODES as readonly string[]).includes(seedPayload.runMode)
+      ? seedPayload.runMode as (typeof DIRECTOR_RUN_MODES)[number]
+      : undefined;
+    const storedRunMode = normalizeDirectorRunMode(directorInput?.runMode ?? fallbackRunMode);
     await this.deps.directorRuntime.initializeRun({
       taskId,
       novelId,
       entrypoint: "continue",
-      policyMode: input?.continuationMode ? "auto_safe_scope" : "run_until_gate",
+      policyMode: input?.continuationMode || isFullBookAutopilotRunMode(storedRunMode)
+        ? "auto_safe_scope"
+        : "run_until_gate",
       summary: "自动导演任务从统一运行时继续。",
     });
     await this.deps.directorRuntime.recordRunResumed({
@@ -168,28 +178,23 @@ export class NovelDirectorContinueRuntime {
     if (!directorInput || !novelId) {
       throw new Error("自动导演任务缺少恢复所需上下文。");
     }
-    const fallbackRunMode = typeof seedPayload.runMode === "string"
-      && (DIRECTOR_RUN_MODES as readonly string[]).includes(seedPayload.runMode)
-      ? seedPayload.runMode as (typeof DIRECTOR_RUN_MODES)[number]
-      : undefined;
     const requestedAutoExecutionContinue = (
       input?.continuationMode === "auto_execute_range"
       || input?.continuationMode === "auto_execute_front10"
     );
-    const runMode = requestedAutoExecutionContinue
+    const baseRunMode = normalizeDirectorRunMode(directorInput.runMode ?? fallbackRunMode);
+    const runMode = requestedAutoExecutionContinue && !isDirectorAutoExecutionRunMode(baseRunMode)
       ? "auto_to_execution"
-      : normalizeDirectorRunMode(directorInput.runMode ?? fallbackRunMode);
-    const effectiveDirectorInput = requestedAutoExecutionContinue && normalizeDirectorRunMode(directorInput.runMode) !== "auto_to_execution"
-      ? {
-        ...directorInput,
-        runMode,
-      }
-      : directorInput;
+      : baseRunMode;
+    const effectiveDirectorInput = applyDirectorRunModeContract({
+      ...directorInput,
+      runMode,
+    });
     const assetFirstRecovery = await this.resolveAssetFirstRecovery({
       novelId,
       directorInput: effectiveDirectorInput,
     });
-    const shouldResumeStoredBatchCheckpoint = runMode === "auto_to_execution"
+    const shouldResumeStoredBatchCheckpoint = isDirectorAutoExecutionRunMode(runMode)
       && (row.checkpointType === "chapter_batch_ready" || row.checkpointType === "replan_required");
     const canSkipReviewBlockedChapter = (
       row.status === "failed"
@@ -198,7 +203,8 @@ export class NovelDirectorContinueRuntime {
       input?.continuationMode === "auto_execute_range"
       || input?.continuationMode === "auto_execute_front10"
     );
-    const approveCurrentGate = input?.continuationMode === "resume";
+    const isFullBookAutopilot = isFullBookAutopilotRunMode(runMode);
+    const approveCurrentGate = input?.continuationMode === "resume" || isFullBookAutopilot;
     const approveAutoExecutionGate = approveCurrentGate || requestedAutoExecutionContinue;
     if (
       assetFirstRecovery?.type === "auto_execution"
@@ -251,7 +257,7 @@ export class NovelDirectorContinueRuntime {
           previousFailureMessage: row.lastError ?? null,
           allowSkipReviewBlockedChapter: canSkipReviewBlockedChapter,
           approveCurrentGate: approveAutoExecutionGate,
-          approveAutoExecutionScope: requestedAutoExecutionContinue,
+          approveAutoExecutionScope: requestedAutoExecutionContinue || isFullBookAutopilot,
         });
       });
       return;
@@ -321,6 +327,7 @@ export class NovelDirectorContinueRuntime {
         }),
         batchAlreadyStartedCount: input?.batchAlreadyStartedCount,
         approveCurrentGate,
+        approveAutoExecutionScope: isFullBookAutopilot,
       });
     });
   }

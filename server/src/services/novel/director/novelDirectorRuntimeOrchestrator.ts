@@ -114,6 +114,7 @@ export class NovelDirectorRuntimeOrchestrator {
     approveAutoExecutionScope?: boolean;
     targetType?: DirectorArtifactRef["targetType"] | null;
     targetId?: string | null;
+    reuseCompletedStep?: boolean;
     waitingState?: {
       stage: NovelWorkflowStage;
       itemKey?: string | null;
@@ -172,6 +173,7 @@ export class NovelDirectorRuntimeOrchestrator {
         targetId: input.targetId ?? null,
         payload: undefined,
         policy,
+        reuseCompletedStep: input.reuseCompletedStep,
       },
       (output) => output.artifacts,
     );
@@ -201,6 +203,7 @@ export class NovelDirectorRuntimeOrchestrator {
     targetId?: string | null;
     approveCurrentGate?: boolean;
     approveAutoExecutionScope?: boolean;
+    reuseCompletedStep?: boolean;
     runner: () => Promise<T>;
     collectArtifacts?: (output: T) => Promise<DirectorArtifactRef[]> | DirectorArtifactRef[];
   }): Promise<T> {
@@ -215,6 +218,7 @@ export class NovelDirectorRuntimeOrchestrator {
       supportsAutoRetry: input.module.supportsAutoRetry,
       approveCurrentGate: input.approveCurrentGate,
       approveAutoExecutionScope: input.approveAutoExecutionScope,
+      reuseCompletedStep: input.reuseCompletedStep,
       targetType: input.targetType ?? input.module.targetType,
       targetId: input.targetId,
       waitingState: input.module.defaultWaitingState,
@@ -256,6 +260,7 @@ export class NovelDirectorRuntimeOrchestrator {
       targetId: input.novelId,
       approveCurrentGate: input.approveCurrentGate,
       approveAutoExecutionScope: input.approveAutoExecutionScope,
+      reuseCompletedStep: false,
       runner: () => this.deps.autoExecutionRuntime.runFromReady(input),
     });
 

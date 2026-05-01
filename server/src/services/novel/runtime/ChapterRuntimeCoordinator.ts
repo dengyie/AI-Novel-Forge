@@ -35,7 +35,7 @@ interface AgentRuntimeLike {
 interface ChapterRuntimeCoordinatorDeps {
   assembler?: Pick<GenerationContextAssembler, "assemble">;
   chapterWritingGraph?: Pick<ChapterWritingGraph, "createChapterStream">;
-  artifactSyncService?: Pick<ChapterArtifactSyncService, "saveDraftAndArtifacts">;
+  artifactSyncService?: Pick<ChapterArtifactSyncService, "saveDraftAndArtifacts" | "syncChapterArtifacts">;
   auditService?: Pick<typeof auditService, "auditChapter" | "assessChapterAuditNeed">;
   plannerService?: Pick<typeof plannerService, "buildReplanRecommendation" | "shouldTriggerReplanFromAudit">;
   styleDetectionService?: Pick<StyleDetectionService, "check">;
@@ -268,10 +268,27 @@ export class ChapterRuntimeCoordinator {
         ensureNovelCharacters: this.deps.ensureNovelCharacters,
         assemble: async () => assembled as AssembledRuntimeChapter,
         generateDraftFromWriter: (input) => this.generateDraftFromWriter(input),
-        saveDraftAndArtifacts: (targetNovelId, targetChapterId, content, generationState) =>
-          this.deps.artifactSyncService.saveDraftAndArtifacts(targetNovelId, targetChapterId, content, generationState),
+        saveDraftAndArtifacts: (targetNovelId, targetChapterId, content, generationState, options) =>
+          this.deps.artifactSyncService.saveDraftAndArtifacts(
+            targetNovelId,
+            targetChapterId,
+            content,
+            generationState,
+            options,
+          ),
+        syncFinalChapterArtifacts: (targetNovelId, targetChapterId, content) =>
+          this.deps.artifactSyncService.syncChapterArtifacts(
+            targetNovelId,
+            targetChapterId,
+            content,
+            { scheduleBackgroundSync: true },
+          ),
         finalizeChapterContent: async (input) => {
-          const finalized = await this.finalizeChapterContent(input);
+          const finalized = await this.finalizeChapterContent({
+            ...input,
+            deferArtifactBackgroundSync: true,
+            scheduleDeferredArtifactBackgroundSync: false,
+          });
           return {
             finalContent: finalized.finalContent,
             runtimePackage: finalized.runtimePackage,
@@ -279,6 +296,8 @@ export class ChapterRuntimeCoordinator {
         },
         markChapterGenerationState: (targetChapterId, generationState) =>
           this.markChapterGenerationState(targetChapterId, generationState),
+        markChapterNeedsRepair: (targetChapterId) =>
+          this.markChapterStatus(targetChapterId, "needs_repair"),
       },
       novelId,
       chapterId,
@@ -331,13 +350,17 @@ export class ChapterRuntimeCoordinator {
     content: string;
     lengthControl?: ChapterRuntimePackage["lengthControl"];
     artifactsAlreadySynced?: boolean;
+    backgroundSyncDeferred?: boolean;
   }> {
     const writerResult = await this.deps.chapterWritingGraph.createChapterStream({
       novelId: input.novelId,
       novelTitle: input.assembled.novel.title,
       chapter: input.assembled.chapter,
       contextPackage: input.assembled.contextPackage,
-      options: input.request,
+      options: {
+        ...input.request,
+        deferArtifactBackgroundSync: true,
+      },
     });
 
     let fullContent = "";
@@ -349,6 +372,7 @@ export class ChapterRuntimeCoordinator {
       content: normalized?.finalContent ?? fullContent,
       lengthControl: normalized?.lengthControl,
       artifactsAlreadySynced: Boolean(normalized?.artifactsAlreadySynced),
+      backgroundSyncDeferred: Boolean(normalized?.backgroundSyncDeferred),
     };
   }
 
@@ -361,6 +385,8 @@ export class ChapterRuntimeCoordinator {
     lengthControl?: ChapterRuntimePackage["lengthControl"];
     runId: string | null;
     startMs: number | null;
+    deferArtifactBackgroundSync?: boolean;
+    scheduleDeferredArtifactBackgroundSync?: boolean;
   }): Promise<FinalizeChapterContentResult> {
     const styleReview = await this.runStyleReview({
       novelId: input.novelId,
@@ -376,6 +402,7 @@ export class ChapterRuntimeCoordinator {
         input.chapterId,
         styleReview.finalContent,
         "repaired",
+        { scheduleBackgroundSync: !input.deferArtifactBackgroundSync },
       );
     }
 
@@ -399,6 +426,7 @@ export class ChapterRuntimeCoordinator {
         content: styleReview.finalContent,
         contextPackage: input.contextPackage,
         lengthControl: input.lengthControl,
+        skipPayoffLedgerSync: true,
       })
       : {
         score: lightAssessment.score,
@@ -426,6 +454,15 @@ export class ChapterRuntimeCoordinator {
       input.chapterId,
       runtimePackage.audit.hasBlockingIssues ? "needs_repair" : "pending_review",
     );
+
+    if (input.deferArtifactBackgroundSync && input.scheduleDeferredArtifactBackgroundSync !== false) {
+      await this.deps.artifactSyncService.syncChapterArtifacts(
+        input.novelId,
+        input.chapterId,
+        styleReview.finalContent,
+        { scheduleBackgroundSync: true },
+      );
+    }
 
     await this.finishTraceRun(input.runId, styleReview.finalContent.length, input.startMs);
 

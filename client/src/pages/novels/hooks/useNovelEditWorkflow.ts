@@ -14,6 +14,7 @@ export function useNovelEditWorkflow(novelId: string) {
 
   const { directorTaskId, workspaceTaskId: workflowTaskId } = readNovelEditWorkflowTaskIds(searchParams);
   const selectedVolumeId = searchParams.get("volumeId") ?? "";
+  const taskPanelOpen = searchParams.get("taskPanel") === "1";
 
   const bootstrapMutation = useMutation({
     mutationFn: () => bootstrapNovelWorkflow({
@@ -95,6 +96,14 @@ export function useNovelEditWorkflow(novelId: string) {
     }, { replace: true });
   }, [setSearchParams]);
 
+  const clearTaskPanelOpen = useCallback(() => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.delete("taskPanel");
+      return next;
+    }, { replace: true });
+  }, [setSearchParams]);
+
   return {
     activeTab,
     setActiveTab,
@@ -105,5 +114,7 @@ export function useNovelEditWorkflow(novelId: string) {
     selectedVolumeId,
     setSelectedVolumeId,
     workflowTaskId,
+    taskPanelOpen,
+    clearTaskPanelOpen,
   };
 }

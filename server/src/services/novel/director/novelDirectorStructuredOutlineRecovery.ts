@@ -4,7 +4,7 @@ import type {
   VolumePlan,
   VolumePlanDocument,
 } from "@ai-novel/shared/types/novel";
-import { parseChapterScenePlan } from "@ai-novel/shared/types/chapterLengthControl";
+import { assessChapterExecutionContractShape } from "@ai-novel/shared/types/chapterTaskSheetQuality";
 import type { DirectorAutoExecutionPlan } from "@ai-novel/shared/types/novelDirector";
 import {
   buildDirectorAutoExecutionScopeLabel,
@@ -75,18 +75,25 @@ export function hasPreparedOutlineChapterExecutionDetail(
   if (!chapter) {
     return false;
   }
-  if (!chapter.purpose?.trim()) {
-    return false;
-  }
-  if (typeof chapter.conflictLevel !== "number" || typeof chapter.revealLevel !== "number" || typeof chapter.targetWordCount !== "number") {
-    return false;
-  }
-  if (!chapter.mustAvoid?.trim() || !chapter.taskSheet?.trim()) {
-    return false;
-  }
-  return Boolean(parseChapterScenePlan(chapter.sceneCards, {
+  return assessChapterExecutionContractShape({
+    novelId: "workspace",
+    volumeId: chapter.volumeId,
+    chapterId: chapter.id,
+    chapterOrder: chapter.chapterOrder,
+    title: chapter.title,
+    summary: chapter.summary,
+    purpose: chapter.purpose,
+    exclusiveEvent: chapter.exclusiveEvent,
+    endingState: chapter.endingState,
+    nextChapterEntryState: chapter.nextChapterEntryState,
+    conflictLevel: chapter.conflictLevel,
+    revealLevel: chapter.revealLevel,
     targetWordCount: chapter.targetWordCount,
-  }));
+    mustAvoid: chapter.mustAvoid,
+    payoffRefs: chapter.payoffRefs,
+    taskSheet: chapter.taskSheet,
+    sceneCards: chapter.sceneCards,
+  }).canEnterExecution;
 }
 
 function hasPreparedOutlineChapterDetailMode(

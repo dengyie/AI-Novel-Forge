@@ -1,5 +1,6 @@
 import type { LLMProvider } from "./llm";
 import type { NovelWorkflowStage } from "./novelWorkflow";
+import type { DirectorCircuitBreakerState } from "./novelDirector";
 
 export const DIRECTOR_POLICY_MODES = [
   "suggest_only",
@@ -91,6 +92,147 @@ export interface DirectorStepRun {
   policyDecision?: DirectorPolicyDecision | null;
 }
 
+export type DirectorUsageAttributionStatus =
+  | "step_attributed"
+  | "task_only"
+  | "unattributed";
+
+export interface DirectorLlmUsageSummary {
+  llmCallCount: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  durationMs?: number | null;
+  lastRecordedAt?: string | null;
+}
+
+export interface DirectorLlmUsageRecordSummary extends DirectorLlmUsageSummary {
+  id: string;
+  novelId?: string | null;
+  taskId?: string | null;
+  runId?: string | null;
+  stepIdempotencyKey?: string | null;
+  nodeKey?: string | null;
+  promptAssetKey?: string | null;
+  promptVersion?: string | null;
+  modelRoute?: string | null;
+  provider?: string | null;
+  model?: string | null;
+  status: string;
+  attributionStatus: DirectorUsageAttributionStatus | string;
+  recordedAt: string;
+}
+
+export interface DirectorStepUsageSummary extends DirectorLlmUsageSummary {
+  stepIdempotencyKey: string;
+  nodeKey: string;
+  label?: string | null;
+  status?: DirectorStepRunStatus | string | null;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  attributionStatus: DirectorUsageAttributionStatus | string;
+}
+
+export interface DirectorPromptUsageSummary extends DirectorLlmUsageSummary {
+  promptAssetKey: string;
+  promptVersion?: string | null;
+  nodeKey?: string | null;
+  stepIdempotencyKey?: string | null;
+  label?: string | null;
+  attributionStatus: DirectorUsageAttributionStatus | string;
+}
+
+const DIRECTOR_NODE_DISPLAY_LABELS: Record<string, string> = {
+  candidate_generation: "生成书级方向",
+  candidate_refine: "细化书级方向",
+  candidate_patch: "修正书级方向",
+  candidate_title_refine: "优化书名",
+  novel_create: "创建小说项目",
+  takeover_execution: "接管已有项目",
+  story_macro: "故事宏观规划",
+  story_macro_phase: "故事宏观规划",
+  book_contract: "书级创作约定",
+  book_contract_phase: "书级创作约定",
+  character_setup: "角色阵容准备",
+  character_setup_phase: "角色阵容准备",
+  volume_strategy: "分卷策略",
+  volume_strategy_phase: "分卷策略",
+  "volume_strategy.volume_generation": "生成分卷策略",
+  structured_outline: "拆章与任务单",
+  structured_outline_phase: "拆章与任务单",
+  "structured_outline.beat_sheet": "生成节奏板",
+  "structured_outline.chapter_list": "生成章节列表",
+  "structured_outline.chapter_detail_bundle": "准备章节任务单",
+  "structured_outline.chapter_sync": "同步章节执行资源",
+  "book.candidate.generate": "生成书级方向",
+  "book.candidate.refine": "细化书级方向",
+  "book.candidate.patch": "修正书级方向",
+  "book.candidate.title_refine": "优化书名",
+  "book.project.create": "创建小说项目",
+  "workflow.takeover.execute": "接管已有项目",
+  "story.macro.plan": "故事宏观规划",
+  "book.contract.create": "书级创作约定",
+  "character.cast.prepare": "角色阵容准备",
+  "volume.strategy.plan": "分卷策略",
+  "chapter.task_sheet.plan": "拆章与任务单",
+  chapter_execution: "章节执行流程",
+  chapter_execution_node: "章节执行流程",
+  chapter_quality_review: "章节质量检查",
+  chapter_quality_review_node: "章节质量检查",
+  chapter_repair: "章节问题修复",
+  chapter_repair_node: "章节问题修复",
+  quality_repair: "章节质量修复",
+  chapter_state_commit: "更新章节状态",
+  chapter_state_commit_node: "更新章节状态",
+  payoff_ledger_sync: "同步伏笔与读者承诺",
+  payoff_ledger_sync_node: "同步伏笔与读者承诺",
+  character_resource_sync: "同步角色状态",
+  character_resource_sync_node: "同步角色状态",
+  "chapter.draft.write": "章节正文生成",
+  "planner.chapter.plan": "章节规划",
+  "novel.chapter.writer": "章节正文生成",
+  "audit.chapter.light": "基础质量检查",
+  "audit.chapter.full": "完整质量检查",
+  "novel.review.patch": "局部文本修复",
+  "style.detection": "风格检查",
+  "style.rewrite": "风格调整",
+  "novel.payoff_ledger.sync": "伏笔与读者承诺同步",
+  "novel.characterDynamics.chapterExtract": "角色动态同步",
+  "novel.character_resource.extract_updates": "角色资源同步",
+  "state.snapshot.extract": "章节状态同步",
+  "chapter.quality.review": "章节质量检查",
+  "chapter.draft.repair": "章节问题修复",
+  "chapter.state.commit": "更新章节状态",
+  "payoff.ledger.sync": "同步伏笔与读者承诺",
+  "character.resource.sync": "同步角色状态",
+  "planner.replan": "调整后续章节规划",
+};
+
+function looksLikeDirectorInternalKey(value: string): boolean {
+  return /^[a-z][a-z0-9]*(?:[._:][a-z0-9]+)+$/.test(value);
+}
+
+export function getDirectorNodeDisplayLabel(input: {
+  label?: string | null;
+  nodeKey?: string | null;
+  fallback?: string;
+}): string {
+  const label = input.label?.trim() ?? "";
+  const nodeKey = input.nodeKey?.trim() ?? "";
+  const mappedLabel = label ? DIRECTOR_NODE_DISPLAY_LABELS[label] : null;
+  if (mappedLabel) {
+    return mappedLabel;
+  }
+  const mappedNode = nodeKey ? DIRECTOR_NODE_DISPLAY_LABELS[nodeKey] : null;
+  if (mappedNode) {
+    return mappedNode;
+  }
+  if (label && !looksLikeDirectorInternalKey(label)) {
+    return label;
+  }
+  return input.fallback ?? "AI 推进步骤";
+}
+
 export type DirectorEventType =
   | "run_started"
   | "run_resumed"
@@ -103,7 +245,11 @@ export type DirectorEventType =
   | "policy_changed"
   | "approval_required"
   | "quality_issue_found"
+  | "quality_loop_assessed"
   | "repair_ticket_created"
+  | "replan_run_created"
+  | "circuit_breaker_opened"
+  | "circuit_breaker_reset"
   | "continue_with_risk";
 
 export interface DirectorEvent {
@@ -187,6 +333,7 @@ export interface DirectorRuntimeProjectionEvent {
   artifactType?: DirectorArtifactType | null;
   severity?: DirectorEvent["severity"];
   occurredAt: string;
+  usage?: DirectorLlmUsageSummary | null;
 }
 
 export interface DirectorRuntimeProjection {
@@ -206,6 +353,193 @@ export interface DirectorRuntimeProjection {
   policyMode: DirectorPolicyMode;
   updatedAt: string;
   recentEvents: DirectorRuntimeProjectionEvent[];
+  usageSummary?: DirectorLlmUsageSummary | null;
+  recentUsage?: DirectorLlmUsageRecordSummary[];
+  stepUsage?: DirectorStepUsageSummary[];
+  promptUsage?: DirectorPromptUsageSummary[];
+  circuitBreaker?: DirectorCircuitBreakerState | null;
+}
+
+export interface DirectorRuntimeEventHistoryResponse {
+  events: DirectorRuntimeProjectionEvent[];
+  totalCount: number;
+  limit: number;
+}
+
+export type DirectorBookAutomationStatus =
+  | "idle"
+  | "queued"
+  | "running"
+  | "waiting_approval"
+  | "waiting_recovery"
+  | "blocked"
+  | "failed"
+  | "cancelled"
+  | "completed";
+
+export type DirectorBookAutomationDisplayState =
+  | "processing"
+  | "needs_confirmation"
+  | "paused"
+  | "needs_attention"
+  | "completed"
+  | "idle";
+
+export type DirectorBookAutomationActionType =
+  | "open_novel"
+  | "open_details"
+  | "continue"
+  | "auto_execute_range"
+  | "confirm_candidate"
+  | "open_chapter"
+  | "open_quality_repair"
+  | "retry"
+  | "cancel";
+
+export interface DirectorBookAutomationActionTarget {
+  novelId?: string | null;
+  taskId?: string | null;
+  chapterId?: string | null;
+  tab?: "basic" | "story_macro" | "outline" | "structured" | "chapter" | "pipeline" | "character" | "history" | null;
+  href?: string | null;
+}
+
+export interface DirectorBookAutomationAction {
+  type: DirectorBookAutomationActionType;
+  label: string;
+  target: DirectorBookAutomationActionTarget;
+  commandPayload?: {
+    taskId?: string | null;
+    continuationMode?: "resume" | "auto_execute_range" | "auto_execute_front10" | null;
+  } | null;
+  emphasis?: "primary" | "secondary" | "destructive";
+}
+
+export interface DirectorBookAutomationFocusNovel {
+  id: string;
+  title: string;
+  href: string;
+}
+
+export type DirectorBookAutomationTimelineItemType =
+  | "task"
+  | "command"
+  | "step"
+  | "event"
+  | "approval"
+  | "usage";
+
+export interface DirectorBookAutomationTimelineItem {
+  id: string;
+  type: DirectorBookAutomationTimelineItemType;
+  title: string;
+  detail?: string | null;
+  status?: string | null;
+  taskId?: string | null;
+  runId?: string | null;
+  nodeKey?: string | null;
+  commandType?: DirectorRunCommandType | string | null;
+  artifactType?: DirectorArtifactType | string | null;
+  severity?: DirectorEvent["severity"];
+  durationMs?: number | null;
+  usage?: DirectorLlmUsageSummary | null;
+  attributionStatus?: DirectorUsageAttributionStatus | string | null;
+  occurredAt: string;
+}
+
+export interface DirectorBookAutomationTaskSummary {
+  id: string;
+  title: string;
+  status: string;
+  progress: number;
+  currentStage?: string | null;
+  currentItemKey?: string | null;
+  currentItemLabel?: string | null;
+  checkpointType?: string | null;
+  checkpointSummary?: string | null;
+  pendingManualRecovery: boolean;
+  lastError?: string | null;
+  updatedAt: string;
+}
+
+export interface DirectorBookAutomationArtifactSummary {
+  activeCount: number;
+  staleCount: number;
+  protectedUserContentCount: number;
+  repairTicketCount: number;
+  dependencyCount?: number;
+  affectedChapterCount?: number;
+  affectedChapterIds?: string[];
+  byType?: DirectorBookAutomationArtifactTypeSummary[];
+  recentArtifacts?: DirectorBookAutomationRecentArtifact[];
+  recentStaleArtifacts?: DirectorBookAutomationRecentArtifact[];
+  recentRepairArtifacts?: DirectorBookAutomationRecentArtifact[];
+  recentVersionedArtifacts?: DirectorBookAutomationRecentArtifact[];
+}
+
+export interface DirectorBookAutomationArtifactTypeSummary {
+  artifactType: DirectorArtifactType | string;
+  totalCount: number;
+  activeCount: number;
+  staleCount: number;
+  protectedUserContentCount: number;
+  dependencyCount: number;
+  latestUpdatedAt?: string | null;
+}
+
+export interface DirectorBookAutomationRecentArtifact {
+  id: string;
+  artifactType: DirectorArtifactType | string;
+  targetType: DirectorArtifactTargetType | string;
+  targetId?: string | null;
+  status: DirectorArtifactStatus | string;
+  source?: DirectorArtifactSource | string | null;
+  version?: number | null;
+  protectedUserContent?: boolean | null;
+  dependencyCount: number;
+  contentHash?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface DirectorBookAutomationProjection {
+  novelId: string;
+  focusNovel: DirectorBookAutomationFocusNovel;
+  latestTask?: DirectorBookAutomationTaskSummary | null;
+  latestRunId?: string | null;
+  status: DirectorBookAutomationStatus;
+  displayState: DirectorBookAutomationDisplayState;
+  runMode?: string | null;
+  policyMode?: DirectorPolicyMode | null;
+  headline: string;
+  userHeadline: string;
+  detail?: string | null;
+  userReason?: string | null;
+  currentStage?: string | null;
+  currentLabel?: string | null;
+  requiresUserAction: boolean;
+  blockedReason?: string | null;
+  nextActionLabel?: string | null;
+  primaryAction?: DirectorBookAutomationAction | null;
+  secondaryActions?: DirectorBookAutomationAction[];
+  automationSummary?: string | null;
+  progressSummary?: string | null;
+  artifactSummary: DirectorBookAutomationArtifactSummary;
+  usageSummary?: DirectorLlmUsageSummary | null;
+  recentUsage?: DirectorLlmUsageRecordSummary[];
+  stepUsage?: DirectorStepUsageSummary[];
+  promptUsage?: DirectorPromptUsageSummary[];
+  circuitBreaker?: DirectorCircuitBreakerState | null;
+  activeCommandCount: number;
+  pendingCommandCount: number;
+  autoApprovalRecordCount: number;
+  latestEventAt?: string | null;
+  updatedAt: string;
+  runtimeProjection?: DirectorRuntimeProjection | null;
+  timeline: DirectorBookAutomationTimelineItem[];
+}
+
+export interface DirectorBookAutomationProjectionResponse {
+  projection: DirectorBookAutomationProjection;
 }
 
 export interface DirectorRuntimeSnapshotResponse {
@@ -214,6 +548,7 @@ export interface DirectorRuntimeSnapshotResponse {
 }
 
 export const DIRECTOR_RUN_COMMAND_TYPES = [
+  "confirm_candidate",
   "continue",
   "resume_from_checkpoint",
   "retry",

@@ -312,6 +312,14 @@ export default function NovelAutoDirectorSetupPanel(props: NovelAutoDirectorSetu
                 />
               </>
             ) : null}
+            {runMode === "full_book_autopilot" ? (
+              <div className={`mt-3 rounded-md border border-primary/15 bg-primary/5 p-3 text-xs leading-5 text-muted-foreground ${AUTO_DIRECTOR_MOBILE_CLASSES.wrapText}`}>
+                <div className="text-sm font-medium text-foreground">全书自动成书</div>
+                <div className="mt-1">
+                  系统会以整本书为目标完成规划、拆章、正文生成、审校和修复。只有模型不可用、服务异常、正文保护或不可恢复风险会停下。
+                </div>
+              </div>
+            ) : null}
           </section>
 
           <div className={AUTO_DIRECTOR_MOBILE_CLASSES.actionRow}>

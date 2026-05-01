@@ -33,6 +33,7 @@ export interface ChapterGraphLLMOptions {
 
 export interface ChapterGraphGenerateOptions extends ChapterGraphLLMOptions {
   previousChaptersSummary?: string[];
+  deferArtifactBackgroundSync?: boolean;
 }
 
 interface ChapterRef {
@@ -59,6 +60,7 @@ interface ChapterGraphDeps {
     chapterId: string,
     content: string,
     generationState: "drafted" | "repaired",
+    options?: { scheduleBackgroundSync?: boolean },
   ) => Promise<void>;
   logInfo: (message: string, meta?: Record<string, unknown>) => void;
   logWarn: (message: string, meta?: Record<string, unknown>) => void;
@@ -456,6 +458,7 @@ export class ChapterWritingGraph {
       finalContent: string;
       lengthControl?: ChapterRuntimePackage["lengthControl"];
       artifactsAlreadySynced?: boolean;
+      backgroundSyncDeferred?: boolean;
     } | void>;
   }> {
     const continuationPack = (input.contextPackage?.continuation as ContinuationPack | undefined)
@@ -540,8 +543,13 @@ export class ChapterWritingGraph {
           input.chapter.id,
           lengthAdjusted,
           "drafted",
+          { scheduleBackgroundSync: !input.options.deferArtifactBackgroundSync },
         );
-        return { finalContent: lengthAdjusted, artifactsAlreadySynced: true };
+        return {
+          finalContent: lengthAdjusted,
+          artifactsAlreadySynced: true,
+          backgroundSyncDeferred: Boolean(input.options.deferArtifactBackgroundSync),
+        };
       },
     };
   }

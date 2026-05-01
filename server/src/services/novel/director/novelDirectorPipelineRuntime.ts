@@ -1,6 +1,10 @@
 import type { CharacterCastOption, VolumePlanDocument } from "@ai-novel/shared/types/novel";
 import type { DirectorConfirmRequest } from "@ai-novel/shared/types/novelDirector";
 import {
+  isDirectorAutoExecutionRunMode,
+  isFullBookAutopilotRunMode,
+} from "@ai-novel/shared/types/novelDirector";
+import {
   normalizeDirectorAutoApprovalConfig,
   shouldAutoApproveDirectorCheckpoint,
 } from "@ai-novel/shared/types/autoDirectorApproval";
@@ -40,6 +44,7 @@ export interface DirectorPipelineRunInput {
   scope?: string | null;
   batchAlreadyStartedCount?: number;
   approveCurrentGate?: boolean;
+  approveAutoExecutionScope?: boolean;
 }
 
 export class NovelDirectorPipelineRuntime {
@@ -74,6 +79,7 @@ export class NovelDirectorPipelineRuntime {
       novelId: input.novelId,
       requestedPhase: input.startPhase,
     });
+    const approval = this.resolveRuntimeApproval(input);
 
     if (safeStartPhase === "story_macro") {
       const module = getDirectorPlanningStepModule("story_macro");
@@ -82,7 +88,8 @@ export class NovelDirectorPipelineRuntime {
         taskId: input.taskId,
         novelId: input.novelId,
         targetId: input.novelId,
-        approveCurrentGate: input.approveCurrentGate,
+        approveCurrentGate: approval.approveCurrentGate,
+        approveAutoExecutionScope: approval.approveAutoExecutionScope,
         runner: () => this.runStoryMacroPhase(input.taskId, input.novelId, input.input),
       });
     }
@@ -94,7 +101,8 @@ export class NovelDirectorPipelineRuntime {
         taskId: input.taskId,
         novelId: input.novelId,
         targetId: input.novelId,
-        approveCurrentGate: input.approveCurrentGate,
+        approveCurrentGate: approval.approveCurrentGate,
+        approveAutoExecutionScope: approval.approveAutoExecutionScope,
         runner: () => this.runBookContractPhase(input.taskId, input.novelId, input.input),
       });
     }
@@ -110,7 +118,8 @@ export class NovelDirectorPipelineRuntime {
         taskId: input.taskId,
         novelId: input.novelId,
         targetId: input.novelId,
-        approveCurrentGate: input.approveCurrentGate,
+        approveCurrentGate: approval.approveCurrentGate,
+        approveAutoExecutionScope: approval.approveAutoExecutionScope,
         runner: () => this.runCharacterSetupPhase(input.taskId, input.novelId, input.input),
       });
       if (paused) {
@@ -138,7 +147,8 @@ export class NovelDirectorPipelineRuntime {
       taskId: input.taskId,
       novelId: input.novelId,
       targetId: input.novelId,
-      approveCurrentGate: input.approveCurrentGate,
+      approveCurrentGate: this.resolveRuntimeApproval(input).approveCurrentGate,
+      approveAutoExecutionScope: this.resolveRuntimeApproval(input).approveAutoExecutionScope,
       runner: () => this.runVolumeStrategyPhase(input.taskId, input.novelId, input.input),
     });
     if (volumeStepOutput === null) {
@@ -188,7 +198,8 @@ export class NovelDirectorPipelineRuntime {
       taskId: input.taskId,
       novelId: input.novelId,
       targetId: input.novelId,
-      approveCurrentGate: input.approveCurrentGate,
+      approveCurrentGate: this.resolveRuntimeApproval(input).approveCurrentGate,
+      approveAutoExecutionScope: this.resolveRuntimeApproval(input).approveAutoExecutionScope,
       runner: () => this.runStructuredOutlinePhase(input.taskId, input.novelId, input.input, workspace),
     });
   }
@@ -214,7 +225,8 @@ export class NovelDirectorPipelineRuntime {
       novelId: input.novelId,
       request: input.input,
       resumeCheckpointType: "front10_ready",
-      approveCurrentGate: input.approveCurrentGate,
+      approveCurrentGate: this.resolveRuntimeApproval(input).approveCurrentGate,
+      approveAutoExecutionScope: this.resolveRuntimeApproval(input).approveAutoExecutionScope,
     });
   }
 
@@ -253,7 +265,18 @@ export class NovelDirectorPipelineRuntime {
         checkpointType,
       );
     }
-    return checkpointType === "front10_ready" && normalizeDirectorRunMode(input.runMode) === "auto_to_execution";
+    return checkpointType === "front10_ready" && isDirectorAutoExecutionRunMode(normalizeDirectorRunMode(input.runMode));
+  }
+
+  private resolveRuntimeApproval(input: DirectorPipelineRunInput): {
+    approveCurrentGate: boolean;
+    approveAutoExecutionScope: boolean;
+  } {
+    const isFullBookAutopilot = isFullBookAutopilotRunMode(normalizeDirectorRunMode(input.input.runMode));
+    return {
+      approveCurrentGate: Boolean(input.approveCurrentGate || isFullBookAutopilot),
+      approveAutoExecutionScope: Boolean(input.approveAutoExecutionScope || isFullBookAutopilot),
+    };
   }
 
   private async runStoryMacroPhase(

@@ -1,8 +1,9 @@
-import type {
+﻿import type {
   DirectorAutoExecutionState,
   DirectorConfirmRequest,
   DirectorQualityRepairRisk,
 } from "@ai-novel/shared/types/novelDirector";
+import { isFullBookAutopilotRunMode } from "@ai-novel/shared/types/novelDirector";
 import type { NovelControlPolicy } from "@ai-novel/shared/types/canonicalState";
 import type { PipelineJobStatus, VolumePlanDocument } from "@ai-novel/shared/types/novel";
 import type { NovelWorkflowCheckpoint } from "@ai-novel/shared/types/novelWorkflow";
@@ -28,6 +29,20 @@ import {
   resolveAutoExecutionRangeAndState,
 } from "./novelDirectorAutoExecutionScopeRuntime";
 import { isSkippableAutoExecutionReviewFailure } from "./novelDirectorAutoExecutionFailure";
+import {
+  buildFailureCircuitBreaker,
+  isDirectorCircuitBreakerOpen,
+  resolveUsageCircuitBreaker,
+  runFullBookAutopilotReplanNotice,
+  stopAutoExecutionForCircuitBreaker,
+  withCircuitBreakerState,
+} from "./novelDirectorAutoExecutionCircuitBreakerRuntime";
+import {
+  isNoChaptersToGenerateError,
+  resolveSingleChapterExecutionRange,
+  shouldClearAutoExecutionCheckpoint,
+} from "./novelDirectorAutoExecutionRuntimeUtils";
+import { directorAutomationLedgerEventService } from "./runtime/DirectorAutomationLedgerEventService";
 
 interface NovelDirectorAutoExecutionWorkflowPort {
   bootstrapTask(input: {
@@ -103,6 +118,8 @@ interface NovelDirectorAutoExecutionNovelPort {
   cancelPipelineJob(jobId: string): Promise<unknown>;
 }
 
+type PipelineJobSnapshot = Awaited<ReturnType<NovelDirectorAutoExecutionNovelPort["getPipelineJobById"]>>;
+
 interface NovelDirectorAutoExecutionVolumeWorkspacePort {
   getVolumes(novelId: string): Promise<VolumePlanDocument>;
 }
@@ -131,35 +148,16 @@ interface NovelDirectorAutoExecutionRuntimeDeps {
     qualityRepairRisk: DirectorQualityRepairRisk;
     checkpointSummary?: string | null;
   }) => Promise<unknown>;
-}
-
-function isNoChaptersToGenerateError(error: unknown): boolean {
-  return error instanceof Error && error.message.includes("指定区间内没有可生成的章节");
-}
-
-function shouldClearAutoExecutionCheckpoint(checkpointType?: "front10_ready" | "chapter_batch_ready" | "replan_required" | null): boolean {
-  return checkpointType === "front10_ready"
-    || checkpointType === "chapter_batch_ready"
-    || checkpointType === "replan_required";
-}
-
-function resolveNextChapterExecutionOrder(
-  range: DirectorAutoExecutionRange,
-  autoExecution: DirectorAutoExecutionState,
-): number {
-  const nextOrder = autoExecution.nextChapterOrder ?? range.startOrder;
-  return Math.max(range.startOrder, Math.min(nextOrder, range.endOrder));
-}
-
-function resolveSingleChapterExecutionRange(
-  range: DirectorAutoExecutionRange,
-  autoExecution: DirectorAutoExecutionState,
-): { startOrder: number; endOrder: number } {
-  const order = resolveNextChapterExecutionOrder(range, autoExecution);
-  return {
-    startOrder: order,
-    endOrder: order,
-  };
+  replanNovel?: (novelId: string, input: {
+    chapterId?: string;
+    triggerType?: string;
+    reason: string;
+    sourceIssueIds?: string[];
+    windowSize?: number;
+    provider?: DirectorConfirmRequest["provider"];
+    model?: string;
+    temperature?: number;
+  }) => Promise<unknown>;
 }
 
 export class NovelDirectorAutoExecutionRuntime {
@@ -260,6 +258,36 @@ export class NovelDirectorAutoExecutionRuntime {
       previousFailureMessage: input.previousFailureMessage,
       allowSkipReviewBlockedChapter: input.allowSkipReviewBlockedChapter,
     });
+    let knownPipelineJob: PipelineJobSnapshot = null;
+    if (pipelineJobId) {
+      knownPipelineJob = await this.deps.novelService.getPipelineJobById(pipelineJobId);
+      if (!knownPipelineJob || ["failed", "cancelled"].includes(knownPipelineJob.status)) {
+        pipelineJobId = "";
+        ({ range, autoExecution } = await this.resolveRangeAndState({
+          novelId: input.novelId,
+          existingState: {
+            ...autoExecution,
+            pipelineJobId: null,
+            pipelineStatus: null,
+            circuitBreaker: null,
+          },
+          pipelineJobId: null,
+          pipelineStatus: "queued",
+        }));
+      }
+    }
+    if (isDirectorCircuitBreakerOpen(autoExecution.circuitBreaker)) {
+      await stopAutoExecutionForCircuitBreaker(this.deps, {
+        taskId: input.taskId,
+        novelId: input.novelId,
+        request: input.request,
+        range,
+        autoExecution,
+        circuitBreaker: autoExecution.circuitBreaker,
+        resumeStage: input.resumeStage,
+      });
+      return;
+    }
 
     try {
       await syncAutoExecutionTaskState(this.deps, {
@@ -276,7 +304,8 @@ export class NovelDirectorAutoExecutionRuntime {
       }
 
       if (pipelineJobId) {
-        const existingJob = await this.deps.novelService.getPipelineJobById(pipelineJobId);
+        const existingJob = knownPipelineJob ?? await this.deps.novelService.getPipelineJobById(pipelineJobId);
+        knownPipelineJob = existingJob;
         if (!existingJob || ["failed", "cancelled"].includes(existingJob.status)) {
           pipelineJobId = "";
         }
@@ -344,6 +373,9 @@ export class NovelDirectorAutoExecutionRuntime {
               temperature: input.request.temperature,
               workflowTaskId: input.taskId,
               taskStyleProfileId: input.request.styleProfileId,
+              controlAdvanceMode: isFullBookAutopilotRunMode(input.request.runMode)
+                ? "full_book_autopilot"
+                : "auto_to_execution",
               ...resolveSingleChapterExecutionRange(range, autoExecution),
               autoReview: autoExecution.autoReview,
               autoRepair: autoExecution.autoRepair,
@@ -428,6 +460,35 @@ export class NovelDirectorAutoExecutionRuntime {
           pipelineJobId,
           pipelineStatus: job.status,
         }));
+        const usageCircuitBreaker = await resolveUsageCircuitBreaker({
+          taskId: input.taskId,
+          novelId: input.novelId,
+          autoExecution,
+        });
+        if (usageCircuitBreaker) {
+          autoExecution = withCircuitBreakerState(autoExecution, usageCircuitBreaker);
+          if (isDirectorCircuitBreakerOpen(usageCircuitBreaker)) {
+            await stopAutoExecutionForCircuitBreaker(this.deps, {
+              taskId: input.taskId,
+              novelId: input.novelId,
+              request: input.request,
+              range,
+              autoExecution,
+              circuitBreaker: usageCircuitBreaker,
+              resumeStage: "pipeline",
+            });
+            return;
+          }
+          await syncAutoExecutionTaskState(this.deps, {
+            taskId: input.taskId,
+            novelId: input.novelId,
+            request: input.request,
+            range,
+            autoExecution,
+            isBackgroundRunning: true,
+            resumeStage: "pipeline",
+          });
+        }
 
         if (job.status === "succeeded" && job.noticeSummary?.trim()) {
           const noticeAction = await resolveQualityRepairNoticeAction(this.deps, {
@@ -444,8 +505,23 @@ export class NovelDirectorAutoExecutionRuntime {
           });
           if (
             noticeAction.checkpointType === "replan_required"
-            && input.request.runMode === "auto_to_execution"
+            && (input.request.runMode === "auto_to_execution" || isFullBookAutopilotRunMode(input.request.runMode))
           ) {
+            const replanNoticeResult = isFullBookAutopilotRunMode(input.request.runMode)
+              ? await runFullBookAutopilotReplanNotice({
+                deps: this.deps,
+                taskId: input.taskId,
+                novelId: input.novelId,
+                request: input.request,
+                range,
+                autoExecution,
+                checkpointState: noticeAction.checkpointState,
+                noticeSummary: job.noticeSummary.trim(),
+              })
+              : { stopped: false as const, circuitBreaker: autoExecution.circuitBreaker ?? null };
+            if (replanNoticeResult.stopped) {
+              return;
+            }
             await this.deps.recordAutoApproval?.({
               taskId: input.taskId,
               checkpointType: noticeAction.checkpointType,
@@ -455,7 +531,7 @@ export class NovelDirectorAutoExecutionRuntime {
             pipelineJobId = "";
             ({ range, autoExecution } = await this.resolveRangeAndState({
               novelId: input.novelId,
-              existingState: noticeAction.checkpointState,
+              existingState: withCircuitBreakerState(noticeAction.checkpointState, replanNoticeResult.circuitBreaker),
               pipelineJobId: null,
               pipelineStatus: "queued",
             }));
@@ -559,6 +635,42 @@ export class NovelDirectorAutoExecutionRuntime {
           || (job.status === "cancelled"
             ? `${scopeLabel}自动执行已取消。`
             : `${scopeLabel}自动执行未能全部通过质量要求。`);
+        const failureCircuitBreaker = buildFailureCircuitBreaker({
+          autoExecution,
+          jobStatus: job.status,
+          message: failureMessage,
+        });
+        const failedAutoExecution = withCircuitBreakerState({
+          ...autoExecution,
+          pipelineJobId,
+          pipelineStatus: job.status,
+        }, failureCircuitBreaker);
+        if (autoExecution.autoRepair && job.status !== "cancelled") {
+          await directorAutomationLedgerEventService.recordRepairTicketCreated({
+            taskId: input.taskId,
+            novelId: input.novelId,
+            chapterId: autoExecution.nextChapterId ?? null,
+            summary: failureMessage,
+            failureCount: failureCircuitBreaker.patchFailureCount ?? failureCircuitBreaker.failureCount ?? 1,
+            metadata: {
+              pipelineJobId,
+              pipelineStatus: job.status,
+              chapterOrder: autoExecution.nextChapterOrder ?? null,
+            },
+          }).catch(() => null);
+        }
+        if (isDirectorCircuitBreakerOpen(failureCircuitBreaker)) {
+          await stopAutoExecutionForCircuitBreaker(this.deps, {
+            taskId: input.taskId,
+            novelId: input.novelId,
+            request: input.request,
+            range,
+            autoExecution: failedAutoExecution,
+            circuitBreaker: failureCircuitBreaker,
+            resumeStage: "pipeline",
+          });
+          return;
+        }
         await this.deps.workflowService.markTaskFailed(input.taskId, failureMessage, {
           stage: "quality_repair",
           itemKey: "quality_repair",
@@ -578,11 +690,7 @@ export class NovelDirectorAutoExecutionRuntime {
           novelId: input.novelId,
           request: input.request,
           range,
-          autoExecution: {
-            ...autoExecution,
-            pipelineJobId,
-            pipelineStatus: job.status,
-          },
+          autoExecution: failedAutoExecution,
           isBackgroundRunning: false,
           resumeStage: "pipeline",
         });

@@ -14,6 +14,7 @@ import {
 } from "./novelCoreShared";
 import { ensureNovelCharacters } from "./novelCoreSupport";
 import { createQualityReport } from "./novelCoreReviewService";
+import { chapterQualityLoopService } from "./quality/ChapterQualityLoopService";
 import { selectPrimaryPipelineJob } from "./pipelineJobDedup";
 import { buildPipelineCurrentItemLabel, buildPipelineStageProgress, decoratePipelineJob as decoratePipelineJobRow, isPipelineActiveStage, parsePipelinePayload as parsePipelineJobPayload, stringifyPipelinePayload as stringifyPipelineJobPayload, type DecoratedPipelineJob, type PipelineActiveStage, type PipelineJobLike } from "./pipelineJobState";
 
@@ -565,6 +566,7 @@ export class NovelCorePipelineService {
     let totalRetryCount = Math.max(existingJob?.retryCount ?? 0, 0);
     const qualityAlertDetails = [...(persistedPayload.qualityAlertDetails ?? [])];
     const replanAlertDetails = [...(persistedPayload.replanAlertDetails ?? [])];
+    const recoverableRepairDetails = [...(persistedPayload.recoverableRepairDetails ?? [])];
 
     try {
       await runWithLlmUsageTracking({
@@ -696,8 +698,36 @@ export class NovelCorePipelineService {
 
           totalRetryCount += chapterResult.retryCountUsed;
           final = { score: chapterResult.score, issues: chapterResult.issues };
+          if (chapterResult.recoverableRepairFailure) {
+            recoverableRepairDetails.push(
+              `第${chapter.order}章需要后续修复：${chapterResult.recoverableRepairFailure.message}`,
+            );
+            logPipelineWarn("章节局部修复未安全应用，已记录并继续后续章节", {
+              jobId,
+              order: chapter.order,
+              reason: chapterResult.recoverableRepairFailure.message,
+              failureTypes: chapterResult.recoverableRepairFailure.failureTypes,
+            });
+          }
           if (chapterResult.reviewExecuted) {
             await createQualityReport(novelId, chapter.id, final.score, final.issues);
+            await chapterQualityLoopService.recordAssessment({
+              novelId,
+              chapterId: chapter.id,
+              chapterOrder: chapter.order,
+              score: final.score,
+              issues: final.issues,
+              runtimePackage: chapterResult.runtimePackage,
+              source: chapterResult.retryCountUsed > 0 ? "repair_recheck" : "pipeline_review",
+              taskId: runtimePayload.workflowTaskId,
+            }).catch((error) => {
+              logPipelineError("记录章节质量闭环状态失败", {
+                jobId,
+                novelId,
+                chapterId: chapter.id,
+                error: error instanceof Error ? error.message : String(error),
+              });
+            });
           }
 
           if (chapterResult.reviewExecuted && !chapterResult.pass) {
@@ -731,6 +761,7 @@ export class NovelCorePipelineService {
               ...runtimePayload,
               qualityAlertDetails,
               replanAlertDetails,
+              recoverableRepairDetails,
             }),
           });
           logPipelineInfo("任务进度更新", {
@@ -767,6 +798,7 @@ export class NovelCorePipelineService {
             ...runtimePayload,
             qualityAlertDetails,
             replanAlertDetails,
+            recoverableRepairDetails,
           }),
         });
         logPipelineInfo("任务执行结束", {
@@ -793,6 +825,7 @@ export class NovelCorePipelineService {
             ...runtimePayload,
             qualityAlertDetails,
             replanAlertDetails,
+            recoverableRepairDetails,
           }),
         });
         void novelEventBus.emit({
@@ -811,6 +844,7 @@ export class NovelCorePipelineService {
           ...runtimePayload,
           qualityAlertDetails,
           replanAlertDetails,
+          recoverableRepairDetails,
         }),
       });
       logPipelineError("任务执行异常", {

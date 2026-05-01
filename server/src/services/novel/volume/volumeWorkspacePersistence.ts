@@ -1,6 +1,7 @@
 import type { VolumeChapterPlan, VolumePlan, VolumePlanDocument } from "@ai-novel/shared/types/novel";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "../../../db/prisma";
+import { withSqliteRetry } from "../../../db/sqliteRetry";
 import {
   buildFallbackVolumesFromLegacy,
   type LegacyVolumeSource,
@@ -17,9 +18,15 @@ export const VOLUME_WORKSPACE_TRANSACTION_TIMEOUT_MS = 60_000;
 export function runVolumeWorkspaceTransaction<T>(
   runner: (tx: Prisma.TransactionClient) => Promise<T> | T,
 ): Promise<T> {
-  return prisma.$transaction(async (tx) => runner(tx), {
-    timeout: VOLUME_WORKSPACE_TRANSACTION_TIMEOUT_MS,
-  });
+  return withSqliteRetry(
+    () => prisma.$transaction(async (tx) => runner(tx), {
+      timeout: VOLUME_WORKSPACE_TRANSACTION_TIMEOUT_MS,
+    }),
+    {
+      label: "volume.workspace.transaction",
+      retryDelaysMs: [500, 1500, 3000, 6000],
+    },
+  );
 }
 
 export async function listActiveVolumeRows(novelId: string, db: DbClient = prisma): Promise<VolumePlan[]> {

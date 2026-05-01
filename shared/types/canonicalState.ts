@@ -204,10 +204,10 @@ export const chapterStateGoalSchema = stateGoalSchema.extend({
 
 export const novelControlPolicySchema = z.object({
   kickoffMode: z.enum(["manual_start", "director_start", "takeover_start"]),
-  advanceMode: z.enum(["manual", "stage_review", "auto_to_ready", "auto_to_execution"]),
+  advanceMode: z.enum(["manual", "stage_review", "auto_to_ready", "auto_to_execution", "full_book_autopilot"]),
   reviewCheckpoints: z.array(z.string()).default([]),
   autoExecutionRange: z.object({
-    mode: z.enum(["front10", "volume", "chapter_range"]),
+    mode: z.enum(["book", "front10", "volume", "chapter_range"]),
     start: z.number().int().nullable().optional(),
     end: z.number().int().nullable().optional(),
     volumeOrder: z.number().int().nullable().optional(),

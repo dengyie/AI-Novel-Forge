@@ -4,8 +4,10 @@ import type { ApiResponse } from "@ai-novel/shared/types/api";
 import {
   DIRECTOR_POLICY_MODES,
   type DirectorPolicyMode,
+  type DirectorBookAutomationProjectionResponse,
   type DirectorRuntimePolicyUpdateRequest,
   type DirectorRuntimePolicyUpdateResponse,
+  type DirectorRuntimeEventHistoryResponse,
   type DirectorRuntimeSnapshotResponse,
   type DirectorManualEditImpactResponse,
   type DirectorWorkspaceAnalysisResponse,
@@ -13,6 +15,7 @@ import {
 import {
   DIRECTOR_CORRECTION_PRESETS,
   DIRECTOR_AUTO_EXECUTION_MODES,
+  DIRECTOR_RUN_MODES,
   DIRECTOR_TAKEOVER_ENTRY_STEPS,
   type DirectorCandidatePatchRequest,
   type DirectorCandidateTitleRefineRequest,
@@ -20,6 +23,7 @@ import {
   type DirectorRefinementRequest,
   DIRECTOR_TAKEOVER_STRATEGIES,
   DIRECTOR_TAKEOVER_START_PHASES,
+  type DirectorRunMode,
   type DirectorTakeoverRequest,
 } from "@ai-novel/shared/types/novelDirector";
 import {
@@ -31,24 +35,28 @@ import { validate } from "../middleware/validate";
 import { llmProviderSchema } from "../llm/providerSchema";
 import { NovelDirectorService } from "../services/novel/director/NovelDirectorService";
 import { DirectorCommandService } from "../services/novel/director/DirectorCommandService";
+import { DirectorBookAutomationProjectionService } from "../services/novel/director/DirectorBookAutomationProjectionService";
 import { directorPersistedCandidateSchema } from "../services/novel/director/novelDirectorSchemas";
+import { loadPersistentDirectorRuntimeEventHistory } from "../services/novel/director/novelDirectorRuntimeProjection";
 
 const router = Router();
 const novelDirectorService = new NovelDirectorService();
 const directorCommandService = new DirectorCommandService();
+const directorBookAutomationProjectionService = new DirectorBookAutomationProjectionService();
 
 const correctionPresetValues = DIRECTOR_CORRECTION_PRESETS.map((item) => item.value) as [string, ...string[]];
 const takeoverStartPhaseValues = [...DIRECTOR_TAKEOVER_START_PHASES] as [string, ...string[]];
 const takeoverEntryStepValues = [...DIRECTOR_TAKEOVER_ENTRY_STEPS] as [string, ...string[]];
 const takeoverStrategyValues = [...DIRECTOR_TAKEOVER_STRATEGIES] as [string, ...string[]];
 const autoExecutionModeValues = [...DIRECTOR_AUTO_EXECUTION_MODES] as [string, ...string[]];
+const directorRunModeValues = [...DIRECTOR_RUN_MODES] as [DirectorRunMode, ...DirectorRunMode[]];
 const runtimePolicyModeValues = [...DIRECTOR_POLICY_MODES] as [DirectorPolicyMode, ...DirectorPolicyMode[]];
 
 const llmOptionsSchema = z.object({
   provider: llmProviderSchema.optional(),
   model: z.string().trim().optional(),
   temperature: z.number().min(0).max(2).optional(),
-  runMode: z.enum(["auto_to_ready", "auto_to_execution", "stage_review"]).optional(),
+  runMode: z.enum(directorRunModeValues).optional(),
 });
 
 const autoExecutionPlanSchema = z.object({
@@ -171,6 +179,10 @@ const runtimeTaskParamsSchema = z.object({
   taskId: z.string().trim().min(1),
 });
 
+const runtimeEventHistoryQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(500).optional(),
+});
+
 const workspaceAnalysisQuerySchema = z.object({
   workflowTaskId: z.string().trim().min(1).optional(),
   ai: z.enum(["true", "false"]).optional(),
@@ -261,11 +273,11 @@ router.post("/refine-titles", validate({ body: refineTitleSchema }), async (req,
 
 router.post("/confirm", validate({ body: confirmSchema }), async (req, res, next) => {
   try {
-    const data = await novelDirectorService.confirmCandidate(req.body as DirectorConfirmRequest);
-    res.status(200).json({
+    const data = await directorCommandService.enqueueConfirmCandidateCommand(req.body as DirectorConfirmRequest);
+    res.status(202).json({
       success: true,
       data,
-      message: "Director candidate confirmed.",
+      message: "Director candidate confirmation accepted.",
     } satisfies ApiResponse<typeof data>);
   } catch (error) {
     next(error);
@@ -280,6 +292,21 @@ router.get("/takeover-readiness/:novelId", validate({ params: takeoverParamsSche
       success: true,
       data,
       message: "Director takeover readiness loaded.",
+    } satisfies ApiResponse<typeof data>);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get("/book-automation/:novelId", validate({ params: takeoverParamsSchema }), async (req, res, next) => {
+  try {
+    const { novelId } = req.params as z.infer<typeof takeoverParamsSchema>;
+    const projection = await directorBookAutomationProjectionService.getProjection(novelId);
+    const data: DirectorBookAutomationProjectionResponse = { projection };
+    res.status(200).json({
+      success: true,
+      data,
+      message: "Director book automation projection loaded.",
     } satisfies ApiResponse<typeof data>);
   } catch (error) {
     next(error);
@@ -363,6 +390,25 @@ router.get("/runtime/:taskId/projection", validate({ params: runtimeTaskParamsSc
     next(error);
   }
 });
+
+router.get(
+  "/runtime/:taskId/events",
+  validate({ params: runtimeTaskParamsSchema, query: runtimeEventHistoryQuerySchema }),
+  async (req, res, next) => {
+    try {
+      const { taskId } = req.params as z.infer<typeof runtimeTaskParamsSchema>;
+      const query = req.query as z.infer<typeof runtimeEventHistoryQuerySchema>;
+      const data: DirectorRuntimeEventHistoryResponse = await loadPersistentDirectorRuntimeEventHistory(taskId, query.limit);
+      res.status(200).json({
+        success: true,
+        data,
+        message: "Director runtime event history loaded.",
+      } satisfies ApiResponse<typeof data>);
+    } catch (error) {
+      next(error);
+    }
+  },
+);
 
 router.post(
   "/runtime/:taskId/policy",

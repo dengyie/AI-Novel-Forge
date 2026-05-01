@@ -5,6 +5,7 @@ import type {
   DirectorRunCommandType,
 } from "@ai-novel/shared/types/directorRuntime";
 import type {
+  DirectorConfirmRequest,
   DirectorContinuationMode,
   DirectorLLMOptions,
   DirectorTakeoverRequest,
@@ -13,9 +14,15 @@ import { prisma } from "../../../db/prisma";
 import { withSqliteRetry } from "../../../db/sqliteRetry";
 import { AppError } from "../../../middleware/errorHandler";
 import { NovelWorkflowService } from "../workflow/NovelWorkflowService";
+import {
+  applyDirectorRunModeContract,
+  buildDirectorSessionState,
+  buildDirectorWorkflowSeedPayload,
+} from "./novelDirectorHelpers";
 
 const ACTIVE_COMMAND_STATUSES: DirectorRunCommandStatus[] = ["queued", "leased", "running"];
 const EXECUTION_COMMAND_TYPES: DirectorRunCommandType[] = [
+  "confirm_candidate",
   "continue",
   "resume_from_checkpoint",
   "retry",
@@ -23,6 +30,7 @@ const EXECUTION_COMMAND_TYPES: DirectorRunCommandType[] = [
   "repair_chapter_titles",
 ];
 export interface DirectorCommandPayload {
+  confirmRequest?: DirectorConfirmRequest;
   continuationMode?: DirectorContinuationMode;
   batchAlreadyStartedCount?: number;
   forceResume?: boolean;
@@ -108,6 +116,39 @@ function isAutoRecoverableStaleCommand(command: {
 export class DirectorCommandService {
   constructor(private readonly workflowService = new NovelWorkflowService()) {}
 
+  async enqueueConfirmCandidateCommand(input: DirectorConfirmRequest): Promise<DirectorCommandAcceptedResponse> {
+    const confirmedInput = applyDirectorRunModeContract(input);
+    const runMode = confirmedInput.runMode;
+    const task = await this.workflowService.bootstrapTask({
+      workflowTaskId: input.workflowTaskId,
+      lane: "auto_director",
+      title: input.candidate.workingTitle.trim() || input.title?.trim() || "自动导演开书",
+      seedPayload: buildDirectorWorkflowSeedPayload(confirmedInput, null, {
+        directorSession: buildDirectorSessionState({
+          runMode,
+          phase: "candidate_selection",
+          isBackgroundRunning: false,
+        }),
+      }),
+      initialState: {
+        stage: "auto_director",
+        itemKey: "candidate_confirm",
+        itemLabel: "等待创建小说项目",
+        progress: 0.18,
+      },
+    });
+    return this.enqueueExecutionCommand({
+      taskId: task.id,
+      commandType: "confirm_candidate",
+      payload: {
+        confirmRequest: {
+          ...confirmedInput,
+          workflowTaskId: task.id,
+        },
+      },
+    });
+  }
+
   async enqueueContinueCommand(taskId: string, input: DirectorCommandPayload = {}): Promise<DirectorCommandAcceptedResponse> {
     return this.enqueueExecutionCommand({
       taskId,
@@ -183,9 +224,10 @@ export class DirectorCommandService {
   }
 
   async enqueueTakeoverCommand(input: DirectorTakeoverRequest): Promise<DirectorCommandAcceptedResponse> {
+    const takeoverInput = applyDirectorRunModeContract(input);
     const reusableCommand = await prisma.directorRunCommand.findFirst({
       where: {
-        novelId: input.novelId,
+        novelId: takeoverInput.novelId,
         commandType: "takeover",
         status: { in: ACTIVE_COMMAND_STATUSES },
       },
@@ -196,7 +238,7 @@ export class DirectorCommandService {
     }
 
     const task = await this.workflowService.bootstrapTask({
-      novelId: input.novelId,
+      novelId: takeoverInput.novelId,
       lane: "auto_director",
       title: "自动导演接管",
       forceNew: true,
@@ -208,10 +250,10 @@ export class DirectorCommandService {
       },
       seedPayload: {
         takeover: {
-          entryStep: input.entryStep ?? null,
-          startPhase: input.startPhase ?? null,
-          strategy: input.strategy ?? null,
-          autoExecutionPlan: input.autoExecutionPlan ?? null,
+          entryStep: takeoverInput.entryStep ?? null,
+          startPhase: takeoverInput.startPhase ?? null,
+          strategy: takeoverInput.strategy ?? null,
+          autoExecutionPlan: takeoverInput.autoExecutionPlan ?? null,
         },
       },
     });
@@ -219,7 +261,7 @@ export class DirectorCommandService {
       taskId: task.id,
       commandType: "takeover",
       payload: {
-        takeoverRequest: input,
+        takeoverRequest: takeoverInput,
       },
     });
   }
@@ -243,9 +285,12 @@ export class DirectorCommandService {
     });
   }
 
-  async recoverStaleLeases(now = new Date()): Promise<number> {
+  async recoverStaleLeases(now = new Date(), options: {
+    taskId?: string;
+  } = {}): Promise<number> {
     const staleCommands = await prisma.directorRunCommand.findMany({
       where: {
+        ...(options.taskId ? { taskId: options.taskId } : {}),
         status: { in: ["leased", "running"] },
         leaseExpiresAt: { lt: now },
       },
@@ -463,12 +508,19 @@ export class DirectorCommandService {
     allowTerminalReuse?: boolean;
     preserveLastError?: boolean;
   }): Promise<DirectorCommandAcceptedResponse> {
-    const row = await this.workflowService.getTaskById(input.taskId);
+    let row = await this.workflowService.getTaskById(input.taskId);
     if (!row) {
       throw new AppError("Task not found.", 404);
     }
     if (row.lane !== "auto_director") {
       throw new AppError("Only auto director workflow tasks can be queued as director commands.", 400);
+    }
+    const recoveredStaleLeaseCount = await this.recoverStaleLeases(new Date(), { taskId: input.taskId });
+    if (recoveredStaleLeaseCount > 0) {
+      row = await this.workflowService.getTaskById(input.taskId);
+      if (!row) {
+        throw new AppError("Task not found.", 404);
+      }
     }
     const reusableCommand = await prisma.directorRunCommand.findFirst({
       where: {

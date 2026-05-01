@@ -18,6 +18,10 @@ import { runStructuredPrompt } from "../../../prompting/core/promptRunner";
 import { volumeChapterExecutionContractPrompt } from "../../../prompting/prompts/novel/volume/chapterDetail.prompts";
 import { buildVolumeChapterDetailContextBlocks } from "../../../prompting/prompts/novel/volume/contextBlocks";
 import type { StoryMacroPlanService } from "../storyMacro/StoryMacroPlanService";
+import {
+  ChapterTaskSheetQualityGateService,
+  ChapterTaskSheetQualityGateError,
+} from "./ChapterTaskSheetQualityGateService";
 import { buildVolumeWorkspaceDocument } from "./volumeWorkspaceDocument";
 import type {
   ChapterDetailMode,
@@ -587,22 +591,33 @@ export async function generateChapterTaskSheetDetail(params: {
   sceneCards: string;
 }> {
   let lastError: Error | null = null;
+  let qualityFeedback: string | null = null;
+  const qualityGate = new ChapterTaskSheetQualityGateService();
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
+      const promptInput = qualityFeedback
+        ? {
+          ...params.promptInput,
+          guidance: [
+            params.promptInput.guidance?.trim(),
+            `上一版章节执行合同未通过质量门禁：${qualityFeedback}`,
+          ].filter(Boolean).join("\n"),
+        }
+        : params.promptInput;
       const generated = await runStructuredPrompt({
         asset: volumeChapterExecutionContractPrompt,
-        promptInput: params.promptInput,
-        contextBlocks: buildVolumeChapterDetailContextBlocks(params.promptInput),
+        promptInput,
+        contextBlocks: buildVolumeChapterDetailContextBlocks(promptInput),
         options: {
           provider: params.options.provider,
           model: params.options.model,
           temperature: params.options.temperature ?? 0.35,
           taskId: params.options.taskId,
           entrypoint: params.options.entrypoint,
-          novelId: params.promptInput.workspace.novelId,
-          volumeId: params.promptInput.targetVolume.id,
-          chapterId: params.promptInput.targetChapter.id,
+          novelId: promptInput.workspace.novelId,
+          volumeId: promptInput.targetVolume.id,
+          chapterId: promptInput.targetChapter.id,
           stage: "chapter_execution_contract",
           itemKey: "chapter_detail_bundle",
           scope: "chapter_detail",
@@ -612,8 +627,34 @@ export async function generateChapterTaskSheetDetail(params: {
       });
       const scenePlan = normalizeChapterScenePlan(
         generated.output.sceneCards,
-        generated.output.targetWordCount ?? params.promptInput.targetChapter.targetWordCount,
+        generated.output.targetWordCount ?? promptInput.targetChapter.targetWordCount,
       );
+      await qualityGate.assertCanEnterExecution({
+        novelId: promptInput.workspace.novelId,
+        volumeId: promptInput.targetVolume.id,
+        chapterId: promptInput.targetChapter.id,
+        chapterOrder: promptInput.targetChapter.chapterOrder,
+        title: promptInput.targetChapter.title,
+        summary: promptInput.targetChapter.summary,
+        purpose: generated.output.purpose,
+        exclusiveEvent: generated.output.exclusiveEvent,
+        endingState: generated.output.endingState,
+        nextChapterEntryState: generated.output.nextChapterEntryState,
+        conflictLevel: generated.output.conflictLevel,
+        revealLevel: generated.output.revealLevel,
+        targetWordCount: generated.output.targetWordCount,
+        mustAvoid: generated.output.mustAvoid,
+        payoffRefs: generated.output.payoffRefs,
+        taskSheet: generated.output.taskSheet,
+        sceneCards: serializeChapterScenePlan(scenePlan),
+      }, {
+        mode: params.options.chapterTaskSheetQualityMode,
+        provider: params.options.provider,
+        model: params.options.model,
+        taskId: params.options.taskId,
+        entrypoint: params.options.entrypoint,
+        signal: params.options.signal,
+      });
       return {
         purpose: generated.output.purpose.trim(),
         exclusiveEvent: generated.output.exclusiveEvent.trim(),
@@ -629,6 +670,9 @@ export async function generateChapterTaskSheetDetail(params: {
       };
     } catch (error) {
       lastError = error instanceof Error ? error : new Error("章节执行合同生成失败。");
+      if (error instanceof ChapterTaskSheetQualityGateError) {
+        qualityFeedback = error.message;
+      }
     }
   }
 
