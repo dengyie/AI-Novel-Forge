@@ -195,6 +195,40 @@ function recoveryActionLabel(
   return action ? labels[action] ?? null : null;
 }
 
+function workerStateLabel(
+  state: NonNullable<DirectorBookAutomationProjection["workerHealth"]>["derivedState"],
+): string {
+  const labels: Record<NonNullable<DirectorBookAutomationProjection["workerHealth"]>["derivedState"], string> = {
+    idle: "未运行",
+    queued_waiting_worker: "等待接手",
+    leased_starting: "正在接手",
+    running_step: "自动推进中",
+    waiting_gate: "等待确认",
+    auto_recovering: "恢复中",
+    cancelled: "已停止",
+    failed_recoverable: "等待恢复",
+    failed_hard: "需要处理",
+    succeeded: "已完成",
+  };
+  return labels[state] ?? state;
+}
+
+function workerStateDetail(health: NonNullable<DirectorBookAutomationProjection["workerHealth"]>): string {
+  if (health.message?.trim()) {
+    return health.message.trim();
+  }
+  if (health.queuedCommandCount > 0) {
+    return "任务已排队，后台执行接手后会继续推进。";
+  }
+  if (health.runningCommandCount > 0 || health.leasedCommandCount > 0) {
+    return "后台执行正在处理当前任务。";
+  }
+  if (health.staleCommandCount > 0) {
+    return "后台执行中断后会从最近进度尝试恢复。";
+  }
+  return "当前没有正在排队或执行的后台动作。";
+}
+
 export default function AICockpit(props: AICockpitProps) {
   const {
     mode = "focusedNovel",
@@ -241,6 +275,7 @@ export default function AICockpit(props: AICockpitProps) {
   const promptUsage = focusProjection.promptUsage?.slice(0, 6) ?? [];
   const circuitBreaker = focusProjection.circuitBreaker?.status === "open" ? focusProjection.circuitBreaker : null;
   const circuitRecovery = recoveryActionLabel(circuitBreaker?.recoveryAction ?? null);
+  const workerHealth = focusProjection.workerHealth ?? null;
   const artifactInsightLines = [
     focusProjection.artifactSummary.affectedChapterCount
       ? `影响 ${focusProjection.artifactSummary.affectedChapterCount} 个章节`
@@ -335,6 +370,42 @@ export default function AICockpit(props: AICockpitProps) {
 
       {!isCompact && focusProjection.progressSummary ? (
         <div className="mt-2 text-xs leading-5 text-muted-foreground">{focusProjection.progressSummary}</div>
+      ) : null}
+
+      {!isCompact && workerHealth ? (
+        <div className="mt-3 rounded-md border bg-background/70 px-3 py-2 text-xs leading-5 text-muted-foreground">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2 font-medium text-foreground">
+              <Database className="h-3.5 w-3.5" />
+              后台执行
+            </div>
+            <Badge variant="outline">{workerStateLabel(workerHealth.derivedState)}</Badge>
+          </div>
+          <div className="mt-1">{workerStateDetail(workerHealth)}</div>
+          <div className="mt-2 grid gap-2 sm:grid-cols-4">
+            <div className="rounded-md bg-muted/40 px-2 py-1">
+              <div className="text-[11px] text-muted-foreground">排队</div>
+              <div className="font-medium text-foreground">{workerHealth.queuedCommandCount}</div>
+            </div>
+            <div className="rounded-md bg-muted/40 px-2 py-1">
+              <div className="text-[11px] text-muted-foreground">接手</div>
+              <div className="font-medium text-foreground">{workerHealth.leasedCommandCount}</div>
+            </div>
+            <div className="rounded-md bg-muted/40 px-2 py-1">
+              <div className="text-[11px] text-muted-foreground">执行</div>
+              <div className="font-medium text-foreground">{workerHealth.runningCommandCount}</div>
+            </div>
+            <div className="rounded-md bg-muted/40 px-2 py-1">
+              <div className="text-[11px] text-muted-foreground">恢复</div>
+              <div className="font-medium text-foreground">{workerHealth.staleCommandCount}</div>
+            </div>
+          </div>
+          {workerHealth.oldestQueuedWaitMs ? (
+            <div className="mt-2 text-[11px] text-muted-foreground">
+              等待接手 {formatDuration(workerHealth.oldestQueuedWaitMs) ?? "<1 秒"}
+            </div>
+          ) : null}
+        </div>
       ) : null}
 
       {circuitBreaker ? (
