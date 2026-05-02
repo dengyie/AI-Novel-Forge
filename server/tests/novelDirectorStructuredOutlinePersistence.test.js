@@ -289,8 +289,8 @@ test("runDirectorStructuredOutlinePhase persists chapter detail after each compl
   }
 
   assert.equal(syncedSnapshots.length, 1);
-  assert.equal(syncCalls[0].input.applyDeletes, true);
-  assert.equal(syncCalls[0].input.preserveContent, false);
+  assert.equal(syncCalls[0].input.applyDeletes, false);
+  assert.equal(syncCalls[0].input.preserveContent, true);
   assert.deepEqual(rebuildCalls, [{
     novelId: "novel-demo",
     options: { sourceType: "rebuild_projection" },
@@ -317,6 +317,9 @@ test("runDirectorStructuredOutlinePhase resumes from the next incomplete chapter
   const preDetailedChapter = {
     ...createChapter("chapter-1", 1, "Chapter 1"),
     purpose: "Chapter 1 purpose",
+    exclusiveEvent: "Chapter 1 exclusive event",
+    endingState: "Chapter 1 ending state",
+    nextChapterEntryState: "Chapter 1 next entry",
     conflictLevel: 3,
     revealLevel: 2,
     targetWordCount: 2800,
