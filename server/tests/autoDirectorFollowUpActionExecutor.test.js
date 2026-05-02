@@ -719,6 +719,93 @@ test("auto director follow-up action executor blocks validation-required tasks f
   prisma.autoDirectorFollowUpActionLog.create = originals.actionLogCreate;
 });
 
+test("auto director follow-up action executor clears validation and resumes structured outline backfill", async () => {
+  const executor = new AutoDirectorFollowUpActionExecutor();
+  const continueCalls = [];
+  const workflowUpdates = [];
+  const originals = {
+    actionLogFindUnique: prisma.autoDirectorFollowUpActionLog.findUnique,
+    actionLogCreate: prisma.autoDirectorFollowUpActionLog.create,
+    workflowUpdate: prisma.novelWorkflowTask.update,
+  };
+  const actionLogs = new Map();
+
+  prisma.autoDirectorFollowUpActionLog.findUnique = async ({ where }) => actionLogs.get(where.idempotencyKey) ?? null;
+  prisma.autoDirectorFollowUpActionLog.create = async ({ data }) => {
+    actionLogs.set(data.idempotencyKey, {
+      ...data,
+      executedAt: data.executedAt ?? new Date(),
+    });
+    return actionLogs.get(data.idempotencyKey);
+  };
+  prisma.novelWorkflowTask.update = async ({ where, data }) => {
+    workflowUpdates.push({ where, data });
+    return { id: where.id, ...data };
+  };
+
+  executor.workflowService.healAutoDirectorTaskState = async () => false;
+  executor.workflowService.getTaskByIdWithoutHealing = async (taskId) => buildWorkflowRow({
+    id: taskId,
+    status: "waiting_approval",
+    checkpointType: "front10_ready",
+    seedPayloadJson: JSON.stringify({
+      autoDirectorValidationResult: {
+        allowed: false,
+        blockingReasons: ["目标范围缺少节奏拆章，需要先完成或重新校验拆章结果。"],
+        warnings: [],
+        requiredActions: [{
+          code: "auto_backfill_structured_outline",
+          label: "让 AI 补齐章节拆分后继续",
+          riskLevel: "low",
+          safeToAutoFix: true,
+        }],
+        affectedScope: {
+          type: "chapter_range",
+          label: "第 1-10 章",
+          startOrder: 1,
+          endOrder: 10,
+        },
+        nextAction: "auto_backfill_structured_outline",
+      },
+      autoExecution: {
+        scopeLabel: "第 1-10 章",
+        startOrder: 1,
+        endOrder: 10,
+      },
+    }),
+  });
+  executor.novelDirectorService.continueTask = async (taskId, input) => {
+    continueCalls.push({ taskId, input });
+  };
+  executor.workflowTaskAdapter.detail = async (taskId) => buildTaskDetail(taskId, {
+    status: "queued",
+  });
+
+  const result = await executor.execute({
+    taskId: "task_structured_backfill",
+    actionCode: "auto_backfill_structured_outline",
+    source: "web",
+    operatorId: "user_10",
+    idempotencyKey: "structured-backfill-k1",
+  });
+
+  assert.equal(result.code, "executed");
+  assert.deepEqual(continueCalls, [{
+    taskId: "task_structured_backfill",
+    input: {
+      continuationMode: "resume",
+      forceResume: true,
+    },
+  }]);
+  assert.equal(workflowUpdates.length, 1);
+  assert.equal(JSON.parse(workflowUpdates[0].data.seedPayloadJson).autoDirectorValidationResult, undefined);
+  assert.equal(actionLogs.get("structured-backfill-k1").resultCode, "executed");
+
+  prisma.autoDirectorFollowUpActionLog.findUnique = originals.actionLogFindUnique;
+  prisma.autoDirectorFollowUpActionLog.create = originals.actionLogCreate;
+  prisma.novelWorkflowTask.update = originals.workflowUpdate;
+});
+
 test("auto director follow-up safe fix repairs only validator-marked safe actions", async () => {
   const executor = new AutoDirectorFollowUpActionExecutor();
   const calls = [];

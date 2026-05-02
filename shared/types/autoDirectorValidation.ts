@@ -42,7 +42,8 @@ export type AutoDirectorValidationRequiredActionCode =
   | "create_rewrite_snapshot"
   | "cancel_replaced_tasks"
   | "reset_downstream_state"
-  | "revalidate_assets";
+  | "revalidate_assets"
+  | "auto_backfill_structured_outline";
 
 export interface AutoDirectorValidationRequiredAction {
   code: AutoDirectorValidationRequiredActionCode;
@@ -81,7 +82,7 @@ export interface AutoDirectorValidationAssetSnapshot {
 
 export interface AutoDirectorTakeoverValidationInput {
   source: AutoDirectorValidationSource;
-  request: Pick<DirectorTakeoverRequest, "novelId" | "entryStep" | "strategy" | "autoExecutionPlan">;
+  request: Pick<DirectorTakeoverRequest, "novelId" | "entryStep" | "strategy" | "autoExecutionPlan" | "runMode">;
   assets: AutoDirectorValidationAssetSnapshot;
 }
 

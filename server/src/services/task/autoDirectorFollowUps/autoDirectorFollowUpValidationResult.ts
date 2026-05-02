@@ -15,6 +15,7 @@ const REQUIRED_ACTION_CODES: readonly AutoDirectorValidationRequiredActionCode[]
   "cancel_replaced_tasks",
   "reset_downstream_state",
   "revalidate_assets",
+  "auto_backfill_structured_outline",
 ];
 
 function isObject(value: unknown): value is Record<string, unknown> {

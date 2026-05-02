@@ -11,6 +11,7 @@ const SAFE_FIX_ACTION_CODES = new Set<AutoDirectorValidationRequiredActionCode>(
   "cancel_replaced_tasks",
   "reset_downstream_state",
   "revalidate_assets",
+  "auto_backfill_structured_outline",
 ]);
 
 const FORBIDDEN_SAFE_FIX_ACTION_CODES = new Set<AutoDirectorValidationRequiredActionCode>([
