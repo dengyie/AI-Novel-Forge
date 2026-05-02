@@ -118,6 +118,10 @@ const promptAssetLoaderEntries: PromptAssetLoaderEntry[] = [
     load: () => require("./prompts/novel/directorManualEditImpact.prompts").directorManualEditImpactPrompt as UnknownPromptAsset,
   },
   {
+    key: "director.state_proposal_resolution@v1",
+    load: () => require("./prompts/novel/directorStateProposalResolution.prompts").directorStateProposalResolutionPrompt as UnknownPromptAsset,
+  },
+  {
     key: "novel.story_macro.decomposition@v1",
     load: () => require("./prompts/novel/storyMacro.prompts").storyMacroDecompositionPrompt as UnknownPromptAsset,
   },

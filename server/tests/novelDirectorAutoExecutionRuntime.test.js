@@ -2125,3 +2125,114 @@ test("runFromReady uses persisted quality budget ledger to defer repeated replan
   assert.ok(calls.some((call) => call[0] === "bootstrapTask" && call[1] === 7 && call[2].includes(6) && call[3] === 1));
   assert.ok(calls.some((call) => call[0] === "recordCheckpoint" && call[2] === "workflow_completed" && call[3].includes(6)));
 });
+
+test("runFromReady resolves pending state proposals before retrying full-book autopilot chapter execution", async () => {
+  const calls = [];
+  let proposalsResolved = false;
+  const runtime = new NovelDirectorAutoExecutionRuntime({
+    novelContextService: {
+      async listChapters() {
+        return [
+          withExecutionDetail({
+            id: "chapter-1",
+            order: 1,
+            generationState: proposalsResolved ? "approved" : "planned",
+            chapterStatus: proposalsResolved ? "completed" : "pending_generation",
+            content: proposalsResolved ? "正文1" : "",
+          }),
+        ];
+      },
+    },
+    novelService: {
+      async startPipelineJob(_novelId, options) {
+        calls.push(["startPipelineJob", options.startOrder, options.endOrder]);
+        return { id: proposalsResolved ? "job-after-state" : "job-state-blocked", status: "queued" };
+      },
+      async findActivePipelineJobForRange() {
+        return null;
+      },
+      async getPipelineJobById(jobId) {
+        calls.push(["getPipelineJobById", jobId]);
+        if (!proposalsResolved) {
+          return {
+            id: jobId,
+            status: "failed",
+            progress: 1,
+            currentStage: null,
+            currentItemLabel: null,
+            payload: null,
+            noticeSummary: null,
+            error: "Chapter generation is blocked until review is resolved. 2 pending state proposal(s) require review.",
+          };
+        }
+        return {
+          id: jobId,
+          status: "succeeded",
+          progress: 1,
+          currentStage: null,
+          currentItemLabel: null,
+          noticeSummary: null,
+          error: null,
+        };
+      },
+      async cancelPipelineJob() {},
+    },
+    workflowService: {
+      async bootstrapTask(input) {
+        calls.push(["bootstrapTask", input.seedPayload.autoExecution?.nextChapterOrder ?? null]);
+      },
+      async getTaskById() {
+        return { status: "running" };
+      },
+      async markTaskRunning() {
+        calls.push(["markTaskRunning"]);
+      },
+      async recordCheckpoint(taskId, input) {
+        calls.push(["recordCheckpoint", taskId, input.checkpointType]);
+      },
+      async markTaskFailed(_taskId, message) {
+        calls.push(["markTaskFailed", message]);
+      },
+    },
+    buildDirectorSeedPayload(_request, _novelId, extra) {
+      return extra ?? {};
+    },
+    async resolveStateProposals(input) {
+      calls.push(["resolveStateProposals", input.chapterId, input.chapterOrder]);
+      proposalsResolved = true;
+      return {
+        processed: true,
+        decision: "apply",
+        reason: "普通状态提案已自动应用。",
+        proposalIds: ["proposal-1", "proposal-2"],
+        affectedChapterWindow: { startOrder: 1, endOrder: 1, chapterOrders: [1] },
+        blockingLedgerKeys: ["proposal-1", "proposal-2"],
+      };
+    },
+  });
+
+  await runtime.runFromReady({
+    taskId: "task-auto-exec",
+    novelId: "novel-1",
+    request: buildRequest({ runMode: "full_book_autopilot" }),
+    existingState: {
+      enabled: true,
+      mode: "book",
+      autoReview: true,
+      autoRepair: true,
+      firstChapterId: "chapter-1",
+      startOrder: 1,
+      endOrder: 1,
+      totalChapterCount: 1,
+      nextChapterId: "chapter-1",
+      nextChapterOrder: 1,
+    },
+  });
+
+  assert.ok(calls.some((call) => call[0] === "resolveStateProposals" && call[1] === "chapter-1" && call[2] === 1));
+  assert.equal(calls.some((call) => call[0] === "markTaskFailed"), false);
+  assert.deepEqual(calls.filter((call) => call[0] === "startPipelineJob").map((call) => call.slice(1)), [
+    [1, 1],
+  ]);
+  assert.ok(calls.some((call) => call[0] === "recordCheckpoint" && call[2] === "workflow_completed"));
+});

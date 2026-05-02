@@ -52,6 +52,7 @@ import {
   recordDirectorQualityLoopBudgetAttempt,
   resolveDirectorQualityLoopBudgetNextAction,
 } from "./runtime/DirectorQualityLoopBudgetLedgerService";
+import type { DirectorStateProposalResolutionRunResult } from "./runtime/DirectorStateProposalResolutionService";
 
 type AutomationLedgerEventPort = Pick<
   typeof directorAutomationLedgerEventService,
@@ -172,6 +173,16 @@ interface NovelDirectorAutoExecutionRuntimeDeps {
     model?: string;
     temperature?: number;
   }) => Promise<unknown>;
+  resolveStateProposals?: (input: {
+    novelId: string;
+    taskId?: string | null;
+    chapterId?: string | null;
+    chapterOrder?: number | null;
+    runMode: string;
+    provider?: DirectorConfirmRequest["provider"];
+    model?: string;
+    temperature?: number;
+  }) => Promise<DirectorStateProposalResolutionRunResult>;
   automationLedgerEventService?: AutomationLedgerEventPort;
 }
 
@@ -653,6 +664,57 @@ export class NovelDirectorAutoExecutionRuntime {
           || (job.status === "cancelled"
             ? `${scopeLabel}自动执行已取消。`
             : `${scopeLabel}自动执行未能全部通过质量要求。`);
+        if (
+          isFullBookAutopilotRunMode(input.request.runMode)
+          && isSkippableAutoExecutionReviewFailure(failureMessage)
+          && this.deps.resolveStateProposals
+        ) {
+          const resolution = await this.deps.resolveStateProposals({
+            novelId: input.novelId,
+            taskId: input.taskId,
+            chapterId: autoExecution.nextChapterId ?? range.firstChapterId,
+            chapterOrder: autoExecution.nextChapterOrder ?? null,
+            runMode: input.request.runMode,
+            provider: input.request.provider,
+            model: input.request.model,
+            temperature: input.request.temperature,
+          });
+          if (resolution.processed) {
+            if (resolution.decision === "auto_replan_window" && this.deps.replanNovel) {
+              await this.deps.replanNovel(input.novelId, {
+                chapterId: autoExecution.nextChapterId ?? undefined,
+                triggerType: "state_proposal_resolution",
+                reason: resolution.reason ?? failureMessage,
+                sourceIssueIds: resolution.proposalIds,
+                windowSize: Math.max(1, resolution.affectedChapterWindow?.chapterOrders?.length ?? 1),
+                provider: input.request.provider,
+                model: input.request.model,
+                temperature: input.request.temperature,
+              });
+            }
+            pipelineJobId = "";
+            ({ range, autoExecution } = await this.resolveRangeAndState({
+              novelId: input.novelId,
+              existingState: {
+                ...autoExecution,
+                pipelineJobId: null,
+                pipelineStatus: null,
+              },
+              pipelineJobId: null,
+              pipelineStatus: "queued",
+            }));
+            await syncAutoExecutionTaskState(this.deps, {
+              taskId: input.taskId,
+              novelId: input.novelId,
+              request: input.request,
+              range,
+              autoExecution,
+              isBackgroundRunning: true,
+              resumeStage: "pipeline",
+            });
+            continue autoExecutionLoop;
+          }
+        }
         let budgetedAutoExecution = autoExecution;
         let qualityBudgetEntry: ReturnType<typeof recordDirectorQualityLoopBudgetAttempt>["entry"] | null = null;
         let qualityBudgetNextAction: ReturnType<typeof recordDirectorQualityLoopBudgetAttempt>["nextAction"] | null = null;

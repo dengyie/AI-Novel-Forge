@@ -78,6 +78,7 @@ import { recordAutoDirectorAutoApprovalFromTask } from "../../task/autoDirectorF
 import { flattenPreparedOutlineChapters } from "./novelDirectorStructuredOutlineRecovery";
 import { DirectorRuntimeService } from "./runtime/DirectorRuntimeService";
 import { DirectorEventProjectionService } from "./runtime/DirectorEventProjectionService";
+import { directorStateProposalResolutionService } from "./runtime/DirectorStateProposalResolutionService";
 import {
   isDirectorRuntimeGateError,
   NovelDirectorRuntimeOrchestrator,
@@ -136,6 +137,7 @@ export class NovelDirectorService {
       });
     },
     replanNovel: (novelId, input) => this.novelService.replanNovel(novelId, input),
+    resolveStateProposals: (input) => directorStateProposalResolutionService.resolvePendingProposals(input),
   });
   private readonly directorRuntimeOrchestrator = new NovelDirectorRuntimeOrchestrator({
     directorRuntime: this.directorRuntime,
