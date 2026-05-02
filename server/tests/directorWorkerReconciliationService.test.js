@@ -11,6 +11,8 @@ function createHarness(overrides = {}) {
     taskFindMany: prisma.novelWorkflowTask.findMany,
     stepUpdateMany: prisma.directorStepRun.updateMany,
     commandFindFirst: prisma.directorRunCommand.findFirst,
+    commandFindMany: prisma.directorRunCommand.findMany,
+    runtimeCommandFindUnique: prisma.directorRuntimeCommand.findUnique,
   };
   const calls = {
     stepUpdates: [],
@@ -43,6 +45,8 @@ function createHarness(overrides = {}) {
     const resolver = overrides.commandResolver ?? (() => null);
     return resolver(where, taskId);
   };
+  prisma.directorRunCommand.findMany = async () => [];
+  prisma.directorRuntimeCommand.findUnique = async () => ({ id: "runtime-command-existing" });
 
   return {
     service: new DirectorWorkerReconciliationService(commandService, workflowService),
@@ -51,6 +55,8 @@ function createHarness(overrides = {}) {
       prisma.novelWorkflowTask.findMany = originals.taskFindMany;
       prisma.directorStepRun.updateMany = originals.stepUpdateMany;
       prisma.directorRunCommand.findFirst = originals.commandFindFirst;
+      prisma.directorRunCommand.findMany = originals.commandFindMany;
+      prisma.directorRuntimeCommand.findUnique = originals.runtimeCommandFindUnique;
     },
   };
 }

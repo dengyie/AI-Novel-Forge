@@ -1674,6 +1674,152 @@ model DirectorRunCommand {
   @@index([leaseOwner, leaseExpiresAt])
 }
 
+model DirectorRuntimeInstance {
+  id                String   @id @default(cuid())
+  novelId           String?
+  workflowTaskId    String?
+  runId             String?
+  runMode           String?
+  status            String   @default("waiting_worker")
+  currentStep       String?
+  currentChapterId  String?
+  checkpointVersion Int      @default(0)
+  cancelRequestedAt DateTime?
+  lastHeartbeatAt   DateTime?
+  lastErrorClass    String?
+  lastErrorMessage  String?
+  workerMessage     String?
+  metadataJson      String?
+  commands          DirectorRuntimeCommand[]
+  executions        DirectorRuntimeExecution[]
+  checkpoints       DirectorRuntimeCheckpoint[]
+  events            DirectorRuntimeEvent[]
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([novelId, status, updatedAt])
+  @@index([workflowTaskId])
+  @@index([runId])
+  @@index([status, updatedAt])
+}
+
+model DirectorRuntimeCommand {
+  id              String   @id @default(cuid())
+  runtimeId       String
+  workflowTaskId  String?
+  novelId         String?
+  legacyCommandId String?  @unique
+  commandType     String
+  idempotencyKey  String
+  status          String   @default("queued")
+  priority        Int      @default(50)
+  runAfter        DateTime @default(now())
+  leaseOwner      String?
+  leaseExpiresAt  DateTime?
+  attempt         Int      @default(0)
+  payloadJson     String?
+  errorMessage    String?
+  startedAt       DateTime?
+  finishedAt      DateTime?
+  runtime         DirectorRuntimeInstance @relation(fields: [runtimeId], references: [id], onDelete: Cascade)
+  executions      DirectorRuntimeExecution[]
+  checkpoints     DirectorRuntimeCheckpoint[]
+  events          DirectorRuntimeEvent[]
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([runtimeId, commandType, idempotencyKey])
+  @@index([runtimeId, status, updatedAt])
+  @@index([status, priority, runAfter, createdAt])
+  @@index([workflowTaskId, status, updatedAt])
+  @@index([novelId, status, updatedAt])
+  @@index([leaseOwner, leaseExpiresAt])
+}
+
+model DirectorRuntimeExecution {
+  id                String   @id @default(cuid())
+  runtimeId         String
+  commandId         String?
+  workflowTaskId    String?
+  novelId           String?
+  legacyCommandId   String?
+  activeLockKey     String?  @unique
+  workerId          String?
+  slotId            String?
+  status            String   @default("leased")
+  stepType          String
+  resourceClass     String?
+  leaseExpiresAt    DateTime?
+  heartbeatAt       DateTime?
+  startedAt         DateTime?
+  finishedAt        DateTime?
+  errorClass        String?
+  errorMessage      String?
+  inputHash         String?
+  checkpointVersion Int      @default(0)
+  runtime           DirectorRuntimeInstance @relation(fields: [runtimeId], references: [id], onDelete: Cascade)
+  command           DirectorRuntimeCommand? @relation(fields: [commandId], references: [id], onDelete: SetNull)
+  checkpoints       DirectorRuntimeCheckpoint[]
+  events            DirectorRuntimeEvent[]
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([runtimeId, status, updatedAt])
+  @@index([status, leaseExpiresAt])
+  @@index([workflowTaskId, status, updatedAt])
+  @@index([novelId, status, updatedAt])
+  @@index([workerId, status, updatedAt])
+}
+
+model DirectorRuntimeCheckpoint {
+  id                String   @id @default(cuid())
+  runtimeId         String
+  commandId         String?
+  executionId       String?
+  version           Int
+  stepType          String
+  targetType        String?
+  targetId          String?
+  inputHash         String?
+  outputRefJson     String?
+  stateJson         String?
+  summary           String?
+  runtime           DirectorRuntimeInstance @relation(fields: [runtimeId], references: [id], onDelete: Cascade)
+  command           DirectorRuntimeCommand? @relation(fields: [commandId], references: [id], onDelete: SetNull)
+  execution         DirectorRuntimeExecution? @relation(fields: [executionId], references: [id], onDelete: SetNull)
+  createdAt         DateTime @default(now())
+
+  @@unique([runtimeId, version])
+  @@index([runtimeId, createdAt])
+  @@index([commandId])
+  @@index([executionId])
+}
+
+model DirectorRuntimeEvent {
+  id          String   @id
+  runtimeId   String
+  commandId   String?
+  executionId String?
+  workflowTaskId String?
+  novelId     String?
+  type        String
+  summary     String
+  severity    String?
+  metadataJson String?
+  occurredAt  DateTime
+  runtime     DirectorRuntimeInstance @relation(fields: [runtimeId], references: [id], onDelete: Cascade)
+  command     DirectorRuntimeCommand? @relation(fields: [commandId], references: [id], onDelete: SetNull)
+  execution   DirectorRuntimeExecution? @relation(fields: [executionId], references: [id], onDelete: SetNull)
+  createdAt   DateTime @default(now())
+
+  @@index([runtimeId, occurredAt])
+  @@index([commandId, occurredAt])
+  @@index([executionId, occurredAt])
+  @@index([workflowTaskId, occurredAt])
+  @@index([novelId, occurredAt])
+  @@index([type, occurredAt])
+}
+
 model DirectorRun {
   id                         String             @id
   taskId                     String             @unique

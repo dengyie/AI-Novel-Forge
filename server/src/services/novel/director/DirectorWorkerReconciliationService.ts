@@ -1,6 +1,10 @@
 import { prisma } from "../../../db/prisma";
 import { NovelWorkflowService } from "../workflow/NovelWorkflowService";
 import { DirectorCommandService } from "./DirectorCommandService";
+import {
+  DirectorRuntimeExecutionService,
+  isDirectorRuntimeTableUnavailable,
+} from "./DirectorRuntimeExecutionService";
 
 const TERMINAL_TASK_STATUSES = ["cancelled", "failed", "succeeded"] as const;
 const ACTIVE_COMMAND_STATUSES = ["queued", "leased", "running"] as const;
@@ -10,6 +14,7 @@ export interface DirectorWorkerReconciliationResult {
   staleLeaseCount: number;
   closedStepCount: number;
   requeuedDanglingTaskCount: number;
+  adoptedLegacyCommandCount: number;
 }
 
 function sumUpdateCounts(results: Array<{ count: number } | null | undefined>): number {
@@ -20,18 +25,21 @@ export class DirectorWorkerReconciliationService {
   constructor(
     private readonly commandService = new DirectorCommandService(),
     private readonly workflowService = new NovelWorkflowService(),
+    private readonly runtimeExecutionService = new DirectorRuntimeExecutionService(),
   ) {}
 
   async reconcile(now = new Date()): Promise<DirectorWorkerReconciliationResult> {
     const staleLeaseCount = await this.commandService.recoverStaleLeases(now);
-    const [closedStepCount, requeuedDanglingTaskCount] = await Promise.all([
+    const [closedStepCount, requeuedDanglingTaskCount, adoptedLegacyCommandCount] = await Promise.all([
       this.closeTerminalTaskSteps(now),
       this.requeueRecoverableDanglingTasks(),
+      this.adoptLegacyQueuedCommands(),
     ]);
     return {
       staleLeaseCount,
       closedStepCount,
       requeuedDanglingTaskCount,
+      adoptedLegacyCommandCount,
     };
   }
 
@@ -139,5 +147,39 @@ export class DirectorWorkerReconciliationService {
       requeuedCount += 1;
     }
     return requeuedCount;
+  }
+
+  private async adoptLegacyQueuedCommands(): Promise<number> {
+    const commands = await prisma.directorRunCommand.findMany({
+      where: {
+        status: { in: [...ACTIVE_COMMAND_STATUSES] },
+      },
+      orderBy: [{ updatedAt: "asc" }, { id: "asc" }],
+      take: 100,
+    });
+    let adoptedCount = 0;
+    for (const command of commands) {
+      const existing = await prisma.directorRuntimeCommand.findUnique({
+        where: { legacyCommandId: command.id },
+        select: { id: true },
+      }).catch((error) => {
+        if (isDirectorRuntimeTableUnavailable(error)) {
+          return { id: "__runtime_table_unavailable__" };
+        }
+        return null;
+      });
+      if (existing?.id === "__runtime_table_unavailable__") {
+        return adoptedCount;
+      }
+      if (existing) {
+        continue;
+      }
+      const adopted = await this.runtimeExecutionService.ensureRuntimeCommandForLegacyCommand(command)
+        .catch(() => null);
+      if (adopted) {
+        adoptedCount += 1;
+      }
+    }
+    return adoptedCount;
   }
 }

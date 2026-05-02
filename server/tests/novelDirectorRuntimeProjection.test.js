@@ -57,6 +57,7 @@ function mockProjectionData(command) {
   const originals = {
     runFindUnique: prisma.directorRun.findUnique,
     commandFindFirst: prisma.directorRunCommand.findFirst,
+    runtimeFindFirst: prisma.directorRuntimeInstance.findFirst,
     getTaskUsage: directorUsageTelemetryQueryService.getTaskUsage,
   };
   prisma.directorRun.findUnique = async ({ where }) => {
@@ -68,6 +69,7 @@ function mockProjectionData(command) {
     assert.deepEqual(where.status.in, ["queued", "leased", "running"]);
     return command;
   };
+  prisma.directorRuntimeInstance.findFirst = async () => null;
   directorUsageTelemetryQueryService.getTaskUsage = async (taskId) => {
     assert.equal(taskId, "task-1");
     return {
@@ -80,6 +82,7 @@ function mockProjectionData(command) {
   return () => {
     prisma.directorRun.findUnique = originals.runFindUnique;
     prisma.directorRunCommand.findFirst = originals.commandFindFirst;
+    prisma.directorRuntimeInstance.findFirst = originals.runtimeFindFirst;
     directorUsageTelemetryQueryService.getTaskUsage = originals.getTaskUsage;
   };
 }
@@ -103,4 +106,3 @@ test("runtime projection shows queued candidate confirmation after direction sel
     restore();
   }
 });
-

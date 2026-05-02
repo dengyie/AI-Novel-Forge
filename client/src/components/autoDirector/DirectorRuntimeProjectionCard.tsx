@@ -198,7 +198,24 @@ export default function DirectorRuntimeProjectionCard({
     || null;
   const qualityDebtLine = formatQualityDebtSummary(projection.qualityDebtSummary);
   const qualityBudgetLine = formatQualityBudgetSummary(projection.qualityBudgetSummary);
+  const activeExecutionLine = projection.activeExecution
+    ? `后台执行：${getDirectorNodeDisplayLabel({
+      nodeKey: projection.activeExecution.stepType,
+      fallback: projection.currentAction || "自动导演任务",
+    })}${projection.activeExecution.resourceClass ? ` · ${projection.activeExecution.resourceClass}` : ""}`
+    : null;
+  const waitingLine = projection.waitingReason ? `等待原因：${projection.waitingReason}` : null;
+  const workerHealthLine = projection.workerHealth
+    ? [
+      `执行队列：${projection.workerHealth.queuedCommandCount} 个等待`,
+      projection.workerHealth.runningCommandCount > 0 ? `${projection.workerHealth.runningCommandCount} 个处理中` : null,
+      projection.workerHealth.currentWorkerId ? `执行器：${projection.workerHealth.currentWorkerId}` : null,
+    ].filter(Boolean).join(" · ")
+    : null;
   const helperLines = [
+    activeExecutionLine,
+    waitingLine,
+    workerHealthLine,
     projection.nextActionLabel ? `下一步：${projection.nextActionLabel}` : null,
     projection.recommendedAction?.reason ? `推荐原因：${projection.recommendedAction.reason}` : null,
     projection.isAutopilotRecoverable ? "AI 可以从当前进度继续处理。" : null,

@@ -395,6 +395,24 @@ export interface DirectorRuntimeProjection {
   runId: string;
   novelId?: string | null;
   status: DirectorRuntimeProjectionStatus;
+  runtimeId?: string | null;
+  runtimeStatus?: string | null;
+  currentAction?: string | null;
+  waitingReason?: string | null;
+  activeExecution?: {
+    executionId: string;
+    stepType: string;
+    resourceClass?: string | null;
+    workerId?: string | null;
+    slotId?: string | null;
+    status: string;
+    startedAt?: string | null;
+    leaseExpiresAt?: string | null;
+  } | null;
+  resourceClass?: string | null;
+  checkpointSummary?: string | null;
+  nextAutomaticAction?: string | null;
+  workerHealth?: DirectorWorkerHealthSummary | null;
   currentNodeKey?: string | null;
   currentLabel?: string | null;
   headline?: string | null;
@@ -670,6 +688,9 @@ export interface DirectorCommandAcceptedResponse {
   commandType: DirectorRunCommandType;
   status: DirectorRunCommandStatus;
   leaseExpiresAt?: string | null;
+  runtimeId?: string | null;
+  runtimeStatus?: string | null;
+  projectionUrl?: string | null;
 }
 
 export interface DirectorWorkspaceAnalysisResponse {
