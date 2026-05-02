@@ -92,9 +92,15 @@ import { prisma } from "../../../db/prisma";
 import { loadPersistentDirectorRuntimeProjection } from "./novelDirectorRuntimeProjection";
 
 function isWorkflowTaskCancelledError(error: unknown): boolean {
-  return error instanceof AppError
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    error instanceof AppError
     && error.statusCode === 409
-    && error.message === "WORKFLOW_TASK_CANCELLED";
+    && error.message === "WORKFLOW_TASK_CANCELLED"
+  )
+    || message === "WORKFLOW_TASK_CANCELLED"
+    || message.includes("当前自动导演任务已取消")
+    || message.includes("This operation was aborted");
 }
 
 type BackgroundRunMode = "detached" | "inline";
@@ -246,18 +252,19 @@ export class NovelDirectorService {
     }
   }
 
-  private async runWithInlineBackgroundRuns(action: () => Promise<void>): Promise<void> {
+  private async runWithInlineBackgroundRuns<T>(action: () => Promise<T>): Promise<T> {
     const scheduledRuns: InlineBackgroundRunner[] = [];
     const previousRuns = this.inlineBackgroundRuns;
     this.inlineBackgroundRuns = scheduledRuns;
     try {
-      await action();
+      const result = await action();
       while (scheduledRuns.length > 0) {
         const nextRun = scheduledRuns.shift();
         if (nextRun) {
           await nextRun();
         }
       }
+      return result;
     } finally {
       this.inlineBackgroundRuns = previousRuns;
     }
@@ -524,6 +531,9 @@ export class NovelDirectorService {
   async startTakeover(input: DirectorTakeoverRequest, options: {
     workflowTaskId?: string | null;
   } = {}): Promise<DirectorTakeoverResponse> {
+    if (this.backgroundRunMode === "inline" && !this.inlineBackgroundRuns) {
+      return this.runWithInlineBackgroundRuns(() => this.startTakeover(input, options));
+    }
     const commandTaskId = options.workflowTaskId?.trim() || null;
     const takeoverState = await loadDirectorTakeoverState({
       novelId: input.novelId,

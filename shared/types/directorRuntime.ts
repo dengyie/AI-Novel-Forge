@@ -242,6 +242,7 @@ export type DirectorEventType =
   | "node_failed"
   | "artifact_indexed"
   | "workspace_analyzed"
+  | "run_cancelled"
   | "policy_changed"
   | "approval_required"
   | "quality_issue_found"

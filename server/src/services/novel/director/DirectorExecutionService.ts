@@ -9,12 +9,14 @@ import {
 } from "./novelDirectorHelpers";
 import type { DirectorTakeoverRequest } from "@ai-novel/shared/types/novelDirector";
 
+export type DirectorCommandExecutionOutcome = "completed" | "cancelled";
+
 export class DirectorExecutionService {
   private readonly directorService = new NovelDirectorService({ backgroundRunMode: "inline" });
   private readonly workflowService = new NovelWorkflowService();
   private readonly commandService = new DirectorCommandService(this.workflowService);
 
-  async executeCommand(command: NonNullable<DirectorRunCommandRow>): Promise<void> {
+  async executeCommand(command: NonNullable<DirectorRunCommandRow>): Promise<DirectorCommandExecutionOutcome> {
     const payload = this.commandService.parseCommandPayload(command);
     if (command.commandType === "confirm_candidate") {
       if (!payload.confirmRequest) {
@@ -24,7 +26,7 @@ export class DirectorExecutionService {
         ...payload.confirmRequest,
         workflowTaskId: command.taskId,
       });
-      return;
+      return this.resolveCommandOutcome(command.taskId);
     }
     if (command.commandType === "continue" || command.commandType === "resume_from_checkpoint" || command.commandType === "retry") {
       const takeoverRequest = await this.resolveContextlessTakeoverRecovery(command.taskId);
@@ -32,13 +34,13 @@ export class DirectorExecutionService {
         await this.directorService.startTakeover(takeoverRequest, {
           workflowTaskId: command.taskId,
         });
-        return;
+        return this.resolveCommandOutcome(command.taskId);
       }
       await this.directorService.executeContinueTask(command.taskId, {
         ...payload,
         forceResume: true,
       });
-      return;
+      return this.resolveCommandOutcome(command.taskId);
     }
     if (command.commandType === "takeover") {
       if (!payload.takeoverRequest) {
@@ -47,19 +49,24 @@ export class DirectorExecutionService {
       await this.directorService.startTakeover(payload.takeoverRequest, {
         workflowTaskId: command.taskId,
       });
-      return;
+      return this.resolveCommandOutcome(command.taskId);
     }
     if (command.commandType === "repair_chapter_titles") {
       await this.directorService.executeChapterTitleRepair(command.taskId, {
         volumeId: payload.volumeId,
       });
-      return;
+      return this.resolveCommandOutcome(command.taskId);
     }
     if (command.commandType === "cancel") {
       await this.workflowService.cancelTask(command.taskId);
-      return;
+      return "cancelled";
     }
     throw new AppError(`Unsupported director command type: ${command.commandType}`, 400);
+  }
+
+  private async resolveCommandOutcome(taskId: string): Promise<DirectorCommandExecutionOutcome> {
+    const row = await this.workflowService.getTaskByIdWithoutHealing(taskId).catch(() => null);
+    return row?.status === "cancelled" || row?.cancelRequestedAt ? "cancelled" : "completed";
   }
 
   private async resolveContextlessTakeoverRecovery(taskId: string): Promise<DirectorTakeoverRequest | null> {

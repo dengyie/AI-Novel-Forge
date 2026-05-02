@@ -91,9 +91,14 @@ export class DirectorWorker {
         throw new Error(`Director command disappeared before execution: ${commandId}`);
       }
       console.log(`[director.worker] executing commandId=${command.id} type=${command.commandType} taskId=${command.taskId}`);
-      await this.executionService.executeCommand(command);
-      await this.commandService.markCommandSucceeded(commandId, this.options.workerId);
-      console.log(`[director.worker] completed commandId=${command.id} taskId=${command.taskId}`);
+      const outcome = await this.executionService.executeCommand(command);
+      if (outcome === "cancelled") {
+        await this.commandService.markCommandCancelled(commandId, this.options.workerId);
+        console.log(`[director.worker] cancelled commandId=${command.id} taskId=${command.taskId}`);
+      } else {
+        await this.commandService.markCommandSucceeded(commandId, this.options.workerId);
+        console.log(`[director.worker] completed commandId=${command.id} taskId=${command.taskId}`);
+      }
     } catch (error) {
       console.error(`[director.worker] command failed commandId=${commandId}`, error);
       await this.commandService.markCommandFailed(commandId, this.options.workerId, error).catch(() => null);

@@ -52,6 +52,8 @@ function createHarness(task = createTask()) {
   const bootstraps = [];
   const requeued = [];
   const stepUpdates = [];
+  const jobUpdates = [];
+  const directorEvents = [];
   const taskUpdates = [];
   const originalDirectorRunCommand = {
     findFirst: prisma.directorRunCommand.findFirst,
@@ -65,6 +67,15 @@ function createHarness(task = createTask()) {
   };
   const originalDirectorStepRun = {
     updateMany: prisma.directorStepRun.updateMany,
+  };
+  const originalGenerationJob = {
+    updateMany: prisma.generationJob.updateMany,
+  };
+  const originalDirectorRun = {
+    findUnique: prisma.directorRun.findUnique,
+  };
+  const originalDirectorEvent = {
+    create: prisma.directorEvent.create,
   };
   const workflowService = {
     async getTaskById(taskId) {
@@ -226,6 +237,19 @@ function createHarness(task = createTask()) {
     stepUpdates.push(args);
     return { count: 1 };
   };
+  prisma.generationJob.updateMany = async (args) => {
+    jobUpdates.push(args);
+    return { count: 1 };
+  };
+  prisma.directorRun.findUnique = async ({ where }) => (
+    where.taskId === task.id
+      ? { id: "run-1", novelId: task.novelId }
+      : null
+  );
+  prisma.directorEvent.create = async ({ data }) => {
+    directorEvents.push(data);
+    return data;
+  };
 
   return {
     commands,
@@ -233,12 +257,17 @@ function createHarness(task = createTask()) {
     requeued,
     task,
     stepUpdates,
+    jobUpdates,
+    directorEvents,
     taskUpdates,
     service: new DirectorCommandService(workflowService),
     restore() {
       Object.assign(prisma.directorRunCommand, originalDirectorRunCommand);
       Object.assign(prisma.novelWorkflowTask, originalNovelWorkflowTask);
       Object.assign(prisma.directorStepRun, originalDirectorStepRun);
+      Object.assign(prisma.generationJob, originalGenerationJob);
+      Object.assign(prisma.directorRun, originalDirectorRun);
+      Object.assign(prisma.directorEvent, originalDirectorEvent);
     },
   };
 }
@@ -431,6 +460,37 @@ test("director command service leases a queued command once", async () => {
       leaseMs: 30_000,
     });
     assert.equal(next, null);
+  } finally {
+    harness.restore();
+  }
+});
+
+test("director command service marks a leased command cancelled and closes running children", async () => {
+  const harness = createHarness();
+  try {
+    await harness.service.enqueueContinueCommand("task-1");
+    const leased = await harness.service.leaseNextCommand({
+      workerId: "worker-a",
+      leaseMs: 30_000,
+    });
+
+    await harness.service.markCommandCancelled(leased.id, "worker-a");
+
+    assert.equal(harness.commands[0].status, "cancelled");
+    assert.equal(harness.commands[0].leaseExpiresAt, null);
+    assert.equal(harness.commands[0].errorMessage, "自动导演任务已取消。");
+    assert.equal(harness.stepUpdates.length, 1);
+    assert.equal(harness.stepUpdates[0].where.taskId, "task-1");
+    assert.equal(harness.stepUpdates[0].where.status, "running");
+    assert.equal(harness.stepUpdates[0].data.status, "failed");
+    assert.equal(harness.stepUpdates[0].data.error, "自动导演任务已取消。");
+    assert.equal(harness.jobUpdates.length, 1);
+    assert.deepEqual(harness.jobUpdates[0].where.status, { in: ["queued", "running"] });
+    assert.deepEqual(harness.jobUpdates[0].where.payload, { contains: "task-1" });
+    assert.equal(harness.jobUpdates[0].data.status, "cancelled");
+    assert.equal(harness.directorEvents.length, 1);
+    assert.equal(harness.directorEvents[0].type, "run_cancelled");
+    assert.equal(harness.directorEvents[0].summary, "自动导演已停止，后台运行状态已收束。");
   } finally {
     harness.restore();
   }

@@ -95,6 +95,7 @@ const DEFAULT_STALE_AUTO_RECOVERY_MAX_ATTEMPTS = 2;
 const STALE_COMMAND_AUTO_RECOVERY_MESSAGE = "后台执行中断，系统已自动从最近进度继续。";
 const STALE_COMMAND_MANUAL_RECOVERY_MESSAGE = "后台执行中断，任务已暂停。点击恢复后会从最近进度继续。";
 const STALE_COMMAND_INTERNAL_MESSAGE = "Director Worker 租约过期，任务等待恢复。";
+const CANCELLED_COMMAND_MESSAGE = "自动导演任务已取消。";
 
 function resolveNumberEnv(name: string, fallback: number): number {
   const value = Number(process.env[name]);
@@ -229,6 +230,7 @@ export class DirectorCommandService {
         errorMessage: "用户请求取消自动导演任务。",
       },
     });
+    await this.closeCancelledTaskRuntimeState(taskId, new Date());
     return this.enqueueExecutionCommand({
       taskId,
       commandType: "cancel",
@@ -460,6 +462,30 @@ export class DirectorCommandService {
     });
   }
 
+  async markCommandCancelled(commandId: string, workerId: string): Promise<void> {
+    const finishedAt = new Date();
+    const updated = await prisma.directorRunCommand.updateMany({
+      where: {
+        id: commandId,
+        leaseOwner: workerId,
+        status: { in: ["leased", "running"] },
+      },
+      data: {
+        status: "cancelled",
+        leaseExpiresAt: null,
+        finishedAt,
+        errorMessage: CANCELLED_COMMAND_MESSAGE,
+      },
+    });
+    if (updated.count !== 1) {
+      return;
+    }
+    const command = await this.getCommandById(commandId);
+    if (command) {
+      await this.closeCancelledTaskRuntimeState(command.taskId, finishedAt);
+    }
+  }
+
   async markCommandFailed(commandId: string, workerId: string, error: unknown): Promise<void> {
     const message = error instanceof Error ? error.message : String(error);
     const failedAt = new Date();
@@ -496,6 +522,51 @@ export class DirectorCommandService {
     }).catch(() => null);
     await this.workflowService.requeueTaskForRecovery(command.taskId, message)
       .catch(() => null);
+  }
+
+  private async closeCancelledTaskRuntimeState(taskId: string, now: Date): Promise<void> {
+    await prisma.directorStepRun.updateMany({
+      where: {
+        taskId,
+        status: "running",
+      },
+      data: {
+        status: "failed",
+        finishedAt: now,
+        error: CANCELLED_COMMAND_MESSAGE,
+      },
+    }).catch(() => null);
+    await prisma.generationJob.updateMany({
+      where: {
+        status: { in: ["queued", "running"] },
+        payload: { contains: taskId },
+      },
+      data: {
+        status: "cancelled",
+        cancelRequestedAt: now,
+        finishedAt: now,
+        error: CANCELLED_COMMAND_MESSAGE,
+      },
+    }).catch(() => null);
+    const run = await prisma.directorRun.findUnique({
+      where: { taskId },
+      select: { id: true, novelId: true },
+    }).catch(() => null);
+    if (!run) {
+      return;
+    }
+    await prisma.directorEvent.create({
+      data: {
+        id: `${taskId}:run_cancelled:${crypto.randomUUID()}`,
+        runId: run.id,
+        taskId,
+        novelId: run.novelId,
+        type: "run_cancelled",
+        summary: "自动导演已停止，后台运行状态已收束。",
+        severity: "low",
+        occurredAt: now,
+      },
+    }).catch(() => null);
   }
 
   parseCommandPayload(command: NonNullable<DirectorRunCommandRow>): DirectorCommandPayload {
