@@ -310,6 +310,8 @@ test("director command service queues candidate confirmation as a serialized com
     assert.equal(payload.confirmRequest.runMode, "auto_to_execution");
     assert.equal(payload.confirmRequest.candidate.workingTitle, "Neon Archive");
     assert.equal(harness.task.status, "queued");
+    assert.equal(harness.task.currentItemKey, "candidate_confirm");
+    assert.equal(harness.task.currentItemLabel, "书级方向提交完成，等待 AI 创建小说项目");
     assert.equal(harness.task.pendingManualRecovery, false);
   } finally {
     harness.restore();

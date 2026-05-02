@@ -128,6 +128,27 @@ function isAutoRecoverableStaleCommand(command: {
     );
 }
 
+function buildAcceptedTaskState(commandType: DirectorRunCommandType): {
+  currentStage?: string;
+  currentItemKey?: string;
+  currentItemLabel?: string;
+  progress?: number;
+  checkpointType?: null;
+  checkpointSummary?: null;
+} {
+  if (commandType === "confirm_candidate") {
+    return {
+      currentStage: "AI 自动导演",
+      currentItemKey: "candidate_confirm",
+      currentItemLabel: "书级方向提交完成，等待 AI 创建小说项目",
+      progress: 0.18,
+      checkpointType: null,
+      checkpointSummary: null,
+    };
+  }
+  return {};
+}
+
 export class DirectorCommandService {
   constructor(private readonly workflowService = new NovelWorkflowService()) {}
 
@@ -638,7 +659,7 @@ export class DirectorCommandService {
 
     try {
       const command = await withSqliteRetry(createCommand, { label: "director.command.create" });
-      await this.markCommandAcceptedOnTask(input.taskId, {
+      await this.markCommandAcceptedOnTask(input.taskId, input.commandType, {
         preserveLastError: input.preserveLastError,
       });
       return toAcceptedResponse(command);
@@ -661,9 +682,10 @@ export class DirectorCommandService {
     }
   }
 
-  private async markCommandAcceptedOnTask(taskId: string, options: {
+  private async markCommandAcceptedOnTask(taskId: string, commandType: DirectorRunCommandType, options: {
     preserveLastError?: boolean;
   } = {}): Promise<void> {
+    const taskState = buildAcceptedTaskState(commandType);
     await prisma.novelWorkflowTask.updateMany({
       where: {
         id: taskId,
@@ -676,6 +698,7 @@ export class DirectorCommandService {
         status: "queued",
         pendingManualRecovery: false,
         ...(options.preserveLastError ? {} : { lastError: null }),
+        ...taskState,
         heartbeatAt: new Date(),
         finishedAt: null,
         cancelRequestedAt: null,
