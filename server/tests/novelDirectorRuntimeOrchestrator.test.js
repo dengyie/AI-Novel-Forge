@@ -7,6 +7,9 @@ const {
 const {
   getDirectorPlanningStepModule,
 } = require("../dist/services/novel/director/workflowStepRuntime/directorWorkflowStepModules.js");
+const {
+  DIRECTOR_INITIALIZATION_PLACEHOLDER_VOLUME_STRATEGY_HASH,
+} = require("../dist/services/novel/director/runtime/DirectorWorkspaceArtifactInventory.js");
 
 function buildArtifact(type, patch = {}) {
   return {
@@ -218,4 +221,63 @@ test("planning write modules pass existing matching artifacts into policy decisi
   assert.equal(runtimeCalls[0].nodeKey, "structured_outline_phase");
   assert.deepEqual(runtimeCalls[0].affectedArtifacts.map((item) => item.id), [taskSheetArtifact.id]);
   assert.deepEqual(runtimeCalls[0].producedArtifacts.map((item) => item.id), [taskSheetArtifact.id]);
+});
+
+test("planning write modules ignore initialization placeholder volume strategy artifacts", async () => {
+  const placeholderVolumeStrategyArtifact = buildArtifact("volume_strategy", {
+    id: "volume_strategy:volume:legacy-volume-1:VolumePlan:legacy-volume-1",
+    targetType: "volume",
+    targetId: "legacy-volume-1",
+    source: "backfilled",
+    contentRef: { table: "VolumePlan", id: "legacy-volume-1" },
+    contentHash: DIRECTOR_INITIALIZATION_PLACEHOLDER_VOLUME_STRATEGY_HASH,
+  });
+  const { orchestrator, runtimeCalls } = buildOrchestrator([placeholderVolumeStrategyArtifact]);
+
+  await orchestrator.runStepModule({
+    module: getDirectorPlanningStepModule("volume_strategy"),
+    taskId: "task-1",
+    novelId: "novel-1",
+    targetId: "novel-1",
+    runner: async () => undefined,
+  });
+
+  assert.equal(runtimeCalls[0].nodeKey, "volume_strategy_phase");
+  assert.deepEqual(runtimeCalls[0].affectedArtifacts, []);
+});
+
+test("planning write modules keep real volume strategy artifacts in policy decisions", async () => {
+  const realVolumeStrategyArtifact = buildArtifact("volume_strategy", {
+    id: "volume_strategy:volume:legacy-volume-1:VolumePlan:legacy-volume-1",
+    targetType: "volume",
+    targetId: "legacy-volume-1",
+    source: "backfilled",
+    contentRef: { table: "VolumePlan", id: "legacy-volume-1" },
+    contentHash: "real-volume-strategy-hash",
+  });
+  const userEditedVolumeStrategyArtifact = buildArtifact("volume_strategy", {
+    id: "volume_strategy:volume:legacy-volume-2:VolumePlan:legacy-volume-2",
+    targetType: "volume",
+    targetId: "legacy-volume-2",
+    source: "user_edited",
+    contentRef: { table: "VolumePlan", id: "legacy-volume-2" },
+    contentHash: DIRECTOR_INITIALIZATION_PLACEHOLDER_VOLUME_STRATEGY_HASH,
+  });
+  const { orchestrator, runtimeCalls } = buildOrchestrator([
+    realVolumeStrategyArtifact,
+    userEditedVolumeStrategyArtifact,
+  ]);
+
+  await orchestrator.runStepModule({
+    module: getDirectorPlanningStepModule("volume_strategy"),
+    taskId: "task-1",
+    novelId: "novel-1",
+    targetId: "novel-1",
+    runner: async () => undefined,
+  });
+
+  assert.deepEqual(
+    runtimeCalls[0].affectedArtifacts.map((item) => item.id).sort(),
+    [realVolumeStrategyArtifact.id, userEditedVolumeStrategyArtifact.id].sort(),
+  );
 });

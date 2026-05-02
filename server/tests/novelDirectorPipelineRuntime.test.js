@@ -139,6 +139,124 @@ test("pipeline resumes structured outline from persisted volume workspace when v
   assert.equal(highMemoryChecks[0].volumeId, "volume_1");
 });
 
+test("auto-to-execution volume strategy approval is passed into the runtime gate", async () => {
+  const calls = [];
+  const runtime = createRuntime({
+    runtimeOrchestrator: {
+      async runStepModule(input) {
+        calls.push({
+          moduleId: input.module.id,
+          approveCurrentGate: input.approveCurrentGate,
+          approveAutoExecutionScope: input.approveAutoExecutionScope,
+        });
+        return null;
+      },
+      async runChapterExecutionNode() {},
+      async markTaskRunning() {},
+    },
+  });
+
+  await runtime.runPipeline({
+    taskId: "task_auto_to_execution_volume_gate",
+    novelId: "novel_auto_to_execution_volume_gate",
+    input: buildDirectorInput({
+      workflowTaskId: "task_auto_to_execution_volume_gate",
+      runMode: "auto_to_execution",
+      autoApproval: {
+        enabled: true,
+        approvalPointCodes: ["volume_strategy_ready"],
+      },
+    }),
+    startPhase: "volume_strategy",
+  });
+
+  assert.deepEqual(calls, [{
+    moduleId: "volume.strategy.plan",
+    approveCurrentGate: true,
+    approveAutoExecutionScope: true,
+  }]);
+});
+
+test("auto-to-execution structured outline approval is passed into the runtime gate", async () => {
+  const calls = [];
+  const workspace = {
+    volumes: [{ id: "volume_1", chapters: [] }],
+    strategyPlan: { targetChapterCount: 30 },
+  };
+  const runtime = createRuntime({
+    runtimeOrchestrator: {
+      async runStepModule(input) {
+        calls.push({
+          moduleId: input.module.id,
+          approveCurrentGate: input.approveCurrentGate,
+          approveAutoExecutionScope: input.approveAutoExecutionScope,
+        });
+        return undefined;
+      },
+      async runChapterExecutionNode() {},
+      async markTaskRunning() {},
+    },
+  });
+
+  await runtime.runStructuredOutlineNode({
+    taskId: "task_auto_to_execution_outline_gate",
+    novelId: "novel_auto_to_execution_outline_gate",
+    input: buildDirectorInput({
+      workflowTaskId: "task_auto_to_execution_outline_gate",
+      runMode: "auto_to_execution",
+      autoApproval: {
+        enabled: true,
+        approvalPointCodes: ["structured_outline_ready"],
+      },
+    }),
+    startPhase: "structured_outline",
+  }, workspace);
+
+  assert.deepEqual(calls, [{
+    moduleId: "chapter.task_sheet.plan",
+    approveCurrentGate: true,
+    approveAutoExecutionScope: true,
+  }]);
+});
+
+test("auto-to-execution does not pass planning gates without matching approval", async () => {
+  const calls = [];
+  const runtime = createRuntime({
+    runtimeOrchestrator: {
+      async runStepModule(input) {
+        calls.push({
+          moduleId: input.module.id,
+          approveCurrentGate: input.approveCurrentGate,
+          approveAutoExecutionScope: input.approveAutoExecutionScope,
+        });
+        return null;
+      },
+      async runChapterExecutionNode() {},
+      async markTaskRunning() {},
+    },
+  });
+
+  await runtime.runPipeline({
+    taskId: "task_auto_to_execution_unapproved_volume_gate",
+    novelId: "novel_auto_to_execution_unapproved_volume_gate",
+    input: buildDirectorInput({
+      workflowTaskId: "task_auto_to_execution_unapproved_volume_gate",
+      runMode: "auto_to_execution",
+      autoApproval: {
+        enabled: true,
+        approvalPointCodes: ["structured_outline_ready"],
+      },
+    }),
+    startPhase: "volume_strategy",
+  });
+
+  assert.deepEqual(calls, [{
+    moduleId: "volume.strategy.plan",
+    approveCurrentGate: false,
+    approveAutoExecutionScope: false,
+  }]);
+});
+
 test("pipeline pauses after volume strategy checkpoint instead of falling through to structured outline", async () => {
   const modules = [];
   let getVolumeCalls = 0;

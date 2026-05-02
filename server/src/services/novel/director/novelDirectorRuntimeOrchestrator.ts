@@ -17,6 +17,7 @@ import type { DirectorProgressItemKey } from "./novelDirectorProgress";
 import type { WorkflowStepModuleDescriptor } from "./workflowStepRuntime/WorkflowStepModule";
 import { buildChapterPipelineWorkflowTemplate } from "./workflowStepRuntime/directorWorkflowPlans";
 import { directorWorkflowStepModuleRegistry } from "./workflowStepRuntime/directorWorkflowStepModules";
+import { isInitializationPlaceholderVolumeStrategyArtifact } from "./runtime/DirectorWorkspaceArtifactInventory";
 
 export class DirectorRuntimeGateError extends AppError {
   constructor(message: string) {
@@ -38,6 +39,12 @@ function filterArtifactsByWrites(
   }
   const writeTypes = new Set(writes);
   return artifacts.filter((artifact) => writeTypes.has(artifact.artifactType));
+}
+
+function filterPolicyAffectedArtifacts(
+  artifacts: DirectorArtifactRef[],
+): DirectorArtifactRef[] {
+  return artifacts.filter((artifact) => !isInitializationPlaceholderVolumeStrategyArtifact(artifact));
 }
 
 export class NovelDirectorRuntimeOrchestrator {
@@ -323,7 +330,7 @@ export class NovelDirectorRuntimeOrchestrator {
       return [];
     }
     const writeTypes = new Set(input.writes);
-    return analysis.inventory.artifacts.filter((artifact) => {
+    return filterPolicyAffectedArtifacts(analysis.inventory.artifacts.filter((artifact) => {
       if (!writeTypes.has(artifact.artifactType)) {
         return false;
       }
@@ -334,7 +341,7 @@ export class NovelDirectorRuntimeOrchestrator {
         return false;
       }
       return artifact.status === "active";
-    });
+    }));
   }
 
   private async resolveNodePolicyOverride(input: {
