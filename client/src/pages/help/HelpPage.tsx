@@ -41,7 +41,7 @@ interface FaqItem {
 const guideSteps: GuideStep[] = [
   {
     title: "配置模型",
-    description: "先让规划、正文和审阅任务有可用模型，后续自动导演和章节执行才能顺利运行。",
+    description: "先在系统设置里配置模型厂商、API Key 和默认模型，后续自动导演和章节执行才能顺利运行。",
     icon: KeyRound,
   },
   {
@@ -92,10 +92,10 @@ const goalEntries: GoalEntry[] = [
     icon: BookOpenText,
   },
   {
-    title: "检查模型",
-    description: "查看规划、正文、审阅等任务使用的模型，保证写作链路有可用配置。",
-    href: "/settings/model-routes",
-    action: "配置模型",
+    title: "配置模型厂商",
+    description: "填写厂商接口、API Key 和默认模型，保证写作链路有可用模型。",
+    href: "/settings",
+    action: "打开系统设置",
     icon: Route,
   },
   {
@@ -162,7 +162,7 @@ export default function HelpPage() {
               <Link to={DIRECTOR_CREATE_LINK}>开始第一本小说</Link>
             </Button>
             <Button asChild size="lg" variant="outline">
-              <Link to="/settings/model-routes">配置模型</Link>
+              <Link to="/settings">配置模型</Link>
             </Button>
           </div>
         </div>
@@ -175,12 +175,12 @@ export default function HelpPage() {
             <CardTitle className="text-lg text-amber-950">开始写作前先配置模型</CardTitle>
           </div>
           <CardDescription className="text-amber-900/80">
-            自动导演、正文写作和章节审阅都需要可用模型。先完成模型路由配置，再启动开书流程会更顺畅。
+            自动导演、正文写作和章节审阅都需要可用模型。先完成模型厂商、API Key 和默认模型配置，再启动开书流程会更顺畅。
           </CardDescription>
         </CardHeader>
         <CardContent>
           <Button asChild variant="outline">
-            <Link to="/settings/model-routes">去配置模型</Link>
+            <Link to="/settings">去配置模型</Link>
           </Button>
         </CardContent>
       </Card>
