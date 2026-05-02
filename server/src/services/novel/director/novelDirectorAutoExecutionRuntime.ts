@@ -824,6 +824,8 @@ export class NovelDirectorAutoExecutionRuntime {
               circuitBreaker: failureCircuitBreaker,
               failureMessage,
               chapterOrder: autoExecution.nextChapterOrder ?? null,
+              qualityBudgetEntry,
+              qualityBudgetNextAction,
             },
           }).catch(() => null);
           const previousNextChapterId = autoExecution.nextChapterId ?? null;

@@ -527,6 +527,9 @@ export function resolveChapterQueuePreview(chapter: Chapter): string {
 }
 
 export function chapterSuggestedActionLabel(chapter: Chapter): string {
+  if (chapterHasContinuableQualityLoop(chapter)) {
+    return hasText(chapter.content) ? "继续下一章" : "写本章";
+  }
   const status = resolveDisplayedChapterStatus(chapter);
   if (status === "generating") return "等待生成";
   if (status === "needs_repair") return "一键修复";

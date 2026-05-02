@@ -151,6 +151,71 @@ test("director event projection exposes deferred quality debt", () => {
   assert.ok(projection.visibleRiskBadges.some((badge) => badge.label === "已暂存质量债"));
 });
 
+test("director event projection exposes quality budget summary", () => {
+  const service = new DirectorEventProjectionService();
+  const projection = service.buildSnapshotProjection(buildSnapshot({
+    steps: [{
+      idempotencyKey: "task-1:chapter_repair_node:chapter:chapter-6",
+      nodeKey: "chapter_repair_node",
+      label: "修复第 6 章",
+      status: "running",
+      targetType: "chapter",
+      targetId: "chapter-6",
+      startedAt: "2026-04-28T00:00:01.000Z",
+    }],
+    events: [{
+      eventId: "event-budget",
+      type: "repair_ticket_created",
+      taskId: "task-1",
+      novelId: "novel-1",
+      nodeKey: "chapter_repair_node",
+      summary: "第 6 章同类质量问题再次出现。",
+      affectedScope: "chapter:chapter-6",
+      severity: "medium",
+      metadata: {
+        chapterOrder: 6,
+        qualityBudgetNextAction: "auto_replan_window",
+        qualityBudgetEntry: {
+          signatureKey: "sig-1",
+          issueSignature: "quality_loop|medium|repair|章节衔接问题",
+          blockingLedgerKeys: ["continuity_state"],
+          affectedChapterWindow: {
+            startOrder: 6,
+            endOrder: 8,
+            chapterOrders: [6, 7, 8],
+            chapterIds: [],
+          },
+          patchRepairCount: 1,
+          chapterRewriteCount: 1,
+          windowReplanCount: 0,
+          deferredCount: 0,
+          lastAction: "chapter_rewrite",
+          lastReason: "章节衔接问题仍存在",
+          lastChapterId: "chapter-6",
+          lastChapterOrder: 6,
+          updatedAt: "2026-04-28T00:00:02.000Z",
+        },
+      },
+      occurredAt: "2026-04-28T00:00:02.000Z",
+    }],
+  }));
+
+  assert.deepEqual(projection.qualityBudgetSummary, {
+    currentChapterId: "chapter-6",
+    currentChapterOrder: 6,
+    latestSignatureKey: "sig-1",
+    latestIssueSignature: "quality_loop|medium|repair|章节衔接问题",
+    latestReason: "章节衔接问题仍存在",
+    patchRepairUsed: 1,
+    chapterRewriteUsed: 1,
+    windowReplanUsed: 0,
+    deferredCount: 0,
+    nextAction: "auto_replan_window",
+    nextActionLabel: "重规划受影响章节",
+    explanation: "质量预算：局部修复 1/1，整章重写 1/1，窗口重规划 0/1；同类问题下一步会重规划受影响章节。",
+  });
+});
+
 test("director event projection summarizes workspace progress and next action", () => {
   const service = new DirectorEventProjectionService();
   const projection = service.buildSnapshotProjection(buildSnapshot({

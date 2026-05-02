@@ -1,6 +1,6 @@
 import type { LLMProvider } from "./llm";
 import type { NovelWorkflowStage } from "./novelWorkflow";
-import type { DirectorCircuitBreakerState } from "./novelDirector";
+import type { DirectorCircuitBreakerState, DirectorQualityLoopBudgetNextAction } from "./novelDirector";
 
 export const DIRECTOR_POLICY_MODES = [
   "suggest_only",
@@ -375,6 +375,21 @@ export interface DirectorRuntimeQualityDebtSummary {
   latestReason?: string | null;
 }
 
+export interface DirectorRuntimeQualityBudgetSummary {
+  currentChapterId?: string | null;
+  currentChapterOrder?: number | null;
+  latestSignatureKey?: string | null;
+  latestIssueSignature?: string | null;
+  latestReason?: string | null;
+  patchRepairUsed: number;
+  chapterRewriteUsed: number;
+  windowReplanUsed: number;
+  deferredCount: number;
+  nextAction: DirectorQualityLoopBudgetNextAction;
+  nextActionLabel: string;
+  explanation: string;
+}
+
 export interface DirectorRuntimeProjection {
   runId: string;
   novelId?: string | null;
@@ -396,6 +411,7 @@ export interface DirectorRuntimeProjection {
   progressBreakdown?: DirectorRuntimeProgressBreakdown;
   visibleRiskBadges?: DirectorRuntimeVisibleRiskBadge[];
   qualityDebtSummary?: DirectorRuntimeQualityDebtSummary | null;
+  qualityBudgetSummary?: DirectorRuntimeQualityBudgetSummary | null;
   policyMode: DirectorPolicyMode;
   updatedAt: string;
   recentEvents: DirectorRuntimeProjectionEvent[];

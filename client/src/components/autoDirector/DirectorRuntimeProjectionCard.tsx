@@ -157,6 +157,16 @@ function formatQualityDebtSummary(summary: DirectorRuntimeProjection["qualityDeb
   return `质量待回收${orderText}。系统会先继续写后续章节，并在质量修复阶段回收这些问题。`;
 }
 
+function formatQualityBudgetSummary(summary: DirectorRuntimeProjection["qualityBudgetSummary"] | null | undefined): string | null {
+  if (!summary) {
+    return null;
+  }
+  const chapterText = typeof summary.currentChapterOrder === "number"
+    ? `第 ${summary.currentChapterOrder} 章`
+    : "当前章节";
+  return `${chapterText}质量预算：局部修复 ${summary.patchRepairUsed}/1，整章重写 ${summary.chapterRewriteUsed}/1，窗口重规划 ${summary.windowReplanUsed}/1。${summary.nextActionLabel}`;
+}
+
 function formatPercent(value: number | null | undefined): string {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return "0%";
@@ -187,10 +197,12 @@ export default function DirectorRuntimeProjectionCard({
     || projection.progressSummary?.trim()
     || null;
   const qualityDebtLine = formatQualityDebtSummary(projection.qualityDebtSummary);
+  const qualityBudgetLine = formatQualityBudgetSummary(projection.qualityBudgetSummary);
   const helperLines = [
     projection.nextActionLabel ? `下一步：${projection.nextActionLabel}` : null,
     projection.recommendedAction?.reason ? `推荐原因：${projection.recommendedAction.reason}` : null,
     projection.isAutopilotRecoverable ? "AI 可以从当前进度继续处理。" : null,
+    qualityBudgetLine,
     qualityDebtLine,
     projection.scopeSummary,
     progressLine,

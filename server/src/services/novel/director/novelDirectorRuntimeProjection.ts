@@ -64,6 +64,7 @@ export async function loadPersistentDirectorRuntimeProjection(
           affectedScope: true,
           severity: true,
           occurredAt: true,
+          metadataJson: true,
         },
       },
     },
@@ -106,6 +107,7 @@ export async function loadPersistentDirectorRuntimeProjection(
       affectedScope: event.affectedScope,
       severity: event.severity as DirectorRuntimeSnapshot["events"][number]["severity"],
       occurredAt: event.occurredAt.toISOString(),
+      metadata: parseJsonOrNull<Record<string, unknown>>(event.metadataJson) ?? undefined,
     })),
     artifacts: [],
     lastWorkspaceAnalysis: parseJsonOrNull<DirectorRuntimeSnapshot["lastWorkspaceAnalysis"]>(
