@@ -5,6 +5,7 @@ import AppLayout from "@/components/layout/AppLayout";
 import { featureFlags } from "@/config/featureFlags";
 
 const Home = lazy(() => import("@/pages/Home"));
+const HelpPage = lazy(() => import("@/pages/help/HelpPage"));
 const NovelList = lazy(() => import("@/pages/novels/NovelList"));
 const NovelCreate = lazy(() => import("@/pages/novels/NovelCreate"));
 const NovelPreview = lazy(() => import("@/pages/novels/NovelPreview"));
@@ -33,6 +34,7 @@ const routes: RouteObject[] = [
     element: <AppLayout />,
     children: [
       { index: true, element: <Home /> },
+      { path: "help", element: <HelpPage /> },
       { path: "novels", element: <NovelList /> },
       { path: "novels/create", element: <NovelCreate /> },
       { path: "novels/:id/preview", element: <NovelPreview /> },
