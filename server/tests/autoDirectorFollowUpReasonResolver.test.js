@@ -145,6 +145,37 @@ test("auto director follow-up reason resolver prioritizes validation blocks over
   assert.equal(result.supportsBatch, false);
 });
 
+test("auto director follow-up reason resolver exposes structured outline backfill action", () => {
+  const result = resolveAutoDirectorFollowUpReason({
+    status: "waiting_approval",
+    checkpointType: "front10_ready",
+    executionScopeLabel: "第 1-10 章",
+    validationResult: {
+      allowed: false,
+      blockingReasons: ["目标范围缺少节奏拆章，需要先完成或重新校验拆章结果。"],
+      warnings: [],
+      requiredActions: [{
+        code: "auto_backfill_structured_outline",
+        label: "让 AI 补齐章节拆分后继续",
+        riskLevel: "low",
+        safeToAutoFix: true,
+      }],
+      affectedScope: {
+        type: "chapter_range",
+        label: "第 1-10 章",
+        startOrder: 1,
+        endOrder: 10,
+      },
+      nextAction: "auto_backfill_structured_outline",
+    },
+  });
+
+  assert.ok(result);
+  assert.equal(result.reason, "validation_required");
+  assert.deepEqual(actionCodes(result), ["open_detail", "auto_backfill_structured_outline"]);
+  assert.equal(result.supportsBatch, false);
+});
+
 test("auto director follow-up reason resolver only marks replaced for inactive tasks", () => {
   const active = resolveAutoDirectorFollowUpReason({
     status: "running",

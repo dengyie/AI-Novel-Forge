@@ -90,8 +90,15 @@ export function resolveAutoDirectorFollowUpReason(
   input: AutoDirectorFollowUpResolverInput,
 ): AutoDirectorResolvedFollowUpReason | null {
   if (input.validationResult && !input.validationResult.allowed) {
+    const hasStructuredBackfill = input.validationResult.requiredActions.some((action) => (
+      action.code === "auto_backfill_structured_outline"
+      && action.safeToAutoFix === true
+      && action.riskLevel === "low"
+    ));
     const hasSafeFix = input.validationResult.requiredActions.some((action) => (
-      action.safeToAutoFix === true && action.riskLevel === "low"
+      action.code !== "auto_backfill_structured_outline"
+      && action.safeToAutoFix === true
+      && action.riskLevel === "low"
     ));
     return finalizeResolvedReason({
       reason: "validation_required",
@@ -101,6 +108,16 @@ export function resolveAutoDirectorFollowUpReason(
           code: "open_detail",
           label: "查看校验结果",
         }),
+        ...(hasStructuredBackfill
+          ? [
+            mutationAction({
+              code: "auto_backfill_structured_outline",
+              label: "让 AI 补齐章节拆分后继续",
+              riskLevel: "low",
+              requiresConfirm: false,
+            }),
+          ]
+          : []),
         ...(hasSafeFix
           ? [
             mutationAction({

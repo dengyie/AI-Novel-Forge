@@ -40,7 +40,41 @@ test("validateAutoDirectorTakeoverRequest lets continue recovery backfill struct
     endOrder: 10,
   });
   assert.deepEqual(result.blockingReasons, []);
-  assert.equal(result.nextAction, "continue_structured_outline");
+  assert.equal(result.nextAction, "auto_backfill_structured_outline");
+});
+
+test("validateAutoDirectorTakeoverRequest backfills partially missing structured outline details before chapter execution", () => {
+  const result = validateAutoDirectorTakeoverRequest({
+    source: "takeover",
+    request: {
+      novelId: "novel-1",
+      entryStep: "chapter",
+      strategy: "continue_existing",
+      autoExecutionPlan: {
+        mode: "chapter_range",
+        startOrder: 1,
+        endOrder: 5,
+      },
+    },
+    assets: {
+      hasProjectSetup: true,
+      hasStoryMacroPlan: true,
+      hasBookContract: true,
+      characterCount: 3,
+      volumeCount: 1,
+      hasVolumeStrategyPlan: true,
+      hasStructuredOutline: true,
+      totalChapterCount: 10,
+      volumeChapterRanges: [
+        { volumeOrder: 1, startOrder: 1, endOrder: 10 },
+      ],
+      structuredOutlineChapterOrders: [1, 2, 3, 4],
+    },
+  });
+
+  assert.equal(result.allowed, true);
+  assert.deepEqual(result.blockingReasons, []);
+  assert.equal(result.nextAction, "auto_backfill_structured_outline");
 });
 
 test("validateAutoDirectorTakeoverRequest still blocks chapter restarts before structured outline exists", () => {

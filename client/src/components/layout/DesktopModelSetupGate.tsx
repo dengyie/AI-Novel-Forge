@@ -34,7 +34,12 @@ export default function DesktopModelSetupGate() {
   }
 
   const isSettingsRoute = location.pathname.startsWith("/settings");
+  const isHelpRoute = location.pathname.startsWith("/help");
   const configuredProviderCount = providerConfigs.filter((item) => item.isConfigured && item.isActive).length;
+
+  if (isHelpRoute) {
+    return null;
+  }
 
   if (isSettingsRoute) {
     return (
@@ -82,6 +87,9 @@ export default function DesktopModelSetupGate() {
           <div className="flex flex-wrap gap-3">
             <Button asChild size="lg">
               <Link to="/settings">Open model settings</Link>
+            </Button>
+            <Button asChild size="lg" variant="outline">
+              <Link to="/help">查看新手上路</Link>
             </Button>
           </div>
         </CardContent>

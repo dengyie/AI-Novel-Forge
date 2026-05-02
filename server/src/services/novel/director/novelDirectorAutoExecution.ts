@@ -250,6 +250,67 @@ export function canPreserveDirectorAutoExecutionSkippedChapter(chapter: Director
     && (chapter.generationState === "reviewed" || chapter.generationState === "repaired");
 }
 
+function uniqueStrings(values: Array<string | null | undefined>): string[] {
+  return Array.from(new Set(
+    values
+      .map((value) => value?.trim())
+      .filter((value): value is string => Boolean(value)),
+  ));
+}
+
+function uniqueNumbers(values: Array<number | null | undefined>): number[] {
+  return Array.from(new Set(
+    values.filter((value): value is number => typeof value === "number" && Number.isFinite(value)),
+  )).sort((left, right) => left - right);
+}
+
+export function buildDirectorAutoExecutionDeferredQualityState(input: {
+  state: DirectorAutoExecutionState;
+  reason: string;
+  source: NonNullable<DirectorAutoExecutionState["qualityDebtSummaries"]>[number]["source"];
+  deferredAt?: string | Date;
+}): DirectorAutoExecutionState {
+  const chapterId = input.state.nextChapterId?.trim() || null;
+  const chapterOrder = typeof input.state.nextChapterOrder === "number"
+    ? input.state.nextChapterOrder
+    : null;
+  const deferredAt = input.deferredAt instanceof Date
+    ? input.deferredAt.toISOString()
+    : input.deferredAt ?? new Date().toISOString();
+  const summaries = [
+    ...(input.state.qualityDebtSummaries ?? []),
+    {
+      chapterId,
+      chapterOrder,
+      reason: input.reason.trim() || "自动成书已暂存本章质量问题，继续推进后续章节。",
+      source: input.source,
+      deferredAt,
+    },
+  ].slice(-40);
+  return {
+    ...input.state,
+    skippedChapterIds: uniqueStrings([
+      ...(input.state.skippedChapterIds ?? []),
+      ...(chapterId ? [chapterId] : []),
+    ]),
+    skippedChapterOrders: uniqueNumbers([
+      ...(input.state.skippedChapterOrders ?? []),
+      ...(chapterOrder != null ? [chapterOrder] : []),
+    ]),
+    qualityDebtChapterIds: uniqueStrings([
+      ...(input.state.qualityDebtChapterIds ?? []),
+      ...(chapterId ? [chapterId] : []),
+    ]),
+    qualityDebtChapterOrders: uniqueNumbers([
+      ...(input.state.qualityDebtChapterOrders ?? []),
+      ...(chapterOrder != null ? [chapterOrder] : []),
+    ]),
+    qualityDebtSummaries: summaries,
+    pipelineJobId: null,
+    pipelineStatus: null,
+  };
+}
+
 export function hasDirectorAutoExecutionChapterContract(chapter: DirectorAutoExecutionChapterRef): boolean {
   if (typeof chapter.conflictLevel !== "number" || typeof chapter.revealLevel !== "number" || typeof chapter.targetWordCount !== "number") {
     return false;
@@ -275,13 +336,20 @@ export function buildDirectorAutoExecutionState(input: {
   const plan = normalizeDirectorAutoExecutionPlan(input.plan);
   const skippedChapterIds = new Set((input.plan as DirectorAutoExecutionState | null | undefined)?.skippedChapterIds ?? []);
   const skippedChapterOrders = new Set((input.plan as DirectorAutoExecutionState | null | undefined)?.skippedChapterOrders ?? []);
+  const qualityDebtChapterIds = new Set((input.plan as DirectorAutoExecutionState | null | undefined)?.qualityDebtChapterIds ?? []);
+  const qualityDebtChapterOrders = new Set((input.plan as DirectorAutoExecutionState | null | undefined)?.qualityDebtChapterOrders ?? []);
   const selected = input.chapters
     .filter((chapter) => chapter.order >= input.range.startOrder && chapter.order <= input.range.endOrder)
     .sort((left, right) => left.order - right.order);
-  const skipped = selected.filter((chapter) => (
-    (skippedChapterIds.has(chapter.id) || skippedChapterOrders.has(chapter.order))
-    && canPreserveDirectorAutoExecutionSkippedChapter(chapter)
-  ));
+  const skipped = selected.filter((chapter) => {
+    const isSkippedChapter = skippedChapterIds.has(chapter.id) || skippedChapterOrders.has(chapter.order);
+    if (!isSkippedChapter) {
+      return false;
+    }
+    const isQualityDebtChapter = qualityDebtChapterIds.has(chapter.id) || qualityDebtChapterOrders.has(chapter.order);
+    return canPreserveDirectorAutoExecutionSkippedChapter(chapter)
+      || (isQualityDebtChapter && hasDirectorAutoExecutionChapterContract(chapter));
+  });
   const preservedSkippedChapterIds = new Set(skipped.map((chapter) => chapter.id));
   const preservedSkippedChapterOrders = new Set(skipped.map((chapter) => chapter.order));
   const actionable = selected.filter((chapter) => (
@@ -291,6 +359,17 @@ export function buildDirectorAutoExecutionState(input: {
   const completed = actionable.filter((chapter) => isDirectorAutoExecutionChapterProcessed(chapter));
   const remaining = actionable.filter((chapter) => !isDirectorAutoExecutionChapterProcessed(chapter));
   const totalChapterCount = Math.max(input.range.totalChapterCount, selected.length);
+  const preservedQualityDebt = skipped.filter((chapter) => (
+    qualityDebtChapterIds.has(chapter.id) || qualityDebtChapterOrders.has(chapter.order)
+  ));
+  const preservedQualityDebtIds = new Set(preservedQualityDebt.map((chapter) => chapter.id));
+  const preservedQualityDebtOrders = new Set(preservedQualityDebt.map((chapter) => chapter.order));
+  const qualityDebtSummaries = ((input.plan as DirectorAutoExecutionState | null | undefined)?.qualityDebtSummaries ?? [])
+    .filter((item) => (
+      (item.chapterId ? preservedQualityDebtIds.has(item.chapterId) : false)
+      || (typeof item.chapterOrder === "number" ? preservedQualityDebtOrders.has(item.chapterOrder) : false)
+    ))
+    .slice(-40);
   return {
     enabled: true,
     mode: plan.mode,
@@ -302,6 +381,11 @@ export function buildDirectorAutoExecutionState(input: {
     preparedVolumeIds: input.preparedVolumeIds ?? [],
     skippedChapterIds: skipped.map((chapter) => chapter.id),
     skippedChapterOrders: skipped.map((chapter) => chapter.order),
+    qualityDebtChapterIds: preservedQualityDebt.map((chapter) => chapter.id),
+    qualityDebtChapterOrders: preservedQualityDebt.map((chapter) => chapter.order),
+    qualityDebtSummaries,
+    qualityLoopLedger: (input.plan as DirectorAutoExecutionState | null | undefined)?.qualityLoopLedger ?? null,
+    circuitBreaker: (input.plan as DirectorAutoExecutionState | null | undefined)?.circuitBreaker ?? null,
     firstChapterId: selected[0]?.id ?? input.range.firstChapterId,
     startOrder: input.range.startOrder,
     endOrder: input.range.endOrder,

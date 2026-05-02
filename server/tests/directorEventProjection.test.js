@@ -65,6 +65,9 @@ test("director event projection marks approval gates as user action", () => {
   assert.equal(projection.headline, "等待确认：执行章节生成批次");
   assert.equal(projection.detail, "当前策略需要确认后继续。");
   assert.equal(projection.blockedReason, "当前策略需要确认后继续。");
+  assert.equal(projection.blockingReason, "当前策略需要确认后继续。");
+  assert.equal(projection.recoveryDecision, "auto_resume_from_checkpoint");
+  assert.equal(projection.isAutopilotRecoverable, false);
   assert.equal(projection.recentEvents.length, 1);
 });
 
@@ -102,6 +105,115 @@ test("director event projection keeps latest event first", () => {
   assert.equal(projection.headline, "步骤完成：生成书级规划资产");
   assert.equal(projection.lastEventSummary, "书级规划资产已准备好。");
   assert.equal(projection.recentEvents[0].eventId, "event-new");
+});
+
+test("director event projection exposes deferred quality debt", () => {
+  const service = new DirectorEventProjectionService();
+  const projection = service.buildSnapshotProjection(buildSnapshot({
+    policy: {
+      mode: "auto_safe_scope",
+      mayOverwriteUserContent: false,
+      maxAutoRepairAttempts: 1,
+      allowExpensiveReview: false,
+      modelTier: "balanced",
+      updatedAt: "2026-04-28T00:00:00.000Z",
+    },
+    steps: [{
+      idempotencyKey: "task-1:chapter_execution_node:novel:novel-1",
+      nodeKey: "chapter_execution_node",
+      label: "继续章节生成",
+      status: "running",
+      targetType: "novel",
+      targetId: "novel-1",
+      startedAt: "2026-04-28T00:00:01.000Z",
+    }],
+    events: [{
+      eventId: "event-quality-debt",
+      type: "continue_with_risk",
+      taskId: "task-1",
+      novelId: "novel-1",
+      nodeKey: "planner.replan",
+      summary: "全书自动成书已暂存重复重规划问题，并继续推进后续章节。",
+      affectedScope: "chapter_order:6",
+      severity: "medium",
+      metadata: { chapterOrder: 6 },
+      occurredAt: "2026-04-28T00:00:02.000Z",
+    }],
+  }));
+
+  assert.equal(projection.recoveryDecision, "defer_and_continue");
+  assert.equal(projection.isAutopilotRecoverable, true);
+  assert.deepEqual(projection.qualityDebtSummary, {
+    deferredChapterCount: 1,
+    deferredChapterOrders: [6],
+    latestReason: "全书自动成书已暂存重复重规划问题，并继续推进后续章节。",
+  });
+  assert.ok(projection.visibleRiskBadges.some((badge) => badge.label === "已暂存质量债"));
+});
+
+test("director event projection exposes quality budget summary", () => {
+  const service = new DirectorEventProjectionService();
+  const projection = service.buildSnapshotProjection(buildSnapshot({
+    steps: [{
+      idempotencyKey: "task-1:chapter_repair_node:chapter:chapter-6",
+      nodeKey: "chapter_repair_node",
+      label: "修复第 6 章",
+      status: "running",
+      targetType: "chapter",
+      targetId: "chapter-6",
+      startedAt: "2026-04-28T00:00:01.000Z",
+    }],
+    events: [{
+      eventId: "event-budget",
+      type: "repair_ticket_created",
+      taskId: "task-1",
+      novelId: "novel-1",
+      nodeKey: "chapter_repair_node",
+      summary: "第 6 章同类质量问题再次出现。",
+      affectedScope: "chapter:chapter-6",
+      severity: "medium",
+      metadata: {
+        chapterOrder: 6,
+        qualityBudgetNextAction: "auto_replan_window",
+        qualityBudgetEntry: {
+          signatureKey: "sig-1",
+          issueSignature: "quality_loop|medium|repair|章节衔接问题",
+          blockingLedgerKeys: ["continuity_state"],
+          affectedChapterWindow: {
+            startOrder: 6,
+            endOrder: 8,
+            chapterOrders: [6, 7, 8],
+            chapterIds: [],
+          },
+          patchRepairCount: 1,
+          chapterRewriteCount: 1,
+          windowReplanCount: 0,
+          deferredCount: 0,
+          lastAction: "chapter_rewrite",
+          lastReason: "章节衔接问题仍存在",
+          lastChapterId: "chapter-6",
+          lastChapterOrder: 6,
+          updatedAt: "2026-04-28T00:00:02.000Z",
+        },
+      },
+      occurredAt: "2026-04-28T00:00:02.000Z",
+    }],
+  }));
+
+  assert.deepEqual(projection.qualityBudgetSummary, {
+    currentChapterId: "chapter-6",
+    currentChapterOrder: 6,
+    latestSignatureKey: "sig-1",
+    latestIssueSignature: "quality_loop|medium|repair|章节衔接问题",
+    latestReason: "章节衔接问题仍存在",
+    patchRepairUsed: 1,
+    chapterRewriteUsed: 1,
+    windowReplanUsed: 0,
+    deferredCount: 0,
+    nextAction: "auto_replan_window",
+    nextActionLabel: "重规划受影响章节",
+    explanation: "质量预算：局部修复 1/1，整章重写 1/1，窗口重规划 0/1；同类问题下一步会重规划受影响章节。",
+  });
 });
 
 test("director event projection summarizes workspace progress and next action", () => {
@@ -231,8 +343,23 @@ test("director event projection summarizes workspace progress and next action", 
   assert.equal(projection.headline, "推进任务：分析小说资产");
   assert.equal(projection.detail, "最近进展：工作区分析完成。");
   assert.equal(projection.nextActionLabel, "复查最近章节");
+  assert.equal(projection.recommendedAction.action, "review_recent_chapters");
   assert.equal(projection.scopeSummary, "工作区：12 章，4 章有正文，1 章待修复，1 类产物待补齐。");
   assert.equal(projection.progressSummary, "进展：0/1 个步骤完成，2 个产物记录，1 个用户内容受保护，1 个产物需确认，1 个修复任务。");
+  assert.equal(projection.recoveryDecision, "auto_repair_chapter");
+  assert.equal(projection.progressBreakdown.planningPercent, 100);
+  assert.equal(projection.progressBreakdown.chapterExecutionPercent, 25);
+  assert.equal(projection.progressBreakdown.qualityRepairPercent, 75);
+  assert.equal(projection.progressBreakdown.totalPercent, 59);
+  assert.equal(projection.progressBreakdown.planningProgress, 100);
+  assert.equal(projection.progressBreakdown.chapterProgress, 25);
+  assert.equal(projection.progressBreakdown.qualityProgress, 75);
+  assert.equal(projection.progressBreakdown.activeJobProgress, 1);
+  assert.equal(projection.progressBreakdown.continuableChapters, 3);
+  assert.deepEqual(
+    projection.visibleRiskBadges.map((badge) => badge.label),
+    ["受保护正文", "1 章待修复", "1 项需复核", "缺少规划资源"],
+  );
 });
 
 test("director event projection keeps heartbeat as latest running progress", () => {

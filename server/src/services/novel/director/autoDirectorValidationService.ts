@@ -148,6 +148,75 @@ function shouldAllowStructuredBackfill(input: {
     && Boolean(input.assets.hasVolumeStrategyPlan);
 }
 
+function resolveStructuredOutlineMissingOrders(input: {
+  affectedScope: AutoDirectorAffectedScope;
+  volumeChapterRanges: Array<{ volumeOrder: number; startOrder: number; endOrder: number }>;
+  structuredOutlineChapterOrders: Set<number>;
+}): number[] {
+  if (input.structuredOutlineChapterOrders.size === 0) {
+    return [];
+  }
+  const missingOrders: number[] = [];
+  if (isChapterRangeScope(input.affectedScope)) {
+    for (let order = input.affectedScope.startOrder; order <= input.affectedScope.endOrder; order += 1) {
+      if (!input.structuredOutlineChapterOrders.has(order)) {
+        missingOrders.push(order);
+      }
+    }
+  }
+  if (isVolumeScope(input.affectedScope)) {
+    const volumeOrder = input.affectedScope.volumeOrder;
+    const range = input.volumeChapterRanges.find((item) => item.volumeOrder === volumeOrder);
+    if (range) {
+      for (let order = range.startOrder; order <= range.endOrder; order += 1) {
+        if (!input.structuredOutlineChapterOrders.has(order)) {
+          missingOrders.push(order);
+        }
+      }
+    }
+  }
+  return missingOrders;
+}
+
+function resolveStructuredBackfillNeed(input: {
+  affectedScope: AutoDirectorAffectedScope;
+  assets: AutoDirectorTakeoverValidationInput["assets"];
+  entryStep: DirectorTakeoverEntryStep;
+}): {
+  needed: boolean;
+  missingOrders: number[];
+} {
+  if (!isEntryAtOrAfter(input.entryStep, "chapter")) {
+    return { needed: false, missingOrders: [] };
+  }
+  if (!input.assets.hasVolumeStrategyPlan) {
+    return { needed: false, missingOrders: [] };
+  }
+  const volumeChapterRanges = Array.isArray(input.assets.volumeChapterRanges)
+    ? input.assets.volumeChapterRanges
+      .map((range) => ({
+        volumeOrder: normalizeChapterOrder(range.volumeOrder),
+        startOrder: normalizeChapterOrder(range.startOrder),
+        endOrder: normalizeChapterOrder(range.endOrder),
+      }))
+      .filter((range): range is { volumeOrder: number; startOrder: number; endOrder: number } => Boolean(range.volumeOrder && range.startOrder && range.endOrder))
+    : [];
+  const structuredOutlineChapterOrders = new Set(
+    (input.assets.structuredOutlineChapterOrders ?? [])
+      .map((order) => normalizeChapterOrder(order))
+      .filter((order): order is number => Boolean(order)),
+  );
+  const missingOrders = resolveStructuredOutlineMissingOrders({
+    affectedScope: input.affectedScope,
+    volumeChapterRanges,
+    structuredOutlineChapterOrders,
+  });
+  return {
+    needed: !input.assets.hasStructuredOutline || missingOrders.length > 0,
+    missingOrders,
+  };
+}
+
 function resolvePlannedChapterCount(input: {
   assets: AutoDirectorTakeoverValidationInput["assets"];
   volumeChapterRanges: Array<{ volumeOrder: number; startOrder: number; endOrder: number }>;
@@ -219,24 +288,11 @@ function validateScopeAgainstAssets(input: {
     reasons.push("目标范围缺少节奏拆章，需要先完成或重新校验拆章结果。");
   }
   if (isEntryAtOrAfter(input.entryStep, "chapter") && structuredOutlineChapterOrders.size > 0) {
-    const missingOrders: number[] = [];
-    if (isChapterRangeScope(affectedScope)) {
-      for (let order = affectedScope.startOrder; order <= affectedScope.endOrder; order += 1) {
-        if (!structuredOutlineChapterOrders.has(order)) {
-          missingOrders.push(order);
-        }
-      }
-    }
-    if (isVolumeScope(affectedScope)) {
-      const range = volumeChapterRanges.find((item) => item.volumeOrder === affectedScope.volumeOrder);
-      if (range) {
-        for (let order = range.startOrder; order <= range.endOrder; order += 1) {
-          if (!structuredOutlineChapterOrders.has(order)) {
-            missingOrders.push(order);
-          }
-        }
-      }
-    }
+    const missingOrders = resolveStructuredOutlineMissingOrders({
+      affectedScope,
+      volumeChapterRanges,
+      structuredOutlineChapterOrders,
+    });
     if (missingOrders.length > 0 && !input.allowStructuredBackfill) {
       reasons.push(`目标范围缺少节奏拆章明细：第 ${missingOrders.slice(0, 5).join("、")} 章需要先完成或重新校验。`);
     }
@@ -255,6 +311,17 @@ export function validateAutoDirectorTakeoverRequest(
     request: input.request,
     assets: input.assets,
   });
+  const structuredBackfillNeed = resolveStructuredBackfillNeed({
+    affectedScope,
+    assets: input.assets,
+    entryStep,
+  });
+  const onlyStructuredBackfillBlocked = blockingReasons.length > 0
+    && structuredBackfillNeed.needed
+    && blockingReasons.every((reason) => reason.includes("节奏拆章"));
+  const canBackfillStructuredOutline = onlyStructuredBackfillBlocked
+    && input.request.strategy === "continue_existing"
+    && Boolean(input.assets.hasVolumeStrategyPlan);
 
   if (entryStep === "story_macro" && !input.assets.hasProjectSetup) {
     blockingReasons.push("项目设定不完整，不能直接从故事宏观规划开始。");
@@ -282,8 +349,17 @@ export function validateAutoDirectorTakeoverRequest(
     warnings: input.request.strategy === "restart_current_step"
       ? ["重新生成会影响目标节点及后续资产，执行前需要保留可恢复快照。"]
       : [],
-    requiredActions: input.request.strategy === "restart_current_step"
+    requiredActions: onlyStructuredBackfillBlocked && Boolean(input.assets.hasVolumeStrategyPlan)
       ? [
+          requiredAction({
+            code: "auto_backfill_structured_outline",
+            label: "让 AI 补齐章节拆分后继续",
+            riskLevel: "low",
+            safeToAutoFix: true,
+          }),
+        ]
+      : input.request.strategy === "restart_current_step"
+        ? [
           requiredAction({
             code: "create_rewrite_snapshot",
             label: "创建重写前快照",
@@ -297,12 +373,14 @@ export function validateAutoDirectorTakeoverRequest(
             safeToAutoFix: false,
           }),
         ]
-      : [],
+        : [],
     nextCheckpoint: "front10_ready",
     nextAction: blockingReasons.length > 0
-      ? "blocked"
-      : allowStructuredBackfill && !input.assets.hasStructuredOutline
-        ? "continue_structured_outline"
+      ? canBackfillStructuredOutline
+        ? "auto_backfill_structured_outline"
+        : "blocked"
+      : allowStructuredBackfill && structuredBackfillNeed.needed
+        ? "auto_backfill_structured_outline"
       : entryStep === "chapter" || entryStep === "pipeline"
         ? "continue_auto_execution"
         : "continue_structured_outline",

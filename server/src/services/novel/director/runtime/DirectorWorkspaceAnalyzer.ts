@@ -21,7 +21,10 @@ import {
 } from "../../../../prompting/prompts/novel/directorManualEditImpact.prompts";
 import { normalizeDirectorArtifactRef } from "./DirectorArtifactLedger";
 import { DirectorRuntimeStore } from "./DirectorRuntimeStore";
-import { buildDirectorWorkspaceArtifactInventory } from "./DirectorWorkspaceArtifactInventory";
+import {
+  buildDirectorWorkspaceArtifactInventory,
+  hasContinuableQualityLoopRiskFlags,
+} from "./DirectorWorkspaceArtifactInventory";
 
 function timestampOf(value?: string | null): number {
   if (!value) {
@@ -431,11 +434,16 @@ export class DirectorWorkspaceAnalyzer {
         where: { novelId },
         select: {
           id: true,
+          sortOrder: true,
+          title: true,
+          summary: true,
           mainPromise: true,
           openPayoffsJson: true,
           escalationMode: true,
           protagonistChange: true,
           nextVolumeHook: true,
+          status: true,
+          sourceVersionId: true,
           updatedAt: true,
         },
         orderBy: { sortOrder: "asc" },
@@ -593,7 +601,10 @@ export class DirectorWorkspaceAnalyzer {
       || chapter.generationState === "published"
       || chapter.chapterStatus === "completed"
     )).length;
-    const pendingRepairChapterCount = chapters.filter((chapter) => chapter.chapterStatus === "needs_repair").length;
+    const pendingRepairChapterCount = chapters.filter((chapter) => (
+      chapter.chapterStatus === "needs_repair"
+      && !hasContinuableQualityLoopRiskFlags(chapter.riskFlags)
+    )).length;
     const artifactInventory = buildDirectorWorkspaceArtifactInventory({
       novelId,
       hasWorldBinding: Boolean(novel.worldId),

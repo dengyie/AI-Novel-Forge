@@ -60,6 +60,28 @@ function auditReport(depVersion = 1) {
   };
 }
 
+function repairTicket(status = "active") {
+  return {
+    id: buildDirectorArtifactId({
+      type: "repair_ticket",
+      targetType: "chapter",
+      targetId: "chapter-1",
+      table: "Chapter",
+      id: "chapter-1",
+    }),
+    novelId: "novel-1",
+    artifactType: "repair_ticket",
+    targetType: "chapter",
+    targetId: "chapter-1",
+    version: 1,
+    status,
+    source: "ai_generated",
+    contentRef: { table: "Chapter", id: "chapter-1" },
+    schemaVersion: "legacy-wrapper-v1",
+    updatedAt: "2026-04-28T01:00:00.000Z",
+  };
+}
+
 test("director artifact ledger increments versions when content hash changes", () => {
   const result = reconcileDirectorArtifactLedger(
     [chapterDraft("hash-old")],
@@ -104,6 +126,27 @@ test("director artifact ledger keeps explicit content source when backfill refre
   assert.equal(result.artifacts.length, 1);
   assert.equal(result.artifacts[0].source, "user_edited");
   assert.equal(result.artifacts[0].protectedUserContent, null);
+});
+
+test("director artifact ledger supersedes repair tickets no longer present in the workspace inventory", () => {
+  const result = reconcileDirectorArtifactLedger(
+    [chapterDraft("hash-old"), repairTicket()],
+    [chapterDraft("hash-old")],
+  );
+  const resolvedTicket = result.artifacts.find((artifact) => artifact.artifactType === "repair_ticket");
+  const summary = summarizeDirectorArtifactLedger(result.artifacts, ["chapter_draft"]);
+
+  assert.equal(resolvedTicket.status, "superseded");
+  assert.deepEqual(summary.needsRepairArtifacts, []);
+});
+
+test("director artifact ledger summary only counts active repair tickets", () => {
+  const summary = summarizeDirectorArtifactLedger(
+    [repairTicket("stale"), repairTicket("superseded"), { ...repairTicket("active"), id: "repair-active" }],
+    ["chapter_draft"],
+  );
+
+  assert.deepEqual(summary.needsRepairArtifacts.map((artifact) => artifact.id), ["repair-active"]);
 });
 
 test("director artifact targets normalize hashes and stable ids", () => {

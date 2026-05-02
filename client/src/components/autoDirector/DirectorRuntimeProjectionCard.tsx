@@ -137,6 +137,43 @@ function statusIcon(status: DirectorRuntimeProjectionStatus) {
   return <ShieldCheck className="h-4 w-4" />;
 }
 
+function riskBadgeClassName(level: NonNullable<DirectorRuntimeProjection["visibleRiskBadges"]>[number]["level"]) {
+  if (level === "danger") {
+    return "border-red-200 bg-red-50 text-red-700";
+  }
+  if (level === "warning") {
+    return "border-amber-200 bg-amber-50 text-amber-700";
+  }
+  return "border-sky-200 bg-sky-50 text-sky-700";
+}
+
+function formatQualityDebtSummary(summary: DirectorRuntimeProjection["qualityDebtSummary"] | null | undefined): string | null {
+  if (!summary || summary.deferredChapterCount <= 0) {
+    return null;
+  }
+  const orderText = summary.deferredChapterOrders.length > 0
+    ? `：第 ${summary.deferredChapterOrders.join("、")} 章`
+    : "";
+  return `质量待回收${orderText}。系统会先继续写后续章节，并在质量修复阶段回收这些问题。`;
+}
+
+function formatQualityBudgetSummary(summary: DirectorRuntimeProjection["qualityBudgetSummary"] | null | undefined): string | null {
+  if (!summary) {
+    return null;
+  }
+  const chapterText = typeof summary.currentChapterOrder === "number"
+    ? `第 ${summary.currentChapterOrder} 章`
+    : "当前章节";
+  return `${chapterText}质量预算：局部修复 ${summary.patchRepairUsed}/1，整章重写 ${summary.chapterRewriteUsed}/1，窗口重规划 ${summary.windowReplanUsed}/1。${summary.nextActionLabel}`;
+}
+
+function formatPercent(value: number | null | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return "0%";
+  }
+  return `${Math.max(0, Math.min(100, Math.round(value)))}%`;
+}
+
 export default function DirectorRuntimeProjectionCard({
   projection,
   className,
@@ -151,17 +188,48 @@ export default function DirectorRuntimeProjectionCard({
     || "等待同步当前推进状态";
   const detailText = projection.detail?.trim();
   const attentionText = projection.requiresUserAction
-    ? projection.blockedReason?.trim() || projection.lastEventSummary?.trim() || "请先处理当前停留点。"
-    : projection.blockedReason?.trim();
+    ? projection.blockingReason?.trim()
+      || projection.blockedReason?.trim()
+      || projection.lastEventSummary?.trim()
+      || "请先处理当前停留点。"
+    : projection.blockingReason?.trim() || projection.blockedReason?.trim();
+  const progressLine = projection.progressBreakdown?.explanation?.trim()
+    || projection.progressSummary?.trim()
+    || null;
+  const qualityDebtLine = formatQualityDebtSummary(projection.qualityDebtSummary);
+  const qualityBudgetLine = formatQualityBudgetSummary(projection.qualityBudgetSummary);
+  const activeExecutionLine = projection.activeExecution
+    ? `后台执行：${getDirectorNodeDisplayLabel({
+      nodeKey: projection.activeExecution.stepType,
+      fallback: projection.currentAction || "自动导演任务",
+    })}${projection.activeExecution.resourceClass ? ` · ${projection.activeExecution.resourceClass}` : ""}`
+    : null;
+  const waitingLine = projection.waitingReason ? `等待原因：${projection.waitingReason}` : null;
+  const workerHealthLine = projection.workerHealth
+    ? [
+      `执行队列：${projection.workerHealth.queuedCommandCount} 个等待`,
+      projection.workerHealth.runningCommandCount > 0 ? `${projection.workerHealth.runningCommandCount} 个处理中` : null,
+      projection.workerHealth.currentWorkerId ? `执行器：${projection.workerHealth.currentWorkerId}` : null,
+    ].filter(Boolean).join(" · ")
+    : null;
   const helperLines = [
+    activeExecutionLine,
+    waitingLine,
+    workerHealthLine,
     projection.nextActionLabel ? `下一步：${projection.nextActionLabel}` : null,
+    projection.recommendedAction?.reason ? `推荐原因：${projection.recommendedAction.reason}` : null,
+    projection.isAutopilotRecoverable ? "AI 可以从当前进度继续处理。" : null,
+    qualityBudgetLine,
+    qualityDebtLine,
     projection.scopeSummary,
-    projection.progressSummary,
+    progressLine,
   ].filter((line): line is string => Boolean(line?.trim()));
   const recentEvents = projection.recentEvents.slice(0, compact ? 2 : 4);
   const usageSummary = projection.usageSummary ?? null;
   const stepUsage = projection.stepUsage?.slice(0, compact ? 2 : 4) ?? [];
   const promptUsage = projection.promptUsage?.slice(0, compact ? 2 : 6) ?? [];
+  const visibleRiskBadges = projection.visibleRiskBadges?.slice(0, compact ? 3 : 6) ?? [];
+  const progressBreakdown = projection.progressBreakdown ?? null;
 
   return (
     <div className={cn("rounded-lg border bg-background/80 p-3", statusClassName(projection.status), className)}>
@@ -177,6 +245,37 @@ export default function DirectorRuntimeProjectionCard({
           {formatStatus(projection.status)}
         </Badge>
       </div>
+
+      {visibleRiskBadges.length > 0 ? (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {visibleRiskBadges.map((badge) => (
+            <Badge key={`${badge.source ?? "risk"}:${badge.label}`} variant="outline" className={cn("bg-background/70", riskBadgeClassName(badge.level))}>
+              {badge.label}
+            </Badge>
+          ))}
+        </div>
+      ) : null}
+
+      {progressBreakdown && !compact ? (
+        <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <div className="rounded-md border bg-background/70 px-3 py-2">
+            <div className="text-[11px] text-muted-foreground">规划</div>
+            <div className="mt-1 text-sm font-semibold text-foreground">{formatPercent(progressBreakdown.planningProgress ?? progressBreakdown.planningPercent)}</div>
+          </div>
+          <div className="rounded-md border bg-background/70 px-3 py-2">
+            <div className="text-[11px] text-muted-foreground">章节</div>
+            <div className="mt-1 text-sm font-semibold text-foreground">{progressBreakdown.continuableChapters}/{progressBreakdown.totalChapters}</div>
+          </div>
+          <div className="rounded-md border bg-background/70 px-3 py-2">
+            <div className="text-[11px] text-muted-foreground">质量</div>
+            <div className="mt-1 text-sm font-semibold text-foreground">{formatPercent(progressBreakdown.qualityProgress ?? progressBreakdown.qualityRepairPercent)}</div>
+          </div>
+          <div className="rounded-md border bg-background/70 px-3 py-2">
+            <div className="text-[11px] text-muted-foreground">当前动作</div>
+            <div className="mt-1 text-sm font-semibold text-foreground">{formatPercent(progressBreakdown.activeJobProgress)}</div>
+          </div>
+        </div>
+      ) : null}
 
       {attentionText ? (
         <div className="mt-3 rounded-md border bg-background/70 px-3 py-2 text-sm leading-5">

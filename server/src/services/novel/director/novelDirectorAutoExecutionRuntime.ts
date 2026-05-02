@@ -7,10 +7,12 @@ import { isFullBookAutopilotRunMode } from "@ai-novel/shared/types/novelDirector
 import type { NovelControlPolicy } from "@ai-novel/shared/types/canonicalState";
 import type { PipelineJobStatus, VolumePlanDocument } from "@ai-novel/shared/types/novel";
 import type { NovelWorkflowCheckpoint } from "@ai-novel/shared/types/novelWorkflow";
+import { parsePipelinePayload } from "../pipelineJobState";
 import {
   buildDirectorAutoExecutionPausedLabel,
   buildDirectorAutoExecutionPausedSummary,
   buildDirectorAutoExecutionScopeLabelFromState,
+  buildDirectorAutoExecutionDeferredQualityState,
   buildDirectorAutoExecutionPipelineOptions,
   resolveDirectorAutoExecutionWorkflowState,
   type DirectorAutoExecutionChapterRef,
@@ -43,6 +45,19 @@ import {
   shouldClearAutoExecutionCheckpoint,
 } from "./novelDirectorAutoExecutionRuntimeUtils";
 import { directorAutomationLedgerEventService } from "./runtime/DirectorAutomationLedgerEventService";
+import {
+  buildDirectorQualityLoopBudgetWindow,
+  buildDirectorQualityLoopIssueSignature,
+  findDirectorQualityLoopBudgetEntry,
+  recordDirectorQualityLoopBudgetAttempt,
+  resolveDirectorQualityLoopBudgetNextAction,
+} from "./runtime/DirectorQualityLoopBudgetLedgerService";
+import type { DirectorStateProposalResolutionRunResult } from "./runtime/DirectorStateProposalResolutionService";
+
+type AutomationLedgerEventPort = Pick<
+  typeof directorAutomationLedgerEventService,
+  "recordEvent" | "recordRepairTicketCreated" | "recordCircuitBreakerOpened"
+>;
 
 interface NovelDirectorAutoExecutionWorkflowPort {
   bootstrapTask(input: {
@@ -158,6 +173,17 @@ interface NovelDirectorAutoExecutionRuntimeDeps {
     model?: string;
     temperature?: number;
   }) => Promise<unknown>;
+  resolveStateProposals?: (input: {
+    novelId: string;
+    taskId?: string | null;
+    chapterId?: string | null;
+    chapterOrder?: number | null;
+    runMode: string;
+    provider?: DirectorConfirmRequest["provider"];
+    model?: string;
+    temperature?: number;
+  }) => Promise<DirectorStateProposalResolutionRunResult>;
+  automationLedgerEventService?: AutomationLedgerEventPort;
 }
 
 export class NovelDirectorAutoExecutionRuntime {
@@ -529,9 +555,12 @@ export class NovelDirectorAutoExecutionRuntime {
               checkpointSummary: job.noticeSummary.trim(),
             });
             pipelineJobId = "";
+            const replanExistingState = "autoExecution" in replanNoticeResult && replanNoticeResult.autoExecution
+              ? replanNoticeResult.autoExecution
+              : withCircuitBreakerState(noticeAction.checkpointState, replanNoticeResult.circuitBreaker);
             ({ range, autoExecution } = await this.resolveRangeAndState({
               novelId: input.novelId,
-              existingState: withCircuitBreakerState(noticeAction.checkpointState, replanNoticeResult.circuitBreaker),
+              existingState: replanExistingState,
               pipelineJobId: null,
               pipelineStatus: "queued",
             }));
@@ -635,18 +664,115 @@ export class NovelDirectorAutoExecutionRuntime {
           || (job.status === "cancelled"
             ? `${scopeLabel}自动执行已取消。`
             : `${scopeLabel}自动执行未能全部通过质量要求。`);
+        if (
+          isFullBookAutopilotRunMode(input.request.runMode)
+          && isSkippableAutoExecutionReviewFailure(failureMessage)
+          && this.deps.resolveStateProposals
+        ) {
+          const resolution = await this.deps.resolveStateProposals({
+            novelId: input.novelId,
+            taskId: input.taskId,
+            chapterId: autoExecution.nextChapterId ?? range.firstChapterId,
+            chapterOrder: autoExecution.nextChapterOrder ?? null,
+            runMode: input.request.runMode,
+            provider: input.request.provider,
+            model: input.request.model,
+            temperature: input.request.temperature,
+          });
+          if (resolution.processed) {
+            if (resolution.decision === "auto_replan_window" && this.deps.replanNovel) {
+              await this.deps.replanNovel(input.novelId, {
+                chapterId: autoExecution.nextChapterId ?? undefined,
+                triggerType: "state_proposal_resolution",
+                reason: resolution.reason ?? failureMessage,
+                sourceIssueIds: resolution.proposalIds,
+                windowSize: Math.max(1, resolution.affectedChapterWindow?.chapterOrders?.length ?? 1),
+                provider: input.request.provider,
+                model: input.request.model,
+                temperature: input.request.temperature,
+              });
+            }
+            pipelineJobId = "";
+            ({ range, autoExecution } = await this.resolveRangeAndState({
+              novelId: input.novelId,
+              existingState: {
+                ...autoExecution,
+                pipelineJobId: null,
+                pipelineStatus: null,
+              },
+              pipelineJobId: null,
+              pipelineStatus: "queued",
+            }));
+            await syncAutoExecutionTaskState(this.deps, {
+              taskId: input.taskId,
+              novelId: input.novelId,
+              request: input.request,
+              range,
+              autoExecution,
+              isBackgroundRunning: true,
+              resumeStage: "pipeline",
+            });
+            continue autoExecutionLoop;
+          }
+        }
+        let budgetedAutoExecution = autoExecution;
+        let qualityBudgetEntry: ReturnType<typeof recordDirectorQualityLoopBudgetAttempt>["entry"] | null = null;
+        let qualityBudgetNextAction: ReturnType<typeof recordDirectorQualityLoopBudgetAttempt>["nextAction"] | null = null;
+        if (job.status !== "cancelled" && autoExecution.autoRepair) {
+          const pipelinePayload = parsePipelinePayload(job.payload);
+          const affectedChapterWindow = buildDirectorQualityLoopBudgetWindow({
+            autoExecution,
+            chapterId: autoExecution.nextChapterId,
+            chapterOrder: autoExecution.nextChapterOrder,
+          });
+          const issueSignature = buildDirectorQualityLoopIssueSignature({
+            reason: failureMessage,
+            noticeCode: job.noticeCode,
+            repairMode: pipelinePayload.repairMode,
+          });
+          const existingBudgetEntry = findDirectorQualityLoopBudgetEntry({
+            state: autoExecution,
+            novelId: input.novelId,
+            taskId: input.taskId,
+            issueSignature,
+            affectedChapterWindow,
+          });
+          const plannedBudgetAction = resolveDirectorQualityLoopBudgetNextAction(existingBudgetEntry);
+          const budgetAttemptAction = plannedBudgetAction === "auto_rewrite_chapter"
+            ? "chapter_rewrite"
+            : plannedBudgetAction === "auto_replan_window"
+              ? "window_replan"
+              : plannedBudgetAction === "defer_and_continue"
+                ? "defer_and_continue"
+                : "patch_repair";
+          const budgetResult = recordDirectorQualityLoopBudgetAttempt({
+            state: autoExecution,
+            novelId: input.novelId,
+            taskId: input.taskId,
+            issueSignature,
+            affectedChapterWindow,
+            action: budgetAttemptAction,
+            reason: failureMessage,
+            chapterId: autoExecution.nextChapterId,
+            chapterOrder: autoExecution.nextChapterOrder,
+          });
+          budgetedAutoExecution = budgetResult.state;
+          qualityBudgetEntry = budgetResult.entry;
+          qualityBudgetNextAction = budgetResult.nextAction;
+        }
         const failureCircuitBreaker = buildFailureCircuitBreaker({
-          autoExecution,
+          autoExecution: budgetedAutoExecution,
           jobStatus: job.status,
           message: failureMessage,
         });
         const failedAutoExecution = withCircuitBreakerState({
-          ...autoExecution,
+          ...budgetedAutoExecution,
           pipelineJobId,
           pipelineStatus: job.status,
         }, failureCircuitBreaker);
         if (autoExecution.autoRepair && job.status !== "cancelled") {
-          await directorAutomationLedgerEventService.recordRepairTicketCreated({
+          const ledgerEventService = this.deps.automationLedgerEventService ?? directorAutomationLedgerEventService;
+          await ledgerEventService.recordRepairTicketCreated({
             taskId: input.taskId,
             novelId: input.novelId,
             chapterId: autoExecution.nextChapterId ?? null,
@@ -656,8 +782,78 @@ export class NovelDirectorAutoExecutionRuntime {
               pipelineJobId,
               pipelineStatus: job.status,
               chapterOrder: autoExecution.nextChapterOrder ?? null,
+              qualityBudgetEntry,
+              qualityBudgetNextAction,
             },
           }).catch(() => null);
+        }
+        if (
+          (
+            isDirectorCircuitBreakerOpen(failureCircuitBreaker)
+            || qualityBudgetNextAction === "defer_and_continue"
+          )
+          && isFullBookAutopilotRunMode(input.request.runMode)
+          && (failureCircuitBreaker.reason === "auto_repair_exhausted" || failureCircuitBreaker.reason === "replan_loop")
+        ) {
+          const deferredState = buildDirectorAutoExecutionDeferredQualityState({
+            state: withCircuitBreakerState(failedAutoExecution, null),
+            reason: failureMessage,
+            source: failureCircuitBreaker.reason === "replan_loop" ? "replan_loop" : "repair_failure",
+          });
+          const ledgerEventService = this.deps.automationLedgerEventService ?? directorAutomationLedgerEventService;
+          await ledgerEventService.recordEvent({
+            type: "continue_with_risk",
+            idempotencyKey: [
+              input.taskId,
+              input.novelId,
+              autoExecution.nextChapterId ?? "unknown",
+              autoExecution.nextChapterOrder ?? "unknown",
+              failureCircuitBreaker.reason,
+              failureCircuitBreaker.failureCount ?? "failure",
+            ].join(":"),
+            taskId: input.taskId,
+            novelId: input.novelId,
+            nodeKey: failureCircuitBreaker.nodeKey ?? "chapter_repair_node",
+            summary: "全书自动成书已暂存本章质量问题，并继续推进后续章节。",
+            affectedScope: autoExecution.nextChapterId
+              ? `chapter:${autoExecution.nextChapterId}`
+              : (typeof autoExecution.nextChapterOrder === "number" ? `chapter_order:${autoExecution.nextChapterOrder}` : null),
+            severity: "medium",
+            metadata: {
+              decision: "defer_and_continue",
+              circuitBreaker: failureCircuitBreaker,
+              failureMessage,
+              chapterOrder: autoExecution.nextChapterOrder ?? null,
+              qualityBudgetEntry,
+              qualityBudgetNextAction,
+            },
+          }).catch(() => null);
+          const previousNextChapterId = autoExecution.nextChapterId ?? null;
+          const previousNextChapterOrder = autoExecution.nextChapterOrder ?? null;
+          pipelineJobId = "";
+          ({ range, autoExecution } = await this.resolveRangeAndState({
+            novelId: input.novelId,
+            existingState: deferredState,
+            pipelineJobId: null,
+            pipelineStatus: "queued",
+          }));
+          const deferredWasPreserved = (
+            autoExecution.nextChapterId !== previousNextChapterId
+            || autoExecution.nextChapterOrder !== previousNextChapterOrder
+            || (autoExecution.remainingChapterCount ?? 0) === 0
+          );
+          if (deferredWasPreserved) {
+            await syncAutoExecutionTaskState(this.deps, {
+              taskId: input.taskId,
+              novelId: input.novelId,
+              request: input.request,
+              range,
+              autoExecution,
+              isBackgroundRunning: true,
+              resumeStage: "pipeline",
+            });
+            continue autoExecutionLoop;
+          }
         }
         if (isDirectorCircuitBreakerOpen(failureCircuitBreaker)) {
           await stopAutoExecutionForCircuitBreaker(this.deps, {

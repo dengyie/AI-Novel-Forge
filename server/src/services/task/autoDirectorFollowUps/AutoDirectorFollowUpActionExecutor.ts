@@ -206,6 +206,9 @@ export class AutoDirectorFollowUpActionExecutor {
     if (input.actionCode === "safe_fix_validation") {
       return this.executeSafeFix(row, input, executedCacheKey, healed);
     }
+    if (input.actionCode === "auto_backfill_structured_outline") {
+      return this.executeStructuredBackfill(row, input, executedCacheKey, healed);
+    }
 
     if (input.metadata?.batchAction === true) {
       const allowedBatchAction = getAllowedBatchActionForRow(row);
@@ -434,6 +437,57 @@ export class AutoDirectorFollowUpActionExecutor {
     await this.recordActionLog(mergeActionMetadata(input, {
       safeFix: {
         safeActionCodes: applied.safeActionCodes,
+        healed,
+      },
+    }), result);
+    return result;
+  }
+
+  private async executeStructuredBackfill(
+    row: WorkflowTaskRow,
+    input: AutoDirectorActionRequest,
+    executedCacheKey: string,
+    healed: boolean,
+  ): Promise<AutoDirectorActionExecutionResult> {
+    const validationResult = extractBlockedAutoDirectorValidationResult(row.seedPayloadJson);
+    const canBackfill = validationResult?.requiredActions.some((action) => (
+      action.code === "auto_backfill_structured_outline"
+      && action.safeToAutoFix === true
+      && action.riskLevel === "low"
+    ));
+    if (!validationResult || !canBackfill) {
+      const result: AutoDirectorActionExecutionResult = {
+        taskId: input.taskId,
+        actionCode: input.actionCode,
+        code: "forbidden",
+        message: "当前任务没有可自动补齐的章节拆分入口，请先查看任务详情。",
+        task: await this.safeGetTaskDetail(input.taskId),
+      };
+      await this.recordActionLog(input, result);
+      return result;
+    }
+
+    await applyAutoDirectorSafeFix({
+      taskId: input.taskId,
+      seedPayloadJson: row.seedPayloadJson,
+      validationResult,
+      healed,
+    });
+    await this.novelDirectorService.continueTask(input.taskId, {
+      continuationMode: "resume",
+      forceResume: true,
+    });
+    const result: AutoDirectorActionExecutionResult = {
+      taskId: input.taskId,
+      actionCode: input.actionCode,
+      code: "executed",
+      message: "AI 将补齐章节拆分并继续推进。",
+      task: await this.safeGetTaskDetail(input.taskId),
+    };
+    EXECUTED_ACTION_CACHE.set(executedCacheKey, result);
+    await this.recordActionLog(mergeActionMetadata(input, {
+      structuredBackfill: {
+        affectedScope: validationResult.affectedScope,
         healed,
       },
     }), result);

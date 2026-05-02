@@ -118,6 +118,10 @@ const promptAssetLoaderEntries: PromptAssetLoaderEntry[] = [
     load: () => require("./prompts/novel/directorManualEditImpact.prompts").directorManualEditImpactPrompt as UnknownPromptAsset,
   },
   {
+    key: "director.state_proposal_resolution@v1",
+    load: () => require("./prompts/novel/directorStateProposalResolution.prompts").directorStateProposalResolutionPrompt as UnknownPromptAsset,
+  },
+  {
     key: "novel.story_macro.decomposition@v1",
     load: () => require("./prompts/novel/storyMacro.prompts").storyMacroDecompositionPrompt as UnknownPromptAsset,
   },
@@ -368,6 +372,10 @@ const promptAssetLoaderEntries: PromptAssetLoaderEntry[] = [
     {
       key: "style.profile.select_anti_ai@v1",
       load: () => require("./prompts/style/style.prompts").styleProfileAntiAiSelectionPrompt as UnknownPromptAsset,
+    },
+    {
+      key: "style.profile.sanitize_for_generation@v1",
+      load: () => require("./prompts/style/style.prompts").styleProfileSanitizeForGenerationPrompt as UnknownPromptAsset,
     },
   {
     key: "world.reference.inspiration@v1",

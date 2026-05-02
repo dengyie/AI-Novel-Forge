@@ -24,6 +24,8 @@ export interface LlmUsageTrackingMeta {
   provider?: LLMProvider | string | null;
   model?: string | null;
   taskType?: string | null;
+  modelRoute?: string | null;
+  routeDegraded?: boolean | null;
   promptMeta?: {
     promptId?: string | null;
     promptVersion?: string | null;
@@ -222,6 +224,8 @@ function buildDirectorUsageMetadata(input: TrackedUsageRecordInput | undefined):
   const metadata = {
     ...(input?.metadata ?? {}),
     taskType: input?.meta?.taskType ?? null,
+    modelRoute: input?.meta?.modelRoute ?? input?.meta?.taskType ?? null,
+    routeDegraded: input?.meta?.routeDegraded === true,
     chapterId: promptMeta?.chapterId ?? null,
     volumeId: promptMeta?.volumeId ?? null,
     stage: promptMeta?.stage ?? null,
@@ -252,7 +256,7 @@ async function recordDirectorLlmUsage(input: {
       nodeKey: input.context.directorNodeKey ?? buildPromptNodeKey(input.record?.meta) ?? null,
       promptAssetKey: promptMeta?.promptId ?? null,
       promptVersion: promptMeta?.promptVersion ?? null,
-      modelRoute: input.record?.meta?.taskType ?? null,
+      modelRoute: input.record?.meta?.modelRoute ?? input.record?.meta?.taskType ?? null,
       provider: input.record?.meta?.provider ? String(input.record.meta.provider) : null,
       model: input.record?.meta?.model ?? null,
       status: input.record?.status ?? "recorded",

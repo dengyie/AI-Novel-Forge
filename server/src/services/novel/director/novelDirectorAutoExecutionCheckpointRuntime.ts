@@ -3,7 +3,7 @@ import type {
   DirectorConfirmRequest,
   DirectorQualityRepairRisk,
 } from "@ai-novel/shared/types/novelDirector";
-import { isDirectorAutoExecutionRunMode } from "@ai-novel/shared/types/novelDirector";
+import { isDirectorAutoExecutionRunMode, isFullBookAutopilotRunMode } from "@ai-novel/shared/types/novelDirector";
 import type { PipelineJobStatus } from "@ai-novel/shared/types/novel";
 import type { NovelWorkflowCheckpoint } from "@ai-novel/shared/types/novelWorkflow";
 import { buildNovelEditResumeTarget } from "../workflow/novelWorkflow.shared";
@@ -223,16 +223,17 @@ export async function resolveQualityRepairNoticeAction(
   };
   const remainingChapterCount = checkpointState.remainingChapterCount ?? 0;
   const isAiDriverExecution = isDirectorAutoExecutionRunMode(input.request.runMode);
+  const isFullBookAutopilot = isFullBookAutopilotRunMode(input.request.runMode);
   const hasQualityAlertDetails = (parsePipelinePayload(input.payload).qualityAlertDetails?.length ?? 0) > 0;
   const shouldNotifyAndContinueAiDriverQualityNotice = checkpointType === "chapter_batch_ready"
     && qualityRepairRisk.autoContinuable
     && isAiDriverExecution
     && hasQualityAlertDetails;
   const canAutoContinue = checkpointType === "chapter_batch_ready"
-    && qualityRepairRisk.autoContinuable
     && remainingChapterCount > 0
     && (
-      shouldNotifyAndContinueAiDriverQualityNotice
+      isFullBookAutopilot
+      || shouldNotifyAndContinueAiDriverQualityNotice
       || await deps.shouldAutoContinueQualityRepair?.({
         request: input.request,
         qualityRepairRisk,

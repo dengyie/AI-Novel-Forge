@@ -157,11 +157,29 @@ function isCandidateSetupFlow(task: UnifiedTaskDetail | null): boolean {
 
 function resolveDirectorExecutionStepIndex(task: UnifiedTaskDetail | null): number {
   const itemKey = task?.currentItemKey ?? "";
+  const chapterExecutionKeys = new Set([
+    "chapter_execution",
+    "chapter_execution_node",
+    "chapter.draft.write",
+    "chapter.write",
+  ]);
+  const qualityRepairKeys = new Set([
+    "reviewing",
+    "repairing",
+    "quality_repair",
+    "chapter_quality_review_node",
+    "chapter.quality.review",
+    "chapter_state_commit_node",
+    "chapter.state.commit",
+  ]);
+  if (qualityRepairKeys.has(itemKey)) {
+    return 5;
+  }
   if (
     task?.checkpointType === "front10_ready"
     || (task?.status === "running" && task?.checkpointType === "chapter_batch_ready")
     || itemKey === "chapter_detail_bundle"
-    || itemKey === "chapter_execution"
+    || chapterExecutionKeys.has(itemKey)
   ) {
     return 5;
   }
@@ -298,6 +316,10 @@ export default function NovelAutoDirectorProgressPanel({
   const historyEvents = eventHistory?.events ?? [];
   const isPendingManualRecovery = Boolean(task?.pendingManualRecovery);
   const runtimeProjectionForDisplay = isPendingManualRecovery ? null : runtimeProjection;
+  const projectedProgressPercent = runtimeProjectionForDisplay?.progressBreakdown?.totalPercent;
+  const displayProgress = typeof projectedProgressPercent === "number"
+    ? projectedProgressPercent
+    : task ? task.progress : null;
   const runtimeRequiresUserAction = Boolean(
     runtimeProjectionForDisplay?.requiresUserAction
     || runtimeProjectionForDisplay?.status === "blocked"
@@ -421,7 +443,7 @@ export default function NovelAutoDirectorProgressPanel({
             ? "正在生成导演候选方案"
             : `正在导演《${taskTitle}》`}
         description={description}
-        progress={task ? task.progress : null}
+        progress={displayProgress}
         currentAction={currentAction}
         checkpointLabel={formatCheckpoint(task?.checkpointType, task)}
         taskId={task?.id || taskId}

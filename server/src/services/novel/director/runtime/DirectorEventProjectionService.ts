@@ -1,12 +1,21 @@
 import type {
+  DirectorArtifactType,
+  DirectorAutopilotRecoveryDecision,
   DirectorEvent,
   DirectorNextAction,
+  DirectorRuntimeProgressBreakdown,
   DirectorRuntimeProjection,
   DirectorRuntimeProjectionStatus,
   DirectorRuntimeSnapshot,
+  DirectorRuntimeVisibleRiskBadge,
   DirectorStepRun,
   DirectorWorkspaceInventory,
 } from "@ai-novel/shared/types/directorRuntime";
+import type {
+  DirectorQualityLoopBudgetEntry,
+  DirectorQualityLoopBudgetNextAction,
+} from "@ai-novel/shared/types/novelDirector";
+import { resolveDirectorQualityLoopBudgetNextAction } from "./DirectorQualityLoopBudgetLedgerService";
 
 function timestampOf(value?: string | null): number {
   if (!value) {
@@ -179,6 +188,397 @@ function buildProgressSummary(snapshot: DirectorRuntimeSnapshot, inventory: Dire
   return `进展：${parts.join("，")}。`;
 }
 
+const PLANNING_ARTIFACT_TYPES: DirectorArtifactType[] = [
+  "book_contract",
+  "story_macro",
+  "character_cast",
+  "volume_strategy",
+  "chapter_task_sheet",
+];
+
+const PLANNING_NODE_HINTS = [
+  "book_contract",
+  "story_macro",
+  "character",
+  "volume_strategy",
+  "chapter_task",
+  "structured",
+];
+
+const CHAPTER_EXECUTION_NODE_HINTS = [
+  "chapter_execution",
+  "chapter.write",
+  "chapter_draft",
+];
+
+const QUALITY_NODE_HINTS = [
+  "quality",
+  "review",
+  "repair",
+  "state_commit",
+];
+
+function clampPercent(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function percentFromCount(done: number, total: number): number {
+  if (total <= 0) {
+    return 0;
+  }
+  return clampPercent((done / total) * 100);
+}
+
+function stepMatches(step: DirectorStepRun, hints: string[]): boolean {
+  const nodeKey = step.nodeKey.toLowerCase();
+  return hints.some((hint) => nodeKey.includes(hint));
+}
+
+function stepProgressPercent(steps: DirectorStepRun[], hints: string[]): number {
+  const matched = steps.filter((step) => stepMatches(step, hints));
+  if (matched.length === 0) {
+    return 0;
+  }
+  const completed = matched.filter((step) => step.status === "succeeded").length;
+  const running = matched.some((step) => step.status === "running" || step.status === "waiting_approval")
+    ? 0.5
+    : 0;
+  return percentFromCount(completed + running, matched.length);
+}
+
+function buildPlanningPercent(snapshot: DirectorRuntimeSnapshot, inventory: DirectorWorkspaceInventory | null | undefined): number {
+  if (inventory) {
+    const completed = [
+      inventory.hasBookContract,
+      inventory.hasStoryMacro,
+      inventory.hasCharacters,
+      inventory.hasVolumeStrategy,
+      inventory.hasChapterPlan,
+    ].filter(Boolean).length;
+    return percentFromCount(completed, 5);
+  }
+  return stepProgressPercent(snapshot.steps, PLANNING_NODE_HINTS);
+}
+
+function buildChapterExecutionPercent(snapshot: DirectorRuntimeSnapshot, inventory: DirectorWorkspaceInventory | null | undefined): number {
+  if (inventory?.chapterCount) {
+    const continuableChapters = Math.max(
+      inventory.approvedChapterCount,
+      inventory.draftedChapterCount - inventory.pendingRepairChapterCount,
+    );
+    return percentFromCount(continuableChapters, inventory.chapterCount);
+  }
+  return stepProgressPercent(snapshot.steps, CHAPTER_EXECUTION_NODE_HINTS);
+}
+
+function buildQualityRepairPercent(snapshot: DirectorRuntimeSnapshot, inventory: DirectorWorkspaceInventory | null | undefined): number {
+  if (inventory) {
+    if (inventory.draftedChapterCount <= 0) {
+      return 0;
+    }
+    return percentFromCount(
+      Math.max(0, inventory.draftedChapterCount - inventory.pendingRepairChapterCount),
+      inventory.draftedChapterCount,
+    );
+  }
+  const percent = stepProgressPercent(snapshot.steps, QUALITY_NODE_HINTS);
+  return percent > 0 ? percent : 100;
+}
+
+function buildActiveJobPercent(snapshot: DirectorRuntimeSnapshot): number {
+  const step = latestStep(snapshot.steps);
+  if (!step) {
+    return 0;
+  }
+  if (step.status === "succeeded") {
+    return 100;
+  }
+  if (step.status === "running") {
+    return 1;
+  }
+  return 0;
+}
+
+function buildProgressBreakdown(
+  snapshot: DirectorRuntimeSnapshot,
+  inventory: DirectorWorkspaceInventory | null | undefined,
+): DirectorRuntimeProgressBreakdown {
+  const completedSteps = snapshot.steps.filter((step) => step.status === "succeeded").length;
+  const planningPercent = buildPlanningPercent(snapshot, inventory);
+  const chapterExecutionPercent = buildChapterExecutionPercent(snapshot, inventory);
+  const qualityRepairPercent = buildQualityRepairPercent(snapshot, inventory);
+  const activeJobProgress = buildActiveJobPercent(snapshot);
+  const totalPercent = clampPercent(
+    planningPercent * 0.35
+    + chapterExecutionPercent * 0.5
+    + qualityRepairPercent * 0.15,
+  );
+  const draftedChapters = inventory?.draftedChapterCount ?? 0;
+  const continuableChapters = inventory
+    ? Math.max(
+      inventory.approvedChapterCount,
+      inventory.draftedChapterCount - inventory.pendingRepairChapterCount,
+    )
+    : 0;
+  const totalChapters = inventory?.chapterCount ?? 0;
+  const pendingRepairChapters = inventory?.pendingRepairChapterCount ?? 0;
+  return {
+    planningProgress: planningPercent,
+    chapterProgress: chapterExecutionPercent,
+    qualityProgress: qualityRepairPercent,
+    activeJobProgress,
+    planningPercent,
+    chapterExecutionPercent,
+    qualityRepairPercent,
+    totalPercent,
+    completedSteps,
+    totalSteps: snapshot.steps.length,
+    draftedChapters,
+    continuableChapters,
+    totalChapters,
+    pendingRepairChapters,
+    explanation: totalChapters > 0
+      ? `章节进度 ${continuableChapters}/${totalChapters}，规划 ${planningPercent}%，质量修复 ${qualityRepairPercent}%，综合进度 ${totalPercent}%。`
+      : `规划 ${planningPercent}%，章节执行 ${chapterExecutionPercent}%，质量修复 ${qualityRepairPercent}%，综合进度 ${totalPercent}%。`,
+  };
+}
+
+function buildRecoveryDecision(input: {
+  status: DirectorRuntimeProjectionStatus;
+  inventory: DirectorWorkspaceInventory | null | undefined;
+  blockedReason: string | null;
+  qualityDebtCount?: number;
+}): DirectorAutopilotRecoveryDecision {
+  const protectedCount = input.inventory?.protectedUserContentArtifacts.length ?? 0;
+  if (protectedCount > 0 && (input.status === "waiting_approval" || input.status === "blocked" || input.status === "failed")) {
+    return "requires_manual_recovery";
+  }
+  if (input.status === "failed") {
+    return "requires_manual_recovery";
+  }
+  if ((input.inventory?.pendingRepairChapterCount ?? 0) > 0) {
+    return "auto_repair_chapter";
+  }
+  const missingArtifacts = input.inventory?.missingArtifactTypes ?? [];
+  if (missingArtifacts.some((type) => PLANNING_ARTIFACT_TYPES.includes(type))) {
+    return "auto_replan_window";
+  }
+  if ((input.qualityDebtCount ?? 0) > 0) {
+    return "defer_and_continue";
+  }
+  if (input.status === "waiting_approval" || input.status === "blocked") {
+    return input.blockedReason ? "auto_resume_from_checkpoint" : "continue";
+  }
+  return "continue";
+}
+
+function isAutomaticPolicy(snapshot: DirectorRuntimeSnapshot): boolean {
+  return snapshot.policy.mode === "auto_safe_scope";
+}
+
+function buildVisibleRiskBadges(input: {
+  status: DirectorRuntimeProjectionStatus;
+  blockedReason: string | null;
+  inventory: DirectorWorkspaceInventory | null | undefined;
+  events: DirectorEvent[];
+}): DirectorRuntimeVisibleRiskBadge[] {
+  const badges: DirectorRuntimeVisibleRiskBadge[] = [];
+  const push = (badge: DirectorRuntimeVisibleRiskBadge) => {
+    if (!badges.some((item) => item.label === badge.label)) {
+      badges.push(badge);
+    }
+  };
+  if (input.status === "failed") {
+    push({ label: "执行失败", level: "danger", source: "status" });
+  } else if (input.status === "blocked" || input.status === "waiting_approval") {
+    push({ label: input.blockedReason ? "等待处理" : "等待确认", level: "warning", source: "status" });
+  }
+  const inventory = input.inventory;
+  if (inventory) {
+    if (inventory.protectedUserContentArtifacts.length > 0) {
+      push({ label: "受保护正文", level: "danger", source: "artifact" });
+    }
+    if (inventory.pendingRepairChapterCount > 0) {
+      push({ label: `${inventory.pendingRepairChapterCount} 章待修复`, level: "warning", source: "artifact" });
+    }
+    if (inventory.staleArtifacts.length > 0) {
+      push({ label: `${inventory.staleArtifacts.length} 项需复核`, level: "warning", source: "artifact" });
+    }
+    if (inventory.missingArtifactTypes.length > 0) {
+      push({ label: "缺少规划资源", level: "warning", source: "artifact" });
+    }
+  }
+  for (const event of input.events) {
+    if (event.type === "quality_issue_found" || event.type === "quality_loop_assessed") {
+      push({ label: "质量风险", level: event.severity === "high" ? "danger" : "warning", source: "event" });
+    }
+    if (event.type === "replan_run_created") {
+      push({ label: "已进入重规划", level: "info", source: "event" });
+    }
+    if (event.type === "circuit_breaker_opened") {
+      push({ label: "连续失败保护", level: "danger", source: "event" });
+    }
+  }
+  for (const event of input.events) {
+    if (event.type === "continue_with_risk") {
+      push({ label: "已暂存质量债", level: "info", source: "event" });
+    }
+  }
+  return badges.slice(0, 6);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function isQualityBudgetNextAction(value: unknown): value is DirectorQualityLoopBudgetNextAction {
+  return value === "auto_patch_repair"
+    || value === "auto_rewrite_chapter"
+    || value === "auto_replan_window"
+    || value === "defer_and_continue";
+}
+
+function readFiniteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function readNullableString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function readQualityBudgetEntry(value: unknown): DirectorQualityLoopBudgetEntry | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const signatureKey = readNullableString(value.signatureKey);
+  const issueSignature = readNullableString(value.issueSignature);
+  if (!signatureKey || !issueSignature) {
+    return null;
+  }
+  return {
+    signatureKey,
+    issueSignature,
+    blockingLedgerKeys: Array.isArray(value.blockingLedgerKeys)
+      ? value.blockingLedgerKeys.filter((item): item is string => typeof item === "string")
+      : [],
+    affectedChapterWindow: isRecord(value.affectedChapterWindow)
+      ? {
+        startOrder: readFiniteNumber(value.affectedChapterWindow.startOrder),
+        endOrder: readFiniteNumber(value.affectedChapterWindow.endOrder),
+        chapterOrders: Array.isArray(value.affectedChapterWindow.chapterOrders)
+          ? value.affectedChapterWindow.chapterOrders.filter((item): item is number => typeof item === "number" && Number.isFinite(item))
+          : [],
+        chapterIds: Array.isArray(value.affectedChapterWindow.chapterIds)
+          ? value.affectedChapterWindow.chapterIds.filter((item): item is string => typeof item === "string")
+          : [],
+      }
+      : {
+        startOrder: null,
+        endOrder: null,
+        chapterOrders: [],
+        chapterIds: [],
+      },
+    patchRepairCount: readFiniteNumber(value.patchRepairCount) ?? 0,
+    chapterRewriteCount: readFiniteNumber(value.chapterRewriteCount) ?? 0,
+    windowReplanCount: readFiniteNumber(value.windowReplanCount) ?? 0,
+    deferredCount: readFiniteNumber(value.deferredCount) ?? 0,
+    lastAction: null,
+    lastReason: readNullableString(value.lastReason),
+    lastChapterId: readNullableString(value.lastChapterId),
+    lastChapterOrder: readFiniteNumber(value.lastChapterOrder),
+    updatedAt: readNullableString(value.updatedAt) ?? new Date(0).toISOString(),
+  };
+}
+
+function buildQualityDebtSummary(
+  events: DirectorEvent[],
+): DirectorRuntimeProjection["qualityDebtSummary"] {
+  const debtEvents = events
+    .filter((event) => event.type === "continue_with_risk")
+    .sort((left, right) => timestampOf(right.occurredAt) - timestampOf(left.occurredAt));
+  if (debtEvents.length === 0) {
+    return null;
+  }
+  const deferredChapterOrders = Array.from(new Set(debtEvents
+    .map((event) => {
+      const order = event.metadata?.chapterOrder;
+      if (typeof order === "number" && Number.isFinite(order)) {
+        return order;
+      }
+      const match = /chapter_order:(\d+)/.exec(event.affectedScope ?? "");
+      return match ? Number(match[1]) : null;
+    })
+    .filter((order): order is number => typeof order === "number" && Number.isFinite(order))))
+    .sort((left, right) => left - right);
+  return {
+    deferredChapterCount: debtEvents.length,
+    deferredChapterOrders,
+    latestReason: debtEvents[0]?.summary ?? null,
+  };
+}
+
+function formatQualityBudgetNextAction(action: DirectorQualityLoopBudgetNextAction): string {
+  const labels: Record<DirectorQualityLoopBudgetNextAction, string> = {
+    auto_patch_repair: "先尝试局部修复",
+    auto_rewrite_chapter: "改用整章重写",
+    auto_replan_window: "重规划受影响章节",
+    defer_and_continue: "登记为质量待回收并继续后续章节",
+  };
+  return labels[action];
+}
+
+function buildQualityBudgetSummary(
+  events: DirectorEvent[],
+): DirectorRuntimeProjection["qualityBudgetSummary"] {
+  const budgetEvents = events
+    .map((event) => {
+      const entry = readQualityBudgetEntry(event.metadata?.qualityBudgetEntry);
+      if (!entry) {
+        return null;
+      }
+      return {
+        event,
+        entry,
+        nextAction: isQualityBudgetNextAction(event.metadata?.qualityBudgetNextAction)
+          ? event.metadata.qualityBudgetNextAction
+          : resolveDirectorQualityLoopBudgetNextAction(entry),
+      };
+    })
+    .filter((item): item is {
+      event: DirectorEvent;
+      entry: DirectorQualityLoopBudgetEntry;
+      nextAction: DirectorQualityLoopBudgetNextAction;
+    } => Boolean(item))
+    .sort((left, right) => timestampOf(right.event.occurredAt) - timestampOf(left.event.occurredAt));
+  const latest = budgetEvents[0];
+  if (!latest) {
+    return null;
+  }
+  const { entry, nextAction } = latest;
+  const nextActionLabel = formatQualityBudgetNextAction(nextAction);
+  const currentChapterOrder = entry.lastChapterOrder
+    ?? readFiniteNumber(latest.event.metadata?.chapterOrder)
+    ?? (entry.affectedChapterWindow.chapterOrders ?? [])[0]
+    ?? null;
+  return {
+    currentChapterId: entry.lastChapterId ?? null,
+    currentChapterOrder,
+    latestSignatureKey: entry.signatureKey,
+    latestIssueSignature: entry.issueSignature,
+    latestReason: entry.lastReason ?? latest.event.summary ?? null,
+    patchRepairUsed: entry.patchRepairCount,
+    chapterRewriteUsed: entry.chapterRewriteCount,
+    windowReplanUsed: entry.windowReplanCount,
+    deferredCount: entry.deferredCount,
+    nextAction,
+    nextActionLabel,
+    explanation: `质量预算：局部修复 ${entry.patchRepairCount}/1，整章重写 ${entry.chapterRewriteCount}/1，窗口重规划 ${entry.windowReplanCount}/1；同类问题下一步会${nextActionLabel}。`,
+  };
+}
+
 export class DirectorEventProjectionService {
   buildSnapshotProjection(snapshot: DirectorRuntimeSnapshot | null): DirectorRuntimeProjection | null {
     if (!snapshot) {
@@ -194,6 +594,25 @@ export class DirectorEventProjectionService {
       ?? snapshot.lastWorkspaceAnalysis?.interpretation?.recommendedAction
       ?? null;
     const headline = buildHeadline({ status, step, event });
+    const progressBreakdown = buildProgressBreakdown(snapshot, inventory);
+    const qualityDebtSummary = buildQualityDebtSummary(snapshot.events);
+    const qualityBudgetSummary = buildQualityBudgetSummary(snapshot.events);
+    const recoveryDecision = buildRecoveryDecision({
+      status,
+      inventory,
+      blockedReason,
+      qualityDebtCount: qualityDebtSummary?.deferredChapterCount ?? 0,
+    });
+    const isAutopilotRecoverable = isAutomaticPolicy(snapshot)
+      && recoveryDecision !== "requires_manual_recovery"
+      && status !== "completed"
+      && status !== "idle";
+    const visibleRiskBadges = buildVisibleRiskBadges({
+      status,
+      blockedReason,
+      inventory,
+      events: snapshot.events,
+    });
     const recentEvents = [...snapshot.events]
       .sort((left, right) => timestampOf(right.occurredAt) - timestampOf(left.occurredAt))
       .slice(0, 8)
@@ -218,9 +637,17 @@ export class DirectorEventProjectionService {
       lastEventSummary: event?.summary ?? null,
       requiresUserAction,
       blockedReason,
+      blockingReason: blockedReason,
       nextActionLabel: formatNextAction(recommendation),
+      recommendedAction: recommendation,
+      recoveryDecision,
+      isAutopilotRecoverable,
       scopeSummary: buildScopeSummary(inventory),
       progressSummary: buildProgressSummary(snapshot, inventory),
+      progressBreakdown,
+      visibleRiskBadges,
+      qualityDebtSummary,
+      qualityBudgetSummary,
       policyMode: snapshot.policy.mode,
       updatedAt: snapshot.updatedAt,
       recentEvents,

@@ -186,6 +186,7 @@ export class NovelDirectorContinueRuntime {
     const runMode = requestedAutoExecutionContinue && !isDirectorAutoExecutionRunMode(baseRunMode)
       ? "auto_to_execution"
       : baseRunMode;
+    const isFullBookAutopilot = isFullBookAutopilotRunMode(runMode);
     const effectiveDirectorInput = applyDirectorRunModeContract({
       ...directorInput,
       runMode,
@@ -200,10 +201,9 @@ export class NovelDirectorContinueRuntime {
       row.status === "failed"
       || row.status === "cancelled"
     ) && (
-      input?.continuationMode === "auto_execute_range"
-      || input?.continuationMode === "auto_execute_front10"
+      requestedAutoExecutionContinue
+      || isFullBookAutopilot
     );
-    const isFullBookAutopilot = isFullBookAutopilotRunMode(runMode);
     const approveCurrentGate = input?.continuationMode === "resume" || isFullBookAutopilot;
     const approveAutoExecutionGate = approveCurrentGate || requestedAutoExecutionContinue;
     if (

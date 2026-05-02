@@ -265,7 +265,12 @@ export default function ChapterExecutionActionPanel(props: ChapterExecutionActio
 
   const showQuickEditorAction = Boolean(selectedChapter && primaryAction.label !== "打开章节编辑器");
   const showQuickAuditAction = Boolean(selectedChapter && primaryAction.label !== "运行完整审校" && primaryAction.label !== "正在运行完整审校...");
-  const showQuickRepairAction = Boolean(selectedChapter && primaryAction.label !== "自动修复问题" && primaryAction.label !== "正在自动修复...");
+  const showQuickRepairAction = Boolean(
+    selectedChapter
+      && displayedStatus === "needs_repair"
+      && primaryAction.label !== "自动修复问题"
+      && primaryAction.label !== "正在自动修复...",
+  );
 
   return (
     <Card className="self-start overflow-hidden border-border/70 lg:sticky lg:top-4">

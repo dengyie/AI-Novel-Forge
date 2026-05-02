@@ -6,7 +6,9 @@ import {
 } from "@ai-novel/shared/types/novelDirector";
 import {
   normalizeDirectorAutoApprovalConfig,
+  shouldAutoApproveDirectorApprovalPoint,
   shouldAutoApproveDirectorCheckpoint,
+  type DirectorAutoApprovalPointCode,
 } from "@ai-novel/shared/types/autoDirectorApproval";
 import type { BookContractService } from "../BookContractService";
 import type { CharacterPreparationService } from "../characterPrep/CharacterPreparationService";
@@ -142,13 +144,14 @@ export class NovelDirectorPipelineRuntime {
 
   private async runVolumeAndOutline(input: DirectorPipelineRunInput): Promise<void> {
     const volumeStrategyModule = getDirectorPlanningStepModule("volume_strategy");
+    const volumeStrategyApproval = this.resolveRuntimeApproval(input, "volume_strategy_ready");
     const volumeStepOutput = await this.deps.runtimeOrchestrator.runStepModule({
       module: volumeStrategyModule,
       taskId: input.taskId,
       novelId: input.novelId,
       targetId: input.novelId,
-      approveCurrentGate: this.resolveRuntimeApproval(input).approveCurrentGate,
-      approveAutoExecutionScope: this.resolveRuntimeApproval(input).approveAutoExecutionScope,
+      approveCurrentGate: volumeStrategyApproval.approveCurrentGate,
+      approveAutoExecutionScope: volumeStrategyApproval.approveAutoExecutionScope,
       runner: () => this.runVolumeStrategyPhase(input.taskId, input.novelId, input.input),
     });
     if (volumeStepOutput === null) {
@@ -193,13 +196,14 @@ export class NovelDirectorPipelineRuntime {
     workspace: VolumePlanDocument,
   ): Promise<void> {
     const module = getDirectorPlanningStepModule("structured_outline");
+    const structuredOutlineApproval = this.resolveRuntimeApproval(input, "structured_outline_ready");
     await this.deps.runtimeOrchestrator.runStepModule({
       module,
       taskId: input.taskId,
       novelId: input.novelId,
       targetId: input.novelId,
-      approveCurrentGate: this.resolveRuntimeApproval(input).approveCurrentGate,
-      approveAutoExecutionScope: this.resolveRuntimeApproval(input).approveAutoExecutionScope,
+      approveCurrentGate: structuredOutlineApproval.approveCurrentGate,
+      approveAutoExecutionScope: structuredOutlineApproval.approveAutoExecutionScope,
       runner: () => this.runStructuredOutlinePhase(input.taskId, input.novelId, input.input, workspace),
     });
   }
@@ -220,13 +224,14 @@ export class NovelDirectorPipelineRuntime {
       taskId: input.taskId,
       checkpointType: "front10_ready",
     });
+    const approval = this.resolveRuntimeApproval(input, "structured_outline_ready");
     await this.deps.runtimeOrchestrator.runChapterExecutionNode({
       taskId: input.taskId,
       novelId: input.novelId,
       request: input.input,
       resumeCheckpointType: "front10_ready",
-      approveCurrentGate: this.resolveRuntimeApproval(input).approveCurrentGate,
-      approveAutoExecutionScope: this.resolveRuntimeApproval(input).approveAutoExecutionScope,
+      approveCurrentGate: approval.approveCurrentGate,
+      approveAutoExecutionScope: approval.approveAutoExecutionScope,
     });
   }
 
@@ -268,14 +273,24 @@ export class NovelDirectorPipelineRuntime {
     return checkpointType === "front10_ready" && isDirectorAutoExecutionRunMode(normalizeDirectorRunMode(input.runMode));
   }
 
-  private resolveRuntimeApproval(input: DirectorPipelineRunInput): {
+  private resolveRuntimeApproval(
+    input: DirectorPipelineRunInput,
+    approvalPointCode?: DirectorAutoApprovalPointCode,
+  ): {
     approveCurrentGate: boolean;
     approveAutoExecutionScope: boolean;
   } {
-    const isFullBookAutopilot = isFullBookAutopilotRunMode(normalizeDirectorRunMode(input.input.runMode));
+    const runMode = normalizeDirectorRunMode(input.input.runMode);
+    const isFullBookAutopilot = isFullBookAutopilotRunMode(runMode);
+    const isAuthorizedAutoToExecutionGate = runMode === "auto_to_execution"
+      && Boolean(approvalPointCode)
+      && shouldAutoApproveDirectorApprovalPoint(
+        normalizeDirectorAutoApprovalConfig(input.input.autoApproval),
+        approvalPointCode as DirectorAutoApprovalPointCode,
+      );
     return {
-      approveCurrentGate: Boolean(input.approveCurrentGate || isFullBookAutopilot),
-      approveAutoExecutionScope: Boolean(input.approveAutoExecutionScope || isFullBookAutopilot),
+      approveCurrentGate: Boolean(input.approveCurrentGate || isFullBookAutopilot || isAuthorizedAutoToExecutionGate),
+      approveAutoExecutionScope: Boolean(input.approveAutoExecutionScope || isFullBookAutopilot || isAuthorizedAutoToExecutionGate),
     };
   }
 

@@ -30,6 +30,7 @@ export type AutoDirectorActionRiskLevel = "low" | "medium" | "high";
 export type AutoDirectorMutationActionCode =
   | "continue_auto_execution"
   | "continue_generic"
+  | "auto_backfill_structured_outline"
   | "retry_with_task_model"
   | "retry_with_route_model"
   | "safe_fix_validation";

@@ -6,7 +6,6 @@ import type {
 } from "@ai-novel/shared/types/directorRuntime";
 import type {
   DirectorConfirmRequest,
-  DirectorContinuationMode,
   DirectorLLMOptions,
   DirectorTakeoverRequest,
 } from "@ai-novel/shared/types/novelDirector";
@@ -19,6 +18,17 @@ import {
   buildDirectorSessionState,
   buildDirectorWorkflowSeedPayload,
 } from "./novelDirectorHelpers";
+import { DirectorRuntimeExecutionService } from "./DirectorRuntimeExecutionService";
+import {
+  buildAcceptedTaskState,
+  hashPayload,
+  isUniqueConstraintError,
+  parsePayload,
+  resolveNumberEnv,
+  stableJson,
+  toAcceptedResponse,
+  type DirectorCommandPayload,
+} from "./DirectorCommandServiceHelpers";
 
 const ACTIVE_COMMAND_STATUSES: DirectorRunCommandStatus[] = ["queued", "leased", "running"];
 const EXECUTION_COMMAND_TYPES: DirectorRunCommandType[] = [
@@ -29,92 +39,46 @@ const EXECUTION_COMMAND_TYPES: DirectorRunCommandType[] = [
   "takeover",
   "repair_chapter_titles",
 ];
-export interface DirectorCommandPayload {
-  confirmRequest?: DirectorConfirmRequest;
-  continuationMode?: DirectorContinuationMode;
-  batchAlreadyStartedCount?: number;
-  forceResume?: boolean;
-  takeoverRequest?: DirectorTakeoverRequest;
-  volumeId?: string | null;
-}
 
 export type DirectorRunCommandRow = Awaited<ReturnType<DirectorCommandService["getCommandById"]>>;
-
-function stableJson(value: unknown): string {
-  if (value === null || typeof value !== "object") {
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) {
-    return `[${value.map((item) => stableJson(item)).join(",")}]`;
-  }
-  const entries = Object.entries(value as Record<string, unknown>)
-    .filter(([, entryValue]) => entryValue !== undefined)
-    .sort(([left], [right]) => left.localeCompare(right));
-  return `{${entries.map(([key, entryValue]) => `${JSON.stringify(key)}:${stableJson(entryValue)}`).join(",")}}`;
-}
-
-function hashPayload(value: unknown): string {
-  return crypto.createHash("sha1").update(stableJson(value)).digest("hex").slice(0, 12);
-}
-
-function isUniqueConstraintError(error: unknown): boolean {
-  return Boolean(error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === "P2002");
-}
-
-function toAcceptedResponse(command: {
-  id: string;
-  taskId: string;
-  novelId: string | null;
-  commandType: string;
-  status: string;
-  leaseExpiresAt: Date | null;
-}): DirectorCommandAcceptedResponse {
-  return {
-    commandId: command.id,
-    taskId: command.taskId,
-    novelId: command.novelId,
-    commandType: command.commandType as DirectorRunCommandType,
-    status: command.status as DirectorRunCommandStatus,
-    leaseExpiresAt: command.leaseExpiresAt?.toISOString() ?? null,
-  };
-}
-
-function parsePayload(payloadJson: string | null): DirectorCommandPayload {
-  if (!payloadJson) {
-    return {};
-  }
-  try {
-    const parsed = JSON.parse(payloadJson);
-    return parsed && typeof parsed === "object" ? parsed as DirectorCommandPayload : {};
-  } catch {
-    return {};
-  }
-}
 
 const DEFAULT_STALE_AUTO_RECOVERY_MAX_ATTEMPTS = 2;
 const STALE_COMMAND_AUTO_RECOVERY_MESSAGE = "后台执行中断，系统已自动从最近进度继续。";
 const STALE_COMMAND_MANUAL_RECOVERY_MESSAGE = "后台执行中断，任务已暂停。点击恢复后会从最近进度继续。";
 const STALE_COMMAND_INTERNAL_MESSAGE = "Director Worker 租约过期，任务等待恢复。";
-
-function resolveNumberEnv(name: string, fallback: number): number {
-  const value = Number(process.env[name]);
-  return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
-}
+const CANCELLED_COMMAND_MESSAGE = "自动导演任务已取消。";
 
 function isAutoRecoverableStaleCommand(command: {
   commandType: string;
   attempt: number;
+  payloadJson?: string | null;
 }): boolean {
-  const maxAttempts = resolveNumberEnv(
+  const defaultMaxAttempts = resolveNumberEnv(
     "DIRECTOR_WORKER_STALE_AUTO_RECOVERY_MAX_ATTEMPTS",
     DEFAULT_STALE_AUTO_RECOVERY_MAX_ATTEMPTS,
   );
+  const payload = parsePayload(command.payloadJson ?? null);
+  const payloadRunMode = payload.confirmRequest?.runMode ?? payload.takeoverRequest?.runMode ?? null;
+  const isFullBookAutopilot = payloadRunMode === "full_book_autopilot";
+  const maxAttempts = isFullBookAutopilot
+    ? resolveNumberEnv(
+      "DIRECTOR_WORKER_FULL_BOOK_STALE_AUTO_RECOVERY_MAX_ATTEMPTS",
+      Math.max(defaultMaxAttempts, 5),
+    )
+    : defaultMaxAttempts;
   return command.attempt < maxAttempts
-    && (command.commandType === "continue" || command.commandType === "resume_from_checkpoint");
+    && (
+      isFullBookAutopilot
+      || command.commandType === "continue"
+      || command.commandType === "resume_from_checkpoint"
+    );
 }
 
 export class DirectorCommandService {
-  constructor(private readonly workflowService = new NovelWorkflowService()) {}
+  constructor(
+    private readonly workflowService = new NovelWorkflowService(),
+    private readonly runtimeExecutionService = new DirectorRuntimeExecutionService(),
+  ) {}
 
   async enqueueConfirmCandidateCommand(input: DirectorConfirmRequest): Promise<DirectorCommandAcceptedResponse> {
     const confirmedInput = applyDirectorRunModeContract(input);
@@ -215,12 +179,21 @@ export class DirectorCommandService {
         errorMessage: "用户请求取消自动导演任务。",
       },
     });
-    return this.enqueueExecutionCommand({
-      taskId,
-      commandType: "cancel",
-      payload: {},
-      allowTerminalReuse: false,
-    });
+    await this.runtimeExecutionService.requestRuntimeCancel(taskId);
+    await this.closeCancelledTaskRuntimeState(taskId, new Date());
+    const now = new Date();
+    const command = await withSqliteRetry(() => prisma.directorRunCommand.create({
+      data: {
+        taskId,
+        novelId: row.novelId,
+        commandType: "cancel",
+        idempotencyKey: `cancel:${now.getTime()}`,
+        status: "succeeded",
+        payloadJson: stableJson({}),
+        finishedAt: now,
+      },
+    }), { label: "director.command.cancel.record" });
+    return toAcceptedResponse(command, null);
   }
 
   async enqueueTakeoverCommand(input: DirectorTakeoverRequest): Promise<DirectorCommandAcceptedResponse> {
@@ -234,7 +207,10 @@ export class DirectorCommandService {
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     });
     if (reusableCommand) {
-      return toAcceptedResponse(reusableCommand);
+      const runtime = await this.runtimeExecutionService.ensureRuntimeCommandForLegacyCommand(reusableCommand, {
+        runMode: takeoverInput.runMode,
+      });
+      return toAcceptedResponse(reusableCommand, runtime?.runtime ?? null);
     }
 
     const task = await this.workflowService.bootstrapTask({
@@ -299,6 +275,7 @@ export class DirectorCommandService {
         taskId: true,
         commandType: true,
         attempt: true,
+        payloadJson: true,
       },
     });
     if (staleCommands.length === 0) {
@@ -445,6 +422,30 @@ export class DirectorCommandService {
     });
   }
 
+  async markCommandCancelled(commandId: string, workerId: string): Promise<void> {
+    const finishedAt = new Date();
+    const updated = await prisma.directorRunCommand.updateMany({
+      where: {
+        id: commandId,
+        leaseOwner: workerId,
+        status: { in: ["leased", "running"] },
+      },
+      data: {
+        status: "cancelled",
+        leaseExpiresAt: null,
+        finishedAt,
+        errorMessage: CANCELLED_COMMAND_MESSAGE,
+      },
+    });
+    if (updated.count !== 1) {
+      return;
+    }
+    const command = await this.getCommandById(commandId);
+    if (command) {
+      await this.closeCancelledTaskRuntimeState(command.taskId, finishedAt);
+    }
+  }
+
   async markCommandFailed(commandId: string, workerId: string, error: unknown): Promise<void> {
     const message = error instanceof Error ? error.message : String(error);
     const failedAt = new Date();
@@ -481,6 +482,51 @@ export class DirectorCommandService {
     }).catch(() => null);
     await this.workflowService.requeueTaskForRecovery(command.taskId, message)
       .catch(() => null);
+  }
+
+  private async closeCancelledTaskRuntimeState(taskId: string, now: Date): Promise<void> {
+    await prisma.directorStepRun.updateMany({
+      where: {
+        taskId,
+        status: "running",
+      },
+      data: {
+        status: "failed",
+        finishedAt: now,
+        error: CANCELLED_COMMAND_MESSAGE,
+      },
+    }).catch(() => null);
+    await prisma.generationJob.updateMany({
+      where: {
+        status: { in: ["queued", "running"] },
+        payload: { contains: taskId },
+      },
+      data: {
+        status: "cancelled",
+        cancelRequestedAt: now,
+        finishedAt: now,
+        error: CANCELLED_COMMAND_MESSAGE,
+      },
+    }).catch(() => null);
+    const run = await prisma.directorRun.findUnique({
+      where: { taskId },
+      select: { id: true, novelId: true },
+    }).catch(() => null);
+    if (!run) {
+      return;
+    }
+    await prisma.directorEvent.create({
+      data: {
+        id: `${taskId}:run_cancelled:${crypto.randomUUID()}`,
+        runId: run.id,
+        taskId,
+        novelId: run.novelId,
+        type: "run_cancelled",
+        summary: "自动导演已停止，后台运行状态已收束。",
+        severity: "low",
+        occurredAt: now,
+      },
+    }).catch(() => null);
   }
 
   parseCommandPayload(command: NonNullable<DirectorRunCommandRow>): DirectorCommandPayload {
@@ -531,7 +577,10 @@ export class DirectorCommandService {
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     });
     if (reusableCommand) {
-      return toAcceptedResponse(reusableCommand);
+      const runtime = await this.runtimeExecutionService.ensureRuntimeCommandForLegacyCommand(reusableCommand, {
+        runMode: input.payload.confirmRequest?.runMode ?? input.payload.takeoverRequest?.runMode ?? null,
+      });
+      return toAcceptedResponse(reusableCommand, runtime?.runtime ?? null);
     }
 
     const normalizedPayload = Object.fromEntries(
@@ -552,10 +601,13 @@ export class DirectorCommandService {
 
     try {
       const command = await withSqliteRetry(createCommand, { label: "director.command.create" });
-      await this.markCommandAcceptedOnTask(input.taskId, {
+      const runtime = await this.runtimeExecutionService.ensureRuntimeCommandForLegacyCommand(command, {
+        runMode: input.payload.confirmRequest?.runMode ?? input.payload.takeoverRequest?.runMode ?? null,
+      });
+      await this.markCommandAcceptedOnTask(input.taskId, input.commandType, {
         preserveLastError: input.preserveLastError,
       });
-      return toAcceptedResponse(command);
+      return toAcceptedResponse(command, runtime?.runtime ?? null);
     } catch (error) {
       if (!isUniqueConstraintError(error) || input.allowTerminalReuse === false) {
         throw error;
@@ -571,13 +623,17 @@ export class DirectorCommandService {
       if (!existing) {
         throw error;
       }
-      return toAcceptedResponse(existing);
+      const runtime = await this.runtimeExecutionService.ensureRuntimeCommandForLegacyCommand(existing, {
+        runMode: input.payload.confirmRequest?.runMode ?? input.payload.takeoverRequest?.runMode ?? null,
+      });
+      return toAcceptedResponse(existing, runtime?.runtime ?? null);
     }
   }
 
-  private async markCommandAcceptedOnTask(taskId: string, options: {
+  private async markCommandAcceptedOnTask(taskId: string, commandType: DirectorRunCommandType, options: {
     preserveLastError?: boolean;
   } = {}): Promise<void> {
+    const taskState = buildAcceptedTaskState(commandType);
     await prisma.novelWorkflowTask.updateMany({
       where: {
         id: taskId,
@@ -590,6 +646,7 @@ export class DirectorCommandService {
         status: "queued",
         pendingManualRecovery: false,
         ...(options.preserveLastError ? {} : { lastError: null }),
+        ...taskState,
         heartbeatAt: new Date(),
         finishedAt: null,
         cancelRequestedAt: null,

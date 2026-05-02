@@ -9,6 +9,7 @@ import {
   ChapterPatchRepairFailedError,
   ChapterPatchRepairService,
 } from "../chapterPatchRepairService";
+import { detectForbiddenStyleEntities } from "../../styleEngine/styleGenerationSanitizer";
 
 export interface PipelineRuntimeHooks {
   onCheckCancelled?: () => Promise<void>;
@@ -96,7 +97,7 @@ interface RunPipelineChapterDeps {
   markChapterNeedsRepair: (chapterId: string) => Promise<void>;
 }
 
-const QUALITY_THRESHOLD = { coherence: 80, repetition: 20, engagement: 75 };
+const QUALITY_THRESHOLD = { coherence: 80, repetition: 75, engagement: 75 };
 
 const AUDIT_CATEGORY_MAP: Record<"continuity" | "character" | "plot" | "mode_fit", ReviewIssue["category"]> = {
   continuity: "coherence",
@@ -164,7 +165,7 @@ export async function runPipelineChapterWithRuntime(
         score: {
           coherence: 100,
           pacing: 100,
-          repetition: 0,
+          repetition: 100,
           engagement: 100,
           voice: 100,
           overall: 100,
@@ -187,11 +188,16 @@ export async function runPipelineChapterWithRuntime(
       runId: null,
       startMs: null,
     });
-    latestIssues = toReviewIssues(latestResult.runtimePackage);
+    const styleLeakageIssues = detectStyleReferenceLeakageIssues(content, latestResult.runtimePackage);
+    latestIssues = [
+      ...toReviewIssues(latestResult.runtimePackage),
+      ...styleLeakageIssues,
+    ];
     content = latestResult.finalContent;
     await deps.markChapterGenerationState(chapterId, "reviewed");
 
-    pass = isQualityPass(latestResult.runtimePackage.audit.score, qualityThreshold);
+    pass = isQualityPass(latestResult.runtimePackage.audit.score, qualityThreshold)
+      && styleLeakageIssues.length === 0;
     if (pass) {
       await deps.markChapterGenerationState(chapterId, "approved");
       break;
@@ -214,6 +220,7 @@ export async function runPipelineChapterWithRuntime(
         temperature: request.temperature,
         repairMode,
       },
+      forceFullRewrite: styleLeakageIssues.length > 0,
     });
     if (repairResult.recoverableFailure) {
       recoverableRepairFailure = repairResult.recoverableFailure;
@@ -258,7 +265,7 @@ async function syncFinalRetainedChapterArtifacts(
 
 function isQualityPass(score: QualityScore, qualityThreshold: number): boolean {
   return score.coherence >= QUALITY_THRESHOLD.coherence
-    && score.repetition <= QUALITY_THRESHOLD.repetition
+    && score.repetition >= QUALITY_THRESHOLD.repetition
     && score.engagement >= QUALITY_THRESHOLD.engagement
     && score.overall >= qualityThreshold;
 }
@@ -280,12 +287,32 @@ function toReviewIssues(runtimePackage: ChapterRuntimePackage): ReviewIssue[] {
     })));
 }
 
+function detectStyleReferenceLeakageIssues(
+  content: string,
+  runtimePackage: ChapterRuntimePackage,
+): ReviewIssue[] {
+  const leakedEntities = detectForbiddenStyleEntities(
+    content,
+    runtimePackage.context.styleContext,
+  );
+  if (leakedEntities.length === 0) {
+    return [];
+  }
+  return [{
+    severity: "critical",
+    category: "voice",
+    evidence: "Generated chapter contains source-reference entities from the bound style profile.",
+    fixSuggestion: "Rewrite the chapter with transferable style guidance only; remove source-work names, places, titles, catchphrases, and iconic plot references.",
+  }];
+}
+
 async function repairDraftContent(input: {
   novelTitle: string;
   chapterTitle: string;
   content: string;
   issues: ReviewIssue[];
   runtimePackage: ChapterRuntimePackage;
+  forceFullRewrite?: boolean;
   options: {
     provider?: LLMProvider;
     model?: string;
@@ -304,49 +331,50 @@ async function repairDraftContent(input: {
         evidence: "Pipeline quality threshold not met.",
         fixSuggestion: "Tighten continuity, sharpen conflict progression, and improve readability.",
       }];
-  const modeHint = getRepairModeHint(
-    input.options.repairMode,
+  let activeRepairMode = input.options.repairMode ?? "light_repair";
+  let modeHint = getRepairModeHint(
+    activeRepairMode,
     input.runtimePackage.audit.openIssues.map((issue) => issue.code),
   );
-  const patchRepairService = new ChapterPatchRepairService();
-  try {
-    const patched = await patchRepairService.repair({
-      novelId: input.runtimePackage.novelId,
-      chapterId: input.runtimePackage.chapterId,
-      novelTitle: input.novelTitle,
-      chapterTitle: input.chapterTitle,
-      content: input.content,
-      issues,
-      runtimePackage: input.runtimePackage,
-      provider: input.options.provider,
-      model: input.options.model,
-      temperature: input.options.temperature,
-      repairMode: input.options.repairMode,
-      modeHint,
-    });
-    return {
-      content: patched.content,
-      recoverableFailure: null,
-    };
-  } catch (error) {
-    if (!(error instanceof ChapterPatchRepairFailedError)) {
-      throw error;
-    }
-    if (input.options.repairMode !== "heavy_repair") {
-      return {
+  if (input.forceFullRewrite && activeRepairMode !== "heavy_repair") {
+    activeRepairMode = "heavy_repair";
+    modeHint = getRepairModeHint(
+      activeRepairMode,
+      input.runtimePackage.audit.openIssues.map((issue) => issue.code),
+    );
+  }
+  if (!input.forceFullRewrite) {
+    const patchRepairService = new ChapterPatchRepairService();
+    try {
+      const patched = await patchRepairService.repair({
+        novelId: input.runtimePackage.novelId,
+        chapterId: input.runtimePackage.chapterId,
+        novelTitle: input.novelTitle,
+        chapterTitle: input.chapterTitle,
         content: input.content,
-        recoverableFailure: {
-          chapterId: input.runtimePackage.chapterId,
-          message: error.message,
-          repairMode: input.options.repairMode ?? "light_repair",
-          failureTypes: Array.from(new Set(
-            error.applyResult?.failures
-              .map((failure) => failure.failureType)
-              .filter(Boolean) ?? [],
-          )),
-          occurredAt: new Date().toISOString(),
-        },
+        issues,
+        runtimePackage: input.runtimePackage,
+        provider: input.options.provider,
+        model: input.options.model,
+        temperature: input.options.temperature,
+          repairMode: activeRepairMode,
+          modeHint,
+        });
+      return {
+        content: patched.content,
+        recoverableFailure: null,
       };
+    } catch (error) {
+      if (!(error instanceof ChapterPatchRepairFailedError)) {
+        throw error;
+      }
+      if (activeRepairMode !== "heavy_repair") {
+        activeRepairMode = "heavy_repair";
+        modeHint = getRepairModeHint(
+          activeRepairMode,
+          input.runtimePackage.audit.openIssues.map((issue) => issue.code),
+        );
+      }
     }
   }
 
@@ -372,7 +400,7 @@ async function repairDraftContent(input: {
       novelId: input.runtimePackage.novelId,
       chapterId: input.runtimePackage.chapterId,
       stage: "chapter_repair",
-      triggerReason: input.options.repairMode ?? "light_repair",
+      triggerReason: activeRepairMode,
     },
   });
   const nextContent = repaired.output.trim();

@@ -329,6 +329,13 @@ export const runtimeStyleContextSchema = z.object({
   usesGlobalAntiAiBaseline: z.boolean().optional(),
   globalAntiAiRuleIds: z.array(z.string()).default([]),
   styleAntiAiRuleIds: z.array(z.string()).default([]),
+  sanitizedGenerationProfile: z.object({
+    writingGuidance: z.array(z.string()).default([]),
+    forbiddenEntities: z.array(z.string()).default([]),
+    sourceProfileNames: z.array(z.string()).default([]),
+    sanitizedAt: z.string(),
+    strategy: z.enum(["deterministic", "llm"]),
+  }).nullable().optional(),
 });
 
 export const runtimeCharacterCandidateSchema = z.object({

@@ -123,6 +123,45 @@ test("director execution replays takeover request when recovery task lacks direc
   }
 });
 
+test("director execution reports cancelled outcome after inline takeover observes cancellation", async () => {
+  const takeoverRequest = {
+    novelId: "novel-1",
+    entryStep: "structured",
+    strategy: "continue_existing",
+    runMode: "auto_to_execution",
+  };
+  const originals = {
+    startTakeover: NovelDirectorService.prototype.startTakeover,
+    getTaskByIdWithoutHealing: NovelWorkflowService.prototype.getTaskByIdWithoutHealing,
+  };
+
+  NovelDirectorService.prototype.startTakeover = async () => ({ workflowTaskId: "task-1" });
+  NovelWorkflowService.prototype.getTaskByIdWithoutHealing = async () => ({
+    id: "task-1",
+    lane: "auto_director",
+    status: "cancelled",
+    cancelRequestedAt: new Date("2026-04-30T10:00:00.000Z"),
+    seedPayloadJson: "{}",
+  });
+
+  try {
+    const service = new DirectorExecutionService();
+    const outcome = await service.executeCommand({
+      id: "command-takeover",
+      taskId: "task-1",
+      novelId: "novel-1",
+      commandType: "takeover",
+      status: "running",
+      payloadJson: JSON.stringify({ takeoverRequest }),
+    });
+
+    assert.equal(outcome, "cancelled");
+  } finally {
+    NovelDirectorService.prototype.startTakeover = originals.startTakeover;
+    NovelWorkflowService.prototype.getTaskByIdWithoutHealing = originals.getTaskByIdWithoutHealing;
+  }
+});
+
 test("director execution replays takeover request when a contextless recovery is continued", async () => {
   const calls = [];
   const takeoverRequest = {

@@ -550,6 +550,15 @@ export interface ResolvedStyleContext {
   usesGlobalAntiAiBaseline: boolean;
   globalAntiAiRuleIds: string[];
   styleAntiAiRuleIds: string[];
+  sanitizedGenerationProfile?: StyleSanitizedGenerationProfile | null;
+}
+
+export interface StyleSanitizedGenerationProfile {
+  writingGuidance: string[];
+  forbiddenEntities: string[];
+  sourceProfileNames: string[];
+  sanitizedAt: string;
+  strategy: "deterministic" | "llm";
 }
 
 export interface StyleIntentSummary {

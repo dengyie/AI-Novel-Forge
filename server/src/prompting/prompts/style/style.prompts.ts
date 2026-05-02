@@ -7,6 +7,7 @@ import {
   styleGeneratedProfileSchema,
   styleProfileExtractionSchema,
   styleProfileMetadataSchema,
+  styleProfileSanitizeForGenerationSchema,
   styleRecommendationSchema,
 } from "./style.promptSchemas";
 
@@ -73,6 +74,12 @@ export interface StyleProfileAntiAiSelectionPromptInput {
   riskDigest: string;
   catalogText: string;
   maxRuleCount?: number;
+}
+
+export interface StyleProfileSanitizeForGenerationPromptInput {
+  profileName: string;
+  styleContractText: string;
+  sourceDigest: string;
 }
 
 export const styleDetectionPrompt: PromptAsset<
@@ -666,6 +673,46 @@ export const styleProfileAntiAiSelectionPrompt: PromptAsset<
       "",
       "合法规则目录：",
       input.catalogText,
+    ].join("\n")),
+  ],
+};
+
+export const styleProfileSanitizeForGenerationPrompt: PromptAsset<
+  StyleProfileSanitizeForGenerationPromptInput,
+  z.infer<typeof styleProfileSanitizeForGenerationSchema>
+> = {
+  id: "style.profile.sanitize_for_generation",
+  version: "v1",
+  taskType: "planner",
+  mode: "structured",
+  language: "zh",
+  contextPolicy: {
+    maxTokensBudget: 0,
+  },
+  outputSchema: styleProfileSanitizeForGenerationSchema,
+  render: (input) => [
+    new SystemMessage([
+      "你是小说写法资产安全净化器。",
+      "你的任务是把写法 profile 转换成可用于生成的抽象写法指导，并识别禁止泄露的源作品实体。",
+      "只输出严格 JSON，不要 Markdown、解释或额外文本。",
+      "",
+      "输出字段只能包含：writingGuidance, forbiddenEntities, sourceRiskSummary。",
+      "",
+      "规则：",
+      "1. writingGuidance 只能保留可迁移的写法维度，例如叙事节奏、信息密度、对话张力、句式组织、留白方式。",
+      "2. forbiddenEntities 必须列出源作品角色名、地名、专有称谓、组织名、标志性梗和可识别组合词。",
+      "3. writingGuidance 里严禁出现 forbiddenEntities 中的任何词。",
+      "4. 不要复述源作品剧情、设定名词、人物关系或名场面。",
+      "5. 如果无法判断某个具体名词是否可迁移，优先放入 forbiddenEntities。",
+    ].join("\n")),
+    new HumanMessage([
+      `写法 profile：${input.profileName}`,
+      "",
+      "当前写法合同：",
+      input.styleContractText,
+      "",
+      "源素材摘要：",
+      input.sourceDigest,
     ].join("\n")),
   ],
 };

@@ -46,6 +46,9 @@ function createHarness(overrides = {}) {
       commandType: "continue",
       status: "running",
       errorMessage: null,
+      leaseOwner: "worker-1",
+      leaseExpiresAt: new Date("2099-04-30T09:02:00.000Z"),
+      runAfter: new Date("2026-04-30T08:59:00.000Z"),
       createdAt: new Date("2026-04-30T08:59:00.000Z"),
       updatedAt: new Date("2026-04-30T09:00:02.000Z"),
       startedAt: new Date("2026-04-30T08:59:30.000Z"),
@@ -164,7 +167,10 @@ function createHarness(overrides = {}) {
   };
 
   return {
-    service: new DirectorBookAutomationProjectionService(async () => overrides.runtimeProjection ?? {
+    service: new DirectorBookAutomationProjectionService(async () => (
+      Object.prototype.hasOwnProperty.call(overrides, "runtimeProjection")
+        ? overrides.runtimeProjection
+        : {
       runId: "run-1",
       novelId: "novel-1",
       status: "running",
@@ -180,7 +186,8 @@ function createHarness(overrides = {}) {
       policyMode: "auto_safe_scope",
       updatedAt: "2026-04-30T09:00:03.000Z",
       recentEvents: [],
-    }),
+        }
+    )),
     restore() {
       prisma.novel.findUnique = originals.novelFindUnique;
       prisma.novelWorkflowTask.findFirst = originals.taskFindFirst;
@@ -212,6 +219,8 @@ test("book automation projection aggregates task, command, event, approval and a
     assert.equal(projection.headline, "推进任务：生成章节任务单");
     assert.equal(projection.activeCommandCount, 1);
     assert.equal(projection.pendingCommandCount, 0);
+    assert.equal(projection.workerHealth.derivedState, "running_step");
+    assert.equal(projection.workerHealth.currentWorkerId, "worker-1");
     assert.equal(projection.autoApprovalRecordCount, 1);
     assert.deepEqual(projection.artifactSummary, {
       activeCount: 5,
@@ -230,6 +239,49 @@ test("book automation projection aggregates task, command, event, approval and a
   }
 });
 
+test("book automation projection explains queued commands waiting for a worker", async () => {
+  const harness = createHarness({
+    runtimeProjection: null,
+    latestTask: {
+      pendingManualRecovery: true,
+      lastError: "后台执行中断，点击恢复后继续。",
+    },
+    commands: [
+      {
+        id: "command-queued",
+        taskId: "task-1",
+        novelId: "novel-1",
+        commandType: "continue",
+        status: "queued",
+        errorMessage: null,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+        runAfter: new Date("2026-04-30T08:59:00.000Z"),
+        createdAt: new Date("2026-04-30T08:58:00.000Z"),
+        updatedAt: new Date("2026-04-30T08:59:00.000Z"),
+        startedAt: null,
+        finishedAt: null,
+      },
+    ],
+  });
+  try {
+    const projection = await harness.service.getProjection("novel-1");
+
+    assert.equal(projection.status, "queued");
+    assert.equal(projection.displayState, "processing");
+    assert.equal(projection.requiresUserAction, false);
+    assert.equal(projection.pendingCommandCount, 1);
+    assert.equal(projection.activeCommandCount, 0);
+    assert.equal(projection.workerHealth.derivedState, "queued_waiting_worker");
+    assert.equal(projection.workerHealth.queuedCommandCount, 1);
+    assert.match(projection.detail, /后台执行器接手/);
+    assert.match(projection.currentLabel, /后台执行器接手/);
+    assert.match(projection.automationSummary, /后台执行器接手/);
+  } finally {
+    harness.restore();
+  }
+});
+
 test("book automation projection treats manual recovery as a book-level user action", async () => {
   const harness = createHarness({
     latestTask: {
@@ -237,6 +289,7 @@ test("book automation projection treats manual recovery as a book-level user act
       pendingManualRecovery: true,
       lastError: "后台执行中断，点击恢复后继续。",
     },
+    commands: [],
     runtimeProjection: {
       runId: "run-1",
       novelId: "novel-1",

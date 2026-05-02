@@ -6,7 +6,7 @@ const {
   runPipelineChapterWithRuntime,
 } = require("../dist/services/novel/runtime/chapterRuntimePipeline.js");
 
-function createRuntimePackage(overallScore) {
+function createRuntimePackage(overallScore, options = {}) {
   return {
     novelId: "novel-1",
     chapterId: "chapter-1",
@@ -14,7 +14,7 @@ function createRuntimePackage(overallScore) {
       score: {
         coherence: overallScore,
         pacing: overallScore,
-        repetition: 10,
+        repetition: overallScore,
         engagement: overallScore,
         voice: overallScore,
         overall: overallScore,
@@ -33,6 +33,7 @@ function createRuntimePackage(overallScore) {
       bookContract: null,
       macroConstraints: null,
       volumeWindow: null,
+      styleContext: options.styleContext ?? null,
     },
   };
 }
@@ -110,14 +111,14 @@ test("runPipelineChapterWithRuntime skips review and repair when autoReview is d
   assert.deepEqual(result.score, {
     coherence: 100,
     pacing: 100,
-    repetition: 0,
+    repetition: 100,
     engagement: 100,
     voice: 100,
     overall: 100,
   });
 });
 
-test("runPipelineChapterWithRuntime records recoverable patch failures without failing the batch chapter", async () => {
+test("runPipelineChapterWithRuntime escalates patch failures to heavy repair and rechecks the chapter", async () => {
   const originalRunStructuredPrompt = promptRunner.runStructuredPrompt;
   const stages = [];
   const savedDrafts = [];
@@ -140,6 +141,11 @@ test("runPipelineChapterWithRuntime records recoverable patch failures without f
       escalationReason: null,
     },
   });
+  promptRunner.setPromptRunnerLLMFactoryForTests(async () => ({
+    invoke: async () => ({
+      content: "rewritten chapter after safe full repair",
+    }),
+  }));
 
   try {
     const result = await runPipelineChapterWithRuntime(
@@ -174,7 +180,7 @@ test("runPipelineChapterWithRuntime records recoverable patch failures without f
           reviewCount += 1;
           return {
             finalContent: content,
-            runtimePackage: createRuntimePackage(72),
+            runtimePackage: createRuntimePackage(reviewCount === 1 ? 72 : 90),
           };
         },
         async markChapterGenerationState() {},
@@ -195,20 +201,118 @@ test("runPipelineChapterWithRuntime records recoverable patch failures without f
       },
     );
 
-    assert.deepEqual(stages, ["generating_chapters", "reviewing", "repairing"]);
-    assert.equal(reviewCount, 1);
-    assert.equal(result.pass, false);
-    assert.equal(result.retryCountUsed, 0);
-    assert.equal(result.recoverableRepairFailure.message, "patch-missing: 目标片段不存在，不能安全应用局部补丁。");
-    assert.deepEqual(result.recoverableRepairFailure.failureTypes, ["missing_target"]);
-    assert.equal(needsRepairMarked, true);
+    assert.deepEqual(stages, ["generating_chapters", "reviewing", "repairing", "reviewing"]);
+    assert.equal(reviewCount, 2);
+    assert.equal(result.pass, true);
+    assert.equal(result.retryCountUsed, 1);
+    assert.equal(result.recoverableRepairFailure, null);
+    assert.equal(needsRepairMarked, false);
     assert.equal(finalSyncs.length, 1);
     assert.deepEqual(savedDrafts, [{
       content: "生成后的正文需要承接。",
       generationState: "drafted",
+    }, {
+      content: "rewritten chapter after safe full repair",
+      generationState: "repaired",
     }]);
   } finally {
     promptRunner.runStructuredPrompt = originalRunStructuredPrompt;
+    promptRunner.setPromptRunnerLLMFactoryForTests();
+  }
+});
+
+test("runPipelineChapterWithRuntime forces full rewrite when style source entities leak", async () => {
+  const originalRunStructuredPrompt = promptRunner.runStructuredPrompt;
+  const stages = [];
+  const savedDrafts = [];
+  let patchRepairCalled = false;
+  let reviewCount = 0;
+
+  promptRunner.runStructuredPrompt = async () => {
+    patchRepairCalled = true;
+    throw new Error("patch repair should not run for style source leakage");
+  };
+  promptRunner.setPromptRunnerLLMFactoryForTests(async () => ({
+    invoke: async () => ({
+      content: "clean rewritten chapter with transferable pacing only",
+    }),
+  }));
+
+  try {
+    const styleContext = {
+      sanitizedGenerationProfile: {
+        writingGuidance: ["keep fast scene turns without copying source entities"],
+        forbiddenEntities: ["北凉王世子"],
+        sourceProfileNames: ["source style"],
+        sanitizedAt: "2026-05-01T00:00:00.000Z",
+        strategy: "deterministic",
+      },
+    };
+
+    const result = await runPipelineChapterWithRuntime(
+      {
+        validateRequest(input) {
+          return input;
+        },
+        async ensureNovelCharacters() {},
+        async assemble() {
+          return {
+            novel: { id: "novel-1", title: "test novel" },
+            chapter: {
+              id: "chapter-1",
+              title: "chapter one",
+              order: 1,
+              content: null,
+              expectation: null,
+            },
+            contextPackage: { styleContext },
+          };
+        },
+        async generateDraftFromWriter() {
+          return { content: "北凉王世子踏进城门，所有人都屏住呼吸。" };
+        },
+        async saveDraftAndArtifacts(_novelId, _chapterId, content, generationState) {
+          savedDrafts.push({ content, generationState });
+        },
+        async syncFinalChapterArtifacts() {},
+        async finalizeChapterContent({ content }) {
+          reviewCount += 1;
+          return {
+            finalContent: content,
+            runtimePackage: createRuntimePackage(92, { styleContext }),
+          };
+        },
+        async markChapterGenerationState() {},
+        async markChapterNeedsRepair() {},
+      },
+      "novel-1",
+      "chapter-1",
+      {
+        autoReview: true,
+        autoRepair: true,
+      },
+      {
+        async onStageChange(stage) {
+          stages.push(stage);
+        },
+      },
+    );
+
+    assert.equal(patchRepairCalled, false);
+    assert.deepEqual(stages, ["generating_chapters", "reviewing", "repairing", "reviewing"]);
+    assert.equal(reviewCount, 2);
+    assert.equal(result.pass, true);
+    assert.equal(result.retryCountUsed, 1);
+    assert.deepEqual(savedDrafts, [{
+      content: "北凉王世子踏进城门，所有人都屏住呼吸。",
+      generationState: "drafted",
+    }, {
+      content: "clean rewritten chapter with transferable pacing only",
+      generationState: "repaired",
+    }]);
+  } finally {
+    promptRunner.runStructuredPrompt = originalRunStructuredPrompt;
+    promptRunner.setPromptRunnerLLMFactoryForTests();
   }
 });
 

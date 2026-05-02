@@ -137,3 +137,41 @@ test("resolveModel constrains Anthropic protocol routes to prompt JSON", async (
     prisma.modelRouteConfig.findUnique = originalFindUnique;
   }
 });
+
+test("resolveModel marks strict routes degraded when only default route is available", async () => {
+  const originalFindUnique = prisma.modelRouteConfig.findUnique;
+
+  prisma.modelRouteConfig.findUnique = async () => null;
+
+  try {
+    const resolved = await resolveModel("critical_review");
+    assert.equal(resolved.routeKey, "critical_review");
+    assert.equal(resolved.routeDegraded, true);
+    assert.equal(resolved.temperature, 0.1);
+  } finally {
+    prisma.modelRouteConfig.findUnique = originalFindUnique;
+  }
+});
+
+test("resolveModel keeps strict routes non-degraded when explicitly configured", async () => {
+  const originalFindUnique = prisma.modelRouteConfig.findUnique;
+
+  prisma.modelRouteConfig.findUnique = async () => ({
+    taskType: "state_resolution",
+    provider: "deepseek",
+    model: "deepseek-reasoner",
+    temperature: 0.1,
+    maxTokens: null,
+    requestProtocol: "auto",
+    structuredResponseFormat: "auto",
+  });
+
+  try {
+    const resolved = await resolveModel("state_resolution");
+    assert.equal(resolved.routeKey, "state_resolution");
+    assert.equal(resolved.routeDegraded, false);
+    assert.equal(resolved.model, "deepseek-reasoner");
+  } finally {
+    prisma.modelRouteConfig.findUnique = originalFindUnique;
+  }
+});

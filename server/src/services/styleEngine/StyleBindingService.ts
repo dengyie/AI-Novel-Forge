@@ -9,6 +9,7 @@ import {
   mapStyleProfileRow,
   mergeRuleObjects,
 } from "./helpers";
+import { sanitizeStyleContextForGeneration } from "./styleGenerationSanitizer";
 
 const TARGET_PRIORITY: Record<StyleBinding["targetType"], number> = {
   novel: 1,
@@ -225,7 +226,7 @@ export class StyleBindingService {
 
     if (matchedBindings.length === 0) {
       if (baselineRules.length === 0) {
-        return {
+        return sanitizeStyleContextForGeneration({
           matchedBindings: [],
           compiledBlocks: null,
           effectiveStyleProfileId: null,
@@ -236,7 +237,7 @@ export class StyleBindingService {
           usesGlobalAntiAiBaseline: false,
           globalAntiAiRuleIds: [],
           styleAntiAiRuleIds: [],
-        };
+        });
       }
 
       const compiledBlocks = this.compiler.compile({
@@ -252,7 +253,7 @@ export class StyleBindingService {
         styleAntiAiRuleIds: [],
       });
 
-      return {
+      return sanitizeStyleContextForGeneration({
         matchedBindings: [],
         compiledBlocks,
         effectiveStyleProfileId: null,
@@ -263,7 +264,7 @@ export class StyleBindingService {
         usesGlobalAntiAiBaseline: true,
         globalAntiAiRuleIds: baselineRules.map((rule) => rule.id),
         styleAntiAiRuleIds: [],
-      };
+      });
     }
 
     const mergedRules = ordered.reduce<StyleRuleSet>((acc, binding) => {
@@ -349,7 +350,7 @@ export class StyleBindingService {
       styleAntiAiRuleIds: styleSpecificRules.map((rule) => rule.id),
     });
 
-    return {
+    return sanitizeStyleContextForGeneration({
       matchedBindings: sortMatchedBindings(matchedBindings),
       compiledBlocks,
       effectiveStyleProfileId: effectiveBinding?.styleProfileId ?? null,
@@ -360,6 +361,6 @@ export class StyleBindingService {
       usesGlobalAntiAiBaseline: baselineRules.length > 0,
       globalAntiAiRuleIds: baselineRules.map((rule) => rule.id),
       styleAntiAiRuleIds: styleSpecificRules.map((rule) => rule.id),
-    };
+    });
   }
 }

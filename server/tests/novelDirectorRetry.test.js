@@ -678,6 +678,105 @@ test("continueTask resumes auto execution in the background instead of blocking 
   }
 });
 
+test("continueTask lets full_book_autopilot recover review-blocked chapter checkpoints", async () => {
+  const service = new NovelDirectorService();
+  const originalContinueCandidateStageTask = service.continueCandidateStageTask;
+  const originalGetTaskById = service.workflowService.getTaskById;
+  const originalResolveAssetFirstRecovery = service.resolveAssetFirstRecovery;
+  const originalMarkTaskRunning = service.workflowService.markTaskRunning;
+  const originalScheduleBackgroundRun = service.scheduleBackgroundRun;
+  const originalRunFromReady = service.autoExecutionRuntime.runFromReady;
+  const runningCalls = [];
+  const scheduledRuns = [];
+  const runtimeCalls = [];
+  const restoreDirectorRunNode = stubDirectorRuntimeNode(service);
+
+  service.continueCandidateStageTask = async () => false;
+  service.resolveAssetFirstRecovery = async () => ({
+    type: "auto_execution",
+    resumeCheckpointType: "chapter_batch_ready",
+  });
+  service.workflowService.getTaskById = async () => ({
+    id: "task_full_book_autopilot_resume",
+    lane: "auto_director",
+    status: "failed",
+    pendingManualRecovery: false,
+    novelId: "novel_full_book_autopilot_resume",
+    checkpointType: "chapter_batch_ready",
+    currentItemKey: "quality_repair",
+    resumeTargetJson: JSON.stringify({
+      stage: "pipeline",
+      chapterId: "chapter_6",
+    }),
+    lastError: "Chapter generation is blocked until review is resolved. 2 pending state proposal(s)",
+    seedPayloadJson: JSON.stringify({
+      directorInput: buildDirectorInput({
+        workflowTaskId: "task_full_book_autopilot_resume",
+        runMode: "full_book_autopilot",
+      }),
+      directorSession: {
+        runMode: "full_book_autopilot",
+        phase: "front10_ready",
+        isBackgroundRunning: false,
+        lockedScopes: ["basic", "story_macro", "character", "outline", "structured", "chapter", "pipeline"],
+        reviewScope: null,
+      },
+      autoExecution: {
+        enabled: true,
+        mode: "book",
+        scopeLabel: "full book",
+        startOrder: 6,
+        endOrder: 30,
+        totalChapterCount: 25,
+        nextChapterId: "chapter_6",
+        nextChapterOrder: 6,
+        remainingChapterCount: 25,
+        remainingChapterIds: ["chapter_6"],
+        remainingChapterOrders: [6, 7, 8, 9, 10],
+        pipelineJobId: "pipeline_full_book_existing",
+        pipelineStatus: "failed",
+      },
+    }),
+  });
+  service.workflowService.markTaskRunning = async (taskId, input) => {
+    runningCalls.push({ taskId, ...input });
+    return null;
+  };
+  service.scheduleBackgroundRun = (taskId, runner) => {
+    scheduledRuns.push({ taskId, runner });
+  };
+  service.autoExecutionRuntime.runFromReady = async (input) => {
+    runtimeCalls.push(input);
+  };
+
+  try {
+    await service.continueTask("task_full_book_autopilot_resume", {
+      continuationMode: "resume",
+    });
+    assert.equal(runningCalls.length, 1);
+    assert.equal(runningCalls[0].stage, "chapter_execution");
+    assert.equal(scheduledRuns.length, 1);
+    assert.equal(runtimeCalls.length, 0);
+
+    await scheduledRuns[0].runner();
+
+    assert.equal(runtimeCalls.length, 1);
+    assert.equal(runtimeCalls[0].taskId, "task_full_book_autopilot_resume");
+    assert.equal(runtimeCalls[0].novelId, "novel_full_book_autopilot_resume");
+    assert.equal(runtimeCalls[0].resumeCheckpointType, "chapter_batch_ready");
+    assert.equal(runtimeCalls[0].allowSkipReviewBlockedChapter, true);
+    assert.equal(runtimeCalls[0].approveAutoExecutionScope, true);
+  } finally {
+    service.continueCandidateStageTask = originalContinueCandidateStageTask;
+    service.workflowService.getTaskById = originalGetTaskById;
+    service.resolveAssetFirstRecovery = originalResolveAssetFirstRecovery;
+    service.workflowService.markTaskRunning = originalMarkTaskRunning;
+    service.scheduleBackgroundRun = originalScheduleBackgroundRun;
+    service.autoExecutionRuntime.runFromReady = originalRunFromReady;
+    restoreDirectorRunNode();
+  }
+});
+
 test("continueTask upgrades an explicit auto-execution continuation to execution mode", async () => {
   const service = new NovelDirectorService();
   const originalContinueCandidateStageTask = service.continueCandidateStageTask;

@@ -230,7 +230,7 @@ export interface CharacterTimelineSyncOptions {
   endOrder?: number;
 }
 
-const QUALITY_THRESHOLD = { coherence: 80, repetition: 20, engagement: 75 };
+const QUALITY_THRESHOLD = { coherence: 80, repetition: 75, engagement: 75 };
 type BeatStatus = "planned" | "completed" | "skipped";
 
 const CONTINUATION_ANALYSIS_SECTION_KEYS: BookAnalysisSectionKey[] = [
@@ -421,7 +421,7 @@ export function normalizeScore(value: Partial<QualityScore>): QualityScore {
   const pacing = clamp(value.pacing ?? 0);
   const voice = clamp(value.voice ?? 0);
   const engagement = clamp(value.engagement ?? 0);
-  const overall = clamp(value.overall ?? (coherence + (100 - repetition) + pacing + voice + engagement) / 5);
+  const overall = clamp(value.overall ?? (coherence + repetition + pacing + voice + engagement) / 5);
   return { coherence, repetition, pacing, voice, engagement, overall };
 }
 
@@ -431,17 +431,17 @@ export function ruleScore(content: string): QualityScore {
   const unique = new Set(sentences);
   const repeatRatio = sentences.length > 0 ? 1 - unique.size / sentences.length : 0;
   const coherence = text.length >= 1800 ? 85 : text.length >= 1200 ? 75 : 60;
-  const repetition = clamp(repeatRatio * 100);
+  const repetition = clamp(100 - repeatRatio * 100);
   const pacing = text.length >= 1800 && text.length <= 3600 ? 82 : 70;
   const voice = sentences.length >= 25 ? 80 : 68;
   const engagement = /悬念|危机|冲突|转折/.test(text) ? 85 : 72;
-  const overall = clamp((coherence + (100 - repetition) + pacing + voice + engagement) / 5);
+  const overall = clamp((coherence + repetition + pacing + voice + engagement) / 5);
   return { coherence, repetition, pacing, voice, engagement, overall };
 }
 
 export function isPass(score: QualityScore): boolean {
   return score.coherence >= QUALITY_THRESHOLD.coherence
-    && score.repetition <= QUALITY_THRESHOLD.repetition
+    && score.repetition >= QUALITY_THRESHOLD.repetition
     && score.engagement >= QUALITY_THRESHOLD.engagement;
 }
 

@@ -356,6 +356,9 @@ export default function Home() {
             <Button asChild size="lg" variant="outline">
               <Link to={MANUAL_CREATE_LINK}>手动创建小说</Link>
             </Button>
+            <Button asChild size="lg" variant="outline">
+              <Link to="/help">新手上路</Link>
+            </Button>
           </div>
         </CardContent>
       </Card>
@@ -454,6 +457,9 @@ export default function Home() {
                 <Button asChild variant="outline">
                   <Link to={MANUAL_CREATE_LINK}>手动创建小说</Link>
                 </Button>
+                <Button asChild variant="outline">
+                  <Link to="/help">新手上路</Link>
+                </Button>
               </div>
             </div>
           )}
@@ -477,6 +483,9 @@ export default function Home() {
           </Button>
           <Button asChild variant="outline">
             <Link to="/tasks">后台任务</Link>
+          </Button>
+          <Button asChild variant="outline">
+            <Link to="/help">新手上路</Link>
           </Button>
         </CardContent>
       </Card>

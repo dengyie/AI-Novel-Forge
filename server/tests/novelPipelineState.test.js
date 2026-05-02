@@ -105,7 +105,7 @@ test("executePipeline preserves persisted quality alerts across resume", async (
     retryCountUsed: 0,
     score: {
       coherence: 88,
-      repetition: 8,
+      repetition: 88,
       pacing: 82,
       voice: 80,
       engagement: 86,

@@ -1,6 +1,6 @@
 import type { LLMProvider } from "./llm";
 import type { NovelWorkflowStage } from "./novelWorkflow";
-import type { DirectorCircuitBreakerState } from "./novelDirector";
+import type { DirectorCircuitBreakerState, DirectorQualityLoopBudgetNextAction } from "./novelDirector";
 
 export const DIRECTOR_POLICY_MODES = [
   "suggest_only",
@@ -242,6 +242,7 @@ export type DirectorEventType =
   | "node_failed"
   | "artifact_indexed"
   | "workspace_analyzed"
+  | "run_cancelled"
   | "policy_changed"
   | "approval_required"
   | "quality_issue_found"
@@ -336,10 +337,82 @@ export interface DirectorRuntimeProjectionEvent {
   usage?: DirectorLlmUsageSummary | null;
 }
 
+export type DirectorAutopilotRecoveryDecision =
+  | "continue"
+  | "auto_repair_chapter"
+  | "auto_rewrite_chapter"
+  | "auto_replan_window"
+  | "auto_resume_from_checkpoint"
+  | "defer_and_continue"
+  | "requires_manual_recovery";
+
+export interface DirectorRuntimeProgressBreakdown {
+  planningProgress: number;
+  chapterProgress: number;
+  qualityProgress: number;
+  activeJobProgress: number;
+  planningPercent: number;
+  chapterExecutionPercent: number;
+  qualityRepairPercent: number;
+  totalPercent: number;
+  completedSteps: number;
+  totalSteps: number;
+  draftedChapters: number;
+  continuableChapters: number;
+  totalChapters: number;
+  pendingRepairChapters: number;
+  explanation: string;
+}
+
+export interface DirectorRuntimeVisibleRiskBadge {
+  label: string;
+  level: "info" | "warning" | "danger";
+  source?: "status" | "artifact" | "event" | "policy";
+}
+
+export interface DirectorRuntimeQualityDebtSummary {
+  deferredChapterCount: number;
+  deferredChapterOrders: number[];
+  latestReason?: string | null;
+}
+
+export interface DirectorRuntimeQualityBudgetSummary {
+  currentChapterId?: string | null;
+  currentChapterOrder?: number | null;
+  latestSignatureKey?: string | null;
+  latestIssueSignature?: string | null;
+  latestReason?: string | null;
+  patchRepairUsed: number;
+  chapterRewriteUsed: number;
+  windowReplanUsed: number;
+  deferredCount: number;
+  nextAction: DirectorQualityLoopBudgetNextAction;
+  nextActionLabel: string;
+  explanation: string;
+}
+
 export interface DirectorRuntimeProjection {
   runId: string;
   novelId?: string | null;
   status: DirectorRuntimeProjectionStatus;
+  runtimeId?: string | null;
+  runtimeStatus?: string | null;
+  currentAction?: string | null;
+  waitingReason?: string | null;
+  activeExecution?: {
+    executionId: string;
+    stepType: string;
+    resourceClass?: string | null;
+    workerId?: string | null;
+    slotId?: string | null;
+    status: string;
+    startedAt?: string | null;
+    leaseExpiresAt?: string | null;
+  } | null;
+  resourceClass?: string | null;
+  checkpointSummary?: string | null;
+  nextAutomaticAction?: string | null;
+  workerHealth?: DirectorWorkerHealthSummary | null;
   currentNodeKey?: string | null;
   currentLabel?: string | null;
   headline?: string | null;
@@ -347,9 +420,17 @@ export interface DirectorRuntimeProjection {
   lastEventSummary?: string | null;
   requiresUserAction: boolean;
   blockedReason?: string | null;
+  blockingReason?: string | null;
   nextActionLabel?: string | null;
+  recommendedAction?: DirectorNextAction | null;
+  recoveryDecision?: DirectorAutopilotRecoveryDecision;
+  isAutopilotRecoverable?: boolean;
   scopeSummary?: string | null;
   progressSummary?: string | null;
+  progressBreakdown?: DirectorRuntimeProgressBreakdown;
+  visibleRiskBadges?: DirectorRuntimeVisibleRiskBadge[];
+  qualityDebtSummary?: DirectorRuntimeQualityDebtSummary | null;
+  qualityBudgetSummary?: DirectorRuntimeQualityBudgetSummary | null;
   policyMode: DirectorPolicyMode;
   updatedAt: string;
   recentEvents: DirectorRuntimeProjectionEvent[];
@@ -501,6 +582,34 @@ export interface DirectorBookAutomationRecentArtifact {
   updatedAt?: string | null;
 }
 
+export type DirectorWorkerDerivedState =
+  | "idle"
+  | "queued_waiting_worker"
+  | "leased_starting"
+  | "running_step"
+  | "waiting_gate"
+  | "auto_recovering"
+  | "cancelled"
+  | "failed_recoverable"
+  | "failed_hard"
+  | "succeeded";
+
+export interface DirectorWorkerHealthSummary {
+  derivedState: DirectorWorkerDerivedState;
+  message?: string | null;
+  queuedCommandCount: number;
+  leasedCommandCount: number;
+  runningCommandCount: number;
+  staleCommandCount: number;
+  oldestQueuedAt?: string | null;
+  oldestQueuedWaitMs?: number | null;
+  currentCommandId?: string | null;
+  currentCommandType?: DirectorRunCommandType | string | null;
+  currentWorkerId?: string | null;
+  currentLeaseExpiresAt?: string | null;
+  lastCommandAt?: string | null;
+}
+
 export interface DirectorBookAutomationProjection {
   novelId: string;
   focusNovel: DirectorBookAutomationFocusNovel;
@@ -529,6 +638,7 @@ export interface DirectorBookAutomationProjection {
   stepUsage?: DirectorStepUsageSummary[];
   promptUsage?: DirectorPromptUsageSummary[];
   circuitBreaker?: DirectorCircuitBreakerState | null;
+  workerHealth?: DirectorWorkerHealthSummary | null;
   activeCommandCount: number;
   pendingCommandCount: number;
   autoApprovalRecordCount: number;
@@ -578,6 +688,9 @@ export interface DirectorCommandAcceptedResponse {
   commandType: DirectorRunCommandType;
   status: DirectorRunCommandStatus;
   leaseExpiresAt?: string | null;
+  runtimeId?: string | null;
+  runtimeStatus?: string | null;
+  projectionUrl?: string | null;
 }
 
 export interface DirectorWorkspaceAnalysisResponse {

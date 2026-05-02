@@ -137,6 +137,46 @@ export interface DirectorCircuitBreakerState {
   recoveryAction?: "retry" | "resume_after_review" | "switch_model" | "confirm_protected_content" | "manual_repair" | null;
 }
 
+export type DirectorQualityLoopBudgetAttemptAction =
+  | "patch_repair"
+  | "chapter_rewrite"
+  | "window_replan"
+  | "defer_and_continue";
+
+export type DirectorQualityLoopBudgetNextAction =
+  | "auto_patch_repair"
+  | "auto_rewrite_chapter"
+  | "auto_replan_window"
+  | "defer_and_continue";
+
+export interface DirectorQualityLoopBudgetWindow {
+  startOrder?: number | null;
+  endOrder?: number | null;
+  chapterOrders?: number[];
+  chapterIds?: string[];
+}
+
+export interface DirectorQualityLoopBudgetEntry {
+  signatureKey: string;
+  issueSignature: string;
+  blockingLedgerKeys: string[];
+  affectedChapterWindow: DirectorQualityLoopBudgetWindow;
+  patchRepairCount: number;
+  chapterRewriteCount: number;
+  windowReplanCount: number;
+  deferredCount: number;
+  lastAction?: DirectorQualityLoopBudgetAttemptAction | null;
+  lastReason?: string | null;
+  lastChapterId?: string | null;
+  lastChapterOrder?: number | null;
+  updatedAt: string;
+}
+
+export interface DirectorQualityLoopBudgetLedger {
+  entries: DirectorQualityLoopBudgetEntry[];
+  updatedAt?: string | null;
+}
+
 export const DIRECTOR_MIN_TARGET_CHAPTER_COUNT = 12;
 export const DIRECTOR_MAX_TARGET_CHAPTER_COUNT = 2000;
 
@@ -208,6 +248,16 @@ export interface DirectorAutoExecutionState extends DirectorAutoExecutionPlan {
   preparedVolumeIds?: string[];
   skippedChapterIds?: string[];
   skippedChapterOrders?: number[];
+  qualityDebtChapterIds?: string[];
+  qualityDebtChapterOrders?: number[];
+  qualityDebtSummaries?: Array<{
+    chapterId?: string | null;
+    chapterOrder?: number | null;
+    reason: string;
+    source: "quality_loop" | "replan_loop" | "repair_failure" | "review_skip";
+    deferredAt: string;
+  }>;
+  qualityLoopLedger?: DirectorQualityLoopBudgetLedger | null;
   firstChapterId?: string | null;
   startOrder?: number;
   endOrder?: number;

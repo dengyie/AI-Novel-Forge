@@ -245,7 +245,12 @@ export default function NovelTaskDrawer({
   const milestones = Array.isArray(task?.meta.milestones)
     ? task.meta.milestones as NovelWorkflowMilestone[]
     : [];
-  const progressPercent = Math.max(0, Math.min(100, Math.round((task?.progress ?? 0) * 100)));
+  const projectedProgressPercent = projection?.runtimeProjection?.progressBreakdown?.totalPercent;
+  const progressPercent = Math.max(0, Math.min(100, Math.round(
+    typeof projectedProgressPercent === "number"
+      ? projectedProgressPercent
+      : (task?.progress ?? 0) * 100,
+  )));
   const tokenUsage = task?.tokenUsage ?? null;
   const primaryAction = projection?.primaryAction ?? null;
   const primaryActionLabel = (

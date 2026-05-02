@@ -160,10 +160,17 @@ export function tabFromDirectorProgress(input: {
     case "chapter_detail_bundle":
       return "structured";
     case "chapter_execution":
+    case "chapter_execution_node":
+    case "chapter.draft.write":
+    case "chapter.write":
       return "chapter";
     case "reviewing":
     case "repairing":
     case "quality_repair":
+    case "chapter_quality_review_node":
+    case "chapter.quality.review":
+    case "chapter_state_commit_node":
+    case "chapter.state.commit":
       return "pipeline";
     default:
       break;

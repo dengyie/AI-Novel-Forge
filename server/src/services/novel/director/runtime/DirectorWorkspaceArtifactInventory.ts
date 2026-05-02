@@ -48,11 +48,16 @@ export interface DirectorWorkspaceArtifactInventoryInput {
   characterCount: number;
   latestCharacter: TimestampedRow | null;
   volumePlans: Array<TimestampedRow & {
+    sortOrder?: number | null;
+    title?: string | null;
+    summary?: string | null;
     mainPromise?: string | null;
     openPayoffsJson?: string | null;
     escalationMode?: string | null;
     protagonistChange?: string | null;
     nextVolumeHook?: string | null;
+    status?: string | null;
+    sourceVersionId?: string | null;
   }>;
   chapterPlanCount: number;
   volumeChapterPlans: Array<{
@@ -90,6 +95,7 @@ export interface DirectorWorkspaceArtifactInventoryInput {
     riskFlags?: string | null;
     repairHistory?: string | null;
     chapterStatus?: string | null;
+    generationState?: string | null;
     updatedAt: Date | string;
   }>;
   qualityReports: Array<{
@@ -151,6 +157,72 @@ export interface DirectorWorkspaceCoreArtifactIds {
   sourceKnowledgeArtifactIds: Array<string | null>;
   readerPromiseArtifactIds: Array<string | null>;
   characterGovernanceArtifactId: string | null;
+}
+
+export const DIRECTOR_INITIALIZATION_PLACEHOLDER_VOLUME_STRATEGY_HASH = stableDirectorContentHash(
+  "director.initialization.placeholder.volume_strategy.v1",
+) as string;
+
+const INITIALIZATION_PLACEHOLDER_VOLUME_ID_PREFIX = "legacy-volume-";
+const PLACEHOLDER_VOLUME_TEXT_PREFIX = "待补全";
+
+function isPlaceholderText(value: string | null | undefined): boolean {
+  const normalized = value?.trim();
+  return !normalized || normalized.startsWith(PLACEHOLDER_VOLUME_TEXT_PREFIX);
+}
+
+function hasMeaningfulJsonArray(value: string | null | undefined): boolean {
+  const normalized = value?.trim();
+  if (!normalized || normalized === "[]") {
+    return false;
+  }
+  try {
+    const parsed = JSON.parse(normalized) as unknown;
+    return Array.isArray(parsed) ? parsed.length > 0 : true;
+  } catch {
+    return true;
+  }
+}
+
+function isInitializationPlaceholderVolumePlan(
+  volume: DirectorWorkspaceArtifactInventoryInput["volumePlans"][number],
+  input: DirectorWorkspaceArtifactInventoryInput,
+): boolean {
+  if (
+    input.volumePlans.length !== 1
+    || !volume.id.startsWith(INITIALIZATION_PLACEHOLDER_VOLUME_ID_PREFIX)
+    || volume.sortOrder !== 1
+    || (volume.status && volume.status !== "active")
+    || volume.sourceVersionId
+  ) {
+    return false;
+  }
+  if (
+    input.volumeChapterPlans.some((plan) => plan.volumeId === volume.id)
+    || hasMeaningfulJsonArray(volume.openPayoffsJson)
+  ) {
+    return false;
+  }
+  return [
+    volume.summary,
+    volume.mainPromise,
+    volume.escalationMode,
+    volume.protagonistChange,
+    volume.nextVolumeHook,
+  ].every(isPlaceholderText);
+}
+
+export function isInitializationPlaceholderVolumeStrategyArtifact(
+  artifact: DirectorArtifactRef,
+): boolean {
+  return artifact.artifactType === "volume_strategy"
+    && artifact.targetType === "volume"
+    && Boolean(artifact.targetId?.startsWith(INITIALIZATION_PLACEHOLDER_VOLUME_ID_PREFIX))
+    && artifact.source === "backfilled"
+    && artifact.protectedUserContent !== true
+    && artifact.contentRef.table === "VolumePlan"
+    && artifact.contentRef.id === artifact.targetId
+    && artifact.contentHash === DIRECTOR_INITIALIZATION_PLACEHOLDER_VOLUME_STRATEGY_HASH;
 }
 
 function buildExpectedArtifactTypes(input: {
@@ -429,12 +501,25 @@ function pushVolumeStrategyArtifacts(
   ids: ReturnType<typeof buildCoreArtifactIds>,
 ): void {
   for (const volume of input.volumePlans) {
+    const placeholder = isInitializationPlaceholderVolumePlan(volume, input);
     artifactTargets.push({
       artifactType: "volume_strategy",
       targetType: "volume",
       targetId: volume.id,
       contentRef: { table: "VolumePlan", id: volume.id },
       updatedAt: volume.updatedAt,
+      contentHash: placeholder
+        ? DIRECTOR_INITIALIZATION_PLACEHOLDER_VOLUME_STRATEGY_HASH
+        : stableDirectorContentHash([
+          volume.title,
+          volume.summary,
+          volume.mainPromise,
+          volume.openPayoffsJson,
+          volume.escalationMode,
+          volume.protagonistChange,
+          volume.nextVolumeHook,
+          volume.sourceVersionId,
+        ].map((value) => value ?? "").join("\n")),
       dependsOn: compactDirectorArtifactDependencies([
         ids.storyMacroArtifactId,
         ...ids.readerPromiseArtifactIds,
@@ -443,6 +528,53 @@ function pushVolumeStrategyArtifacts(
       ]),
     });
   }
+}
+
+const AI_GENERATED_CHAPTER_STATES = new Set([
+  "drafted",
+  "reviewed",
+  "repaired",
+  "approved",
+  "published",
+]);
+
+export function hasContinuableQualityLoopRiskFlags(riskFlags: string | null | undefined): boolean {
+  if (!riskFlags?.trim()) {
+    return false;
+  }
+  try {
+    const parsed = JSON.parse(riskFlags) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return false;
+    }
+    const qualityLoop = (parsed as { qualityLoop?: unknown }).qualityLoop;
+    return Boolean(
+      qualityLoop
+        && typeof qualityLoop === "object"
+        && !Array.isArray(qualityLoop)
+        && (qualityLoop as { overallStatus?: unknown }).overallStatus === "valid"
+        && (qualityLoop as { recommendedAction?: unknown }).recommendedAction === "continue",
+    );
+  } catch {
+    return false;
+  }
+}
+
+function resolveChapterDraftSource(
+  chapter: DirectorWorkspaceArtifactInventoryInput["chapters"][number],
+): DirectorArtifactRef["source"] {
+  if (chapter.generationState === "repaired") {
+    return "auto_repaired";
+  }
+  if (chapter.generationState && AI_GENERATED_CHAPTER_STATES.has(chapter.generationState)) {
+    return "ai_generated";
+  }
+  return "user_edited";
+}
+
+function chapterNeedsRepairTicket(chapter: DirectorWorkspaceArtifactInventoryInput["chapters"][number]): boolean {
+  return chapter.chapterStatus === "needs_repair"
+    && !hasContinuableQualityLoopRiskFlags(chapter.riskFlags);
 }
 
 function pushChapterArtifacts(
@@ -489,22 +621,23 @@ function pushChapterArtifacts(
       });
     }
     if (chapter.content?.trim()) {
+      const draftSource = resolveChapterDraftSource(chapter);
       artifactTargets.push({
         artifactType: "chapter_draft",
         targetType: "chapter",
         targetId: chapter.id,
         contentRef: { table: "Chapter", id: chapter.id },
         updatedAt: chapter.updatedAt,
-        source: "user_edited",
+        source: draftSource,
         contentHash: stableDirectorContentHash(chapter.content),
-        protectedUserContent: true,
+        protectedUserContent: draftSource === "user_edited",
         dependsOn: compactDirectorArtifactDependencies([
           chapter.taskSheet?.trim() ? taskSheetArtifactId : null,
           ...(retentionArtifactIdsByChapter.get(chapter.id) ?? []),
         ]),
       });
     }
-    if (chapter.chapterStatus === "needs_repair") {
+    if (chapterNeedsRepairTicket(chapter)) {
       artifactTargets.push({
         artifactType: "repair_ticket",
         targetType: "chapter",

@@ -15,6 +15,9 @@ export interface GenerationDecisionInput {
 export class GenerationDecisionEngine {
   decideNextAction(input: GenerationDecisionInput): GenerationNextAction {
     if ((input.pendingReviewProposalCount ?? 0) > 0 && input.hasRepairableDraft) {
+      if (input.policy?.advanceMode === "full_book_autopilot") {
+        return "repair_existing_chapter";
+      }
       return "hold_for_review";
     }
 
