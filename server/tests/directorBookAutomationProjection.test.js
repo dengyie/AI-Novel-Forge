@@ -167,7 +167,10 @@ function createHarness(overrides = {}) {
   };
 
   return {
-    service: new DirectorBookAutomationProjectionService(async () => overrides.runtimeProjection ?? {
+    service: new DirectorBookAutomationProjectionService(async () => (
+      Object.prototype.hasOwnProperty.call(overrides, "runtimeProjection")
+        ? overrides.runtimeProjection
+        : {
       runId: "run-1",
       novelId: "novel-1",
       status: "running",
@@ -183,7 +186,8 @@ function createHarness(overrides = {}) {
       policyMode: "auto_safe_scope",
       updatedAt: "2026-04-30T09:00:03.000Z",
       recentEvents: [],
-    }),
+        }
+    )),
     restore() {
       prisma.novel.findUnique = originals.novelFindUnique;
       prisma.novelWorkflowTask.findFirst = originals.taskFindFirst;
@@ -237,6 +241,11 @@ test("book automation projection aggregates task, command, event, approval and a
 
 test("book automation projection explains queued commands waiting for a worker", async () => {
   const harness = createHarness({
+    runtimeProjection: null,
+    latestTask: {
+      pendingManualRecovery: true,
+      lastError: "后台执行中断，点击恢复后继续。",
+    },
     commands: [
       {
         id: "command-queued",
@@ -258,11 +267,15 @@ test("book automation projection explains queued commands waiting for a worker",
   try {
     const projection = await harness.service.getProjection("novel-1");
 
+    assert.equal(projection.status, "queued");
+    assert.equal(projection.displayState, "processing");
+    assert.equal(projection.requiresUserAction, false);
     assert.equal(projection.pendingCommandCount, 1);
     assert.equal(projection.activeCommandCount, 0);
     assert.equal(projection.workerHealth.derivedState, "queued_waiting_worker");
     assert.equal(projection.workerHealth.queuedCommandCount, 1);
     assert.match(projection.detail, /后台执行器接手/);
+    assert.match(projection.currentLabel, /后台执行器接手/);
     assert.match(projection.automationSummary, /后台执行器接手/);
   } finally {
     harness.restore();
@@ -276,6 +289,7 @@ test("book automation projection treats manual recovery as a book-level user act
       pendingManualRecovery: true,
       lastError: "后台执行中断，点击恢复后继续。",
     },
+    commands: [],
     runtimeProjection: {
       runId: "run-1",
       novelId: "novel-1",

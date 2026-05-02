@@ -142,6 +142,20 @@ function buildWorkerHealth(input: {
   };
 }
 
+function resolveWorkerCurrentLabel(workerHealth: DirectorWorkerHealthSummary): string | null {
+  if (!workerHealth.message?.trim()) {
+    return null;
+  }
+  if (
+    workerHealth.derivedState === "queued_waiting_worker"
+    || workerHealth.derivedState === "leased_starting"
+    || workerHealth.derivedState === "auto_recovering"
+  ) {
+    return workerHealth.message;
+  }
+  return null;
+}
+
 export class DirectorBookAutomationProjectionService {
   constructor(
     private readonly runtimeProjectionLoader: RuntimeProjectionLoader = loadPersistentDirectorRuntimeProjection,
@@ -292,12 +306,12 @@ export class DirectorBookAutomationProjectionService {
       ? "waiting_recovery"
       : workflowStatusToBookStatus(latestTask?.status);
     const runtimeStatus = runtimeProjection ? runtimeStatusToBookStatus(runtimeProjection.status) : "idle";
-    const status: DirectorBookAutomationStatus = latestTask?.pendingManualRecovery
-      ? "waiting_recovery"
-      : activeCommandCount > 0
-        ? "running"
-        : pendingCommandCount > 0 && runtimeStatus === "idle"
-          ? "queued"
+    const status: DirectorBookAutomationStatus = activeCommandCount > 0
+      ? "running"
+      : pendingCommandCount > 0
+        ? "queued"
+        : taskStatus === "waiting_recovery"
+          ? "waiting_recovery"
           : runtimeStatus !== "idle"
             ? runtimeStatus
             : taskStatus;
@@ -306,6 +320,7 @@ export class DirectorBookAutomationProjectionService {
       status,
       now: new Date(),
     });
+    const workerCurrentLabel = resolveWorkerCurrentLabel(workerHealth);
     const displayState = buildDisplayState(status);
     const requiresUserAction = circuitBreaker?.status === "open"
       || status === "waiting_approval"
@@ -464,7 +479,7 @@ export class DirectorBookAutomationProjectionService {
       detail,
       userReason,
       currentStage: latestTask?.currentStage ?? runtimeProjection?.currentNodeKey ?? null,
-      currentLabel: latestTask?.currentItemLabel ?? runtimeProjection?.currentLabel ?? null,
+      currentLabel: workerCurrentLabel ?? latestTask?.currentItemLabel ?? runtimeProjection?.currentLabel ?? null,
       requiresUserAction,
       blockedReason,
       nextActionLabel: runtimeProjection?.nextActionLabel ?? null,
