@@ -25,6 +25,13 @@ import {
   recordUsageAnomalySignal,
   withCircuitBreakerState,
 } from "./runtime/DirectorCircuitBreakerService";
+import {
+  buildDirectorQualityLoopBudgetWindow,
+  buildDirectorQualityLoopIssueSignature,
+  findDirectorQualityLoopBudgetEntry,
+  recordDirectorQualityLoopBudgetAttempt,
+  resolveDirectorQualityLoopBudgetNextAction,
+} from "./runtime/DirectorQualityLoopBudgetLedgerService";
 import { directorAutomationLedgerEventService } from "./runtime/DirectorAutomationLedgerEventService";
 import { directorUsageTelemetryQueryService } from "./runtime/DirectorUsageTelemetryQueryService";
 
@@ -173,8 +180,87 @@ export async function runFullBookAutopilotReplanNotice(input: {
     decision?: "auto_replan_window" | "defer_and_continue";
   }
 > {
+  const affectedChapterWindow = buildDirectorQualityLoopBudgetWindow({
+    autoExecution: input.autoExecution,
+    chapterId: input.autoExecution.nextChapterId,
+    chapterOrder: input.autoExecution.nextChapterOrder,
+  });
+  const issueSignature = buildDirectorQualityLoopIssueSignature({
+    reason: input.noticeSummary,
+    noticeCode: input.checkpointState.qualityRepairRisk?.noticeCode,
+    riskLevel: input.checkpointState.qualityRepairRisk?.riskLevel,
+    repairMode: input.checkpointState.qualityRepairRisk?.repairMode,
+  });
+  const existingBudgetEntry = findDirectorQualityLoopBudgetEntry({
+    state: input.autoExecution,
+    novelId: input.novelId,
+    taskId: input.taskId,
+    issueSignature,
+    affectedChapterWindow,
+  });
+  const nextBudgetAction = resolveDirectorQualityLoopBudgetNextAction(existingBudgetEntry);
+  if (nextBudgetAction === "defer_and_continue") {
+    const budgetResult = recordDirectorQualityLoopBudgetAttempt({
+      state: input.checkpointState,
+      novelId: input.novelId,
+      taskId: input.taskId,
+      issueSignature,
+      affectedChapterWindow,
+      action: "defer_and_continue",
+      reason: input.noticeSummary,
+      chapterId: input.autoExecution.nextChapterId,
+      chapterOrder: input.autoExecution.nextChapterOrder,
+    });
+    const ledgerEventService = input.deps.automationLedgerEventService ?? directorAutomationLedgerEventService;
+    const closedCircuitBreaker = buildClosedDirectorCircuitBreakerState(input.autoExecution.circuitBreaker);
+    const deferredState = buildDirectorAutoExecutionDeferredQualityState({
+      state: withCircuitBreakerState(budgetResult.state, closedCircuitBreaker),
+      reason: input.noticeSummary,
+      source: "replan_loop",
+    });
+    await ledgerEventService.recordEvent({
+      type: "continue_with_risk",
+      idempotencyKey: [
+        input.taskId,
+        input.novelId,
+        budgetResult.entry.signatureKey,
+        budgetResult.entry.deferredCount,
+      ].join(":"),
+      taskId: input.taskId,
+      novelId: input.novelId,
+      nodeKey: "planner.replan",
+      summary: "全书自动成书已暂存重复重规划问题，并继续推进后续章节。",
+      affectedScope: input.autoExecution.nextChapterId
+        ? `chapter:${input.autoExecution.nextChapterId}`
+        : (typeof input.autoExecution.nextChapterOrder === "number" ? `chapter_order:${input.autoExecution.nextChapterOrder}` : null),
+      severity: "medium",
+      metadata: {
+        decision: "defer_and_continue",
+        noticeSummary: input.noticeSummary,
+        chapterOrder: input.autoExecution.nextChapterOrder ?? null,
+        qualityBudgetEntry: budgetResult.entry,
+      },
+    }).catch(() => null);
+    return {
+      stopped: false,
+      circuitBreaker: closedCircuitBreaker,
+      autoExecution: deferredState,
+      decision: "defer_and_continue",
+    };
+  }
+  const budgetResult = recordDirectorQualityLoopBudgetAttempt({
+    state: input.checkpointState,
+    novelId: input.novelId,
+    taskId: input.taskId,
+    issueSignature,
+    affectedChapterWindow,
+    action: "window_replan",
+    reason: input.noticeSummary,
+    chapterId: input.autoExecution.nextChapterId,
+    chapterOrder: input.autoExecution.nextChapterOrder,
+  });
   const replanCircuitBreaker = recordReplanLoopSignal({
-    previous: input.autoExecution.circuitBreaker,
+    previous: budgetResult.state.circuitBreaker,
     chapterId: input.autoExecution.nextChapterId,
     chapterOrder: input.autoExecution.nextChapterOrder,
     message: input.noticeSummary,
@@ -183,7 +269,7 @@ export async function runFullBookAutopilotReplanNotice(input: {
     const ledgerEventService = input.deps.automationLedgerEventService ?? directorAutomationLedgerEventService;
     const closedCircuitBreaker = buildClosedDirectorCircuitBreakerState(replanCircuitBreaker);
     const deferredState = buildDirectorAutoExecutionDeferredQualityState({
-      state: withCircuitBreakerState(input.checkpointState, closedCircuitBreaker),
+      state: withCircuitBreakerState(budgetResult.state, closedCircuitBreaker),
       reason: input.noticeSummary,
       source: "replan_loop",
     });
@@ -209,6 +295,7 @@ export async function runFullBookAutopilotReplanNotice(input: {
         circuitBreaker: replanCircuitBreaker,
         noticeSummary: input.noticeSummary,
         chapterOrder: input.autoExecution.nextChapterOrder ?? null,
+        qualityBudgetEntry: budgetResult.entry,
       },
     }).catch(() => null);
     return {
@@ -242,7 +329,7 @@ export async function runFullBookAutopilotReplanNotice(input: {
           novelId: input.novelId,
           request: input.request,
           range: input.range,
-          autoExecution: withCircuitBreakerState(input.checkpointState, replanFailureBreaker),
+          autoExecution: withCircuitBreakerState(budgetResult.state, replanFailureBreaker),
           circuitBreaker: replanFailureBreaker,
           resumeStage: "pipeline",
         });
@@ -251,7 +338,12 @@ export async function runFullBookAutopilotReplanNotice(input: {
       throw error;
     }
   }
-  return { stopped: false, circuitBreaker: replanCircuitBreaker, decision: "auto_replan_window" };
+  return {
+    stopped: false,
+    circuitBreaker: replanCircuitBreaker,
+    autoExecution: withCircuitBreakerState(budgetResult.state, replanCircuitBreaker),
+    decision: "auto_replan_window",
+  };
 }
 
 export { isDirectorCircuitBreakerOpen, withCircuitBreakerState };

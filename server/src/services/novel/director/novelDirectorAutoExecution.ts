@@ -384,6 +384,7 @@ export function buildDirectorAutoExecutionState(input: {
     qualityDebtChapterIds: preservedQualityDebt.map((chapter) => chapter.id),
     qualityDebtChapterOrders: preservedQualityDebt.map((chapter) => chapter.order),
     qualityDebtSummaries,
+    qualityLoopLedger: (input.plan as DirectorAutoExecutionState | null | undefined)?.qualityLoopLedger ?? null,
     circuitBreaker: (input.plan as DirectorAutoExecutionState | null | undefined)?.circuitBreaker ?? null,
     firstChapterId: selected[0]?.id ?? input.range.firstChapterId,
     startOrder: input.range.startOrder,

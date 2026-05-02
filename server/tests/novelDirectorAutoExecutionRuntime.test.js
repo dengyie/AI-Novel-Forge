@@ -4,6 +4,11 @@ const assert = require("node:assert/strict");
 const {
   NovelDirectorAutoExecutionRuntime,
 } = require("../dist/services/novel/director/novelDirectorAutoExecutionRuntime.js");
+const {
+  buildDirectorQualityLoopBudgetWindow,
+  buildDirectorQualityLoopIssueSignature,
+  recordDirectorQualityLoopBudgetAttempt,
+} = require("../dist/services/novel/director/runtime/DirectorQualityLoopBudgetLedgerService.js");
 
 function buildRequest(overrides = {}) {
   return {
@@ -1951,4 +1956,172 @@ test("prepareRequestedAutoExecution rejects chapter ranges with incomplete execu
     }),
     /第 2 章.*章节细化/,
   );
+});
+
+test("runFromReady uses persisted quality budget ledger to defer repeated replan after worker recovery", async () => {
+  const calls = [];
+  const completedOrders = new Set();
+  const jobOrderById = new Map();
+  const seedState = {
+    enabled: true,
+    mode: "book",
+    autoReview: true,
+    autoRepair: true,
+    firstChapterId: "chapter-6",
+    startOrder: 6,
+    endOrder: 7,
+    totalChapterCount: 2,
+    nextChapterId: "chapter-6",
+    nextChapterOrder: 6,
+    remainingChapterIds: ["chapter-6", "chapter-7"],
+    remainingChapterOrders: [6, 7],
+  };
+  const seededBudget = recordDirectorQualityLoopBudgetAttempt({
+    state: seedState,
+    novelId: "novel-1",
+    taskId: "task-auto-exec",
+    issueSignature: buildDirectorQualityLoopIssueSignature({
+      noticeCode: "PIPELINE_REPLAN_REQUIRED",
+      riskLevel: "replan",
+      repairMode: "heavy_repair",
+      reason: "State-driven replan is required before continuing: 第 6 章关系状态冲突",
+    }),
+    affectedChapterWindow: buildDirectorQualityLoopBudgetWindow({
+      autoExecution: seedState,
+      chapterId: "chapter-6",
+      chapterOrder: 6,
+    }),
+    action: "window_replan",
+    reason: "第 6 章关系状态冲突",
+    chapterId: "chapter-6",
+    chapterOrder: 6,
+    occurredAt: "2026-05-02T00:00:00.000Z",
+  }).state;
+  const runtime = new NovelDirectorAutoExecutionRuntime({
+    novelContextService: {
+      async listChapters() {
+        return [
+          withExecutionDetail({
+            id: "chapter-6",
+            order: 6,
+            generationState: "planned",
+            chapterStatus: "pending_generation",
+            content: "",
+          }),
+          withExecutionDetail({
+            id: "chapter-7",
+            order: 7,
+            generationState: completedOrders.has(7) ? "approved" : "planned",
+            chapterStatus: completedOrders.has(7) ? "completed" : "pending_generation",
+            content: completedOrders.has(7) ? "正文7" : "",
+          }),
+        ];
+      },
+    },
+    novelService: {
+      async startPipelineJob(_novelId, options) {
+        calls.push(["startPipelineJob", options.startOrder, options.endOrder]);
+        const jobId = `job-${options.startOrder}`;
+        jobOrderById.set(jobId, options.startOrder);
+        return { id: jobId, status: "queued" };
+      },
+      async findActivePipelineJobForRange() {
+        return null;
+      },
+      async getPipelineJobById(jobId) {
+        const order = jobOrderById.get(jobId);
+        calls.push(["getPipelineJobById", jobId, order]);
+        if (order === 6) {
+          return {
+            id: jobId,
+            status: "succeeded",
+            progress: 1,
+            currentStage: null,
+            currentItemLabel: null,
+            payload: JSON.stringify({
+              repairMode: "heavy_repair",
+              replanAlertDetails: ["第 6 章关系状态冲突"],
+            }),
+            noticeCode: "PIPELINE_REPLAN_REQUIRED",
+            noticeSummary: "State-driven replan is required before continuing: 第 6 章关系状态冲突",
+            error: null,
+          };
+        }
+        completedOrders.add(order);
+        return {
+          id: jobId,
+          status: "succeeded",
+          progress: 1,
+          currentStage: null,
+          currentItemLabel: null,
+          noticeSummary: null,
+          error: null,
+        };
+      },
+      async cancelPipelineJob() {},
+    },
+    workflowService: {
+      async bootstrapTask(input) {
+        calls.push([
+          "bootstrapTask",
+          input.seedPayload.autoExecution?.nextChapterOrder ?? null,
+          input.seedPayload.autoExecution?.qualityDebtChapterOrders ?? [],
+          input.seedPayload.autoExecution?.qualityLoopLedger?.entries?.[0]?.deferredCount ?? 0,
+        ]);
+      },
+      async getTaskById() {
+        return { status: "running" };
+      },
+      async markTaskRunning() {
+        calls.push(["markTaskRunning"]);
+      },
+      async recordCheckpoint(taskId, input) {
+        calls.push([
+          "recordCheckpoint",
+          taskId,
+          input.checkpointType,
+          input.seedPayload.autoExecution?.qualityDebtChapterOrders ?? [],
+        ]);
+      },
+      async markTaskFailed(_taskId, message) {
+        calls.push(["markTaskFailed", message]);
+      },
+    },
+    buildDirectorSeedPayload(_request, _novelId, extra) {
+      return extra ?? {};
+    },
+    async recordAutoApproval(input) {
+      calls.push(["recordAutoApproval", input.checkpointType, input.qualityRepairRisk.riskLevel]);
+    },
+    async replanNovel() {
+      calls.push(["replanNovel"]);
+    },
+    automationLedgerEventService: {
+      async recordEvent(input) {
+        calls.push(["recordEvent", input.type, input.metadata?.decision ?? null]);
+      },
+      async recordRepairTicketCreated(input) {
+        calls.push(["recordRepairTicketCreated", input.summary]);
+      },
+      async recordCircuitBreakerOpened(input) {
+        calls.push(["recordCircuitBreakerOpened", input.state?.reason]);
+      },
+    },
+  });
+
+  await runtime.runFromReady({
+    taskId: "task-auto-exec",
+    novelId: "novel-1",
+    request: buildRequest({ runMode: "full_book_autopilot" }),
+    existingState: seededBudget,
+  });
+
+  assert.deepEqual(calls.filter((call) => call[0] === "startPipelineJob").map((call) => call.slice(1)), [
+    [6, 6],
+    [7, 7],
+  ]);
+  assert.equal(calls.some((call) => call[0] === "replanNovel"), false);
+  assert.ok(calls.some((call) => call[0] === "recordEvent" && call[1] === "continue_with_risk" && call[2] === "defer_and_continue"));
+  assert.ok(calls.some((call) => call[0] === "bootstrapTask" && call[1] === 7 && call[2].includes(6) && call[3] === 1));
+  assert.ok(calls.some((call) => call[0] === "recordCheckpoint" && call[2] === "workflow_completed" && call[3].includes(6)));
 });
