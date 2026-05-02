@@ -4,6 +4,7 @@ import type {
   DirectorBookAutomationTimelineItem,
   DirectorPolicyMode,
   DirectorRuntimeProjection,
+  DirectorWorkerHealthSummary,
 } from "@ai-novel/shared/types/directorRuntime";
 import { getDirectorNodeDisplayLabel } from "@ai-novel/shared/types/directorRuntime";
 import { prisma } from "../../../db/prisma";
@@ -34,6 +35,112 @@ import {
 } from "./DirectorBookAutomationProjectionModel";
 
 type RuntimeProjectionLoader = (taskId: string) => Promise<DirectorRuntimeProjection | null>;
+
+type ProjectionCommandRow = {
+  id: string;
+  taskId: string;
+  novelId: string | null;
+  commandType: string;
+  status: string;
+  errorMessage: string | null;
+  leaseOwner?: string | null;
+  leaseExpiresAt?: Date | null;
+  runAfter?: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+  startedAt: Date | null;
+  finishedAt: Date | null;
+};
+
+function minDate(values: Array<Date | null | undefined>): Date | null {
+  const timestamps = values
+    .filter((value): value is Date => Boolean(value))
+    .map((value) => value.getTime())
+    .filter(Number.isFinite);
+  if (timestamps.length === 0) {
+    return null;
+  }
+  return new Date(Math.min(...timestamps));
+}
+
+function buildWorkerHealth(input: {
+  commands: ProjectionCommandRow[];
+  status: DirectorBookAutomationStatus;
+  now: Date;
+}): DirectorWorkerHealthSummary {
+  const queuedCommands = input.commands.filter((command) => command.status === "queued");
+  const leasedCommands = input.commands.filter((command) => command.status === "leased");
+  const runningCommands = input.commands.filter((command) => command.status === "running");
+  const staleCommands = input.commands.filter((command) => {
+    if (command.status === "stale") {
+      return true;
+    }
+    if ((command.status === "leased" || command.status === "running") && command.leaseExpiresAt) {
+      return command.leaseExpiresAt.getTime() < input.now.getTime();
+    }
+    return false;
+  });
+  const oldestQueuedAt = minDate(queuedCommands.map((command) => command.runAfter ?? command.createdAt));
+  const activeCommand = runningCommands[0] ?? leasedCommands[0] ?? queuedCommands[0] ?? input.commands[0] ?? null;
+  const derivedState: DirectorWorkerHealthSummary["derivedState"] = (() => {
+    if (staleCommands.length > 0) {
+      return "auto_recovering";
+    }
+    if (runningCommands.length > 0) {
+      return "running_step";
+    }
+    if (leasedCommands.length > 0) {
+      return "leased_starting";
+    }
+    if (queuedCommands.length > 0) {
+      return "queued_waiting_worker";
+    }
+    if (input.status === "waiting_approval") {
+      return "waiting_gate";
+    }
+    if (input.status === "waiting_recovery" || input.status === "failed" || input.status === "blocked") {
+      return "failed_recoverable";
+    }
+    if (input.status === "cancelled") {
+      return "cancelled";
+    }
+    if (input.status === "completed") {
+      return "succeeded";
+    }
+    return "idle";
+  })();
+  const message = (() => {
+    if (derivedState === "queued_waiting_worker") {
+      return "任务已进入后台队列，正在等待后台执行器接手。";
+    }
+    if (derivedState === "leased_starting") {
+      return "后台执行器正在接手任务，马上会进入实际执行。";
+    }
+    if (derivedState === "running_step") {
+      return "后台执行器正在推进这本书的自动导演流程。";
+    }
+    if (derivedState === "auto_recovering") {
+      return "后台执行器连接中断后正在恢复，系统会优先从最近进度继续。";
+    }
+    return null;
+  })();
+
+  return {
+    derivedState,
+    message,
+    queuedCommandCount: queuedCommands.length,
+    leasedCommandCount: leasedCommands.length,
+    runningCommandCount: runningCommands.length,
+    staleCommandCount: staleCommands.length,
+    oldestQueuedAt: oldestQueuedAt ? oldestQueuedAt.toISOString() : null,
+    oldestQueuedWaitMs: oldestQueuedAt ? Math.max(0, input.now.getTime() - oldestQueuedAt.getTime()) : null,
+    currentCommandId: activeCommand?.id ?? null,
+    currentCommandType: activeCommand?.commandType ?? null,
+    currentWorkerId: activeCommand?.leaseOwner ?? null,
+    currentLeaseExpiresAt: activeCommand?.leaseExpiresAt ? activeCommand.leaseExpiresAt.toISOString() : null,
+    lastCommandAt: activeCommand ? toIso(activeCommand.finishedAt ?? activeCommand.startedAt ?? activeCommand.updatedAt) : null,
+  };
+}
 
 export class DirectorBookAutomationProjectionService {
   constructor(
@@ -106,6 +213,9 @@ export class DirectorBookAutomationProjectionService {
           commandType: true,
           status: true,
           errorMessage: true,
+          leaseOwner: true,
+          leaseExpiresAt: true,
+          runAfter: true,
           createdAt: true,
           updatedAt: true,
           startedAt: true,
@@ -191,6 +301,11 @@ export class DirectorBookAutomationProjectionService {
           : runtimeStatus !== "idle"
             ? runtimeStatus
             : taskStatus;
+    const workerHealth = buildWorkerHealth({
+      commands,
+      status,
+      now: new Date(),
+    });
     const displayState = buildDisplayState(status);
     const requiresUserAction = circuitBreaker?.status === "open"
       || status === "waiting_approval"
@@ -201,7 +316,10 @@ export class DirectorBookAutomationProjectionService {
       ? latestTask?.lastError ?? runtimeProjection?.blockedReason ?? null
       : runtimeProjection?.blockedReason ?? (status === "failed" ? latestTask?.lastError ?? null : null);
     const headline = buildHeadline({ status, runtimeProjection, task: latestTask });
-    const detail = buildDetail({ status, runtimeProjection, task: latestTask });
+    const baseDetail = buildDetail({ status, runtimeProjection, task: latestTask });
+    const detail = (status === "queued" || status === "running") && workerHealth.message
+      ? workerHealth.message
+      : baseDetail;
     const userHeadline = buildUserHeadline({ status, task: latestTask });
     const userReason = buildUserReason({
       status,
@@ -352,13 +470,16 @@ export class DirectorBookAutomationProjectionService {
       nextActionLabel: runtimeProjection?.nextActionLabel ?? null,
       primaryAction,
       secondaryActions,
-      automationSummary: buildAutomationSummary({
+      automationSummary: [
+        workerHealth.message,
+        buildAutomationSummary({
         activeCommandCount,
         pendingCommandCount,
         artifactSummary,
         autoApprovalRecordCount,
         usageSummary: usageTelemetry.summary,
-      }),
+        }),
+      ].filter((value): value is string => Boolean(value?.trim())).join("；"),
       progressSummary: runtimeProjection?.progressSummary ?? null,
       artifactSummary,
       usageSummary: usageTelemetry.summary,
@@ -366,6 +487,7 @@ export class DirectorBookAutomationProjectionService {
       stepUsage: usageTelemetry.stepUsage,
       promptUsage: usageTelemetry.promptUsage,
       circuitBreaker,
+      workerHealth,
       activeCommandCount,
       pendingCommandCount,
       autoApprovalRecordCount,

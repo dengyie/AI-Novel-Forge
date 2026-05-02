@@ -46,6 +46,9 @@ function createHarness(overrides = {}) {
       commandType: "continue",
       status: "running",
       errorMessage: null,
+      leaseOwner: "worker-1",
+      leaseExpiresAt: new Date("2099-04-30T09:02:00.000Z"),
+      runAfter: new Date("2026-04-30T08:59:00.000Z"),
       createdAt: new Date("2026-04-30T08:59:00.000Z"),
       updatedAt: new Date("2026-04-30T09:00:02.000Z"),
       startedAt: new Date("2026-04-30T08:59:30.000Z"),
@@ -212,6 +215,8 @@ test("book automation projection aggregates task, command, event, approval and a
     assert.equal(projection.headline, "推进任务：生成章节任务单");
     assert.equal(projection.activeCommandCount, 1);
     assert.equal(projection.pendingCommandCount, 0);
+    assert.equal(projection.workerHealth.derivedState, "running_step");
+    assert.equal(projection.workerHealth.currentWorkerId, "worker-1");
     assert.equal(projection.autoApprovalRecordCount, 1);
     assert.deepEqual(projection.artifactSummary, {
       activeCount: 5,
@@ -225,6 +230,40 @@ test("book automation projection aggregates task, command, event, approval and a
     assert.equal(projection.timeline[0].id, "event:event-1");
     assert.ok(projection.timeline.some((item) => item.id === "command:command-1"));
     assert.ok(projection.timeline.some((item) => item.id === "approval:approval-1"));
+  } finally {
+    harness.restore();
+  }
+});
+
+test("book automation projection explains queued commands waiting for a worker", async () => {
+  const harness = createHarness({
+    commands: [
+      {
+        id: "command-queued",
+        taskId: "task-1",
+        novelId: "novel-1",
+        commandType: "continue",
+        status: "queued",
+        errorMessage: null,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+        runAfter: new Date("2026-04-30T08:59:00.000Z"),
+        createdAt: new Date("2026-04-30T08:58:00.000Z"),
+        updatedAt: new Date("2026-04-30T08:59:00.000Z"),
+        startedAt: null,
+        finishedAt: null,
+      },
+    ],
+  });
+  try {
+    const projection = await harness.service.getProjection("novel-1");
+
+    assert.equal(projection.pendingCommandCount, 1);
+    assert.equal(projection.activeCommandCount, 0);
+    assert.equal(projection.workerHealth.derivedState, "queued_waiting_worker");
+    assert.equal(projection.workerHealth.queuedCommandCount, 1);
+    assert.match(projection.detail, /后台执行器接手/);
+    assert.match(projection.automationSummary, /后台执行器接手/);
   } finally {
     harness.restore();
   }

@@ -5,6 +5,7 @@ import { loadProviderApiKeys } from "../llm/factory";
 import { initializeRagSettingsCompatibility } from "../services/settings/RagCompatibilityBootstrapService";
 import { DirectorCommandService } from "../services/novel/director/DirectorCommandService";
 import { DirectorExecutionService } from "../services/novel/director/DirectorExecutionService";
+import { DirectorWorkerReconciliationService } from "../services/novel/director/DirectorWorkerReconciliationService";
 
 const DEFAULT_POLL_MS = 1500;
 const DEFAULT_LEASE_MS = 120_000;
@@ -26,6 +27,7 @@ export class DirectorWorker {
   constructor(
     private readonly commandService = new DirectorCommandService(),
     private readonly executionService = new DirectorExecutionService(),
+    private readonly reconciliationService = new DirectorWorkerReconciliationService(commandService),
     private readonly options = {
       workerId: process.env.DIRECTOR_WORKER_ID?.trim()
         || `director-worker-${os.hostname()}-${process.pid}`,
@@ -43,7 +45,7 @@ export class DirectorWorker {
     console.log(
       `[director.worker] started workerId=${this.options.workerId} pollMs=${this.options.pollMs} leaseMs=${this.options.leaseMs}`,
     );
-    await this.commandService.recoverStaleLeases();
+    await this.reconcileWorkerState("startup");
     while (!this.stopped) {
       const didWork = await this.tick().catch((error) => {
         console.error("[director.worker] tick failed", error);
@@ -59,10 +61,7 @@ export class DirectorWorker {
     const now = Date.now();
     if (now - this.lastStaleScanAt >= this.options.staleScanMs) {
       this.lastStaleScanAt = now;
-      const staleCount = await this.commandService.recoverStaleLeases();
-      if (staleCount > 0) {
-        console.warn(`[director.worker] recovered stale command leases count=${staleCount}`);
-      }
+      await this.reconcileWorkerState("tick");
     }
 
     const command = await this.commandService.leaseNextCommand({
@@ -105,6 +104,20 @@ export class DirectorWorker {
     } finally {
       clearInterval(renewTimer);
     }
+  }
+
+  private async reconcileWorkerState(scope: "startup" | "tick"): Promise<void> {
+    const result = await this.reconciliationService.reconcile();
+    if (
+      result.staleLeaseCount === 0
+      && result.closedStepCount === 0
+      && result.requeuedDanglingTaskCount === 0
+    ) {
+      return;
+    }
+    console.warn(
+      `[director.worker] reconciled state scope=${scope} staleLeases=${result.staleLeaseCount} closedSteps=${result.closedStepCount} requeuedTasks=${result.requeuedDanglingTaskCount}`,
+    );
   }
 }
 

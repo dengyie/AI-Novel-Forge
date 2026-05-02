@@ -564,6 +564,34 @@ export interface DirectorBookAutomationRecentArtifact {
   updatedAt?: string | null;
 }
 
+export type DirectorWorkerDerivedState =
+  | "idle"
+  | "queued_waiting_worker"
+  | "leased_starting"
+  | "running_step"
+  | "waiting_gate"
+  | "auto_recovering"
+  | "cancelled"
+  | "failed_recoverable"
+  | "failed_hard"
+  | "succeeded";
+
+export interface DirectorWorkerHealthSummary {
+  derivedState: DirectorWorkerDerivedState;
+  message?: string | null;
+  queuedCommandCount: number;
+  leasedCommandCount: number;
+  runningCommandCount: number;
+  staleCommandCount: number;
+  oldestQueuedAt?: string | null;
+  oldestQueuedWaitMs?: number | null;
+  currentCommandId?: string | null;
+  currentCommandType?: DirectorRunCommandType | string | null;
+  currentWorkerId?: string | null;
+  currentLeaseExpiresAt?: string | null;
+  lastCommandAt?: string | null;
+}
+
 export interface DirectorBookAutomationProjection {
   novelId: string;
   focusNovel: DirectorBookAutomationFocusNovel;
@@ -592,6 +620,7 @@ export interface DirectorBookAutomationProjection {
   stepUsage?: DirectorStepUsageSummary[];
   promptUsage?: DirectorPromptUsageSummary[];
   circuitBreaker?: DirectorCircuitBreakerState | null;
+  workerHealth?: DirectorWorkerHealthSummary | null;
   activeCommandCount: number;
   pendingCommandCount: number;
   autoApprovalRecordCount: number;
