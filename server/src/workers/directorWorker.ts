@@ -139,7 +139,12 @@ export class DirectorWorker {
     if (!lease) {
       return false;
     }
-    await this.resourceBudget.run(lease.resourceClass, () => this.executeLeasedRuntimeCommand(lease, slotId));
+    const stopLeaseRenewal = this.startLeaseRenewal(lease, slotId);
+    try {
+      await this.resourceBudget.run(lease.resourceClass, () => this.executeLeasedRuntimeCommand(lease, slotId));
+    } finally {
+      stopLeaseRenewal();
+    }
     return true;
   }
 
@@ -155,9 +160,9 @@ export class DirectorWorker {
     }
   }
 
-  private async executeLeasedRuntimeCommand(lease: RuntimeExecutionLease, slotId: string): Promise<void> {
+  private startLeaseRenewal(lease: RuntimeExecutionLease, slotId: string): () => void {
     const leaseOwner = `${this.options.workerId}:${slotId}`;
-    const renewTimer = setInterval(() => {
+    const renewLease = () => {
       void this.runtimeExecutionService.renewExecutionLease(lease.executionId, {
         workerId: this.options.workerId,
         slotId,
@@ -171,8 +176,14 @@ export class DirectorWorker {
           console.warn(`[director.worker] failed to renew legacy lease commandId=${lease.legacyCommandId}`, error);
         });
       }
-    }, Math.max(1000, Math.floor(this.options.leaseMs / 3)));
+    };
+    renewLease();
+    const renewTimer = setInterval(renewLease, Math.max(100, Math.floor(this.options.leaseMs / 3)));
+    return () => clearInterval(renewTimer);
+  }
 
+  private async executeLeasedRuntimeCommand(lease: RuntimeExecutionLease, slotId: string): Promise<void> {
+    const leaseOwner = `${this.options.workerId}:${slotId}`;
     try {
       await this.runtimeExecutionService.markExecutionRunning(lease.executionId, {
         workerId: this.options.workerId,
@@ -205,8 +216,6 @@ export class DirectorWorker {
         await this.commandService.markCommandFailed(lease.legacyCommandId, leaseOwner, error).catch(() => null);
       }
       await this.runtimeExecutionService.markExecutionFailed(lease.executionId, error).catch(() => null);
-    } finally {
-      clearInterval(renewTimer);
     }
   }
 

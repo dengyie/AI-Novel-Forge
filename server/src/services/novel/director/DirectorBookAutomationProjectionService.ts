@@ -83,9 +83,6 @@ function buildWorkerHealth(input: {
   const oldestQueuedAt = minDate(queuedCommands.map((command) => command.runAfter ?? command.createdAt));
   const activeCommand = runningCommands[0] ?? leasedCommands[0] ?? queuedCommands[0] ?? input.commands[0] ?? null;
   const derivedState: DirectorWorkerHealthSummary["derivedState"] = (() => {
-    if (staleCommands.length > 0) {
-      return "auto_recovering";
-    }
     if (runningCommands.length > 0) {
       return "running_step";
     }
@@ -100,6 +97,9 @@ function buildWorkerHealth(input: {
     }
     if (input.status === "waiting_recovery" || input.status === "failed" || input.status === "blocked") {
       return "failed_recoverable";
+    }
+    if (staleCommands.length > 0) {
+      return "auto_recovering";
     }
     if (input.status === "cancelled") {
       return "cancelled";

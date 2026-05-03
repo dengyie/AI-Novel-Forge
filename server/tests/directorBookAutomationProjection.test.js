@@ -318,3 +318,91 @@ test("book automation projection treats manual recovery as a book-level user act
     harness.restore();
   }
 });
+
+test("book automation projection keeps active work ahead of old stale commands", async () => {
+  const harness = createHarness({
+    runtimeProjection: null,
+    commands: [
+      {
+        id: "command-running",
+        taskId: "task-1",
+        novelId: "novel-1",
+        commandType: "continue",
+        status: "running",
+        errorMessage: null,
+        leaseOwner: "worker-1",
+        leaseExpiresAt: new Date("2099-04-30T09:02:00.000Z"),
+        runAfter: new Date("2026-04-30T08:59:00.000Z"),
+        createdAt: new Date("2026-04-30T08:59:00.000Z"),
+        updatedAt: new Date("2026-04-30T09:00:02.000Z"),
+        startedAt: new Date("2026-04-30T08:59:30.000Z"),
+        finishedAt: null,
+      },
+      {
+        id: "command-stale",
+        taskId: "task-1",
+        novelId: "novel-1",
+        commandType: "continue",
+        status: "stale",
+        errorMessage: "lease expired",
+        leaseOwner: "worker-old",
+        leaseExpiresAt: new Date("2026-04-30T08:00:00.000Z"),
+        runAfter: new Date("2026-04-30T07:50:00.000Z"),
+        createdAt: new Date("2026-04-30T07:50:00.000Z"),
+        updatedAt: new Date("2026-04-30T08:00:02.000Z"),
+        startedAt: new Date("2026-04-30T07:59:30.000Z"),
+        finishedAt: new Date("2026-04-30T08:00:02.000Z"),
+      },
+    ],
+  });
+  try {
+    const projection = await harness.service.getProjection("novel-1");
+
+    assert.equal(projection.status, "running");
+    assert.equal(projection.workerHealth.derivedState, "running_step");
+    assert.equal(projection.workerHealth.runningCommandCount, 1);
+    assert.equal(projection.workerHealth.staleCommandCount, 1);
+    assert.equal(projection.workerHealth.currentCommandId, "command-running");
+  } finally {
+    harness.restore();
+  }
+});
+
+test("book automation projection keeps waiting gates ahead of old stale commands", async () => {
+  const harness = createHarness({
+    runtimeProjection: null,
+    latestTask: {
+      status: "waiting_approval",
+      currentItemLabel: "waiting gate",
+      checkpointSummary: "approval needed",
+    },
+    commands: [
+      {
+        id: "command-stale",
+        taskId: "task-1",
+        novelId: "novel-1",
+        commandType: "continue",
+        status: "stale",
+        errorMessage: "lease expired",
+        leaseOwner: "worker-old",
+        leaseExpiresAt: new Date("2026-04-30T08:00:00.000Z"),
+        runAfter: new Date("2026-04-30T07:50:00.000Z"),
+        createdAt: new Date("2026-04-30T07:50:00.000Z"),
+        updatedAt: new Date("2026-04-30T08:00:02.000Z"),
+        startedAt: new Date("2026-04-30T07:59:30.000Z"),
+        finishedAt: new Date("2026-04-30T08:00:02.000Z"),
+      },
+    ],
+  });
+  try {
+    const projection = await harness.service.getProjection("novel-1");
+
+    assert.equal(projection.status, "waiting_approval");
+    assert.equal(projection.workerHealth.derivedState, "waiting_gate");
+    assert.equal(projection.workerHealth.staleCommandCount, 1);
+    assert.equal(projection.currentLabel, "waiting gate");
+    assert.equal(projection.detail, "approval needed");
+  } finally {
+    harness.restore();
+  }
+});
