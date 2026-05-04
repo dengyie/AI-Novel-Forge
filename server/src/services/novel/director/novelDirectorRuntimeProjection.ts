@@ -50,6 +50,7 @@ type RuntimeInstanceProjectionRow = {
     status: string;
     startedAt: Date | null;
     leaseExpiresAt: Date | null;
+    errorMessage?: string | null;
   }>;
   checkpoints: Array<{
     summary: string | null;
@@ -61,6 +62,10 @@ type RuntimeInstanceProjectionRow = {
     status: string;
     leaseOwner: string | null;
     leaseExpiresAt: Date | null;
+    errorMessage?: string | null;
+    runAfter?: Date | null;
+    startedAt?: Date | null;
+    finishedAt?: Date | null;
     createdAt: Date;
     updatedAt: Date;
   }>;
@@ -93,6 +98,20 @@ function runtimeWaitingReason(status: string): string | null {
     return "等待确认";
   }
   return null;
+}
+
+function splitLeaseOwner(value: string | null | undefined): {
+  workerId: string | null;
+  slotId: string | null;
+} {
+  if (!value?.trim()) {
+    return { workerId: null, slotId: null };
+  }
+  const [workerId, ...slotParts] = value.split(":");
+  return {
+    workerId: workerId || value,
+    slotId: slotParts.length > 0 ? slotParts.join(":") : null,
+  };
 }
 
 function runtimeHeadline(runtime: RuntimeInstanceProjectionRow): {
@@ -140,40 +159,89 @@ function runtimeHeadline(runtime: RuntimeInstanceProjectionRow): {
 }
 
 function buildWorkerHealth(runtime: RuntimeInstanceProjectionRow): DirectorRuntimeProjection["workerHealth"] {
+  const now = new Date();
   const queued = runtime.commands.filter((command) => command.status === "queued");
   const leased = runtime.commands.filter((command) => command.status === "leased");
   const running = runtime.commands.filter((command) => command.status === "running");
+  const staleCommands = runtime.commands.filter((command) => {
+    if (command.status === "stale") {
+      return true;
+    }
+    if ((command.status === "leased" || command.status === "running") && command.leaseExpiresAt) {
+      return command.leaseExpiresAt.getTime() < now.getTime();
+    }
+    return false;
+  });
+  const activeExecution = runtime.executions[0] ?? null;
+  const activeExecutionStale = Boolean(
+    activeExecution?.leaseExpiresAt
+      && activeExecution.leaseExpiresAt.getTime() < now.getTime(),
+  );
   const current = running[0] ?? leased[0] ?? queued[0] ?? runtime.commands[0] ?? null;
+  const owner = splitLeaseOwner(current?.leaseOwner);
   const oldestQueued = queued
     .slice()
-    .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime())[0] ?? null;
+    .sort((left, right) => (left.runAfter ?? left.createdAt).getTime() - (right.runAfter ?? right.createdAt).getTime())[0] ?? null;
+  const blockedReason = runtime.lastErrorMessage ?? current?.errorMessage ?? activeExecution?.errorMessage ?? null;
+  const derivedState = (() => {
+    if (activeExecutionStale || staleCommands.length > 0) {
+      return "auto_recovering" as const;
+    }
+    if (activeExecution?.status === "running") {
+      return "running_step" as const;
+    }
+    if (activeExecution?.status === "leased" || leased.length > 0) {
+      return "leased_starting" as const;
+    }
+    if (queued.length > 0) {
+      return "queued_waiting_worker" as const;
+    }
+    if (runtime.status === "waiting_gate") {
+      return "waiting_gate" as const;
+    }
+    if (runtime.status === "failed_recoverable") {
+      return "failed_recoverable" as const;
+    }
+    if (runtime.status === "failed_hard") {
+      return "failed_hard" as const;
+    }
+    if (runtime.status === "cancelled") {
+      return "cancelled" as const;
+    }
+    if (runtime.status === "completed") {
+      return "succeeded" as const;
+    }
+    return "idle" as const;
+  })();
+  const nextAction = (() => {
+    if (derivedState === "auto_recovering") return "recover_stale_command" as const;
+    if (derivedState === "running_step") return "continue_running" as const;
+    if (derivedState === "leased_starting") return "wait_for_lease_start" as const;
+    if (derivedState === "queued_waiting_worker") return "wait_for_worker" as const;
+    if (derivedState === "waiting_gate" || derivedState === "failed_recoverable" || derivedState === "failed_hard") {
+      return "requires_user_action" as const;
+    }
+    return "none" as const;
+  })();
   return {
-    derivedState: runtime.executions.length > 0
-      ? "running_step"
-      : queued.length > 0
-        ? "queued_waiting_worker"
-        : runtime.status === "waiting_gate"
-          ? "waiting_gate"
-          : runtime.status === "failed_recoverable"
-            ? "failed_recoverable"
-            : runtime.status === "failed_hard"
-              ? "failed_hard"
-              : runtime.status === "cancelled"
-                ? "cancelled"
-                : runtime.status === "completed"
-                  ? "succeeded"
-                  : "idle",
+    derivedState,
     message: runtime.workerMessage ?? runtimeWaitingReason(runtime.status),
     queuedCommandCount: queued.length,
     leasedCommandCount: leased.length,
     runningCommandCount: running.length,
-    staleCommandCount: 0,
-    oldestQueuedAt: oldestQueued?.createdAt.toISOString() ?? null,
-    oldestQueuedWaitMs: oldestQueued ? Date.now() - oldestQueued.createdAt.getTime() : null,
+    staleCommandCount: staleCommands.length + (activeExecutionStale ? 1 : 0),
+    oldestQueuedAt: oldestQueued ? (oldestQueued.runAfter ?? oldestQueued.createdAt).toISOString() : null,
+    oldestQueuedWaitMs: oldestQueued ? Math.max(0, now.getTime() - (oldestQueued.runAfter ?? oldestQueued.createdAt).getTime()) : null,
     currentCommandId: current?.id ?? null,
     currentCommandType: current?.commandType ?? null,
-    currentWorkerId: current?.leaseOwner ?? null,
-    currentLeaseExpiresAt: current?.leaseExpiresAt?.toISOString() ?? null,
+    currentWorkerId: activeExecution?.workerId ?? owner.workerId,
+    currentSlotId: activeExecution?.slotId ?? owner.slotId,
+    currentExecutionId: activeExecution?.id ?? null,
+    currentExecutionStatus: activeExecution?.status ?? null,
+    currentLeaseExpiresAt: activeExecution?.leaseExpiresAt?.toISOString() ?? current?.leaseExpiresAt?.toISOString() ?? null,
+    blockedReason,
+    lastErrorMessage: blockedReason,
+    nextAction,
     lastCommandAt: current?.updatedAt.toISOString() ?? null,
   };
 }
@@ -339,7 +407,8 @@ export async function loadPersistentDirectorRuntimeProjection(
   taskId: string,
   projectionService = new DirectorEventProjectionService(),
 ): Promise<DirectorRuntimeProjection | null> {
-  const [run, activeCommand, runtime] = await Promise.all([
+  const TERMINAL_TASK_STATUSES = ["succeeded", "cancelled", "failed"];
+  const [run, activeCommand, runtime, taskRow] = await Promise.all([
     prisma.directorRun.findUnique({
       where: { taskId },
       select: {
@@ -389,6 +458,9 @@ export async function loadPersistentDirectorRuntimeProjection(
       where: {
         taskId,
         status: { in: ["queued", "leased", "running"] },
+        task: {
+          status: { notIn: ["succeeded", "cancelled", "failed"] },
+        },
       },
       orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }, { id: "desc" }],
       select: {
@@ -425,6 +497,7 @@ export async function loadPersistentDirectorRuntimeProjection(
             status: true,
             startedAt: true,
             leaseExpiresAt: true,
+            errorMessage: true,
           },
         },
         checkpoints: {
@@ -444,6 +517,10 @@ export async function loadPersistentDirectorRuntimeProjection(
             status: true,
             leaseOwner: true,
             leaseExpiresAt: true,
+            errorMessage: true,
+            runAfter: true,
+            startedAt: true,
+            finishedAt: true,
             createdAt: true,
             updatedAt: true,
           },
@@ -455,7 +532,16 @@ export async function loadPersistentDirectorRuntimeProjection(
       }
       throw error;
     }) as Promise<RuntimeInstanceProjectionRow | null>,
+    prisma.novelWorkflowTask.findUnique({
+      where: { id: taskId },
+      select: { status: true },
+    }).catch(() => null),
   ]);
+
+  const isTaskTerminal = taskRow
+    ? TERMINAL_TASK_STATUSES.includes(taskRow.status)
+    : false;
+
   if (!run) {
     return runtime ? buildRuntimeOnlyProjection(taskId, runtime) : null;
   }
@@ -510,8 +596,10 @@ export async function loadPersistentDirectorRuntimeProjection(
     taskId,
     snapshot.steps,
   );
+  const commandToOverlay = isTaskTerminal ? null : activeCommand;
+  const runtimeToOverlay = isTaskTerminal ? null : runtime;
   return {
-    ...overlayRuntimeInstance(overlayActiveCommand(projection, activeCommand), runtime),
+    ...overlayRuntimeInstance(overlayActiveCommand(projection, commandToOverlay), runtimeToOverlay),
     usageSummary: usageTelemetry.summary,
     recentUsage: usageTelemetry.recentUsage,
     stepUsage: usageTelemetry.stepUsage,

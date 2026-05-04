@@ -94,10 +94,10 @@ function createLeaseHarness(commands) {
     },
   };
 
-  prisma.directorRuntimeCommand.findMany = async ({ where }) => commands.filter((command) => (
+  prisma.directorRuntimeCommand.findMany = async ({ where, skip = 0, take }) => commands.filter((command) => (
     command.status === where.status
       && command.runAfter <= where.runAfter.lte
-  ));
+  )).slice(skip, typeof take === "number" ? skip + take : undefined);
   prisma.$transaction = async (fn) => fn(tx);
 
   return {
@@ -157,6 +157,115 @@ test("runtime execution service leases different novels in parallel but keeps on
     assert.deepEqual(harness.executions.map((execution) => execution.runtimeId), ["runtime-a", "runtime-b"]);
   } finally {
     harness.restore();
+  }
+});
+
+test("runtime execution service scans past a blocked candidate batch", async () => {
+  const blockedNovelCommands = Array.from({ length: 26 }, (_, index) => createQueuedRuntimeCommand({
+    id: `runtime-command-a${index + 1}`,
+    runtimeId: "runtime-a",
+    novelId: "novel-a",
+    legacyCommandId: `legacy-a${index + 1}`,
+    idempotencyKey: `continue:a${index + 1}`,
+    runtime: { id: "runtime-a", checkpointVersion: 3 },
+  }));
+  const harness = createLeaseHarness([
+    ...blockedNovelCommands,
+    createQueuedRuntimeCommand({
+      id: "runtime-command-b1",
+      runtimeId: "runtime-b",
+      novelId: "novel-b",
+      legacyCommandId: "legacy-b1",
+      idempotencyKey: "continue:b1",
+      runtime: { id: "runtime-b", checkpointVersion: 1 },
+    }),
+  ]);
+  try {
+    const first = await harness.service.leaseNextExecution({
+      workerId: "worker-a",
+      slotId: "slot-1",
+      leaseMs: 30_000,
+    });
+    const second = await harness.service.leaseNextExecution({
+      workerId: "worker-a",
+      slotId: "slot-2",
+      leaseMs: 30_000,
+    });
+
+    assert.equal(first.novelId, "novel-a");
+    assert.equal(second.novelId, "novel-b");
+    assert.equal(harness.executions.length, 2);
+  } finally {
+    harness.restore();
+  }
+});
+
+test("runtime execution service requeues stale leased commands without executions", async () => {
+  const original = {
+    transaction: prisma.$transaction,
+    executionFindMany: prisma.directorRuntimeExecution.findMany,
+    commandFindMany: prisma.directorRuntimeCommand.findMany,
+  };
+  const now = new Date("2026-05-04T00:00:00.000Z");
+  const command = {
+    ...createQueuedRuntimeCommand({
+      id: "runtime-command-orphan",
+      status: "leased",
+      leaseOwner: "dead-worker:slot-1",
+      leaseExpiresAt: new Date("2026-05-03T23:00:00.000Z"),
+      legacyCommandId: "legacy-orphan",
+    }),
+    executions: [],
+  };
+  const legacyUpdates = [];
+  const runtimeUpdates = [];
+  const events = [];
+  const tx = {
+    directorRuntimeCommand: {
+      findUnique: async ({ where }) => (where.id === command.id ? command : null),
+      update: async ({ data }) => {
+        Object.assign(command, data);
+        return command;
+      },
+    },
+    directorRunCommand: {
+      updateMany: async (input) => {
+        legacyUpdates.push(input);
+        return { count: 1 };
+      },
+    },
+    directorRuntimeInstance: {
+      update: async (input) => {
+        runtimeUpdates.push(input);
+        return input;
+      },
+    },
+    directorRuntimeEvent: {
+      create: async ({ data }) => {
+        events.push(data);
+        return data;
+      },
+    },
+  };
+  prisma.directorRuntimeExecution.findMany = async () => [];
+  prisma.directorRuntimeCommand.findMany = async () => [command];
+  prisma.$transaction = async (fn) => fn(tx);
+
+  try {
+    const service = new DirectorRuntimeExecutionService();
+    const recovered = await service.recoverStaleExecutions(now, 120_000);
+
+    assert.equal(recovered, 1);
+    assert.equal(command.status, "queued");
+    assert.equal(command.leaseOwner, null);
+    assert.equal(command.leaseExpiresAt, null);
+    assert.equal(legacyUpdates.length, 1);
+    assert.equal(runtimeUpdates.length, 1);
+    assert.equal(events[0].type, "command_requeued");
+  } finally {
+    prisma.$transaction = original.transaction;
+    prisma.directorRuntimeExecution.findMany = original.executionFindMany;
+    prisma.directorRuntimeCommand.findMany = original.commandFindMany;
   }
 });
 

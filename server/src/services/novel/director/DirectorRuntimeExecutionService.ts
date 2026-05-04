@@ -18,6 +18,11 @@ import {
 } from "./DirectorRuntimeExecutionHelpers";
 import { createRuntimeEvent, finishRuntimeExecutionWithError } from "./DirectorRuntimeEventPersistence";
 
+const LEASE_CANDIDATE_BATCH_SIZE = 25;
+const LEASE_CANDIDATE_SCAN_LIMIT = 250;
+const STALE_RUNTIME_COMMAND_STATUSES = ["leased", "running"] as const;
+const STALE_EXECUTION_RECOVERY_MESSAGE = "后台执行中断，系统会从最近进度继续。";
+
 export { isDirectorRuntimeTableUnavailable } from "./DirectorRuntimeExecutionHelpers";
 export type {
   LegacyDirectorCommandRef,
@@ -190,35 +195,44 @@ export class DirectorRuntimeExecutionService {
   async leaseNextExecution(input: RuntimeLeaseInput): Promise<RuntimeExecutionLease | null> {
     const now = new Date();
     const leaseExpiresAt = new Date(now.getTime() + input.leaseMs);
-    const candidates = await prisma.directorRuntimeCommand.findMany({
-      where: {
-        status: "queued",
-        runAfter: { lte: now },
-      },
-      orderBy: [
-        { priority: "desc" },
-        { runAfter: "asc" },
-        { createdAt: "asc" },
-        { id: "asc" },
-      ],
-      take: 25,
-      include: { runtime: true },
-    }).catch((error) => {
-      if (isDirectorRuntimeTableUnavailable(error)) {
-        return [];
-      }
-      throw error;
-    });
-    for (const candidate of candidates) {
-      const leased = await this.tryLeaseCandidate(candidate.id, {
-        workerId: input.workerId,
-        slotId: input.slotId,
-        leaseMs: input.leaseMs,
-        leaseExpiresAt,
-        now,
+    for (let skip = 0; skip < LEASE_CANDIDATE_SCAN_LIMIT; skip += LEASE_CANDIDATE_BATCH_SIZE) {
+      const candidates = await prisma.directorRuntimeCommand.findMany({
+        where: {
+          status: "queued",
+          runAfter: { lte: now },
+        },
+        orderBy: [
+          { priority: "desc" },
+          { runAfter: "asc" },
+          { createdAt: "asc" },
+          { id: "asc" },
+        ],
+        skip,
+        take: LEASE_CANDIDATE_BATCH_SIZE,
+        include: { runtime: true },
+      }).catch((error) => {
+        if (isDirectorRuntimeTableUnavailable(error)) {
+          return [];
+        }
+        throw error;
       });
-      if (leased) {
-        return leased;
+      if (candidates.length === 0) {
+        break;
+      }
+      for (const candidate of candidates) {
+        const leased = await this.tryLeaseCandidate(candidate.id, {
+          workerId: input.workerId,
+          slotId: input.slotId,
+          leaseMs: input.leaseMs,
+          leaseExpiresAt,
+          now,
+        });
+        if (leased) {
+          return leased;
+        }
+      }
+      if (candidates.length < LEASE_CANDIDATE_BATCH_SIZE) {
+        break;
       }
     }
     return null;
@@ -498,7 +512,111 @@ export class DirectorRuntimeExecutionService {
         });
       });
     }
-    return staleExecutions.length;
+    const orphanedCommandCount = await this.recoverOrphanedLeasedRuntimeCommands(now, leaseMs);
+    return staleExecutions.length + orphanedCommandCount;
+  }
+
+  private async recoverOrphanedLeasedRuntimeCommands(now: Date, leaseMs: number): Promise<number> {
+    const staleCommands = await prisma.directorRuntimeCommand.findMany({
+      where: {
+        status: { in: [...STALE_RUNTIME_COMMAND_STATUSES] },
+        leaseExpiresAt: { lt: now },
+      },
+      take: 100,
+      include: {
+        executions: {
+          where: { status: { in: [...ACTIVE_EXECUTION_STATUSES] } },
+          take: 1,
+        },
+      },
+    }).catch((error) => {
+      if (isDirectorRuntimeTableUnavailable(error)) {
+        return [];
+      }
+      throw error;
+    });
+    let recovered = 0;
+    for (const command of staleCommands) {
+      if (command.executions.length > 0) {
+        continue;
+      }
+      const changed = await this.recoverOrphanedRuntimeCommand(command.id, now, leaseMs);
+      if (changed) {
+        recovered += 1;
+      }
+    }
+    return recovered;
+  }
+
+  private async recoverOrphanedRuntimeCommand(commandId: string, now: Date, leaseMs: number): Promise<boolean> {
+    return prisma.$transaction(async (tx) => {
+      const command = await tx.directorRuntimeCommand.findUnique({
+        where: { id: commandId },
+        include: {
+          executions: {
+            where: { status: { in: [...ACTIVE_EXECUTION_STATUSES] } },
+            take: 1,
+          },
+        },
+      });
+      if (
+        !command
+        || !STALE_RUNTIME_COMMAND_STATUSES.includes(command.status as typeof STALE_RUNTIME_COMMAND_STATUSES[number])
+        || !command.leaseExpiresAt
+        || command.leaseExpiresAt >= now
+        || command.executions.length > 0
+      ) {
+        return false;
+      }
+      const runAfter = new Date(now.getTime() + Math.min(leaseMs, 30_000));
+      await tx.directorRuntimeCommand.update({
+        where: { id: command.id },
+        data: {
+          status: "queued",
+          leaseOwner: null,
+          leaseExpiresAt: null,
+          runAfter,
+          errorMessage: STALE_EXECUTION_RECOVERY_MESSAGE,
+        },
+      });
+      if (command.legacyCommandId) {
+        await tx.directorRunCommand.updateMany({
+          where: {
+            id: command.legacyCommandId,
+            status: { in: [...STALE_RUNTIME_COMMAND_STATUSES] },
+          },
+          data: {
+            status: "queued",
+            leaseOwner: null,
+            leaseExpiresAt: null,
+            runAfter,
+            errorMessage: STALE_EXECUTION_RECOVERY_MESSAGE,
+          },
+        });
+      }
+      await tx.directorRuntimeInstance.update({
+        where: { id: command.runtimeId },
+        data: {
+          status: "waiting_worker",
+          workerMessage: "自动导演已保存进度，等待后台执行资源接续。",
+          lastHeartbeatAt: now,
+        },
+      });
+      await tx.directorRuntimeEvent.create({
+        data: {
+          id: buildRuntimeEventId(command.runtimeId, "command_requeued"),
+          runtimeId: command.runtimeId,
+          commandId: command.id,
+          workflowTaskId: command.workflowTaskId,
+          novelId: command.novelId,
+          type: "command_requeued",
+          summary: STALE_EXECUTION_RECOVERY_MESSAGE,
+          severity: "medium",
+          occurredAt: now,
+        },
+      });
+      return true;
+    });
   }
 
   private async ensureRuntimeInstance(input: {

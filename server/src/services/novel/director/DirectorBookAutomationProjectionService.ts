@@ -63,6 +63,20 @@ function minDate(values: Array<Date | null | undefined>): Date | null {
   return new Date(Math.min(...timestamps));
 }
 
+function splitLeaseOwner(value: string | null | undefined): {
+  workerId: string | null;
+  slotId: string | null;
+} {
+  if (!value?.trim()) {
+    return { workerId: null, slotId: null };
+  }
+  const [workerId, ...slotParts] = value.split(":");
+  return {
+    workerId: workerId || value,
+    slotId: slotParts.length > 0 ? slotParts.join(":") : null,
+  };
+}
+
 function buildWorkerHealth(input: {
   commands: ProjectionCommandRow[];
   status: DirectorBookAutomationStatus;
@@ -82,7 +96,12 @@ function buildWorkerHealth(input: {
   });
   const oldestQueuedAt = minDate(queuedCommands.map((command) => command.runAfter ?? command.createdAt));
   const activeCommand = runningCommands[0] ?? leasedCommands[0] ?? queuedCommands[0] ?? input.commands[0] ?? null;
+  const activeOwner = splitLeaseOwner(activeCommand?.leaseOwner);
+  const blockedReason = activeCommand?.errorMessage ?? null;
   const derivedState: DirectorWorkerHealthSummary["derivedState"] = (() => {
+    if (staleCommands.length > 0) {
+      return "auto_recovering";
+    }
     if (runningCommands.length > 0) {
       return "running_step";
     }
@@ -97,9 +116,6 @@ function buildWorkerHealth(input: {
     }
     if (input.status === "waiting_recovery" || input.status === "failed" || input.status === "blocked") {
       return "failed_recoverable";
-    }
-    if (staleCommands.length > 0) {
-      return "auto_recovering";
     }
     if (input.status === "cancelled") {
       return "cancelled";
@@ -136,8 +152,24 @@ function buildWorkerHealth(input: {
     oldestQueuedWaitMs: oldestQueuedAt ? Math.max(0, input.now.getTime() - oldestQueuedAt.getTime()) : null,
     currentCommandId: activeCommand?.id ?? null,
     currentCommandType: activeCommand?.commandType ?? null,
-    currentWorkerId: activeCommand?.leaseOwner ?? null,
+    currentWorkerId: activeOwner.workerId,
+    currentSlotId: activeOwner.slotId,
+    currentExecutionId: null,
+    currentExecutionStatus: activeCommand?.status ?? null,
     currentLeaseExpiresAt: activeCommand?.leaseExpiresAt ? activeCommand.leaseExpiresAt.toISOString() : null,
+    blockedReason,
+    lastErrorMessage: blockedReason,
+    nextAction: derivedState === "auto_recovering"
+      ? "recover_stale_command"
+      : derivedState === "running_step"
+        ? "continue_running"
+        : derivedState === "leased_starting"
+          ? "wait_for_lease_start"
+          : derivedState === "queued_waiting_worker"
+            ? "wait_for_worker"
+            : derivedState === "waiting_gate" || derivedState === "failed_recoverable"
+              ? "requires_user_action"
+              : "none",
     lastCommandAt: activeCommand ? toIso(activeCommand.finishedAt ?? activeCommand.startedAt ?? activeCommand.updatedAt) : null,
   };
 }
