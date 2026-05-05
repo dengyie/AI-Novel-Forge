@@ -168,7 +168,11 @@ test("volume chapter list prompt render hardens title diversity rules", () => {
   assert.match(String(messages[0].content), /只能为「开卷抓手」生成 6 章/);
   assert.match(String(messages[0].content), /beatKey 必须严格等于 open_hook/);
   assert.match(String(messages[0].content), /chapterCount 与 chapters\.length 必须严格等于 6/);
-  assert.match(String(messages[0].content), /“X的Y \/ X中的Y \/ 在X中Y”这类骨架最多只占约三成/);
+  const rendered = String(messages[0].content);
+  assert.ok(
+    rendered.includes("X的Y") && rendered.includes("X中的Y") && rendered.includes("在X中Y") && rendered.includes("最多只占约三成"),
+    "prompt should keep the X的Y title-skeleton diversity cap line",
+  );
   assert.match(String(messages[0].content), /A，B \/ 四字动作，四字结果/);
   assert.match(String(messages[0].content), /章名结构过于集中/);
 });

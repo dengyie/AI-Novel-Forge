@@ -49,6 +49,7 @@ import { toast } from "@/components/ui/toast";
 import { useSSE } from "@/hooks/useSSE";
 import { useDirectorChapterTitleRepair } from "@/hooks/useDirectorChapterTitleRepair";
 import { useLLMStore } from "@/store/llmStore";
+import { useDirectorRealtimeStore } from "@/store/directorRealtimeStore";
 import { buildWorldInjectionSummary } from "./novelEdit.utils";
 import type { QuickCharacterCreatePayload } from "./components/characterPanel.utils";
 import type { ChapterExecutionBackgroundActivity } from "./components/chapterExecution.shared";
@@ -606,6 +607,12 @@ export default function NovelEdit() {
     id,
     setDirectorTaskId,
   ]);
+  useEffect(() => {
+    if (!id || !activeAutoDirectorTaskQuery.isSuccess) {
+      return;
+    }
+    useDirectorRealtimeStore.getState().setFromAutoDirectorTask(id, activeAutoDirectorTask);
+  }, [id, activeAutoDirectorTask, activeAutoDirectorTaskQuery.isSuccess]);
   const activeDirectorSession = useMemo(() => {
     if (
       !activeAutoDirectorTask

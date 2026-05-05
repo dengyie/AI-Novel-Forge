@@ -6,6 +6,7 @@ import type {
   RuntimeStyleDetectionReport,
 } from "@ai-novel/shared/types/chapterRuntime";
 import { prisma } from "../../../db/prisma";
+import { mergeChapterPatchForGenerationStateBump } from "../chapterLifecycleState";
 import { auditService } from "../../audit/AuditService";
 import { buildSyntheticPayoffIssues } from "../../payoff/payoffLedgerShared";
 import { plannerService } from "../../planner/PlannerService";
@@ -742,7 +743,7 @@ export class ChapterRuntimeCoordinator {
   ): Promise<void> {
     await prisma.chapter.update({
       where: { id: chapterId },
-      data: { generationState },
+      data: mergeChapterPatchForGenerationStateBump({}, generationState),
     });
   }
 

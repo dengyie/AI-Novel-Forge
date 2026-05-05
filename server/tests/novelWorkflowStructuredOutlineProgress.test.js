@@ -183,6 +183,9 @@ function createDetailedChapter(id, chapterOrder, overrides = {}) {
     volumeId: "volume-1",
     chapterOrder,
     purpose: `chapter ${chapterOrder} purpose`,
+    exclusiveEvent: `chapter ${chapterOrder} exclusive event`,
+    endingState: `chapter ${chapterOrder} ending state`,
+    nextChapterEntryState: `chapter ${chapterOrder} next entry`,
     conflictLevel: 3,
     revealLevel: 2,
     targetWordCount: 2500,
@@ -295,6 +298,7 @@ test("resolveStructuredOutlineRecoveryCursor returns chapter_detail_bundle with 
   assert.equal(cursor.step, "chapter_detail_bundle");
   assert.equal(cursor.chapterId, "chapter-1");
   assert.equal(cursor.detailMode, "task_sheet");
+  // chapter-2 已通过 task_sheet；chapter-1 因 sceneCards=null 仍为缺口，光标停在 chapter-1。
   assert.equal(cursor.completedDetailSteps, 1);
 });
 

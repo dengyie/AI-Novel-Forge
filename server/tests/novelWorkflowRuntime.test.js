@@ -4,6 +4,10 @@ const assert = require("node:assert/strict");
 const {
   NovelWorkflowRuntimeService,
 } = require("../dist/services/novel/workflow/NovelWorkflowRuntimeService.js");
+const {
+  NovelWorkflowService,
+} = require("../dist/services/novel/workflow/NovelWorkflowService.js");
+const { prisma } = require("../dist/db/prisma.js");
 
 test("resumePendingAutoDirectorTasks requeues interrupted running tasks before continuing", async () => {
   const calls = [];
@@ -187,6 +191,65 @@ test("markPendingAutoDirectorTasksForManualRecovery marks stale running tasks as
     ["failed", "task-stale", "自动导演任务长时间没有心跳，可能已因服务重启或内存不足中断。请检查后继续或重试。"],
     ["requeue", "task-fresh", "服务重启后任务已暂停，等待手动恢复。"],
   ]);
+});
+
+test("stale running auto director healing does not recurse through markTaskFailed", async () => {
+  const originals = {
+    archiveFindUnique: prisma.taskCenterArchive.findUnique,
+    taskFindUnique: prisma.novelWorkflowTask.findUnique,
+    taskUpdate: prisma.novelWorkflowTask.update,
+  };
+  const updates = [];
+  const staleRow = {
+    id: "task-stale",
+    novelId: "novel-1",
+    lane: "auto_director",
+    status: "running",
+    progress: 0.4,
+    currentStage: "结构化大纲",
+    currentItemKey: "chapter_detail_bundle",
+    currentItemLabel: "生成章节细纲",
+    checkpointType: null,
+    checkpointSummary: null,
+    resumeTargetJson: null,
+    seedPayloadJson: null,
+    milestonesJson: null,
+    pendingManualRecovery: false,
+    cancelRequestedAt: null,
+    heartbeatAt: new Date("2026-05-01T00:00:00.000Z"),
+    updatedAt: new Date("2026-05-01T00:00:00.000Z"),
+  };
+
+  prisma.taskCenterArchive.findUnique = async () => null;
+  prisma.novelWorkflowTask.findUnique = async () => staleRow;
+  prisma.novelWorkflowTask.update = async ({ data }) => {
+    updates.push(data);
+    return {
+      ...staleRow,
+      ...data,
+      novel: { title: "测试小说" },
+      updatedAt: new Date("2026-05-04T00:00:00.000Z"),
+    };
+  };
+
+  try {
+    const service = new NovelWorkflowService();
+    service.markTaskFailed = async () => {
+      throw new Error("healStaleAutoDirectorRunningTask must not call markTaskFailed");
+    };
+    service.notifyAutoDirectorTaskTransition = async () => {};
+
+    const changed = await service.healStaleAutoDirectorRunningTask("task-stale", staleRow);
+
+    assert.equal(changed, true);
+    assert.equal(updates.length, 1);
+    assert.equal(updates[0].status, "failed");
+    assert.equal(updates[0].lastError, "自动导演任务长时间没有心跳，可能已因服务重启或内存不足中断。请检查后继续或重试。");
+  } finally {
+    prisma.taskCenterArchive.findUnique = originals.archiveFindUnique;
+    prisma.novelWorkflowTask.findUnique = originals.taskFindUnique;
+    prisma.novelWorkflowTask.update = originals.taskUpdate;
+  }
 });
 
 test("startup recovery initialization marks interrupted auto director tasks for manual recovery", async () => {

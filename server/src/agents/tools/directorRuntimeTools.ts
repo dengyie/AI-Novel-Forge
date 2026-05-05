@@ -221,7 +221,7 @@ async function analyzeWorkspaceForTool(
   const scope = await resolveDirectorRuntimeScope(context, input);
   const analysis = await novelDirectorService.analyzeRuntimeWorkspace(scope.novelId, {
     workflowTaskId: scope.taskId,
-    includeAiInterpretation: input.includeAiInterpretation ?? true,
+    includeAiInterpretation: input.includeAiInterpretation === true,
     llm: getLlmOptions(context),
   });
   return { scope, analysis };

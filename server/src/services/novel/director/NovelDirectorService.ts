@@ -600,8 +600,6 @@ export class NovelDirectorService {
     await this.ensurePrimaryNovelStyleBinding(input.novelId, directorInput.styleProfileId);
     const takeoverWorkspaceAnalysis = await this.directorRuntime.analyzeWorkspace({
       novelId: input.novelId,
-      includeAiInterpretation: true,
-      llm: input,
     });
     const response = await startDirectorTakeoverExecution({
       request: input,

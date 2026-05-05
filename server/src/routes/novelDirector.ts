@@ -322,7 +322,7 @@ router.get(
       const query = req.query as z.infer<typeof workspaceAnalysisQuerySchema>;
       const analysis = await novelDirectorService.analyzeRuntimeWorkspace(novelId, {
         workflowTaskId: query.workflowTaskId,
-        includeAiInterpretation: query.ai !== "false",
+        includeAiInterpretation: query.ai === "true",
       });
       const data: DirectorWorkspaceAnalysisResponse = { analysis };
       res.status(200).json({

@@ -47,6 +47,12 @@
 - [World Management v2](./design/world-management-v2.md)
 - [World Story Interface v1](./design/world-story-interface-v1.md)
 
+### `docs/architecture`
+
+承接横切架构说明与工程约定（不改变根目录对外入口）。
+
+- [Backend testing](./architecture/testing.md)：后端 `node:test` 脚本的运行方式与目录约定。
+
 ### `docs/releases`
 
 用于放完整的用户可见版本更新说明与发布历史；根 `README.md` 只保留最新一次更新，本目录负责承接完整历史。
