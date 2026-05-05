@@ -2,9 +2,12 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
+  DirectorWorkspaceAnalyzer,
   buildManualEditFallbackDecision,
   buildManualEditInventoryFromArtifacts,
 } = require("../dist/services/novel/director/runtime/DirectorWorkspaceAnalyzer.js");
+const promptRunner = require("../dist/prompting/core/promptRunner.js");
+const promptContextResolution = require("../dist/prompting/context/promptContextResolution.js");
 
 function chapterDraft(hash) {
   return {
@@ -104,4 +107,130 @@ test("manual edit inventory stays empty when tracked hashes did not change", () 
   assert.equal(inventory.changedChapters.length, 0);
   assert.equal(decision.impactLevel, "none");
   assert.equal(decision.safeToContinue, true);
+});
+
+test("workspace analyzer uses structured AI interpretation when requested", async (t) => {
+  const originalResolve = promptContextResolution.resolvePromptContextBlocksForAsset;
+  const structuredCalls = [];
+  promptContextResolution.resolvePromptContextBlocksForAsset = async ({ fallbackBlocks }) => ({
+    blocks: fallbackBlocks,
+    brokerResolution: {},
+  });
+  promptRunner.setPromptRunnerStructuredInvokerForTests(async (input) => {
+    structuredCalls.push(input);
+    return {
+      data: {
+        productionStage: "has_seed",
+        missingArtifacts: ["book_contract"],
+        staleArtifacts: [],
+        protectedUserContent: [],
+        recommendedAction: {
+          action: "create_book_contract",
+          reason: "AI 判断应先建立书约。",
+          affectedScope: "novel",
+          riskLevel: "low",
+        },
+        confidence: 0.82,
+        evidenceRefs: ["workspace_inventory"],
+        summary: "AI workspace summary",
+        riskNotes: [],
+      },
+      repairUsed: false,
+      repairAttempts: 0,
+      diagnostics: {},
+    };
+  });
+  t.after(() => {
+    promptContextResolution.resolvePromptContextBlocksForAsset = originalResolve;
+    promptRunner.setPromptRunnerStructuredInvokerForTests();
+  });
+
+  const recorded = [];
+  const analyzer = new DirectorWorkspaceAnalyzer({
+    recordWorkspaceAnalysis: async (input) => recorded.push(input),
+  });
+  analyzer.buildInventory = async () => ({
+    novelId: "novel-1",
+    novelTitle: "测试小说",
+    hasBookContract: false,
+    hasStoryMacro: false,
+    hasCharacters: false,
+    hasVolumeStrategy: false,
+    hasChapterPlan: false,
+    chapterCount: 0,
+    draftedChapterCount: 0,
+    approvedChapterCount: 0,
+    pendingRepairChapterCount: 0,
+    hasActivePipelineJob: false,
+    hasActiveDirectorRun: false,
+    hasWorldBinding: false,
+    hasSourceKnowledge: true,
+    hasContinuationAnalysis: false,
+    missingArtifactTypes: ["book_contract"],
+    staleArtifacts: [],
+    protectedUserContentArtifacts: [],
+    needsRepairArtifacts: [],
+    artifacts: [],
+  });
+
+  const analysis = await analyzer.analyze({
+    novelId: "novel-1",
+    workflowTaskId: "task-1",
+    includeAiInterpretation: true,
+  });
+
+  assert.equal(structuredCalls.length, 1);
+  assert.equal(structuredCalls[0].label, "novel.director.workspace_analysis@v1");
+  assert.equal(analysis.prompt.promptId, "novel.director.workspace_analysis");
+  assert.equal(analysis.interpretation.summary, "AI workspace summary");
+  assert.equal(analysis.recommendation.reason, "AI 判断应先建立书约。");
+  assert.equal(recorded.length, 1);
+  assert.equal(recorded[0].analysis.prompt.promptId, "novel.director.workspace_analysis");
+});
+
+test("workspace analyzer defaults to deterministic inventory interpretation", async (t) => {
+  const structuredCalls = [];
+  promptRunner.setPromptRunnerStructuredInvokerForTests(async (input) => {
+    structuredCalls.push(input);
+    throw new Error("structured LLM should not be called by default");
+  });
+  t.after(() => {
+    promptRunner.setPromptRunnerStructuredInvokerForTests();
+  });
+
+  const analyzer = new DirectorWorkspaceAnalyzer({
+    recordWorkspaceAnalysis: async () => {},
+  });
+  analyzer.buildInventory = async () => ({
+    novelId: "novel-1",
+    novelTitle: "测试小说",
+    hasBookContract: false,
+    hasStoryMacro: false,
+    hasCharacters: false,
+    hasVolumeStrategy: false,
+    hasChapterPlan: false,
+    chapterCount: 0,
+    draftedChapterCount: 0,
+    approvedChapterCount: 0,
+    pendingRepairChapterCount: 0,
+    hasActivePipelineJob: false,
+    hasActiveDirectorRun: false,
+    hasWorldBinding: false,
+    hasSourceKnowledge: true,
+    hasContinuationAnalysis: false,
+    missingArtifactTypes: ["book_contract"],
+    staleArtifacts: [],
+    protectedUserContentArtifacts: [],
+    needsRepairArtifacts: [],
+    artifacts: [],
+  });
+
+  const analysis = await analyzer.analyze({
+    novelId: "novel-1",
+  });
+
+  assert.equal(structuredCalls.length, 0);
+  assert.equal(analysis.prompt, null);
+  assert.equal(analysis.interpretation.productionStage, "has_seed");
+  assert.equal(analysis.recommendation.action, "create_book_contract");
 });

@@ -17,7 +17,6 @@ const GOVERNED_DIRECTORIES = [
 const INLINE_PROMPT_ALLOWED_FILES = new Set([
   "src/routes/chat.ts",
   "src/services/title/titlePromptBuilder.ts",
-  "src/services/writingFormula/WritingFormulaService.ts",
   "src/services/novel/novelCoreGenerationService.ts",
 ]);
 
@@ -27,7 +26,6 @@ const INLINE_PROMPT_ALLOWED_PREFIXES = [
 
 const DIRECT_GET_LLM_ALLOWED_FILES = new Set([
   "src/routes/chat.ts",
-  "src/services/writingFormula/WritingFormulaService.ts",
   "src/services/world/worldDraftGeneration.ts",
   "src/services/novel/novelCoreGenerationService.ts",
 ]);

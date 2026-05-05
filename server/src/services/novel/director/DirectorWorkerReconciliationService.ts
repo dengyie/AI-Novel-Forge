@@ -69,6 +69,8 @@ export class DirectorWorkerReconciliationService {
       .filter((task) => task.status === "succeeded")
       .map((task) => task.id);
 
+    const allTerminalIds = terminalTasks.map((task) => task.id);
+
     const updates = await Promise.all([
       cancelledIds.length > 0
         ? prisma.directorStepRun.updateMany({
@@ -97,6 +99,21 @@ export class DirectorWorkerReconciliationService {
             status: "succeeded",
             finishedAt: now,
             error: null,
+          },
+        })
+        : null,
+      allTerminalIds.length > 0
+        ? prisma.directorRunCommand.updateMany({
+          where: {
+            taskId: { in: allTerminalIds },
+            status: { in: [...ACTIVE_COMMAND_STATUSES] },
+          },
+          data: {
+            status: "cancelled",
+            finishedAt: now,
+            leaseOwner: null,
+            leaseExpiresAt: null,
+            errorMessage: "自动导演任务已结束，残留命令已清理。",
           },
         })
         : null,

@@ -866,9 +866,16 @@ export class NovelWorkflowService {
   async healStaleAutoDirectorRunningTask(
     taskId: string,
     row = null as {
+      id?: string | null;
+      novelId?: string | null;
       lane?: string | null;
       status?: string | null;
+      currentStage?: string | null;
       currentItemKey?: string | null;
+      currentItemLabel?: string | null;
+      checkpointType?: string | null;
+      checkpointSummary?: string | null;
+      resumeTargetJson?: string | null;
       pendingManualRecovery?: boolean | null;
       cancelRequestedAt?: Date | null;
       heartbeatAt?: Date | null;
@@ -879,7 +886,26 @@ export class NovelWorkflowService {
     if (!candidate || !isStaleAutoDirectorRunningTask(candidate)) {
       return false;
     }
-    await this.markTaskFailed(taskId, STALE_AUTO_DIRECTOR_RUNNING_MESSAGE);
+    const existing = await this.getVisibleRowByIdRaw(taskId);
+    if (!existing || !isStaleAutoDirectorRunningTask(existing)) {
+      return false;
+    }
+    const resumeTarget = parseResumeTarget(existing.resumeTargetJson) ?? this.buildResumeTarget({
+      taskId,
+      novelId: existing.novelId,
+      lane: existing.lane,
+      stage: "auto_director",
+    });
+    await this.updateWorkflowTaskWithNotifications({
+      before: existing,
+      data: {
+        status: "failed",
+        finishedAt: new Date(),
+        heartbeatAt: new Date(),
+        resumeTargetJson: stringifyResumeTarget(resumeTarget),
+        lastError: STALE_AUTO_DIRECTOR_RUNNING_MESSAGE,
+      },
+    });
     return true;
   }
 

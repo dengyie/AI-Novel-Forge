@@ -377,8 +377,20 @@ const promptAssetLoaderEntries: PromptAssetLoaderEntry[] = [
       key: "style.profile.sanitize_for_generation@v1",
       load: () => require("./prompts/style/style.prompts").styleProfileSanitizeForGenerationPrompt as UnknownPromptAsset,
     },
-  {
-    key: "world.reference.inspiration@v1",
+    {
+      key: "writingFormula.extract.stream@v1",
+      load: () => require("./prompts/writingFormula/writingFormulaStream.prompts").writingFormulaExtractStreamPrompt as UnknownPromptAsset,
+    },
+    {
+      key: "writingFormula.apply.rewrite.stream@v1",
+      load: () => require("./prompts/writingFormula/writingFormulaStream.prompts").writingFormulaApplyRewriteStreamPrompt as UnknownPromptAsset,
+    },
+    {
+      key: "writingFormula.apply.generate.stream@v1",
+      load: () => require("./prompts/writingFormula/writingFormulaStream.prompts").writingFormulaApplyGenerateStreamPrompt as UnknownPromptAsset,
+    },
+    {
+      key: "world.reference.inspiration@v1",
     load: () => require("./prompts/world/world.prompts").worldReferenceInspirationPrompt as UnknownPromptAsset,
   },
   {

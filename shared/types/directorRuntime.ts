@@ -594,6 +594,14 @@ export type DirectorWorkerDerivedState =
   | "failed_hard"
   | "succeeded";
 
+export type DirectorWorkerNextAction =
+  | "none"
+  | "wait_for_worker"
+  | "wait_for_lease_start"
+  | "continue_running"
+  | "recover_stale_command"
+  | "requires_user_action";
+
 export interface DirectorWorkerHealthSummary {
   derivedState: DirectorWorkerDerivedState;
   message?: string | null;
@@ -606,7 +614,13 @@ export interface DirectorWorkerHealthSummary {
   currentCommandId?: string | null;
   currentCommandType?: DirectorRunCommandType | string | null;
   currentWorkerId?: string | null;
+  currentSlotId?: string | null;
+  currentExecutionId?: string | null;
+  currentExecutionStatus?: string | null;
   currentLeaseExpiresAt?: string | null;
+  blockedReason?: string | null;
+  lastErrorMessage?: string | null;
+  nextAction?: DirectorWorkerNextAction;
   lastCommandAt?: string | null;
 }
 

@@ -29,6 +29,7 @@ import {
   toAcceptedResponse,
   type DirectorCommandPayload,
 } from "./DirectorCommandServiceHelpers";
+import { taskDispatcher } from "../../../workers/TaskDispatcher";
 
 const ACTIVE_COMMAND_STATUSES: DirectorRunCommandStatus[] = ["queued", "leased", "running"];
 const EXECUTION_COMMAND_TYPES: DirectorRunCommandType[] = [
@@ -309,6 +310,7 @@ export class DirectorCommandService {
           finishedAt: null,
         },
       }).catch(() => null);
+      taskDispatcher.notify();
     }
 
     if (manualRecoveryCommands.length === 0) {
@@ -607,6 +609,7 @@ export class DirectorCommandService {
       await this.markCommandAcceptedOnTask(input.taskId, input.commandType, {
         preserveLastError: input.preserveLastError,
       });
+      taskDispatcher.notify({ commandType: input.commandType, taskId: input.taskId });
       return toAcceptedResponse(command, runtime?.runtime ?? null);
     } catch (error) {
       if (!isUniqueConstraintError(error) || input.allowTerminalReuse === false) {

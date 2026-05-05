@@ -33,6 +33,7 @@ import {
   ChapterPatchRepairService,
 } from "./chapterPatchRepairService";
 import { chapterQualityLoopService } from "./quality/ChapterQualityLoopService";
+import { chapterStatePairAfterManualQualityReview } from "./chapterLifecycleState";
 import { directorAutomationLedgerEventService } from "./director/runtime/DirectorAutomationLedgerEventService";
 
 type AuditContextOperation = "review" | "audit" | "repair";
@@ -106,12 +107,10 @@ export class NovelCoreReviewService {
       chapterId,
     );
 
+    const chapterStatePatch = chapterStatePairAfterManualQualityReview(isPass(review.score));
     await prisma.chapter.update({
       where: { id: chapterId },
-      data: {
-        generationState: "reviewed",
-        chapterStatus: isPass(review.score) ? "completed" : "needs_repair",
-      },
+      data: chapterStatePatch,
     });
     await createQualityReport(novelId, chapterId, review.score, review.issues);
     await chapterQualityLoopService.recordAssessment({
