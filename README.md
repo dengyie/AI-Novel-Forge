@@ -133,6 +133,8 @@
 - 运行 `docker compose up -d --build` 后，可以从 `http://localhost:8080` 打开应用，`/api` 请求会由 Web 容器自动转发到后端服务。
 - Docker 运行时会一起启动 Web、API、PostgreSQL 和 Qdrant，并把数据库、向量库和生成资产保存到 Docker volume，普通停止使用 `docker compose down`。
 - 首次容器启动会自动执行非破坏性的 PostgreSQL 迁移准备和 `prisma migrate deploy`，不需要手动处理本地 SQLite 或宿主机 Prisma 环境。
+- 使用 `.env.docker` 自定义端口或数据库配置时，通过 `docker compose --env-file .env.docker up -d --build` 启动即可让配置实际生效。
+- Docker Web 入口支持流式响应，章节生成、Creative Hub 和 AI 执行进度在反代后仍能持续刷新。
 - README 已补充 Docker 启动、停止和日志排查命令，并明确不要把 `docker compose down -v` 作为常规停止方式，避免删除持久化数据。
 
 ## 功能预览
@@ -467,10 +469,22 @@ docker compose up -d --build
 cp .env.docker.example .env.docker
 ```
 
+复制后请用 `--env-file` 启动，让端口、数据库名、用户名和密码等 Compose 解析期变量生效：
+
+```bash
+docker compose --env-file .env.docker up -d --build
+```
+
 Docker 运行时默认使用 PostgreSQL，并把数据库、Qdrant 向量库和本地生成资产保存到 Docker volume。停止服务使用：
 
 ```bash
 docker compose down
+```
+
+如果本次启动使用了 `.env.docker`，停止时也建议保持同一份配置：
+
+```bash
+docker compose --env-file .env.docker down
 ```
 
 不要把 `docker compose down -v` 当作常规停止命令；`-v` 会删除数据库、向量库和生成资产等持久化数据。

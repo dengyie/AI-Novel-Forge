@@ -10,9 +10,12 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+const WARN_THROTTLE_MS = 30000;
+
 export class RagWorker {
   private timer: NodeJS.Timeout | null = null;
   private isTicking = false;
+  private readonly lastWarnAtByMessage = new Map<string, number>();
 
   constructor(private readonly ragIndexService: RagIndexService) {}
 
@@ -28,9 +31,12 @@ export class RagWorker {
   }
 
   private logWarn(message: string, meta?: Record<string, unknown>): void {
-    if (!ragConfig.verboseLog) {
+    const now = Date.now();
+    const lastWarnAt = this.lastWarnAtByMessage.get(message) ?? 0;
+    if (!ragConfig.verboseLog && now - lastWarnAt < WARN_THROTTLE_MS) {
       return;
     }
+    this.lastWarnAtByMessage.set(message, now);
     if (meta) {
       console.warn(`[RAG][Worker] ${message}`, meta);
       return;

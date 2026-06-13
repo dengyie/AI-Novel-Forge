@@ -62,7 +62,7 @@ services:
     restart: unless-stopped
     depends_on:
       api:
-        condition: service_started
+        condition: service_healthy
     ports:
       - "${AI_NOVEL_WEB_PORT:-8080}:8080"
 

@@ -12,6 +12,10 @@
 - Docker 运行时会一起启动 Web、API、PostgreSQL 和 Qdrant，并把数据库、向量库和生成资产保存到 Docker volume，普通停止使用 `docker compose down`。
 - 首次容器启动会自动执行非破坏性的 PostgreSQL 迁移准备和 `prisma migrate deploy`，不需要手动处理本地 SQLite 或宿主机 Prisma 环境。
 - 提供 `.env.docker.example`，可以按需修改 Web 端口、数据库密码、模型供应商 Key 和 RAG 设置。
+- 使用 `.env.docker` 自定义端口或数据库配置时，文档会引导使用 `docker compose --env-file .env.docker up -d --build`，确保配置实际生效。
+- Docker Web 入口支持流式响应，章节生成、Creative Hub 和 AI 执行进度在反代后仍能持续刷新。
+- 镜像构建会排除本地依赖、数据库、日志和密钥文件，减少构建上下文并降低误带本地数据的风险。
+- Web 容器会等待 API 健康后再启动，知识库后台 worker 的基础设施异常也会默认输出节流后的诊断日志。
 - README 新增 Docker 启动、停止和日志排查命令，并明确不要把 `docker compose down -v` 作为常规停止方式，避免删除持久化数据。
 
 ### 2026-06-09（跨章设定漂移修复 + 测试重置工具 + 质量守卫补录）
