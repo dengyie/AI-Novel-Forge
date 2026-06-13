@@ -6,6 +6,10 @@ function backoffMs(attempt: number): number {
   return ragConfig.workerRetryBaseMs * (2 ** (factor - 1));
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 export class RagWorker {
   private timer: NodeJS.Timeout | null = null;
   private isTicking = false;
@@ -43,7 +47,11 @@ export class RagWorker {
       maxAttempts: ragConfig.workerMaxAttempts,
       retryBaseMs: ragConfig.workerRetryBaseMs,
     });
-    void this.requeueInterruptedJobs();
+    void this.requeueInterruptedJobs().catch((error) => {
+      this.logWarn("Initial interrupted-job requeue skipped.", {
+        error: errorMessage(error),
+      });
+    });
     this.timer = setInterval(() => {
       void this.tick();
     }, ragConfig.workerPollMs);
@@ -158,6 +166,10 @@ export class RagWorker {
           error: message,
         });
       }
+    } catch (error) {
+      this.logWarn("Worker cycle skipped.", {
+        error: errorMessage(error),
+      });
     } finally {
       this.isTicking = false;
     }

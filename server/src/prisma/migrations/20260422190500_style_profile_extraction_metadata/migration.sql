@@ -1,3 +1,3 @@
-ALTER TABLE "StyleProfile" ADD COLUMN "extractionPresetsJson" TEXT;
-ALTER TABLE "StyleProfile" ADD COLUMN "extractionAntiAiRuleKeysJson" TEXT;
-ALTER TABLE "StyleProfile" ADD COLUMN "selectedExtractionPresetKey" TEXT;
+ALTER TABLE "StyleProfile" ADD COLUMN IF NOT EXISTS "extractionPresetsJson" TEXT;
+ALTER TABLE "StyleProfile" ADD COLUMN IF NOT EXISTS "extractionAntiAiRuleKeysJson" TEXT;
+ALTER TABLE "StyleProfile" ADD COLUMN IF NOT EXISTS "selectedExtractionPresetKey" TEXT;

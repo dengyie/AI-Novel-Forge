@@ -1,13 +1,11 @@
-ARG NODE_IMAGE=node:20-bookworm-slim
-FROM ${NODE_IMAGE} AS base
+ARG BUILD_NODE_IMAGE=node:20-bookworm
+ARG RUNTIME_NODE_IMAGE=node:20-bookworm
+FROM ${BUILD_NODE_IMAGE} AS base
 ENV PNPM_HOME=/pnpm
 ENV PATH=${PNPM_HOME}:${PATH}
 ENV NODE_ENV=development
 USER root
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends python3 make g++ openssl \
-    && rm -rf /var/lib/apt/lists/* \
-    && corepack enable
+RUN corepack enable
 
 FROM base AS deps
 WORKDIR /app
@@ -44,8 +42,7 @@ ENV AI_NOVEL_DATABASE_MODE=postgresql
 RUN pnpm install --frozen-lockfile \
     && pnpm --filter @ai-novel/server prisma:generate
 
-ARG NODE_IMAGE
-FROM ${NODE_IMAGE} AS runtime
+FROM ${RUNTIME_NODE_IMAGE} AS runtime
 USER root
 WORKDIR /app
 ENV NODE_ENV=production
@@ -55,10 +52,13 @@ COPY --from=build --chown=node:node /app/pnpm-workspace.yaml ./pnpm-workspace.ya
 COPY --from=prod-deps --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/server ./server
 COPY --from=build --chown=node:node /app/shared ./shared
+COPY --chown=node:node server/scripts/docker-entrypoint.sh ./server/scripts/docker-entrypoint.sh
+COPY --chown=node:node server/scripts/docker-prepare-postgres-migrations.js ./server/scripts/docker-prepare-postgres-migrations.js
 RUN mkdir -p /app/storage/generated-images /app/node_modules/.bin \
     && printf '%s\n' '#!/bin/sh' 'exec node /app/server/node_modules/prisma/build/index.js --config /app/server/prisma.config.ts "$@"' > /app/node_modules/.bin/prisma \
     && chmod +x /app/node_modules/.bin/prisma \
-    && chown -R node:node /app/storage /app/node_modules/.bin/prisma
+    && chmod +x /app/server/scripts/docker-entrypoint.sh \
+    && chown -R node:node /app/storage /app/node_modules/.bin/prisma /app/server/scripts/docker-entrypoint.sh /app/server/scripts/docker-prepare-postgres-migrations.js
 USER node
 EXPOSE 3000
-CMD ["node", "./server/dist/app.js"]
+CMD ["./server/scripts/docker-entrypoint.sh"]

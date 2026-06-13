@@ -1,4 +1,4 @@
-CREATE TABLE "StyleExtractionTask" (
+CREATE TABLE IF NOT EXISTS "StyleExtractionTask" (
     "id" TEXT NOT NULL,
     "name" TEXT NOT NULL,
     "category" TEXT,
@@ -34,5 +34,5 @@ CREATE TABLE "StyleExtractionTask" (
     CONSTRAINT "StyleExtractionTask_pkey" PRIMARY KEY ("id")
 );
 
-CREATE INDEX "StyleExtractionTask_status_updatedAt_idx" ON "StyleExtractionTask"("status", "updatedAt");
-CREATE INDEX "StyleExtractionTask_createdStyleProfileId_idx" ON "StyleExtractionTask"("createdStyleProfileId");
+CREATE INDEX IF NOT EXISTS "StyleExtractionTask_status_updatedAt_idx" ON "StyleExtractionTask"("status", "updatedAt");
+CREATE INDEX IF NOT EXISTS "StyleExtractionTask_createdStyleProfileId_idx" ON "StyleExtractionTask"("createdStyleProfileId");

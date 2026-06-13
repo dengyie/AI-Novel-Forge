@@ -126,14 +126,14 @@
 
 完整历史更新见 [docs/releases/release-notes.md](./docs/releases/release-notes.md)。
 
-### 2026-06-09
+### 2026-06-14
 
-彻底修复了正文即兴写出的硬设定（交易性质、金额、票号、数量等）无法跨章保持一致的问题，并新增便于反复测试的章节重置工具。
+本地服务现在可以通过 Docker Compose 一键启动完整运行环境，减少宿主机 Node、pnpm、原生依赖和数据库路径差异带来的启动不稳定。
 
-- 章节定稿时自动抽取正文中的关键硬事实并写入事实账本，下一章生成时即可读到真实前文，消除"私下交易被改写成公务流程"这类跨章设定矛盾。
-- 章节摘要与事实抽取已接入全书自动执行流程，不再只能从前端手动触发。
-- 新增"重置所有章节正文"开发工具，便于反复重新生成测试。
-- 修复懒规划（JIT）模式下结构化大纲步骤被误报"未产出"的问题；补充小说生成质量守卫（世界观污染词防护、关键节点守卫、章节连续性诊断）。
+- 运行 `docker compose up -d --build` 后，可以从 `http://localhost:8080` 打开应用，`/api` 请求会由 Web 容器自动转发到后端服务。
+- Docker 运行时会一起启动 Web、API、PostgreSQL 和 Qdrant，并把数据库、向量库和生成资产保存到 Docker volume，普通停止使用 `docker compose down`。
+- 首次容器启动会自动执行非破坏性的 PostgreSQL 迁移准备和 `prisma migrate deploy`，不需要手动处理本地 SQLite 或宿主机 Prisma 环境。
+- README 已补充 Docker 启动、停止和日志排查命令，并明确不要把 `docker compose down -v` 作为常规停止方式，避免删除持久化数据。
 
 ## 功能预览
 ### 功能概览中的95%以上编写都是AI完成
@@ -448,7 +448,44 @@ pnpm dev
 2. 打开 `http://localhost:5173/settings/model-routes`，检查各任务实际使用的模型路由
 3. 如果要启用知识库，打开 `http://localhost:5173/knowledge?tab=settings`，保存 Embedding / Collection 设置
 
-### 4. 如果你使用 Qdrant Cloud
+### 4. 使用 Docker 一键启动
+
+如果你希望避开本机 Node、pnpm 和原生依赖编译差异，可以直接使用 Docker Compose 启动 Web、API、PostgreSQL 和 Qdrant：
+
+```bash
+docker compose up -d --build
+```
+
+默认入口：
+
+- Web：`http://localhost:8080`
+- API 健康检查：`http://localhost:8080/api/health`
+
+如果要修改 Web 端口、数据库密码，或预先填写模型供应商 Key，可以先复制 Docker 环境模板：
+
+```bash
+cp .env.docker.example .env.docker
+```
+
+Docker 运行时默认使用 PostgreSQL，并把数据库、Qdrant 向量库和本地生成资产保存到 Docker volume。停止服务使用：
+
+```bash
+docker compose down
+```
+
+不要把 `docker compose down -v` 当作常规停止命令；`-v` 会删除数据库、向量库和生成资产等持久化数据。
+
+常用排查命令：
+
+```bash
+docker compose ps
+docker compose logs -f api
+docker compose logs -f web
+```
+
+Docker 入口适合稳定体验和迁移部署；如果你要修改代码并依赖热更新，仍建议使用 `pnpm dev`。
+
+### 5. 如果你使用 Qdrant Cloud
 
 如果你只是先体验主流程，其实可以先跳过 Qdrant，直接在 `server/.env` 里设：
 
@@ -490,7 +527,7 @@ Qdrant 官方文档：
 - [Database Authentication in Qdrant Managed Cloud](https://qdrant.tech/documentation/cloud/authentication/)
 - [Cloud Quickstart](https://qdrant.tech/documentation/cloud/quickstart-cloud/)
 
-### 5. 可选初始化
+### 6. 可选初始化
 
 下面这些都不是首次启动 `pnpm dev` 的前置步骤：
 
@@ -608,4 +645,3 @@ docs/     设计文档、阶段检查点、模块计划与历史归档
 - 请遵守开源协议条款，并在适用场景下取得相应授权。
 
 贡献说明：新贡献默认按 [CLA.md](./CLA.md) 提交，可随项目按 AGPL-3.0-only 分发，并可纳入项目维护者另行提供的商业授权；详见 [CONTRIBUTING.md](./CONTRIBUTING.md)。
-

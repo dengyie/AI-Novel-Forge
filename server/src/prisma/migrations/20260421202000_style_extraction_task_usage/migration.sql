@@ -11,4 +11,4 @@ ALTER TABLE "StyleExtractionTask"
 ADD COLUMN "llmCallCount" INTEGER NOT NULL DEFAULT 0;
 
 ALTER TABLE "StyleExtractionTask"
-ADD COLUMN "lastTokenRecordedAt" DATETIME;
+ADD COLUMN "lastTokenRecordedAt" TIMESTAMP(3);
