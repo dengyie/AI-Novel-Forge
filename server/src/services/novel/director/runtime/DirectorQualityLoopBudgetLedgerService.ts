@@ -190,7 +190,10 @@ export function findDirectorQualityLoopBudgetEntry(input: {
   affectedChapterWindow: DirectorQualityLoopBudgetWindow;
 }): DirectorQualityLoopBudgetEntry | null {
   const signatureKey = buildDirectorQualityLoopBudgetSignatureKey(input);
-  return input.state.qualityLoopLedger?.entries?.find((entry) => entry.signatureKey === signatureKey) ?? null;
+  const existingLedger = input.state.qualityLoopLedger && !Array.isArray(input.state.qualityLoopLedger)
+    ? input.state.qualityLoopLedger
+    : null;
+  return existingLedger?.entries?.find((entry) => entry.signatureKey === signatureKey) ?? null;
 }
 
 export function recordDirectorQualityLoopBudgetAttempt(input: {
@@ -214,7 +217,10 @@ export function recordDirectorQualityLoopBudgetAttempt(input: {
     ? input.occurredAt.toISOString()
     : input.occurredAt ?? new Date().toISOString();
   const signatureKey = buildDirectorQualityLoopBudgetSignatureKey(input);
-  const existingEntries = input.state.qualityLoopLedger?.entries ?? [];
+  const existingLedger = input.state.qualityLoopLedger && !Array.isArray(input.state.qualityLoopLedger)
+    ? input.state.qualityLoopLedger
+    : null;
+  const existingEntries = existingLedger?.entries ?? [];
   const existing = existingEntries.find((entry) => entry.signatureKey === signatureKey)
     ?? emptyLedgerEntry({
       signatureKey,

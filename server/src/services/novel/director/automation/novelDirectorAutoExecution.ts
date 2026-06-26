@@ -558,7 +558,10 @@ function qualityLoopEntryMatchesCurrentChapter(
 export function resolveDirectorAutoExecutionRepairMode(
   state: DirectorAutoExecutionState,
 ): DirectorAutoExecutionRepairMode {
-  const entries = (state.qualityLoopLedger?.entries ?? [])
+  const ledgerEntries = state.qualityLoopLedger && !Array.isArray(state.qualityLoopLedger)
+    ? state.qualityLoopLedger.entries
+    : [];
+  const entries = (Array.isArray(ledgerEntries) ? ledgerEntries : [])
     .filter((entry) => qualityLoopEntryMatchesCurrentChapter(entry, state))
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   const latestEntry = entries[0];
