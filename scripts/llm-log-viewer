@@ -1,0 +1,276 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+LOGS_DIR="$ROOT/.logs"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+usage() {
+  cat <<'HELP'
+用法: llm-log-viewer <命令> [参数]
+
+命令:
+  live            实时监控 LLM 请求（tail -f 格式化输出）
+  recent [N]      查看最近 N 条记录（默认 20）
+  list-dates      列出有日志的日期
+  stats           统计概览（按 provider/model/taskType 分布）
+  filter <条件>   按条件过滤历史记录
+  search <关键词> 搜索 payload 中包含关键词的记录
+
+监控选项 (live):
+  -p, --provider    只看指定 provider
+  -m, --model       只看指定模型
+  -t, --task        只看指定 taskType
+  -s, --stage       只看指定 stage
+  -f, --follow      持续监控（默认）
+  --once            只看最新一条后退出
+  -n N              显示最近 N 条后退出
+
+过滤条件 (filter):
+  --provider xxx    按 provider 过滤
+  --model xxx       按 model 过滤
+  --task xxx        按 taskType 过滤
+  --stage xxx       按 stage 过滤
+  --prompt xxx      按 promptId 过滤
+  --from "2026-06-24T10:00:00"  起始时间
+  --to "2026-06-24T12:00:00"    结束时间
+  --limit N         最多返回 N 条（默认 50）
+  --errors-only     只看失败的请求
+
+示例:
+  llm-log-viewer live                          # 实时监控所有
+  llm-log-viewer live -p openai -m gpt-5.5     # 只看 openai 的 gpt-5.5
+  llm-log-viewer live -t writer --once          # 最新一条 writer 请求
+  llm-log-viewer recent 30                      # 最近 30 条
+  llm-log-viewer stats                          # 统计概览
+  llm-log-viewer filter --task planner --limit 10  # planner 任务最近 10 条
+  llm-log-viewer filter --errors-only --from "2026-06-24T00:00:00"  # 今天的失败
+  llm-log-viewer search "超时"                  # 搜索关键词
+HELP
+}
+
+# --- helpers ---
+
+latest_llm_jsonl() {
+  find "$LOGS_DIR" -name "*.llm.jsonl" -type f 2>/dev/null | sort -r | head -1
+}
+
+all_llm_jsonls() {
+  find "$LOGS_DIR" -name "*.llm.jsonl" -type f 2>/dev/null | sort
+}
+
+format_one() {
+  python3 "$SCRIPT_DIR/llm-log-format" -
+}
+
+# --- commands ---
+
+cmd_live() {
+  local follow=true
+  local once=false
+  local limit=""
+  local filters=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -p|--provider) filters="$filters | provider=$2"; shift 2 ;;
+      -m|--model)    filters="$filters | model=$2"; shift 2 ;;
+      -t|--task)     filters="$filters | task=$2"; shift 2 ;;
+      -s|--stage)    filters="$filters | stage=$2"; shift 2 ;;
+      --once)        once=true; follow=false; shift ;;
+      -n)            limit="$2"; follow=false; shift 2 ;;
+      -h|--help)     usage; return ;;
+      *) echo "未知参数: $1"; return 1 ;;
+    esac
+  done
+
+  local jsonl
+  jsonl=$(latest_llm_jsonl)
+  if [[ -z "$jsonl" ]]; then
+    echo "没有找到 LLM 调试日志文件。"
+    echo "确认 LLM_DEBUG_LOG 已启用（默认非 production 环境已开启）。"
+    return 1
+  fi
+
+  echo "📡 监控文件: $jsonl"
+  if [[ -n "$filters" ]]; then
+    echo "🔍 过滤条件:${filters// | / }"
+  fi
+  echo "---"
+
+  if $once; then
+    python3 -c "
+import json, sys
+filters = '''$filters'''
+conds = {}
+for part in filters.split(' | '):
+    part = part.strip()
+    if not part: continue
+    k, v = part.split('=', 1)
+    conds[k] = v
+
+with open('$jsonl') as f:
+    for line in f:
+        line = line.strip()
+        if not line: continue
+        try: d = json.loads(line)
+        except: continue
+        match = True
+        if 'provider' in conds and d.get('provider') != conds['provider']: match = False
+        if 'model' in conds and d.get('model') != conds['model']: match = False
+        if 'task' in conds and d.get('taskType') != conds['task']: match = False
+        if 'stage' in conds:
+            s = (d.get('promptMeta') or {}).get('stage', '')
+            if s != conds['stage']: match = False
+        if match and d.get('event') in ('request', 'response', 'error'):
+            print(line)
+" | format_one
+  elif [[ -n "$limit" ]]; then
+    tail -n "$((limit * 2))" "$jsonl" | format_one
+  else
+    tail -f "$jsonl" | format_one
+  fi
+}
+
+cmd_recent() {
+  local n="${1:-20}"
+  local jsonl
+  jsonl=$(latest_llm_jsonl)
+  if [[ -z "$jsonl" ]]; then
+    echo "没有找到 LLM 调试日志文件。"
+    return 1
+  fi
+  echo "📄 $jsonl (最近 $n 条)"
+  echo "---"
+  tail -n "$((n * 2))" "$jsonl" | format_one
+}
+
+cmd_list_dates() {
+  echo "可用日志日期:"
+  find "$LOGS_DIR" -name "*.llm.jsonl" -type f 2>/dev/null \
+    | sed 's|.*/\.logs/||' | sed 's|/.*||' | sort -ur \
+    | while read d; do
+      local count=$(find "$LOGS_DIR/$d" -name "*.llm.jsonl" -type f 2>/dev/null | xargs wc -l 2>/dev/null | tail -1 | awk '{print $1}')
+      echo "  $d  (${count:-0} lines)"
+    done
+}
+
+cmd_stats() {
+  local jsonls
+  jsonls=$(all_llm_jsonls)
+  if [[ -z "$jsonls" ]]; then
+    echo "没有找到 LLM 调试日志文件。"
+    return 1
+  fi
+  python3 "$SCRIPT_DIR/llm-log-stats" $jsonls
+}
+
+cmd_filter() {
+  local provider="" model="" task="" stage="" prompt=""
+  local from_ts="" to_ts="" limit=50 errors_only=false format="full"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --provider) provider="$2"; shift 2 ;;
+      --model)    model="$2"; shift 2 ;;
+      --task)     task="$2"; shift 2 ;;
+      --stage)    stage="$2"; shift 2 ;;
+      --prompt)   prompt="$2"; shift 2 ;;
+      --from)     from_ts="$2"; shift 2 ;;
+      --to)       to_ts="$2"; shift 2 ;;
+      --limit)    limit="$2"; shift 2 ;;
+      --errors-only) errors_only=true; shift ;;
+      --compact)  format="compact"; shift ;;
+      -h|--help)  usage; return ;;
+      *) echo "未知参数: $1"; return 1 ;;
+    esac
+  done
+
+  python3 -c "
+import json, sys
+provider='$provider'.strip()
+model='$model'.strip()
+task='$task'.strip()
+stage='$stage'.strip()
+prompt='$prompt'.strip()
+from_ts='$from_ts'.strip()
+to_ts='$to_ts'.strip()
+limit=$limit
+errors_only='$errors_only'=='true'
+fmt='$format'
+
+matches=[]
+for f in sorted(sys.argv[1:]):
+    try:
+        with open(f) as fh:
+            for line in fh:
+                line=line.strip()
+                if not line: continue
+                try: d=json.loads(line)
+                except: continue
+                if provider and d.get('provider')!=provider: continue
+                if model and d.get('model')!=model: continue
+                if task and d.get('taskType')!=task: continue
+                if stage:
+                    s=(d.get('promptMeta') or {}).get('stage','')
+                    if s!=stage: continue
+                if prompt:
+                    p=(d.get('promptMeta') or {}).get('promptId','')
+                    if p!=prompt: continue
+                if from_ts and d.get('timestamp','') < from_ts: continue
+                if to_ts and d.get('timestamp','') > to_ts: continue
+                if errors_only and d.get('event')!='error': continue
+                matches.append(d)
+    except Exception as e:
+        print(f'Error: {e}', file=sys.stderr)
+
+matches.sort(key=lambda x: x.get('timestamp',''))
+if len(matches)>limit:
+    print(f'共 {len(matches)} 条, 显示后 {limit} 条.', file=sys.stderr)
+    matches=matches[-limit:]
+
+if fmt=='compact':
+    for d in matches:
+        print(json.dumps({
+            'ts':d.get('timestamp','')[:19],
+            'event':d.get('event'),
+            'provider':d.get('provider'),
+            'model':d.get('model'),
+            'task':d.get('taskType'),
+            'stage':(d.get('promptMeta') or {}).get('stage',''),
+            'ms':d.get('latencyMs'),
+            'tokens':d.get('actualPromptTokens'),
+        }, ensure_ascii=False))
+else:
+    print(json.dumps(matches, indent=2, ensure_ascii=False))
+" $(all_llm_jsonls)
+}
+
+cmd_search() {
+  local keyword="${1:-}"
+  if [[ -z "$keyword" ]]; then
+    echo "用法: llm-log-viewer search <关键词>"
+    return 1
+  fi
+  echo "🔍 搜索: $keyword"
+  echo "---"
+  all_llm_jsonls | xargs grep -i "$keyword" 2>/dev/null | head -100 | format_one
+}
+
+# --- main ---
+
+COMMAND="${1:-}"
+shift || true
+
+case "$COMMAND" in
+  live)       cmd_live "$@" ;;
+  recent)     cmd_recent "$@" ;;
+  list-dates) cmd_list_dates ;;
+  stats)      cmd_stats ;;
+  filter)     cmd_filter "$@" ;;
+  search)     cmd_search "$@" ;;
+  -h|--help)  usage ;;
+  help)       usage ;;
+  "")         usage ;;
+  *)          echo "未知命令: $COMMAND"; usage; exit 1 ;;
+esac

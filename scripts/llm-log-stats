@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+"""LLM Log Stats - Analyze llm.jsonl log files"""
+
+import json, sys
+from collections import Counter, defaultdict
+
+def main():
+    files = sys.argv[1:]
+    if not files:
+        print("用法: llm-log-stats <jsonl-file>...", file=sys.stderr)
+        sys.exit(1)
+
+    providers = Counter()
+    models = Counter()
+    tasks = Counter()
+    stages = Counter()
+    prompts = Counter()
+    errors = 0
+    total_requests = 0
+    total_responses = 0
+    total_latency = 0
+    total_prompt_tokens = 0
+    pairings = defaultdict(lambda: defaultdict(Counter))
+
+    for f in files:
+        with open(f) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                event = d.get('event')
+                if event == 'request':
+                    total_requests += 1
+                elif event == 'response':
+                    total_responses += 1
+                    p = d.get('provider') or '?'
+                    m = d.get('model') or '?'
+                    t = d.get('taskType') or '?'
+                    providers[p] += 1
+                    models[m] += 1
+                    tasks[t] += 1
+                    pm = d.get('promptMeta') or {}
+                    s = pm.get('stage')
+                    if s:
+                        stages[s] += 1
+                    pid = pm.get('promptId')
+                    if pid:
+                        prompts[pid] += 1
+                    if d.get('latencyMs'):
+                        total_latency += d['latencyMs']
+                    if d.get('actualPromptTokens'):
+                        total_prompt_tokens += d['actualPromptTokens']
+                    pairings[p][m][t] += 1
+                elif event == 'error':
+                    errors += 1
+
+    print(f"总请求: {total_requests}  总响应: {total_responses}  错误: {errors}")
+    if total_responses:
+        print(f"平均耗时: {total_latency/total_responses/1000:.1f}s")
+        print(f"总 Prompt Tokens: {total_prompt_tokens:,}")
+
+    print()
+    print("=== 按 Provider/Model 分布 ===")
+    for provider in sorted(pairings):
+        for model in sorted(pairings[provider], key=lambda m: -sum(pairings[provider][m].values())):
+            count = sum(pairings[provider][model].values())
+            pct = count / total_responses * 100 if total_responses else 0
+            print(f"  {provider:<14} {model:<28} {count:>6}  {pct:>5.1f}%")
+
+    print()
+    print("=== 按 TaskType 分布 ===")
+    for task, count in tasks.most_common():
+        pct = count / total_responses * 100 if total_responses else 0
+        print(f"  {task:<20} {count:>5}  ({pct:>5.1f}%)")
+
+    print()
+    print("=== 按 Stage 分布 (Top 15) ===")
+    for stage, count in stages.most_common(15):
+        print(f"  {stage:<30} {count:>5}")
+
+    print()
+    print("=== Top Prompts (Top 15) ===")
+    for prompt, count in prompts.most_common(15):
+        print(f"  {prompt:<50} {count:>5}")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""LLM Log Format - Pretty-print llm.jsonl lines to terminal"""
+
+import json, sys
+
+
+RESET = "\033[0m"
+BOLD = "\033[1m"
+DIM = "\033[2m"
+GREEN = "\033[32m"
+RED = "\033[31m"
+CYAN = "\033[36m"
+YELLOW = "\033[33m"
+
+
+def format_one_line(line: str) -> str:
+    line = line.strip()
+    if not line:
+        return ""
+    try:
+        d = json.loads(line)
+    except Exception:
+        return line + "\n"
+
+    ts = d.get("timestamp", "")[:19].replace("T", " ")
+    provider = d.get("provider") or "?"
+    model = d.get("model") or "?"
+    task = d.get("taskType") or "?"
+    event = d.get("event") or "?"
+
+    icons = {"request": "→", "response": "←", "error": "✗"}
+    icon = icons.get(event, "?")
+
+    if event == "response":
+        color = GREEN
+    elif event == "error":
+        color = RED
+    else:
+        color = CYAN
+
+    prompt_id = (d.get("promptMeta") or {}).get("promptId", "")
+    stage = (d.get("promptMeta") or {}).get("stage", "")
+    latency = d.get("latencyMs")
+    prompt_tokens = d.get("actualPromptTokens")
+
+    parts = []
+    parts.append(f"{color}{icon}{RESET}")
+    parts.append(f"{DIM}{ts}{RESET}")
+    parts.append(f"{BOLD}{provider}{RESET}/{model}")
+    parts.append(f"task={task}")
+    if stage:
+        parts.append(f"stage={stage}")
+    if prompt_id:
+        parts.append(f"{DIM}{prompt_id}{RESET}")
+
+    if event == "response":
+        extras = []
+        if prompt_tokens:
+            extras.append(f"prompt={prompt_tokens}")
+        if latency:
+            extras.append(f"{latency/1000:.1f}s")
+        if extras:
+            parts.append(f"({', '.join(extras)})")
+        payload = d.get("payload")
+        if isinstance(payload, dict):
+            content = payload.get("content", "")
+            if isinstance(content, str) and content.strip():
+                preview = content[:120].replace("\n", "\\n").replace("\r", "")
+                suffix = "..." if len(content) > 120 else ""
+                parts.append(f"  {DIM}↳ {preview}{suffix}{RESET}")
+
+    elif event == "error":
+        err = d.get("error", {})
+        if isinstance(err, dict):
+            msg = err.get("message", str(err))[:200]
+        elif isinstance(err, str):
+            msg = err[:200]
+        else:
+            msg = str(err)[:200]
+        parts.append(f"  {RED}✗ {msg}{RESET}")
+
+    elif event == "request":
+        payload = d.get("payload")
+        if isinstance(payload, list):
+            roles = {}
+            for m in payload:
+                if isinstance(m, dict):
+                    r = m.get("role", "unknown")
+                    roles[r] = roles.get(r, 0) + 1
+            role_str = ", ".join(f"{r}×{c}" for r, c in roles.items())
+            parts.append(f"  [{role_str}]")
+
+    return " ".join(parts) + "\n"
+
+
+def main():
+    for line in sys.stdin:
+        result = format_one_line(line)
+        if result:
+            sys.stdout.write(result)
+            sys.stdout.flush()
+
+
+if __name__ == "__main__":
+    main()

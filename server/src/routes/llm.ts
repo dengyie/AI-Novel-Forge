@@ -1,4 +1,6 @@
 import { Router } from "express";
+import fs from "node:fs";
+import path from "node:path";
 import type { ApiResponse } from "@ai-novel/shared/types/api";
 import { z } from "zod";
 import { prisma } from "../db/prisma";
@@ -231,5 +233,60 @@ router.post(
     }
   },
 );
+
+router.get("/logs/recent", async (req, res, next) => {
+  try {
+    const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 500);
+    const logsDir = path.resolve(process.cwd(), "..", ".logs");
+    const jsonlFiles = fs.existsSync(logsDir)
+      ? fs.readdirSync(logsDir, { recursive: true })
+          .filter((f) => String(f).endsWith(".llm.jsonl"))
+          .map((f) => path.join(logsDir, String(f)))
+          .sort((a, b) => fs.statSync(a).mtimeMs - fs.statSync(b).mtimeMs)
+      : [];
+    if (jsonlFiles.length === 0) {
+      res.json({ success: true, data: { entries: [], files: [] } });
+      return;
+    }
+    // Read from the most recently modified file
+    const latest = jsonlFiles[jsonlFiles.length - 1]!;
+    const lines = fs.readFileSync(latest, "utf-8").trim().split("\n").filter(Boolean);
+    const entries = lines.slice(-limit).map((line) => {
+      try { return JSON.parse(line); } catch { return null; }
+    }).filter(Boolean);
+    res.json({ success: true, data: { file: path.basename(latest), entries, totalLines: lines.length } });
+  } catch (e) { next(e); }
+});
+
+router.get("/logs/stats", async (_req, res, next) => {
+  try {
+    const logsDir = path.resolve(process.cwd(), "..", ".logs");
+    const jsonlFiles = fs.existsSync(logsDir)
+      ? fs.readdirSync(logsDir, { recursive: true }).filter((f) => String(f).endsWith(".llm.jsonl")).map((f) => path.join(logsDir, String(f))).sort()
+      : [];
+    const stats = { totalRequests: 0, totalResponses: 0, errors: 0, providers: {} as Record<string, number>, models: {} as Record<string, number>, tasks: {} as Record<string, number>, totalPromptTokens: 0, totalLatencyMs: 0 };
+    for (const f of jsonlFiles.slice(-5)) {
+      const lines = fs.readFileSync(f, "utf-8").trim().split("\n").filter(Boolean);
+      for (const line of lines) {
+        try {
+          const d = JSON.parse(line);
+          if (d.event === "request") stats.totalRequests++;
+          else if (d.event === "response") {
+            stats.totalResponses++;
+            const p = d.provider || "?";
+            const m = d.model || "?";
+            const t = d.taskType || "?";
+            stats.providers[p] = (stats.providers[p] || 0) + 1;
+            stats.models[m] = (stats.models[m] || 0) + 1;
+            stats.tasks[t] = (stats.tasks[t] || 0) + 1;
+            if (d.latencyMs) stats.totalLatencyMs += d.latencyMs;
+            if (d.actualPromptTokens) stats.totalPromptTokens += d.actualPromptTokens;
+          } else if (d.event === "error") stats.errors++;
+        } catch { /* skip */ }
+      }
+    }
+    res.json({ success: true, data: stats });
+  } catch (e) { next(e); }
+});
 
 export default router;
