@@ -373,8 +373,8 @@ export class NovelCorePipelineService {
         matchedChapters: chapters.length,
         availableRange: `${chapterStats._min.order ?? 1}-${chapterStats._max.order ?? 1}`,
         maxRetries,
-        provider: options.provider ?? "deepseek",
-        model: options.model ?? "",
+        provider: options.provider,
+        model: options.model,
       });
 
       const job = await prisma.generationJob.create({
@@ -394,8 +394,8 @@ export class NovelCorePipelineService {
           maxRetries,
           currentStage: "queued",
           payload: this.stringifyPipelinePayload({
-            provider: options.provider ?? "deepseek",
-            model: options.model ?? "",
+            provider: options.provider,
+            model: options.model,
             temperature: options.temperature ?? 0.8,
             controlPolicy: options.controlPolicy,
             workflowTaskId: options.workflowTaskId?.trim() || undefined,
@@ -579,8 +579,8 @@ export class NovelCorePipelineService {
     });
     const persistedPayload = this.parsePipelinePayload(existingJob?.payload);
     const runtimePayload: PipelinePayload = {
-      provider: persistedPayload.provider ?? options.provider ?? "deepseek",
-      model: persistedPayload.model ?? options.model ?? "",
+      provider: persistedPayload.provider ?? options.provider,
+      model: persistedPayload.model ?? options.model,
       temperature: persistedPayload.temperature ?? options.temperature ?? 0.8,
       controlPolicy: persistedPayload.controlPolicy ?? options.controlPolicy,
       workflowTaskId: persistedPayload.workflowTaskId ?? options.workflowTaskId,
