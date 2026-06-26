@@ -25,7 +25,7 @@ const MODEL_CACHE_TTL_MS = 30 * 60 * 1000;
 const modelCache = new Map<string, ModelCacheItem>();
 
 function uniqueModels(models: string[]): string[] {
-  return Array.from(new Set(models.map((item) => item.trim()).filter(Boolean)));
+  return Array.from(new Set(models.map((item) => item.replace(/\x00/g, "").trim()).filter(Boolean)));
 }
 
 function getFallbackModels(provider: LLMProvider, options: GetProviderModelsOptions = {}): string[] {
@@ -83,7 +83,7 @@ function parseModelIds(payload: unknown): string[] {
       const candidate = (item as { id?: unknown; model?: unknown; name?: unknown }).id
         ?? (item as { model?: unknown }).model
         ?? (item as { name?: unknown }).name;
-      return typeof candidate === "string" ? candidate : "";
+      return typeof candidate === "string" ? candidate.replace(/\x00/g, "").trim() : "";
     })
     .filter(Boolean);
 }
