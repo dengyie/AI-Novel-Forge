@@ -25,6 +25,7 @@ import {
   type DirectorWorkflowSeedPayload,
 } from "./novelDirectorHelpers";
 import { resolveAssetFirstRecoveryFromSnapshot } from "../recovery/novelDirectorRecovery";
+import { buildClosedDirectorCircuitBreakerState } from "./DirectorCircuitBreakerService";
 import {
   loadDirectorTakeoverState,
   resolveDirectorRunningStateForPhase,
@@ -319,10 +320,13 @@ export class NovelDirectorContinueRuntime {
     const approveAutoExecutionGate = approveCurrentGate || requestedAutoExecutionContinue;
 
     if (assetFirstRecovery?.type === "auto_execution") {
+      const sanitizedAutoExecution = seedPayload.autoExecution
+        ? { ...seedPayload.autoExecution, circuitBreaker: buildClosedDirectorCircuitBreakerState(seedPayload.autoExecution.circuitBreaker) }
+        : null;
       const resumedChapterId = (
         parseResumeTargetLike(row.resumeTargetJson)?.chapterId
         ?? parseResumeTargetLike(seedPayload.resumeTarget)?.chapterId
-        ?? seedPayload.autoExecution?.nextChapterId
+        ?? sanitizedAutoExecution?.nextChapterId
         ?? null
       );
       await this.deps.workflowService.markTaskRunning(taskId, {
@@ -346,7 +350,7 @@ export class NovelDirectorContinueRuntime {
             stage: "pipeline",
             chapterId: resumedChapterId,
           }),
-          autoExecution: seedPayload.autoExecution ?? null,
+          autoExecution: sanitizedAutoExecution,
         }),
       });
       this.deps.scheduleBackgroundRun(taskId, async () => {
@@ -360,8 +364,8 @@ export class NovelDirectorContinueRuntime {
             taskId,
             novelId,
             request: effectiveDirectorInput,
-            existingPipelineJobId: seedPayload.autoExecution?.pipelineJobId ?? null,
-            existingState: seedPayload.autoExecution ?? null,
+            existingPipelineJobId: sanitizedAutoExecution?.pipelineJobId ?? null,
+            existingState: sanitizedAutoExecution,
             resumeCheckpointType: "chapter_batch_ready",
             previousFailureMessage: row.lastError ?? null,
             allowSkipReviewBlockedChapter: canSkipReviewBlockedChapter,
@@ -373,8 +377,8 @@ export class NovelDirectorContinueRuntime {
           taskId,
           novelId,
           request: effectiveDirectorInput,
-          existingPipelineJobId: seedPayload.autoExecution?.pipelineJobId ?? null,
-          existingState: seedPayload.autoExecution ?? null,
+          existingPipelineJobId: sanitizedAutoExecution?.pipelineJobId ?? null,
+          existingState: sanitizedAutoExecution,
           resumeCheckpointType: assetFirstRecovery.resumeCheckpointType,
           previousFailureMessage: row.lastError ?? null,
           allowSkipReviewBlockedChapter: canSkipReviewBlockedChapter,
