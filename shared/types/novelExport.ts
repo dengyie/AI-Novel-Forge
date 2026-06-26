@@ -15,7 +15,7 @@ export const NOVEL_EXPORT_FORMAT_VALUES = ["txt", "markdown", "json"] as const;
 
 export type NovelExportFormat = (typeof NOVEL_EXPORT_FORMAT_VALUES)[number];
 
-export const NOVEL_EXPORT_DOWNLOAD_FORMAT_VALUES = ["markdown", "json"] as const;
+export const NOVEL_EXPORT_DOWNLOAD_FORMAT_VALUES = ["txt", "markdown", "json"] as const;
 
 export type NovelExportDownloadFormat = (typeof NOVEL_EXPORT_DOWNLOAD_FORMAT_VALUES)[number];
 

@@ -2619,12 +2619,18 @@ export default function NovelEdit() {
   const isExportingCurrentJson = exportNovelMutation.isPending
     && exportVariables?.scope === currentExportScope
     && exportVariables?.format === "json";
+  const isExportingCurrentTxt = exportNovelMutation.isPending
+    && exportVariables?.scope === currentExportScope
+    && exportVariables?.format === "txt";
   const isExportingFullMarkdown = exportNovelMutation.isPending
     && exportVariables?.scope === "full"
     && exportVariables?.format === "markdown";
   const isExportingFullJson = exportNovelMutation.isPending
     && exportVariables?.scope === "full"
     && exportVariables?.format === "json";
+  const isExportingFullTxt = exportNovelMutation.isPending
+    && exportVariables?.scope === "full"
+    && exportVariables?.format === "txt";
 
   return (
     <NovelEditView
@@ -2634,8 +2640,10 @@ export default function NovelEdit() {
       onActiveTabChange={setActiveTab}
       exportControls={{
         canExportCurrentStep: Boolean(currentExportScope),
+        isExportingCurrentTxt,
         isExportingCurrentMarkdown,
         isExportingCurrentJson,
+        isExportingFullTxt,
         isExportingFullMarkdown,
         isExportingFullJson,
         onExportCurrent: (format) => {
