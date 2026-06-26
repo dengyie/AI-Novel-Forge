@@ -43,10 +43,34 @@ export async function collectStream(stream: AsyncIterable<BaseMessageChunk>): Pr
 
 export function parseStructuredOutline(raw: string): Array<{ order: number; title: string; summary: string }> {
   const parsed = JSON.parse(raw) as unknown;
-  if (!Array.isArray(parsed)) {
-    throw new Error("结构化大纲不是数组。");
+  if (Array.isArray(parsed)) {
+    return normalizeOutlineChapters(parsed);
   }
-  return parsed
+  // Handle volumes-object format: { volumes: [{ chapters: [...] }] }
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    const record = parsed as Record<string, unknown>;
+    if (Array.isArray(record.volumes)) {
+      const chapters: unknown[] = [];
+      for (const volume of record.volumes) {
+        if (volume && typeof volume === "object" && !Array.isArray(volume)) {
+          const volChapters = (volume as Record<string, unknown>).chapters;
+          if (Array.isArray(volChapters)) {
+            chapters.push(...volChapters);
+          }
+        }
+      }
+      if (chapters.length > 0) {
+        return normalizeOutlineChapters(chapters);
+      }
+    }
+  }
+  throw new Error("结构化大纲格式不正确。");
+}
+
+function normalizeOutlineChapters(
+  raw: unknown[],
+): Array<{ order: number; title: string; summary: string }> {
+  return raw
     .map((item) => {
       if (!item || typeof item !== "object" || Array.isArray(item)) {
         return null;
@@ -56,7 +80,11 @@ export function parseStructuredOutline(raw: string): Array<{ order: number; titl
         ? record.chapter
         : typeof record.chapter === "string"
           ? Number(record.chapter)
-          : null;
+          : typeof record.order === "number"
+            ? record.order
+            : typeof record.order === "string"
+              ? Number(record.order)
+              : null;
       const title = typeof record.title === "string" ? record.title.trim() : "";
       const summary = typeof record.summary === "string" ? record.summary.trim() : "";
       if (!order || !title) {
