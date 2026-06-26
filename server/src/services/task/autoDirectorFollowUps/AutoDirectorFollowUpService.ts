@@ -235,10 +235,16 @@ export class AutoDirectorFollowUpService {
       .map((row) => row.novelId)
       .filter((novelId): novelId is string => Boolean(novelId?.trim()));
     const records = await loadRecentAutoDirectorAutoApprovalRecords(novelIds);
-    return records.map((record) => projectAutoApprovalRecordItem({
-      ...record,
-      novel: taskById.get(record.taskId)?.novel ?? null,
-    }, taskById));
+    return records
+      .filter((record) => {
+        const parentTask = taskById.get(record.taskId);
+        if (!parentTask) return true;
+        return parentTask.status !== "succeeded" && parentTask.status !== "cancelled";
+      })
+      .map((record) => projectAutoApprovalRecordItem({
+        ...record,
+        novel: taskById.get(record.taskId)?.novel ?? null,
+      }, taskById));
   }
 
   private async loadRows(options: { heal?: boolean } = {}): Promise<FollowUpWorkflowRow[]> {
