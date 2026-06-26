@@ -224,6 +224,15 @@ function DesktopNovelEditView(props: NovelEditViewProps) {
                       <CardTitle className="text-base">当前步骤：{currentStepLabel}</CardTitle>
                     </CardHeader>
                     <CardContent className="flex flex-wrap gap-2">
+                      <p className="mb-2 text-sm text-muted-foreground">纯文本</p>
+                      <Button
+                        variant="outline"
+                        onClick={() => exportControls.onExportCurrent("txt")}
+                        disabled={!exportControls.canExportCurrentStep || exportControls.isExportingCurrentTxt}
+                      >
+                        {exportControls.isExportingCurrentTxt ? "导出中..." : "TXT"}
+                      </Button>
+                      <p className="mb-2 mt-3 text-sm text-muted-foreground">含标题和格式</p>
                       <Button
                         variant="outline"
                         onClick={() => exportControls.onExportCurrent("markdown")}
@@ -245,6 +254,15 @@ function DesktopNovelEditView(props: NovelEditViewProps) {
                       <CardTitle className="text-base">整本书</CardTitle>
                     </CardHeader>
                     <CardContent className="flex flex-wrap gap-2">
+                      <p className="mb-2 text-sm text-muted-foreground">纯文本</p>
+                      <Button
+                        variant="outline"
+                        onClick={() => exportControls.onExportFull("txt")}
+                        disabled={exportControls.isExportingFullTxt}
+                      >
+                        {exportControls.isExportingFullTxt ? "导出中..." : "TXT"}
+                      </Button>
+                      <p className="mb-2 mt-3 text-sm text-muted-foreground">含标题和格式</p>
                       <Button
                         variant="outline"
                         onClick={() => exportControls.onExportFull("markdown")}

@@ -632,8 +632,10 @@ export interface NovelEditViewProps {
   onActiveTabChange: (value: string) => void;
   exportControls: {
     canExportCurrentStep: boolean;
+    isExportingCurrentTxt: boolean;
     isExportingCurrentMarkdown: boolean;
     isExportingCurrentJson: boolean;
+    isExportingFullTxt: boolean;
     isExportingFullMarkdown: boolean;
     isExportingFullJson: boolean;
     onExportCurrent: (format: NovelExportDownloadFormat) => void;
