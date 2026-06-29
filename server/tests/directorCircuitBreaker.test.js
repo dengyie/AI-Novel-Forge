@@ -59,7 +59,7 @@ test("usage anomaly ignores the same usage record twice", () => {
   let state = recordUsageAnomalySignal({
     previous: null,
     usageRecordId: "usage-1",
-    totalTokens: 180000,
+    totalTokens: 260000,
     nodeKey: "chapter_execution_node",
   });
   assert.equal(state.status, "closed");
@@ -68,7 +68,7 @@ test("usage anomaly ignores the same usage record twice", () => {
   state = recordUsageAnomalySignal({
     previous: state,
     usageRecordId: "usage-1",
-    totalTokens: 180000,
+    totalTokens: 260000,
     nodeKey: "chapter_execution_node",
   });
   assert.equal(state.status, "closed");
@@ -77,7 +77,7 @@ test("usage anomaly ignores the same usage record twice", () => {
   state = recordUsageAnomalySignal({
     previous: state,
     usageRecordId: "usage-2",
-    totalTokens: 180000,
+    totalTokens: 260000,
     nodeKey: "chapter_execution_node",
   });
   assert.equal(state.status, "open");

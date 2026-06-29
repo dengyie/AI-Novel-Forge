@@ -120,7 +120,11 @@ function isChapterRelevant(item: CharacterResourceLedgerItem, chapterOrder: numb
   }
   const nearLastTouch = item.lastTouchedChapterOrder == null || item.lastTouchedChapterOrder <= chapterOrder;
   const nearWindow = item.expectedUseEndChapterOrder == null || item.expectedUseEndChapterOrder >= chapterOrder - 2;
-  return nearLastTouch && nearWindow;
+  // Unheld items (transferred/lost/dropped) recently touched should remain visible for context continuity
+  const unheldAndRecent = !item.holderCharacterId
+    && item.lastTouchedChapterOrder != null
+    && item.lastTouchedChapterOrder >= chapterOrder - 3;
+  return (nearLastTouch && nearWindow) || unheldAndRecent;
 }
 
 function buildStructuredRiskSignals(input: {

@@ -10,9 +10,13 @@ export class RagRetrievalTraceRetention {
     if (this.timer) {
       return;
     }
+    // Run initial cleanup immediately on start, then on interval
+    void this.clearExpiredTraces().catch((error) => {
+      console.warn("[rag] initial trace cleanup failed:", error instanceof Error ? error.message : String(error));
+    });
     this.timer = setInterval(() => {
       void this.clearExpiredTraces().catch((error) => {
-        console.warn("[rag] failed to clean retrieval traces", error);
+        console.warn("[rag] failed to clean retrieval traces:", error instanceof Error ? error.message : String(error));
       });
     }, intervalMs);
     this.timer.unref?.();

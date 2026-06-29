@@ -159,6 +159,7 @@ export class ImageGenerationService {
   private readonly queue: string[] = [];
   private readonly queueSet = new Set<string>();
   private processing = false;
+  private static readonly MAX_QUEUE_SIZE = 100;
 
   async createCharacterTask(input: CharacterImageGenerationRequest): Promise<ImageGenerationTask> {
     const provider: LLMProvider = input.provider ?? "openai";
@@ -531,33 +532,22 @@ export class ImageGenerationService {
       if (rows.length === 0) {
         return;
       }
-      const runningIds = rows.filter((item) => item.status === "running").map((item) => item.id);
-      if (runningIds.length > 0) {
-        await prisma.imageGenerationTask.updateMany({
-          where: { id: { in: runningIds } },
-          data: {
-            status: "queued",
-            pendingManualRecovery: true,
-            error: "服务重启后任务已暂停，等待手动恢复。",
-            heartbeatAt: null,
-            currentStage: "queued",
-            currentItemKey: null,
-            currentItemLabel: null,
-            cancelRequestedAt: null,
-          },
-        });
-      }
-      const queuedIds = rows.filter((item) => item.status === "queued").map((item) => item.id);
-      if (queuedIds.length > 0) {
-        await prisma.imageGenerationTask.updateMany({
-          where: { id: { in: queuedIds } },
-          data: {
-            pendingManualRecovery: true,
-            error: "服务重启后任务已暂停，等待手动恢复。",
-            heartbeatAt: null,
-            cancelRequestedAt: null,
-          },
-        });
+      const allIds = rows.map((item) => item.id);
+      await prisma.imageGenerationTask.updateMany({
+        where: { id: { in: allIds } },
+        data: {
+          status: "queued",
+          pendingManualRecovery: false,
+          error: null,
+          heartbeatAt: null,
+          currentStage: "queued",
+          currentItemKey: null,
+          currentItemLabel: null,
+          cancelRequestedAt: null,
+        },
+      });
+      for (const id of allIds) {
+        this.enqueueTask(id);
       }
     } catch (error) {
       if (isMissingTableError(error)) {
@@ -570,6 +560,13 @@ export class ImageGenerationService {
   private enqueueTask(taskId: string): void {
     if (this.queueSet.has(taskId)) {
       return;
+    }
+    if (this.queue.length >= ImageGenerationService.MAX_QUEUE_SIZE) {
+      console.warn(`[image] queue at capacity (${ImageGenerationService.MAX_QUEUE_SIZE}), dropping oldest task ${this.queue[0]}`);
+      const oldest = this.queue.shift();
+      if (oldest) {
+        this.queueSet.delete(oldest);
+      }
     }
     this.queue.push(taskId);
     this.queueSet.add(taskId);

@@ -181,6 +181,10 @@ function resolveReplanAction(signal: ReplanSignal, input: ReplanDecisionInput): 
     return "stop_for_replan";
   }
   if (signal === "blocking_audit") {
+    const overdueCount = (input.ledgerSummary?.overdueCount ?? 0) + collectBlockingLedgerKeys(input.blockingLedgerKeys, input.snapshot).length;
+    if (overdueCount > 0 && (overduePayoffAffectsCurrentChapter(input) || maxOverdueDistance(input) >= OVERDUE_PAYOFF_STOP_WINDOW)) {
+      return "stop_for_replan";
+    }
     return "local_patch_plan";
   }
   if (signal === "overdue_payoff") {
@@ -192,7 +196,13 @@ function resolveReplanAction(signal: ReplanSignal, input: ReplanDecisionInput): 
   return "continue_with_warning";
 }
 
-function resolveWindowMode(signal: ReplanSignal): WindowMode {
+function resolveWindowMode(signal: ReplanSignal, action: ReplanAction): WindowMode {
+  // When a blocking audit escalates to a full stop because a severe overdue payoff
+  // also needs handling, the overdue payoff drives the window shape: it needs
+  // surrounding context (setup + payoff + aftermath), not a forward-only patch.
+  if (signal === "blocking_audit" && action === "stop_for_replan") {
+    return "surrounding";
+  }
   return signal === "blocking_audit" || signal === "manual_request" ? "forward" : "surrounding";
 }
 
@@ -375,7 +385,7 @@ export function buildReplanDecision(input: ReplanDecisionInput): ReplanDecision 
       anchorChapterOrder,
       input.availableChapterOrders,
       requestedWindowSize,
-      resolveWindowMode(signal),
+      resolveWindowMode(signal, action),
     )
     : [];
   const triggerReason = buildTriggerReason(signal, input, blockingIssues, blockingLedgerKeys);

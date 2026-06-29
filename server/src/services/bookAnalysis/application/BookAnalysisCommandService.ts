@@ -595,6 +595,27 @@ export class BookAnalysisCommandService {
         },
       });
     }
+    // Invalidate stale knowledge if this analysis was previously published:
+    // editing a section means the published RAG document no longer matches the analysis,
+    // so drop the bindings and clear publishedDocumentId to force an explicit re-publish.
+    const analysisRow = await prisma.bookAnalysis.findUnique({
+      where: { id: analysisId },
+      select: { publishedDocumentId: true },
+    });
+    if (analysisRow?.publishedDocumentId) {
+      await prisma.$transaction(async (tx) => {
+        await tx.knowledgeBinding.deleteMany({
+          where: {
+            sourceAnalysisId: analysisId,
+            targetType: "novel",
+          },
+        });
+        await tx.bookAnalysis.update({
+          where: { id: analysisId },
+          data: { publishedDocumentId: null },
+        });
+      }).catch(() => null);
+    }
     const detail = await this.queryService.getAnalysisById(analysisId);
     if (!detail) {
       throw new AppError("Book analysis not found after section update.", 500);

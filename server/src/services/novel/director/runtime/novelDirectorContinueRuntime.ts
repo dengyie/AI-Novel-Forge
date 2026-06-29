@@ -320,8 +320,22 @@ export class NovelDirectorContinueRuntime {
     const approveAutoExecutionGate = approveCurrentGate || requestedAutoExecutionContinue;
 
     if (assetFirstRecovery?.type === "auto_execution") {
+      // Only reset the circuit breaker if the previous trip was a recoverable user-action type.
+      // Persisting trip counts (token overrun, model failures) ensures the breaker re-trips
+      // immediately if the underlying condition hasn't been resolved, rather than silently looping.
+      const prevBreaker = seedPayload.autoExecution?.circuitBreaker ?? null;
+      const prevReason = prevBreaker?.reason;
+      const shouldResetBreaker = !prevReason
+        || prevReason === "auto_repair_exhausted"
+        || prevReason === "replan_loop"
+        || prevReason === "protected_user_content";
       const sanitizedAutoExecution = seedPayload.autoExecution
-        ? { ...seedPayload.autoExecution, circuitBreaker: buildClosedDirectorCircuitBreakerState(seedPayload.autoExecution.circuitBreaker) }
+        ? {
+            ...seedPayload.autoExecution,
+            circuitBreaker: shouldResetBreaker
+              ? buildClosedDirectorCircuitBreakerState(prevBreaker)
+              : buildClosedDirectorCircuitBreakerState(null),
+          }
         : null;
       const resumedChapterId = (
         parseResumeTargetLike(row.resumeTargetJson)?.chapterId

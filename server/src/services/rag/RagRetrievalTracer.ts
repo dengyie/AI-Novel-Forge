@@ -175,7 +175,7 @@ export class RagRetrievalTracer {
       ...this.extraScope,
     });
 
-    void prisma.ragRetrievalTrace.create({
+    prisma.ragRetrievalTrace.create({
       data: {
         tenantId: this.context.tenantId,
         novelId: this.context.novelId,
@@ -190,7 +190,7 @@ export class RagRetrievalTracer {
         rerankerUsed: this.rerankerUsed,
       },
     }).catch((error) => {
-      console.warn("[rag] failed to write retrieval trace", error);
+      console.warn("[rag] failed to write retrieval trace:", error instanceof Error ? error.message : String(error));
     });
   }
 }

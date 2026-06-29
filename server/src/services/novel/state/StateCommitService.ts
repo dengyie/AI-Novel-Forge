@@ -528,7 +528,7 @@ export class StateCommitService {
         currentGoal: typeof payload.currentGoal === "string" ? compactText(payload.currentGoal) || null : null,
         lastEvolvedAt: new Date(),
       },
-    }).catch(() => null);
+    });
   }
 
   private toProposal(row: PersistedProposalRow): StateChangeProposal {

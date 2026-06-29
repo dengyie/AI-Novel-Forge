@@ -157,6 +157,13 @@ export class NovelDirectorAutoExecutionRuntime {
         });
       }
 
+      // Guards against runaway loops: limit consecutive pipeline-start failures
+      // and consecutive defer-and-continue advances without any chapter succeeding.
+      let consecutiveStartFailures = 0;
+      let consecutiveDefers = 0;
+      const MAX_CONSECUTIVE_START_FAILURES = 3;
+      const MAX_CONSECUTIVE_DEFERS = 5;
+
       autoExecutionLoop:
       while (true) {
       if (!pipelineJobId) {
@@ -211,8 +218,26 @@ export class NovelDirectorAutoExecutionRuntime {
             pipelineJobId: job.id,
             pipelineStatus: job.status,
           };
+          consecutiveStartFailures = 0;
         } catch (error) {
           if (!isNoChaptersToGenerateError(error)) {
+            consecutiveStartFailures += 1;
+            if (consecutiveStartFailures >= MAX_CONSECUTIVE_START_FAILURES) {
+              const startErrorMessage = error instanceof Error ? error.message : String(error);
+              await this.deps.workflowService.markTaskFailed(input.taskId,
+                `连续 ${MAX_CONSECUTIVE_START_FAILURES} 次启动章节生成失败，自动执行已停止。最近错误：${startErrorMessage.slice(0, 200)}`,
+                {
+                  stage: "quality_repair",
+                  itemKey: "chapter_execution",
+                  itemLabel: "章节自动执行失败",
+                  checkpointType: "chapter_batch_ready",
+                  checkpointSummary: `连续启动失败 ${MAX_CONSECUTIVE_START_FAILURES} 次，可能存在章节规划或生成条件问题。`,
+                  chapterId: autoExecution.nextChapterId ?? range.firstChapterId,
+                  progress: 0.93,
+                },
+              );
+              return;
+            }
             throw error;
           }
           ({ range, autoExecution } = await resolveAutoExecutionRuntimeRangeAndState(this.deps, {
@@ -336,6 +361,7 @@ export class NovelDirectorAutoExecutionRuntime {
           });
           if (noticeAction.action === "auto_continue") {
             pipelineJobId = "";
+            consecutiveDefers = 0;
             ({ range, autoExecution } = await resolveAutoExecutionRuntimeRangeAndState(this.deps, {
               novelId: input.novelId,
               existingState: noticeAction.checkpointState,
@@ -382,6 +408,7 @@ export class NovelDirectorAutoExecutionRuntime {
         if (job.status === "succeeded") {
           const completedPipelineJobId = pipelineJobId;
           pipelineJobId = "";
+          consecutiveDefers = 0;
           if ((autoExecution.remainingChapterCount ?? 0) > 0) {
             if (this.deps.autoConfirmPendingCandidates) {
               await this.deps.autoConfirmPendingCandidates(input.novelId).catch(() => null);
@@ -609,6 +636,22 @@ export class NovelDirectorAutoExecutionRuntime {
             || (autoExecution.remainingChapterCount ?? 0) === 0
           );
           if (deferredWasPreserved) {
+            consecutiveDefers += 1;
+            if (consecutiveDefers >= MAX_CONSECUTIVE_DEFERS) {
+              await this.deps.workflowService.markTaskFailed(input.taskId,
+                `连续 ${MAX_CONSECUTIVE_DEFERS} 章被暂存质量问题且未能收敛，自动执行已停止。`,
+                {
+                  stage: "quality_repair",
+                  itemKey: "quality_repair",
+                  itemLabel: "质量问题持续累积",
+                  checkpointType: "chapter_batch_ready",
+                  checkpointSummary: `连续 ${MAX_CONSECUTIVE_DEFERS} 章触发了 defer_and_continue，说明可能存在系统性问题需要人工介入。`,
+                  chapterId: autoExecution.nextChapterId ?? range.firstChapterId,
+                  progress: 0.98,
+                },
+              );
+              return;
+            }
             await syncAutoExecutionTaskState(this.deps, {
               taskId: input.taskId,
               novelId: input.novelId,
