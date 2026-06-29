@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { chapterSceneCardSchema } from "@ai-novel/shared/types/chapterLengthControl";
+import { chapterSceneCardSchema, SCENE_COUNT_MIN } from "@ai-novel/shared/types/chapterLengthControl";
 import type { VolumeCountRange } from "@ai-novel/shared/types/novel";
 import { MAX_VOLUME_COUNT } from "@ai-novel/shared/types/volumePlanning";
 
@@ -665,7 +665,7 @@ export function createChapterBoundarySchema() {
 export function createChapterTaskSheetSchema() {
   return z.preprocess(normalizeScenePlanPayload, z.object({
     taskSheet: z.string().trim().min(1),
-    sceneCards: z.array(z.preprocess(normalizeSceneCardPayload, chapterSceneCardSchema)).min(1),
+    sceneCards: z.array(z.preprocess(normalizeSceneCardPayload, chapterSceneCardSchema)).min(SCENE_COUNT_MIN),
   }));
 }
 
@@ -688,7 +688,7 @@ export function createChapterExecutionContractSchema() {
       mustAvoid: z.string().trim().min(1),
       payoffRefs: z.array(z.string().trim().min(1)).default([]),
       taskSheet: z.string().trim().min(1),
-      sceneCards: z.array(z.preprocess(normalizeSceneCardPayload, chapterSceneCardSchema)).min(1),
+      sceneCards: z.array(z.preprocess(normalizeSceneCardPayload, chapterSceneCardSchema)).min(SCENE_COUNT_MIN),
     }),
   );
 }
