@@ -1,8 +1,8 @@
 import { z } from "zod";
 import { sanitizeCreativeMustAdvanceItems } from "./chapterCreativeContract.js";
 
-const SCENE_COUNT_MIN = 3;
-const SCENE_COUNT_MAX = 8;
+export const SCENE_COUNT_MIN = 3;
+export const SCENE_COUNT_MAX = 8;
 
 export const lengthBudgetContractSchema = z.object({
   targetWordCount: z.number().int().positive(),
@@ -217,9 +217,10 @@ export function normalizeChapterScenePlan(
     throw new Error("Target word count is required to normalize chapter scene plan.");
   }
 
-  const record = isRecord(raw) ? raw : null;
-  const scenesRaw = Array.isArray(raw)
-    ? raw
+  const parsed = typeof raw === "string" ? (() => { try { return JSON.parse(raw) as unknown; } catch { return raw; } })() : raw;
+  const record = isRecord(parsed) ? parsed : null;
+  const scenesRaw = Array.isArray(parsed)
+    ? parsed
     : Array.isArray(record?.scenes)
       ? record.scenes
       : Array.isArray(record?.sceneCards)
