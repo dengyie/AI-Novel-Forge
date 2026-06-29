@@ -34,6 +34,29 @@ function takeTop<T>(items: T[], limit: number): T[] {
   return items.slice(0, Math.max(0, limit));
 }
 
+/**
+ * 按伏笔章龄降序排列 pending 段——埋得越久（firstSeenChapterOrder 距当前章越远）越靠前，
+ * 让长线老伏笔优先进入写作硬指令 takeTop(5)，避免被近期频繁更新的项挤出。
+ * 同章龄按 targetEndChapterOrder 升序（截止更近的优先）。
+ */
+export function rankPendingByChapterAge(
+  payoffs: CanonicalPayoffState[],
+  chapterOrder: number,
+): CanonicalPayoffState[] {
+  return payoffs.slice().sort((left, right) => {
+    const leftAnchor = left.firstSeenChapterOrder ?? left.targetStartChapterOrder ?? 0;
+    const rightAnchor = right.firstSeenChapterOrder ?? right.targetStartChapterOrder ?? 0;
+    const leftAge = chapterOrder - leftAnchor;
+    const rightAge = chapterOrder - rightAnchor;
+    if (leftAge !== rightAge) {
+      return rightAge - leftAge;
+    }
+    const leftDeadline = left.targetEndChapterOrder ?? Number.MAX_SAFE_INTEGER;
+    const rightDeadline = right.targetEndChapterOrder ?? Number.MAX_SAFE_INTEGER;
+    return leftDeadline - rightDeadline;
+  });
+}
+
 function normalizeForBoundaryMatch(value: string | null | undefined): string {
   return (value ?? "").trim().toLowerCase();
 }
@@ -90,10 +113,13 @@ export function buildChapterPayoffDirectives(
   protectedSecrets: string[],
 ): ChapterPayoffDirective[] {
   const chapterOrder = snapshot.narrative.currentChapterOrder ?? 0;
+  // urgentPayoffs 是 pendingPayoffs 的子集（CanonicalStateService.ts:279），不能作为独立段排在前面：
+  // 当大量窗口已过、几乎所有 pending 都判为 urgent 时，未排序的 urgent 段会占满 takeTop(5)，
+  // 让长线老伏笔（章龄大但 updatedAt 旧）永远轮空。直接对整个 pending 按章龄排序即可去重并生效。
+  const rankedPending = rankPendingByChapterAge(snapshot.narrative.pendingPayoffs, chapterOrder);
   return takeTop([
     ...snapshot.narrative.overduePayoffs,
-    ...snapshot.narrative.urgentPayoffs,
-    ...snapshot.narrative.pendingPayoffs,
+    ...rankedPending,
   ], 5).map((payoff) => buildPayoffDirective(payoff, chapterOrder, protectedSecrets));
 }
 
@@ -119,8 +145,7 @@ function buildChapterStateGoal(
     targetPayoffs: takeTop(
       [
         ...snapshot.narrative.overduePayoffs.map((item) => item.title),
-        ...snapshot.narrative.urgentPayoffs.map((item) => item.title),
-        ...snapshot.narrative.pendingPayoffs.map((item) => item.title),
+        ...rankPendingByChapterAge(snapshot.narrative.pendingPayoffs, snapshot.narrative.currentChapterOrder ?? 0).map((item) => item.title),
       ],
       3,
     ),

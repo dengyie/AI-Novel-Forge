@@ -7,6 +7,7 @@ import { payoffLedgerSyncPrompt } from "../../prompting/prompts/payoff/payoffLed
 import {
   appendStaleRiskSignal,
   buildPayoffLedgerResponse,
+  applyGraceExtension,
   buildSyntheticPayoffIssues,
   clearStaleRiskSignal,
   dedupeRiskSignals,
@@ -125,6 +126,59 @@ export class PayoffLedgerSyncService {
     return prisma.payoffLedgerItem.findMany({
       where: { novelId },
       orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
+    });
+  }
+
+  /**
+   * 全表扫描：对 DB 里所有"有窗口但已过当前章"的 pending_payoff 跑 applyGraceExtension 顺延窗口。
+   * 不依赖 LLM 本次是否重新输出该项——解决"被 LLM 遗忘的旧伏笔（窗口已过却不被顺延）"死循环。
+   * applyGraceExtension 内部已封顶 3 次，超限项不再变化、自然进入 overdue。
+   */
+  private async extendStalePendingWindows(novelId: string, chapterOrder: number | null): Promise<void> {
+    if (typeof chapterOrder !== "number" || !Number.isFinite(chapterOrder)) {
+      return;
+    }
+    const rows = await this.loadLedgerRows(novelId);
+    const now = new Date();
+    await prisma.$transaction(async (tx) => {
+      for (const row of rows) {
+        if (row.currentStatus !== "pending_payoff") {
+          continue;
+        }
+        if (typeof row.targetEndChapterOrder !== "number" || row.targetEndChapterOrder >= chapterOrder) {
+          continue;
+        }
+        const riskSignals = safeParseJson<Array<{ code: string; severity: "low" | "medium" | "high" | "critical"; summary: string; stale?: boolean }>>(
+          row.riskSignalsJson,
+          [],
+        );
+        const extended = applyGraceExtension(
+          {
+            ledgerKey: row.ledgerKey,
+            title: row.title,
+            scopeType: row.scopeType,
+            currentStatus: row.currentStatus,
+            targetStartChapterOrder: row.targetStartChapterOrder,
+            targetEndChapterOrder: row.targetEndChapterOrder,
+            payoffChapterId: row.payoffChapterId,
+            riskSignals,
+            statusReason: row.statusReason,
+          },
+          chapterOrder,
+        );
+        if (extended.targetEndChapterOrder === row.targetEndChapterOrder) {
+          continue;
+        }
+        await tx.payoffLedgerItem.update({
+          where: { id: row.id },
+          data: {
+            targetStartChapterOrder: extended.targetStartChapterOrder ?? null,
+            targetEndChapterOrder: extended.targetEndChapterOrder ?? null,
+            riskSignalsJson: serializeLedgerJson(extended.riskSignals),
+            updatedAt: now,
+          },
+        });
+      }
     });
   }
 
@@ -372,7 +426,10 @@ export class PayoffLedgerSyncService {
       const now = new Date();
       const resolvedItemsByKey = new Map<string, typeof result.output.items[number]>();
       for (const rawItem of result.output.items) {
-        const sanitizedItem = sanitizePayoffLedgerSyncItem(rawItem);
+        const sanitizedItem = applyGraceExtension(
+          sanitizePayoffLedgerSyncItem(rawItem),
+          chapterOrder,
+        );
         const ledgerKey = resolvePayoffLedgerSyncLedgerKey(sanitizedItem, existingRows);
         resolvedItemsByKey.set(ledgerKey, {
           ...sanitizedItem,
@@ -473,6 +530,8 @@ export class PayoffLedgerSyncService {
           });
         }
       });
+
+      await this.extendStalePendingWindows(novelId, chapterOrder);
 
       const rows = await this.loadLedgerRows(novelId);
       const items = rows.map(mapPayoffLedgerRow);
