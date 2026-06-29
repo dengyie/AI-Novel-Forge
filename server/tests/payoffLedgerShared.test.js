@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
+  applyGraceExtension,
   buildPayoffLedgerResponse,
   buildSyntheticPayoffIssues,
   classifyPayoffLedgerItems,
@@ -257,4 +258,86 @@ test("sanitizePayoffLedgerSyncItem downgrades overdue without explicit payoff wi
   assert.equal(item.currentStatus, "pending_payoff");
   assert.equal(item.riskSignals.length, 1);
   assert.equal(item.riskSignals[0].code, "payoff_missing_progress");
+});
+
+test("applyGraceExtension extends window when pending payoff targetEnd is past current chapter", () => {
+  const item = applyGraceExtension({
+    ledgerKey: "tide_salamander_recruit",
+    title: "唤潮蝾螈的招募",
+    scopeType: "volume",
+    currentStatus: "pending_payoff",
+    targetStartChapterOrder: 5,
+    targetEndChapterOrder: 15,
+    payoffChapterId: null,
+    payoffChapterOrder: null,
+    riskSignals: [],
+    statusReason: null,
+  }, 22);
+
+  assert.equal(item.currentStatus, "pending_payoff");
+  assert.equal(item.targetStartChapterOrder, 15);
+  assert.equal(item.targetEndChapterOrder, 25);
+  assert.equal(item.riskSignals.length, 1);
+  assert.equal(item.riskSignals[0].code, "payoff_window_extended");
+  assert.match(item.riskSignals[0].summary, /顺延至第15-25章/);
+});
+
+test("applyGraceExtension leaves item unchanged when targetEnd not yet past current chapter", () => {
+  const item = applyGraceExtension({
+    ledgerKey: "k1",
+    title: "未到期伏笔",
+    scopeType: "volume",
+    currentStatus: "pending_payoff",
+    targetStartChapterOrder: 24,
+    targetEndChapterOrder: 28,
+    payoffChapterId: null,
+    payoffChapterOrder: null,
+    riskSignals: [],
+    statusReason: null,
+  }, 22);
+
+  assert.equal(item.targetEndChapterOrder, 28);
+  assert.equal(item.riskSignals.length, 0);
+});
+
+test("applyGraceExtension skips non-pending_payoff statuses", () => {
+  for (const status of ["setup", "hinted", "paid_off", "failed", "overdue"]) {
+    const item = applyGraceExtension({
+      ledgerKey: "k1",
+      title: "t",
+      scopeType: "volume",
+      currentStatus: status,
+      targetStartChapterOrder: 5,
+      targetEndChapterOrder: 6,
+      payoffChapterId: null,
+      payoffChapterOrder: null,
+      riskSignals: [],
+      statusReason: null,
+    }, 22);
+    assert.equal(item.targetEndChapterOrder, 6, `${status} should not be extended`);
+    assert.equal(item.riskSignals.length, 0, `${status} should not gain risk signal`);
+  }
+});
+
+test("applyGraceExtension stops extending after 3 prior extensions", () => {
+  const existing = Array.from({ length: 3 }, (_, i) => ({
+    code: "payoff_window_extended",
+    severity: "medium",
+    summary: `目标窗口已过未兑现，自动顺延至第${5 + i * 10}-${6 + i * 10}章。`,
+  }));
+  const item = applyGraceExtension({
+    ledgerKey: "k1",
+    title: "t",
+    scopeType: "volume",
+    currentStatus: "pending_payoff",
+    targetStartChapterOrder: 5,
+    targetEndChapterOrder: 6,
+    payoffChapterId: null,
+    payoffChapterOrder: null,
+    riskSignals: existing,
+    statusReason: null,
+  }, 22);
+
+  assert.equal(item.targetEndChapterOrder, 6, "should not extend beyond max");
+  assert.equal(item.riskSignals.length, 3, "should not add new signal");
 });

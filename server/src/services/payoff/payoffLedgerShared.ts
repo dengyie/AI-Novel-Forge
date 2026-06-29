@@ -195,6 +195,57 @@ export function sanitizePayoffLedgerSyncItem<T extends PayoffLedgerSyncCandidate
   };
 }
 
+const PAYOFF_WINDOW_EXTENSION_STEP = 10;
+const PAYOFF_WINDOW_EXTENSION_MAX = 3;
+const PAYOFF_WINDOW_EXTENDED_SIGNAL_CODE = "payoff_window_extended";
+
+function countWindowExtensions(signals: PayoffLedgerRiskSignal[]): number {
+  return signals.filter((signal) => signal.code === PAYOFF_WINDOW_EXTENDED_SIGNAL_CODE).length;
+}
+
+/**
+ * 对"有明确窗口但 targetEnd 已过当前章仍未兑现"的 pending_payoff 项自动顺延目标窗口，
+ * 避免被 LLM 在下次对账标 overdue 累积、触发强制 replan。
+ * 顺延上限 PAYOFF_WINDOW_EXTENSION_MAX 次，超限则不再顺延（让其自然 overdue）。
+ * 顺延次数通过 riskSignals 里 payoff_window_extended 信号计数体现，不改表结构。
+ */
+export function applyGraceExtension<T extends PayoffLedgerSyncCandidate>(
+  item: T,
+  chapterOrder: number | null | undefined,
+): T {
+  if (item.currentStatus !== "pending_payoff") {
+    return item;
+  }
+  if (typeof chapterOrder !== "number" || !Number.isFinite(chapterOrder)) {
+    return item;
+  }
+  const targetEnd = item.targetEndChapterOrder;
+  if (typeof targetEnd !== "number" || targetEnd >= chapterOrder) {
+    return item;
+  }
+  if (countWindowExtensions(item.riskSignals) >= PAYOFF_WINDOW_EXTENSION_MAX) {
+    return item;
+  }
+  const targetStart = typeof item.targetStartChapterOrder === "number"
+    ? item.targetStartChapterOrder
+    : targetEnd;
+  const nextStart = targetStart + PAYOFF_WINDOW_EXTENSION_STEP;
+  const nextEnd = targetEnd + PAYOFF_WINDOW_EXTENSION_STEP;
+  return {
+    ...item,
+    targetStartChapterOrder: nextStart,
+    targetEndChapterOrder: nextEnd,
+    riskSignals: dedupeRiskSignals([
+      ...item.riskSignals,
+      {
+        code: PAYOFF_WINDOW_EXTENDED_SIGNAL_CODE,
+        severity: "medium",
+        summary: `目标窗口已过未兑现，自动顺延至第${nextStart}-${nextEnd}章。`,
+      },
+    ]),
+  };
+}
+
 export function mapPayoffLedgerRow(row: PayoffLedgerRowLike): PayoffLedgerItem {
   return {
     id: row.id,
