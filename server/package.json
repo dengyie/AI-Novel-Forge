@@ -33,6 +33,7 @@
     "test:book-analysis": "pnpm --filter @ai-novel/shared build && pnpm run build && node --test tests/bookAnalysis.test.js",
     "audit:director-recovery-samples": "node scripts/director-recovery-sample-audit.cjs",
     "backfill:director-draft-baselines": "node scripts/director-chapter-draft-baseline-backfill.cjs",
+    "migrate:model-routes": "node scripts/migrate-model-routes-to-pro-chat.cjs",
     "prisma": "prisma",
     "prisma:generate": "prisma generate --config prisma.config.ts",
     "prisma:push": "prisma db push --config prisma.config.ts",
