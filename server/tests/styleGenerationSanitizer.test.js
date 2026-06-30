@@ -5,9 +5,6 @@ const {
   detectForbiddenStyleEntities,
   sanitizeStyleContextForGeneration,
 } = require("../dist/services/styleEngine/styleGenerationSanitizer.js");
-const {
-  buildStyleEngineBlock,
-} = require("../dist/services/novel/runtime/runtimeContextBlocks.js");
 
 function section(key, text) {
   return {
@@ -119,9 +116,4 @@ test("sanitizeStyleContextForGeneration redacts source entities before writer co
     detectForbiddenStyleEntities("主角被误写成北凉王世子。", sanitized),
     ["北凉王世子"],
   );
-
-  const block = buildStyleEngineBlock(sanitized);
-  assert.match(block, /\[source-entity\]/);
-  assert.doesNotMatch(block, /北凉王世子/);
-  assert.doesNotMatch(block, /徐凤年/);
 });

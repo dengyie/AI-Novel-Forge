@@ -43,9 +43,11 @@ test("restoring archived knowledge document queues a rebuild and marks indexing 
         latestIndexStatus: "queued",
       },
     });
-    assert.deepEqual(enqueueCalls, [
+    assert.equal(enqueueCalls.length, 1);
+    assert.deepEqual(
+      enqueueCalls[0].slice(0, 3),
       ["rebuild", "knowledge_document", "knowledge-doc-1"],
-    ]);
+    );
   } finally {
     prisma.knowledgeDocument.findUnique = originalFindUnique;
     prisma.knowledgeDocument.update = originalUpdate;

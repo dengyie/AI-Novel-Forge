@@ -159,9 +159,20 @@ function withPatchedPrisma(store, fn) {
 
   prisma.bookAnalysis.findUnique = async (args) => {
     if (args?.select?.status) return { status: "succeeded" };
+    // Budget guard reads usedTokens before computing the new total
+    // (Prisma increment on NULL yields NULL — see dc3a82a6). Return a
+    // stable zero so the guard sends `usedTokens: 0 + tokenCount`; the
+    // update handler then accumulates tokenCount, which is concurrency-safe
+    // across generateAllCandidates' parallel workers.
+    if (args?.select?.usedTokens) {
+      return { budgetTokens: store.budgetTokens, usedTokens: 0 };
+    }
     return createAnalysis();
   };
   prisma.bookAnalysis.update = async ({ data }) => {
+    if (typeof data?.usedTokens === "number") {
+      store.usedTokens += data.usedTokens;
+    }
     const increment = data?.usedTokens?.increment ?? 0;
     store.usedTokens += increment;
     return { budgetTokens: store.budgetTokens, usedTokens: store.usedTokens };

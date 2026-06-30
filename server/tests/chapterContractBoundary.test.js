@@ -14,17 +14,25 @@ function createPayoff(overrides) {
     currentStatus: overrides.currentStatus,
     targetStartChapterOrder: overrides.targetStartChapterOrder ?? null,
     targetEndChapterOrder: overrides.targetEndChapterOrder ?? null,
+    firstSeenChapterOrder: overrides.firstSeenChapterOrder ?? null,
     statusReason: overrides.statusReason ?? null,
   };
 }
 
+// 对齐 CanonicalStateService 的真实快照分组：pending_payoff 与 setup/hinted 同属
+// pendingPayoffs，urgentPayoffs 是 pendingPayoffs 中临近截止的子集（非互斥）。
 function createSnapshot(payoffs) {
+  const pendingPayoffs = payoffs.filter((item) =>
+    item.currentStatus === "setup"
+    || item.currentStatus === "hinted"
+    || item.currentStatus === "pending_payoff");
   return {
     narrative: {
       currentChapterOrder: 3,
       overduePayoffs: payoffs.filter((item) => item.currentStatus === "overdue"),
-      urgentPayoffs: payoffs.filter((item) => item.currentStatus === "pending_payoff"),
-      pendingPayoffs: payoffs.filter((item) => item.currentStatus === "setup" || item.currentStatus === "hinted"),
+      pendingPayoffs,
+      urgentPayoffs: pendingPayoffs.filter((item) =>
+        typeof item.targetEndChapterOrder === "number" && item.targetEndChapterOrder <= 3 + 1),
     },
   };
 }
@@ -36,16 +44,19 @@ test("chapter payoff directives never turn overdue pressure into direct payoff",
       title: "后续规则伏笔",
       currentStatus: "setup",
       targetStartChapterOrder: 8,
+      firstSeenChapterOrder: 2,
     }),
     createPayoff({
       ledgerKey: "hinted-now",
       title: "已经轻触的订单异常",
       currentStatus: "hinted",
+      firstSeenChapterOrder: 3,
     }),
     createPayoff({
       ledgerKey: "pending-now",
       title: "临近兑现的代价",
       currentStatus: "pending_payoff",
+      firstSeenChapterOrder: 1,
     }),
     createPayoff({
       ledgerKey: "overdue-now",

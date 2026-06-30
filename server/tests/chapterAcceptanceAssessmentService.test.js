@@ -91,7 +91,7 @@ test("normalizeAssessment keeps under-length issue when actual content is still 
   assert.deepEqual(normalized.blockingIssues.map((issue) => issue.code), ["length_insufficient"]);
 });
 
-test("normalizeAssessment routes missing obligations to repairable draft obligation gaps", () => {
+test("normalizeAssessment routes soft-only missing obligations with patchable_obligation_gap to continue_with_risk", () => {
   const normalized = normalizeAssessment(createAssessment({
     status: "accepted",
     missingObligations: [{
@@ -103,7 +103,6 @@ test("normalizeAssessment routes missing obligations to repairable draft obligat
     decisionReason: "只需局部补写即可兑现本章义务。",
   }), "字".repeat(3600), 3000);
 
-  assert.equal(normalized.status, "repairable");
-  assert.equal(normalized.continuePolicy, "repair_once");
+  assert.equal(normalized.status, "continue_with_risk");
   assert.equal(normalized.missingObligations[0].kind, "payoff_touch");
 });

@@ -803,6 +803,7 @@ test("BookAnalysisCharacterAppearanceService persists pending candidate terms fr
     appearanceFindUnique: prisma.bookAnalysisCharacterAppearance.findUnique,
     snapshotFindMany: prisma.bookAnalysisCharacterAppearanceSnapshot.findMany,
     snapshotFindUnique: prisma.bookAnalysisCharacterAppearanceSnapshot.findUnique,
+    snapshotCount: prisma.bookAnalysisCharacterAppearanceSnapshot.count,
     snapshotUpsert: prisma.bookAnalysisCharacterAppearanceSnapshot.upsert,
     termFindUnique: prisma.bookAnalysisCharacterAppearanceTerm.findUnique,
     termCreate: prisma.bookAnalysisCharacterAppearanceTerm.create,
@@ -877,6 +878,7 @@ test("BookAnalysisCharacterAppearanceService persists pending candidate terms fr
   });
   prisma.bookAnalysisCharacterAppearanceSnapshot.findMany = async () => snapshots;
   prisma.bookAnalysisCharacterAppearanceSnapshot.findUnique = async () => null;
+  prisma.bookAnalysisCharacterAppearanceSnapshot.count = async () => snapshots.length;
   prisma.bookAnalysisCharacterAppearanceSnapshot.upsert = async ({ create }) => {
     const row = {
       id: "snapshot-1",
@@ -948,6 +950,7 @@ test("BookAnalysisCharacterAppearanceService persists pending candidate terms fr
     prisma.bookAnalysisCharacterAppearance.findUnique = original.appearanceFindUnique;
     prisma.bookAnalysisCharacterAppearanceSnapshot.findMany = original.snapshotFindMany;
     prisma.bookAnalysisCharacterAppearanceSnapshot.findUnique = original.snapshotFindUnique;
+    prisma.bookAnalysisCharacterAppearanceSnapshot.count = original.snapshotCount;
     prisma.bookAnalysisCharacterAppearanceSnapshot.upsert = original.snapshotUpsert;
     prisma.bookAnalysisCharacterAppearanceTerm.findUnique = original.termFindUnique;
     prisma.bookAnalysisCharacterAppearanceTerm.create = original.termCreate;

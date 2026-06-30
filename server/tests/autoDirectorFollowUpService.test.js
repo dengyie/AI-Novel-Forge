@@ -150,10 +150,11 @@ test("auto director follow-up service lists recent auto-approved records in auto
     }),
   ]);
   prisma.autoDirectorAutoApprovalRecord.findMany = async ({ where, take }) => {
+    // 生产改为单次 IN 查询（无 take，per-novel ≤10 由 JS 端 countByNovelId 限制）
     assert.deepEqual(where, {
-      novelId: "novel_a",
+      novelId: { in: ["novel_a"] },
     });
-    assert.equal(take, 10);
+    assert.equal(take, undefined);
     return [
       {
         id: "auto_approval_1",
