@@ -341,3 +341,24 @@ test("applyGraceExtension stops extending after 3 prior extensions", () => {
   assert.equal(item.targetEndChapterOrder, 6, "should not extend beyond max");
   assert.equal(item.riskSignals.length, 3, "should not add new signal");
 });
+
+test("applyGraceExtension uses targetEnd as nextStart when targetStartChapterOrder is null", () => {
+  const item = applyGraceExtension({
+    ledgerKey: "k1",
+    title: "无起始窗口伏笔",
+    scopeType: "volume",
+    currentStatus: "pending_payoff",
+    targetStartChapterOrder: null,
+    targetEndChapterOrder: 15,
+    payoffChapterId: null,
+    payoffChapterOrder: null,
+    riskSignals: [],
+    statusReason: null,
+  }, 22);
+
+  assert.equal(item.currentStatus, "pending_payoff");
+  assert.equal(item.targetStartChapterOrder, 15, "nextStart should fall back to targetEnd");
+  assert.equal(item.targetEndChapterOrder, 25, "nextEnd should be targetEnd + STEP");
+  assert.equal(item.riskSignals.length, 1);
+  assert.equal(item.riskSignals[0].code, "payoff_window_extended");
+});

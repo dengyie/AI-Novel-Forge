@@ -132,8 +132,7 @@ function resolveAnchorChapterOrder(signal: ReplanSignal, input: ReplanDecisionIn
 }
 
 function pickSignal(input: ReplanDecisionInput, blockingIssues: AuditIssue[], blockingLedgerKeys: string[]): ReplanSignal {
-  const overdueCount = (input.ledgerSummary?.overdueCount ?? 0) + blockingLedgerKeys.length;
-  if (overdueCount > 0) {
+  if (blockingLedgerKeys.length > 0) {
     return "overdue_payoff";
   }
   if (input.nextAction === "replan") {
