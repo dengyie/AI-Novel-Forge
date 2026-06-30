@@ -13,6 +13,32 @@ export const ARCHIVABLE_STATUSES = new Set<TaskStatus>(["succeeded", "failed", "
 
 export type TaskSortMode = "default" | "updated_desc" | "updated_asc" | "heartbeat_desc" | "heartbeat_asc";
 
+export type TaskViewGroup = "active" | "needs_attention" | "completed";
+
+export function getTaskViewGroup(status: TaskStatus): TaskViewGroup {
+  if (ACTIVE_STATUSES.has(status)) {
+    return "active";
+  }
+  if (ANOMALY_STATUSES.has(status)) {
+    return "needs_attention";
+  }
+  return "completed";
+}
+
+export const TASK_VIEW_GROUP_ORDER: TaskViewGroup[] = ["active", "needs_attention", "completed"];
+
+export const TASK_VIEW_GROUP_LABEL: Record<TaskViewGroup, string> = {
+  active: "进行中",
+  needs_attention: "需要关注",
+  completed: "已完成",
+};
+
+export const TASK_VIEW_GROUP_DEFAULT_COLLAPSED: Record<TaskViewGroup, boolean> = {
+  active: false,
+  needs_attention: false,
+  completed: true,
+};
+
 export function getTaskListPriority(status: TaskStatus): number {
   return status === "failed" ? 0 : 1;
 }
