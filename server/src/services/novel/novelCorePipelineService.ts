@@ -648,8 +648,21 @@ export class NovelCorePipelineService {
             orderBy: { order: "asc" },
           }),
         ]);
-        if (!novel || chapters.length === 0) {
+        if (!novel) {
           throw new Error("任务执行失败：小说或章节不存在");
+        }
+        if (chapters.length === 0) {
+          // 任务创建后异步执行期间，区间内章节可能已被审稿/质量循环标记为完成或 defer_and_continue，
+          // 被 skipCompleted 过滤为空。这不是硬故障——抛与创建路径一致的 sentinel，让导演自动执行
+          // 的 isNoChaptersToGenerateError 兜底识别并推进 range，而非把任务卡在 failed。
+          const stats = await prisma.chapter.aggregate({
+            where: { novelId },
+            _min: { order: true },
+            _max: { order: true },
+          });
+          const minOrder = stats._min.order ?? 1;
+          const maxOrder = stats._max.order ?? 1;
+          throw new Error(`指定区间内没有可生成的章节。当前可用章节范围为第 ${minOrder} 章到第 ${maxOrder} 章。`);
         }
 
         logPipelineInfo("任务加载完成", {
