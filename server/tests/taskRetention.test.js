@@ -113,3 +113,33 @@ test("falls back to updatedAt when finishedAt is null", () => {
   const deletable = selectDeletableTaskIds([...base, oldByUpdate], NOW, CFG);
   assert.ok(deletable.includes("byUpdate"));
 });
+
+test("keepPerNovel = 0 ages out every terminal row past its window", () => {
+  const cfg = { keepPerNovel: 0, succeededDays: 7, failedDays: 30 };
+  const rows = [
+    row({ id: "old-succ", status: "succeeded", finishedAt: ageDays(8) }),
+    row({ id: "young-succ", status: "succeeded", finishedAt: ageDays(3) }),
+    row({ id: "old-fail", status: "failed", finishedAt: ageDays(40) }),
+  ];
+  const deletable = selectDeletableTaskIds(rows, NOW, cfg);
+  // young-succ still within 7-day window even with keep 0; failed beyond 30d
+  assert.deepEqual(deletable.sort(), ["old-fail", "old-succ"].sort());
+});
+
+test("identical timestamps produce a deterministic deletion set via id tiebreaker", () => {
+  const sameTime = ageDays(10);
+  const make = () => {
+    const rows = [];
+    for (let i = 0; i < 22; i++) {
+      rows.push(row({ id: `t${String(i).padStart(2, "0")}`, finishedAt: sameTime }));
+    }
+    return rows;
+  };
+  const first = selectDeletableTaskIds(make(), NOW, CFG);
+  const second = selectDeletableTaskIds(make().reverse(), NOW, CFG);
+  // 22 rows, keep 20 -> exactly 2 deletable, same set regardless of input order
+  assert.equal(first.length, 2);
+  assert.deepEqual(first.sort(), second.sort());
+  // same timestamp -> id ascending tiebreaker; keep t00..t19, delete t20/t21
+  assert.deepEqual(first.sort(), ["t20", "t21"]);
+});

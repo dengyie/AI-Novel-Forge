@@ -48,7 +48,9 @@ export function selectDeletableTaskIds(
     bucket.sort((a, b) => {
       const aTime = a.finishedAt?.getTime() ?? a.updatedAt.getTime();
       const bTime = b.finishedAt?.getTime() ?? b.updatedAt.getTime();
-      return bTime - aTime;
+      // id tiebreaker keeps the deletion set deterministic when batch tasks
+      // share an identical timestamp.
+      return bTime - aTime || a.id.localeCompare(b.id);
     });
 
     for (let i = 0; i < bucket.length; i++) {

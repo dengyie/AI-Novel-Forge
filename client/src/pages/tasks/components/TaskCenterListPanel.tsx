@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import type { TaskStatus, UnifiedTaskSummary } from "@ai-novel/shared/types/task";
+import type { UnifiedTaskSummary } from "@ai-novel/shared/types/task";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -88,7 +88,7 @@ export default function TaskCenterListPanel({
       completed: [],
     };
     for (const task of tasks) {
-      buckets[getTaskViewGroup(task.status as TaskStatus)].push(task);
+      buckets[getTaskViewGroup(task.status)].push(task);
     }
     return buckets;
   }, [tasks]);
@@ -96,15 +96,23 @@ export default function TaskCenterListPanel({
   // Auto-expand a collapsed group when the selected task falls inside it.
   useEffect(() => {
     if (!selectedId) return;
-    for (const group of TASK_VIEW_GROUP_ORDER) {
-      const inGroup = grouped[group].some(
-        (task) => task.id === selectedId && task.kind === selectedKind,
-      );
-      if (inGroup && collapsed[group]) {
-        setCollapsed((prev) => ({ ...prev, [group]: false }));
+    setCollapsed((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const group of TASK_VIEW_GROUP_ORDER) {
+        if (
+          next[group]
+          && grouped[group].some(
+            (task) => task.id === selectedId && task.kind === selectedKind,
+          )
+        ) {
+          next[group] = false;
+          changed = true;
+        }
       }
-    }
-  }, [selectedId, selectedKind, grouped, collapsed]);
+      return changed ? next : prev;
+    });
+  }, [selectedId, selectedKind, grouped]);
 
   const toggleGroup = (group: TaskViewGroup) => {
     setCollapsed((prev) => ({ ...prev, [group]: !prev[group] }));
