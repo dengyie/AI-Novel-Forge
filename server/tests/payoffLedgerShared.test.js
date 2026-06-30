@@ -6,6 +6,7 @@ const {
   buildPayoffLedgerResponse,
   buildSyntheticPayoffIssues,
   classifyPayoffLedgerItems,
+  isAuditArtifactLedgerKey,
   normalizePayoffLedgerIdentity,
   resolvePayoffLedgerSyncLedgerKey,
   sanitizePayoffLedgerSyncItem,
@@ -361,4 +362,89 @@ test("applyGraceExtension uses targetEnd as nextStart when targetStartChapterOrd
   assert.equal(item.targetEndChapterOrder, 25, "nextEnd should be targetEnd + STEP");
   assert.equal(item.riskSignals.length, 1);
   assert.equal(item.riskSignals[0].code, "payoff_window_extended");
+});
+
+// --- isAuditArtifactLedgerKey ---
+
+test("isAuditArtifactLedgerKey identifies chapterN_missing_progress pattern", () => {
+  assert.equal(isAuditArtifactLedgerKey("chapter36_missing_progress"), true);
+  assert.equal(isAuditArtifactLedgerKey("chapter23_24_missing_progress"), true);
+  assert.equal(isAuditArtifactLedgerKey("ch9_missing_progress"), true);
+  assert.equal(isAuditArtifactLedgerKey("ch12_13_overdue"), true);
+  // 不以审计后缀结尾 → 不是伪项
+  assert.equal(isAuditArtifactLedgerKey("ch9_foreshadow_01"), false);
+  assert.equal(isAuditArtifactLedgerKey("ch12_goal_change"), false);
+  // 非 chapter/ch 前缀 → 不是伪项
+  assert.equal(isAuditArtifactLedgerKey("slate_map_clue_missing_progress"), false);
+  assert.equal(isAuditArtifactLedgerKey("flametail_golden_aftermath"), false);
+  // 空值
+  assert.equal(isAuditArtifactLedgerKey(null), false);
+  assert.equal(isAuditArtifactLedgerKey(""), false);
+});
+
+// --- sanitizePayoffLedgerSyncItem: pseudo ledger key interception ---
+
+test("sanitizePayoffLedgerSyncItem demotes overdue audit-artifact keys to pending_payoff", () => {
+  const item = sanitizePayoffLedgerSyncItem({
+    ledgerKey: "chapter36_missing_progress",
+    title: "第36章矿洞避雨伏笔推进缺失",
+    scopeType: "chapter",
+    currentStatus: "overdue",
+    targetStartChapterOrder: 36,
+    targetEndChapterOrder: 36,
+    payoffChapterId: null,
+    payoffChapterOrder: null,
+    riskSignals: [{
+      code: "payoff_missing_progress",
+      severity: "high",
+      summary: "第36章明确标记推进缺失，已过目标窗口仍未兑现。",
+    }],
+    statusReason: "目标窗口已过，相关伏笔未兑现，标记为overdue。",
+  });
+
+  assert.equal(item.currentStatus, "pending_payoff");
+  // 自指的 payoff_missing_progress 被过滤掉，只剩降级信号
+  const codes = item.riskSignals.map((s) => s.code);
+  assert.ok(!codes.includes("payoff_missing_progress"), "self-referencing signal should be removed");
+  assert.ok(codes.includes("pseudo_ledger_demoted"), "demoted signal should be added");
+});
+
+test("sanitizePayoffLedgerSyncItem does not demote overdue with real ledger keys", () => {
+  const item = sanitizePayoffLedgerSyncItem({
+    ledgerKey: "windvillage_intel",
+    title: "风来村情报",
+    scopeType: "volume",
+    currentStatus: "overdue",
+    targetStartChapterOrder: 10,
+    targetEndChapterOrder: 12,
+    payoffChapterId: null,
+    payoffChapterOrder: null,
+    riskSignals: [],
+    statusReason: "逾期未兑现",
+  });
+
+  // 有窗口的正常 overdue 不被拦截
+  assert.equal(item.currentStatus, "overdue");
+  assert.equal(item.riskSignals.length, 0);
+});
+
+// --- buildSyntheticPayoffIssues: no feedback loop on pseudo items ---
+
+test("buildSyntheticPayoffIssues skips audit-artifact ledger items to break feedback loop", () => {
+  const items = [
+    createLedgerItem({
+      ledgerKey: "chapter36_missing_progress",
+      title: "第36章矿洞避雨伏笔推进缺失",
+      currentStatus: "pending_payoff",
+      riskSignals: [{
+        code: "payoff_missing_progress",
+        severity: "high",
+        summary: "已过目标窗口仍未兑现。",
+      }],
+    }),
+  ];
+
+  const issues = buildSyntheticPayoffIssues(items, 40);
+  // 伪项不再二次产出审计问题
+  assert.equal(issues.length, 0, "pseudo ledger items should not emit synthetic issues");
 });

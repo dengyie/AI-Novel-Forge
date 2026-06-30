@@ -130,6 +130,39 @@ function hasExplicitPayoffWindow(item: PayoffLedgerSyncCandidate): boolean {
     || Boolean(item.payoffChapterId?.trim());
 }
 
+/**
+ * 识别"审计问题被 LLM 误当成伏笔回灌"的伪 ledger 项。
+ *
+ * 反馈环：章节审校产出 payoff_missing_progress / payoff_overdue 审计问题 →
+ * 这些问题文本被喂进 payoffLedgerSync prompt 的 payoffAuditIssuesText →
+ * LLM 把"审计问题"本身误当成一条伏笔，造出 ledgerKey 形如
+ * `chapter36_missing_progress` 的项（标题"第N章伏笔推进缺失"、evidence 空、
+ * riskSignal 自指 payoff_missing_progress）。它带章节窗口 → 被标 overdue →
+ * 触发 PIPELINE_REPLAN_REQUIRED → 任务 failed → 下一轮又回灌，自我放大。
+ *
+ * 真实伏笔的 ledgerKey 是语义化的（slate_map_clue、flametail_golden_aftermath），
+ * 不会以 chapterN_ 开头并以 _missing_progress / _overdue 等审计后缀结尾。
+ */
+const PSEUDO_LEDGER_AUDIT_SUFFIXES = [
+  "missing_progress",
+  "overdue",
+  "payoff_overdue",
+  "payoff_missing_progress",
+  "no_progress",
+];
+
+export function isAuditArtifactLedgerKey(ledgerKey: string | null | undefined): boolean {
+  const key = String(ledgerKey ?? "").trim().toLowerCase();
+  if (!key) {
+    return false;
+  }
+  // 必须是"按章节序号命名"的 key（chapter36_… / ch23_24_…），真实伏笔不会这样命名。
+  if (!/^(chapter|ch)\d+(_\d+)*_/.test(key)) {
+    return false;
+  }
+  return PSEUDO_LEDGER_AUDIT_SUFFIXES.some((suffix) => key.endsWith(suffix));
+}
+
 function compareExistingLedgerIdentityRows(
   item: PayoffLedgerSyncCandidate,
   left: ExistingLedgerIdentityRow,
@@ -177,6 +210,22 @@ export function resolvePayoffLedgerSyncLedgerKey(
 }
 
 export function sanitizePayoffLedgerSyncItem<T extends PayoffLedgerSyncCandidate>(item: T): T {
+  // 伪 ledger 项（审计问题被误当成伏笔回灌）即使带章节窗口也强制降级，
+  // 永不允许进 overdue —— 否则触发 PIPELINE_REPLAN_REQUIRED 形成自我放大环。
+  if (isAuditArtifactLedgerKey(item.ledgerKey) && item.currentStatus === "overdue") {
+    return {
+      ...item,
+      currentStatus: "pending_payoff",
+      riskSignals: dedupeRiskSignals([
+        ...item.riskSignals.filter((signal) => signal.code !== "payoff_missing_progress"),
+        {
+          code: "pseudo_ledger_demoted",
+          severity: "low",
+          summary: "该账本项疑似由审计问题回灌生成（非真实伏笔），已降级为待推进，不再触发逾期重规划。",
+        },
+      ]),
+    };
+  }
   if (item.currentStatus !== "overdue" || hasExplicitPayoffWindow(item)) {
     return item;
   }
@@ -356,7 +405,11 @@ export function buildSyntheticPayoffIssues(
   chapterOrder?: number | null,
 ): SyntheticPayoffIssue[] {
   const issues: SyntheticPayoffIssue[] = [];
-  const classified = classifyPayoffLedgerItems(items, chapterOrder);
+  // 伪 ledger 项（审计问题被 LLM 误当成伏笔回灌生成，ledgerKey 形如
+  // chapterN_missing_progress）整体排除：它们不是真实伏笔，再产出审计问题会与
+  // ledger sync 形成"审计问题⇄ledger 项"自我放大环，最终触发 PIPELINE_REPLAN_REQUIRED。
+  const realItems = items.filter((item) => !isAuditArtifactLedgerKey(item.ledgerKey));
+  const classified = classifyPayoffLedgerItems(realItems, chapterOrder);
 
   for (const item of classified.overdueItems) {
     issues.push({
@@ -386,7 +439,7 @@ export function buildSyntheticPayoffIssues(
     }
   }
 
-  for (const item of items) {
+  for (const item of realItems) {
     for (const signal of item.riskSignals) {
       if (
         signal.code !== "payoff_paid_without_setup"
