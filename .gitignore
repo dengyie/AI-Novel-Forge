@@ -39,3 +39,10 @@ server/prisma-diff-migrations-to-schema.sql
 .spec-workflow/
 .codex-backups/
 .cursor/
+
+# Playwright MCP debug artifacts
+.playwright-mcp/
+console-errors
+current-page
+network-requests
+page-*.png

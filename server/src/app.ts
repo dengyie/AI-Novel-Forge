@@ -47,6 +47,7 @@ import { getSharedNovelServices } from "./services/novel/application/sharedNovel
 import { novelSideEffectWorker } from "./events/sideEffects";
 import { NovelPipelineRuntimeService } from "./services/novel/NovelPipelineRuntimeService";
 import { recoveryTaskService } from "./services/task/RecoveryTaskService";
+import { taskRetentionService } from "./services/task/TaskRetentionService";
 import {
   ensureSystemResourceStarterData,
   hasSystemResourceBootstrapChanges,
@@ -247,6 +248,7 @@ function scheduleLogRetentionCleanup(): void {
 function initializeBackgroundServices(): BackgroundServicesHandle {
   ragServices.ragWorker.start();
   ragServices.ragRetrievalTraceRetention.start();
+  taskRetentionService.start();
   novelSideEffectWorker.start();
   const directorWorker = new DirectorWorker();
   void directorWorker.start().catch((error) => {
@@ -285,6 +287,7 @@ function initializeBackgroundServices(): BackgroundServicesHandle {
       novelSideEffectWorker.stop();
       ragServices.ragWorker.stop();
       ragServices.ragRetrievalTraceRetention.stop();
+      taskRetentionService.stop();
       bookAnalysisService.stopWatchdog();
       novelPipelineRuntimeService.stopWatchdog();
     },
