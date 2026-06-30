@@ -548,6 +548,8 @@ export class GenerationContextAssembler {
     const previousChapterTail = extractChapterTail(recentChapters[0]?.content);
 
     const storyWorldSlice = worldContextBlock?.rawSlice ?? null;
+    const worldBlock = worldContextBlock?.promptBlock
+      ?? "本书世界上下文：暂无。请根据小说基础信息、章节任务和已有连续性推进，不要凭空新增复杂世界规则。";
     const openingHint = await this.buildOpeningConstraintHint(novelId, chapter.order);
 
     // Phase 2 缺陷6：合并 baseContextPackage 与 contextPackage 为单一构建。
@@ -566,7 +568,7 @@ export class GenerationContextAssembler {
         taskSheet: chapter.taskSheet ?? null,
         sceneCards: chapter.sceneCards ?? null,
         hook: chapter.hook ?? null,
-        supportingContextText: "",
+        supportingContextText: worldBlock,
       },
       plan: mappedPlan,
       narrativeProgressHint: buildNarrativeProgressHint(
