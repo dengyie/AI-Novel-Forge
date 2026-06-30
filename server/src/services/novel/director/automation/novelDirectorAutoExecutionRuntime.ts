@@ -236,9 +236,18 @@ export class NovelDirectorAutoExecutionRuntime {
                   progress: 0.93,
                 },
               );
+              await syncAutoExecutionTaskState(this.deps, {
+                taskId: input.taskId,
+                novelId: input.novelId,
+                request: input.request,
+                range,
+                autoExecution,
+                isBackgroundRunning: false,
+                resumeStage: "pipeline",
+              });
               return;
             }
-            throw error;
+            continue autoExecutionLoop;
           }
           ({ range, autoExecution } = await resolveAutoExecutionRuntimeRangeAndState(this.deps, {
             novelId: input.novelId,
@@ -650,6 +659,15 @@ export class NovelDirectorAutoExecutionRuntime {
                   progress: 0.98,
                 },
               );
+              await syncAutoExecutionTaskState(this.deps, {
+                taskId: input.taskId,
+                novelId: input.novelId,
+                request: input.request,
+                range,
+                autoExecution,
+                isBackgroundRunning: false,
+                resumeStage: "pipeline",
+              });
               return;
             }
             await syncAutoExecutionTaskState(this.deps, {

@@ -333,8 +333,8 @@ export class NovelDirectorContinueRuntime {
         ? {
             ...seedPayload.autoExecution,
             circuitBreaker: shouldResetBreaker
-              ? buildClosedDirectorCircuitBreakerState(prevBreaker)
-              : buildClosedDirectorCircuitBreakerState(null),
+              ? buildClosedDirectorCircuitBreakerState(null)
+              : buildClosedDirectorCircuitBreakerState(prevBreaker),
           }
         : null;
       const resumedChapterId = (

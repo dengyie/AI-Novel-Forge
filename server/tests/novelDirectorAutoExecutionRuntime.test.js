@@ -374,33 +374,30 @@ test("runFromReady treats explicit range continuation as approval for quality-al
     },
   });
 
-  await assert.rejects(
-    runtime.runFromReady({
-      taskId: "task-auto-exec",
-      novelId: "novel-1",
-      request: buildRequest(),
-      existingState: {
-        enabled: true,
-        firstChapterId: "chapter-1",
-        startOrder: 1,
-        endOrder: 3,
-        totalChapterCount: 3,
-        pipelineJobId: "job-quality-alert",
-        pipelineStatus: "succeeded",
-      },
-      existingPipelineJobId: "job-quality-alert",
-      resumeCheckpointType: "chapter_batch_ready",
-      approveAutoExecutionScope: true,
-    }),
-    /TRACE_STOP_AFTER_NEXT_PIPELINE_START/,
-  );
+  await runtime.runFromReady({
+    taskId: "task-auto-exec",
+    novelId: "novel-1",
+    request: buildRequest(),
+    existingState: {
+      enabled: true,
+      firstChapterId: "chapter-1",
+      startOrder: 1,
+      endOrder: 3,
+      totalChapterCount: 3,
+      pipelineJobId: "job-quality-alert",
+      pipelineStatus: "succeeded",
+    },
+    existingPipelineJobId: "job-quality-alert",
+    resumeCheckpointType: "chapter_batch_ready",
+    approveAutoExecutionScope: true,
+  });
 
   assert.equal(calls.some((call) => call[0] === "shouldAutoContinueQualityRepair"), false);
   assert.ok(!calls.some((call) => call[0] === "recordCheckpoint"));
-  assert.deepEqual(
-    calls.filter((call) => call[0] === "startPipelineJob"),
-    [["startPipelineJob", "novel-1", 2, 2]],
-  );
+  const startCalls = calls.filter((call) => call[0] === "startPipelineJob");
+  assert.equal(startCalls.length, 3, "should retry startPipelineJob up to MAX_CONSECUTIVE_START_FAILURES");
+  const failedCalls = calls.filter((call) => call[0] === "markTaskFailed");
+  assert.equal(failedCalls.length, 1, "should mark task failed after 3 consecutive start failures");
 });
 
 test("runFromReady resumes a pending manual-recovery pipeline job before waiting on it", async () => {

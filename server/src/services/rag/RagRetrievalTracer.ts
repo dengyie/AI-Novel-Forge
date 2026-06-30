@@ -175,7 +175,7 @@ export class RagRetrievalTracer {
       ...this.extraScope,
     });
 
-    prisma.ragRetrievalTrace.create({
+    void prisma.ragRetrievalTrace.create({
       data: {
         tenantId: this.context.tenantId,
         novelId: this.context.novelId,
