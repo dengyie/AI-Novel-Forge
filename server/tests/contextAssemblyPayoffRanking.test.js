@@ -64,3 +64,13 @@ test("rankPendingByChapterAge does not mutate input array", () => {
   rankPendingByChapterAge(input, 22);
   assert.deepEqual(input.map((item) => item.id), snapshot);
 });
+
+test("rankPendingByChapterAge sorts unknown-anchor payoffs last", () => {
+  const ranked = rankPendingByChapterAge([
+    payoff({ id: "old", firstSeenChapterOrder: 4 }),
+    payoff({ id: "unknown", targetStartChapterOrder: null, targetEndChapterOrder: 10 }),
+    payoff({ id: "recent", firstSeenChapterOrder: 20 }),
+  ], 22);
+
+  assert.deepEqual(ranked.map((item) => item.id), ["old", "recent", "unknown"]);
+});

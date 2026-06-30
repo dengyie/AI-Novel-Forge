@@ -44,10 +44,19 @@ export function rankPendingByChapterAge(
   chapterOrder: number,
 ): CanonicalPayoffState[] {
   return payoffs.slice().sort((left, right) => {
-    const leftAnchor = left.firstSeenChapterOrder ?? left.targetStartChapterOrder ?? 0;
-    const rightAnchor = right.firstSeenChapterOrder ?? right.targetStartChapterOrder ?? 0;
-    const leftAge = chapterOrder - leftAnchor;
-    const rightAge = chapterOrder - rightAnchor;
+    const leftKnown = left.firstSeenChapterOrder ?? left.targetStartChapterOrder;
+    const rightKnown = right.firstSeenChapterOrder ?? right.targetStartChapterOrder;
+    if (leftKnown == null && rightKnown == null) {
+      return 0;
+    }
+    if (leftKnown == null) {
+      return 1;
+    }
+    if (rightKnown == null) {
+      return -1;
+    }
+    const leftAge = chapterOrder - leftKnown;
+    const rightAge = chapterOrder - rightKnown;
     if (leftAge !== rightAge) {
       return rightAge - leftAge;
     }

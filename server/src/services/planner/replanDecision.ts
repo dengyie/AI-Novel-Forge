@@ -181,8 +181,8 @@ function resolveReplanAction(signal: ReplanSignal, input: ReplanDecisionInput): 
     return "stop_for_replan";
   }
   if (signal === "blocking_audit") {
-    const overdueCount = (input.ledgerSummary?.overdueCount ?? 0) + collectBlockingLedgerKeys(input.blockingLedgerKeys, input.snapshot).length;
-    if (overdueCount > 0 && (overduePayoffAffectsCurrentChapter(input) || maxOverdueDistance(input) >= OVERDUE_PAYOFF_STOP_WINDOW)) {
+    const blockingKeys = collectBlockingLedgerKeys(input.blockingLedgerKeys, input.snapshot);
+    if (blockingKeys.length > 0 && (overduePayoffAffectsCurrentChapter(input) || maxOverdueDistance(input) >= OVERDUE_PAYOFF_STOP_WINDOW)) {
       return "stop_for_replan";
     }
     return "local_patch_plan";

@@ -566,6 +566,14 @@ export class ImageGenerationService {
       const oldest = this.queue.shift();
       if (oldest) {
         this.queueSet.delete(oldest);
+        void prisma.imageGenerationTask.update({
+          where: { id: oldest },
+          data: {
+            status: "failed",
+            error: "队列已满，任务被逐出。请重新提交。",
+            pendingManualRecovery: true,
+          },
+        }).catch(() => null);
       }
     }
     this.queue.push(taskId);

@@ -226,10 +226,10 @@ export function applyGraceExtension<T extends PayoffLedgerSyncCandidate>(
   if (countWindowExtensions(item.riskSignals) >= PAYOFF_WINDOW_EXTENSION_MAX) {
     return item;
   }
-  const targetStart = typeof item.targetStartChapterOrder === "number"
-    ? item.targetStartChapterOrder
+  const hasTargetStart = typeof item.targetStartChapterOrder === "number";
+  const nextStart = hasTargetStart
+    ? item.targetStartChapterOrder! + PAYOFF_WINDOW_EXTENSION_STEP
     : targetEnd;
-  const nextStart = targetStart + PAYOFF_WINDOW_EXTENSION_STEP;
   const nextEnd = targetEnd + PAYOFF_WINDOW_EXTENSION_STEP;
   return {
     ...item,
