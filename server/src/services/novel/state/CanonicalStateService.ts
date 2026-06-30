@@ -5,6 +5,7 @@ import type {
 import type { GenerationContextPackage } from "@ai-novel/shared/types/chapterRuntime";
 import { prisma } from "../../../db/prisma";
 import { characterResourceLedgerService } from "../characterResource/CharacterResourceLedgerService";
+import { isAuditArtifactLedgerKey } from "../../payoff/payoffLedgerShared";
 
 function compactText(value: string | null | undefined, fallback = ""): string {
   return String(value ?? "").replace(/\s+/g, " ").trim() || fallback;
@@ -280,7 +281,7 @@ export class CanonicalStateService {
       && typeof chapterOrder === "number"
       && item.targetEndChapterOrder <= chapterOrder + 1);
     const overduePayoffs = payoffItems
-      .filter((item) => item.currentStatus === "overdue")
+      .filter((item) => item.currentStatus === "overdue" && !isAuditArtifactLedgerKey(item.ledgerKey))
       .map((item) => ({
         id: item.id,
         ledgerKey: item.ledgerKey,
