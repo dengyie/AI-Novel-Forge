@@ -3,6 +3,7 @@ import type { ResolvedStyleContext } from "@ai-novel/shared/types/styleEngine";
 import type { PayoffLedgerResponse } from "@ai-novel/shared/types/payoffLedger";
 import { buildPlannerStyleContractSummaryText } from "../styleEngine/styleContractText";
 import { buildStoryModePromptBlock, normalizeStoryModeOutput } from "../storyMode/storyModeProfile";
+import { isAuditArtifactLedgerKey } from "../payoff/payoffLedgerShared";
 import { characterDynamicsQueryService } from "../novel/dynamics/CharacterDynamicsQueryService";
 
 export type PlannerStoryModeRow = {
@@ -215,11 +216,11 @@ export function buildPlannerPayoffLedgerContext(ledger: PayoffLedgerResponse, ch
     .slice(0, 6)
     .map((item) => `${item.title} | ${item.summary}`);
   const overdueItems = ledger.items
-    .filter((item) => item.currentStatus === "overdue")
+    .filter((item) => item.currentStatus === "overdue" && !isAuditArtifactLedgerKey(item.ledgerKey))
     .slice(0, 4)
     .map((item) => `${item.title} | ${item.statusReason ?? item.summary}`);
   const touchNowItems = ledger.items
-    .filter((item) => item.currentStatus !== "paid_off" && item.currentStatus !== "failed")
+    .filter((item) => item.currentStatus !== "paid_off" && item.currentStatus !== "failed" && !isAuditArtifactLedgerKey(item.ledgerKey))
     .filter((item) => (
       (typeof item.targetStartChapterOrder === "number" && item.targetStartChapterOrder <= chapterOrder)
       || (typeof item.targetEndChapterOrder === "number" && item.targetEndChapterOrder <= chapterOrder + 1)
