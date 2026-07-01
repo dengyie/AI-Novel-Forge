@@ -405,7 +405,13 @@ export function classifyPayoffLedgerItems(
   overdueItems: PayoffLedgerItem[];
   paidOffItems: PayoffLedgerItem[];
 } {
-  const overdueItems = items.filter((item) => item.currentStatus === "overdue");
+  // premature overdue（窗口未过却标 overdue）不计入 overdueItems：它会同时污染
+  // summary.overdueCount（给 planner 的文字摘要）和 buildSyntheticPayoffIssues 产出的
+  // payoff_overdue 合成审计问题——后者会流回审计→ledger sync，是伪账本反馈环的同类风险。
+  // 与 CanonicalStateService overduePayoffs 过滤共用 isPrematureOverduePayoff 判据。
+  const overdueItems = items.filter(
+    (item) => item.currentStatus === "overdue" && !isPrematureOverduePayoff(item, chapterOrder),
+  );
   const pendingItems = items.filter((item) => isPendingLike(item.currentStatus));
   const urgentItems = pendingItems.filter((item) => isUrgent(item, chapterOrder));
   const paidOffItems = items.filter((item) => item.currentStatus === "paid_off");

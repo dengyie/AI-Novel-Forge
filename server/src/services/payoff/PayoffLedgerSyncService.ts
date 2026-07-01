@@ -340,8 +340,12 @@ export class PayoffLedgerSyncService {
     };
   }
 
-  private async syncLedgerOpenConflicts(novelId: string, items: PayoffLedgerItem[]): Promise<void> {
-    const syntheticIssues = buildSyntheticPayoffIssues(items);
+  private async syncLedgerOpenConflicts(
+    novelId: string,
+    items: PayoffLedgerItem[],
+    chapterOrder?: number | null,
+  ): Promise<void> {
+    const syntheticIssues = buildSyntheticPayoffIssues(items, chapterOrder);
     const activeConflictKeys = syntheticIssues.map((issue) => `payoff:${issue.ledgerKey}:${issue.code}`);
 
     await prisma.$transaction(async (tx) => {
@@ -547,7 +551,7 @@ export class PayoffLedgerSyncService {
 
       const rows = await this.loadLedgerRows(novelId);
       const items = rows.map(mapPayoffLedgerRow);
-      await this.syncLedgerOpenConflicts(novelId, items);
+      await this.syncLedgerOpenConflicts(novelId, items, chapterOrder);
       return buildPayoffLedgerResponse(items, chapterOrder);
     } catch (error) {
       if (existingRows.length > 0) {

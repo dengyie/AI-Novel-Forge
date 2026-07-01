@@ -93,6 +93,34 @@ test("classifyPayoffLedgerItems separates pending urgent overdue and paid-off it
   assert.deepEqual(classified.paidOffItems.map((item) => item.ledgerKey), ["paid"]);
 });
 
+test("classifyPayoffLedgerItems excludes premature overdue from overdueItems", () => {
+  // 窗口未过却标 overdue（targetEnd 65 ≥ 当前第 56 章）不计入 overdueItems，
+  // 防止污染 summary.overdueCount 和 buildSyntheticPayoffIssues 的 payoff_overdue 产出。
+  // 真逾期项（targetEnd 40 < 56）仍正常计入。
+  const items = [
+    createLedgerItem({
+      ledgerKey: "premature",
+      title: "碎鳞药剂倒计时",
+      currentStatus: "overdue",
+      targetStartChapterOrder: 55,
+      targetEndChapterOrder: 65,
+    }),
+    createLedgerItem({
+      ledgerKey: "genuine",
+      title: "旧线索回收",
+      currentStatus: "overdue",
+      targetStartChapterOrder: 35,
+      targetEndChapterOrder: 40,
+    }),
+  ];
+
+  const classified = classifyPayoffLedgerItems(items, 56);
+
+  assert.deepEqual(classified.overdueItems.map((item) => item.ledgerKey), ["genuine"]);
+  // premature 项 currentStatus 字段仍是 overdue（消费时过滤，不改 DB），故也不落入 pendingItems
+  assert.deepEqual(classified.pendingItems.map((item) => item.ledgerKey), []);
+});
+
 test("buildSyntheticPayoffIssues surfaces overdue missing progress and payoff risk signals", () => {
   const items = [
     createLedgerItem({
@@ -160,6 +188,10 @@ test("buildPayoffLedgerResponse orders items by risk and computes summary counts
       ledgerKey: "overdue",
       title: "黑市账户异常",
       currentStatus: "overdue",
+      // 窗口真过期（targetEnd 4 < 当前第 5 章），确保是真 overdue 而非 premature，
+      // 才计入 overdueCount。premature 守卫的专项覆盖在 sanitize 用例里。
+      targetStartChapterOrder: 3,
+      targetEndChapterOrder: 4,
       updatedAt: "2026-04-05T10:00:04.000Z",
     }),
   ], 5);
