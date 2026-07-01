@@ -14,8 +14,11 @@ import {
   stateService,
 } from "../../state/StateService";
 import {
+  buildReopenedTerminalRiskSignal,
   clearStaleRiskSignal,
   dedupeRiskSignals,
+  isTerminalPayoffStatus,
+  sanitizePayoffLedgerSyncItem,
   serializeLedgerJson,
 } from "../../payoff/payoffLedgerShared";
 import { characterResourceLedgerService } from "../characterResource/CharacterResourceLedgerService";
@@ -603,8 +606,8 @@ export class ChapterArtifactDeltaService {
     }
     const now = new Date();
     await prisma.$transaction(async (tx) => {
-      for (const item of input.output.payoffDeltas) {
-        const ledgerKey = normalizeLedgerKey(item.ledgerKey, normalizeLedgerKey(item.title, `chapter_${input.chapterOrder}_payoff`));
+      for (const rawItem of input.output.payoffDeltas) {
+        const ledgerKey = normalizeLedgerKey(rawItem.ledgerKey, normalizeLedgerKey(rawItem.title, `chapter_${input.chapterOrder}_payoff`));
         const previous = await tx.payoffLedgerItem.findUnique({
           where: {
             novelId_ledgerKey: {
@@ -613,6 +616,35 @@ export class ChapterArtifactDeltaService {
             },
           },
         });
+        // 与 syncLedger 路径对齐：章节增量同样要过 overdue 误判清洗（审计伪项 / 无窗口 /
+        // premature-overdue），否则 LLM 在章节产出里直接标 overdue 会绕过写入层守卫落库
+        // （如 tujian_black_screen 窗口60-65 在 ch59 被标 overdue）。
+        const item = sanitizePayoffLedgerSyncItem(rawItem, input.chapterOrder);
+        // 终态保护：previous 已是 paid_off/failed 时，LLM 章节增量不得自动重开为 active 状态。
+        // 保留终态项既有信号，仅追加 payoff_regressed 让人工可见，跳过 upsert。
+        if (previous && isTerminalPayoffStatus(previous.currentStatus) && !isTerminalPayoffStatus(item.currentStatus)) {
+          const previousSignals = ((): Array<{ code: string; severity: "low" | "medium" | "high" | "critical"; summary: string; stale?: boolean }> => {
+            try {
+              const parsed = previous.riskSignalsJson ? JSON.parse(previous.riskSignalsJson) : [];
+              return Array.isArray(parsed) ? parsed : [];
+            } catch {
+              return [];
+            }
+          })();
+          const protectedSignals = dedupeRiskSignals([
+            ...previousSignals.filter((signal) => signal.code !== "payoff_regressed"),
+            buildReopenedTerminalRiskSignal(previous.currentStatus, item.currentStatus),
+          ]);
+          await tx.payoffLedgerItem.update({
+            where: { id: previous.id },
+            data: {
+              riskSignalsJson: serializeLedgerJson(protectedSignals),
+              lastSnapshotId: input.stateSnapshotId ?? previous.lastSnapshotId ?? null,
+              updatedAt: now,
+            },
+          });
+          continue;
+        }
         const setupChapterId = this.resolveChapterReference({
           value: item.setupChapterId ?? item.setupChapterOrder ?? item.firstSeenChapterOrder,
           chapters: input.chapters,
