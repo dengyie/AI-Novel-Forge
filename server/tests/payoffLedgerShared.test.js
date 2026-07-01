@@ -4,9 +4,11 @@ const assert = require("node:assert/strict");
 const {
   applyGraceExtension,
   buildPayoffLedgerResponse,
+  buildReopenedTerminalRiskSignal,
   buildSyntheticPayoffIssues,
   classifyPayoffLedgerItems,
   isAuditArtifactLedgerKey,
+  isTerminalPayoffStatus,
   normalizePayoffLedgerIdentity,
   resolvePayoffLedgerSyncLedgerKey,
   sanitizePayoffLedgerSyncItem,
@@ -461,6 +463,32 @@ test("applyGraceExtension uses targetEnd as nextStart when targetStartChapterOrd
 });
 
 // --- isAuditArtifactLedgerKey ---
+
+test("isTerminalPayoffStatus identifies paid_off and failed only", () => {
+  assert.equal(isTerminalPayoffStatus("paid_off"), true);
+  assert.equal(isTerminalPayoffStatus("failed"), true);
+  // active 状态一律非终态，LLM 重报到这些状态属于"重开"
+  assert.equal(isTerminalPayoffStatus("overdue"), false);
+  assert.equal(isTerminalPayoffStatus("pending_payoff"), false);
+  assert.equal(isTerminalPayoffStatus("setup"), false);
+  assert.equal(isTerminalPayoffStatus("hinted"), false);
+  // 空值
+  assert.equal(isTerminalPayoffStatus(null), false);
+  assert.equal(isTerminalPayoffStatus(""), false);
+  assert.equal(isTerminalPayoffStatus(undefined), false);
+});
+
+test("buildReopenedTerminalRiskSignal produces human-readable payoff_regressed signal", () => {
+  const fromPaid = buildReopenedTerminalRiskSignal("paid_off", "overdue");
+  assert.equal(fromPaid.code, "payoff_regressed");
+  assert.equal(fromPaid.severity, "high");
+  assert.match(fromPaid.summary, /已兑现/);
+  assert.match(fromPaid.summary, /overdue/);
+
+  const fromFailed = buildReopenedTerminalRiskSignal("failed", "pending_payoff");
+  assert.match(fromFailed.summary, /已失败/);
+  assert.match(fromFailed.summary, /pending_payoff/);
+});
 
 test("isAuditArtifactLedgerKey identifies chapterN_missing_progress pattern", () => {
   // 章号前缀 + 审计后缀（旧命名形态）

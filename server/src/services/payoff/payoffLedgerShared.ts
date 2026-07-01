@@ -123,6 +123,33 @@ function isUnfinishedPayoffStatus(status: PayoffLedgerStatus): boolean {
   return status !== "paid_off" && status !== "failed";
 }
 
+const TERMINAL_PAYOFF_STATUSES: ReadonlySet<PayoffLedgerStatus> = new Set(["paid_off", "failed"]);
+
+/**
+ * 终态判定：paid_off / failed。终态一旦落定，LLM 对账不得自动重开为 active 状态
+ * （setup/hinted/pending_payoff/overdue）。重复登记的旧窗口伏笔每轮都会被 LLM 重报，
+ * 若无保护会反复 reopen→replan→failed。终态只能由显式人工/系统动作改变。
+ */
+export function isTerminalPayoffStatus(status: PayoffLedgerStatus | string | null | undefined): boolean {
+  return Boolean(status) && TERMINAL_PAYOFF_STATUSES.has(status as PayoffLedgerStatus);
+}
+
+/**
+ * 构造 payoff_regressed 信号：LLM 对账试图把已终态（paid_off/failed）的伏笔重开为
+ * active 状态时，记一条人工可见的风险信号。终态 currentStatus 由调用方负责保留，
+ * 本函数只产出信号，不改变状态。
+ */
+export function buildReopenedTerminalRiskSignal(
+  previousStatus: PayoffLedgerStatus,
+  nextStatus: PayoffLedgerStatus,
+): PayoffLedgerRiskSignal {
+  return {
+    code: "payoff_regressed",
+    severity: "high",
+    summary: `LLM 对账试图把已${previousStatus === "paid_off" ? "兑现" : "失败"}的伏笔重新标记为「${nextStatus}」，已拒绝重开，保留终态。`,
+  };
+}
+
 function hasExplicitPayoffWindow(item: PayoffLedgerSyncCandidate): boolean {
   return typeof item.targetStartChapterOrder === "number"
     || typeof item.targetEndChapterOrder === "number"

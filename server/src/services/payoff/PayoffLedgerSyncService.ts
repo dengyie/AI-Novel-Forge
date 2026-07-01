@@ -8,10 +8,12 @@ import {
   appendStaleRiskSignal,
   buildPayoffLedgerResponse,
   applyGraceExtension,
+  buildReopenedTerminalRiskSignal,
   buildSyntheticPayoffIssues,
   clearStaleRiskSignal,
   dedupeRiskSignals,
   isAuditArtifactLedgerKey,
+  isTerminalPayoffStatus,
   mapPayoffLedgerRow,
   resolvePayoffLedgerSyncLedgerKey,
   sanitizePayoffLedgerSyncItem,
@@ -460,6 +462,29 @@ export class PayoffLedgerSyncService {
       await prisma.$transaction(async (tx) => {
         for (const item of resolvedItems) {
           const previous = existingRows.find((row) => row.ledgerKey === item.ledgerKey);
+          // 终态保护：previous 已是 paid_off/failed，LLM 重报不得自动重开为 active 状态。
+          // 重复登记的旧窗口伏笔每轮都会被 LLM 重报为 overdue，若无保护会反复 reopen→
+          // replan→failed。终态只能由显式人工/系统动作改变，对账不得覆盖。保留终态项的
+          // 既有信号，仅追加 payoff_regressed 让人工可见，其余字段（含 currentStatus）不动。
+          if (previous && isTerminalPayoffStatus(previous.currentStatus) && !isTerminalPayoffStatus(item.currentStatus)) {
+            const previousSignals = safeParseJson<Array<{ code: string; severity: "low" | "medium" | "high" | "critical"; summary: string; stale?: boolean }>>(
+              previous.riskSignalsJson,
+              [],
+            );
+            const protectedSignals = dedupeRiskSignals([
+              ...previousSignals.filter((signal) => signal.code !== "payoff_regressed"),
+              buildReopenedTerminalRiskSignal(previous.currentStatus, item.currentStatus),
+            ]);
+            await tx.payoffLedgerItem.update({
+              where: { id: previous.id },
+              data: {
+                riskSignalsJson: serializeLedgerJson(protectedSignals),
+                lastSnapshotId: latestSnapshotId ?? previous.lastSnapshotId ?? null,
+                updatedAt: now,
+              },
+            });
+            continue;
+          }
           const normalizedChapterRefs = normalizePayoffLedgerPromptChapterRefs({
             item,
             previous,
