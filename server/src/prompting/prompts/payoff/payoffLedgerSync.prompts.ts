@@ -127,6 +127,7 @@ export const payoffLedgerSyncPrompt: PromptAsset<
       "4. 如果没有足够铺垫就直接兑现，要保留该项并输出风险信号。",
       "5. 如果已经过了明确目标窗口仍未兑现，要标成 overdue；没有 targetStartChapterOrder / targetEndChapterOrder / payoffChapterOrder / payoffChapterId 时，不要标成 overdue，只能用 pending_payoff 加 riskSignals 提醒。",
       "6. 如果输入里只有提示和铺垫，没有明确兑现证据，不要误判为 paid_off。",
+      "7. 【重要】最近 payoff 审校问题（payoffAuditIssuesText）只是校验信号，不是伏笔来源。不要为'第N章推进缺失/未touch/缺失义务'这类审计结论创建新的 ledger item。审计指出某章没推进某伏笔时，应当去更新那条已存在的真实伏笔项的状态，而不是把'审校问题本身'抄成一条新的账本项。ledgerKey 必须描述伏笔内容（如 slate_map_clue、flametail_golden_aftermath），不得用 chapterN_missing_progress、missing_obligations_chN 之类按章号+审计动词命名。",
       "",
       "输出必须严格符合 payoffLedgerSyncOutputSchema。",
     ].join("\n")),

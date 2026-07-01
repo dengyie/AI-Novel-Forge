@@ -11,6 +11,7 @@ import {
   buildSyntheticPayoffIssues,
   clearStaleRiskSignal,
   dedupeRiskSignals,
+  isAuditArtifactLedgerKey,
   mapPayoffLedgerRow,
   resolvePayoffLedgerSyncLedgerKey,
   sanitizePayoffLedgerSyncItem,
@@ -426,6 +427,12 @@ export class PayoffLedgerSyncService {
       const now = new Date();
       const resolvedItemsByKey = new Map<string, typeof result.output.items[number]>();
       for (const rawItem of result.output.items) {
+        // 写入阻断：审计问题回灌生成的伪 ledger 项（ledgerKey 含章号作用域 + 审计
+        // 语义 token）根本不进 DB。这是反馈环的根治层——下游所有消费点因此自动干净，
+        // isAuditArtifactLedgerKey 在各读取点的过滤降为冗余保险。
+        if (isAuditArtifactLedgerKey(rawItem.ledgerKey)) {
+          continue;
+        }
         const sanitizedItem = applyGraceExtension(
           sanitizePayoffLedgerSyncItem(rawItem),
           chapterOrder,
@@ -515,6 +522,11 @@ export class PayoffLedgerSyncService {
 
         for (const row of existingRows) {
           if (outputByKey.has(row.ledgerKey) || row.currentStatus === "paid_off") {
+            continue;
+          }
+          // 已存在的伪 ledger 项（审计问题回灌生成）直接删除，不再标 stale 残留。
+          if (isAuditArtifactLedgerKey(row.ledgerKey)) {
+            await tx.payoffLedgerItem.delete({ where: { id: row.id } });
             continue;
           }
           const staleSignals = appendStaleRiskSignal(

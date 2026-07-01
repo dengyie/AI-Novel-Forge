@@ -135,32 +135,45 @@ function hasExplicitPayoffWindow(item: PayoffLedgerSyncCandidate): boolean {
  *
  * 反馈环：章节审校产出 payoff_missing_progress / payoff_overdue 审计问题 →
  * 这些问题文本被喂进 payoffLedgerSync prompt 的 payoffAuditIssuesText →
- * LLM 把"审计问题"本身误当成一条伏笔，造出 ledgerKey 形如
- * `chapter36_missing_progress` 的项（标题"第N章伏笔推进缺失"、evidence 空、
+ * LLM 把"审计问题"本身误当成一条伏笔，造出以章节+审计动词命名的 ledgerKey
+ * （标题"第N章…未兑现/未touch"、evidence 引用"审校列出/审校指出"、
  * riskSignal 自指 payoff_missing_progress）。它带章节窗口 → 被标 overdue →
  * 触发 PIPELINE_REPLAN_REQUIRED → 任务 failed → 下一轮又回灌，自我放大。
  *
- * 真实伏笔的 ledgerKey 是语义化的（slate_map_clue、flametail_golden_aftermath），
- * 不会以 chapterN_ 开头并以 _missing_progress / _overdue 等审计后缀结尾。
+ * 判据是双重门（两者都满足才算伪项），真实伏笔（slate_map_clue、
+ * flametail_golden_aftermath、northwest_anomaly_base）一律不命中：
+ *   1. 章节作用域：key 里有 `chapterN` / `chN` 独立段（前缀或后缀都算），
+ *      因为伪项永远绑定某个具体章节；真实伏笔按故事内容命名，不带章号。
+ *   2. 审计语义 token：key 含审计动词短语（missing_progress、missing_obligation、
+ *      touch_missing、overdue 等）。LLM 换命名方式（chapterN_missing_progress ↔
+ *      missing_obligations_chN）都能被覆盖。
+ *
+ * 单独任一条件都不够：`ch9_foreshadow_02`（有章号无审计词）是真实伏笔；
+ * `slate_map_clue_missing_progress`（有审计词无章号）按故事内容命名，不误删。
  */
-const PSEUDO_LEDGER_AUDIT_SUFFIXES = [
+const PSEUDO_LEDGER_AUDIT_TOKENS = [
   "missing_progress",
-  "overdue",
-  "payoff_overdue",
-  "payoff_missing_progress",
+  "missing_obligation",
+  "touch_missing",
+  "not_touched",
+  "untouched",
   "no_progress",
+  "payoff_overdue",
+  "overdue",
 ];
+
+// `chapterN` / `chN` / `ch12_13` 作为独立段出现（^ 或 _ 边界，_ 或 $ 收尾）。
+const CHAPTER_SCOPED_KEY = /(^|_)(chapter|ch)\d+(_\d+)*(_|$)/;
 
 export function isAuditArtifactLedgerKey(ledgerKey: string | null | undefined): boolean {
   const key = String(ledgerKey ?? "").trim().toLowerCase();
   if (!key) {
     return false;
   }
-  // 必须是"按章节序号命名"的 key（chapter36_… / ch23_24_…），真实伏笔不会这样命名。
-  if (!/^(chapter|ch)\d+(_\d+)*_/.test(key)) {
+  if (!CHAPTER_SCOPED_KEY.test(key)) {
     return false;
   }
-  return PSEUDO_LEDGER_AUDIT_SUFFIXES.some((suffix) => key.endsWith(suffix));
+  return PSEUDO_LEDGER_AUDIT_TOKENS.some((token) => key.includes(token));
 }
 
 function compareExistingLedgerIdentityRows(

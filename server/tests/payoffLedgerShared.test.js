@@ -367,16 +367,25 @@ test("applyGraceExtension uses targetEnd as nextStart when targetStartChapterOrd
 // --- isAuditArtifactLedgerKey ---
 
 test("isAuditArtifactLedgerKey identifies chapterN_missing_progress pattern", () => {
+  // 章号前缀 + 审计后缀（旧命名形态）
   assert.equal(isAuditArtifactLedgerKey("chapter36_missing_progress"), true);
   assert.equal(isAuditArtifactLedgerKey("chapter23_24_missing_progress"), true);
   assert.equal(isAuditArtifactLedgerKey("ch9_missing_progress"), true);
   assert.equal(isAuditArtifactLedgerKey("ch12_13_overdue"), true);
-  // 不以审计后缀结尾 → 不是伪项
+  // 审计语义前缀 + 章号后缀（新命名形态，LLM 换写法）
+  assert.equal(isAuditArtifactLedgerKey("missing_obligations_ch48"), true);
+  assert.equal(isAuditArtifactLedgerKey("payoff_touch_missing_ch48"), true);
+  assert.equal(isAuditArtifactLedgerKey("not_touched_ch50"), true);
+  // 有章号作用域但无审计 token → 真实伏笔
   assert.equal(isAuditArtifactLedgerKey("ch9_foreshadow_01"), false);
   assert.equal(isAuditArtifactLedgerKey("ch12_goal_change"), false);
-  // 非 chapter/ch 前缀 → 不是伪项
+  // 有审计 token 但无章号作用域 → 按故事内容命名，不误删
   assert.equal(isAuditArtifactLedgerKey("slate_map_clue_missing_progress"), false);
   assert.equal(isAuditArtifactLedgerKey("flametail_golden_aftermath"), false);
+  assert.equal(isAuditArtifactLedgerKey("northwest_anomaly_base"), false);
+  assert.equal(isAuditArtifactLedgerKey("battle_field_identity_first"), false);
+  // `ch` 必须是独立段，不能是单词的一部分（mecha_unit_5 含 "ch" 子串但不是章号）
+  assert.equal(isAuditArtifactLedgerKey("mecha_unit_5_overdue"), false);
   // 空值
   assert.equal(isAuditArtifactLedgerKey(null), false);
   assert.equal(isAuditArtifactLedgerKey(""), false);
