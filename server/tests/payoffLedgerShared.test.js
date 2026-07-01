@@ -261,6 +261,70 @@ test("sanitizePayoffLedgerSyncItem downgrades overdue without explicit payoff wi
   assert.equal(item.riskSignals[0].code, "payoff_missing_progress");
 });
 
+test("sanitizePayoffLedgerSyncItem demotes overdue when target window has not yet ended", () => {
+  // 误判场景：窗口 55-60，当前第 56 章 → targetEnd(60) ≥ 56，窗口未结束却标 overdue。
+  // 多为 LLM 把剧情倒计时/危机当成账本逾期（riskSignal 是 time_pressure 而非 payoff_overdue）。
+  const item = sanitizePayoffLedgerSyncItem({
+    ledgerKey: "scalemail_cure_countdown",
+    title: "碎鳞药剂倒计时",
+    scopeType: "volume",
+    currentStatus: "overdue",
+    targetStartChapterOrder: 55,
+    targetEndChapterOrder: 60,
+    payoffChapterId: null,
+    payoffChapterOrder: null,
+    riskSignals: [{
+      code: "time_pressure",
+      severity: "critical",
+      summary: "林逸当前处于逃亡状态，无法在十二小时内找到救治手段。",
+    }],
+    statusReason: "倒计时已启动，且林逸处境恶化。",
+  }, 56);
+
+  assert.equal(item.currentStatus, "pending_payoff");
+  const codes = item.riskSignals.map((s) => s.code);
+  assert.ok(codes.includes("payoff_premature_overdue_demoted"), "premature-overdue demote signal should be added");
+  assert.ok(codes.includes("time_pressure"), "original story-pressure signal should be preserved");
+});
+
+test("sanitizePayoffLedgerSyncItem keeps overdue when target window has genuinely passed", () => {
+  // 真实逾期：窗口 40-45，当前第 56 章 → targetEnd(45) < 56，窗口确已过，overdue 成立，不降级。
+  const item = sanitizePayoffLedgerSyncItem({
+    ledgerKey: "windvillage_intel",
+    title: "风来村情报",
+    scopeType: "volume",
+    currentStatus: "overdue",
+    targetStartChapterOrder: 40,
+    targetEndChapterOrder: 45,
+    payoffChapterId: null,
+    payoffChapterOrder: null,
+    riskSignals: [],
+    statusReason: "已过目标窗口仍未兑现。",
+  }, 56);
+
+  assert.equal(item.currentStatus, "overdue");
+  assert.equal(item.riskSignals.length, 0);
+});
+
+test("sanitizePayoffLedgerSyncItem keeps windowed overdue when chapterOrder is unknown", () => {
+  // 没有当前章号时无法判定窗口是否已过，保持原有行为（有窗口的 overdue 放行）。
+  const item = sanitizePayoffLedgerSyncItem({
+    ledgerKey: "windvillage_intel",
+    title: "风来村情报",
+    scopeType: "volume",
+    currentStatus: "overdue",
+    targetStartChapterOrder: 55,
+    targetEndChapterOrder: 60,
+    payoffChapterId: null,
+    payoffChapterOrder: null,
+    riskSignals: [],
+    statusReason: "逾期未兑现",
+  });
+
+  assert.equal(item.currentStatus, "overdue");
+  assert.equal(item.riskSignals.length, 0);
+});
+
 test("applyGraceExtension extends window when pending payoff targetEnd is past current chapter", () => {
   const item = applyGraceExtension({
     ledgerKey: "tide_salamander_recruit",

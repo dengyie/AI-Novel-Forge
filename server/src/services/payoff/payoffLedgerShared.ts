@@ -131,6 +131,25 @@ function hasExplicitPayoffWindow(item: PayoffLedgerSyncCandidate): boolean {
 }
 
 /**
+ * 判定"窗口未过却标 overdue"这类逻辑自相矛盾的伏笔项。
+ *
+ * overdue 的定义是"已过 targetEnd 仍未兑现"。若 targetEnd ≥ 当前章，目标窗口
+ * 尚未结束，标逾期不成立——多半是 LLM 把剧情内的紧迫感（倒计时、危机、处境恶化）
+ * 误当成账本逾期。写入层（sanitizePayoffLedgerSyncItem）与读取层
+ * （CanonicalStateService overduePayoffs 过滤）共用此判据，避免逻辑漂移。
+ */
+export function isPrematureOverduePayoff(
+  item: { currentStatus: string; targetEndChapterOrder?: number | null },
+  chapterOrder: number | null | undefined,
+): boolean {
+  return item.currentStatus === "overdue"
+    && typeof chapterOrder === "number"
+    && Number.isFinite(chapterOrder)
+    && typeof item.targetEndChapterOrder === "number"
+    && item.targetEndChapterOrder >= chapterOrder;
+}
+
+/**
  * 识别"审计问题被 LLM 误当成伏笔回灌"的伪 ledger 项。
  *
  * 反馈环：章节审校产出 payoff_missing_progress / payoff_overdue 审计问题 →
@@ -222,7 +241,10 @@ export function resolvePayoffLedgerSyncLedgerKey(
   return candidates[0]?.ledgerKey ?? item.ledgerKey;
 }
 
-export function sanitizePayoffLedgerSyncItem<T extends PayoffLedgerSyncCandidate>(item: T): T {
+export function sanitizePayoffLedgerSyncItem<T extends PayoffLedgerSyncCandidate>(
+  item: T,
+  chapterOrder?: number | null,
+): T {
   // 伪 ledger 项（审计问题被误当成伏笔回灌）即使带章节窗口也强制降级，
   // 永不允许进 overdue —— 否则触发 PIPELINE_REPLAN_REQUIRED 形成自我放大环。
   if (isAuditArtifactLedgerKey(item.ledgerKey) && item.currentStatus === "overdue") {
@@ -239,7 +261,29 @@ export function sanitizePayoffLedgerSyncItem<T extends PayoffLedgerSyncCandidate
       ]),
     };
   }
-  if (item.currentStatus !== "overdue" || hasExplicitPayoffWindow(item)) {
+  if (item.currentStatus !== "overdue") {
+    return item;
+  }
+  // 窗口未过却标 overdue —— 逻辑自相矛盾。overdue 的定义是"已过 targetEnd 仍未兑现"，
+  // 若 targetEnd ≥ 当前章，说明目标窗口尚未结束，标逾期不成立。这类多半是 LLM 把剧情
+  // 内的紧迫感（倒计时、危机、处境恶化）误当成账本逾期。降级为 pending_payoff，避免
+  // 未到窗口末尾就触发 PIPELINE_REPLAN_REQUIRED。窗口过后（targetEnd < 当前章）仍未
+  // 兑现，才允许自然进入 overdue。
+  if (isPrematureOverduePayoff(item, chapterOrder)) {
+    return {
+      ...item,
+      currentStatus: "pending_payoff",
+      riskSignals: dedupeRiskSignals([
+        ...item.riskSignals,
+        {
+          code: "payoff_premature_overdue_demoted",
+          severity: "low",
+          summary: `目标窗口（至第${item.targetEndChapterOrder}章）尚未结束，当前第${chapterOrder}章标记逾期不成立，已降级为待推进。`,
+        },
+      ]),
+    };
+  }
+  if (hasExplicitPayoffWindow(item)) {
     return item;
   }
   return {

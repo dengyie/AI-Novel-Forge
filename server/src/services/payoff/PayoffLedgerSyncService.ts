@@ -434,7 +434,7 @@ export class PayoffLedgerSyncService {
           continue;
         }
         const sanitizedItem = applyGraceExtension(
-          sanitizePayoffLedgerSyncItem(rawItem),
+          sanitizePayoffLedgerSyncItem(rawItem, chapterOrder),
           chapterOrder,
         );
         const ledgerKey = resolvePayoffLedgerSyncLedgerKey(sanitizedItem, existingRows);
