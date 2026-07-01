@@ -3,7 +3,7 @@ import { TASK_RETENTION_INTERVAL_MS, taskRetentionConfig } from "../../config/ta
 import { prisma } from "../../db/prisma";
 import {
   STALE_AUTO_DIRECTOR_RUNNING_MESSAGE,
-  isStaleAutoDirectorRunningTask,
+  isStaleAutoDirectorRunningTaskBroad,
 } from "../novel/workflow/autoDirectorStaleTaskRecovery";
 
 const TERMINAL_WORKFLOW_STATUSES = ["succeeded", "failed", "cancelled"] as const;
@@ -199,9 +199,9 @@ export class TaskRetentionService {
   /**
    * Mark zombie auto_director running tasks (heartbeat stale, no manual-recovery
    * flag) as cancelled — two-step: this cycle only cancels, a later cycle's
-   * supersede sweep deletes them. Reuses the conservative isStaleAutoDirectorRunningTask
-   * guard so a task mid-respawn (recent heartbeat) or stuck in a non-structured
-   * step is never touched.
+   * supersede sweep deletes them. Uses the broad stale guard (no currentItemKey
+   * restriction) so zombies stuck in chapter-execution stages (e.g. quality_repair)
+   * are caught too, not just structured-outline stages.
    */
   private async cancelZombieRunningTasks(now: Date): Promise<number> {
     const runningRows = await prisma.novelWorkflowTask.findMany({
@@ -215,7 +215,6 @@ export class TaskRetentionService {
         id: true,
         lane: true,
         status: true,
-        currentItemKey: true,
         pendingManualRecovery: true,
         cancelRequestedAt: true,
         heartbeatAt: true,
@@ -223,7 +222,7 @@ export class TaskRetentionService {
       },
     });
     const zombieIds = runningRows
-      .filter((row) => isStaleAutoDirectorRunningTask(row, now))
+      .filter((row) => isStaleAutoDirectorRunningTaskBroad(row, now))
       .map((row) => row.id);
     if (zombieIds.length === 0) {
       return 0;
