@@ -47,8 +47,10 @@ export {
 // 整章重来→任务反复 failed。这里给有限重试 + 短退避，把瞬时抖动吸收在调用层。
 // 只重试"确属瞬时"的错误（超时/中断/连接/socket/fetch 失败/SDK 解析畸形响应体），
 // 避免对持续性错误（如测试桩的 "primary structured output failed"）盲目重试拖延。
-const TRANSPORT_RETRY_MAX_ATTEMPTS = Math.max(0, Number.parseInt(process.env.LLM_TRANSPORT_RETRY_MAX_ATTEMPTS ?? "2", 10) || 0);
-const TRANSPORT_RETRY_BACKOFF_BASE_MS = Math.max(0, Number.parseInt(process.env.LLM_TRANSPORT_RETRY_BACKOFF_BASE_MS ?? "2000", 10) || 0);
+// CPA 代理多渠道自动切换：单次畸形响应体→SDK TypeError→transport_error。默认 4 次
+// 重试（共 5 次尝试）给代理足够机会轮换到健康渠道；退避短（1.5s 基数）快速重试。
+const TRANSPORT_RETRY_MAX_ATTEMPTS = Math.max(0, Number.parseInt(process.env.LLM_TRANSPORT_RETRY_MAX_ATTEMPTS ?? "4", 10) || 0);
+const TRANSPORT_RETRY_BACKOFF_BASE_MS = Math.max(0, Number.parseInt(process.env.LLM_TRANSPORT_RETRY_BACKOFF_BASE_MS ?? "1500", 10) || 0);
 
 const TRANSIENT_TRANSPORT_ERROR_PATTERNS = [
   "timed out",
