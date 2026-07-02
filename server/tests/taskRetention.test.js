@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const {
   selectDeletableTaskIds,
   selectSupersededTaskIds,
+  selectSupersededGenerationJobIds,
 } = require("../dist/services/task/TaskRetentionService.js");
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -252,6 +253,113 @@ test("supersede: output is deterministic regardless of input order", () => {
   ];
   const first = selectSupersededTaskIds(make(), NOW, SUPERSEDE_CFG);
   const second = selectSupersededTaskIds(make().reverse(), NOW, SUPERSEDE_CFG);
+  assert.deepEqual(first, second);
+  assert.deepEqual(first, ["t-a", "t-b", "t-c"]);
+});
+
+// --- selectSupersededGenerationJobIds ---
+
+function jobRow(overrides = {}) {
+  return {
+    id: overrides.id ?? `job-${Math.random().toString(16).slice(2)}`,
+    novelId: "novelId" in overrides ? overrides.novelId : "novel-1",
+    status: overrides.status ?? "failed",
+    finishedAt: overrides.finishedAt ?? ageDays(1),
+    updatedAt: overrides.updatedAt ?? ageDays(1),
+  };
+}
+
+test("pipeline supersede: terminal jobs deletable when bucket has an active pipeline job", () => {
+  const rows = [
+    jobRow({ id: "running", status: "running" }),
+    jobRow({ id: "failed-1", status: "failed" }),
+    jobRow({ id: "succeeded-1", status: "succeeded" }),
+    jobRow({ id: "cancelled-1", status: "cancelled" }),
+  ];
+  const deletable = selectSupersededGenerationJobIds(rows, new Set(), NOW, SUPERSEDE_CFG);
+  assert.deepEqual(deletable.sort(), ["cancelled-1", "failed-1", "succeeded-1"]);
+});
+
+test("pipeline supersede: active auto_director takeover supersedes terminal pipeline jobs", () => {
+  // no active pipeline job, but novel-1 has an active takeover -> terminal jobs still superseded
+  const rows = [
+    jobRow({ id: "failed-1", status: "failed" }),
+    jobRow({ id: "succeeded-1", status: "succeeded" }),
+  ];
+  const deletable = selectSupersededGenerationJobIds(rows, new Set(["novel-1"]), NOW, SUPERSEDE_CFG);
+  assert.deepEqual(deletable.sort(), ["failed-1", "succeeded-1"]);
+});
+
+test("pipeline supersede: lone terminal job with no active sibling and no takeover is NOT deletable", () => {
+  const rows = [jobRow({ id: "failed-only", status: "failed" })];
+  const deletable = selectSupersededGenerationJobIds(rows, new Set(), NOW, SUPERSEDE_CFG);
+  assert.equal(deletable.length, 0);
+});
+
+test("pipeline supersede: active job itself is never selected", () => {
+  for (const active of ["queued", "running", "waiting_approval"]) {
+    const rows = [
+      jobRow({ id: "active", status: active }),
+      jobRow({ id: "failed-1", status: "failed" }),
+    ];
+    const deletable = selectSupersededGenerationJobIds(rows, new Set(), NOW, SUPERSEDE_CFG);
+    assert.ok(!deletable.includes("active"), `${active} should never be superseded`);
+    assert.deepEqual(deletable, ["failed-1"]);
+  }
+});
+
+test("pipeline supersede: buckets are isolated per novel", () => {
+  const rows = [
+    jobRow({ id: "A-running", novelId: "novel-A", status: "running" }),
+    jobRow({ id: "A-failed", novelId: "novel-A", status: "failed" }),
+    // novel-B has only a failed job, no active pipeline and no takeover -> kept
+    jobRow({ id: "B-failed", novelId: "novel-B", status: "failed" }),
+  ];
+  const deletable = selectSupersededGenerationJobIds(rows, new Set(), NOW, SUPERSEDE_CFG);
+  assert.deepEqual(deletable, ["A-failed"]);
+});
+
+test("pipeline supersede: takeover on a different novel does not leak into other buckets", () => {
+  const rows = [
+    jobRow({ id: "A-failed", novelId: "novel-A", status: "failed" }),
+    jobRow({ id: "B-failed", novelId: "novel-B", status: "failed" }),
+  ];
+  // takeover active only for novel-B -> only B's failed job is superseded
+  const deletable = selectSupersededGenerationJobIds(rows, new Set(["novel-B"]), NOW, SUPERSEDE_CFG);
+  assert.deepEqual(deletable, ["B-failed"]);
+});
+
+test("pipeline supersede: null novelId is its own bucket (takeover never applies to null)", () => {
+  const rows = [
+    jobRow({ id: "null-running", novelId: null, status: "running" }),
+    jobRow({ id: "null-failed", novelId: null, status: "failed" }),
+    jobRow({ id: "other-failed", novelId: "novel-X", status: "failed" }),
+  ];
+  // even if a takeover exists for some novel, null bucket only borrows its own active job
+  const deletable = selectSupersededGenerationJobIds(rows, new Set("novel-X"), NOW, SUPERSEDE_CFG);
+  assert.deepEqual(deletable, ["null-failed"]);
+});
+
+test("pipeline supersede: minAgeMs keeps recently-finished terminal jobs", () => {
+  const cfg = { supersededMinAgeMs: 10 * 60 * 1000 };
+  const rows = [
+    jobRow({ id: "running", status: "running" }),
+    jobRow({ id: "fresh-failed", status: "failed", finishedAt: new Date(NOW.getTime() - 5 * 60 * 1000) }),
+    jobRow({ id: "old-failed", status: "failed", finishedAt: new Date(NOW.getTime() - 20 * 60 * 1000) }),
+  ];
+  const deletable = selectSupersededGenerationJobIds(rows, new Set(), NOW, cfg);
+  assert.deepEqual(deletable, ["old-failed"]);
+});
+
+test("pipeline supersede: output is deterministic regardless of input order", () => {
+  const make = () => [
+    jobRow({ id: "running", status: "running" }),
+    jobRow({ id: "t-c", status: "cancelled" }),
+    jobRow({ id: "t-a", status: "failed" }),
+    jobRow({ id: "t-b", status: "succeeded" }),
+  ];
+  const first = selectSupersededGenerationJobIds(make(), new Set(), NOW, SUPERSEDE_CFG);
+  const second = selectSupersededGenerationJobIds(make().reverse(), new Set(), NOW, SUPERSEDE_CFG);
   assert.deepEqual(first, second);
   assert.deepEqual(first, ["t-a", "t-b", "t-c"]);
 });

@@ -144,6 +144,68 @@ export function selectSupersededTaskIds(
   return deletable.sort((a, b) => a.localeCompare(b));
 }
 
+export interface GenerationJobSupersedeRow {
+  id: string;
+  novelId: string | null;
+  status: string;
+  finishedAt: Date | null;
+  updatedAt: Date;
+}
+
+const ACTIVE_PIPELINE_STATUSES = ["queued", "running", "waiting_approval"] as const;
+const TERMINAL_PIPELINE_STATUSES_SET = new Set<string>(TERMINAL_PIPELINE_STATUSES);
+
+/**
+ * 选出"被取代的终态 GenerationJob"——同 novel 桶内已有活跃任务接管时，桶内所有
+ * 终态旧 pipeline 任务视为已被取代，可清理。GenerationJob 无 lane 字段，桶键只用
+ * novelId。活跃判定同时认 GenerationJob 自身的活跃态和同 novel 的 auto_director
+ * NovelWorkflowTask 接管（takeover 接管后，旧 pipeline 失败任务即死任务）。
+ *
+ * 与 selectSupersededTaskIds 同构的安全边界：桶内无活跃 → 整桶跳过；活跃自身非
+ * TERMINAL 永不选中；supersededMinAgeMs 兜底存活窗口。
+ */
+export function selectSupersededGenerationJobIds(
+  rows: GenerationJobSupersedeRow[],
+  activeNovelIds: ReadonlySet<string>,
+  now: Date,
+  cfg: { supersededMinAgeMs: number },
+): string[] {
+  const nowMs = now.getTime();
+  const activeStatuses = new Set<string>(ACTIVE_PIPELINE_STATUSES);
+
+  const buckets = new Map<string, GenerationJobSupersedeRow[]>();
+  for (const row of rows) {
+    const key = row.novelId ?? NULL_NOVEL_BUCKET;
+    let bucket = buckets.get(key);
+    if (!bucket) {
+      bucket = [];
+      buckets.set(key, bucket);
+    }
+    bucket.push(row);
+  }
+
+  const deletable: string[] = [];
+  for (const [novelKey, bucket] of buckets) {
+    const hasActivePipeline = bucket.some((row) => activeStatuses.has(row.status));
+    const hasActiveTakeover = novelKey !== NULL_NOVEL_BUCKET && activeNovelIds.has(novelKey);
+    if (!hasActivePipeline && !hasActiveTakeover) {
+      continue;
+    }
+    for (const row of bucket) {
+      if (!TERMINAL_PIPELINE_STATUSES_SET.has(row.status)) {
+        continue;
+      }
+      const effectiveTime = row.finishedAt?.getTime() ?? row.updatedAt.getTime();
+      if (nowMs - effectiveTime < cfg.supersededMinAgeMs) {
+        continue;
+      }
+      deletable.push(row.id);
+    }
+  }
+
+  return deletable.sort((a, b) => a.localeCompare(b));
+}
+
 export class TaskRetentionService {
   private timer: NodeJS.Timeout | null = null;
 
@@ -182,6 +244,10 @@ export class TaskRetentionService {
       prisma.directorRuntimeExecution.deleteMany({ where: { workflowTaskId: { in: ids } } }),
       prisma.directorRuntimeCommand.deleteMany({ where: { workflowTaskId: { in: ids } } }),
       prisma.directorRuntimeInstance.deleteMany({ where: { workflowTaskId: { in: ids } } }),
+      // follow-up action/notification logs reference taskId (no FK, indexed) — without this
+      // they become orphans that pile up in the "导演跟进" panel after the task is deleted.
+      prisma.autoDirectorFollowUpActionLog.deleteMany({ where: { taskId: { in: ids } } }),
+      prisma.autoDirectorFollowUpNotificationLog.deleteMany({ where: { taskId: { in: ids } } }),
     ]);
     summary.runtimeRowsDeleted += runtimeDeleteResults.reduce((sum, r) => sum + r.count, 0);
 
@@ -283,13 +349,62 @@ export class TaskRetentionService {
       console.warn("[task.retention] novel workflow cleanup failed:", error instanceof Error ? error.message : String(error));
     }
 
+    // --- orphan follow-up logs (taskId no longer exists) ---
+    // Historical tasks deleted before the cascade was added leave orphan rows in the
+    // follow-up action/notification logs; they pile up in the "导演跟进" panel. Sweep
+    // them by deleting log rows whose taskId is absent from NovelWorkflowTask.
+    try {
+      const existingTaskIds = (await prisma.novelWorkflowTask.findMany({ select: { id: true } })).map((row) => row.id);
+      const orphanActionDelete = await prisma.autoDirectorFollowUpActionLog.deleteMany({
+        where: { NOT: { taskId: { in: existingTaskIds } } },
+      });
+      const orphanNotificationDelete = await prisma.autoDirectorFollowUpNotificationLog.deleteMany({
+        where: { NOT: { taskId: { in: existingTaskIds } } },
+      });
+      summary.runtimeRowsDeleted += orphanActionDelete.count + orphanNotificationDelete.count;
+    } catch (error) {
+      console.warn("[task.retention] orphan follow-up log cleanup failed:", error instanceof Error ? error.message : String(error));
+    }
+
     // --- GenerationJob ---
     try {
+      // Supersede sweep: terminal pipeline tasks whose novel already has an active
+      // pipeline job OR an active auto_director takeover are dead weight; delete now.
+      const pipelineSupersedeRows = await prisma.generationJob.findMany({
+        select: { id: true, novelId: true, status: true, finishedAt: true, updatedAt: true },
+      });
+      const activeTakeoverNovelIds = new Set(
+        (await prisma.novelWorkflowTask.findMany({
+          where: { lane: SUPERSEDE_LANE, status: { in: [...ACTIVE_WORKFLOW_STATUSES] } },
+          select: { novelId: true },
+        })).map((row) => row.novelId).filter((id): id is string => Boolean(id)),
+      );
+      const pipelineSupersededIds = selectSupersededGenerationJobIds(
+        pipelineSupersedeRows,
+        activeTakeoverNovelIds,
+        now,
+        cfg,
+      );
+      if (pipelineSupersededIds.length > 0) {
+        const pipelineSupersededDeleteResult = await prisma.generationJob.deleteMany({
+          where: { id: { in: pipelineSupersededIds }, status: { in: [...TERMINAL_PIPELINE_STATUSES] } },
+        });
+        summary.generationJobDeleted += pipelineSupersededDeleteResult.count;
+
+        const archivePipelineSupersededResult = await prisma.taskCenterArchive.deleteMany({
+          where: { taskKind: "novel_pipeline", taskId: { in: pipelineSupersededIds } },
+        });
+        summary.archiveRowsDeleted += archivePipelineSupersededResult.count;
+      }
+
+      // Step 3: age-based retention sweep (keep-window + status aging).
       const pipelineRows = await prisma.generationJob.findMany({
         where: { status: { in: [...TERMINAL_PIPELINE_STATUSES] } },
         select: { id: true, novelId: true, status: true, finishedAt: true, updatedAt: true },
       });
-      const pipelineDeletable = selectDeletableTaskIds(pipelineRows, now, cfg);
+      const pipelineDeletable = selectDeletableTaskIds(pipelineRows, now, cfg).filter(
+        (id) => !pipelineSupersededIds.includes(id),
+      );
 
       if (pipelineDeletable.length > 0) {
         const pipelineDeleteResult = await prisma.generationJob.deleteMany({
