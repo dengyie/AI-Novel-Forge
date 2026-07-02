@@ -408,6 +408,158 @@ test("invokeStructuredLlmDetailed switches to the configured fallback model afte
   }
 });
 
+test("invokeStructuredLlmDetailed retries transient transport_error before failing over", async () => {
+  // 真实瞬时故障（代理抖动/连接重置）应被同策略内重试吸收，不触发 fallback。
+  // 首次抛 "fetch failed: ECONNRESET"（命中 isTransientTransportError），第二次成功。
+  const originalResolveOptions = factory.resolveLLMClientOptions;
+  const originalCreateLLM = factory.createLLMFromResolvedOptions;
+  const originalGetFallbackSettings = structuredFallbackSettings.getStructuredFallbackSettings;
+  const calls = [];
+
+  factory.resolveLLMClientOptions = async (provider, options = {}) => {
+    const resolvedProvider = provider ?? "openai";
+    const resolvedModel = options.model ?? "gpt-4o-mini";
+    const baseURL = options.baseURL ?? "https://api.openai.com/v1";
+    const structuredProfile = options.executionMode === "structured"
+      ? resolveStructuredOutputProfile({ provider: resolvedProvider, model: resolvedModel, baseURL, executionMode: "structured" })
+      : null;
+    return {
+      provider: resolvedProvider,
+      providerName: resolvedProvider,
+      model: resolvedModel,
+      temperature: options.temperature ?? 0.3,
+      apiKey: "test-key",
+      baseURL,
+      maxTokens: options.maxTokens,
+      reasoningEnabled: !(structuredProfile?.requiresNonThinkingForStructured),
+      modelKwargs: undefined,
+      includeRawResponse: false,
+      executionMode: options.executionMode ?? "plain",
+      structuredProfile,
+      structuredStrategy: options.structuredStrategy ?? null,
+      reasoningForcedOff: Boolean(structuredProfile?.requiresNonThinkingForStructured),
+      taskType: options.taskType,
+      promptMeta: options.promptMeta,
+    };
+  };
+  let primaryAttempts = 0;
+  factory.createLLMFromResolvedOptions = (resolved) => ({
+    invoke: async () => {
+      calls.push({ provider: resolved.provider });
+      if (resolved.provider === "openai") {
+        primaryAttempts += 1;
+        if (primaryAttempts === 1) {
+          throw new Error("fetch failed: ECONNRESET");
+        }
+      }
+      return { content: "{\"value\":\"recovered\"}" };
+    },
+  });
+  structuredFallbackSettings.getStructuredFallbackSettings = async () => ({
+    enabled: true,
+    provider: "deepseek",
+    model: "deepseek-chat",
+    temperature: 0.2,
+    maxTokens: null,
+  });
+
+  try {
+    const result = await structuredInvoke.invokeStructuredLlmDetailed({
+      provider: "openai",
+      model: "gpt-4o-mini",
+      label: "structured.invoke.transport.retry",
+      taskType: "planner",
+      schema: z.object({ value: z.string() }),
+      systemPrompt: "只返回 JSON。",
+      userPrompt: "给我一个 value。",
+      disableFallbackModel: false,
+    });
+
+    assert.deepEqual(result.data, { value: "recovered" });
+    assert.equal(result.diagnostics.fallbackUsed, false);
+    // primary 重试后成功，未触达 fallback
+    assert.deepEqual(calls, [{ provider: "openai" }, { provider: "openai" }]);
+  } finally {
+    factory.resolveLLMClientOptions = originalResolveOptions;
+    factory.createLLMFromResolvedOptions = originalCreateLLM;
+    structuredFallbackSettings.getStructuredFallbackSettings = originalGetFallbackSettings;
+  }
+});
+
+test("invokeStructuredLlmDetailed does not retry non-transient errors", async () => {
+  // 持续性错误（如测试桩 "primary structured output failed"）不命中瞬时判据，
+  // 不重试，直接 fallback，保持既有行为。
+  const originalResolveOptions = factory.resolveLLMClientOptions;
+  const originalCreateLLM = factory.createLLMFromResolvedOptions;
+  const originalGetFallbackSettings = structuredFallbackSettings.getStructuredFallbackSettings;
+  const calls = [];
+
+  factory.resolveLLMClientOptions = async (provider, options = {}) => {
+    const resolvedProvider = provider ?? "openai";
+    const resolvedModel = options.model ?? (resolvedProvider === "deepseek" ? "deepseek-chat" : "gpt-4o-mini");
+    const baseURL = options.baseURL ?? (resolvedProvider === "deepseek" ? "https://api.deepseek.com/v1" : "https://api.openai.com/v1");
+    const structuredProfile = options.executionMode === "structured"
+      ? resolveStructuredOutputProfile({ provider: resolvedProvider, model: resolvedModel, baseURL, executionMode: "structured" })
+      : null;
+    return {
+      provider: resolvedProvider,
+      providerName: resolvedProvider,
+      model: resolvedModel,
+      temperature: options.temperature ?? 0.3,
+      apiKey: "test-key",
+      baseURL,
+      maxTokens: options.maxTokens,
+      reasoningEnabled: !(structuredProfile?.requiresNonThinkingForStructured),
+      modelKwargs: undefined,
+      includeRawResponse: false,
+      executionMode: options.executionMode ?? "plain",
+      structuredProfile,
+      structuredStrategy: options.structuredStrategy ?? null,
+      reasoningForcedOff: Boolean(structuredProfile?.requiresNonThinkingForStructured),
+      taskType: options.taskType,
+      promptMeta: options.promptMeta,
+    };
+  };
+  factory.createLLMFromResolvedOptions = (resolved) => ({
+    invoke: async () => {
+      calls.push({ provider: resolved.provider });
+      if (resolved.provider === "openai") {
+        throw new Error("primary structured output failed");
+      }
+      return { content: "{\"value\":\"fallback-ok\"}" };
+    },
+  });
+  structuredFallbackSettings.getStructuredFallbackSettings = async () => ({
+    enabled: true,
+    provider: "deepseek",
+    model: "deepseek-chat",
+    temperature: 0.2,
+    maxTokens: null,
+  });
+
+  try {
+    const result = await structuredInvoke.invokeStructuredLlmDetailed({
+      provider: "openai",
+      model: "gpt-4o-mini",
+      label: "structured.invoke.no-retry",
+      taskType: "planner",
+      schema: z.object({ value: z.string() }),
+      systemPrompt: "只返回 JSON。",
+      userPrompt: "给我一个 value。",
+      disableFallbackModel: false,
+    });
+
+    assert.deepEqual(result.data, { value: "fallback-ok" });
+    assert.equal(result.diagnostics.fallbackUsed, true);
+    // 持续性错误不重试：primary 1 次 + fallback 1 次
+    assert.deepEqual(calls, [{ provider: "openai" }, { provider: "deepseek" }]);
+  } finally {
+    factory.resolveLLMClientOptions = originalResolveOptions;
+    factory.createLLMFromResolvedOptions = originalCreateLLM;
+    structuredFallbackSettings.getStructuredFallbackSettings = originalGetFallbackSettings;
+  }
+});
+
 test("invokeStructuredLlmDetailed preserves explicit Anthropic protocol through repair calls", async () => {
   const originalResolveOptions = factory.resolveLLMClientOptions;
   const originalCreateLLM = factory.createLLMFromResolvedOptions;

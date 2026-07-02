@@ -42,6 +42,66 @@ export {
   type StructuredInvokeResult,
 } from "./structuredInvokeParser";
 
+// transport_error 是瞬时故障（代理抖动、上游渠道切换、单次畸形响应）。LLM 调用是
+// 幂等只读，安全可重试。命中即 break 不重试会导致密集调用（如章节生成）单次崩→
+// 整章重来→任务反复 failed。这里给有限重试 + 短退避，把瞬时抖动吸收在调用层。
+// 只重试"确属瞬时"的错误（超时/中断/连接/socket/fetch 失败/SDK 解析畸形响应体），
+// 避免对持续性错误（如测试桩的 "primary structured output failed"）盲目重试拖延。
+const TRANSPORT_RETRY_MAX_ATTEMPTS = Math.max(0, Number.parseInt(process.env.LLM_TRANSPORT_RETRY_MAX_ATTEMPTS ?? "2", 10) || 0);
+const TRANSPORT_RETRY_BACKOFF_BASE_MS = Math.max(0, Number.parseInt(process.env.LLM_TRANSPORT_RETRY_BACKOFF_BASE_MS ?? "2000", 10) || 0);
+
+const TRANSIENT_TRANSPORT_ERROR_PATTERNS = [
+  "timed out",
+  "timeout",
+  "aborted",
+  "econnreset",
+  "econnrefused",
+  "enetunreach",
+  "esockettimedout",
+  "socket hang",
+  "fetch failed",
+  "network error",
+  "upstream service",
+  "502",
+  "503",
+  "504",
+  "429",
+  "reading 'message'",
+  "reading 'content'",
+  "cannot read properties of undefined",
+  "bad gateway",
+  "service unavailable",
+];
+
+function isTransientTransportError(error: unknown): boolean {
+  const message = error instanceof Error
+    ? error.message
+    : typeof error === "string"
+      ? error
+      : String(error ?? "");
+  if (!message) {
+    return false;
+  }
+  const lower = message.toLowerCase();
+  if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
+    return true;
+  }
+  return TRANSIENT_TRANSPORT_ERROR_PATTERNS.some((pattern) => lower.includes(pattern));
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener("abort", () => {
+      clearTimeout(timer);
+      reject(signal.reason ?? new Error("aborted"));
+    }, { once: true });
+  });
+}
+
 export interface StructuredInvokeInput<T> {
   systemPrompt?: string;
   userPrompt?: string;
@@ -301,30 +361,44 @@ async function tryStructuredStrategies<T>(input: {
   let lastError: StructuredOutputError | null = null;
   for (let index = 0; index < preferredSequence.length; index += 1) {
     const strategy = preferredSequence[index]!;
-    try {
-      return await invokeStructuredAttempt({
-        baseInput: input.baseInput,
-        target: input.target,
-        strategy,
-        strategyIndex: index,
-        fallbackAvailable: input.fallbackAvailable,
-        fallbackUsed: input.fallbackUsed,
-      });
-    } catch (error) {
-      lastError = wrapStructuredInvokeError({
-        label: input.baseInput.label,
-        error,
-        strategy,
-        profile: input.target.profile,
-        fallbackAvailable: input.fallbackAvailable,
-        fallbackUsed: input.fallbackUsed,
-      });
-      if (lastError.category === "transport_error") {
-        break;
+    // transport_error 为瞬时故障时同策略内有限重试吸收代理抖动/渠道切换。只重试
+    // 确属瞬时的错误（isTransientTransportError），持续性错误直接 fast-fail，避免
+    // 拖延。其它类别（schema_mismatch/malformed_json 等）与调用本身有关，不重试。
+    const maxAttempts = TRANSPORT_RETRY_MAX_ATTEMPTS + 1;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        return await invokeStructuredAttempt({
+          baseInput: input.baseInput,
+          target: input.target,
+          strategy,
+          strategyIndex: index,
+          fallbackAvailable: input.fallbackAvailable,
+          fallbackUsed: input.fallbackUsed,
+        });
+      } catch (error) {
+        lastError = wrapStructuredInvokeError({
+          label: input.baseInput.label,
+          error,
+          strategy,
+          profile: input.target.profile,
+          fallbackAvailable: input.fallbackAvailable,
+          fallbackUsed: input.fallbackUsed,
+        });
+        const shouldRetry = lastError.category === "transport_error"
+          && isTransientTransportError(error)
+          && attempt < maxAttempts;
+        if (!shouldRetry) {
+          break;
+        }
+        const backoffMs = TRANSPORT_RETRY_BACKOFF_BASE_MS * attempt;
+        await sleep(backoffMs, input.baseInput.signal);
       }
-      if (lastError.category === "schema_mismatch" && strategy === "prompt_json") {
-        break;
-      }
+    }
+    if (lastError?.category === "transport_error") {
+      break;
+    }
+    if (lastError?.category === "schema_mismatch" && strategy === "prompt_json") {
+      break;
     }
   }
   throw lastError ?? buildStructuredError({
