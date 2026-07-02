@@ -18,6 +18,7 @@ import {
   clearStaleRiskSignal,
   dedupeRiskSignals,
   isTerminalPayoffStatus,
+  resolvePayoffLedgerSyncLedgerKey,
   sanitizePayoffLedgerSyncItem,
   serializeLedgerJson,
 } from "../../payoff/payoffLedgerShared";
@@ -606,20 +607,24 @@ export class ChapterArtifactDeltaService {
     }
     const now = new Date();
     await prisma.$transaction(async (tx) => {
+      // 一次性加载本小说全部账本行，供跨 key 去重解析（resolvePayoffLedgerSyncLedgerKey）
+      // 与终态守卫查 previous 共用。与 syncLedger 路径对齐：LLM 在章节增量里给已兑现
+      // 剧情发明新 key 变体时，窗口指纹把新 key 重映射到同窗口终态行，previous 命中终态
+      // → 守卫拒绝重开 → 保留 paid_off。否则新 key 无 previous 终态可保护，落到 overdue
+      // 绕过写入层守卫（见 payoffLedgerShared.ts 跨 key 重复登记防御注释）。
+      const existingRows = await tx.payoffLedgerItem.findMany({ where: { novelId: input.novelId } });
       for (const rawItem of input.output.payoffDeltas) {
-        const ledgerKey = normalizeLedgerKey(rawItem.ledgerKey, normalizeLedgerKey(rawItem.title, `chapter_${input.chapterOrder}_payoff`));
-        const previous = await tx.payoffLedgerItem.findUnique({
-          where: {
-            novelId_ledgerKey: {
-              novelId: input.novelId,
-              ledgerKey,
-            },
-          },
-        });
+        const fallbackKey = normalizeLedgerKey(rawItem.ledgerKey, normalizeLedgerKey(rawItem.title, `chapter_${input.chapterOrder}_payoff`));
         // 与 syncLedger 路径对齐：章节增量同样要过 overdue 误判清洗（审计伪项 / 无窗口 /
         // premature-overdue），否则 LLM 在章节产出里直接标 overdue 会绕过写入层守卫落库
         // （如 tujian_black_screen 窗口60-65 在 ch59 被标 overdue）。
         const item = sanitizePayoffLedgerSyncItem(rawItem, input.chapterOrder);
+        // 跨 key 去重：把新 key 变体重映射到同窗口终态行（若有），让终态守卫生效。
+        const ledgerKey = resolvePayoffLedgerSyncLedgerKey(
+          { ...item, ledgerKey: fallbackKey },
+          existingRows,
+        );
+        const previous = existingRows.find((row) => row.ledgerKey === ledgerKey) ?? null;
         // 终态保护：previous 已是 paid_off/failed 时，LLM 章节增量不得自动重开为 active 状态。
         // 保留终态项既有信号，仅追加 payoff_regressed 让人工可见，跳过 upsert。
         if (previous && isTerminalPayoffStatus(previous.currentStatus) && !isTerminalPayoffStatus(item.currentStatus)) {
