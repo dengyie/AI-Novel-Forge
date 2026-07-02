@@ -276,6 +276,99 @@ test("resolvePayoffLedgerSyncLedgerKey does not reuse paid-off or failed title m
   assert.equal(resolvedKey, "review_first_success");
 });
 
+test("resolvePayoffLedgerSyncLedgerKey remaps new key variant to paid-off row with identical window (cross-key dedup)", () => {
+  // 碎鳞救治弧场景：ch40 已兑现的 paid_off 行（窗口 35-40），LLM 发明新 key 变体
+  // （标题微调）重报为 overdue。窗口指纹（targetStart+targetEnd 完全相同）应把新 key
+  // 重映射到 paid_off 行，让终态守卫生效。
+  const existingRows = [
+    createLedgerItem({
+      ledgerKey: "shattered_scale_crisis",
+      title: "碎鳞救治倒计时",
+      currentStatus: "paid_off",
+      targetStartChapterOrder: 35,
+      targetEndChapterOrder: 40,
+      lastTouchedChapterOrder: 40,
+      updatedAt: "2026-07-02T10:00:00.000Z",
+    }),
+  ];
+
+  const resolvedKey = resolvePayoffLedgerSyncLedgerKey({
+    ledgerKey: "shattered_scale_antidote_countdown",
+    title: "碎鳞药剂倒计时与救治",
+    scopeType: "volume",
+    currentStatus: "overdue",
+    targetStartChapterOrder: 35,
+    targetEndChapterOrder: 40,
+    riskSignals: [],
+  }, existingRows);
+
+  assert.equal(resolvedKey, "shattered_scale_crisis");
+});
+
+test("resolvePayoffLedgerSyncLedgerKey window dedup does not match when window differs (new distinct payoff)", () => {
+  // 同名/相近标题但窗口不同 → 是新的不同伏笔，不重映射到终态行
+  const existingRows = [
+    createLedgerItem({
+      ledgerKey: "shattered_scale_crisis",
+      title: "碎鳞救治倒计时",
+      currentStatus: "paid_off",
+      targetStartChapterOrder: 35,
+      targetEndChapterOrder: 40,
+      lastTouchedChapterOrder: 40,
+      updatedAt: "2026-07-02T10:00:00.000Z",
+    }),
+  ];
+
+  const resolvedKey = resolvePayoffLedgerSyncLedgerKey({
+    ledgerKey: "shattered_scale_resurgence",
+    title: "碎鳞救治倒计时",
+    scopeType: "volume",
+    currentStatus: "pending_payoff",
+    targetStartChapterOrder: 120,
+    targetEndChapterOrder: 130,
+    riskSignals: [],
+  }, existingRows);
+
+  // 不同窗口 → 不重映射，保留新 key（这是续作里的新伏笔）
+  assert.equal(resolvedKey, "shattered_scale_resurgence");
+});
+
+test("resolvePayoffLedgerSyncLedgerKey window dedup prefers paid-off over failed when both match window", () => {
+  const existingRows = [
+    createLedgerItem({
+      ledgerKey: "failed_arc",
+      title: "某弧线",
+      currentStatus: "failed",
+      targetStartChapterOrder: 35,
+      targetEndChapterOrder: 40,
+      lastTouchedChapterOrder: 40,
+      updatedAt: "2026-07-02T09:00:00.000Z",
+    }),
+    createLedgerItem({
+      ledgerKey: "paid_arc",
+      title: "某弧线变体",
+      currentStatus: "paid_off",
+      targetStartChapterOrder: 35,
+      targetEndChapterOrder: 40,
+      lastTouchedChapterOrder: 40,
+      updatedAt: "2026-07-02T10:00:00.000Z",
+    }),
+  ];
+
+  const resolvedKey = resolvePayoffLedgerSyncLedgerKey({
+    ledgerKey: "new_variant",
+    title: "某弧线",
+    scopeType: "volume",
+    currentStatus: "overdue",
+    targetStartChapterOrder: 35,
+    targetEndChapterOrder: 40,
+    riskSignals: [],
+  }, existingRows);
+
+  // 两个终态行都匹配窗口；compareExistingLedgerIdentityRows 按 updatedAt 降序，paid_arc 更新
+  assert.equal(resolvedKey, "paid_arc");
+});
+
 test("sanitizePayoffLedgerSyncItem downgrades overdue without explicit payoff window", () => {
   const item = sanitizePayoffLedgerSyncItem({
     ledgerKey: "review_first_success",

@@ -50,6 +50,7 @@ type ExistingLedgerIdentityRow = {
   title: string;
   scopeType: "book" | "volume" | "chapter";
   currentStatus: PayoffLedgerStatus;
+  targetStartChapterOrder: number | null;
   targetEndChapterOrder: number | null;
   lastTouchedChapterOrder: number | null;
   updatedAt: Date | string;
@@ -258,14 +259,45 @@ export function resolvePayoffLedgerSyncLedgerKey(
     return item.ledgerKey;
   }
   const identity = normalizePayoffLedgerIdentity(item.title);
-  if (!identity) {
-    return item.ledgerKey;
+
+  // 标题归一化匹配：只复用"未终态"的同名行。终态行（paid_off/failed）不复用——
+  // 同名可能是续作里的新伏笔，强行复用会被终态守卫误压。保持既有行为。
+  const titleCandidates = identity
+    ? existingRows
+        .filter((row) => isUnfinishedPayoffStatus(row.currentStatus))
+        .filter((row) => normalizePayoffLedgerIdentity(row.title) === identity)
+        .sort((left, right) => compareExistingLedgerIdentityRows(item, left, right))
+    : [];
+
+  if (titleCandidates[0]) {
+    return titleCandidates[0].ledgerKey;
   }
-  const candidates = existingRows
-    .filter((row) => isUnfinishedPayoffStatus(row.currentStatus))
-    .filter((row) => normalizePayoffLedgerIdentity(row.title) === identity)
-    .sort((left, right) => compareExistingLedgerIdentityRows(item, left, right));
-  return candidates[0]?.ledgerKey ?? item.ledgerKey;
+
+  // 跨 key 重复登记防御（窗口指纹兜底）：LLM 会给同一段已兑现剧情反复发明新
+  // ledgerKey 变体（碎鳞救治弧已出现 5 个 key，全指向 ch40 已兑现的同一段剧情）。
+  // 按 key 查 previous 的终态守卫拦不住新 key——新 key 无 previous 终态可保护，落到
+  // overdue 就触发 replan。这里用"窗口指纹"（targetStart+targetEnd 完全相同）把新 key
+  // 重映射到同窗口的终态行，让终态守卫生效：LLM 想把已兑现剧情重报为 overdue 时，
+  // previous 命中终态行 → 守卫拒绝重开 → 保留 paid_off。
+  //
+  // 窗口指纹是强信号（同 start+end 几乎必是同一伏笔弧），比标题更可靠——标题会被
+  // LLM 微调（"碎鳞药剂倒计时与救治" vs "碎鳞药剂倒计时与救治压力"），但窗口是结构
+  // 化字段，LLM 抄自同一来源，稳定一致。仅终态行参与：active 行的同窗口匹配走标题
+  // 路径已处理；这里专治"已兑现剧情的新 key 变体"。
+  const itemStart = item.targetStartChapterOrder ?? null;
+  const itemEnd = item.targetEndChapterOrder ?? null;
+  if (typeof itemStart === "number" && typeof itemEnd === "number") {
+    const windowMatch = existingRows
+      .filter((row) => isTerminalPayoffStatus(row.currentStatus))
+      .filter((row) => row.targetEndChapterOrder === itemEnd
+        && row.targetStartChapterOrder === itemStart)
+      .sort((left, right) => compareExistingLedgerIdentityRows(item, left, right));
+    if (windowMatch[0]) {
+      return windowMatch[0].ledgerKey;
+    }
+  }
+
+  return item.ledgerKey;
 }
 
 export function sanitizePayoffLedgerSyncItem<T extends PayoffLedgerSyncCandidate>(
