@@ -550,7 +550,9 @@ export class PayoffLedgerSyncService {
         }
 
         for (const row of existingRows) {
-          if (outputByKey.has(row.ledgerKey) || row.currentStatus === "paid_off") {
+          // 终态行（paid_off/failed）豁免 stale-marking：终态只能由显式人工/系统动作
+          // 改变（与上面的终态守卫同一模型），不该因为本轮未被 LLM 命中就刷新风险信号。
+          if (outputByKey.has(row.ledgerKey) || isTerminalPayoffStatus(row.currentStatus)) {
             continue;
           }
           // 已存在的伪 ledger 项（审计问题回灌生成）直接删除，不再标 stale 残留。
