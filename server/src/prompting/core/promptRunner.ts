@@ -6,6 +6,7 @@ import {
   parseStructuredLlmRawContentDetailed,
   type StructuredInvokeResult,
 } from "../../llm/structuredInvoke";
+import { runWithEnforcedTimeout } from "../../llm/invokeTimeout";
 import {
   buildStructuredResponseFormat,
   resolveStructuredOutputProfile,
