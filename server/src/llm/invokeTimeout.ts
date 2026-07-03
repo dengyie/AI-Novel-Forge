@@ -20,6 +20,21 @@ function createAbortError(reason?: unknown): Error {
   return error;
 }
 
+// 硬性墙钟超时兜底：调用方不显式传 timeoutMs 时（planner/章节生成核心路径都不传），
+// runWithEnforcedTimeout 仍必须启用 AbortController + Promise.race 超时。仅靠 LLM 客户端
+// （ChatOpenAI/Anthropic）的 HTTP timeout 不够——CPA 某渠道可能已返回响应头但 body 流
+// 静默 hang，SDK 的 timeout 管不到流式 body，导致 invoke promise 永久挂死（无 reject=
+// Phase 4 重试够不着=director 循环卡死=假 running）。这里的墙钟超时不依赖 SDK/fetch
+// 语义，到点无条件 abort + reject（"timed out" 命中 isTransientTransportError）→ 重试接管。
+const DEFAULT_ENFORCED_TIMEOUT_MS = (() => {
+  const raw = process.env.LLM_REQUEST_TIMEOUT_MS?.trim();
+  const parsed = raw ? Number(raw) : Number.NaN;
+  if (Number.isFinite(parsed) && parsed >= 30_000 && parsed <= 900_000) {
+    return Math.floor(parsed);
+  }
+  return 300_000;
+})();
+
 export async function runWithEnforcedTimeout<T>(input: {
   label?: string;
   timeoutMs?: number;
@@ -28,7 +43,7 @@ export async function runWithEnforcedTimeout<T>(input: {
 }): Promise<T> {
   const timeoutMs = typeof input.timeoutMs === "number" && Number.isFinite(input.timeoutMs) && input.timeoutMs > 0
     ? Math.floor(input.timeoutMs)
-    : null;
+    : DEFAULT_ENFORCED_TIMEOUT_MS;
 
   if (!timeoutMs && !input.signal) {
     return input.run(undefined);

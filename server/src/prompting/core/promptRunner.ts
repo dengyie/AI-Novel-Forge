@@ -847,7 +847,19 @@ export async function runTextPrompt<I>(input: {
       taskType: input.asset.taskType,
       promptMeta: prepared.invocation,
     });
-    const result = await llm.invoke(prepared.messages, buildPromptCallOptions(input.options));
+    const callOptions = buildPromptCallOptions(input.options);
+    // 墙钟超时兜底：text 路径原本裸调 llm.invoke，只靠客户端 HTTP 超时——对"响应头已返回
+    // 但 body 流静默 hang"的渠道管不到，promise 永久挂死。套 runWithEnforcedTimeout 后到点
+    // 无条件 abort + reject（timeoutMs 未传时用其内部默认兜底），命中瞬时错误判据后由上层重试。
+    const result = await runWithEnforcedTimeout({
+      label: `${input.asset.id}@${input.asset.version}`,
+      timeoutMs: input.options?.timeoutMs,
+      signal: input.options?.signal,
+      run: (signal) => llm.invoke(
+        prepared.messages,
+        signal ? { ...callOptions, signal } : callOptions,
+      ),
+    });
     const output = applyPromptPostValidate({
       asset: input.asset,
       promptInput: input.promptInput,
