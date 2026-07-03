@@ -178,3 +178,74 @@ DELETE FROM GenerationJob WHERE id='...';
 - `/v1/models` 返回全量列表（约 40 个，含空字节污染需清理）
 - 通过 `/v1/chat/completions` 统一路由，不同模型名转发到不同后端
 - 延迟主要取决于 prompt token 数和后端模型推理速度
+
+---
+
+## 11. LLM 调用无墙钟超时 → 永久挂死 → 流水线假 running（最深根因）
+
+**文件**：`server/src/llm/invokeTimeout.ts`、`server/src/llm/factory.ts`、`server/src/prompting/core/promptRunner.ts`
+
+**症状**：auto_director 任务反复 stall——`status=running`、心跳新鲜，但章节不推进、DirectorEvent 长时间无新增、resume 救不了，只能硬重启 ts-node-dev 主进程。
+
+**根因**（两层，同一根源）：核心 LLM 调用（`planner.chapter.plan` 等）不显式传 `timeoutMs`：
+1. `runWithEnforcedTimeout` 原本在 `timeoutMs` 为 undefined 时直接裸跑（`if (!timeoutMs && !signal) return input.run(undefined)`），AbortController + Promise.race 墙钟超时**根本没启用**。
+2. `runTextPrompt` 根本没套 `runWithEnforcedTimeout`，裸调 `llm.invoke`，只靠 ChatOpenAI/Anthropic 客户端的 HTTP timeout。
+
+**为什么客户端 HTTP timeout 不够**：CPA 某渠道会「响应头已返回 200 但 body 流静默 hang」，SDK 的 timeout 管不到已开始的流式 body → invoke promise 永不 resolve/reject。
+
+**卡死链**：promise 永久挂死 → 不 reject → Phase 4 瞬时重试（`isTransientTransportError`）够不着（没有 error 可判断）→ director 执行循环卡在 `node_started` 之后 → 但心跳 cron 独立在刷 → 表现为「假 running」。
+
+**诊断特征**：
+- task=running + 心跳新鲜，但 DirectorEvent >5min 无新增
+- LLM 日志（`.logs/YYYY-MM-DD/*.llm.jsonl`）某条 `event:request` 有 `latencyMs:null`、无对应 response、`timeoutMs:null`
+- 章节 `generationState` 停在 planned/writing 不动
+
+**根治**（3 层超时注入）：
+1. `factory.ts` 注入 `DEFAULT_LLM_REQUEST_TIMEOUT_MS`（读 `LLM_REQUEST_TIMEOUT_MS` env，默认 300s，范围 30s–900s），客户端 HTTP 层兜底。
+2. `runWithEnforcedTimeout` 自身默认兜底 `DEFAULT_ENFORCED_TIMEOUT_MS`，墙钟超时**无条件启用**，不依赖 SDK/fetch 语义。
+3. `runTextPrompt` 也套 `runWithEnforcedTimeout`。
+
+墙钟超时到点无条件 `abort + reject`，reject 消息含 "timed out" → 命中 `isTransientTransportError` → Phase 4 重试自动换渠道。这把「永久挂死」变成「300s 后超时重试」，从机制上消除假 running。
+
+**教训**：
+- 新增任何 LLM 调用路径，务必最终过 `runWithEnforcedTimeout`（现有默认兜底，但别新开绕过它的裸 `llm.invoke`）。
+- 调全局超时用 `LLM_REQUEST_TIMEOUT_MS` env（纯 env，不改源码不触发 respawn）。
+- 遇到「假 running」先查 LLM 日志有无 `latencyMs:null` 的挂死 request。
+
+---
+
+## 12. PayoffLedger 跨 key 重复登记 → 误判 overdue → 强制 replan
+
+**文件**：`server/src/services/payoffLedgerShared.ts`、`server/src/services/payoff/PayoffLedgerSyncService.ts`、`server/src/services/novel/runtime/ChapterArtifactDeltaService.ts`
+
+**症状**：某伏笔已在早期章节 `paid_off`，但流水线仍反复报该伏笔 overdue → `PIPELINE_REPLAN_REQUIRED` → 任务 failed。
+
+**根因**：LM 在每轮 reconciliation 里为**同一条剧情**发明新的 `ledgerKey` 变体（措辞不同），每个新 key 都是全新 setup→无窗口→overdue，绕过了已有终态行。
+
+**修复**（两条写路径都要加防御，缺一不可）：
+- `PayoffLedgerSyncService.syncLedger`（LM 对账路径）
+- `ChapterArtifactDeltaService.applyPayoffDeltas`（章节 delta 路径）
+
+三层守卫：
+1. **终态守卫** `isTerminalPayoffStatus`：`paid_off`/`failed` 状态不可被 LM 重开，除非显式动作。stale-marking 循环跳过条件从 `=== "paid_off"` 改为 `isTerminalPayoffStatus`（连 failed 一起豁免）。
+2. **跨 key 窗口指纹去重** `resolvePayoffLedgerSyncLedgerKey`：title 匹配只复用未完成行；新增 fallback 用 `targetStart + targetEnd` 相同指纹重映射到终态行，让 LM 的新 key 落回原终态行而非新建。
+3. **premature-overdue sanitize** `isPrematureOverduePayoff`：过滤审计伪项、无窗口项、终态重开等误判。
+
+**教训**：payoff 有两条独立写路径，任何守卫都必须同时应用到两边，只改一边会被另一条路径绕过。
+
+---
+
+## 13. 任务中心堆积失败/导演跟进任务的清理
+
+**文件**：`server/src/services/task/TaskRetentionService.ts`
+
+**症状**：任务中心堆一堆 superseded 的失败任务和孤儿导演跟进日志。
+
+**清理策略**（三类 sweep）：
+1. **age-based** `selectDeletableTaskIds`：按年龄清扫过期任务。
+2. **supersede** `selectSupersededTaskIds` + `selectSupersededGenerationJobIds`：按 novelId 分桶 GenerationJob，当该小说有 active pipeline job **或** active auto_director takeover 时，删除已终态的旧 job。
+3. **orphan-log**：删除 `taskId` 不在 `NovelWorkflowTask` 里的孤儿日志行（`autoDirectorFollowUpActionLog` + `autoDirectorFollowUpNotificationLog`）。
+
+`deleteWorkflowTasks` 级联删除现包含两张导演跟进日志表的 `deleteMany`，避免删任务后残留孤儿日志。
+
+**教训**：删任务时要级联清跟进日志，否则孤儿日志会一直堆在任务中心。
