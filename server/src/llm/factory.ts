@@ -111,6 +111,22 @@ function normalizeOptionalTimeoutMs(value: number | undefined): number | undefin
   return Math.floor(value);
 }
 
+// 全局默认 LLM 请求超时兜底：调用方不显式传 timeoutMs 时（planner/章节生成等核心
+// 路径都不传），LLM 客户端 HTTP 层必须仍有超时，否则 CPA 某渠道 hang 会让 invoke
+// promise 永久挂死——无超时=promise 永不 reject=Phase 4 瞬时重试够不着=director
+// 执行循环卡死（心跳 cron 独立刷，表现为"假 running"，resume 也救不了，只能硬重启）。
+// 注入默认超时后 hung socket 被 abort → invoke reject（"timed out"，命中
+// isTransientTransportError）→ Phase 4 重试自动接管恢复。显式传超时的调用方
+// （styleEngine/rag 等）值优先，不受影响。
+const DEFAULT_LLM_REQUEST_TIMEOUT_MS = (() => {
+  const raw = process.env.LLM_REQUEST_TIMEOUT_MS?.trim();
+  const parsed = raw ? Number(raw) : Number.NaN;
+  if (Number.isFinite(parsed) && parsed >= 30_000 && parsed <= 900_000) {
+    return Math.floor(parsed);
+  }
+  return 300_000;
+})();
+
 function normalizeProviderSecret(secret: ProviderSecret): ProviderSecret {
   return {
     key: normalizeOptionalText(secret.key),
@@ -272,7 +288,7 @@ export async function resolveLLMClientOptions(
   }
 
   const temperature = resolveModelTemperature(resolvedProvider, model, resolvedTemperature);
-  const timeoutMs = normalizeOptionalTimeoutMs(options.timeoutMs);
+  const timeoutMs = normalizeOptionalTimeoutMs(options.timeoutMs) ?? DEFAULT_LLM_REQUEST_TIMEOUT_MS;
   const concurrencyLimit = normalizeLimitValue(dbSecret?.concurrencyLimit);
   const requestIntervalMs = normalizeLimitValue(dbSecret?.requestIntervalMs);
   const requestProtocol = options.requestProtocol === "anthropic" ? "anthropic" : "openai_compatible";
