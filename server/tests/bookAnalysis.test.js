@@ -2810,7 +2810,9 @@ test("NovelReferenceService formats structured timeline nodes by phase", async (
 
   try {
     const service = new NovelReferenceService();
-    const reference = await service.buildReferenceForStage("novel-1", "chapter");
+    // 上游移除了 chapter stage（无生产代码使用）；timeline 仍归属 outline stage 的
+    // section 集合，改用 outline 保留对 timeline-by-phase 格式化的验证价值。
+    const reference = await service.buildReferenceForStage("novel-1", "outline");
 
     assert.match(reference, /\[analysis\.reference\] 测试拆书/);
     assert.match(reference, /### 潜入/);
