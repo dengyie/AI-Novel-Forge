@@ -8,7 +8,7 @@ const DEFAULT_STALE_THRESHOLD_MS = 3 * 60 * 1000;
 interface PipelineRecoveryPort {
   listPendingCancellationPipelineJobs(): Promise<Array<{ id: string; status: string }>>;
   listRecoverablePipelineJobs(): Promise<Array<{ id: string; status: string }>>;
-  listStaleRecoverablePipelineJobs(cutoff: Date): Promise<Array<{ id: string; status: string }>>;
+  listStaleRecoverablePipelineJobs(cutoff: Date, now: Date): Promise<Array<{ id: string; status: string }>>;
   markPipelineJobCancelled(jobId: string): Promise<void>;
   markPipelineJobFailed(jobId: string, message: string): Promise<void>;
   markPipelineJobPendingManualRecovery(jobId: string, message: string): Promise<void>;
@@ -48,7 +48,7 @@ export class NovelPipelineRuntimeService {
 
   async recoverStalePipelineJobs(now = new Date(), staleThresholdMs = DEFAULT_STALE_THRESHOLD_MS): Promise<void> {
     const cutoff = new Date(now.getTime() - Math.max(10000, staleThresholdMs));
-    const rows = await this.pipelineService.listStaleRecoverablePipelineJobs(cutoff);
+    const rows = await this.pipelineService.listStaleRecoverablePipelineJobs(cutoff, now);
     await this.recoverJobs(rows, STALE_PIPELINE_RECOVERY_MESSAGE);
   }
 

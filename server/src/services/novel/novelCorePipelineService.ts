@@ -18,7 +18,7 @@ import {
 import { ensureNovelCharacters } from "./novelCoreSupport";
 import { createQualityReport } from "./novelCoreReviewService";
 import { chapterQualityLoopService } from "./quality/ChapterQualityLoopService";
-import { selectPrimaryPipelineJob } from "./pipelineJobDedup";
+import { buildPipelineLeaseClaimWhere, buildStaleRecoverablePipelineJobWhere, selectPrimaryPipelineJob } from "./pipelineJobDedup";
 import { buildPipelineCurrentItemLabel, buildPipelineStageProgress, decoratePipelineJob as decoratePipelineJobRow, isPipelineActiveStage, parsePipelinePayload as parsePipelineJobPayload, stringifyPipelinePayload as stringifyPipelineJobPayload, type DecoratedPipelineJob, type PipelineActiveStage, type PipelineJobLike } from "./pipelineJobState";
 
 export { buildPipelineCurrentItemLabel, buildPipelineStageProgress } from "./pipelineJobState";
@@ -206,21 +206,9 @@ export class NovelCorePipelineService {
     }));
   }
 
-  async listStaleRecoverablePipelineJobs(cutoff: Date): Promise<Array<{ id: string; status: string }>> {
+  async listStaleRecoverablePipelineJobs(cutoff: Date, now: Date = new Date()): Promise<Array<{ id: string; status: string }>> {
     const rows = await prisma.generationJob.findMany({
-      where: {
-        status: { in: ["queued", "running"] },
-        pendingManualRecovery: false,
-        finishedAt: null,
-        cancelRequestedAt: null,
-        OR: [
-          { heartbeatAt: { lt: cutoff } },
-          { heartbeatAt: null, updatedAt: { lt: cutoff } },
-          // 持久化租约过期：持有者死亡后心跳停止、leaseExpiresAt 不再续期 → watchdog 判可恢复。
-          // 比 heartbeatAt 更精确（heartbeatAt 只表示"5 分钟没动"，leaseExpiresAt 表示"租约到期"）。
-          { leaseExpiresAt: { lt: cutoff } },
-        ],
-      },
+      where: buildStaleRecoverablePipelineJobWhere({ cutoff, now }),
       select: {
         id: true,
         status: true,
@@ -575,12 +563,7 @@ export class NovelCorePipelineService {
       if (leaseEnabled) {
         try {
           const claimed = await prisma.generationJob.updateMany({
-            where: {
-              id: jobId,
-              status: { in: ["queued", "running"] },
-              cancelRequestedAt: null,
-              OR: [{ leaseExpiresAt: null }, { leaseExpiresAt: { lt: new Date() } }],
-            },
+            where: buildPipelineLeaseClaimWhere({ jobId, now: new Date() }),
             data: {
               status: "running",
               leaseOwner: `pipeline-${process.pid}`,
