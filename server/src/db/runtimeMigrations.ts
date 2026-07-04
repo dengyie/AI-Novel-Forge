@@ -105,6 +105,19 @@ const REQUIRED_COLUMN_BACKFILLS = [
     columnName: "sourceInputCharCount",
     columnDefinition: `"sourceInputCharCount" INTEGER`,
   },
+  // GenerationJob 持久化租约：让 watchdog 按 leaseExpiresAt 判定孤儿 job（respawn 后内存
+  // activeJobIds Set 丢失，纯心跳 schema 不足以让新进程接管）。复用 directorRunCommand 表
+  // 的 CAS 租约模式。Phase 3 只加字段；CAS claim 路径在 Phase 4 启用。
+  {
+    tableName: "GenerationJob",
+    columnName: "leaseOwner",
+    columnDefinition: `"leaseOwner" TEXT`,
+  },
+  {
+    tableName: "GenerationJob",
+    columnName: "leaseExpiresAt",
+    columnDefinition: `"leaseExpiresAt" DATETIME`,
+  },
 ] as const;
 
 function resolveSqliteDatabasePath(): string | null {

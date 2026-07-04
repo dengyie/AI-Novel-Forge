@@ -24,6 +24,9 @@ import { buildPipelineCurrentItemLabel, buildPipelineStageProgress, decoratePipe
 export { buildPipelineCurrentItemLabel, buildPipelineStageProgress } from "./pipelineJobState";
 
 const PIPELINE_HEARTBEAT_INTERVAL_MS = 15000;
+// 持久化租约 TTL：watchdog 走 180s stale 阈值，心跳 15s 一次 → TTL 取 300s（stale 阈值的
+// 1.67 倍）保证活体 lease 不会被误判过期；持有者死、心跳停止后 5 分钟内 watchdog 接管。
+const PIPELINE_LEASE_TTL_MS = 300_000;
 const TERMINAL_CONTINUE_QUALITY_LOOP_RISK_FLAG_FRAGMENT = '"terminalAction":"defer_and_continue"';
 const REPLAN_REQUIRED_QUALITY_LOOP_RISK_FLAG_FRAGMENT = '"rootCauseCode":"replan_required"';
 const REPLAN_ACTION_QUALITY_LOOP_RISK_FLAG_FRAGMENT = '"recommendedAction":"replan"';
@@ -213,6 +216,9 @@ export class NovelCorePipelineService {
         OR: [
           { heartbeatAt: { lt: cutoff } },
           { heartbeatAt: null, updatedAt: { lt: cutoff } },
+          // 持久化租约过期：持有者死亡后心跳停止、leaseExpiresAt 不再续期 → watchdog 判可恢复。
+          // 比 heartbeatAt 更精确（heartbeatAt 只表示"5 分钟没动"，leaseExpiresAt 表示"租约到期"）。
+          { leaseExpiresAt: { lt: cutoff } },
         ],
       },
       select: {
@@ -295,6 +301,8 @@ export class NovelCorePipelineService {
         status: "queued",
         pendingManualRecovery: false,
         heartbeatAt: null,
+        leaseOwner: null,
+        leaseExpiresAt: null,
         cancelRequestedAt: null,
       });
       const payload = this.parsePipelinePayload(job.payload);
@@ -531,6 +539,8 @@ export class NovelCorePipelineService {
     retryCount?: number;
     pendingManualRecovery?: boolean;
     heartbeatAt?: Date | null;
+    leaseOwner?: string | null;
+    leaseExpiresAt?: Date | null;
     currentStage?: string | null;
     currentItemKey?: string | null;
     currentItemLabel?: string | null;
@@ -626,6 +636,7 @@ export class NovelCorePipelineService {
           pendingManualRecovery: false,
           startedAt: existingJob?.startedAt ?? new Date(),
           heartbeatAt: new Date(),
+          leaseExpiresAt: new Date(Date.now() + PIPELINE_LEASE_TTL_MS),
           currentStage: "generating_chapters",
         });
         logPipelineInfo("任务开始执行", {
@@ -731,6 +742,7 @@ export class NovelCorePipelineService {
           const heartbeatTimer = setInterval(() => {
             void this.updateJobSafe(jobId, {
               heartbeatAt: new Date(),
+              leaseExpiresAt: new Date(Date.now() + PIPELINE_LEASE_TTL_MS),
               currentStage: activeStage,
               currentItemKey: chapter.id,
               currentItemLabel,

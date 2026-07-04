@@ -1521,6 +1521,8 @@ model GenerationJob {
   maxRetries     Int               @default(2)
   pendingManualRecovery Boolean    @default(false)
   heartbeatAt    DateTime?
+  leaseOwner      String?
+  leaseExpiresAt  DateTime?
   currentStage   String?
   currentItemKey String?
   currentItemLabel String?
