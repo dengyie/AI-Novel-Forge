@@ -18,7 +18,12 @@ interface RecoveryInitializationDeps {
   markPendingBookAnalysesForManualRecovery(): Promise<unknown>;
   markPendingImageTasksForManualRecovery(): Promise<unknown>;
   markPendingAutoDirectorTasksForManualRecovery(): Promise<unknown>;
-  markPendingPipelineJobsForManualRecovery(): Promise<unknown>;
+  // 启动时对章节流水线任务走自动恢复而非标 manual-recovery——标过 pendingManualRecovery=true
+  // 的孤儿 GenerationJob 会被 watchdog 跳过（listStaleRecoverablePipelineJobs where 含
+  // pendingManualRecovery:false），重启后无新 director command 可 lease 时永卡 queued。auto-resume
+  // 复用 resumePendingPipelineJobs → resumePipelineJob（skipCompleted 跳已成功章节），回到
+  // commit 59f11406 之前的行为。
+  resumePendingPipelineJobs(): Promise<unknown>;
   markPendingStyleTasksForManualRecovery(): Promise<unknown>;
 }
 
@@ -73,7 +78,7 @@ export class RecoveryTaskService {
       markPendingBookAnalysesForManualRecovery: () => bookAnalysisService.markPendingAnalysesForManualRecovery(),
       markPendingImageTasksForManualRecovery: () => imageGenerationService.markPendingTasksForManualRecovery(),
       markPendingAutoDirectorTasksForManualRecovery: () => this.novelWorkflowRuntimeService.markPendingAutoDirectorTasksForManualRecovery(),
-      markPendingPipelineJobsForManualRecovery: () => this.novelPipelineRuntimeService.markPendingPipelineJobsForManualRecovery(),
+      resumePendingPipelineJobs: () => this.novelPipelineRuntimeService.resumePendingPipelineJobs(),
       markPendingStyleTasksForManualRecovery: () => styleExtractionTaskService.markPendingTasksForManualRecovery(),
     },
   ) {}
@@ -84,7 +89,7 @@ export class RecoveryTaskService {
         this.initializationDeps.markPendingBookAnalysesForManualRecovery(),
         this.initializationDeps.markPendingImageTasksForManualRecovery(),
         this.initializationDeps.markPendingAutoDirectorTasksForManualRecovery(),
-        this.initializationDeps.markPendingPipelineJobsForManualRecovery(),
+        this.initializationDeps.resumePendingPipelineJobs(),
         this.initializationDeps.markPendingStyleTasksForManualRecovery(),
       ]).then(() => undefined);
     }
