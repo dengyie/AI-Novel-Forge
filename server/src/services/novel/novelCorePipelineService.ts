@@ -565,13 +565,45 @@ export class NovelCorePipelineService {
       return;
     }
     NovelCorePipelineService.activeJobIds.add(jobId);
-    void this.executePipeline(jobId, novelId, options)
-      .catch(() => {
-        // 防止后台任务未处理拒绝导致进程不稳定
-      })
-      .finally(() => {
-        NovelCorePipelineService.activeJobIds.delete(jobId);
-      });
+    void (async () => {
+      // CAS 认领：消除"两个进程同时调度同 jobId"的竞态——内存 activeJobIds 只能防本进程内
+      // 重复 dispatch，跨进程（respawn 后新实例 + 旧实例残留）dedup 必须落 DB。leaseExpiresAt
+      // null 或已过期才能认领；认领成功后其它实例 updateMany 看到 status=running 且 lease
+      // 未过期，count=0 → 跳过。env GENERATION_JOB_LEASE_ENABLED=false 回退到内存去重路径
+      // （只保留 activeJobIds，不做 DB CAS）——留给线上 hot-fix 回退用。
+      const leaseEnabled = process.env.GENERATION_JOB_LEASE_ENABLED !== "false";
+      if (leaseEnabled) {
+        try {
+          const claimed = await prisma.generationJob.updateMany({
+            where: {
+              id: jobId,
+              status: { in: ["queued", "running"] },
+              cancelRequestedAt: null,
+              OR: [{ leaseExpiresAt: null }, { leaseExpiresAt: { lt: new Date() } }],
+            },
+            data: {
+              status: "running",
+              leaseOwner: `pipeline-${process.pid}`,
+              leaseExpiresAt: new Date(Date.now() + PIPELINE_LEASE_TTL_MS),
+            },
+          });
+          if (claimed.count === 0) {
+            // 已被其它实例认领或租约未过期——不重复调度。
+            NovelCorePipelineService.activeJobIds.delete(jobId);
+            return;
+          }
+        } catch {
+          // 认领失败不阻断：回退到内存路径继续 executePipeline（已有 activeJobIds 保护同进程）。
+        }
+      }
+      await this.executePipeline(jobId, novelId, options)
+        .catch(() => {
+          // 防止后台任务未处理拒绝导致进程不稳定
+        })
+        .finally(() => {
+          NovelCorePipelineService.activeJobIds.delete(jobId);
+        });
+    })();
   }
 
   private async executePipeline(jobId: string, novelId: string, options: PipelineRunOptions) {

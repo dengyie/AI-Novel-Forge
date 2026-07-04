@@ -10,6 +10,11 @@ eventsStub.loaded = true;
 eventsStub.exports = {
   novelEventBus: {
     async emit() {},
+    // BatchContextCache 加载时订阅 character/volume 变更事件，stub 必须提供 on/off 才不阻断
+    // require dist 链路。这是 pre-existing stub 缺口，此前 dist 未重编译时被掩盖。
+    on() {},
+    off() {},
+    once() {},
   },
 };
 require.cache[eventsEntry] = eventsStub;
