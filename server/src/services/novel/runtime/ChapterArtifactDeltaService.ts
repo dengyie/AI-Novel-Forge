@@ -612,7 +612,10 @@ export class ChapterArtifactDeltaService {
       // 剧情发明新 key 变体时，窗口指纹把新 key 重映射到同窗口终态行，previous 命中终态
       // → 守卫拒绝重开 → 保留 paid_off。否则新 key 无 previous 终态可保护，落到 overdue
       // 绕过写入层守卫（见 payoffLedgerShared.ts 跨 key 重复登记防御注释）。
-      const existingRows = await tx.payoffLedgerItem.findMany({ where: { novelId: input.novelId } });
+      const existingRows = await tx.payoffLedgerItem.findMany({
+        where: { novelId: input.novelId },
+        include: { setupChapter: { select: { order: true } } },
+      });
       for (const rawItem of input.output.payoffDeltas) {
         const fallbackKey = normalizeLedgerKey(rawItem.ledgerKey, normalizeLedgerKey(rawItem.title, `chapter_${input.chapterOrder}_payoff`));
         // 与 syncLedger 路径对齐：章节增量同样要过 overdue 误判清洗（审计伪项 / 无窗口 /

@@ -43,6 +43,12 @@ type PayoffLedgerSyncCandidate = {
   payoffChapterOrder?: number | null;
   riskSignals: PayoffLedgerRiskSignal[];
   statusReason?: string | null;
+  // 退化匹配用：新 key 的 setup 章号。优先 setupChapterOrder，缺失时回落
+  // firstSeenChapterOrder。LM 为同剧情造的无窗口新 key 变体靠这个跟已兑现终态行
+  // 的 setup 章做区间校验，避免误拦续卷同类新伏笔。
+  firstSeenChapterOrder?: number | null;
+  setupChapterId?: string | null;
+  setupChapterOrder?: number | null;
 };
 
 type ExistingLedgerIdentityRow = {
@@ -54,6 +60,13 @@ type ExistingLedgerIdentityRow = {
   targetEndChapterOrder: number | null;
   lastTouchedChapterOrder: number | null;
   updatedAt: Date | string;
+  // 退化匹配用：终态行的 setup 章号来源有两种形态——Prisma row 嵌套在
+  // setupChapter.order（两条写路径都裸传 row），或拓平到 setupChapterOrder。
+  // matchDegenerateTerminalRow 两者都读，优先 setupChapterOrder，回落 setupChapter.order。
+  firstSeenChapterOrder?: number | null;
+  setupChapterId?: string | null;
+  setupChapterOrder?: number | null;
+  setupChapter?: { order: number | null } | null;
 };
 
 export interface SyntheticPayoffIssue {
@@ -251,6 +264,89 @@ function compareExistingLedgerIdentityRows(
   return left.ledgerKey.localeCompare(right.ledgerKey);
 }
 
+// 第四级退化匹配：终态行无窗口时的 setup 区间 + 标题最长公共子串兜底。
+// LLM 为同一段已兑现剧情反复造新 ledgerKey 变体——部分终态行（如 league_traitor、
+// alliance_mole）根本没有 targetStart/targetEnd，窗口指纹（第三级）对不上新 key 的
+// 过期窗口，新 key 直落 overdue→replan。本级在窗口指紋未命中后兜底：用 setup 章区间
+// 重叠 + 归一化标题最长公共连续子串长度门槛把新 key 重映射到已兑现终态行，让下游
+// 终态守卫拒重开。用 LCS 而非子串：同源变体标题常含插入词（「联盟内部卧底」vs
+// 「联盟内部反派卧底」中间插了「反派」），互非子串但有连续命中段「联盟内部」。
+//
+// 三重收敛防误拦续卷真实新伏笔：
+// 1. setup 章区间：新 key setup 章在终态行 setup±容差内（容差=max(新 key 窗口跨度,10)），
+//    同源剧情 setup 章必然靠近；续卧行 setup 章在很后面，超容差不命中。
+// 2. scopeType 一致：book/volume/chapter 不同 scope 不比。
+// 3. LCS 长度门槛 4：归一化后两串最长公共连续子串 <4 字符（如单字「卧」命中所有含卧
+//    标题）不命中，避免误抓。同源变体必有 ≥4 的连续段（「联盟内部」）。
+function matchDegenerateTerminalRow(
+  item: PayoffLedgerSyncCandidate,
+  rows: ExistingLedgerIdentityRow[],
+): ExistingLedgerIdentityRow | undefined {
+  const itemNorm = normalizePayoffLedgerIdentity(item.title);
+  if (!itemNorm) {
+    return undefined;
+  }
+  const MIN_SUBSTRING = 4;
+  const WINDOW_TOLERANCE = 10;
+  const itemSetup = item.setupChapterOrder ?? item.firstSeenChapterOrder ?? null;
+  if (itemSetup == null) {
+    return undefined;
+  }
+  const resolveRowSetup = (row: ExistingLedgerIdentityRow): number | null => {
+    if (typeof row.setupChapterOrder === "number") {
+      return row.setupChapterOrder;
+    }
+    if (row.setupChapter && typeof row.setupChapter.order === "number") {
+      return row.setupChapter.order;
+    }
+    return null;
+  };
+  // 最长公共连续子串（LCS substring）。同源剧情变体标题虽非彼此子串（如「联盟内部卧底」
+  // vs「联盟内部反派卧底」中间插入了「反派」），但归一化后必有连续命中段（"联盟内部"
+  // 4 字）。共享关键令牌长度门槛拒「卧」单字这类误抓。
+  const longestCommonSubstring = (a: string, b: string): number => {
+    if (!a || !b) {
+      return 0;
+    }
+    let longest = 0;
+    const dp = new Array(b.length + 1).fill(0);
+    for (let i = 1; i <= a.length; i += 1) {
+      const prev = new Array(b.length + 1).fill(0);
+      for (let j = 1; j <= b.length; j += 1) {
+        if (a[i - 1] === b[j - 1]) {
+          prev[j] = dp[j - 1] + 1;
+          if (prev[j] > longest) {
+            longest = prev[j];
+          }
+        }
+      }
+      dp.splice(0, dp.length, ...prev);
+    }
+    return longest;
+  };
+  const windowSpan = Math.abs(
+    (item.targetEndChapterOrder ?? 0) - (item.targetStartChapterOrder ?? 0),
+  );
+  const tolerance = Math.max(windowSpan, WINDOW_TOLERANCE);
+  const candidates = rows
+    .filter((row) => {
+      if (!isTerminalPayoffStatus(row.currentStatus) || row.scopeType !== item.scopeType) {
+        return false;
+      }
+      const rowSetup = resolveRowSetup(row);
+      return rowSetup != null && Math.abs(rowSetup - itemSetup) <= tolerance;
+    })
+    .filter((row) => {
+      const rowNorm = normalizePayoffLedgerIdentity(row.title);
+      if (!rowNorm) {
+        return false;
+      }
+      return longestCommonSubstring(itemNorm, rowNorm) >= MIN_SUBSTRING;
+    })
+    .sort((left, right) => compareExistingLedgerIdentityRows(item, left, right));
+  return candidates[0];
+}
+
 export function resolvePayoffLedgerSyncLedgerKey(
   item: PayoffLedgerSyncCandidate,
   existingRows: ExistingLedgerIdentityRow[],
@@ -295,6 +391,13 @@ export function resolvePayoffLedgerSyncLedgerKey(
     if (windowMatch[0]) {
       return windowMatch[0].ledgerKey;
     }
+  }
+
+  // 第四级退化匹配：终态行无窗口（窗口指纹够不着）时，靠 setup 章区间 + 标题最长
+  // 公共子串把新 key 重映射到已兑现终态行，让下游终态守卫拒重开。详见 matchDegenerateTerminalRow。
+  const degenerateMatch = matchDegenerateTerminalRow(item, existingRows);
+  if (degenerateMatch) {
+    return degenerateMatch.ledgerKey;
   }
 
   return item.ledgerKey;

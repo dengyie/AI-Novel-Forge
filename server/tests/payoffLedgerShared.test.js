@@ -674,3 +674,168 @@ test("buildSyntheticPayoffIssues skips audit-artifact ledger items to break feed
   // 伪项不再二次产出审计问题
   assert.equal(issues.length, 0, "pseudo ledger items should not emit synthetic issues");
 });
+
+// --- 跨 key 去重第四级：无窗口终态行退化匹配 ---
+// 联盟卧底场景：league_traitor@ch11 已 paid_off 但无 targetStart/targetEnd，LM 又造
+// 新 key 变体（vol1_traitor_in_league 窗口1-45 setup ch1）。窗口指纹（第三级）对不上
+// → 退化匹配靠 setup 章区间 + 标题最长公共子串把新 key 重映射到终态行，让守卫拒重开。
+// existingRows 用 Prisma include setupChapter 形态（裸传 row）。
+function identityRow(overrides = {}) {
+  return {
+    ledgerKey: overrides.ledgerKey ?? "row-key",
+    title: overrides.title ?? "联盟内部反派卧底",
+    scopeType: overrides.scopeType ?? "volume",
+    currentStatus: overrides.currentStatus ?? "paid_off",
+    targetStartChapterOrder: overrides.targetStartChapterOrder ?? null,
+    targetEndChapterOrder: overrides.targetEndChapterOrder ?? null,
+    lastTouchedChapterOrder: overrides.lastTouchedChapterOrder ?? null,
+    updatedAt: overrides.updatedAt ?? "2026-07-04T10:00:00.000Z",
+    firstSeenChapterOrder: overrides.firstSeenChapterOrder ?? null,
+    setupChapterId: overrides.setupChapterId ?? null,
+    setupChapterOrder: typeof overrides.setupChapterOrder === "number" ? overrides.setupChapterOrder : (overrides.setupChapter?.order ?? null),
+    setupChapter: overrides.setupChapter ?? null,
+  };
+}
+
+test("resolvePayoffLedgerSyncLedgerKey degenerate match remaps new key to windowless paid-off terminal row", () => {
+  const existingRows = [
+    identityRow({
+      ledgerKey: "league_traitor",
+      title: "联盟内部卧底",
+      currentStatus: "paid_off",
+      setupChapter: { order: 11 },
+      lastTouchedChapterOrder: 11,
+      updatedAt: "2026-07-02T10:00:00.000Z",
+    }),
+  ];
+
+  const resolvedKey = resolvePayoffLedgerSyncLedgerKey({
+    ledgerKey: "vol1_traitor_in_league",
+    title: "联盟内部反派卧底",
+    scopeType: "volume",
+    currentStatus: "overdue",
+    targetStartChapterOrder: 1,
+    targetEndChapterOrder: 45,
+    firstSeenChapterOrder: 1,
+    riskSignals: [],
+  }, existingRows);
+
+  assert.equal(resolvedKey, "league_traitor");
+});
+
+test("resolvePayoffLedgerSyncLedgerKey degenerate match prefers paid-off over failed when both match setup", () => {
+  const existingRows = [
+    identityRow({
+      ledgerKey: "failed_mole",
+      title: "联盟内部卧底",
+      currentStatus: "failed",
+      setupChapter: { order: 11 },
+      lastTouchedChapterOrder: 11,
+      updatedAt: "2026-07-02T09:00:00.000Z",
+    }),
+    identityRow({
+      ledgerKey: "paid_mole",
+      title: "联盟内部卧底",
+      currentStatus: "paid_off",
+      setupChapter: { order: 11 },
+      lastTouchedChapterOrder: 11,
+      updatedAt: "2026-07-02T10:00:00.000Z",
+    }),
+  ];
+
+  const resolvedKey = resolvePayoffLedgerSyncLedgerKey({
+    ledgerKey: "vol1_traitor_in_league",
+    title: "联盟内部反派卧底",
+    scopeType: "volume",
+    currentStatus: "overdue",
+    targetStartChapterOrder: 1,
+    targetEndChapterOrder: 45,
+    firstSeenChapterOrder: 1,
+    riskSignals: [],
+  }, existingRows);
+
+  assert.equal(resolvedKey, "paid_mole");
+});
+
+test("resolvePayoffLedgerSyncLedgerKey degenerate match rejects setup chapter outside tolerance (continuation volume)", () => {
+  // 续卷真实新伏底：终态行 setup ch1，新 key setup ch85 → 超 setup±窗口容差，不重映射
+  const existingRows = [
+    identityRow({
+      ledgerKey: "league_traitor",
+      title: "联盟内部卧底",
+      currentStatus: "paid_off",
+      setupChapter: { order: 1 },
+      lastTouchedChapterOrder: 11,
+      updatedAt: "2026-07-02T10:00:00.000Z",
+    }),
+  ];
+
+  const resolvedKey = resolvePayoffLedgerSyncLedgerKey({
+    ledgerKey: "vol3_new_mole",
+    title: "联盟内部反派卧底",
+    scopeType: "volume",
+    currentStatus: "pending_payoff",
+    targetStartChapterOrder: 188,
+    targetEndChapterOrder: 195,
+    firstSeenChapterOrder: 188,
+    riskSignals: [],
+  }, existingRows);
+
+  // 续卧行不重映射，保留新 key
+  assert.equal(resolvedKey, "vol3_new_mole");
+});
+
+test("resolvePayoffLedgerSyncLedgerKey degenerate match rejects different scopeType", () => {
+  const existingRows = [
+    identityRow({
+      ledgerKey: "league_traitor",
+      title: "联盟内部卧底",
+      currentStatus: "paid_off",
+      scopeType: "book",
+      setupChapter: { order: 11 },
+      lastTouchedChapterOrder: 11,
+      updatedAt: "2026-07-02T10:00:00.000Z",
+    }),
+  ];
+
+  const resolvedKey = resolvePayoffLedgerSyncLedgerKey({
+    ledgerKey: "vol1_traitor_in_league",
+    title: "联盟内部反派卧底",
+    scopeType: "volume",
+    currentStatus: "overdue",
+    targetStartChapterOrder: 1,
+    targetEndChapterOrder: 45,
+    firstSeenChapterOrder: 1,
+    riskSignals: [],
+  }, existingRows);
+
+  assert.equal(resolvedKey, "vol1_traitor_in_league");
+});
+
+test("resolvePayoffLedgerSyncLedgerKey degenerate match rejects too-short normalized substring", () => {
+  // 归一化后短串 <4 字符（如单字「卧」）不命中，避免误抓所有含卧标题
+  const existingRows = [
+    identityRow({
+      ledgerKey: "league_traitor",
+      title: "联盟内部卧底",
+      currentStatus: "paid_off",
+      setupChapter: { order: 11 },
+      lastTouchedChapterOrder: 11,
+      updatedAt: "2026-07-02T10:00:00.000Z",
+    }),
+  ];
+
+  const resolvedKey = resolvePayoffLedgerSyncLedgerKey({
+    ledgerKey: "wei_卧_explosion",
+    title: "卧",
+    scopeType: "volume",
+    currentStatus: "overdue",
+    targetStartChapterOrder: 1,
+    targetEndChapterOrder: 45,
+    firstSeenChapterOrder: 1,
+    riskSignals: [],
+  }, existingRows);
+
+  assert.equal(resolvedKey, "wei_卧_explosion");
+});
+

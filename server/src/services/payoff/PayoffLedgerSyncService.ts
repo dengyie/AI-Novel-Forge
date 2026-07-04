@@ -129,6 +129,11 @@ export class PayoffLedgerSyncService {
     return prisma.payoffLedgerItem.findMany({
       where: { novelId },
       orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
+      // 退化匹配用：带出终态行的 setup 章号，供 resolvePayoffLedgerSyncLedgerKey 第四级
+      // setup 区间匹配。无迁移成本——setupChapter 关系已存在（schema.prisma:2376）。
+      include: {
+        setupChapter: { select: { order: true } },
+      },
     });
   }
 
