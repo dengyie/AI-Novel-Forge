@@ -606,16 +606,16 @@ export class ChapterArtifactDeltaService {
       return 0;
     }
     const now = new Date();
+    // 在事务外用顶层 prisma 拍快照，与 syncLedger 路径（PayoffLedgerSyncService.loadLedgerRows
+    // 在 syncLedger 入口事务外加载）对齐：避免在 $transaction 内做全表 findMany 拖长事务持锁
+    // 时间，且本小说全量账本行只读一次供 resolve + previous 查找复用。事务内 update/upsert
+    // 不会回灌到 existingRows——这跟原事务内 findMany 的语义一致（existingRows 也是开事务时
+    // 一次性拍的，后续 item 的写不更新快照），所以行为不变，只把读移出事务临界区。
+    const existingRows = await prisma.payoffLedgerItem.findMany({
+      where: { novelId: input.novelId },
+      include: { setupChapter: { select: { order: true } } },
+    });
     await prisma.$transaction(async (tx) => {
-      // 一次性加载本小说全部账本行，供跨 key 去重解析（resolvePayoffLedgerSyncLedgerKey）
-      // 与终态守卫查 previous 共用。与 syncLedger 路径对齐：LLM 在章节增量里给已兑现
-      // 剧情发明新 key 变体时，窗口指纹把新 key 重映射到同窗口终态行，previous 命中终态
-      // → 守卫拒绝重开 → 保留 paid_off。否则新 key 无 previous 终态可保护，落到 overdue
-      // 绕过写入层守卫（见 payoffLedgerShared.ts 跨 key 重复登记防御注释）。
-      const existingRows = await tx.payoffLedgerItem.findMany({
-        where: { novelId: input.novelId },
-        include: { setupChapter: { select: { order: true } } },
-      });
       for (const rawItem of input.output.payoffDeltas) {
         const fallbackKey = normalizeLedgerKey(rawItem.ledgerKey, normalizeLedgerKey(rawItem.title, `chapter_${input.chapterOrder}_payoff`));
         // 与 syncLedger 路径对齐：章节增量同样要过 overdue 误判清洗（审计伪项 / 无窗口 /

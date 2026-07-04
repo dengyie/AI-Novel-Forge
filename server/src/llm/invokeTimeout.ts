@@ -41,13 +41,12 @@ export async function runWithEnforcedTimeout<T>(input: {
   signal?: AbortSignal;
   run: (signal?: AbortSignal) => Promise<T>;
 }): Promise<T> {
+  // timeoutMs 必为正有限数：调用方显式传合法值，否则回落 DEFAULT_ENFORCED_TIMEOUT_MS。
+  // 上面的三元保证 Math.floor(input.timeoutMs) 要么是 >=1 的有限数，要么是 DEFAULT（>=30000），
+  // 所以这里不存在「无超时」路径——墙钟兜底永远启用，杜绝 CPA body 流静默 hang 致假 running。
   const timeoutMs = typeof input.timeoutMs === "number" && Number.isFinite(input.timeoutMs) && input.timeoutMs > 0
     ? Math.floor(input.timeoutMs)
     : DEFAULT_ENFORCED_TIMEOUT_MS;
-
-  if (!timeoutMs && !input.signal) {
-    return input.run(undefined);
-  }
 
   const controller = new AbortController();
   const upstreamSignal = input.signal;
