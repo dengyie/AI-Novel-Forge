@@ -95,3 +95,41 @@ test("RagContextualChunkService stores context metadata and searchText on candid
   assert.equal(metadata.contextVersion, 2);
   assert.equal(metadata.searchText, candidates[0].searchText);
 }));
+
+test("RagContextualChunkService applyToCandidates is a no-op when contextual retrieval is disabled", () => withRagConfig({
+  contextualRetrievalEnabled: false,
+}, async () => {
+  // 回归守卫：flag=off 时 applyToCandidates 不应触碰候选块——既不写 contextPrefix/version/
+  // sourceHash/searchText 元数据污染持久化形状,也不付每块 buildContextPrefix 的空跑开销。
+  // 下游仍用 searchText ?? chunkText 兜底,等同移植前行为。
+  const service = new RagContextualChunkService(async () => {
+    throw new Error("applyToCandidates should not invoke prompt runner when disabled");
+  });
+  const originalMetadata = JSON.stringify({ chapterOrder: 3 });
+  const candidates = [{
+    id: "chunk-1",
+    ownerType: "novel",
+    ownerId: "novel-1",
+    tenantId: "default",
+    title: "测试小说",
+    chunkText: "他把铜钥匙收进袖中。",
+    chunkHash: "hash",
+    chunkOrder: 0,
+    tokenEstimate: 12,
+    language: "zh",
+    metadataJson: originalMetadata,
+    embedProvider: "test",
+    embedModel: "test",
+    embedVersion: 1,
+  }];
+
+  await service.applyToCandidates({
+    candidates,
+    documentsByOwner: new Map(),
+  });
+
+  assert.equal(candidates[0].metadataJson, originalMetadata);
+  assert.equal(candidates[0].searchText, undefined);
+  assert.equal(candidates[0].contextPrefix, undefined);
+  assert.equal(candidates[0].contextVersion, undefined);
+}));

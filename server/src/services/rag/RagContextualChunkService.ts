@@ -135,6 +135,13 @@ export class RagContextualChunkService {
     if (input.candidates.length === 0) {
       return;
     }
+    // flag=off 时不应碰候选块：buildContextPrefix 在此模式下只早返 chunkText,
+    // 但本方法仍会用 stringifyMetadata 把 contextPrefix:undefined/contextVersion/
+    // contextSourceHash/searchText 写进 metadataJson,污染持久化形状且与移植前不一致。
+    // flag=off 直接跳过——下游 splitTexts = searchText ?? chunkText 仍用 chunkText 兜底。
+    if (!ragConfig.contextualRetrievalEnabled) {
+      return;
+    }
 
     await runWithConcurrency(input.candidates, ragConfig.contextualRetrievalConcurrency, async (candidate) => {
       const document = input.documentsByOwner.get(`${candidate.ownerType}:${candidate.ownerId}`) ?? {

@@ -81,25 +81,21 @@ test("continuation chapter pack prefers bound structured book analysis sections"
   }
 });
 
-test("reference stage builder degrades to empty text on internal lookup errors", async () => {
-  const original = {
-    novelFindUnique: prisma.novel.findUnique,
-    warn: console.warn,
-  };
-  const warnings = [];
+test("reference stage builder rethrows DB/lookup failures (fail-loud on the prompt path)", async () => {
+  const original = { novelFindUnique: prisma.novel.findUnique };
   try {
     prisma.novel.findUnique = async () => {
       throw new Error("simulated lookup failure");
     };
-    console.warn = (...args) => warnings.push(args);
 
-    const reference = await new NovelReferenceService().buildReferenceForStage("novel-1", "outline");
-
-    assert.equal(reference, "");
-    assert.equal(warnings.length, 1);
-    assert.equal(warnings[0][0], "[novel-reference] reference context skipped.");
+    // 移植前契约：DB/连接类异常必须上抛到生成调用点，而不是静默拼成空 reference
+    // 继续 LLM 生成（novelCoreGenerationService 直接把返回串拼进 prompt、无空串分支）。
+    // 回归守卫：catch-all 一旦回退、会让 DB 抖动时章节带空 reference 静默降质。
+    await assert.rejects(
+      new NovelReferenceService().buildReferenceForStage("novel-1", "outline"),
+      /simulated lookup failure/,
+    );
   } finally {
     prisma.novel.findUnique = original.novelFindUnique;
-    console.warn = original.warn;
   }
 });

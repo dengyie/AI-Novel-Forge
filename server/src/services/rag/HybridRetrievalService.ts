@@ -158,6 +158,9 @@ export class HybridRetrievalService {
         ...buildFacetWhere(options.facets),
         OR: terms.flatMap((term) => [
           { chunkText: { contains: term } },
+          // 有意纳入 metadataJson：应用层写入的标题/章节序号/标签等可检索字段存在此列，
+          // 让关键词召回能命中仅暴露在元数据里的命中。这是召回变宽,不受 reranker/contextual
+          // flag 门禁,与移植前严格 parity 不同,但不缩窄生成可用上下文,故不视为降质。
           { metadataJson: { contains: term } },
         ]),
       },
