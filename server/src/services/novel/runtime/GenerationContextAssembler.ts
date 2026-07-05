@@ -41,6 +41,7 @@ import {
   buildRuntimeCharacterHardFactsList,
   parseCharacterProhibitionsJson,
 } from "../characters/characterHardFacts";
+import type { PendingCharacterHardFactReviewMap } from "../characters/characterHardFacts";
 import { NovelVolumeService } from "../volume/NovelVolumeService";
 import { ChapterPlanJITService } from "../planning/ChapterPlanJITService";
 import {
@@ -253,7 +254,8 @@ export class GenerationContextAssembler {
     const pendingReviewProposalCountPromise = prisma.stateChangeProposal.count({
       where: buildBlockingPendingReviewProposalWhere(novelId, chapterId),
     });
-    const pendingCharacterHardFactReviewsPromise = loadPendingCharacterHardFactReviews(novelId, chapterId);
+    const pendingCharacterHardFactReviewsPromise = loadPendingCharacterHardFactReviews(novelId, chapterId)
+      .catch(() => new Map() as PendingCharacterHardFactReviewMap);
     const [
       worldContextBlock,
       pendingReviewProposalCount,
