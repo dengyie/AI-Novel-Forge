@@ -118,6 +118,14 @@ const REQUIRED_COLUMN_BACKFILLS = [
     columnName: "leaseExpiresAt",
     columnDefinition: `"leaseExpiresAt" DATETIME`,
   },
+  // 卷张力等级锚点来源：区分用户锚定 vs AI 推断，让 replan/明细合并保住用户手改的
+  // conflictLevel（上游 2438f5ce+737a915d）。SQLite dev 走此幂等 ADD COLUMN；PG 部署
+  // 走 prisma migrations/20260703173000_volume_chapter_conflict_level_source（Manual-required）。
+  {
+    tableName: "VolumeChapterPlan",
+    columnName: "conflictLevelSource",
+    columnDefinition: `"conflictLevelSource" TEXT`,
+  },
 ] as const;
 
 function resolveSqliteDatabasePath(): string | null {
