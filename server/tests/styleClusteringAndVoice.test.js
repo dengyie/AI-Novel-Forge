@@ -87,19 +87,26 @@ test("disabled 规则不参与扫描", () => {
 
 // ============ 聚类兜底 applyClusteredRiskFloor ============
 
-test("成簇时 LLM 低分被抬到聚类下限 45", () => {
-  assert.equal(applyClusteredRiskFloor(20, true), 45);
-  assert.equal(applyClusteredRiskFloor(0, true), 45);
+test("成簇且有 violations 时 LLM 低分被抬到聚类下限 45", () => {
+  assert.equal(applyClusteredRiskFloor(20, true, true), 45);
+  assert.equal(applyClusteredRiskFloor(0, true, true), 45);
+});
+
+test("成簇但 LLM 判定文本干净（0 violations）→ 不抬分（P1 回归守卫）", () => {
+  // 3 个字面量作为常用词合法出现使 isClustered=true，但 LLM 报 0 violations，
+  // 说明文本其实干净——此时不应抬到 45，否则自相矛盾并触发无谓改写。
+  assert.equal(applyClusteredRiskFloor(0, true, false), 0);
+  assert.equal(applyClusteredRiskFloor(20, true, false), 20);
 });
 
 test("成簇时 LLM 高分不被压低", () => {
-  assert.equal(applyClusteredRiskFloor(80, true), 80);
+  assert.equal(applyClusteredRiskFloor(80, true, true), 80);
 });
 
 test("未成簇时 LLM 分数原样（clamp 到 0-100）", () => {
-  assert.equal(applyClusteredRiskFloor(20, false), 20);
-  assert.equal(applyClusteredRiskFloor(150, false), 100);
-  assert.equal(applyClusteredRiskFloor(-5, false), 0);
+  assert.equal(applyClusteredRiskFloor(20, false, true), 20);
+  assert.equal(applyClusteredRiskFloor(150, false, true), 100);
+  assert.equal(applyClusteredRiskFloor(-5, false, true), 0);
 });
 
 // ============ Voice Calibration buildVoiceProfileText ============

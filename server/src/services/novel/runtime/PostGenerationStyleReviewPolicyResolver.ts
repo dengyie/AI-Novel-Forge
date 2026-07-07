@@ -9,9 +9,9 @@ export interface PostGenerationStyleReviewPolicy {
   secondRoundThreshold: number;
 }
 
-const DEFAULT_SECOND_ROUND_THRESHOLD = 50;
+export const DEFAULT_SECOND_ROUND_THRESHOLD = 50;
 
-function resolveSecondRoundEnabled(): boolean {
+export function resolveSecondRoundEnabled(): boolean {
   const raw = process.env.HUMANIZER_SECOND_ROUND_ENABLED;
   if (raw == null || raw.trim() === "") {
     return true;
@@ -19,8 +19,13 @@ function resolveSecondRoundEnabled(): boolean {
   return raw.trim().toLowerCase() !== "false" && raw.trim() !== "0";
 }
 
-function resolveSecondRoundThreshold(): number {
+export function resolveSecondRoundThreshold(): number {
   const raw = process.env.HUMANIZER_SECOND_ROUND_THRESHOLD;
+  // 空/空白先回落默认——否则 Number("")===0 会让阈值变 0，riskScore>=0 恒真，
+  // 二轮永远触发，破坏控成本闸门。
+  if (raw == null || raw.trim() === "") {
+    return DEFAULT_SECOND_ROUND_THRESHOLD;
+  }
   const parsed = Number(raw);
   if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 100) {
     return parsed;

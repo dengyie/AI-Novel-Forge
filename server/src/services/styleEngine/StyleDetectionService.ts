@@ -85,9 +85,15 @@ export function computeAntiAiClustering(content: string, rules: ClusteringScanRu
 }
 
 // 聚类兜底：成簇时把 LLM 的 riskScore 抬到下限，防 LLM 低估导致漏放。
-export function applyClusteredRiskFloor(llmRiskScore: number, isClustered: boolean): number {
+// 仅当 LLM 也确实报了 violations 才兜底——否则"3 个字面量作为常用词合法出现、
+// 但 LLM 判定文本干净（0 violations）"会被错误抬到 45，产生自相矛盾报告并触发无谓改写。
+export function applyClusteredRiskFloor(
+  llmRiskScore: number,
+  isClustered: boolean,
+  hasViolations: boolean,
+): number {
   const clamped = Math.max(0, Math.min(100, Math.round(llmRiskScore)));
-  return isClustered ? Math.max(clamped, CLUSTERED_RISK_FLOOR) : clamped;
+  return isClustered && hasViolations ? Math.max(clamped, CLUSTERED_RISK_FLOOR) : clamped;
 }
 
 export class StyleDetectionService {
@@ -156,9 +162,10 @@ export class StyleDetectionService {
       },
     });
     const parsed = result.output;
-    // 聚类兜底：成簇时即使 LLM 低估 riskScore，也抬到聚类下限，
+    // 聚类兜底：成簇且 LLM 也报了 violations 时，即使 LLM 低估 riskScore，也抬到聚类下限，
     // 确保后续 rewrite gate（riskScore≥阈值）能被触发，堵住"整章各套一种 tell"漏检。
-    const effectiveRiskScore = applyClusteredRiskFloor(parsed.riskScore ?? 0, isClustered);
+    const hasViolations = (parsed.violations ?? []).length > 0;
+    const effectiveRiskScore = applyClusteredRiskFloor(parsed.riskScore ?? 0, isClustered, hasViolations);
     return {
       riskScore: effectiveRiskScore,
       summary: parsed.summary ?? "",

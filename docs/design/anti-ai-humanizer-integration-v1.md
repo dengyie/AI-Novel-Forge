@@ -42,21 +42,24 @@
 
 ```
 首轮 detect → riskScore ≥ FIRST_ROUND_REWRITE_THRESHOLD(35) 且有可改写项 → 首轮 rewrite
-  → （policy.secondRoundEnabled）对首轮产物 re-detect
+  → （policy.secondRoundEnabled）对首轮产物 re-detect（得首轮残留分）
     → 残留 riskScore ≥ secondRoundThreshold(默认 50) 且有可改写项 → 二轮 rewrite
+      → 二轮产物再 detect（质量回退门）：仅当二轮分 < 首轮残留分才采纳，否则回退首轮
 硬上限两轮，防无限循环、控成本。
 ```
 
 - 首轮阈值 35（沿用原逻辑），二轮阈值默认 50（更高，只在仍明显 AI 时才追加）。
 - 二轮的 issues 来自对首轮产物的重新检测（humanizer 的 "还有什么像 AI" 自审）。
-- `rewriteOnce()` 私有方法供两轮复用，失败或空产物返回 null 回退。
+- `rewriteOnce()` 私有方法供两轮复用，失败或空产物返回 null 回退；`detect()`/`noRewriteResult()` 私有方法消除重复。
+- **质量回退门**：二轮产物必须重检确认 riskScore 真的低于首轮残留才采纳；二轮未更优、或二轮重检失败（LLM 出错）都保守回退首轮，保障"不降低质量"。
+- **residualReport 透出**：`StyleReviewResult` 除入口 `report`（原始正文的检测分）外，新增 `residualReport` 字段反映**最终交付内容**的真实残留分（未改写时为 null），供调用方持久化/上报，避免拿改写前的偏高分当交付指标。
 
 ### 2. 聚类检测（`StyleDetectionService`）
 
 抽两个导出纯函数（便于单测）：
 
 - `computeAntiAiClustering(content, rules)`：统计命中的不同规则数（含 forbidden + risk）。forbidden 命中任意 1 个即走 LLM；命中 ≥`CLUSTERING_THRESHOLD`(3) 个不同规则判成簇；forbidden 有字面量但 0 命中且未成簇 → 短路跳过 LLM 省成本。
-- `applyClusteredRiskFloor(llmRiskScore, isClustered)`：成簇时把 LLM 输出的 riskScore 抬到 `CLUSTERED_RISK_FLOOR`(45)，防 LLM 低估导致漏放，堵住"整章各套一种 tell"漏检。
+- `applyClusteredRiskFloor(llmRiskScore, isClustered, hasViolations)`：**仅当成簇 AND LLM 也报了 violations** 时才把 riskScore 抬到 `CLUSTERED_RISK_FLOOR`(45)，防 LLM 低估导致漏放，堵住"整章各套一种 tell"漏检。加 `hasViolations` 门是为了避免"3 个字面量作为常用词合法出现、但 LLM 判定文本干净（0 violations）"被错误抬分、触发无谓改写。
 
 ### 3. Voice Calibration（`StyleRewriteService`）
 
@@ -84,12 +87,13 @@
 
 ## 测试
 
-- `tests/postGenerationStyleReview.test.js`（6）：双轮控制流——低分不改写、单轮收敛、追加二轮、gate 关退单轮、硬上限两轮、policy 关直接返回。mutation 验证有效性。
-- `tests/styleClusteringAndVoice.test.js`（13）：聚类判定（含"整章各套一种 tell"漏检回归）、聚类兜底、Voice Calibration 摘要（null/全空/缺字段回退）。
-- `tests/humanizerPipeline.integration.test.js`（3）：端到端双轮 riskScore 递降、单轮收敛、聚类捕捉多类痕迹。
+- `tests/postGenerationStyleReview.test.js`（11）：双轮控制流——低分不改写、单轮收敛、追加二轮采纳、二轮未更优回退首轮（质量回退门）、二轮重检失败回退、gate 关退单轮、硬上限两轮、首轮空产物回退、canAutoRewrite=false 不改、policy 关直接返回、residualReport 透出。mutation 验证有效性。
+- `tests/postGenerationStyleReviewPolicy.test.js`（8）：环境变量解析——`secondRoundEnabled` 空/false/0/其他，`secondRoundThreshold` 空串击穿回归守卫、空白回落、显式 0 采纳、越界/非数值回落。
+- `tests/styleClusteringAndVoice.test.js`（12）：聚类判定（含"整章各套一种 tell"漏检回归）、聚类兜底（含"成簇但 0 violations 不抬分" P1 守卫）、Voice Calibration 摘要（null/全空/缺字段回退）。
+- `tests/humanizerPipeline.integration.test.js`（4）：端到端双轮 riskScore 递降、单轮收敛、聚类捕捉多类痕迹、真实聚类+兜底驱动 runner 联合链路。
 - 现有 `tests/style-engine.test.js`（17）回归全绿。
 
-运行：`cd server && node --test tests/postGenerationStyleReview.test.js tests/styleClusteringAndVoice.test.js tests/humanizerPipeline.integration.test.js`（先 `pnpm exec tsc -p tsconfig.json` 构建 dist）。
+运行：`cd server && node --test tests/postGenerationStyleReview.test.js tests/postGenerationStyleReviewPolicy.test.js tests/styleClusteringAndVoice.test.js tests/humanizerPipeline.integration.test.js`（先 `pnpm exec tsc -p tsconfig.json` 构建 dist）。
 
 ## Manual-required
 
