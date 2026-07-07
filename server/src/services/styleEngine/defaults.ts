@@ -688,7 +688,9 @@ export const DEFAULT_ANTI_AI_RULES: DefaultAntiAiRuleDefinition[] = [
     type: "risk",
     severity: "low",
     description: "用“真正重要的是/归根结底/本质上”假装切中要害，后文只是普通信息。",
-    detectPatterns: ["真正重要的是", "本质上", "从某种意义上", "说到底"],
+    // 无字面量：这些前缀在正常叙述里也高频出现（"本质上""说到底"），
+    // 字面量子串匹配会污染聚类计数，只靠 LLM 语义识别是否为空转权威腔。
+    detectPatterns: [],
     rewriteSuggestion: "删掉权威腔前缀，直接说具体的那件事。",
     promptInstruction: "避免“真正重要的是…”“归根结底…”等权威腔空转，直接陈述具体内容。",
     autoRewrite: false,
@@ -701,7 +703,9 @@ export const DEFAULT_ANTI_AI_RULES: DefaultAntiAiRuleDefinition[] = [
     type: "risk",
     severity: "medium",
     description: "“不是X而是Y”“不仅仅是”负向排比过度，是 AI 强调套路。",
-    detectPatterns: ["不是", "而是", "不仅仅是", "不只是"],
+    // 无字面量：负向排比是语义结构（"不是X而是Y"的搭配），单个"不是""而是"是超高频词，
+    // 字面量匹配几乎每章必中、严重污染聚类计数。只靠 LLM 识别排比堆砌结构。
+    detectPatterns: [],
     rewriteSuggestion: "改成正面陈述，避免负向排比堆叠。",
     promptInstruction: "避免“不是X而是Y”“不仅仅是”等负向排比堆砌，用正面陈述。",
     autoRewrite: false,
