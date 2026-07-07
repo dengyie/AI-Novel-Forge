@@ -40,6 +40,9 @@ export interface StyleRewritePromptInput {
   styleContractText: string;
   content: string;
   issuesBlock: string;
+  // Voice Calibration（可选）：目标文风的句式/节奏/语域摘要。借鉴 humanizer——
+  // 改写不只是删 AI 味，而是把套词替换成这套文风的写法。绑定了 StyleProfile 才有值。
+  voiceProfileText?: string;
 }
 
 export interface StyleProfileExtractionPromptInput {
@@ -414,12 +417,21 @@ export const styleRewritePrompt: PromptAsset<StyleRewritePromptInput, string, st
       "6. 是否只输出修正后的正文，没有任何额外说明。",
     ].join("\n\n")),
     new HumanMessage([
+      input.voiceProfileText
+        ? [
+          "目标文风（Voice Calibration）：",
+          "改写不只是删掉 AI 痕迹，而是把套话替换成下面这套文风的句式、节奏和语域。",
+          "在不改事件事实的前提下，让改写后的正文读起来像这套文风写出来的：",
+          input.voiceProfileText,
+          "",
+        ].join("\n")
+        : "",
       "原文：",
       input.content,
       "",
       "检测到的问题：",
       input.issuesBlock,
-    ].join("\n")),
+    ].filter(Boolean).join("\n")),
   ],
 };
 

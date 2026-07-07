@@ -46,6 +46,9 @@ export class PostGenerationStyleReviewRunner {
   async run(input: PostGenerationStyleReviewInput): Promise<StyleReviewResult> {
     const policy = await this.deps.postGenerationStyleReviewPolicyResolver.resolve(input.novelId).catch(() => ({
       enabled: true,
+      // resolve 失败时保守退回单轮，避免 fallback 路径意外触发二轮改写增加成本。
+      secondRoundEnabled: false,
+      secondRoundThreshold: 50,
     }));
     if (!policy.enabled) {
       return {
