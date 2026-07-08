@@ -265,6 +265,17 @@ export async function runPipelineChapterWithRuntime(
       && isQualityPass(latestResult.runtimePackage.audit.score, qualityThreshold)
       && styleLeakageIssues.length === 0;
     if (pass) {
+      // 改写实际发生时把改写后正文落库到 Chapter.content，否则一次过审章节会保留有 AI 味的原始草稿而
+      // 只有 artifacts 用的是改写后文本。syncArtifacts:false 不重复触发已由循环后 syncFinalRetainedChapterArtifacts
+      // 承担的 artifact 同步。在 markChapterGenerationState("approved") 之前调用，因 saveDraftAndArtifacts 会把
+      // chapterStatus 置 "generating"，由随后的 approved 覆盖回 "completed"。
+      if (latestResult.runtimePackage.styleReview?.autoRewritten) {
+        await deps.saveDraftAndArtifacts(novelId, chapterId, content, "drafted", {
+          scheduleBackgroundSync: false,
+          artifactSyncMode,
+          syncArtifacts: false,
+        });
+      }
       await deps.markChapterGenerationState(chapterId, "approved");
       break;
     }

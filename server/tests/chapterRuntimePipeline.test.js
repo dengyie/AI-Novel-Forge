@@ -1208,3 +1208,182 @@ test("runPipelineChapterWithRuntime clamps maxRetries to a single repair pass", 
     promptRunner.runStructuredPrompt = originalRunStructuredPrompt;
   }
 });
+
+test("runPipelineChapterWithRuntime 一次过审且发生去 AI 味改写时把改写后正文落库", async () => {
+  const savedDrafts = [];
+  const finalSyncs = [];
+
+  const result = await runPipelineChapterWithRuntime(
+    {
+      validateRequest(input) {
+        return input;
+      },
+      async ensureNovelCharacters() {},
+      async assemble() {
+        return {
+          novel: { id: "novel-1", title: "测试小说" },
+          chapter: {
+            id: "chapter-1",
+            title: "第一章",
+            order: 1,
+            content: null,
+            expectation: null,
+          },
+          contextPackage: {},
+        };
+      },
+      async generateDraftFromWriter() {
+        return { content: "原始草稿，深吸一口气，他感到一阵寒意。" };
+      },
+      async saveDraftAndArtifacts(_novelId, _chapterId, content, generationState, options) {
+        savedDrafts.push({ content, generationState, options });
+      },
+      async syncFinalChapterArtifacts(_novelId, _chapterId, content) {
+        finalSyncs.push(content);
+      },
+      async finalizeChapterContent({ content }) {
+        return {
+          finalContent: "改写后正文，刀刃贴着头皮擦过去。",
+          runtimePackage: {
+            ...createRuntimePackage(98),
+            audit: {
+              score: {
+                coherence: 98,
+                pacing: 98,
+                repetition: 98,
+                engagement: 98,
+                voice: 98,
+                overall: 98,
+              },
+              openIssues: [],
+              reports: [],
+              hasBlockingIssues: false,
+            },
+            meta: {
+              acceptanceStatus: "accepted",
+              continuePolicy: "continue",
+            },
+            timelineCheck: { status: "passed" },
+            styleReview: {
+              autoRewritten: true,
+              report: null,
+              residualReport: null,
+              originalContent: content,
+            },
+          },
+        };
+      },
+      async markChapterGenerationState(_chapterId, generationState) {},
+      async markChapterNeedsRepair() {},
+    },
+    "novel-1",
+    "chapter-1",
+    {
+      autoReview: true,
+      autoRepair: true,
+    },
+  );
+
+  assert.equal(result.pass, true);
+  assert.deepEqual(savedDrafts, [
+    {
+      content: "原始草稿，深吸一口气，他感到一阵寒意。",
+      generationState: "drafted",
+      options: {
+        scheduleBackgroundSync: false,
+        artifactSyncMode: "adaptive",
+        syncArtifacts: false,
+      },
+    },
+    {
+      content: "改写后正文，刀刃贴着头皮擦过去。",
+      generationState: "drafted",
+      options: {
+        scheduleBackgroundSync: false,
+        artifactSyncMode: "adaptive",
+        syncArtifacts: false,
+      },
+    },
+  ]);
+  assert.deepEqual(finalSyncs, ["改写后正文，刀刃贴着头皮擦过去。"]);
+});
+
+test("runPipelineChapterWithRuntime 一次过审但未改写时不二次落库草稿", async () => {
+  const savedDrafts = [];
+  const finalSyncs = [];
+
+  const result = await runPipelineChapterWithRuntime(
+    {
+      validateRequest(input) {
+        return input;
+      },
+      async ensureNovelCharacters() {},
+      async assemble() {
+        return {
+          novel: { id: "novel-1", title: "测试小说" },
+          chapter: {
+            id: "chapter-1",
+            title: "第一章",
+            order: 1,
+            content: "已就绪的正文，无需改写。",
+            expectation: null,
+          },
+          contextPackage: {},
+        };
+      },
+      async generateDraftFromWriter() {
+        throw new Error("已有正文不应重新生成");
+      },
+      async saveDraftAndArtifacts(_novelId, _chapterId, content, generationState, options) {
+        savedDrafts.push({ content, generationState, options });
+      },
+      async syncFinalChapterArtifacts(_novelId, _chapterId, content) {
+        finalSyncs.push(content);
+      },
+      async finalizeChapterContent() {
+        return {
+          finalContent: "已就绪的正文，无需改写。",
+          runtimePackage: {
+            ...createRuntimePackage(98),
+            audit: {
+              score: {
+                coherence: 98,
+                pacing: 98,
+                repetition: 98,
+                engagement: 98,
+                voice: 98,
+                overall: 98,
+              },
+              openIssues: [],
+              reports: [],
+              hasBlockingIssues: false,
+            },
+            meta: {
+              acceptanceStatus: "accepted",
+              continuePolicy: "continue",
+            },
+            timelineCheck: { status: "passed" },
+            styleReview: {
+              autoRewritten: false,
+              report: null,
+              residualReport: null,
+              originalContent: null,
+            },
+          },
+        };
+      },
+      async markChapterGenerationState(_chapterId, generationState) {},
+      async markChapterNeedsRepair() {},
+    },
+    "novel-1",
+    "chapter-1",
+    {
+      autoReview: true,
+      autoRepair: true,
+    },
+  );
+
+  assert.equal(result.pass, true);
+  assert.deepEqual(savedDrafts, []);
+  assert.deepEqual(finalSyncs, ["已就绪的正文，无需改写。"]);
+});
