@@ -157,7 +157,7 @@ export const styleDetectionPrompt: PromptAsset<
       "",
       "字段要求：",
       "1. ruleName：写明触发的问题规则名，优先使用输入规则中的原始名称或最贴近的规则指代。",
-      "2. ruleType：必须清楚区分来源类别，应对应写法规则、角色表达规则或反AI规则中的一类。",
+      "2. ruleType：取值必须且只能是以下英文字面量之一：style、character、forbidden、risk、encourage。写法规则用 style，角色表达规则用 character，反 AI 规则按其等级用 forbidden（硬违禁）、risk（风险告警）或 encourage（鼓励项）。禁止输出 antiAi、writing、character_expression 等其它值。",
       "3. severity：必须体现问题严重程度，使用稳定、清晰、可比较的等级表述。",
       "4. issueCategory：表达层偏差用 style_expression；只有已经影响章节结构或事件推进时才用 story_structure。",
       "5. excerpt：必须摘取文本中的具体问题片段，尽量短、准、能定位；不要整段复制。",
