@@ -506,7 +506,9 @@ export const DEFAULT_ANTI_AI_RULES: DefaultAntiAiRuleDefinition[] = [
     type: "risk",
     severity: "medium",
     description: "段落长度和节奏过于平均，容易产生 AI 作文感。",
-    detectPatterns: ["段落整齐", "节奏平均"],
+    // 无字面量：段落整齐度是数值/结构特征，没有可子串匹配的稳定触发词；
+    // 仅靠 LLM 语义识别，不参与字面量快扫聚类计数（空 detectPatterns 天然被 computeAntiAiClustering 排除）。
+    detectPatterns: [],
     rewriteSuggestion: "打破段落长度均衡，让句子和段落有自然起伏。",
     promptInstruction: "注意避免每段都过于工整、平均和像标准作文。",
     autoRewrite: false,
@@ -519,7 +521,9 @@ export const DEFAULT_ANTI_AI_RULES: DefaultAntiAiRuleDefinition[] = [
     type: "risk",
     severity: "high",
     description: "连续几段只有解释没有动作，会削弱现场感。",
-    detectPatterns: ["连续解释", "没有动作"],
+    // 无字面量："连续解释""没有动作"是对模式的语言描述而非正文里会出现的字面量，
+    // 子串匹配恒漏判；仅靠 LLM 语义识别，不参与字面量快扫聚类计数。
+    detectPatterns: [],
     rewriteSuggestion: "插入动作、对话、环境反馈，减少连段说明。",
     promptInstruction: "注意避免连续几段只有解释没有动作或对话。",
     autoRewrite: false,
@@ -545,7 +549,10 @@ export const DEFAULT_ANTI_AI_RULES: DefaultAntiAiRuleDefinition[] = [
     type: "risk",
     severity: "medium",
     description: "连续句式过于整齐，容易显得机械。",
-    detectPatterns: ["首先", "然后", "接着", "最后"],
+    // 无字面量："首先/然后/接着/最后"是逻辑推进超高频词，正常叙事也常用，
+    // 字面量匹配几乎每章必中、严重污染聚类计数并误伤正常文本；仅靠 LLM 语义识别，
+    // 不参与字面量快扫聚类计数（空 detectPatterns 天然被 computeAntiAiClustering 排除）。
+    detectPatterns: [],
     rewriteSuggestion: "拉开句式长度和起句方式，打散结构。",
     promptInstruction: "警惕连续句式重复和排比化表达。",
     autoRewrite: false,
