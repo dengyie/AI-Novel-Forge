@@ -51,6 +51,12 @@ export class PostGenerationStyleReviewRunner {
   }
 
   async run(input: PostGenerationStyleReviewInput): Promise<StyleReviewResult> {
+    // 先做无 IO 的短路：没有 styleContext 就无可审内容，直接返回，避免空跑 policy
+    // resolve 的 prisma 查询（finalize 路径里无 styleContext 的场景不应触发 DB 读）。
+    if (!input.contextPackage.styleContext?.compiledBlocks) {
+      return this.noRewriteResult(null, input.content);
+    }
+
     const policy = await this.deps.postGenerationStyleReviewPolicyResolver.resolve(input.novelId).catch(() => ({
       enabled: true,
       // resolve 失败时保守退回单轮，避免 fallback 路径意外触发二轮改写增加成本。
@@ -58,10 +64,6 @@ export class PostGenerationStyleReviewRunner {
       secondRoundThreshold: DEFAULT_SECOND_ROUND_THRESHOLD,
     }));
     if (!policy.enabled) {
-      return this.noRewriteResult(null, input.content);
-    }
-
-    if (!input.contextPackage.styleContext?.compiledBlocks) {
       return this.noRewriteResult(null, input.content);
     }
 

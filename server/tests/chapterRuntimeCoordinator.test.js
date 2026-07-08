@@ -1072,6 +1072,7 @@ test("post-generation style review policy disables detection and rewrite", async
   assert.equal(rewriteCalls, 0);
   assert.deepEqual(result, {
     report: null,
+    residualReport: null,
     autoRewritten: false,
     originalContent: null,
     finalContent: "正文草稿",

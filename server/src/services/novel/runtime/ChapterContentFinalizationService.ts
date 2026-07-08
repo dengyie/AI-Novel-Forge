@@ -7,7 +7,7 @@ import { filterAcceptedFactItems, type FactLedgerExcludedItem } from "../fact/fa
 import { novelFactService } from "../fact/NovelFactService";
 import { ChapterArtifactSyncService } from "./ChapterArtifactSyncService";
 import type { ChapterRuntimeRequestInput } from "./chapterRuntimeSchema";
-import type { StyleReviewResult } from "./PostGenerationStyleReviewRunner";
+import { PostGenerationStyleReviewRunner, type StyleReviewResult } from "./PostGenerationStyleReviewRunner";
 import { ChapterQualityGateService } from "./ChapterQualityGateService";
 import {
   buildRuntimePackage,
@@ -23,6 +23,8 @@ export interface ChapterContentFinalizationServiceDeps {
   artifactSyncService: Pick<ChapterArtifactSyncService, "syncChapterArtifacts">;
   plannerService: ChapterRuntimePlannerPort;
   agentRuntime: ChapterContentFinalizationAgentRuntime;
+  // 生成后去 AI 味双轮自审改写。生产用默认实例；测试可注入 stub 验证接入。
+  postGenerationStyleReviewRunner?: Pick<PostGenerationStyleReviewRunner, "run">;
 }
 
 export interface FinalizeChapterContentInput {
@@ -49,16 +51,44 @@ export class ChapterContentFinalizationService {
   private readonly artifactSyncService: Pick<ChapterArtifactSyncService, "syncChapterArtifacts">;
   private readonly plannerService: ChapterRuntimePlannerPort;
   private readonly agentRuntime: ChapterContentFinalizationAgentRuntime;
+  private readonly postGenerationStyleReviewRunner: Pick<PostGenerationStyleReviewRunner, "run">;
 
   constructor(deps: ChapterContentFinalizationServiceDeps) {
     this.qualityGateService = deps.qualityGateService;
     this.artifactSyncService = deps.artifactSyncService;
     this.plannerService = deps.plannerService;
     this.agentRuntime = deps.agentRuntime;
+    this.postGenerationStyleReviewRunner = deps.postGenerationStyleReviewRunner ?? new PostGenerationStyleReviewRunner();
   }
 
   async finalizeChapterContent(input: FinalizeChapterContentInput): Promise<FinalizeChapterContentResult> {
-    const finalContent = input.content;
+    // 生成后去 AI 味：先跑双轮自审改写，拿到改写后正文再做验收。runner 内部已有质量回退门
+    // （二轮产物 riskScore 不低于首轮即回退）+ policy gate + detect 失败回退，不会降低质量。
+    // runner 整体抛错时保守回退原正文 + 空 styleReview，绝不让去 AI 味阻断章节定稿。
+    let styleReview: StyleReviewResult;
+    try {
+      styleReview = await this.postGenerationStyleReviewRunner.run({
+        novelId: input.novelId,
+        chapterId: input.chapterId,
+        request: input.request,
+        contextPackage: input.contextPackage,
+        content: input.content,
+      });
+    } catch (error) {
+      console.warn("[chapter-runtime] post-generation style review failed, fallback to raw content", {
+        novelId: input.novelId,
+        chapterId: input.chapterId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      styleReview = {
+        report: null,
+        residualReport: null,
+        autoRewritten: false,
+        originalContent: null,
+        finalContent: input.content,
+      };
+    }
+    const finalContent = styleReview.autoRewritten ? styleReview.finalContent : input.content;
     const { acceptance, timelineGate } = await this.qualityGateService.runAcceptanceGateOnly({
       novelId: input.novelId,
       chapterId: input.chapterId,
@@ -71,13 +101,6 @@ export class ChapterContentFinalizationService {
       score: acceptance.score,
       issues: acceptance.issues,
       auditReports: acceptance.auditReports,
-    };
-    const styleReview: StyleReviewResult = {
-      report: null,
-      residualReport: null,
-      autoRewritten: false,
-      originalContent: null,
-      finalContent,
     };
     const activeOpenConflicts = await openConflictService.listOpenConflicts(input.novelId, {
       beforeChapterOrder: input.contextPackage.chapter.order,
