@@ -1,12 +1,44 @@
 import { z } from "zod";
 
-export const styleDetectionRuleTypeSchema = z.enum([
+const STYLE_DETECTION_RULE_TYPES = [
   "style",
   "character",
   "forbidden",
   "risk",
   "encourage",
-]);
+] as const;
+
+// LLM 偶尔按"类别名"而非枚举字面量输出 ruleType（如 antiAi/writing/character_expression），
+// 会导致每次检测都触发一次 schema repair（多一次 LLM 调用/延迟）。此处在解析层把常见别名
+// 归一到合法枚举，避免无谓 repair。真正的 ruleType 在 StyleDetectionService 里会被 matchedRule.type
+// 覆盖，此归一仅作无匹配规则时的兜底，映射到语义最接近的 risk（反 AI 风险类）。
+const STYLE_DETECTION_RULE_TYPE_ALIASES: Record<string, (typeof STYLE_DETECTION_RULE_TYPES)[number]> = {
+  antiai: "risk",
+  "anti-ai": "risk",
+  anti_ai: "risk",
+  writing: "style",
+  writingrule: "style",
+  writing_rule: "style",
+  character_expression: "character",
+  characterexpression: "character",
+  role: "character",
+  forbid: "forbidden",
+  forbidden_rule: "forbidden",
+  warn: "risk",
+  warning: "risk",
+  encouraged: "encourage",
+};
+
+export const styleDetectionRuleTypeSchema = z.preprocess((value) => {
+  if (typeof value !== "string") {
+    return value;
+  }
+  const normalized = value.trim().toLowerCase();
+  if ((STYLE_DETECTION_RULE_TYPES as readonly string[]).includes(normalized)) {
+    return normalized;
+  }
+  return STYLE_DETECTION_RULE_TYPE_ALIASES[normalized] ?? "risk";
+}, z.enum(STYLE_DETECTION_RULE_TYPES));
 
 export const styleDetectionViolationSchema = z.object({
   ruleId: z.string().trim().optional(),

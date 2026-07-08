@@ -493,6 +493,7 @@ export function buildRuntimePackage(input: BuildRuntimePackageInput): ChapterRun
     lengthControl: input.lengthControl,
     styleReview: {
       report: input.styleReview.report,
+      residualReport: input.styleReview.residualReport ?? null,
       autoRewritten: input.styleReview.autoRewritten,
       originalContent: input.styleReview.originalContent,
     },

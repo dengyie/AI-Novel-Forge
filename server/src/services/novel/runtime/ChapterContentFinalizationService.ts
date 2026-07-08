@@ -74,6 +74,7 @@ export class ChapterContentFinalizationService {
     };
     const styleReview: StyleReviewResult = {
       report: null,
+      residualReport: null,
       autoRewritten: false,
       originalContent: null,
       finalContent,

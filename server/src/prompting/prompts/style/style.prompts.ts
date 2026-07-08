@@ -40,6 +40,9 @@ export interface StyleRewritePromptInput {
   styleContractText: string;
   content: string;
   issuesBlock: string;
+  // Voice Calibration（可选）：目标文风的句式/节奏/语域摘要。借鉴 humanizer——
+  // 改写不只是删 AI 味，而是把套词替换成这套文风的写法。绑定了 StyleProfile 才有值。
+  voiceProfileText?: string;
 }
 
 export interface StyleProfileExtractionPromptInput {
@@ -154,13 +157,30 @@ export const styleDetectionPrompt: PromptAsset<
       "",
       "字段要求：",
       "1. ruleName：写明触发的问题规则名，优先使用输入规则中的原始名称或最贴近的规则指代。",
-      "2. ruleType：必须清楚区分来源类别，应对应写法规则、角色表达规则或反AI规则中的一类。",
+      "2. ruleType：取值必须且只能是以下英文字面量之一：style、character、forbidden、risk、encourage。写法规则用 style，角色表达规则用 character，反 AI 规则按其等级用 forbidden（硬违禁）、risk（风险告警）或 encourage（鼓励项）。禁止输出 antiAi、writing、character_expression 等其它值。",
       "3. severity：必须体现问题严重程度，使用稳定、清晰、可比较的等级表述。",
       "4. issueCategory：表达层偏差用 style_expression；只有已经影响章节结构或事件推进时才用 story_structure。",
       "5. excerpt：必须摘取文本中的具体问题片段，尽量短、准、能定位；不要整段复制。",
       "6. reason：必须具体说明这段 excerpt 为什么违规，不能只复读规则名。",
       "7. suggestion：必须给出可执行的修改方向，直接说明应如何调整表达、人物、节奏或技法；禁止输出完整可复制替换句，禁止使用“例如：……”后接成段正文。",
       "8. canAutoRewrite：表示该条问题是否适合自动改写修复，必须与问题性质一致。",
+      "",
+      "聚类判定（关键）：",
+      "1. 单个孤立的疑似 AI 痕迹不足以判高危——一处比喻、一句短句强调、一个副词，单独出现都可能是正常写作。",
+      "2. 只有当多类痕迹在同一段或相邻段落共现（比喻套话 + 弱化副词堆叠 + 段尾定格 + 情绪副词驱动等），才升高 riskScore 并合并为高价值 violation。",
+      "3. 判断标准是“成簇”而非“单点”：越多不同类型的 AI 痕迹叠加，风险越高；零散单点从宽。",
+      "",
+      "误判护栏（不要误伤以下正常表达）：",
+      "1. 人物用短句强调、单处方言口语、偶发感叹，都是正常网文手法，不要判违规。",
+      "2. 单个比喻、单个副词、单处破折号/省略号，孤立出现不算 AI 痕迹。",
+      "3. 引号内被引用的话、专有名词、被讨论而非被使用的词，不要改写。",
+      "4. 正式或书面的词汇本身不是 AI 痕迹，只有特定高频模板词成簇才是。",
+      "5. 干巴、平淡但没有具体模板痕迹的文本，只是写得朴素，不要当 AI 痕迹判违规。",
+      "",
+      "人味保留（见到以下信号，倾向保留不动）：",
+      "1. 具体、反常、难以编造的细节（真实地名、怪异引语、私人化描述）——AI 会磨平细节，人会囤积细节。",
+      "2. 混合、未解决的情绪（“说不清为什么，但就是别扭”）——AI 默认给干净结论。",
+      "3. 句长的自然起伏、真实的自嘲和自我更正、半途插入的旁白——这些是真人写作的痕迹。",
       "",
       "质量要求：",
       "1. 不要输出空泛套话，如“可以更生动一些”“建议优化表达”。",
@@ -379,6 +399,7 @@ export const styleRewritePrompt: PromptAsset<StyleRewritePromptInput, string, st
       "6. 必须保留原题材的叙事质感，但降低过度工整、华丽、均匀和总结式表达。",
       "7. 结尾可以从总结宣言改为具体行动、异常反应或阻力，但不得新增事实型设定、硬反转、隐藏身份、地图批注、密信、死人、刺客、失踪者等原文没有的剧情信息。",
       "8. 对人物情绪，优先用动作、停顿、视线、对白和选择表现；删除替读者总结的判断句。",
+      "9. 完成修正后，再自问一次“这一版是否仍有一眼就能看出是 AI 写的痕迹”；若有残留套话、模板句、定格式收尾或情绪副词堆叠，在本次输出中一并消除，不要留到下一轮。",
       "",
       "质量要求：",
       "1. 修正后正文必须自然、连贯、可读，不能有明显补丁感。",
@@ -396,12 +417,21 @@ export const styleRewritePrompt: PromptAsset<StyleRewritePromptInput, string, st
       "6. 是否只输出修正后的正文，没有任何额外说明。",
     ].join("\n\n")),
     new HumanMessage([
+      input.voiceProfileText
+        ? [
+          "目标文风（Voice Calibration）：",
+          "改写不只是删掉 AI 痕迹，而是把套话替换成下面这套文风的句式、节奏和语域。",
+          "在不改事件事实的前提下，让改写后的正文读起来像这套文风写出来的：",
+          input.voiceProfileText,
+          "",
+        ].join("\n")
+        : "",
       "原文：",
       input.content,
       "",
       "检测到的问题：",
       input.issuesBlock,
-    ].join("\n")),
+    ].filter(Boolean).join("\n")),
   ],
 };
 

@@ -854,6 +854,9 @@ export const styleDetectionReportSchema = z.object({
 
 export const runtimeStyleReviewSchema = z.object({
   report: styleDetectionReportSchema.nullable(),
+  // 最终交付内容的真实残留检测分（双轮自审后）。report 是入口分（原始正文），
+  // residualReport 反映实际落库正文的 AI 味，供上报/持久化用作交付质量指标。
+  residualReport: styleDetectionReportSchema.nullable().optional(),
   autoRewritten: z.boolean(),
   originalContent: z.string().nullable().optional(),
 });
