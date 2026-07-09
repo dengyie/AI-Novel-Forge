@@ -1,6 +1,7 @@
 import "dotenv/config";
 import type { Server } from "node:http";
 import os from "node:os";
+import path from "node:path";
 import cors from "cors";
 import express from "express";
 import helmet from "helmet";
@@ -55,7 +56,7 @@ import {
 import { initializeRagSettingsCompatibility } from "./services/settings/RagCompatibilityBootstrapService";
 import { DirectorWorker } from "./workers/directorWorker";
 import { cleanupLogDirectory, resolveLogRetentionConfig } from "./platform/logging/logRetention";
-import { resolveLogsRoot } from "./runtime/appPaths";
+import { resolveClientDistPath, resolveLogsRoot } from "./runtime/appPaths";
 
 getSharedNovelServices();
 registerNovelEventHandlers(novelEventBus);
@@ -148,6 +149,23 @@ export function createApp() {
   app.use("/api/auto-director/channel-callbacks", autoDirectorChannelCallbacksRouter);
   app.use("/api/settings", settingsRouter);
   app.use("/api/astrology", astrologyRouter);
+
+  const clientDistDir = resolveClientDistPath();
+  if (clientDistDir) {
+    app.use(express.static(clientDistDir, {
+      index: "index.html",
+      immutable: true,
+      maxAge: "1y",
+      setHeaders: (res, filePath) => {
+        if (path.basename(filePath) === "index.html") {
+          res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+        }
+      },
+    }));
+    app.get(/^(?!\/api(?:\/|$)|\/assets(?:\/|$)).*/, (_req, res) => {
+      res.sendFile(path.join(clientDistDir, "index.html"));
+    });
+  }
 
   app.use((_req, res) => {
     const response: ApiResponse<null> = {

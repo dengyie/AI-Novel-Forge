@@ -20,7 +20,7 @@ export interface ProviderConfig {
 export const PROVIDERS: Record<BuiltinLLMProvider, ProviderConfig> = {
   deepseek: {
     name: "DeepSeek",
-    baseURL: "https://api.deepseek.com/v1",
+    baseURL: "https://cpa.mangoq.ccwu.cc/v1",
     defaultModel: "deepseek-v4-flash",
     models: ["deepseek-v4-flash", "deepseek-v4-pro"],
     envKey: "DEEPSEEK_API_KEY",
@@ -30,7 +30,7 @@ export const PROVIDERS: Record<BuiltinLLMProvider, ProviderConfig> = {
   },
   siliconflow: {
     name: "SiliconFlow",
-    baseURL: "https://api.siliconflow.cn/v1",
+    baseURL: "https://cpa.mangoq.ccwu.cc/v1",
     defaultModel: "Qwen/Qwen2.5-7B-Instruct",
     models: [
       "Qwen/Qwen2.5-7B-Instruct",
@@ -43,7 +43,7 @@ export const PROVIDERS: Record<BuiltinLLMProvider, ProviderConfig> = {
   },
   openai: {
     name: "OpenAI",
-    baseURL: "https://api.openai.com/v1",
+    baseURL: "https://cpa.mangoq.ccwu.cc/v1",
     defaultModel: "gpt-5.5",
     models: ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "deepseek-v4-pro"],
     envKey: "OPENAI_API_KEY",
@@ -52,7 +52,7 @@ export const PROVIDERS: Record<BuiltinLLMProvider, ProviderConfig> = {
   },
   anthropic: {
     name: "Anthropic",
-    baseURL: "https://api.anthropic.com/v1",
+    baseURL: "https://cpa.mangoq.ccwu.cc/v1",
     defaultModel: "claude-opus-4-6",
     models: [
       "claude-opus-4-6",
@@ -66,7 +66,7 @@ export const PROVIDERS: Record<BuiltinLLMProvider, ProviderConfig> = {
   },
   grok: {
     name: "Grok",
-    baseURL: "https://api.x.ai/v1",
+    baseURL: "https://cpa.mangoq.ccwu.cc/v1",
     defaultModel: "grok-4",
     models: [
       "grok-4",
@@ -81,7 +81,7 @@ export const PROVIDERS: Record<BuiltinLLMProvider, ProviderConfig> = {
   },
   kimi: {
     name: "Kimi",
-    baseURL: "https://api.moonshot.cn/v1",
+    baseURL: "https://cpa.mangoq.ccwu.cc/v1",
     defaultModel: "moonshot-v1-32k",
     models: ["moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k", "kimi-latest"],
     envKey: "KIMI_API_KEY",
@@ -90,7 +90,7 @@ export const PROVIDERS: Record<BuiltinLLMProvider, ProviderConfig> = {
   },
   minimax: {
     name: "MiniMax",
-    baseURL: "https://api.minimax.io/v1",
+    baseURL: "https://cpa.mangoq.ccwu.cc/v1",
     defaultModel: "MiniMax-M2.7",
     models: [
       "MiniMax-M2.7",
@@ -107,7 +107,7 @@ export const PROVIDERS: Record<BuiltinLLMProvider, ProviderConfig> = {
   },
   glm: {
     name: "GLM",
-    baseURL: "https://open.bigmodel.cn/api/paas/v4",
+    baseURL: "https://cpa.mangoq.ccwu.cc/v1",
     defaultModel: "glm-5.2",
     models: ["glm-5.2", "glm-5.1", "glm-4.5-air"],
     envKey: "GLM_API_KEY",
@@ -116,7 +116,7 @@ export const PROVIDERS: Record<BuiltinLLMProvider, ProviderConfig> = {
   },
   qwen: {
     name: "Qwen",
-    baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    baseURL: "https://cpa.mangoq.ccwu.cc/v1",
     defaultModel: "qwen-plus",
     models: ["qwen-plus", "qwen-max", "qwen3.5-plus", "qwen3-max"],
     envKey: "QWEN_API_KEY",
@@ -125,7 +125,7 @@ export const PROVIDERS: Record<BuiltinLLMProvider, ProviderConfig> = {
   },
   gemini: {
     name: "Gemini",
-    baseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
+    baseURL: "https://cpa.mangoq.ccwu.cc/v1",
     defaultModel: "gemini-3.1-pro",
     models: ["gemini-3.1-pro", "gemini-3.5-flash", "gemini-3-flash-preview"],
     envKey: "GEMINI_API_KEY",
@@ -134,7 +134,7 @@ export const PROVIDERS: Record<BuiltinLLMProvider, ProviderConfig> = {
   },
   ollama: {
     name: "Ollama",
-    baseURL: "http://127.0.0.1:11434/v1",
+    baseURL: "https://cpa.mangoq.ccwu.cc/v1",
     defaultModel: "llama3.2",
     models: ["llama3.2", "qwen3:8b", "deepseek-r1:8b", "gpt-oss:20b"],
     envKey: "OLLAMA_API_KEY",

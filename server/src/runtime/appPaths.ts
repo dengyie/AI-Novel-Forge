@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -44,6 +45,11 @@ export function resolveServerRoot(): string {
 
 export function resolveWorkspaceRoot(): string {
   return WORKSPACE_ROOT;
+}
+
+export function resolveClientDistPath(): string | null {
+  const dir = path.join(resolveWorkspaceRoot(), "client", "dist");
+  return fs.existsSync(path.join(dir, "index.html")) ? dir : null;
 }
 
 export function resolveDataRoot(): string {
