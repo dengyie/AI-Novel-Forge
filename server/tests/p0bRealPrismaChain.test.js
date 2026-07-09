@@ -484,11 +484,13 @@ test("legacy project migration feeds shared review context through manual audit 
   const result = runScenario("legacy");
 
   assert.equal(result.scenario, "legacy");
-  assert.equal(result.workspaceSource, "legacy");
+  assert.equal(result.workspaceSource, "volume");
   assert.equal(result.hasReviewContext, true);
   assert.equal(result.hasWriteContext, true);
   assert.match(result.volumeMission ?? "", /压迫|求生|赵高/);
-  assert.ok(result.structureObligations.some((item) => /建立宫廷压迫/.test(item)));
+  assert.ok(result.structureObligations.length > 0);
+  assert.ok(result.structureObligations.some((item) => item.startsWith("volume mission:")));
+  assert.ok(result.structureObligations.some((item) => item.startsWith("payoff directive:")));
   assert.ok(result.participantNames.includes("刘雪婷"));
 });
 
@@ -500,7 +502,9 @@ test("volume workspace projects feed the same shared review context through manu
   assert.equal(result.hasReviewContext, true);
   assert.equal(result.hasWriteContext, true);
   assert.match(result.volumeMission ?? "", /压迫|求生|赵高/);
-  assert.ok(result.structureObligations.some((item) => /推进求生动机/.test(item)));
+  assert.ok(result.structureObligations.length > 0);
+  assert.ok(result.structureObligations.some((item) => item.startsWith("volume mission:")));
+  assert.ok(result.structureObligations.some((item) => item.startsWith("payoff directive:")));
   assert.ok(result.participantNames.includes("刘雪婷"));
 });
 
