@@ -9,6 +9,8 @@ eventsStub.filename = eventsEntry;
 eventsStub.loaded = true;
 eventsStub.exports = {
   novelEventBus: {
+    on() {},
+    off() {},
     async emit() {},
   },
 };

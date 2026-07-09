@@ -9,6 +9,9 @@ const {
   promptAddendumService,
 } = require("../dist/prompting/addendums/PromptAddendumService.js");
 const {
+  promptSlotOverrideService,
+} = require("../dist/prompting/slots/PromptSlotOverrideService.js");
+const {
   NOVEL_PROMPT_BUDGETS,
 } = require("../dist/prompting/prompts/novel/promptBudgetProfiles.js");
 const {
@@ -1358,28 +1361,16 @@ test("prompt runner records failed executions without swallowing the original er
   }
 });
 
-test("prompt runner injects enabled custom addendum blocks for supported prompts", async () => {
-  const originalResolveContextBlocks = promptAddendumService.resolveContextBlocks;
+test("prompt runner injects enabled custom slot append blocks for supported prompts", async () => {
+  const originalGetOverrideMaps = promptSlotOverrideService.getOverrideMaps;
   let capturedMessages = [];
-  promptAddendumService.resolveContextBlocks = async ({ promptId, novelId }) => {
+  promptSlotOverrideService.getOverrideMaps = async ({ promptId, novelId }) => {
     assert.equal(promptId, "novel.chapter.writer");
     assert.equal(novelId, "novel-1");
-    return [
-      createContextBlock({
-        id: "custom_addendum:global:test",
-        group: "custom_addendum",
-        priority: 999,
-        required: true,
-        content: "【全局补充要求】\n禁止模板化表达。",
-      }),
-      createContextBlock({
-        id: "custom_addendum:novel:test",
-        group: "custom_addendum",
-        priority: 899,
-        required: true,
-        content: "【本书补充要求】\n保留主角冷静克制的表达。",
-      }),
-    ];
+    return {
+      global: { "writer.customConstraints": { value: "禁止模板化表达。", baseHash: "" } },
+      novel: { "writer.customConstraints": { value: "保留主角冷静克制的表达。", baseHash: "" } },
+    };
   };
   setPromptRunnerLLMFactoryForTests(async () => ({
     invoke: async (messages) => {
@@ -1401,33 +1392,24 @@ test("prompt runner injects enabled custom addendum blocks for supported prompts
     });
 
     assert.equal(result.output, "正文");
+    // novel scope 与 global 同 key 合并时 novel 优先，故只产 1 个 append block。
     assert.deepEqual(result.meta.invocation.customAddendumBlockIds, [
-      "custom_addendum:global:test",
-      "custom_addendum:novel:test",
+      "custom_slot:writer.customConstraints:0",
     ]);
     const rendered = capturedMessages.map((message) => String(message.content)).join("\n");
-    assert.match(rendered, /禁止模板化表达/);
     assert.match(rendered, /保留主角冷静克制的表达/);
   } finally {
-    promptAddendumService.resolveContextBlocks = originalResolveContextBlocks;
+    promptSlotOverrideService.getOverrideMaps = originalGetOverrideMaps;
     setPromptRunnerLLMFactoryForTests();
   }
 });
 
-test("prompt runner skips custom addendums for prompts outside the allowlist", async () => {
-  const originalResolveContextBlocks = promptAddendumService.resolveContextBlocks;
+test("prompt runner skips custom slot append for prompts without slots", async () => {
+  const originalGetOverrideMaps = promptSlotOverrideService.getOverrideMaps;
   let called = false;
-  promptAddendumService.resolveContextBlocks = async () => {
+  promptSlotOverrideService.getOverrideMaps = async () => {
     called = true;
-    return [
-      createContextBlock({
-        id: "custom_addendum:global:unexpected",
-        group: "custom_addendum",
-        priority: 999,
-        required: true,
-        content: "不应注入。",
-      }),
-    ];
+    return { global: {}, novel: {} };
   };
   setPromptRunnerLLMFactoryForTests(async () => ({
     stream: async () => ({
@@ -1458,7 +1440,7 @@ test("prompt runner skips custom addendums for prompts outside the allowlist", a
     assert.equal(completed.meta.invocation.customAddendumBlockIds.length, 0);
     assert.equal(called, false);
   } finally {
-    promptAddendumService.resolveContextBlocks = originalResolveContextBlocks;
+    promptSlotOverrideService.getOverrideMaps = originalGetOverrideMaps;
     setPromptRunnerLLMFactoryForTests();
   }
 });

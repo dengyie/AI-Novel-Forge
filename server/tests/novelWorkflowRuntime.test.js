@@ -270,7 +270,7 @@ test("startup recovery initialization marks interrupted auto director tasks for 
       async markPendingAutoDirectorTasksForManualRecovery() {
         calls.push(["manual-auto-director"]);
       },
-      async markPendingPipelineJobsForManualRecovery() {
+      async resumePendingPipelineJobs() {
         calls.push(["manual-pipeline"]);
       },
       async markPendingStyleTasksForManualRecovery() {
