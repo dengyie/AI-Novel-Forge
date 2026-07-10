@@ -14,6 +14,7 @@ import {
   isMiniMaxCompatibleProvider,
 } from "../llm/reasoning";
 import { initSSE, writeSSEFrame } from "../llm/streaming";
+import { resolveEnforcedTimeoutMs, runWithEnforcedTimeout } from "../llm/invokeTimeout";
 import { authMiddleware } from "../middleware/auth";
 import { validate } from "../middleware/validate";
 import { ragServices } from "../services/rag";
@@ -231,7 +232,14 @@ router.post("/", validate({ body: chatSchema }), async (req, res, next) => {
       }),
     ];
 
-    const stream = await llm.stream(messages);
+    // 墙钟：建流 + body 消费共享单预算；body 对 iterator.next() race，半道静默也能打断
+    const chatBudgetMs = resolveEnforcedTimeoutMs();
+    const chatDeadlineAt = Date.now() + chatBudgetMs;
+    const stream = await runWithEnforcedTimeout({
+      label: "chat.stream",
+      timeoutMs: Math.max(1, chatDeadlineAt - Date.now()),
+      run: () => llm.stream(messages),
+    });
     const disposeHeartbeat = initSSE(res);
     let fullContent = "";
     const isMiniMaxStream = isMiniMaxCompatibleProvider(
@@ -244,10 +252,46 @@ router.post("/", validate({ body: chatSchema }), async (req, res, next) => {
     let miniMaxReasoningBuffer = "";
 
     try {
-      for await (const chunk of stream) {
+      const iterator = stream[Symbol.asyncIterator]();
+      while (true) {
         if (res.writableEnded) {
           break;
         }
+        const remainingMs = Math.max(0, chatDeadlineAt - Date.now());
+        if (remainingMs <= 0) {
+          throw Object.assign(new Error(`[chat.stream] Request timed out after ${chatBudgetMs}ms.`), {
+            name: "TimeoutError",
+          });
+        }
+        let raceHandle: ReturnType<typeof setTimeout> | null = null;
+        const nextResult = await new Promise<IteratorResult<BaseMessageChunk>>((resolve, reject) => {
+          raceHandle = setTimeout(() => {
+            reject(Object.assign(
+              new Error(`[chat.stream] Request timed out after ${chatBudgetMs}ms.`),
+              { name: "TimeoutError" },
+            ));
+          }, remainingMs);
+          Promise.resolve(iterator.next()).then(
+            (value) => {
+              if (raceHandle) {
+                clearTimeout(raceHandle);
+                raceHandle = null;
+              }
+              resolve(value);
+            },
+            (error) => {
+              if (raceHandle) {
+                clearTimeout(raceHandle);
+                raceHandle = null;
+              }
+              reject(error);
+            },
+          );
+        });
+        if (nextResult.done) {
+          break;
+        }
+        const chunk = nextResult.value;
 
         let reasoningContent = "";
         let text = chunkToText(chunk.content);

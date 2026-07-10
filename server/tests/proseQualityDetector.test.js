@@ -78,6 +78,20 @@ test("Chinese dash and ellipsis alone do not block chapter acceptance", () => {
   assert.equal(report.hasBlockingFindings, false);
 });
 
+test("single natural Chinese negative flip does not block chapter acceptance", () => {
+  // 「不是 A，而是 B」网文常见对比；降 medium 后不得 hard-block
+  const report = detectProseQuality([
+    "他不是害怕，而是终于明白自己已经没有退路。",
+    "她把刀收回鞘中，转身走进雨里。",
+  ].join("\n"));
+
+  assert.ok(codes(report).includes("prose_negative_flip"));
+  const flipSeverities = severitiesByCode(report, "prose_negative_flip");
+  assert.ok(flipSeverities.length >= 1);
+  assert.ok(flipSeverities.every((severity) => severity === "medium"));
+  assert.equal(report.hasBlockingFindings, false);
+});
+
 test("buildProseQualityAuditReport maps findings into mode_fit runtime audit issues", () => {
   const report = detectProseQuality("作为AI语言模型，我无法继续生成这一章。后来他只能望着未完成的门");
   const auditReport = buildProseQualityAuditReport({

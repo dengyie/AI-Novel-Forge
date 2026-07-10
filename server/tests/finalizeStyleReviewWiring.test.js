@@ -201,3 +201,32 @@ test("dual-track: Chinese dash/ellipsis after humanizer stays non-blocking pendi
   assert.ok(proseIssues.every((issue) => issue.severity === "medium"));
   assert.equal(markedStatus, "pending_review");
 });
+
+test("dual-track: Chinese negative flip after humanizer stays non-blocking pending_review", async () => {
+  let markedStatus = null;
+  const { service, getGateContent } = buildService({
+    runner: {
+      run: async (input) => ({
+        report: { riskScore: 10, summary: "低", violations: [], canAutoRewrite: true, appliedRuleIds: [] },
+        residualReport: { riskScore: 0, summary: "干净", violations: [], canAutoRewrite: false, appliedRuleIds: [] },
+        autoRewritten: true,
+        originalContent: input.content,
+        finalContent: "他不是害怕，而是终于明白自己已经没有退路。她把刀收回鞘中。",
+      }),
+    },
+  });
+  service.markChapterStatus = async (_chapterId, status) => {
+    markedStatus = status;
+  };
+
+  const result = await service.finalizeChapterContent(baseInput("原始草稿"));
+
+  assert.equal(getGateContent(), "他不是害怕，而是终于明白自己已经没有退路。她把刀收回鞘中。");
+  assert.equal(result.runtimePackage.audit.hasBlockingIssues, false);
+  const proseIssues = (result.runtimePackage.audit.reports ?? [])
+    .flatMap((report) => report.issues ?? [])
+    .filter((issue) => issue.code === "prose_negative_flip");
+  assert.ok(proseIssues.length >= 1);
+  assert.ok(proseIssues.every((issue) => issue.severity === "medium"));
+  assert.equal(markedStatus, "pending_review");
+});

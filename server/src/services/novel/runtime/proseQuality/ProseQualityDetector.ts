@@ -164,9 +164,11 @@ function scanNegativeFlip(
     if (isInsideQuote(segment.text, index) || /不是[^。！？；;\n]{1,16}就是/u.test(match[0])) {
       continue;
     }
+    // 中文网文「不是 A，而是 B」常见对比叙述：保留质量债信号，但降为 medium，
+    // 避免单条命中 → hasBlockingFindings → needs_repair 误伤正常章节（同破折号门禁策略）。
     addFinding({
       code: "prose_negative_flip",
-      severity: "high",
+      severity: "medium",
       line: segment.line,
       column: index + 1,
       message: "正文出现高频 AI 式否定翻转句，容易显得概念化、模板化。",

@@ -1,6 +1,20 @@
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
+import { runWithEnforcedTimeout } from "../llm/invokeTimeout";
+
+/** 墙钟兜底：规划图节点裸 invoke 在 body hang 时永不结束 → 导演/建书流假 running */
+async function invokeWithTimeout(
+  llm: BaseChatModel,
+  messages: Parameters<BaseChatModel["invoke"]>[0],
+  label = "graph.llm.invoke",
+) {
+  return runWithEnforcedTimeout({
+    label,
+    run: () => llm.invoke(messages),
+  });
+}
+
 
 export const NovelOutlineGraphAnnotation = Annotation.Root({
   novelTitle: Annotation<string>(),
@@ -28,7 +42,7 @@ export type NovelOutlineGraphOutput = Pick<
 
 async function analyzeTheme(state: NovelOutlineGraphState, llm: BaseChatModel) {
   try {
-    const result = await llm.invoke([
+    const result = await invokeWithTimeout(llm, [
       new SystemMessage("你是一位小说主题分析专家，请提炼主题和立意。"),
       new HumanMessage(
         `标题：${state.novelTitle}
@@ -47,7 +61,7 @@ async function analyzeTheme(state: NovelOutlineGraphState, llm: BaseChatModel) {
 
 async function designConflicts(state: NovelOutlineGraphState, llm: BaseChatModel) {
   try {
-    const result = await llm.invoke([
+    const result = await invokeWithTimeout(llm, [
       new SystemMessage("你是一位冲突设计专家，请输出 3-5 个核心冲突。"),
       new HumanMessage(
         `主题分析：
@@ -64,7 +78,7 @@ ${state.themeAnalysis}
 
 async function generateOutline(state: NovelOutlineGraphState, llm: BaseChatModel) {
   try {
-    const result = await llm.invoke([
+    const result = await invokeWithTimeout(llm, [
       new SystemMessage("你是一位小说策划师，请生成完整发展走向。"),
       new HumanMessage(
         `主题分析：
@@ -85,7 +99,7 @@ ${state.conflictDesign}
 
 async function structureOutline(state: NovelOutlineGraphState, llm: BaseChatModel) {
   try {
-    const result = await llm.invoke([
+    const result = await invokeWithTimeout(llm, [
       new SystemMessage("请将小说大纲转换为 JSON 章节规划。"),
       new HumanMessage(
         `小说大纲：

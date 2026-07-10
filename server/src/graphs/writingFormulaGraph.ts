@@ -1,6 +1,20 @@
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
+import { runWithEnforcedTimeout } from "../llm/invokeTimeout";
+
+/** 墙钟兜底：规划图节点裸 invoke 在 body hang 时永不结束 → 导演/建书流假 running */
+async function invokeWithTimeout(
+  llm: BaseChatModel,
+  messages: Parameters<BaseChatModel["invoke"]>[0],
+  label = "graph.llm.invoke",
+) {
+  return runWithEnforcedTimeout({
+    label,
+    run: () => llm.invoke(messages),
+  });
+}
+
 
 export const WritingFormulaGraphAnnotation = Annotation.Root({
   sourceText: Annotation<string>(),
@@ -25,7 +39,7 @@ export type WritingFormulaGraphOutput = Pick<
 
 async function analyzeStyle(state: WritingFormulaGraphState, llm: BaseChatModel) {
   try {
-    const result = await llm.invoke([
+    const result = await invokeWithTimeout(llm, [
       new SystemMessage("你是写作风格分析专家，请分析语言风格、叙事视角和节奏。"),
       new HumanMessage(state.sourceText),
     ]);
@@ -38,7 +52,7 @@ async function analyzeStyle(state: WritingFormulaGraphState, llm: BaseChatModel)
 
 async function extractTechniques(state: WritingFormulaGraphState, llm: BaseChatModel) {
   try {
-    const result = await llm.invoke([
+    const result = await invokeWithTimeout(llm, [
       new SystemMessage("请提取可复现的写作技巧并归纳规则。"),
       new HumanMessage(
         `风格分析：
@@ -55,7 +69,7 @@ ${state.styleAnalysis}
 
 async function buildFormula(state: WritingFormulaGraphState, llm: BaseChatModel) {
   try {
-    const result = await llm.invoke([
+    const result = await invokeWithTimeout(llm, [
       new SystemMessage("请将分析结果整理为 Markdown 写作公式文档。"),
       new HumanMessage(
         `风格分析：

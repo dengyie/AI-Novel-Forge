@@ -425,11 +425,29 @@ function recordPromptFailure(input: {
   });
 }
 
+function createStreamTimeoutError(timeoutMs: number, label?: string): Error {
+  const error = new Error(
+    label?.trim()
+      ? `[${label}] Request timed out after ${timeoutMs}ms.`
+      : `Request timed out after ${timeoutMs}ms.`,
+  );
+  error.name = "TimeoutError";
+  return error;
+}
+
+/**
+ * 流式 body 墙钟：对 iterator.next() 做 Promise.race，即使 provider 半道不再 yield
+ * 也能在 deadline 到点后打断消费（纯 for-await 在无 chunk 时不会醒来）。
+ * 支持绝对 deadlineAt（与建流共享单预算）或相对 timeoutMs。
+ */
 function captureStreamOutput(
   rawStream: AsyncIterable<BaseMessageChunk>,
   options?: {
     label?: string;
+    /** 相对超时（毫秒）；若同时给 deadlineAt，以 deadlineAt 为准 */
     timeoutMs?: number;
+    /** 绝对截止时间（Date.now() 毫秒），与建流阶段共享单墙钟预算 */
+    deadlineAt?: number;
     signal?: AbortSignal;
   },
 ): {
@@ -450,29 +468,47 @@ function captureStreamOutput(
     rejectUsage = reject;
   });
 
-  // 流式 body 墙钟：text invoke 已有 runWithEnforcedTimeout；stream 路径原先仅依赖 SDK HTTP timeout，
-  // 响应头返回后 body 静默 hang 时 completedText 永不 settle。整段消费共享同一 deadline。
-  const timeoutMs = resolveEnforcedTimeoutMs(options?.timeoutMs);
   const label = options?.label;
-  const deadlineAt = Date.now() + timeoutMs;
+  const budgetMs = resolveEnforcedTimeoutMs(options?.timeoutMs);
+  const deadlineAt = typeof options?.deadlineAt === "number" && Number.isFinite(options.deadlineAt)
+    ? Math.floor(options.deadlineAt)
+    : Date.now() + budgetMs;
+  // 用于错误消息展示的「配置预算」；实际剩余由 deadlineAt 决定
+  const timeoutMsForMessage = budgetMs;
+  let settled = false;
   let timedOut = false;
-  let timeoutHandle: ReturnType<typeof setTimeout> | null = setTimeout(() => {
-    timedOut = true;
-    const error = new Error(
-      label?.trim()
-        ? `[${label}] Request timed out after ${timeoutMs}ms.`
-        : `Request timed out after ${timeoutMs}ms.`,
-    );
-    error.name = "TimeoutError";
+  const settleReject = (error: unknown) => {
+    if (settled) {
+      return;
+    }
+    settled = true;
     rejectText(error);
     rejectUsage(error);
-  }, timeoutMs);
+  };
+  const settleResolve = (text: string, usage: LlmTokenUsageSnapshot | null) => {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    resolveText(text);
+    resolveUsage(usage);
+  };
+
+  const remainingMs = () => Math.max(0, deadlineAt - Date.now());
+  const makeTimeoutError = () => createStreamTimeoutError(timeoutMsForMessage, label);
+
+  // 到点后 reject completed*，并标记 timedOut；iterator race 会立刻看到
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+    timedOut = true;
+    settleReject(makeTimeoutError());
+  }, Math.max(1, remainingMs()));
   const clearStreamTimeout = () => {
     if (timeoutHandle) {
       clearTimeout(timeoutHandle);
       timeoutHandle = null;
     }
   };
+
   const upstreamSignal = options?.signal;
   const onUpstreamAbort = () => {
     clearStreamTimeout();
@@ -480,8 +516,7 @@ function captureStreamOutput(
     const error = reason instanceof Error
       ? reason
       : Object.assign(new Error(typeof reason === "string" && reason.trim() ? reason.trim() : "Request aborted."), { name: "AbortError" });
-    rejectText(error);
-    rejectUsage(error);
+    settleReject(error);
   };
   if (upstreamSignal) {
     if (upstreamSignal.aborted) {
@@ -495,25 +530,22 @@ function captureStreamOutput(
     async *[Symbol.asyncIterator]() {
       const chunks: string[] = [];
       let usage: LlmTokenUsageSnapshot | null = null;
+      const iterator = rawStream[Symbol.asyncIterator]();
       try {
-        if (timedOut || upstreamSignal?.aborted) {
-          const error = new Error(
-            label?.trim()
-              ? `[${label}] Request timed out after ${timeoutMs}ms.`
-              : `Request timed out after ${timeoutMs}ms.`,
-          );
-          error.name = timedOut ? "TimeoutError" : "AbortError";
-          throw error;
+        if (timedOut || remainingMs() <= 0) {
+          throw makeTimeoutError();
         }
-        for await (const chunk of rawStream) {
-          if (timedOut || Date.now() > deadlineAt) {
-            const error = new Error(
-              label?.trim()
-                ? `[${label}] Request timed out after ${timeoutMs}ms.`
-                : `Request timed out after ${timeoutMs}ms.`,
-            );
-            error.name = "TimeoutError";
-            throw error;
+        if (upstreamSignal?.aborted) {
+          const reason = upstreamSignal.reason;
+          throw reason instanceof Error
+            ? reason
+            : Object.assign(new Error("Request aborted."), { name: "AbortError" });
+        }
+
+        while (true) {
+          const left = remainingMs();
+          if (timedOut || left <= 0) {
+            throw makeTimeoutError();
           }
           if (upstreamSignal?.aborted) {
             const reason = upstreamSignal.reason;
@@ -521,21 +553,56 @@ function captureStreamOutput(
               ? reason
               : Object.assign(new Error("Request aborted."), { name: "AbortError" });
           }
+
+          // 关键：对 next() 做墙钟 race——body 静默不再 yield 时也能在 deadline 打断
+          let timeoutRaceHandle: ReturnType<typeof setTimeout> | null = null;
+          const nextResult = await new Promise<IteratorResult<BaseMessageChunk>>((resolve, reject) => {
+            timeoutRaceHandle = setTimeout(() => {
+              timedOut = true;
+              reject(makeTimeoutError());
+            }, left);
+            Promise.resolve(iterator.next()).then(
+              (value) => {
+                if (timeoutRaceHandle) {
+                  clearTimeout(timeoutRaceHandle);
+                  timeoutRaceHandle = null;
+                }
+                resolve(value);
+              },
+              (error) => {
+                if (timeoutRaceHandle) {
+                  clearTimeout(timeoutRaceHandle);
+                  timeoutRaceHandle = null;
+                }
+                reject(error);
+              },
+            );
+          });
+
+          if (nextResult.done) {
+            break;
+          }
+          const chunk = nextResult.value;
           chunks.push(toText(chunk.content));
           usage = mergeStreamTokenUsage(usage, extractLlmTokenUsage(chunk));
           yield chunk;
         }
+
         clearStreamTimeout();
-        resolveText(chunks.join(""));
-        resolveUsage(usage);
+        settleResolve(chunks.join(""), usage);
       } catch (error) {
         clearStreamTimeout();
-        rejectText(error);
-        rejectUsage(error);
+        settleReject(error);
         throw error;
       } finally {
         if (upstreamSignal) {
           upstreamSignal.removeEventListener("abort", onUpstreamAbort);
+        }
+        // 尽量释放底层 iterator（若 provider 支持 return）
+        try {
+          await iterator.return?.();
+        } catch {
+          // ignore cleanup errors
         }
       }
     },
@@ -1029,10 +1096,12 @@ export async function streamTextPrompt<I>(input: {
       taskType: input.asset.taskType,
       promptMeta: prepared.invocation,
     });
-    // 建流 + 消费共享墙钟：llm.stream 本身 hang 与 body 静默 hang 均覆盖。
+    // 建流 + 消费共享**单**墙钟预算（非 2×）：deadlineAt 贯穿 establish 与 body race。
+    const streamBudgetMs = resolveEnforcedTimeoutMs(input.options?.timeoutMs);
+    const streamDeadlineAt = Date.now() + streamBudgetMs;
     const rawStream = await runWithEnforcedTimeout({
       label: streamLabel,
-      timeoutMs: input.options?.timeoutMs,
+      timeoutMs: Math.max(1, streamDeadlineAt - Date.now()),
       signal: input.options?.signal,
       run: (signal) => {
         const callOptions = buildPromptCallOptions({
@@ -1044,7 +1113,8 @@ export async function streamTextPrompt<I>(input: {
     });
     captured = captureStreamOutput(rawStream as AsyncIterable<BaseMessageChunk>, {
       label: streamLabel,
-      timeoutMs: input.options?.timeoutMs,
+      timeoutMs: streamBudgetMs,
+      deadlineAt: streamDeadlineAt,
       signal: input.options?.signal,
     });
   } catch (error) {
@@ -1166,9 +1236,12 @@ export async function streamStructuredPrompt<I, O, R = O>(input: {
       invokeOptions.signal = input.options.signal;
     }
     const streamLabel = `${input.asset.id}@${input.asset.version}`;
+    // 建流 + 消费共享单墙钟预算（与 streamTextPrompt 一致）
+    const streamBudgetMs = resolveEnforcedTimeoutMs(input.options?.timeoutMs);
+    const streamDeadlineAt = Date.now() + streamBudgetMs;
     const rawStream = await runWithEnforcedTimeout({
       label: streamLabel,
-      timeoutMs: input.options?.timeoutMs,
+      timeoutMs: Math.max(1, streamDeadlineAt - Date.now()),
       signal: input.options?.signal,
       run: (signal) => {
         const opts = signal ? { ...invokeOptions, signal } : invokeOptions;
@@ -1177,7 +1250,8 @@ export async function streamStructuredPrompt<I, O, R = O>(input: {
     });
     captured = captureStreamOutput(rawStream as AsyncIterable<BaseMessageChunk>, {
       label: streamLabel,
-      timeoutMs: input.options?.timeoutMs,
+      timeoutMs: streamBudgetMs,
+      deadlineAt: streamDeadlineAt,
       signal: input.options?.signal,
     });
   } catch (error) {

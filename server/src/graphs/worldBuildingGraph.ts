@@ -1,6 +1,20 @@
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
+import { runWithEnforcedTimeout } from "../llm/invokeTimeout";
+
+/** 墙钟兜底：规划图节点裸 invoke 在 body hang 时永不结束 → 导演/建书流假 running */
+async function invokeWithTimeout(
+  llm: BaseChatModel,
+  messages: Parameters<BaseChatModel["invoke"]>[0],
+  label = "graph.llm.invoke",
+) {
+  return runWithEnforcedTimeout({
+    label,
+    run: () => llm.invoke(messages),
+  });
+}
+
 
 function cleanJsonText(source: string): string {
   return source.replace(/```json|```/gi, "").trim();
@@ -41,7 +55,7 @@ export type WorldBuildingGraphState = typeof WorldBuildingGraphAnnotation.State;
 
 async function seedNode(state: WorldBuildingGraphState, llm: BaseChatModel) {
   try {
-    const result = await llm.invoke([
+    const result = await invokeWithTimeout(llm, [
       new SystemMessage("Convert user seed into concise world description."),
       new HumanMessage(
         `name=${state.name}
@@ -57,7 +71,7 @@ seed=${state.seed}`,
 
 async function axiomNode(state: WorldBuildingGraphState, llm: BaseChatModel) {
   try {
-    const result = await llm.invoke([
+    const result = await invokeWithTimeout(llm, [
       new SystemMessage("Generate 5 core axioms as bullet lines."),
       new HumanMessage(
         `worldType=${state.worldType}
@@ -73,7 +87,7 @@ description=${state.description}`,
 
 async function foundationNode(state: WorldBuildingGraphState, llm: BaseChatModel) {
   try {
-    const result = await llm.invoke([
+    const result = await invokeWithTimeout(llm, [
       new SystemMessage("Output JSON with fields background, geography."),
       new HumanMessage(
         `description=${state.description}
@@ -93,7 +107,7 @@ worldType=${state.worldType}`,
 
 async function powerNode(state: WorldBuildingGraphState, llm: BaseChatModel) {
   try {
-    const result = await llm.invoke([
+    const result = await invokeWithTimeout(llm, [
       new SystemMessage("Output JSON with fields magicSystem, technology."),
       new HumanMessage(
         `description=${state.description}
@@ -114,7 +128,7 @@ axioms=${state.axioms}`,
 
 async function societyNode(state: WorldBuildingGraphState, llm: BaseChatModel) {
   try {
-    const result = await llm.invoke([
+    const result = await invokeWithTimeout(llm, [
       new SystemMessage("Output JSON with fields races, politics."),
       new HumanMessage(
         `background=${state.background}
@@ -135,7 +149,7 @@ technology=${state.technology}`,
 
 async function cultureNode(state: WorldBuildingGraphState, llm: BaseChatModel) {
   try {
-    const result = await llm.invoke([
+    const result = await invokeWithTimeout(llm, [
       new SystemMessage("Output JSON with fields cultures, religions."),
       new HumanMessage(
         `races=${state.races}
@@ -155,7 +169,7 @@ background=${state.background}`,
 
 async function historyNode(state: WorldBuildingGraphState, llm: BaseChatModel) {
   try {
-    const result = await llm.invoke([
+    const result = await invokeWithTimeout(llm, [
       new SystemMessage("Write concise world history timeline."),
       new HumanMessage(
         `description=${state.description}
@@ -172,7 +186,7 @@ cultures=${state.cultures}`,
 
 async function conflictNode(state: WorldBuildingGraphState, llm: BaseChatModel) {
   try {
-    const result = await llm.invoke([
+    const result = await invokeWithTimeout(llm, [
       new SystemMessage("Write core world conflicts and narrative tension."),
       new HumanMessage(
         `axioms=${state.axioms}
@@ -189,7 +203,7 @@ magicSystem=${state.magicSystem}`,
 
 async function consistencyNode(state: WorldBuildingGraphState, llm: BaseChatModel) {
   try {
-    const result = await llm.invoke([
+    const result = await invokeWithTimeout(llm, [
       new SystemMessage("Output a concise consistency audit."),
       new HumanMessage(
         `axioms=${state.axioms}
@@ -208,7 +222,7 @@ conflicts=${state.conflicts}`,
 
 async function summaryNode(state: WorldBuildingGraphState, llm: BaseChatModel) {
   try {
-    const result = await llm.invoke([
+    const result = await invokeWithTimeout(llm, [
       new SystemMessage("Write final world summary in 5-8 lines."),
       new HumanMessage(
         `name=${state.name}
