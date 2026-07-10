@@ -1,0 +1,18 @@
+[Unit]
+Description=AI Novel Writing Assistant server (node dist/app.js)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mango
+WorkingDirectory=/home/mango/AI-Novel-Writing-Assistant/server
+EnvironmentFile=/home/mango/AI-Novel-Writing-Assistant/server/.env
+ExecStart=/usr/bin/node dist/app.js
+Restart=on-failure
+RestartSec=8
+StandardOutput=append:/home/mango/AI-Novel-Writing-Assistant/server/logs/server.log
+StandardError=append:/home/mango/AI-Novel-Writing-Assistant/server/logs/server.log
+
+[Install]
+WantedBy=multi-user.target
