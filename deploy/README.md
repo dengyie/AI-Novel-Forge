@@ -21,7 +21,7 @@
 
 ## 大文件在 GitHub Release
 
-数据库和构建产物不进 git，作为 Release 附件（tag `vps-backup-YYYYMMDD`）：
+数据库和构建产物不进 git，作为 Release 附件（tag `vps-backup-20260710`）：
 
 - `dev.db.gz` — 生产库快照（gunzip 后放 `server/dev.db`）
 - `db-backups.tar.gz` — 历史备份（解到 `server/tmp/db-backups/`）
@@ -43,10 +43,10 @@ pnpm build
 #   或：从 Release 下载 server-dist.tgz / client-dist.tgz 解压到对应 dist/
 
 # 4. 数据库：从 Release 下载并还原
-gh release download vps-backup-YYYYMMDD -p "dev.db.gz"
+gh release download vps-backup-20260710 -p "dev.db.gz"
 gunzip -c dev.db.gz > server/dev.db
 #   历史备份（可选）
-gh release download vps-backup-YYYYMMDD -p "db-backups.tar.gz"
+gh release download vps-backup-20260710 -p "db-backups.tar.gz"
 mkdir -p server/tmp/db-backups && tar xzf db-backups.tar.gz -C server/tmp/
 
 # 5. 反代 + 服务
