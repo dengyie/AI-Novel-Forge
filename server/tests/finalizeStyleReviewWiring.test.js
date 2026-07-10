@@ -169,3 +169,35 @@ test("无 styleContext 时 runner 仍被调用但应自短路（不依赖 finali
   assert.equal(runCalls, 1);
   assert.equal(result.finalContent, "正文");
 });
+
+test("dual-track: Chinese dash/ellipsis after humanizer stays non-blocking pending_review", async () => {
+  // 双轨：humanizer 先改写 → acceptance 通过 → detectProseQuality 在 finalContent 上跑。
+  // 仅含 ——/…… 时不得因 prose 门禁把章节打成 needs_repair（audit.hasBlockingIssues=false）。
+  let markedStatus = null;
+  const { service, getGateContent } = buildService({
+    runner: {
+      run: async (input) => ({
+        report: { riskScore: 10, summary: "低", violations: [], canAutoRewrite: true, appliedRuleIds: [] },
+        residualReport: { riskScore: 0, summary: "干净", violations: [], canAutoRewrite: false, appliedRuleIds: [] },
+        autoRewritten: true,
+        originalContent: input.content,
+        finalContent: "他停顿了一下……随后抬起头。门后传来声音——很轻。",
+      }),
+    },
+  });
+  service.markChapterStatus = async (_chapterId, status) => {
+    markedStatus = status;
+  };
+
+  const result = await service.finalizeChapterContent(baseInput("原始草稿"));
+
+  assert.equal(result.finalContent, "他停顿了一下……随后抬起头。门后传来声音——很轻。");
+  assert.equal(getGateContent(), "他停顿了一下……随后抬起头。门后传来声音——很轻。");
+  assert.equal(result.runtimePackage.audit.hasBlockingIssues, false);
+  const proseIssues = (result.runtimePackage.audit.reports ?? [])
+    .flatMap((report) => report.issues ?? [])
+    .filter((issue) => issue.code === "prose_dash_or_ellipsis");
+  assert.ok(proseIssues.length >= 1);
+  assert.ok(proseIssues.every((issue) => issue.severity === "medium"));
+  assert.equal(markedStatus, "pending_review");
+});

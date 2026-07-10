@@ -44,6 +44,9 @@ test("detectProseQuality detects deterministic prose degradation signals", () =>
     "prose_engineering_term_leak",
   ]));
   assert.ok(severitiesByCode(report, "prose_long_paragraph").includes("medium"));
+  // 中文 ——/…… 仅作质量债信号，不得 hard-block 正常网文章节。
+  assert.ok(severitiesByCode(report, "prose_dash_or_ellipsis").includes("medium"));
+  assert.equal(severitiesByCode(report, "prose_dash_or_ellipsis").includes("high"), false);
   assert.ok(severitiesByCode(report, "prose_ai_self_reference").includes("critical"));
 });
 
@@ -57,6 +60,21 @@ test("detectProseQuality keeps common false positives out of blocking findings",
 
   assert.equal(codes(report).includes("prose_negative_flip"), false);
   assert.equal(codes(report).includes("prose_ai_self_reference"), false);
+  assert.equal(report.hasBlockingFindings, false);
+});
+
+
+test("Chinese dash and ellipsis alone do not block chapter acceptance", () => {
+  const report = detectProseQuality([
+    "他停顿了一下……随后抬起头。",
+    "门后传来声音——很轻，却像刀锋一样贴着耳骨。",
+    "她把信折好，放进抽屉，转身离开。",
+  ].join("\n"));
+
+  assert.ok(codes(report).includes("prose_dash_or_ellipsis"));
+  const dashSeverities = severitiesByCode(report, "prose_dash_or_ellipsis");
+  assert.ok(dashSeverities.length >= 1);
+  assert.ok(dashSeverities.every((severity) => severity === "medium"));
   assert.equal(report.hasBlockingFindings, false);
 });
 

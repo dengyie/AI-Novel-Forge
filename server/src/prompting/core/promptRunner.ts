@@ -6,7 +6,7 @@ import {
   parseStructuredLlmRawContentDetailed,
   type StructuredInvokeResult,
 } from "../../llm/structuredInvoke";
-import { runWithEnforcedTimeout } from "../../llm/invokeTimeout";
+import { resolveEnforcedTimeoutMs, runWithEnforcedTimeout } from "../../llm/invokeTimeout";
 import {
   buildStructuredResponseFormat,
   resolveStructuredOutputProfile,
@@ -425,7 +425,14 @@ function recordPromptFailure(input: {
   });
 }
 
-function captureStreamOutput(rawStream: AsyncIterable<BaseMessageChunk>): {
+function captureStreamOutput(
+  rawStream: AsyncIterable<BaseMessageChunk>,
+  options?: {
+    label?: string;
+    timeoutMs?: number;
+    signal?: AbortSignal;
+  },
+): {
   stream: AsyncIterable<BaseMessageChunk>;
   completedText: Promise<string>;
   completedUsage: Promise<LlmTokenUsageSnapshot | null>;
@@ -443,22 +450,93 @@ function captureStreamOutput(rawStream: AsyncIterable<BaseMessageChunk>): {
     rejectUsage = reject;
   });
 
+  // 流式 body 墙钟：text invoke 已有 runWithEnforcedTimeout；stream 路径原先仅依赖 SDK HTTP timeout，
+  // 响应头返回后 body 静默 hang 时 completedText 永不 settle。整段消费共享同一 deadline。
+  const timeoutMs = resolveEnforcedTimeoutMs(options?.timeoutMs);
+  const label = options?.label;
+  const deadlineAt = Date.now() + timeoutMs;
+  let timedOut = false;
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+    timedOut = true;
+    const error = new Error(
+      label?.trim()
+        ? `[${label}] Request timed out after ${timeoutMs}ms.`
+        : `Request timed out after ${timeoutMs}ms.`,
+    );
+    error.name = "TimeoutError";
+    rejectText(error);
+    rejectUsage(error);
+  }, timeoutMs);
+  const clearStreamTimeout = () => {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+      timeoutHandle = null;
+    }
+  };
+  const upstreamSignal = options?.signal;
+  const onUpstreamAbort = () => {
+    clearStreamTimeout();
+    const reason = upstreamSignal?.reason;
+    const error = reason instanceof Error
+      ? reason
+      : Object.assign(new Error(typeof reason === "string" && reason.trim() ? reason.trim() : "Request aborted."), { name: "AbortError" });
+    rejectText(error);
+    rejectUsage(error);
+  };
+  if (upstreamSignal) {
+    if (upstreamSignal.aborted) {
+      onUpstreamAbort();
+    } else {
+      upstreamSignal.addEventListener("abort", onUpstreamAbort, { once: true });
+    }
+  }
+
   const stream = {
     async *[Symbol.asyncIterator]() {
       const chunks: string[] = [];
       let usage: LlmTokenUsageSnapshot | null = null;
       try {
+        if (timedOut || upstreamSignal?.aborted) {
+          const error = new Error(
+            label?.trim()
+              ? `[${label}] Request timed out after ${timeoutMs}ms.`
+              : `Request timed out after ${timeoutMs}ms.`,
+          );
+          error.name = timedOut ? "TimeoutError" : "AbortError";
+          throw error;
+        }
         for await (const chunk of rawStream) {
+          if (timedOut || Date.now() > deadlineAt) {
+            const error = new Error(
+              label?.trim()
+                ? `[${label}] Request timed out after ${timeoutMs}ms.`
+                : `Request timed out after ${timeoutMs}ms.`,
+            );
+            error.name = "TimeoutError";
+            throw error;
+          }
+          if (upstreamSignal?.aborted) {
+            const reason = upstreamSignal.reason;
+            throw reason instanceof Error
+              ? reason
+              : Object.assign(new Error("Request aborted."), { name: "AbortError" });
+          }
           chunks.push(toText(chunk.content));
           usage = mergeStreamTokenUsage(usage, extractLlmTokenUsage(chunk));
           yield chunk;
         }
+        clearStreamTimeout();
         resolveText(chunks.join(""));
         resolveUsage(usage);
       } catch (error) {
+        clearStreamTimeout();
         rejectText(error);
         rejectUsage(error);
         throw error;
+      } finally {
+        if (upstreamSignal) {
+          upstreamSignal.removeEventListener("abort", onUpstreamAbort);
+        }
       }
     },
   };
@@ -940,6 +1018,7 @@ export async function streamTextPrompt<I>(input: {
   });
   const renderedPromptChars = estimateRenderedPromptChars(messages);
   let captured: ReturnType<typeof captureStreamOutput>;
+  const streamLabel = `${input.asset.id}@${input.asset.version}`;
   try {
     const llm = await promptRunnerLLMFactory(input.options?.provider, {
       fallbackProvider: "deepseek",
@@ -950,8 +1029,24 @@ export async function streamTextPrompt<I>(input: {
       taskType: input.asset.taskType,
       promptMeta: prepared.invocation,
     });
-    const rawStream = await llm.stream(messages, buildPromptCallOptions(input.options));
-    captured = captureStreamOutput(rawStream as AsyncIterable<BaseMessageChunk>);
+    // 建流 + 消费共享墙钟：llm.stream 本身 hang 与 body 静默 hang 均覆盖。
+    const rawStream = await runWithEnforcedTimeout({
+      label: streamLabel,
+      timeoutMs: input.options?.timeoutMs,
+      signal: input.options?.signal,
+      run: (signal) => {
+        const callOptions = buildPromptCallOptions({
+          ...input.options,
+          signal: signal ?? input.options?.signal,
+        });
+        return llm.stream(messages, callOptions);
+      },
+    });
+    captured = captureStreamOutput(rawStream as AsyncIterable<BaseMessageChunk>, {
+      label: streamLabel,
+      timeoutMs: input.options?.timeoutMs,
+      signal: input.options?.signal,
+    });
   } catch (error) {
     recordPromptFailure({
       asset: input.asset as PromptAsset<unknown, unknown, unknown>,
@@ -1070,8 +1165,21 @@ export async function streamStructuredPrompt<I, O, R = O>(input: {
     if (input.options?.signal) {
       invokeOptions.signal = input.options.signal;
     }
-    const rawStream = await llm.stream(prepared.messages, invokeOptions);
-    captured = captureStreamOutput(rawStream as AsyncIterable<BaseMessageChunk>);
+    const streamLabel = `${input.asset.id}@${input.asset.version}`;
+    const rawStream = await runWithEnforcedTimeout({
+      label: streamLabel,
+      timeoutMs: input.options?.timeoutMs,
+      signal: input.options?.signal,
+      run: (signal) => {
+        const opts = signal ? { ...invokeOptions, signal } : invokeOptions;
+        return llm.stream(prepared.messages, opts);
+      },
+    });
+    captured = captureStreamOutput(rawStream as AsyncIterable<BaseMessageChunk>, {
+      label: streamLabel,
+      timeoutMs: input.options?.timeoutMs,
+      signal: input.options?.signal,
+    });
   } catch (error) {
     recordPromptFailure({
       asset: input.asset as PromptAsset<unknown, unknown, unknown>,

@@ -184,9 +184,11 @@ function scanDashOrEllipsis(
   if (!match || match.index == null) {
     return;
   }
+  // 中文网文合法标点：——/…… 很常见。保留信号进入质量债/审计，但降为 medium，
+  // 避免 hasBlockingFindings → hasBlockingIssues → needs_repair 硬阻断正常章节。
   addFinding({
     code: "prose_dash_or_ellipsis",
-    severity: "high",
+    severity: "medium",
     line: segment.line,
     column: match.index + 1,
     message: "正文使用破折号、省略号或双连字符，容易形成模型化停顿。",

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { buildStyleIntentSummary } from "@ai-novel/shared/types/styleEngine";
@@ -103,7 +103,8 @@ export function useAutoDirectorCreateController(input: UseAutoDirectorCreateCont
   const [batches, setBatches] = useState<DirectorCandidateBatch[]>([]);
   const [workflowTaskId, setWorkflowTaskId] = useState(workflowTaskIdProp ?? "");
   const [dialogMode, setDialogMode] = useState<DirectorExecutionViewMode>("candidate_selection");
-  const [candidateDialogOpen, setCandidateDialogOpen] = useState(false);
+  // 候选弹窗 UI 已并入 dialogMode；保留 no-op setter 兼容 mutations 入参，避免 write-only state。
+  const setCandidateDialogOpen: Dispatch<SetStateAction<boolean>> = () => undefined;
   const [executionRequested, setExecutionRequested] = useState(false);
   const [pendingTitleHint, setPendingTitleHint] = useState("");
   const [executionError, setExecutionError] = useState("");
