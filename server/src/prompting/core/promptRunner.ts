@@ -22,6 +22,7 @@ import { toText } from "../../services/novel/novelP0Utils";
 import { hasRegisteredPromptAsset } from "../registry";
 import { CUSTOM_SLOT_CONTEXT_GROUP } from "../slots/slotResolution";
 import { promptSlotOverrideService } from "../slots/PromptSlotOverrideService";
+import { resolveAdvancedTextPromptMessages } from "../templates/templateRuntime";
 import { selectContextBlocks } from "./contextSelection";
 import {
   recordPromptQualityEvent,
@@ -837,7 +838,14 @@ export async function runTextPrompt<I>(input: {
     resolvedSlots: overlays.resolvedSlots,
   });
   const startedAt = Date.now();
-  const renderedPromptChars = estimateRenderedPromptChars(prepared.messages);
+  const messages = await resolveAdvancedTextPromptMessages({
+    asset: input.asset,
+    promptInput: input.promptInput,
+    context: prepared.context,
+    officialMessages: prepared.messages,
+    novelId: input.options?.novelId,
+  });
+  const renderedPromptChars = estimateRenderedPromptChars(messages);
   try {
     const llm = await promptRunnerLLMFactory(input.options?.provider, {
       fallbackProvider: "deepseek",
@@ -848,16 +856,17 @@ export async function runTextPrompt<I>(input: {
       taskType: input.asset.taskType,
       promptMeta: prepared.invocation,
     });
-    const callOptions = buildPromptCallOptions(input.options);
+const callOptions = buildPromptCallOptions(input.options);
     // 墙钟超时兜底：text 路径原本裸调 llm.invoke，只靠客户端 HTTP 超时——对"响应头已返回
     // 但 body 流静默 hang"的渠道管不到，promise 永久挂死。套 runWithEnforcedTimeout 后到点
     // 无条件 abort + reject（timeoutMs 未传时用其内部默认兜底），命中瞬时错误判据后由上层重试。
+    // 使用 advanced-resolved messages（上游 0.4.x），而非 prepared.messages。
     const result = await runWithEnforcedTimeout({
       label: `${input.asset.id}@${input.asset.version}`,
       timeoutMs: input.options?.timeoutMs,
       signal: input.options?.signal,
       run: (signal) => llm.invoke(
-        prepared.messages,
+        messages,
         signal ? { ...callOptions, signal } : callOptions,
       ),
     });
@@ -922,7 +931,14 @@ export async function streamTextPrompt<I>(input: {
     resolvedSlots: overlays.resolvedSlots,
   });
   const startedAt = Date.now();
-  const renderedPromptChars = estimateRenderedPromptChars(prepared.messages);
+  const messages = await resolveAdvancedTextPromptMessages({
+    asset: input.asset,
+    promptInput: input.promptInput,
+    context: prepared.context,
+    officialMessages: prepared.messages,
+    novelId: input.options?.novelId,
+  });
+  const renderedPromptChars = estimateRenderedPromptChars(messages);
   let captured: ReturnType<typeof captureStreamOutput>;
   try {
     const llm = await promptRunnerLLMFactory(input.options?.provider, {
@@ -934,7 +950,7 @@ export async function streamTextPrompt<I>(input: {
       taskType: input.asset.taskType,
       promptMeta: prepared.invocation,
     });
-    const rawStream = await llm.stream(prepared.messages, buildPromptCallOptions(input.options));
+    const rawStream = await llm.stream(messages, buildPromptCallOptions(input.options));
     captured = captureStreamOutput(rawStream as AsyncIterable<BaseMessageChunk>);
   } catch (error) {
     recordPromptFailure({

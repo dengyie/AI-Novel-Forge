@@ -10,6 +10,7 @@
 import fs from "fs/promises";
 import path from "path";
 import sharp from "sharp";
+import type { OverlayOptions, Sharp as SharpInstance } from "sharp";
 import { prisma } from "../../db/prisma";
 import { AppError } from "../../middleware/errorHandler";
 import { resolveGeneratedImagesRoot } from "../../runtime/appPaths";
@@ -150,7 +151,7 @@ export class ComicExportService {
         create: { width: targetWidth, height: totalHeight, channels: 3, background: { r: 255, g: 255, b: 255 } },
       }).composite(composites);
 
-      const applyQuality = (s: sharp.Sharp): sharp.Sharp => {
+      const applyQuality = (s: SharpInstance): SharpInstance => {
         if (outputFmt === "jpg") return s.jpeg({ quality });
         if (outputFmt === "webp") return s.webp({ quality });
         return s.png();

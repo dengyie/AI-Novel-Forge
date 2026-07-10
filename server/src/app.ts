@@ -54,6 +54,7 @@ import {
   hasSystemResourceBootstrapChanges,
 } from "./services/bootstrap/SystemResourceBootstrapService";
 import { initializeRagSettingsCompatibility } from "./services/settings/RagCompatibilityBootstrapService";
+import { qualityDebtSettingsService } from "./services/settings/QualityDebtSettingsService";
 import { DirectorWorker } from "./workers/directorWorker";
 import { cleanupLogDirectory, resolveLogRetentionConfig } from "./platform/logging/logRetention";
 import { resolveClientDistPath, resolveLogsRoot } from "./runtime/appPaths";
@@ -323,6 +324,9 @@ export async function startServer(options?: ServerStartOptions): Promise<Started
   ) {
     console.log("[server] imported legacy RAG env settings.", ragCompatibilityReport);
   }
+  await qualityDebtSettingsService.warnIfAutoPromotionEnabled().catch((error) => {
+    console.warn("[server] failed to inspect pending review auto-promotion settings.", error);
+  });
 
   const app = createApp();
   const { host, port, allowLan } = resolveServerStartOptions(options);

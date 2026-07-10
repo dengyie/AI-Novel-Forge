@@ -254,6 +254,8 @@ export class GenerationContextAssembler {
     const pendingReviewProposalCountPromise = prisma.stateChangeProposal.count({
       where: buildBlockingPendingReviewProposalWhere(novelId, chapterId),
     });
+// pending 硬事实评审是辅助上下文：DB 抖动时降级为空 Map，不阻断整章生成
+    // （与 NovelReferenceService fail-loud 不同关注点）
     const pendingCharacterHardFactReviewsPromise = loadPendingCharacterHardFactReviews(novelId, chapterId)
       .catch(() => new Map() as PendingCharacterHardFactReviewMap);
     const [

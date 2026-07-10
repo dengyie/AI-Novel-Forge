@@ -15,6 +15,7 @@ import os from "os";
 import path from "path";
 
 import sharp from "sharp";
+import type { OverlayOptions, Sharp as SharpInstance } from "sharp";
 
 import { resolveGeneratedImagesRoot } from "../../runtime/appPaths";
 import { resolveAssetFile } from "./ComicCharacterAssetService";
@@ -153,7 +154,7 @@ export class ComicSpriteSheetService {
 
     // 横向拼合
     const totalWidth = columns.reduce((sum, c) => sum + c.width, 0);
-    const compositeInputs: Array<sharp.OverlayOptions> = [];
+    const compositeInputs: Array<OverlayOptions> = [];
     let xOffset = 0;
     for (const col of columns) {
       compositeInputs.push({ input: col.buf, top: 0, left: xOffset });
