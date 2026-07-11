@@ -1141,6 +1141,138 @@ test("runPipelineChapterWithRuntime fails empty writer output without saving or 
   assert.deepEqual(generationStates, []);
 });
 
+test("runPipelineChapterWithRuntime retries mid-stream transport failure then succeeds", async () => {
+  const stages = [];
+  const transportEvents = [];
+  const savedDrafts = [];
+  let generationCount = 0;
+
+  const result = await runPipelineChapterWithRuntime(
+    {
+      validateRequest(input) {
+        return input;
+      },
+      async ensureNovelCharacters() {},
+      async assemble() {
+        return {
+          novel: { id: "novel-1", title: "测试小说" },
+          chapter: {
+            id: "chapter-1",
+            title: "第一章",
+            order: 1,
+            content: null,
+            expectation: null,
+          },
+          contextPackage: {},
+        };
+      },
+      async generateDraftFromWriter() {
+        generationCount += 1;
+        if (generationCount === 1) {
+          throw new Error("fetch failed: ECONNRESET");
+        }
+        return { content: "传输重试后的正文" };
+      },
+      async saveDraftAndArtifacts(_novelId, _chapterId, content, generationState) {
+        savedDrafts.push({ content, generationState });
+      },
+      async syncFinalChapterArtifacts() {},
+      async finalizeChapterContent({ content }) {
+        return {
+          finalContent: content,
+          runtimePackage: createRuntimePackage(90),
+        };
+      },
+      async markChapterGenerationState() {},
+      async markChapterNeedsRepair() {},
+    },
+    "novel-1",
+    "chapter-1",
+    {
+      autoReview: true,
+      autoRepair: true,
+    },
+    {
+      async onStageChange(stage) {
+        stages.push(stage);
+      },
+      async onWriterTransportRetry(event) {
+        transportEvents.push({
+          attempt: event.attempt,
+          willRetry: event.willRetry,
+          message: event.message,
+        });
+      },
+    },
+  );
+
+  assert.equal(generationCount, 2);
+  assert.deepEqual(stages, ["generating_chapters", "generating_chapters", "reviewing"]);
+  assert.equal(transportEvents.length, 1);
+  assert.equal(transportEvents[0].attempt, 1);
+  assert.equal(transportEvents[0].willRetry, true);
+  assert.match(transportEvents[0].message, /ECONNRESET|fetch failed/);
+  assert.deepEqual(savedDrafts, [{
+    content: "传输重试后的正文",
+    generationState: "drafted",
+  }]);
+  assert.equal(result.pass, true);
+});
+
+test("runPipelineChapterWithRuntime does not retry non-transient writer errors", async () => {
+  let generationCount = 0;
+  const transportEvents = [];
+
+  await assert.rejects(
+    () => runPipelineChapterWithRuntime(
+      {
+        validateRequest(input) {
+          return input;
+        },
+        async ensureNovelCharacters() {},
+        async assemble() {
+          return {
+            novel: { id: "novel-1", title: "测试小说" },
+            chapter: {
+              id: "chapter-1",
+              title: "第一章",
+              order: 1,
+              content: null,
+              expectation: null,
+            },
+            contextPackage: {},
+          };
+        },
+        async generateDraftFromWriter() {
+          generationCount += 1;
+          throw new Error("provider rejected: invalid_api_key");
+        },
+        async saveDraftAndArtifacts() {
+          throw new Error("should not save");
+        },
+        async syncFinalChapterArtifacts() {},
+        async finalizeChapterContent() {
+          throw new Error("should not finalize");
+        },
+        async markChapterGenerationState() {},
+        async markChapterNeedsRepair() {},
+      },
+      "novel-1",
+      "chapter-1",
+      { autoReview: true, autoRepair: true },
+      {
+        async onWriterTransportRetry(event) {
+          transportEvents.push(event);
+        },
+      },
+    ),
+    /invalid_api_key/,
+  );
+
+  assert.equal(generationCount, 1);
+  assert.deepEqual(transportEvents, []);
+});
+
 test("runPipelineChapterWithRuntime defaults to a single repair pass before stopping", async () => {
   const originalRunStructuredPrompt = promptRunner.runStructuredPrompt;
   const stages = [];

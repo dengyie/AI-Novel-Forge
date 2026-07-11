@@ -1027,6 +1027,26 @@ export class NovelCorePipelineService {
                 }
                 logPipelineError("章节生成连续未返回正文，已暂停流水线", meta);
               },
+              onWriterTransportRetry: async (event) => {
+                const meta = {
+                  jobId,
+                  workflowTaskId: runtimePayload.workflowTaskId,
+                  novelId,
+                  chapterId: chapter.id,
+                  chapterOrder: chapter.order,
+                  provider: runtimePayload.provider,
+                  model: runtimePayload.model,
+                  runMode: runtimePayload.runMode,
+                  transportAttempt: event.attempt,
+                  willRetry: event.willRetry,
+                  message: event.message,
+                };
+                if (event.willRetry) {
+                  logPipelineWarn("章节生成瞬时传输失败，正在整章重试", meta);
+                  return;
+                }
+                logPipelineError("章节生成瞬时传输失败已耗尽重试，任务将失败", meta);
+              },
             },
           ).finally(() => {
             clearInterval(heartbeatTimer);

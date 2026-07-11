@@ -9,12 +9,15 @@ import {
   isChapterEmptyContentError,
   type ChapterEmptyContentError,
 } from "./chapterEmptyContentError";
+import { isTransientTransportError } from "../../../llm/transportRetry";
 import { runChapterRepairText } from "./repair/chapterRepairRuntime";
 
 export interface PipelineRuntimeHooks {
   onCheckCancelled?: () => Promise<void>;
   onStageChange?: (stage: "generating_chapters" | "reviewing" | "repairing") => Promise<void>;
   onEmptyContent?: (event: PipelineEmptyContentEvent) => Promise<void>;
+  /** mid-stream / writer 瞬时 transport 失败，将整章重试时回调（可观测） */
+  onWriterTransportRetry?: (event: PipelineWriterTransportRetryEvent) => Promise<void>;
 }
 
 export interface PipelineEmptyContentEvent {
@@ -23,6 +26,13 @@ export interface PipelineEmptyContentEvent {
   error: ChapterEmptyContentError;
   contentLength: number;
   rawContentLength: number;
+}
+
+export interface PipelineWriterTransportRetryEvent {
+  attempt: number;
+  willRetry: boolean;
+  error: unknown;
+  message: string;
 }
 
 export interface PipelineRuntimeInput extends ChapterRuntimeRequestInput {
@@ -149,6 +159,11 @@ interface RunPipelineChapterDeps {
 
 const QUALITY_THRESHOLD = { coherence: 80, repetition: 75, engagement: 75 };
 const EMPTY_CONTENT_GENERATION_RETRY_LIMIT = 1;
+/** mid-stream / writer transport 瞬时失败整章重试上限（不含首次）。与 empty 重试独立计数。 */
+const WRITER_TRANSPORT_GENERATION_RETRY_LIMIT = Math.max(
+  0,
+  Number.parseInt(process.env.CHAPTER_WRITER_TRANSPORT_RETRY_MAX_ATTEMPTS ?? "2", 10) || 0,
+);
 const NON_PATCHABLE_REVIEW_ISSUE_CODES = new Set(["acceptance_gate_unavailable"]);
 
 const AUDIT_CATEGORY_MAP: Record<"continuity" | "character" | "plot" | "mode_fit", ReviewIssue["category"]> = {
@@ -384,8 +399,14 @@ async function generateNonEmptyDraftFromWriter(input: {
   artifactsAlreadySynced?: boolean;
 }> {
   let emptyAttempt = 0;
+  let transportAttempt = 0;
   while (true) {
     await input.hooks.onCheckCancelled?.();
+    if (input.signal?.aborted) {
+      throw input.signal.reason instanceof Error
+        ? input.signal.reason
+        : new Error("章节生成已取消。");
+    }
     await input.hooks.onStageChange?.("generating_chapters");
     try {
       const generatedDraft = await input.deps.generateDraftFromWriter({
@@ -408,17 +429,40 @@ async function generateNonEmptyDraftFromWriter(input: {
         content,
       };
     } catch (error) {
-      if (!isChapterEmptyContentError(error)) {
+      if (isChapterEmptyContentError(error)) {
+        emptyAttempt += 1;
+        const willRetry = emptyAttempt <= EMPTY_CONTENT_GENERATION_RETRY_LIMIT;
+        await input.hooks.onEmptyContent?.({
+          attempt: emptyAttempt,
+          willRetry,
+          error,
+          contentLength: error.details.trimmedLength,
+          rawContentLength: error.details.rawLength,
+        });
+        if (willRetry) {
+          continue;
+        }
         throw error;
       }
-      emptyAttempt += 1;
-      const willRetry = emptyAttempt <= EMPTY_CONTENT_GENERATION_RETRY_LIMIT;
-      await input.hooks.onEmptyContent?.({
-        attempt: emptyAttempt,
+
+      // mid-stream / establish 瞬时故障：整章重开（与 empty 重试独立计数）。
+      // 用户/流水线 abort 不重试；非瞬时错误直接失败。
+      const cancelled = input.signal?.aborted
+        || (error instanceof Error && (
+          error.message === "PIPELINE_CANCELLED"
+          || error.message.includes("章节生成已取消")
+        ));
+      if (cancelled || !isTransientTransportError(error)) {
+        throw error;
+      }
+      transportAttempt += 1;
+      const willRetry = transportAttempt <= WRITER_TRANSPORT_GENERATION_RETRY_LIMIT;
+      const message = error instanceof Error ? error.message : String(error);
+      await input.hooks.onWriterTransportRetry?.({
+        attempt: transportAttempt,
         willRetry,
         error,
-        contentLength: error.details.trimmedLength,
-        rawContentLength: error.details.rawLength,
+        message,
       });
       if (willRetry) {
         continue;

@@ -7,6 +7,7 @@ import {
   type StructuredInvokeResult,
 } from "../../llm/structuredInvoke";
 import { resolveEnforcedTimeoutMs, runWithEnforcedTimeout } from "../../llm/invokeTimeout";
+import { runWithTransportRetry } from "../../llm/transportRetry";
 import {
   buildStructuredResponseFormat,
   resolveStructuredOutputProfile,
@@ -1004,17 +1005,34 @@ export async function runTextPrompt<I>(input: {
 const callOptions = buildPromptCallOptions(input.options);
     // 墙钟超时兜底：text 路径原本裸调 llm.invoke，只靠客户端 HTTP 超时——对"响应头已返回
     // 但 body 流静默 hang"的渠道管不到，promise 永久挂死。套 runWithEnforcedTimeout 后到点
-    // 无条件 abort + reject（timeoutMs 未传时用其内部默认兜底），命中瞬时错误判据后由上层重试。
+    // 无条件 abort + reject（timeoutMs 未传时用其内部默认兜底），命中瞬时错误判据后由
+    // runWithTransportRetry 接管（与 structuredInvoke 同判据）。
     // 使用 advanced-resolved messages（上游 0.4.x），而非 prepared.messages。
-    const result = await runWithEnforcedTimeout({
-      label: `${input.asset.id}@${input.asset.version}`,
-      timeoutMs: input.options?.timeoutMs,
-      signal: input.options?.signal,
-      run: (signal) => llm.invoke(
-        messages,
-        signal ? { ...callOptions, signal } : callOptions,
-      ),
-    });
+    const textLabel = `${input.asset.id}@${input.asset.version}`;
+    const result = await runWithTransportRetry(
+      () => runWithEnforcedTimeout({
+        label: textLabel,
+        timeoutMs: input.options?.timeoutMs,
+        signal: input.options?.signal,
+        run: (signal) => llm.invoke(
+          messages,
+          signal ? { ...callOptions, signal } : callOptions,
+        ),
+      }),
+      {
+        signal: input.options?.signal,
+        label: textLabel,
+        onRetry: ({ attempt, maxAttempts, error, backoffMs }) => {
+          console.warn("[prompt-runner] text transport retry", {
+            label: textLabel,
+            attempt,
+            maxAttempts,
+            backoffMs,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        },
+      },
+    );
     const output = applyPromptPostValidate({
       asset: input.asset,
       promptInput: input.promptInput,
@@ -1097,20 +1115,37 @@ export async function streamTextPrompt<I>(input: {
       promptMeta: prepared.invocation,
     });
     // 建流 + 消费共享**单**墙钟预算（非 2×）：deadlineAt 贯穿 establish 与 body race。
+    // 仅对「建流」做 transport 重试：尚未向调用方 yield 任何 chunk，可安全整段重开。
+    // mid-stream 失败由章节 pipeline 层（generateNonEmptyDraftFromWriter）整章重试。
     const streamBudgetMs = resolveEnforcedTimeoutMs(input.options?.timeoutMs);
     const streamDeadlineAt = Date.now() + streamBudgetMs;
-    const rawStream = await runWithEnforcedTimeout({
-      label: streamLabel,
-      timeoutMs: Math.max(1, streamDeadlineAt - Date.now()),
-      signal: input.options?.signal,
-      run: (signal) => {
-        const callOptions = buildPromptCallOptions({
-          ...input.options,
-          signal: signal ?? input.options?.signal,
-        });
-        return llm.stream(messages, callOptions);
+    const rawStream = await runWithTransportRetry(
+      () => runWithEnforcedTimeout({
+        label: streamLabel,
+        timeoutMs: Math.max(1, streamDeadlineAt - Date.now()),
+        signal: input.options?.signal,
+        run: (signal) => {
+          const callOptions = buildPromptCallOptions({
+            ...input.options,
+            signal: signal ?? input.options?.signal,
+          });
+          return llm.stream(messages, callOptions);
+        },
+      }),
+      {
+        signal: input.options?.signal,
+        label: streamLabel,
+        onRetry: ({ attempt, maxAttempts, error, backoffMs }) => {
+          console.warn("[prompt-runner] stream establish transport retry", {
+            label: streamLabel,
+            attempt,
+            maxAttempts,
+            backoffMs,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        },
       },
-    });
+    );
     captured = captureStreamOutput(rawStream as AsyncIterable<BaseMessageChunk>, {
       label: streamLabel,
       timeoutMs: streamBudgetMs,
@@ -1236,18 +1271,33 @@ export async function streamStructuredPrompt<I, O, R = O>(input: {
       invokeOptions.signal = input.options.signal;
     }
     const streamLabel = `${input.asset.id}@${input.asset.version}`;
-    // 建流 + 消费共享单墙钟预算（与 streamTextPrompt 一致）
+    // 建流 + 消费共享单墙钟预算（与 streamTextPrompt 一致）；建流阶段 transport 可重试。
     const streamBudgetMs = resolveEnforcedTimeoutMs(input.options?.timeoutMs);
     const streamDeadlineAt = Date.now() + streamBudgetMs;
-    const rawStream = await runWithEnforcedTimeout({
-      label: streamLabel,
-      timeoutMs: Math.max(1, streamDeadlineAt - Date.now()),
-      signal: input.options?.signal,
-      run: (signal) => {
-        const opts = signal ? { ...invokeOptions, signal } : invokeOptions;
-        return llm.stream(prepared.messages, opts);
+    const rawStream = await runWithTransportRetry(
+      () => runWithEnforcedTimeout({
+        label: streamLabel,
+        timeoutMs: Math.max(1, streamDeadlineAt - Date.now()),
+        signal: input.options?.signal,
+        run: (signal) => {
+          const opts = signal ? { ...invokeOptions, signal } : invokeOptions;
+          return llm.stream(prepared.messages, opts);
+        },
+      }),
+      {
+        signal: input.options?.signal,
+        label: streamLabel,
+        onRetry: ({ attempt, maxAttempts, error, backoffMs }) => {
+          console.warn("[prompt-runner] structured stream establish transport retry", {
+            label: streamLabel,
+            attempt,
+            maxAttempts,
+            backoffMs,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        },
       },
-    });
+    );
     captured = captureStreamOutput(rawStream as AsyncIterable<BaseMessageChunk>, {
       label: streamLabel,
       timeoutMs: streamBudgetMs,
