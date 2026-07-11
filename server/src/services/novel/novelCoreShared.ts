@@ -80,6 +80,14 @@ export interface ChapterInput {
   title: string;
   order: number;
   content?: string;
+  /**
+   * 正文 CAS token。仅当本次请求写入 content 时生效：
+   * - 传入且与库中 contentRevision 一致 → 写入并 +1
+   * - 传入但不一致 → 409 CHAPTER_CONTENT_CONFLICT
+   * - 省略 → last-write-wins，仍 bump contentRevision
+   * metadata-only 更新忽略该字段且不 bump。
+   */
+  expectedContentRevision?: number;
   expectation?: string;
   chapterStatus?: "unplanned" | "pending_generation" | "generating" | "pending_review" | "needs_repair" | "completed";
   targetWordCount?: number | null;

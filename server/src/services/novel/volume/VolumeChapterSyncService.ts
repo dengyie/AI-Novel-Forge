@@ -10,6 +10,7 @@ import {
 } from "@ai-novel/shared/types/chapterTaskSheetQuality";
 import { prisma } from "../../../db/prisma";
 import type { VolumeUpdateReason } from "../../../events";
+import { contentRevisionBumpData } from "../chapterContentCas";
 import {
   buildVolumeSyncPlan,
   hasPayoffLedgerRelevantPlanChanges,
@@ -144,7 +145,9 @@ export class VolumeChapterSyncService {
                 chapterStatus: "unplanned",
               }
               : {}),
-            ...(item.clearContent ? { content: "" } : {}),
+            ...(item.clearContent
+              ? { content: "", ...contentRevisionBumpData() }
+              : {}),
           },
         });
       }

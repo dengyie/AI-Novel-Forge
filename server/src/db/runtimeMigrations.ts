@@ -126,6 +126,13 @@ const REQUIRED_COLUMN_BACKFILLS = [
     columnName: "conflictLevelSource",
     columnDefinition: `"conflictLevelSource" TEXT`,
   },
+  // 章节正文 CAS：仅 content 写入 bump；HTTP/agent 可选 expectedContentRevision。
+  // SQLite dev 幂等 ADD COLUMN；PG 走 migrations/20260712090000_chapter_content_revision。
+  {
+    tableName: "Chapter",
+    columnName: "contentRevision",
+    columnDefinition: `"contentRevision" INTEGER NOT NULL DEFAULT 0`,
+  },
 ] as const;
 
 function resolveSqliteDatabasePath(): string | null {

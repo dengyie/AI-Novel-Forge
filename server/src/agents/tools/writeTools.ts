@@ -72,11 +72,15 @@ export const writeToolDefinitions: Partial<
       const updated = await novelService.updateChapter(input.novelId, input.chapterId, {
         content: input.content,
         ...(input.title ? { title: input.title } : {}),
+        ...(typeof input.expectedContentRevision === "number"
+          ? { expectedContentRevision: input.expectedContentRevision }
+          : {}),
       });
       return saveChapterDraftOutputSchema.parse({
         novelId: input.novelId,
         chapterId: updated.id,
         contentLength: (updated.content ?? "").length,
+        contentRevision: updated.contentRevision,
         updatedAt: updated.updatedAt.toISOString(),
         dryRun: false,
         summary: "章节草稿已保存。",
@@ -115,12 +119,16 @@ export const writeToolDefinitions: Partial<
       }
       const updated = await novelService.updateChapter(input.novelId, input.chapterId, {
         content: after,
+        ...(typeof input.expectedContentRevision === "number"
+          ? { expectedContentRevision: input.expectedContentRevision }
+          : {}),
       });
       return applyChapterPatchOutputSchema.parse({
         novelId: input.novelId,
         chapterId: updated.id,
         mode: input.mode,
         contentLength: (updated.content ?? "").length,
+        contentRevision: updated.contentRevision,
         updatedAt: updated.updatedAt.toISOString(),
         dryRun: false,
         summary: diff.summary,

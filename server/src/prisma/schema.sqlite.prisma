@@ -519,6 +519,9 @@ model Chapter {
   id              String                 @id @default(cuid())
   title           String
   content         String?                @default("")
+  /// 正文乐观并发版本：仅 content 写入时 +1；metadata 更新不 bump。
+  /// 客户端可传 expectedContentRevision 做 CAS；省略则 last-write-wins。
+  contentRevision Int                    @default(0)
   order           Int
   generationState ChapterGenerationState @default(planned)
   chapterStatus   ChapterStatus?         @default(unplanned)

@@ -220,6 +220,11 @@ export const updateChapterSchema = z.object({
   title: z.string().trim().min(1).optional(),
   order: z.number().int().nonnegative().optional(),
   content: z.string().optional(),
+  /**
+   * 正文 CAS token。仅与 content 同传时生效；省略则 last-write-wins。
+   * 不一致时服务端 409 + details.code=CHAPTER_CONTENT_CONFLICT。
+   */
+  expectedContentRevision: z.number().int().min(0).optional(),
   expectation: z.string().optional(),
   chapterStatus: z.enum(["unplanned", "pending_generation", "generating", "pending_review", "needs_repair", "completed"]).optional(),
   targetWordCount: z.number().int().min(200).max(20000).nullable().optional(),

@@ -52,6 +52,8 @@ export async function updateNovelChapter(
     title: string;
     order: number;
     content: string;
+    /** 正文 CAS：与 content 同传；省略则 last-write-wins */
+    expectedContentRevision: number;
     expectation: string;
     chapterStatus: ChapterStatus;
     targetWordCount: number;

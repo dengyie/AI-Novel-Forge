@@ -1,4 +1,5 @@
 import { prisma } from "../../../../db/prisma";
+import { contentRevisionBumpData } from "../../chapterContentCas";
 
 export async function resetDirectorDownstreamChapterState(
   novelId: string,
@@ -34,6 +35,8 @@ export async function resetDirectorDownstreamChapterState(
       where: { id: { in: chapterIds } },
       data: {
         content: "",
+        // 清空空白章 content 也 bump，避免 CAS token 与空内容状态错位
+        ...contentRevisionBumpData(),
         generationState: "planned",
         chapterStatus: "unplanned",
         repairHistory: null,

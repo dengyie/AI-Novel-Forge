@@ -1,4 +1,5 @@
 import { prisma } from "../../db/prisma";
+import { contentRevisionBumpData } from "./chapterContentCas";
 import { normalizeNovelOutput } from "./novelCoreShared";
 
 const DEFAULT_NOVEL_SNAPSHOT_RETENTION_COUNT = 10;
@@ -177,7 +178,11 @@ export class NovelCoreSnapshotService {
             data: {
               ...(chapter.title != null && { title: chapter.title }),
               ...(chapter.order != null && { order: chapter.order }),
-              ...(chapter.content != null && { content: chapter.content }),
+              ...(chapter.content != null && {
+                content: chapter.content,
+                // 快照恢复写正文：权威覆盖，仍 bump 以便编辑器检测
+                ...contentRevisionBumpData(),
+              }),
             },
           });
         }

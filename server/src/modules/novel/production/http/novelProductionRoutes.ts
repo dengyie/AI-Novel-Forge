@@ -7,6 +7,7 @@ import type { NovelDraftOptimizeService } from "../../../../services/novel/Novel
 import type { NovelApplicationServices } from "../../../../services/novel/application/NovelApplicationContracts";
 import { timelineContextService, timelineRepository } from "../../../../modules/timeline";
 import { prisma } from "../../../../db/prisma";
+import { contentRevisionBumpData } from "../../../../services/novel/chapterContentCas";
 
 interface RegisterNovelProductionRoutesInput {
   router: Router;
@@ -285,6 +286,7 @@ export function registerNovelProductionRoutes(input: RegisterNovelProductionRout
             where: { id: { in: chapterIds } },
             data: {
               content: "",
+              ...contentRevisionBumpData(),
               generationState: "planned",
               chapterStatus: "unplanned",
               repairHistory: null,

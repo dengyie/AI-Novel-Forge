@@ -3,6 +3,7 @@ import { prisma } from "../../../db/prisma";
 import { withSqliteRetry } from "../../../db/sqliteRetry";
 import { ragServices } from "../../rag";
 import { briefSummary, extractFacts } from "../novelP0Utils";
+import { contentRevisionBumpData } from "../chapterContentCas";
 import { chapterArtifactBackgroundSyncService } from "./ChapterArtifactBackgroundSyncService";
 import { assertChapterContentNotEmpty } from "./chapterEmptyContentError";
 import type { ArtifactSyncMode } from "../novelCoreShared";
@@ -40,6 +41,9 @@ export class ChapterArtifactSyncService {
           content: safeContent,
           generationState,
           chapterStatus: "generating",
+          // 生成/定稿旁路写正文：系统权威写，不走 expected CAS，但仍 bump revision
+          // 以便随后的人工编辑能检测到「生成已覆盖」。
+          ...contentRevisionBumpData(),
         },
       }),
       { label: "chapterArtifactSync.chapter.update" },

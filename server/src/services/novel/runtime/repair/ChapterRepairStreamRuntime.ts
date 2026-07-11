@@ -5,6 +5,7 @@ import { prisma } from "../../../../db/prisma";
 import { streamTextPrompt } from "../../../../prompting/core/promptRunner";
 import { withChapterRepairContext } from "../../../../prompting/prompts/novel/chapterLayeredContext";
 import { auditService } from "../../../audit/AuditService";
+import { contentRevisionBumpData } from "../../chapterContentCas";
 import { ChapterPatchRepairFailedError } from "../../chapterPatchRepairService";
 import {
   isPass,
@@ -184,7 +185,12 @@ export class ChapterRepairStreamRuntime {
 
     await prisma.chapter.update({
       where: { id: input.chapterId },
-      data: { content: repairedContent, generationState: "repaired" },
+      data: {
+        content: repairedContent,
+        generationState: "repaired",
+        // 修复旁路写正文：系统权威写，不走 expected CAS，但仍 bump revision
+        ...contentRevisionBumpData(),
+      },
     });
     await this.deps.artifactSyncService.syncChapterArtifacts(
       input.novelId,

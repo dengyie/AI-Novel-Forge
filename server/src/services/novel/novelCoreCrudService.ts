@@ -11,6 +11,12 @@ import { STORY_WORLD_SLICE_SCHEMA_VERSION } from "./storyWorldSlice/storyWorldSl
 import { syncChapterArtifacts } from "./novelChapterArtifacts";
 import { listNovelTokenUsageByNovelIds } from "./novelTokenUsageSummary";
 import {
+  contentRevisionBumpData,
+  createChapterContentConflictError,
+  createChapterNotFoundError,
+  initialContentRevisionForCreate,
+} from "./chapterContentCas";
+import {
   ChapterInput,
   CreateNovelInput,
   normalizeNovelOutput,
@@ -440,12 +446,14 @@ export class NovelCoreCrudService {
 
   async createChapter(novelId: string, input: ChapterInput) {
     await assertChapterTitleUniqueInNovel({ novelId, title: input.title });
+    const initialContent = input.content ?? "";
     const chapter = await prisma.chapter.create({
       data: {
         novelId,
         title: input.title,
         order: input.order,
-        content: input.content ?? "",
+        content: initialContent,
+        contentRevision: initialContentRevisionForCreate(initialContent),
         expectation: input.expectation,
         chapterStatus: input.chapterStatus,
         targetWordCount: input.targetWordCount ?? null,
@@ -484,9 +492,12 @@ export class NovelCoreCrudService {
   }
 
   async updateChapter(novelId: string, chapterId: string, input: Partial<ChapterInput>) {
-    const exists = await prisma.chapter.findFirst({ where: { id: chapterId, novelId }, select: { id: true } });
+    const exists = await prisma.chapter.findFirst({
+      where: { id: chapterId, novelId },
+      select: { id: true, contentRevision: true },
+    });
     if (!exists) {
-      throw new Error("章节不存在");
+      throw createChapterNotFoundError();
     }
     if (typeof input.title === "string") {
       await assertChapterTitleUniqueInNovel({
@@ -496,28 +507,75 @@ export class NovelCoreCrudService {
       });
     }
 
-    const chapter = await prisma.chapter.update({
-      where: { id: chapterId },
-      data: {
-        title: input.title,
-        order: input.order,
-        content: input.content,
-        expectation: input.expectation,
-        chapterStatus: input.chapterStatus,
-        targetWordCount: input.targetWordCount,
-        conflictLevel: input.conflictLevel,
-        revealLevel: input.revealLevel,
-        mustAvoid: input.mustAvoid,
-        taskSheet: input.taskSheet,
-        sceneCards: input.sceneCards,
-        repairHistory: input.repairHistory,
-        qualityScore: input.qualityScore,
-        continuityScore: input.continuityScore,
-        characterScore: input.characterScore,
-        pacingScore: input.pacingScore,
-        riskFlags: input.riskFlags,
-      },
-    });
+    const isContentWrite = typeof input.content === "string";
+    const expectedContentRevision = input.expectedContentRevision;
+    const metadataData = {
+      title: input.title,
+      order: input.order,
+      expectation: input.expectation,
+      chapterStatus: input.chapterStatus,
+      targetWordCount: input.targetWordCount,
+      conflictLevel: input.conflictLevel,
+      revealLevel: input.revealLevel,
+      mustAvoid: input.mustAvoid,
+      taskSheet: input.taskSheet,
+      sceneCards: input.sceneCards,
+      repairHistory: input.repairHistory,
+      qualityScore: input.qualityScore,
+      continuityScore: input.continuityScore,
+      characterScore: input.characterScore,
+      pacingScore: input.pacingScore,
+      riskFlags: input.riskFlags,
+    };
+
+    let chapter;
+    if (isContentWrite && typeof expectedContentRevision === "number") {
+      // CAS：where contentRevision 匹配才写入；成功则 revision = expected + 1
+      const claimed = await prisma.chapter.updateMany({
+        where: {
+          id: chapterId,
+          novelId,
+          contentRevision: expectedContentRevision,
+        },
+        data: {
+          ...metadataData,
+          content: input.content,
+          contentRevision: expectedContentRevision + 1,
+        },
+      });
+      if (claimed.count === 0) {
+        const current = await prisma.chapter.findFirst({
+          where: { id: chapterId, novelId },
+          select: { contentRevision: true },
+        });
+        if (!current) {
+          throw createChapterNotFoundError();
+        }
+        throw createChapterContentConflictError({
+          currentContentRevision: current.contentRevision,
+          expectedContentRevision,
+        });
+      }
+      chapter = await prisma.chapter.findFirstOrThrow({
+        where: { id: chapterId, novelId },
+      });
+    } else if (isContentWrite) {
+      // 兼容路径：无 expected → last-write-wins，仍 bump contentRevision
+      chapter = await prisma.chapter.update({
+        where: { id: chapterId },
+        data: {
+          ...metadataData,
+          content: input.content,
+          ...contentRevisionBumpData(),
+        },
+      });
+    } else {
+      // metadata-only：不 bump contentRevision
+      chapter = await prisma.chapter.update({
+        where: { id: chapterId },
+        data: metadataData,
+      });
+    }
 
     if (typeof input.content === "string") {
       await syncChapterArtifacts(novelId, chapterId, input.content);

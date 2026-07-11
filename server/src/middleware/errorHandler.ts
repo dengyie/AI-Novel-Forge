@@ -237,11 +237,16 @@ export function errorHandler(
     if (error.statusCode >= 500) {
       logServerError(req, error);
     }
-    res.status(error.statusCode).json({
+    // 对象 details（如 CAS 冲突 currentContentRevision）原样透出，供客户端程序化重载
+    const payload: ApiResponse<null> & { details?: unknown } = {
       success: false,
       error: error.message,
       message: detail,
-    });
+    };
+    if (error.details !== undefined && typeof error.details !== "string") {
+      payload.details = error.details;
+    }
+    res.status(error.statusCode).json(payload);
     return;
   }
 

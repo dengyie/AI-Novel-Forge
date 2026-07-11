@@ -6,6 +6,8 @@ export interface ApiResponse<T> {
   data?: T;
   error?: string;
   message?: string;
+  /** 结构化错误细节（如 CHAPTER_CONTENT_CONFLICT 的 revision 信息） */
+  details?: unknown;
 }
 
 export type SSEFrame =

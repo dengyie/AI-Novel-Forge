@@ -19,6 +19,7 @@ import { ChapterRuntimeCoordinator } from "../runtime/ChapterRuntimeCoordinator"
 import { NovelVolumeService } from "../volume/NovelVolumeService";
 import { NovelChapterEditorService } from "../chapterEditor/NovelChapterEditorService";
 import { ChapterEditorWorkspaceService } from "../chapterEditor/ChapterEditorWorkspaceService";
+import { contentRevisionBumpData } from "../chapterContentCas";
 import type { NovelApplicationServices } from "./NovelApplicationContracts";
 import type { NovelSnapshotListItem } from "@ai-novel/shared/types/novel";
 
@@ -218,7 +219,9 @@ export class DefaultNovelApplicationServices {
           data: {
             ...(chapter.title != null ? { title: chapter.title } : {}),
             ...(chapter.order != null ? { order: chapter.order } : {}),
-            ...(chapter.content != null ? { content: chapter.content } : {}),
+            ...(chapter.content != null
+              ? { content: chapter.content, ...contentRevisionBumpData() }
+              : {}),
           },
         });
       }

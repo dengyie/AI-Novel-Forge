@@ -36,6 +36,8 @@ export const saveChapterDraftInputSchema = z.object({
   chapterId: toolRequiredIdSchema,
   content: toolRequiredTextSchema,
   title: toolOptionalTextSchema,
+  /** 正文 CAS：与 content 同传；省略则 last-write-wins */
+  expectedContentRevision: z.number().int().min(0).optional(),
   dryRun: toolDryRunSchema,
 });
 
@@ -43,6 +45,7 @@ export const saveChapterDraftOutputSchema = z.object({
   novelId: z.string(),
   chapterId: z.string(),
   contentLength: toolCountSchema,
+  contentRevision: z.number().int().min(0).optional(),
   updatedAt: toolNullableTimestampSchema,
   dryRun: z.boolean(),
   summary: toolSummarySchema,
@@ -54,6 +57,8 @@ export const applyChapterPatchInputSchema = z.object({
   mode: chapterPatchModeSchema.default("append"),
   content: toolRequiredTextSchema,
   marker: toolOptionalTextSchema,
+  /** 正文 CAS：与 content 同传；省略则 last-write-wins */
+  expectedContentRevision: z.number().int().min(0).optional(),
   chapterIds: z.array(toolRequiredIdSchema).optional(),
   worldRuleChange: z.boolean().optional(),
   worldId: toolOptionalIdSchema,
@@ -65,6 +70,7 @@ export const applyChapterPatchOutputSchema = z.object({
   chapterId: z.string(),
   mode: chapterPatchModeSchema,
   contentLength: toolCountSchema,
+  contentRevision: z.number().int().min(0).optional(),
   updatedAt: toolNullableTimestampSchema,
   dryRun: z.boolean(),
   summary: toolSummarySchema,

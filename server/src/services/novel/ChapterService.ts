@@ -1,4 +1,8 @@
 import { prisma } from "../../db/prisma";
+import {
+  contentRevisionBumpData,
+  initialContentRevisionForCreate,
+} from "./chapterContentCas";
 
 interface ChapterWriteInput {
   title?: string;
@@ -15,12 +19,14 @@ export class ChapterService {
   }
 
   async createChapter(novelId: string, input: Required<Pick<ChapterWriteInput, "title" | "order">> & ChapterWriteInput) {
+    const initialContent = input.content ?? "";
     return prisma.chapter.create({
       data: {
         novelId,
         title: input.title,
         order: input.order,
-        content: input.content ?? "",
+        content: initialContent,
+        contentRevision: initialContentRevisionForCreate(initialContent),
       },
     });
   }
@@ -33,9 +39,13 @@ export class ChapterService {
     if (!exists) {
       throw new Error("章节不存在。");
     }
+    const isContentWrite = typeof input.content === "string";
     return prisma.chapter.update({
       where: { id: chapterId },
-      data: input,
+      data: {
+        ...input,
+        ...(isContentWrite ? contentRevisionBumpData() : {}),
+      },
     });
   }
 

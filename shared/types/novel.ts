@@ -189,6 +189,11 @@ export interface Chapter {
   id: string;
   title: string;
   content?: string | null;
+  /**
+   * 正文乐观并发版本。仅 content 写入时 +1；metadata 更新不变。
+   * 写正文时可回传 expectedContentRevision 做 CAS。
+   */
+  contentRevision?: number;
   order: number;
   generationState?: ChapterGenerationState;
   chapterStatus?: ChapterStatus | null;
