@@ -494,7 +494,7 @@ export class NovelCoreCrudService {
   async updateChapter(novelId: string, chapterId: string, input: Partial<ChapterInput>) {
     const exists = await prisma.chapter.findFirst({
       where: { id: chapterId, novelId },
-      select: { id: true, contentRevision: true },
+      select: { id: true },
     });
     if (!exists) {
       throw createChapterNotFoundError();
@@ -508,7 +508,16 @@ export class NovelCoreCrudService {
     }
 
     const isContentWrite = typeof input.content === "string";
-    const expectedContentRevision = input.expectedContentRevision;
+    const rawExpected = input.expectedContentRevision;
+    // 仅非负整数 expected 才走 CAS；NaN/浮点/负值拒绝（防内部调用绕过 zod）
+    const hasValidExpected = typeof rawExpected === "number"
+      && Number.isInteger(rawExpected)
+      && rawExpected >= 0;
+    if (isContentWrite && rawExpected !== undefined && !hasValidExpected) {
+      throw new AppError("expectedContentRevision 必须是 ≥0 的整数。", 400);
+    }
+    // expected 仅在 content 写入时生效；metadata-only 携带 expected 会被忽略（不 400，保持兼容）
+    const expectedContentRevision = hasValidExpected ? rawExpected : undefined;
     const metadataData = {
       title: input.title,
       order: input.order,
@@ -529,7 +538,7 @@ export class NovelCoreCrudService {
     };
 
     let chapter;
-    if (isContentWrite && typeof expectedContentRevision === "number") {
+    if (isContentWrite && expectedContentRevision !== undefined) {
       // CAS：where contentRevision 匹配才写入；成功则 revision = expected + 1
       const claimed = await prisma.chapter.updateMany({
         where: {
@@ -556,9 +565,13 @@ export class NovelCoreCrudService {
           expectedContentRevision,
         });
       }
-      chapter = await prisma.chapter.findFirstOrThrow({
+      const reloaded = await prisma.chapter.findFirst({
         where: { id: chapterId, novelId },
       });
+      if (!reloaded) {
+        throw createChapterNotFoundError();
+      }
+      chapter = reloaded;
     } else if (isContentWrite) {
       // 兼容路径：无 expected → last-write-wins，仍 bump contentRevision
       chapter = await prisma.chapter.update({

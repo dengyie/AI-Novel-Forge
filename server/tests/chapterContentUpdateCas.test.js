@@ -194,6 +194,39 @@ test("updateChapter without expectedContentRevision is last-write-wins and still
   }
 });
 
+test("updateChapter rejects non-integer expectedContentRevision with 400", async () => {
+  const service = new NovelCoreCrudService();
+  const originals = {
+    findFirst: prisma.chapter.findFirst,
+    updateMany: prisma.chapter.updateMany,
+    update: prisma.chapter.update,
+  };
+  try {
+    prisma.chapter.findFirst = async () => ({ id: "ch_1" });
+    prisma.chapter.updateMany = async () => {
+      throw new Error("invalid expected must not call updateMany");
+    };
+    prisma.chapter.update = async () => {
+      throw new Error("invalid expected must not call update");
+    };
+    await assert.rejects(
+      () => service.updateChapter("novel_1", "ch_1", {
+        content: "x",
+        expectedContentRevision: 1.5,
+      }),
+      (error) => {
+        assert.ok(error instanceof AppError);
+        assert.equal(error.statusCode, 400);
+        return true;
+      },
+    );
+  } finally {
+    prisma.chapter.findFirst = originals.findFirst;
+    prisma.chapter.updateMany = originals.updateMany;
+    prisma.chapter.update = originals.update;
+  }
+});
+
 test("updateChapter metadata-only does not bump contentRevision", async () => {
   const service = new NovelCoreCrudService();
   const originals = {
