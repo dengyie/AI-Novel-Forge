@@ -108,6 +108,7 @@ export class ChapterStreamGenerationOrchestrator {
           assembled,
           writerDone: () => writerResult.onDone(fullContent),
           fallbackContent: fullContent,
+          signal: cancelSignal,
         });
         const generatedContent = normalized.finalContent;
         this.emitRunStatus(helpers, {
@@ -295,6 +296,7 @@ export class ChapterStreamGenerationOrchestrator {
       backgroundSyncDeferred?: boolean;
     } | void>;
     fallbackContent: string;
+    signal?: AbortSignal;
   }): Promise<{
     finalContent: string;
     lengthControl?: ChapterRuntimePackage["lengthControl"];
@@ -336,7 +338,7 @@ export class ChapterStreamGenerationOrchestrator {
         chapterId: input.chapterId,
         request: input.request,
         assembled: input.assembled,
-        signal: (input.request as { signal?: AbortSignal }).signal,
+        signal: input.signal,
       });
       return {
         finalContent: retryDraft.content,
