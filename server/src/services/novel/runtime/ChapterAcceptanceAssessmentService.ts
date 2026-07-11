@@ -13,6 +13,7 @@ import {
   chapterAcceptanceAssessmentPrompt,
   type ChapterAcceptanceAssessmentOutput,
 } from "../../../prompting/prompts/novel/chapterAcceptance.prompts";
+import { evaluateLengthBudget } from "@ai-novel/shared/types/chapterLengthControl";
 import { openConflictService } from "../../state/OpenConflictService";
 import { normalizeScore, ruleScore } from "../novelP0Utils";
 import {
@@ -202,24 +203,41 @@ function reconcileLengthAssessment(
   targetWordCount?: number | null,
 ): ChapterAcceptanceAssessmentOutput {
   const range = resolveTargetWordRange(targetWordCount);
-  if (range.minWordCount == null && range.maxWordCount == null) {
+  const dualBound = evaluateLengthBudget({ content, targetWordCount });
+  if (range.minWordCount == null && range.maxWordCount == null && !dualBound) {
     return output;
   }
-  const actualWordCount = countChapterCharacters(content);
+  const actualWordCount = dualBound?.actualWordCount ?? countChapterCharacters(content);
+  // 假阳性清理：仍以 soft 带为界（与历史 resolveTargetWordRange 一致）。
+  // hardMax 超界不通过「丢弃 over issue」放行，而是靠 riskTags 可观测。
   const blockingIssues = output.blockingIssues.filter((issue) => !shouldDropLengthIssue({
     issue,
     actualWordCount,
     minWordCount: range.minWordCount,
     maxWordCount: range.maxWordCount,
   }));
-  if (blockingIssues.length === output.blockingIssues.length) {
+  const droppedLengthNoise = blockingIssues.length !== output.blockingIssues.length;
+  let riskTags = droppedLengthNoise
+    ? output.riskTags.filter((tag) => !includesAnyMarker(tag, [...UNDER_LENGTH_MARKERS, ...OVER_LENGTH_MARKERS]))
+    : [...output.riskTags];
+  // P2-2：注入双界观测标签（under_soft / over_soft / over_hard），不抬升 hard-block。
+  if (dualBound) {
+    for (const tag of dualBound.riskTags) {
+      if (!riskTags.includes(tag)) {
+        riskTags.push(tag);
+      }
+    }
+  }
+  if (!droppedLengthNoise && dualBound?.riskTags.length === 0) {
     return output;
   }
   return {
     ...output,
     blockingIssues,
-    repairDirectives: output.repairDirectives.filter((directive) => !isLengthDirective(directive)),
-    riskTags: output.riskTags.filter((tag) => !includesAnyMarker(tag, [...UNDER_LENGTH_MARKERS, ...OVER_LENGTH_MARKERS])),
+    repairDirectives: droppedLengthNoise
+      ? output.repairDirectives.filter((directive) => !isLengthDirective(directive))
+      : output.repairDirectives,
+    riskTags,
   };
 }
 

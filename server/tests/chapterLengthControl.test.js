@@ -2,8 +2,10 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
+  evaluateLengthBudget,
   normalizeChapterScenePlan,
   parseChapterScenePlan,
+  resolveChapterTypeTargetWordCount,
   resolveLengthBudgetContract,
   serializeChapterScenePlan,
 } = require("../../shared/dist/types/chapterLengthControl.js");
@@ -141,4 +143,63 @@ test("chapter length control filters system audit labels from mustAdvance", () =
     ["逼问证人"],
     ["敌人现身"],
   ]);
+});
+
+test("resolveChapterTypeTargetWordCount prefers explicit target over type multiplier", () => {
+  assert.equal(resolveChapterTypeTargetWordCount({
+    baseWordCount: 2800,
+    chapterType: "transition",
+    explicitTargetWordCount: 3500,
+  }), 3500);
+});
+
+test("resolveChapterTypeTargetWordCount applies type multipliers to base", () => {
+  assert.equal(resolveChapterTypeTargetWordCount({
+    baseWordCount: 2800,
+    chapterType: "emotion",
+  }), 2520);
+  assert.equal(resolveChapterTypeTargetWordCount({
+    baseWordCount: 2800,
+    chapterType: "combat",
+  }), 2940);
+  assert.equal(resolveChapterTypeTargetWordCount({
+    baseWordCount: 2800,
+    chapterType: "transition",
+  }), 2240);
+  assert.equal(resolveChapterTypeTargetWordCount({
+    baseWordCount: 2800,
+    chapterType: "explore",
+  }), 2800);
+});
+
+test("evaluateLengthBudget reports dual-bound bands without hard-block semantics", () => {
+  const within = evaluateLengthBudget({
+    content: "字".repeat(2800),
+    targetWordCount: 2800,
+  });
+  assert.ok(within);
+  assert.equal(within.band, "within_soft");
+  assert.deepEqual(within.riskTags, []);
+
+  const under = evaluateLengthBudget({
+    content: "字".repeat(2000),
+    targetWordCount: 2800,
+  });
+  assert.equal(under?.band, "under_soft");
+  assert.ok(under?.riskTags.includes("length_under_soft"));
+
+  const overSoft = evaluateLengthBudget({
+    content: "字".repeat(3300),
+    targetWordCount: 2800,
+  });
+  assert.equal(overSoft?.band, "over_soft");
+  assert.ok(overSoft?.riskTags.includes("length_over_soft"));
+
+  const overHard = evaluateLengthBudget({
+    content: "字".repeat(4000),
+    targetWordCount: 2800,
+  });
+  assert.equal(overHard?.band, "over_hard");
+  assert.ok(overHard?.riskTags.includes("length_over_hard"));
+  assert.ok(overHard.actualWordCount > overHard.budget.hardMaxWordCount);
 });

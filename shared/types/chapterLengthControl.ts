@@ -208,6 +208,95 @@ export function resolveLengthBudgetContract(targetWordCount: number | null | und
   };
 }
 
+/** 相对 base 目标字数的章型倍率（情感偏短、战斗偏满、过渡更短）。 */
+export const CHAPTER_TYPE_LENGTH_MULTIPLIERS = {
+  emotion: 0.9,
+  combat: 1.05,
+  explore: 1.0,
+  transition: 0.8,
+} as const;
+
+export type ChapterLengthTypeKey = keyof typeof CHAPTER_TYPE_LENGTH_MULTIPLIERS;
+
+/**
+ * 按章型解析目标字数。显式 target 优先；否则 base × 分型倍率。
+ * base 通常来自 novel.defaultChapterLength 或规划默认。
+ */
+export function resolveChapterTypeTargetWordCount(input: {
+  baseWordCount: number | null | undefined;
+  chapterType?: ChapterLengthTypeKey | string | null;
+  explicitTargetWordCount?: number | null;
+}): number | null {
+  if (
+    Number.isFinite(input.explicitTargetWordCount)
+    && (input.explicitTargetWordCount ?? 0) > 0
+  ) {
+    return Math.round(input.explicitTargetWordCount as number);
+  }
+  if (!Number.isFinite(input.baseWordCount) || (input.baseWordCount ?? 0) <= 0) {
+    return null;
+  }
+  const base = Math.round(input.baseWordCount as number);
+  const key = input.chapterType && input.chapterType in CHAPTER_TYPE_LENGTH_MULTIPLIERS
+    ? (input.chapterType as ChapterLengthTypeKey)
+    : null;
+  if (!key) {
+    return base;
+  }
+  return Math.max(200, Math.round(base * CHAPTER_TYPE_LENGTH_MULTIPLIERS[key]));
+}
+
+export type LengthBudgetBand = "within_soft" | "under_soft" | "over_soft" | "over_hard";
+
+export interface LengthBudgetEvaluation {
+  budget: LengthBudgetContract;
+  actualWordCount: number;
+  band: LengthBudgetBand;
+  /** 可观测标签；不单独决定 hard-block 写流 */
+  riskTags: string[];
+  varianceRatio: number;
+}
+
+export function countContentCharacters(content: string): number {
+  return content.replace(/\s+/g, "").trim().length;
+}
+
+/**
+ * 双界评估：softMin–softMax 为提示带，hardMax 为软上限（可观测 over_hard，默认不阻断写流）。
+ */
+export function evaluateLengthBudget(input: {
+  content: string;
+  targetWordCount: number | null | undefined;
+}): LengthBudgetEvaluation | null {
+  const budget = resolveLengthBudgetContract(input.targetWordCount);
+  if (!budget) {
+    return null;
+  }
+  const actualWordCount = countContentCharacters(input.content);
+  const varianceRatio = budget.targetWordCount > 0
+    ? (actualWordCount - budget.targetWordCount) / budget.targetWordCount
+    : 0;
+  let band: LengthBudgetBand = "within_soft";
+  const riskTags: string[] = [];
+  if (actualWordCount < budget.softMinWordCount) {
+    band = "under_soft";
+    riskTags.push("length_under_soft");
+  } else if (actualWordCount > budget.hardMaxWordCount) {
+    band = "over_hard";
+    riskTags.push("length_over_hard");
+  } else if (actualWordCount > budget.softMaxWordCount) {
+    band = "over_soft";
+    riskTags.push("length_over_soft");
+  }
+  return {
+    budget,
+    actualWordCount,
+    band,
+    riskTags,
+    varianceRatio,
+  };
+}
+
 export function normalizeChapterScenePlan(
   raw: unknown,
   targetWordCount: number | null | undefined,

@@ -12,8 +12,10 @@ import type {
 } from "@ai-novel/shared/types/novel";
 import {
   normalizeChapterScenePlan,
+  resolveChapterTypeTargetWordCount,
   serializeChapterScenePlan,
 } from "@ai-novel/shared/types/chapterLengthControl";
+import { inferChapterTaskSheetType } from "@ai-novel/shared/types/chapterTaskSheetQuality";
 import { runStructuredPrompt } from "../../../prompting/core/promptRunner";
 import { volumeChapterExecutionContractPrompt } from "../../../prompting/prompts/novel/volume/chapterDetail.prompts";
 import { buildVolumeChapterDetailContextBlocks } from "../../../prompting/prompts/novel/volume/contextBlocks";
@@ -621,9 +623,22 @@ export async function generateChapterTaskSheetDetail(params: {
     && existingChapter.taskSheet?.trim()
     && existingChapter.sceneCards?.trim()
   ) {
+    const chapterType = inferChapterTaskSheetType({
+      title: existingChapter.title,
+      summary: existingChapter.summary,
+      purpose: existingChapter.purpose,
+      exclusiveEvent: existingChapter.exclusiveEvent,
+      taskSheet: existingChapter.taskSheet,
+      conflictLevel: existingChapter.conflictLevel,
+    });
+    const resolvedTarget = resolveChapterTypeTargetWordCount({
+      baseWordCount: 2200,
+      chapterType,
+      explicitTargetWordCount: existingChapter.targetWordCount,
+    }) ?? 2200;
     const scenePlan = normalizeChapterScenePlan(
       existingChapter.sceneCards,
-      existingChapter.targetWordCount,
+      resolvedTarget,
     );
     return {
       purpose: existingChapter.purpose?.trim() || existingChapter.summary.trim(),
@@ -632,7 +647,7 @@ export async function generateChapterTaskSheetDetail(params: {
       nextChapterEntryState: existingChapter.nextChapterEntryState?.trim() || existingChapter.endingState?.trim() || "下一章承接本章结果继续推进。",
       conflictLevel: existingChapter.conflictLevel ?? 3,
       revealLevel: existingChapter.revealLevel ?? 2,
-      targetWordCount: existingChapter.targetWordCount ?? 2200,
+      targetWordCount: resolvedTarget,
       mustAvoid: existingChapter.mustAvoid?.trim() || "避免偏离本章任务单和卷节奏。",
       payoffRefs: existingChapter.payoffRefs,
       taskSheet: existingChapter.taskSheet.trim(),
@@ -675,9 +690,23 @@ export async function generateChapterTaskSheetDetail(params: {
           signal: params.options.signal,
         },
       });
+      const chapterType = inferChapterTaskSheetType({
+        title: promptInput.targetChapter.title,
+        summary: promptInput.targetChapter.summary,
+        purpose: generated.output.purpose,
+        exclusiveEvent: generated.output.exclusiveEvent,
+        taskSheet: generated.output.taskSheet,
+        conflictLevel: generated.output.conflictLevel,
+      });
+      // P2-2：LLM 显式 target 优先；缺失时按章型倍率从 base 推导。
+      const resolvedTarget = resolveChapterTypeTargetWordCount({
+        baseWordCount: promptInput.targetChapter.targetWordCount ?? 2200,
+        chapterType,
+        explicitTargetWordCount: generated.output.targetWordCount,
+      }) ?? 2200;
       const scenePlan = normalizeChapterScenePlan(
         generated.output.sceneCards,
-        generated.output.targetWordCount ?? promptInput.targetChapter.targetWordCount,
+        resolvedTarget,
       );
       await qualityGate.assertCanEnterExecution({
         novelId: promptInput.workspace.novelId,
@@ -692,7 +721,7 @@ export async function generateChapterTaskSheetDetail(params: {
         nextChapterEntryState: generated.output.nextChapterEntryState,
         conflictLevel: generated.output.conflictLevel,
         revealLevel: generated.output.revealLevel,
-        targetWordCount: generated.output.targetWordCount,
+        targetWordCount: resolvedTarget,
         mustAvoid: generated.output.mustAvoid,
         payoffRefs: generated.output.payoffRefs,
         taskSheet: generated.output.taskSheet,
@@ -712,7 +741,7 @@ export async function generateChapterTaskSheetDetail(params: {
         nextChapterEntryState: generated.output.nextChapterEntryState.trim(),
         conflictLevel: generated.output.conflictLevel,
         revealLevel: generated.output.revealLevel,
-        targetWordCount: generated.output.targetWordCount,
+        targetWordCount: resolvedTarget,
         mustAvoid: generated.output.mustAvoid.trim(),
         payoffRefs: generated.output.payoffRefs,
         taskSheet: generated.output.taskSheet.trim(),

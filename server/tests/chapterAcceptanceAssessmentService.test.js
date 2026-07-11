@@ -89,6 +89,20 @@ test("normalizeAssessment keeps under-length issue when actual content is still 
   assert.equal(normalized.status, "repairable");
   assert.equal(normalized.continuePolicy, "repair_once");
   assert.deepEqual(normalized.blockingIssues.map((issue) => issue.code), ["length_insufficient"]);
+  assert.ok(normalized.riskTags.includes("length_under_soft"));
+});
+
+test("normalizeAssessment injects over_hard risk tag without hard-blocking accepted chapters", () => {
+  const normalized = normalizeAssessment(createAssessment({
+    status: "accepted",
+    riskTags: [],
+    continuePolicy: "continue",
+  }), "字".repeat(4000), 2800);
+
+  assert.equal(normalized.status, "accepted");
+  assert.equal(normalized.continuePolicy, "continue");
+  assert.ok(normalized.riskTags.includes("length_over_hard"));
+  assert.equal(normalized.blockingIssues.length, 0);
 });
 
 test("normalizeAssessment routes soft-only missing obligations with patchable_obligation_gap to continue_with_risk", () => {
