@@ -3,6 +3,8 @@ export * from "./types/bookAnalysis";
 export * from "./types/characterDynamics";
 export * from "./types/chapterLengthControl";
 export * from "./types/chapterCreativeContract";
+export * from "./types/chapterTaskSheetQuality";
+export * from "./types/genreBeatQuota";
 export * from "./types/chapterRuntime";
 export * from "./types/characterResource";
 export * from "./types/characterSync";

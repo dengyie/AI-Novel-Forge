@@ -32,9 +32,9 @@ test("detectProseQuality detects deterministic prose degradation signals", () =>
   ].join("\n"));
 
   assert.ok(report.hasBlockingFindings);
-  assert.deepEqual(new Set(codes(report)), new Set([
+  const codeSet = new Set(codes(report));
+  for (const expected of [
     "prose_negative_flip",
-    "prose_dash_or_ellipsis",
     "prose_period_stutter",
     "prose_long_paragraph",
     "prose_verbatim_repeat",
@@ -42,11 +42,14 @@ test("detectProseQuality detects deterministic prose degradation signals", () =>
     "prose_ai_self_reference",
     "prose_placeholder_leak",
     "prose_engineering_term_leak",
-  ]));
+  ]) {
+    assert.ok(codeSet.has(expected), `missing ${expected}`);
+  }
   assert.ok(severitiesByCode(report, "prose_long_paragraph").includes("medium"));
-  // 中文 ——/…… 仅作质量债信号，不得 hard-block 正常网文章节。
-  assert.ok(severitiesByCode(report, "prose_dash_or_ellipsis").includes("medium"));
-  assert.equal(severitiesByCode(report, "prose_dash_or_ellipsis").includes("high"), false);
+  // 破折号/省略号改为密度 pass：稀疏时可不记；若记则不得 high/critical。
+  const dashSeverities = severitiesByCode(report, "prose_dash_or_ellipsis");
+  assert.equal(dashSeverities.includes("high"), false);
+  assert.equal(dashSeverities.includes("critical"), false);
   assert.ok(severitiesByCode(report, "prose_ai_self_reference").includes("critical"));
 });
 
@@ -64,18 +67,38 @@ test("detectProseQuality keeps common false positives out of blocking findings",
 });
 
 
-test("Chinese dash and ellipsis alone do not block chapter acceptance", () => {
-  const report = detectProseQuality([
+test("sparse Chinese dash and ellipsis density is ignored or non-blocking", () => {
+  // 少量合法 ——/……：密度低于 ignore 阈值时可不记 finding；即使记也不得 hard-block。
+  const sparse = detectProseQuality([
     "他停顿了一下……随后抬起头。",
     "门后传来声音——很轻，却像刀锋一样贴着耳骨。",
     "她把信折好，放进抽屉，转身离开。",
+    "街灯一盏盏亮起，脚步声渐渐远去。",
+    "风从巷口灌进来，衣角轻轻扬起。",
   ].join("\n"));
+  assert.equal(sparse.hasBlockingFindings, false);
+  const sparseDash = severitiesByCode(sparse, "prose_dash_or_ellipsis");
+  assert.ok(sparseDash.every((severity) => severity === "low" || severity === "medium"));
+  assert.equal(sparseDash.includes("high"), false);
+  assert.equal(sparseDash.includes("critical"), false);
+});
 
+test("high dash/ellipsis density yields medium debt without hard block", () => {
+  const denseBody = Array.from({ length: 12 }, (_, i) => (
+    `他停顿——又一次……第${i + 1}次机械停顿——继续往前……`
+  )).join("\n");
+  const report = detectProseQuality(denseBody);
   assert.ok(codes(report).includes("prose_dash_or_ellipsis"));
   const dashSeverities = severitiesByCode(report, "prose_dash_or_ellipsis");
   assert.ok(dashSeverities.length >= 1);
-  assert.ok(dashSeverities.every((severity) => severity === "medium"));
-  assert.equal(report.hasBlockingFindings, false);
+  assert.ok(dashSeverities.every((severity) => severity === "medium" || severity === "low"));
+  assert.equal(dashSeverities.includes("high"), false);
+  assert.equal(dashSeverities.includes("critical"), false);
+  // 仅有标点密度时不得 hasBlockingFindings
+  const onlyDashBlocking = report.findings
+    .filter((finding) => finding.severity === "high" || finding.severity === "critical")
+    .map((finding) => finding.code);
+  assert.equal(onlyDashBlocking.includes("prose_dash_or_ellipsis"), false);
 });
 
 test("single natural Chinese negative flip does not block chapter acceptance", () => {

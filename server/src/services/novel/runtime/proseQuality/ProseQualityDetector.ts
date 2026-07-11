@@ -44,9 +44,14 @@ interface TextSegment {
 const MAX_FINDINGS_PER_CODE = 8;
 const MAX_TOTAL_FINDINGS = 40;
 
+/** 破折号/省略号密度：每千字命中数超过该值才记 medium 质量债（仍不 hard-block）。 */
+export const PROSE_DASH_ELLIPSIS_DENSITY_SOFT_PER_1K = 3.5;
+/** 极稀疏时不记 finding，避免正常网文节奏被刷屏。 */
+export const PROSE_DASH_ELLIPSIS_DENSITY_IGNORE_BELOW_PER_1K = 1.2;
+
 const TERMINAL_PUNCTUATION = /[。！？!?”"」』）)】》…]$/u;
 const NEGATIVE_FLIP_PATTERN = /(?:不是|并非|并不是|不算|不能说是|没有|不再是)[^。！？；;\n]{1,36}?[，,、]?\s*(?:而是|却是|反而是|更像是|只是)[^。！？；;\n]{1,36}/gu;
-const DASH_OR_ELLIPSIS_PATTERN = /——|—|--|……|…{2,}|\.{3,}/u;
+const DASH_OR_ELLIPSIS_PATTERN = /——|—|--|……|…{2,}|\.{3,}/gu;
 const AI_SELF_REFERENCE_PATTERN = /作为(?:一名|一个)?(?:AI|人工智能|语言模型)|我是(?:AI|人工智能|语言模型)|我无法(?:继续)?(?:创作|生成|提供|完成)|我不能(?:继续)?(?:创作|生成|提供|完成)|无法满足(?:该|这个)?请求|不能协助|as an AI|I (?:am|cannot|can't)[^。！？.!?\n]{0,40}AI/iu;
 const PLACEHOLDER_PATTERN = /TODO|TBD|待补充|此处省略|省略若干|略写|占位|PLACEHOLDER|\{\{[^}]{0,80}\}\}|\[[^\]]{0,40}待补[^\]]{0,40}\]/iu;
 const ENGINEERING_TERM_STRONG_PATTERN = /细纲|情节点|卷纲|功能标签|目标情绪|字数目标|章首钩子|章尾钩子|任务描述|任务单|scene\s*card|prompt|schema|runtime\s*package|上下文包|系统提示词|修复指令/iu;
@@ -79,13 +84,15 @@ export function detectProseQuality(content: string): ProseQualityReport {
 
   for (const segment of segments) {
     scanNegativeFlip(segment, addFinding);
-    scanDashOrEllipsis(segment, addFinding);
     scanAiSelfReference(segment, addFinding);
     scanPlaceholderLeak(segment, addFinding);
     scanEngineeringTermLeak(segment, addFinding);
     scanPeriodStutter(segment, addFinding);
     scanLongParagraph(segment, addFinding);
   }
+
+  // 破折号/省略号：按全文密度轻量 pass，不逐句硬刷、不升 critical。
+  scanDashOrEllipsisDensity(content, segments, addFinding);
 
   scanVerbatimRepeat(segments, addFinding);
   scanTruncation(content, segments, addFinding);
@@ -178,25 +185,72 @@ function scanNegativeFlip(
   }
 }
 
-function scanDashOrEllipsis(
-  segment: TextSegment,
+export function measureDashOrEllipsisDensity(content: string): {
+  matchCount: number;
+  charCount: number;
+  perThousand: number;
+} {
+  const plain = content.replace(/\s+/g, "");
+  const charCount = plain.length;
+  const matches = content.match(DASH_OR_ELLIPSIS_PATTERN) ?? [];
+  const matchCount = matches.length;
+  const perThousand = charCount <= 0 ? 0 : (matchCount * 1000) / charCount;
+  return { matchCount, charCount, perThousand };
+}
+
+function scanDashOrEllipsisDensity(
+  content: string,
+  segments: TextSegment[],
   addFinding: (finding: ProseQualityFinding) => void,
 ): void {
-  const match = segment.text.match(DASH_OR_ELLIPSIS_PATTERN);
-  if (!match || match.index == null) {
+  const density = measureDashOrEllipsisDensity(content);
+  if (density.matchCount === 0) {
     return;
   }
-  // 中文网文合法标点：——/…… 很常见。保留信号进入质量债/审计，但降为 medium，
-  // 避免 hasBlockingFindings → hasBlockingIssues → needs_repair 硬阻断正常章节。
-  addFinding({
-    code: "prose_dash_or_ellipsis",
-    severity: "medium",
-    line: segment.line,
-    column: match.index + 1,
-    message: "正文使用破折号、省略号或双连字符，容易形成模型化停顿。",
-    excerpt: formatExcerpt(segment.text),
-    fixSuggestion: "改写为自然的动作停顿、句读或人物反应，减少机械标点制造的情绪。",
-  });
+  // 稀疏合法节奏：不记 finding。
+  if (density.perThousand < PROSE_DASH_ELLIPSIS_DENSITY_IGNORE_BELOW_PER_1K) {
+    return;
+  }
+  // 中等密度：只记一条 low 摘要；高密度：medium 样例行 + 不升 high/critical。
+  const highDensity = density.perThousand >= PROSE_DASH_ELLIPSIS_DENSITY_SOFT_PER_1K;
+  const severity: RuntimeAuditIssue["severity"] = highDensity ? "medium" : "low";
+  const sampleSegments = segments
+    .filter((segment) => {
+      DASH_OR_ELLIPSIS_PATTERN.lastIndex = 0;
+      return DASH_OR_ELLIPSIS_PATTERN.test(segment.text);
+    })
+    .slice(0, highDensity ? 3 : 1);
+
+  if (sampleSegments.length === 0) {
+    addFinding({
+      code: "prose_dash_or_ellipsis",
+      severity,
+      line: 1,
+      column: 1,
+      message: highDensity
+        ? `破折号/省略号密度偏高（约 ${density.perThousand.toFixed(1)}/千字），节奏偏模型化。`
+        : `正文含少量破折号/省略号（约 ${density.perThousand.toFixed(1)}/千字），可择机改写。`,
+      excerpt: formatExcerpt(content.slice(0, 80)),
+      fixSuggestion: "优先用动作停顿、句读或人物反应替代机械标点堆叠。",
+    });
+    return;
+  }
+
+  for (const segment of sampleSegments) {
+    DASH_OR_ELLIPSIS_PATTERN.lastIndex = 0;
+    const match = segment.text.match(DASH_OR_ELLIPSIS_PATTERN);
+    addFinding({
+      code: "prose_dash_or_ellipsis",
+      severity,
+      line: segment.line,
+      column: (match?.index ?? 0) + 1,
+      message: highDensity
+        ? `破折号/省略号密度偏高（约 ${density.perThousand.toFixed(1)}/千字），容易形成模型化停顿。`
+        : "正文使用破折号或省略号，可改写为更自然的停顿（轻量提示）。",
+      excerpt: formatExcerpt(segment.text),
+      fixSuggestion: "改写为自然的动作停顿、句读或人物反应，减少机械标点制造的情绪。",
+    });
+  }
 }
 
 function scanAiSelfReference(
