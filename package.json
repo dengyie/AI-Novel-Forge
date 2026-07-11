@@ -63,7 +63,10 @@
     "ignoredBuiltDependencies": [
       "electron",
       "electron-winstaller"
-    ]
+    ],
+    "overrides": {
+      "@assistant-ui/store": "0.2.20"
+    }
   },
   "devDependencies": {
     "concurrently": "^9.2.1",
