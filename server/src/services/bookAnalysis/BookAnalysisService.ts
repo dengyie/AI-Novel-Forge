@@ -25,6 +25,10 @@ class BookAnalysisServiceFacade {
     return this.commandService.markPendingAnalysesForManualRecovery();
   }
 
+  resumePendingAnalyses(): Promise<void> {
+    return this.commandService.resumePendingAnalyses();
+  }
+
   recoverTimedOutAnalyses(): Promise<void> {
     return this.commandService.recoverTimedOutAnalyses();
   }

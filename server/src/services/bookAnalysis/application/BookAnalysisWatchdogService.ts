@@ -2,7 +2,16 @@ import { prisma } from "../../../db/prisma";
 import { isMissingTableError } from "../shared/bookAnalysis.utils";
 
 const BOOK_ANALYSIS_WATCHDOG_INTERVAL_MS = 15_000;
-const BOOK_ANALYSIS_STALE_TIMEOUT_MS = 120_000;
+
+/** Default 5min so a single slow LLM step under LLM_REQUEST_TIMEOUT_MS (default 300s) is not mis-killed. */
+function resolveBookAnalysisStaleTimeoutMs(): number {
+  const raw = process.env.BOOK_ANALYSIS_STALE_TIMEOUT_MS?.trim();
+  const parsed = raw ? Number(raw) : Number.NaN;
+  if (Number.isFinite(parsed) && parsed >= 60_000 && parsed <= 30 * 60_000) {
+    return Math.floor(parsed);
+  }
+  return 5 * 60_000;
+}
 
 export class BookAnalysisWatchdogService {
   private watchdogTimer: NodeJS.Timeout | null = null;
@@ -82,8 +91,50 @@ export class BookAnalysisWatchdogService {
     }
   }
 
+  /**
+   * Startup auto-resume: clear manual flag and re-enqueue interrupted analyses.
+   * Section generation is idempotent (frozen/succeeded sections stay).
+   */
+  async resumePendingAnalyses(enqueue: (analysisId: string) => void): Promise<void> {
+    try {
+      const rows = await prisma.bookAnalysis.findMany({
+        where: {
+          status: { in: ["queued", "running"] },
+        },
+        select: { id: true },
+        orderBy: { createdAt: "asc" },
+      });
+      if (rows.length === 0) {
+        return;
+      }
+      const ids = rows.map((row) => row.id);
+      await prisma.bookAnalysis.updateMany({
+        where: { id: { in: ids } },
+        data: {
+          status: "queued",
+          pendingManualRecovery: false,
+          lastError: null,
+          heartbeatAt: null,
+          currentStage: null,
+          currentItemKey: null,
+          currentItemLabel: null,
+          cancelRequestedAt: null,
+        },
+      });
+      for (const id of ids) {
+        enqueue(id);
+      }
+    } catch (error) {
+      if (isMissingTableError(error)) {
+        return;
+      }
+      throw error;
+    }
+  }
+
   async recoverTimedOutAnalyses(): Promise<void> {
-    const cutoff = new Date(Date.now() - BOOK_ANALYSIS_STALE_TIMEOUT_MS);
+    const staleTimeoutMs = resolveBookAnalysisStaleTimeoutMs();
+    const cutoff = new Date(Date.now() - staleTimeoutMs);
     const rows = await prisma.bookAnalysis.findMany({
       where: {
         status: "running",

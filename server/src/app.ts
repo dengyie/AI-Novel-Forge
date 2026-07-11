@@ -335,7 +335,18 @@ function initializeBackgroundServices(): BackgroundServicesHandle {
 
   return {
     stop: async () => {
-      directorWorker.stop();
+      // Bound wait for director in-flight ticks; force-exit still owned by SHUTDOWN_TIMEOUT_MS.
+      const drainMs = Math.max(
+        1_000,
+        Math.min(15_000, parsePositiveInt(process.env.SHUTDOWN_TIMEOUT_MS, 20_000) - 5_000),
+      );
+      const drainResult = await directorWorker.waitForStop(drainMs).catch((error) => {
+        console.warn("[director.worker] waitForStop failed", error);
+        return "timeout" as const;
+      });
+      if (drainResult === "timeout") {
+        console.warn(`[director.worker] in-flight drain timed out after ${drainMs}ms; continuing shutdown.`);
+      }
       novelSideEffectWorker.stop();
       ragServices.ragWorker.stop();
       ragServices.ragRetrievalTraceRetention.stop();

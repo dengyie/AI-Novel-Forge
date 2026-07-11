@@ -158,6 +158,8 @@ function buildAssetOwnerWhere(input: {
 export class ImageGenerationService {
   private readonly queue: string[] = [];
   private readonly queueSet = new Set<string>();
+  /** Tasks deferred by in-memory backpressure; drained after processQueue finishes. */
+  private readonly deferredQueue = new Set<string>();
   private processing = false;
   private static readonly MAX_QUEUE_SIZE = 100;
 
@@ -519,12 +521,19 @@ export class ImageGenerationService {
     };
   }
 
+  /**
+   * Startup auto-resume (name kept for callers that still expect "mark" side-effect of requeue).
+   * Does NOT set pendingManualRecovery — re-enqueues work so image tasks continue after restart.
+   */
   async markPendingTasksForManualRecovery(): Promise<void> {
+    return this.resumePendingTasks();
+  }
+
+  async resumePendingTasks(): Promise<void> {
     try {
       const rows = await prisma.imageGenerationTask.findMany({
         where: {
           status: { in: ["queued", "running"] },
-          pendingManualRecovery: false,
         },
         select: { id: true, status: true },
         orderBy: { createdAt: "asc" },
@@ -558,23 +567,17 @@ export class ImageGenerationService {
   }
 
   private enqueueTask(taskId: string): void {
-    if (this.queueSet.has(taskId)) {
+    if (this.queueSet.has(taskId) || this.deferredQueue.has(taskId)) {
       return;
     }
     if (this.queue.length >= ImageGenerationService.MAX_QUEUE_SIZE) {
-      console.warn(`[image] queue at capacity (${ImageGenerationService.MAX_QUEUE_SIZE}), dropping oldest task ${this.queue[0]}`);
-      const oldest = this.queue.shift();
-      if (oldest) {
-        this.queueSet.delete(oldest);
-        void prisma.imageGenerationTask.update({
-          where: { id: oldest },
-          data: {
-            status: "failed",
-            error: "队列已满，任务被逐出。请重新提交。",
-            pendingManualRecovery: true,
-          },
-        }).catch(() => null);
-      }
+      // Backpressure: do not fail older tasks. Keep id deferred and drain after capacity frees.
+      this.deferredQueue.add(taskId);
+      console.warn(
+        `[image] in-memory queue at capacity (${ImageGenerationService.MAX_QUEUE_SIZE}); `
+        + `deferring task ${taskId} (not failed).`,
+      );
+      return;
     }
     this.queue.push(taskId);
     this.queueSet.add(taskId);
@@ -597,6 +600,13 @@ export class ImageGenerationService {
       }
     } finally {
       this.processing = false;
+      if (this.deferredQueue.size > 0) {
+        const deferred = Array.from(this.deferredQueue);
+        this.deferredQueue.clear();
+        for (const id of deferred) {
+          this.enqueueTask(id);
+        }
+      }
     }
   }
 

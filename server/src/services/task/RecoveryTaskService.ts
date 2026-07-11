@@ -15,16 +15,17 @@ import { NovelWorkflowRuntimeService } from "../novel/workflow/NovelWorkflowRunt
 import { styleExtractionTaskService } from "../styleEngine/StyleExtractionTaskService";
 
 interface RecoveryInitializationDeps {
-  markPendingBookAnalysesForManualRecovery(): Promise<unknown>;
-  markPendingImageTasksForManualRecovery(): Promise<unknown>;
-  markPendingAutoDirectorTasksForManualRecovery(): Promise<unknown>;
-  // 启动时对章节流水线任务走自动恢复而非标 manual-recovery——标过 pendingManualRecovery=true
-  // 的孤儿 GenerationJob 会被 watchdog 跳过（listStaleRecoverablePipelineJobs where 含
-  // pendingManualRecovery:false），重启后无新 director command 可 lease 时永卡 queued。auto-resume
-  // 复用 resumePendingPipelineJobs → resumePipelineJob（skipCompleted 跳已成功章节），回到
-  // commit 59f11406 之前的行为。
+  /**
+   * 启动恢复统一走 auto-resume（可幂等重入的任务）。
+   * 历史 mark*ManualRecovery 仅保留给运维/测试显式调用；启动路径不得再批量标 manual，
+   * 否则 pendingManualRecovery=true 会被各子系统 watchdog 永久跳过。
+   */
+  resumePendingBookAnalyses(): Promise<unknown>;
+  resumePendingImageTasks(): Promise<unknown>;
+  resumePendingAutoDirectorTasks(): Promise<unknown>;
+  // 章节流水线：resumePendingPipelineJobs → resumePipelineJob（skipCompleted 跳已成功章节）
   resumePendingPipelineJobs(): Promise<unknown>;
-  markPendingStyleTasksForManualRecovery(): Promise<unknown>;
+  resumePendingStyleTasks(): Promise<unknown>;
 }
 
 interface AutoDirectorRecoveryCommandPort {
@@ -75,22 +76,22 @@ export class RecoveryTaskService {
     private readonly directorCommandService: AutoDirectorRecoveryCommandPort = new DirectorCommandService(),
     private readonly novelService: Pick<NovelApplicationServices, "resumePipelineJob"> = getSharedNovelServices(),
     private readonly initializationDeps: RecoveryInitializationDeps = {
-      markPendingBookAnalysesForManualRecovery: () => bookAnalysisService.markPendingAnalysesForManualRecovery(),
-      markPendingImageTasksForManualRecovery: () => imageGenerationService.markPendingTasksForManualRecovery(),
-      markPendingAutoDirectorTasksForManualRecovery: () => this.novelWorkflowRuntimeService.markPendingAutoDirectorTasksForManualRecovery(),
+      resumePendingBookAnalyses: () => bookAnalysisService.resumePendingAnalyses(),
+      resumePendingImageTasks: () => imageGenerationService.resumePendingTasks(),
+      resumePendingAutoDirectorTasks: () => this.novelWorkflowRuntimeService.resumePendingAutoDirectorTasks(),
       resumePendingPipelineJobs: () => this.novelPipelineRuntimeService.resumePendingPipelineJobs(),
-      markPendingStyleTasksForManualRecovery: () => styleExtractionTaskService.markPendingTasksForManualRecovery(),
+      resumePendingStyleTasks: () => styleExtractionTaskService.resumePendingTasks(),
     },
   ) {}
 
   initializePendingRecoveries(): Promise<void> {
     if (!this.initializationPromise) {
       this.initializationPromise = Promise.all([
-        this.initializationDeps.markPendingBookAnalysesForManualRecovery(),
-        this.initializationDeps.markPendingImageTasksForManualRecovery(),
-        this.initializationDeps.markPendingAutoDirectorTasksForManualRecovery(),
+        this.initializationDeps.resumePendingBookAnalyses(),
+        this.initializationDeps.resumePendingImageTasks(),
+        this.initializationDeps.resumePendingAutoDirectorTasks(),
         this.initializationDeps.resumePendingPipelineJobs(),
-        this.initializationDeps.markPendingStyleTasksForManualRecovery(),
+        this.initializationDeps.resumePendingStyleTasks(),
       ]).then(() => undefined);
     }
     return this.initializationPromise;

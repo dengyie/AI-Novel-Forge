@@ -352,6 +352,46 @@ export class StyleExtractionTaskService {
     }
   }
 
+  /**
+   * Startup auto-resume: clear manual flags and re-enqueue interrupted style tasks.
+   * Extraction is idempotent when a profile already exists (execute path reuses it).
+   */
+  async resumePendingTasks(): Promise<void> {
+    try {
+      const rows = await prisma.styleExtractionTask.findMany({
+        where: {
+          status: { in: ["queued", "running"] },
+        },
+        select: { id: true },
+        orderBy: { createdAt: "asc" },
+      });
+      if (rows.length === 0) {
+        return;
+      }
+      const ids = rows.map((row) => row.id);
+      await prisma.styleExtractionTask.updateMany({
+        where: { id: { in: ids } },
+        data: {
+          status: "queued",
+          pendingManualRecovery: false,
+          error: null,
+          heartbeatAt: null,
+          currentStage: "queued",
+          currentItemKey: null,
+          cancelRequestedAt: null,
+        },
+      });
+      for (const id of ids) {
+        this.enqueueTask(id);
+      }
+    } catch (error) {
+      if (isMissingStyleExtractionTaskTableError(error)) {
+        return;
+      }
+      throw error;
+    }
+  }
+
   async resumeTask(taskId: string) {
     const task = await prisma.styleExtractionTask.findUnique({
       where: { id: taskId },

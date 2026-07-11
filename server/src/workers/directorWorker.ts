@@ -27,6 +27,9 @@ export class DirectorWorker {
   private stopped = false;
   private readonly queue: DirectorTaskQueue;
   private readonly commandExecutor: DirectorWorkerDeps["commandExecutor"];
+  /** In-flight tick promises so stop() can wait for a bounded drain without aborting LLM mid-chapter. */
+  private readonly inflight = new Set<Promise<unknown>>();
+  private runnersDone: Promise<void> | null = null;
 
   constructor(options?: DirectorTaskQueueOptions);
   constructor(deps: DirectorWorkerDeps);
@@ -40,9 +43,30 @@ export class DirectorWorker {
     }
   }
 
+  /**
+   * Cooperative stop: no new leases; wake waiters; optionally wait for in-flight ticks.
+   * Does not abort LLM mid-call (would risk partial chapter writes). Shutdown force-exit
+   * remains the hard bound in app.ts SHUTDOWN_TIMEOUT_MS.
+   */
   stop(): void {
     this.stopped = true;
     taskDispatcher.notify();
+  }
+
+  /** Wait until slot loops exit or timeout. Used by app graceful shutdown. */
+  async waitForStop(timeoutMs = 15_000): Promise<"drained" | "timeout"> {
+    this.stop();
+    if (!this.runnersDone && this.inflight.size === 0) {
+      return "drained";
+    }
+    const drain = Promise.all([
+      this.runnersDone ?? Promise.resolve(),
+      ...this.inflight,
+    ]).then(() => "drained" as const);
+    const timeout = new Promise<"timeout">((resolve) => {
+      setTimeout(() => resolve("timeout"), Math.max(0, timeoutMs)).unref?.();
+    });
+    return Promise.race([drain, timeout]);
   }
 
   async start(): Promise<void> {
@@ -53,13 +77,21 @@ export class DirectorWorker {
     const runners = Array.from({ length: this.queue.executionSlots }, (_, i) =>
       this.runSlot(`slot-${i + 1}`),
     );
-    await Promise.all(runners);
+    this.runnersDone = Promise.all(runners).then(() => undefined);
+    await this.runnersDone;
   }
 
   private async runSlot(slotId: string): Promise<void> {
     while (!this.stopped) {
       try {
-        const didWork = await this.tick(slotId);
+        const tickPromise = this.tick(slotId);
+        this.inflight.add(tickPromise);
+        let didWork = false;
+        try {
+          didWork = await tickPromise;
+        } finally {
+          this.inflight.delete(tickPromise);
+        }
         if (!didWork) {
           await this.queue.waitForWork();
         }
@@ -71,9 +103,11 @@ export class DirectorWorker {
   }
 
   async tick(slotId: string): Promise<boolean> {
+    if (this.stopped) return false;
+
     const leased = await this.queue.leaseNext(slotId);
     if (!leased) return false;
-
+    // If stop raced after lease, still finish this command (lease already held) so state is consistent.
     const { command } = leased;
     const stopRenewal = this.queue.startLeaseRenewal(command.id, slotId);
 

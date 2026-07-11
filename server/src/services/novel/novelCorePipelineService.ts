@@ -538,14 +538,31 @@ export class NovelCorePipelineService {
     finishedAt?: Date | null;
     payload?: string | null;
   }) {
-    try {
-      await prisma.generationJob.update({
-        where: { id: jobId },
-        data,
-      });
-    } catch {
-      // 后台任务状态更新失败不应影响主服务稳定
+    const isTerminal = data.status === "succeeded"
+      || data.status === "failed"
+      || data.status === "cancelled";
+    const maxAttempts = isTerminal ? 3 : 1;
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        await prisma.generationJob.update({
+          where: { id: jobId },
+          data,
+        });
+        return;
+      } catch (error) {
+        lastError = error;
+        if (attempt < maxAttempts) {
+          await new Promise((resolve) => setTimeout(resolve, 50 * attempt));
+          continue;
+        }
+      }
     }
+    logPipelineWarn("流水线任务状态写库失败", {
+      jobId,
+      status: data.status ?? null,
+      error: lastError instanceof Error ? lastError.message : String(lastError),
+    });
   }
 
   private schedulePipelineExecution(jobId: string, novelId: string, options: PipelineRunOptions): void {
@@ -575,8 +592,15 @@ export class NovelCorePipelineService {
             NovelCorePipelineService.activeJobIds.delete(jobId);
             return;
           }
-        } catch {
-          // 认领失败不阻断：回退到内存路径继续 executePipeline（已有 activeJobIds 保护同进程）。
+        } catch (error) {
+          // 认领异常：不静默双跑。仅本进程 activeJobIds 不足以防跨进程竞态。
+          logPipelineWarn("流水线租约认领失败，跳过本次调度", {
+            jobId,
+            novelId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          NovelCorePipelineService.activeJobIds.delete(jobId);
+          return;
         }
       }
       await this.executePipeline(jobId, novelId, options)

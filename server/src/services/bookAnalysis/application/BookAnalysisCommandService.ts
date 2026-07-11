@@ -99,6 +99,12 @@ export class BookAnalysisCommandService {
     await this.watchdogService.markPendingAnalysesForManualRecovery();
   }
 
+  async resumePendingAnalyses(): Promise<void> {
+    await this.watchdogService.resumePendingAnalyses((analysisId) => {
+      this.enqueueTask({ analysisId, kind: "full" });
+    });
+  }
+
   async recoverTimedOutAnalyses(): Promise<void> {
     await this.watchdogService.recoverTimedOutAnalyses();
   }

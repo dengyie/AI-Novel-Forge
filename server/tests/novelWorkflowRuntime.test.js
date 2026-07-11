@@ -252,7 +252,7 @@ test("stale running auto director healing does not recurse through markTaskFaile
   }
 });
 
-test("startup recovery initialization marks interrupted auto director tasks for manual recovery", async () => {
+test("startup recovery initialization auto-resumes interrupted tasks (including auto director)", async () => {
   const calls = [];
   const { RecoveryTaskService } = require("../dist/services/task/RecoveryTaskService.js");
   const recoveryService = new RecoveryTaskService(
@@ -261,27 +261,31 @@ test("startup recovery initialization marks interrupted auto director tasks for 
     undefined,
     undefined,
     {
-      async markPendingBookAnalysesForManualRecovery() {
-        calls.push(["manual-book"]);
+      async resumePendingBookAnalyses() {
+        calls.push(["resume-book"]);
       },
-      async markPendingImageTasksForManualRecovery() {
-        calls.push(["manual-image"]);
+      async resumePendingImageTasks() {
+        calls.push(["resume-image"]);
       },
-      async markPendingAutoDirectorTasksForManualRecovery() {
-        calls.push(["manual-auto-director"]);
+      async resumePendingAutoDirectorTasks() {
+        calls.push(["resume-auto-director"]);
       },
       async resumePendingPipelineJobs() {
-        calls.push(["manual-pipeline"]);
+        calls.push(["resume-pipeline"]);
       },
-      async markPendingStyleTasksForManualRecovery() {
-        calls.push(["manual-style"]);
+      async resumePendingStyleTasks() {
+        calls.push(["resume-style"]);
       },
     },
   );
 
   await recoveryService.initializePendingRecoveries();
 
-  assert.deepEqual(calls.filter((call) => call[0].includes("auto-director")), [
-    ["manual-auto-director"],
+  assert.deepEqual(calls, [
+    ["resume-book"],
+    ["resume-image"],
+    ["resume-auto-director"],
+    ["resume-pipeline"],
+    ["resume-style"],
   ]);
 });

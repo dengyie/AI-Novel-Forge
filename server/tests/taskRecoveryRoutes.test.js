@@ -32,11 +32,11 @@ test("recovery task service accepts auto director resume before background work 
     },
     {},
     {
-      async markPendingBookAnalysesForManualRecovery() {},
-      async markPendingImageTasksForManualRecovery() {},
-      async markPendingAutoDirectorTasksForManualRecovery() {},
-      async markPendingPipelineJobsForManualRecovery() {},
-      async markPendingStyleTasksForManualRecovery() {},
+      async resumePendingBookAnalyses() {},
+      async resumePendingImageTasks() {},
+      async resumePendingAutoDirectorTasks() {},
+      async resumePendingPipelineJobs() {},
+      async resumePendingStyleTasks() {},
     },
   );
 
