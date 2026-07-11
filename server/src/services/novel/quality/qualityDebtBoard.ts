@@ -5,7 +5,11 @@ import {
   type ChapterQualityLoopSignalStatus,
 } from "@ai-novel/shared/types/chapterQualityLoop";
 
-/** 卷内 blocking replan/manual_gate 累计达到该阈值时，流水线停止后续自动成书。 */
+/**
+ * 运行范围内（pipeline job 的 startOrder–endOrder，或债板聚合的章节集合）
+ * blocking replan/manual_gate 累计达到该阈值时，停止后续自动成书。
+ * 注意：不是物理「卷」实体；命名保留 volume 前缀以兼容已发布 API 字段。
+ */
 export const QUALITY_DEBT_VOLUME_REPLAN_GATE_THRESHOLD = 3;
 
 export interface QualityDebtChapterRow {
@@ -50,6 +54,10 @@ export interface VolumeReplanQualityDebtGate {
   blockingReplanCount: number;
   shouldPause: boolean;
   reason: string | null;
+  /** 计数作用域：range=指定章节序区间；board=传入章节集合（通常为全书债板） */
+  scope: "range" | "board";
+  startOrder: number | null;
+  endOrder: number | null;
 }
 
 export interface QualityDebtBoardResult {
@@ -100,11 +108,32 @@ export function isBlockingReplanQualityDebt(
   return false;
 }
 
+export function filterChaptersByOrderRange<T extends { order?: number | null }>(
+  chapters: T[],
+  range?: { startOrder?: number | null; endOrder?: number | null } | null,
+): T[] {
+  const start = range?.startOrder;
+  const end = range?.endOrder;
+  if (typeof start !== "number" || typeof end !== "number" || !Number.isFinite(start) || !Number.isFinite(end)) {
+    return chapters;
+  }
+  const lo = Math.min(start, end);
+  const hi = Math.max(start, end);
+  return chapters.filter((chapter) => {
+    if (typeof chapter.order !== "number" || !Number.isFinite(chapter.order)) {
+      return false;
+    }
+    return chapter.order >= lo && chapter.order <= hi;
+  });
+}
+
 export function countBlockingReplanQualityDebts(
-  chapters: Array<Pick<QualityDebtChapterRow, "riskFlags">>,
+  chapters: Array<Pick<QualityDebtChapterRow, "riskFlags" | "order">>,
+  range?: { startOrder?: number | null; endOrder?: number | null } | null,
 ): number {
+  const scoped = filterChaptersByOrderRange(chapters, range);
   let count = 0;
-  for (const chapter of chapters) {
+  for (const chapter of scoped) {
     const qualityLoop = parseQualityLoopFromRiskFlags(chapter.riskFlags);
     if (isBlockingReplanQualityDebt(qualityLoop)) {
       count += 1;
@@ -120,19 +149,54 @@ export function shouldPauseVolumeForReplanQualityDebt(
   return blockingReplanCount >= Math.max(1, threshold);
 }
 
+function formatGateScopeLabel(input: {
+  scope: "range" | "board";
+  startOrder: number | null;
+  endOrder: number | null;
+}): string {
+  if (
+    input.scope === "range"
+    && typeof input.startOrder === "number"
+    && typeof input.endOrder === "number"
+  ) {
+    if (input.startOrder === input.endOrder) {
+      return `第 ${input.startOrder} 章运行范围`;
+    }
+    return `第 ${input.startOrder}-${input.endOrder} 章运行范围`;
+  }
+  return "当前债板章节范围";
+}
+
 export function buildVolumeReplanQualityDebtGate(input: {
-  chapters: Array<Pick<QualityDebtChapterRow, "riskFlags">>;
+  chapters: Array<Pick<QualityDebtChapterRow, "riskFlags" | "order">>;
   threshold?: number;
+  /** 流水线/导演 job 的章节序闭区间；缺省则对传入 chapters 全集计数（债板默认全书） */
+  startOrder?: number | null;
+  endOrder?: number | null;
 }): VolumeReplanQualityDebtGate {
   const threshold = input.threshold ?? QUALITY_DEBT_VOLUME_REPLAN_GATE_THRESHOLD;
-  const blockingReplanCount = countBlockingReplanQualityDebts(input.chapters);
+  const hasRange = typeof input.startOrder === "number"
+    && typeof input.endOrder === "number"
+    && Number.isFinite(input.startOrder)
+    && Number.isFinite(input.endOrder);
+  const startOrder = hasRange ? Math.min(input.startOrder!, input.endOrder!) : null;
+  const endOrder = hasRange ? Math.max(input.startOrder!, input.endOrder!) : null;
+  const scope: "range" | "board" = hasRange ? "range" : "board";
+  const blockingReplanCount = countBlockingReplanQualityDebts(
+    input.chapters,
+    hasRange ? { startOrder, endOrder } : null,
+  );
   const shouldPause = shouldPauseVolumeForReplanQualityDebt(blockingReplanCount, threshold);
+  const scopeLabel = formatGateScopeLabel({ scope, startOrder, endOrder });
   return {
     threshold,
     blockingReplanCount,
     shouldPause,
+    scope,
+    startOrder,
+    endOrder,
     reason: shouldPause
-      ? `卷内阻塞性 replan/manual_gate 质量债累计 ${blockingReplanCount} 章（阈值 ${threshold}），已暂停后续自动成书。`
+      ? `${scopeLabel}内阻塞性 replan/manual_gate 质量债累计 ${blockingReplanCount} 章（阈值 ${threshold}），已暂停后续自动成书。`
       : null,
   };
 }
@@ -220,6 +284,9 @@ export function buildQualityDebtBoardResult(input: {
   novelId: string;
   chapters: Array<Required<Pick<QualityDebtChapterRow, "id" | "order">> & QualityDebtChapterRow>;
   threshold?: number;
+  /** 可选：将 volumeReplanGate 限制在该序区间（默认对传入 chapters 全集） */
+  gateStartOrder?: number | null;
+  gateEndOrder?: number | null;
 }): QualityDebtBoardResult {
   const items = input.chapters
     .map((chapter) => buildQualityDebtBoardItem(chapter))
@@ -229,6 +296,8 @@ export function buildQualityDebtBoardResult(input: {
   const volumeReplanGate = buildVolumeReplanQualityDebtGate({
     chapters: input.chapters,
     threshold: input.threshold,
+    startOrder: input.gateStartOrder,
+    endOrder: input.gateEndOrder,
   });
   // keep summary aligned with gate counter
   summary.blockingReplanCount = volumeReplanGate.blockingReplanCount;

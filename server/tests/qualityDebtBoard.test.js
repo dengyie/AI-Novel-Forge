@@ -125,3 +125,52 @@ test("deferred patch repair is non-blocking for volume replan count", () => {
   assert.equal(gate.blockingReplanCount, 0);
   assert.equal(gate.shouldPause, false);
 });
+
+
+test("range-scoped replan gate ignores debts outside startOrder-endOrder", () => {
+  const replan = (order) => ({
+    order,
+    riskFlags: riskFlags({
+      overallStatus: "invalid",
+      recommendedAction: "replan",
+      rootCauseCode: "replan_required",
+    }),
+  });
+  const chapters = [
+    replan(1),
+    replan(2),
+    replan(3),
+    replan(10),
+    replan(11),
+    replan(12),
+  ];
+  // job range 1-3 only has 3 replans → pause
+  const inRange = buildVolumeReplanQualityDebtGate({
+    chapters,
+    startOrder: 1,
+    endOrder: 3,
+  });
+  assert.equal(inRange.scope, "range");
+  assert.equal(inRange.startOrder, 1);
+  assert.equal(inRange.endOrder, 3);
+  assert.equal(inRange.blockingReplanCount, 3);
+  assert.equal(inRange.shouldPause, true);
+  assert.match(inRange.reason, /第 1-3 章运行范围/);
+
+  // job range 4-9 has 0 → no pause even if book has many
+  const emptyRange = buildVolumeReplanQualityDebtGate({
+    chapters,
+    startOrder: 4,
+    endOrder: 9,
+  });
+  assert.equal(emptyRange.blockingReplanCount, 0);
+  assert.equal(emptyRange.shouldPause, false);
+  assert.equal(emptyRange.reason, null);
+
+  // board mode (no range) counts all 6
+  const board = buildVolumeReplanQualityDebtGate({ chapters });
+  assert.equal(board.scope, "board");
+  assert.equal(board.blockingReplanCount, 6);
+  assert.equal(board.shouldPause, true);
+  assert.match(board.reason, /当前债板章节范围/);
+});

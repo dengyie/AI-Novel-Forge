@@ -908,24 +908,34 @@ export class NovelCorePipelineService {
             }
           }
 
-          // 卷级 replan 质量债熔断：全书/区间内 blocking replan 累计 ≥ 阈值则停止后续章。
+          // 卷级 replan 质量债熔断：job 运行范围（startOrder–endOrder）内 blocking replan 累计 ≥ 阈值则停止后续章。
           if (!shouldStopAfterCurrentChapter) {
             const debtRows = await prisma.chapter.findMany({
-              where: { novelId },
-              select: { riskFlags: true },
+              where: {
+                novelId,
+                order: { gte: options.startOrder, lte: options.endOrder },
+              },
+              select: { riskFlags: true, order: true },
             });
-            const volumeGate = buildVolumeReplanQualityDebtGate({ chapters: debtRows });
+            const volumeGate = buildVolumeReplanQualityDebtGate({
+              chapters: debtRows,
+              startOrder: options.startOrder,
+              endOrder: options.endOrder,
+            });
             if (volumeGate.shouldPause) {
-              const detail = volumeGate.reason ?? "卷内 replan 质量债已达熔断阈值。";
+              const detail = volumeGate.reason ?? "运行范围内 replan 质量债已达熔断阈值。";
               if (!replanAlertDetails.includes(detail)) {
                 replanAlertDetails.push(detail);
               }
               shouldStopAfterCurrentChapter = true;
-              logPipelineWarn("卷级 replan 质量债熔断，停止后续章节流水线", {
+              logPipelineWarn("运行范围 replan 质量债熔断，停止后续章节流水线", {
                 jobId,
                 order: chapter.order,
                 blockingReplanCount: volumeGate.blockingReplanCount,
                 threshold: volumeGate.threshold,
+                scope: volumeGate.scope,
+                startOrder: volumeGate.startOrder,
+                endOrder: volumeGate.endOrder,
               });
             }
           }

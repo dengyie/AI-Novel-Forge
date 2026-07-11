@@ -52,7 +52,12 @@ export interface DirectorAutoExecutionChapterRef {
   expectation?: string | null;
   generationState?: ChapterGenerationState | null;
   chapterStatus?: "unplanned" | "pending_generation" | "generating" | "pending_review" | "needs_repair" | "completed" | null;
-  /** 可选：有值时用于判断 blocking replan 质量债是否阻断 auto-advance */
+  /**
+   * 质量债判定契约：auto-execution 路径必须加载本字段。
+   * - string：JSON riskFlags（含 qualityLoop）
+   * - null/undefined：视为无 qualityLoop（不阻断）
+   * 禁止用「对象上缺 key」绕过 blocking 检查；调用方应显式传 riskFlags: null。
+   */
   riskFlags?: string | null;
 }
 
@@ -246,14 +251,12 @@ function isDirectorAutoExecutionChapterCompleted(chapter: DirectorAutoExecutionC
 
 /**
  * blocking replan / manual_gate 质量债不得视为 auto-execution 已处理，否则导演会跳过并继续堆章。
- * 无 riskFlags 字段时保持旧语义（兼容未加载该列的调用方）。
+ * 始终根据 riskFlags 内容分类：缺字段 / null / 空串 / 无 qualityLoop → 不阻断。
+ * 不再用 hasOwnProperty 旁路——调用方须显式加载 riskFlags（listChapters 全行已含该列）。
  */
 export function hasBlockingQualityLoopDebtForAutoExecution(
   chapter: Pick<DirectorAutoExecutionChapterRef, "riskFlags">,
 ): boolean {
-  if (!Object.prototype.hasOwnProperty.call(chapter, "riskFlags")) {
-    return false;
-  }
   return classifyChapterQualityLoopRiskFlags(chapter.riskFlags) === "blocking";
 }
 

@@ -18,9 +18,17 @@ function chapter(overrides = {}) {
   };
 }
 
-test("reviewed pending_review without riskFlags stays processed (compat)", () => {
+test("reviewed pending_review with missing riskFlags stays processed (no qualityLoop)", () => {
+  // 契约：缺字段等同 null/无 qualityLoop，不阻断；生产 listChapters 会显式带 riskFlags 列。
   const row = chapter();
   delete row.riskFlags;
+  assert.equal(hasBlockingQualityLoopDebtForAutoExecution(row), false);
+  assert.equal(isDirectorAutoExecutionChapterProcessed(row), true);
+});
+
+test("reviewed pending_review with explicit riskFlags null stays processed", () => {
+  const row = chapter({ riskFlags: null });
+  assert.equal(hasBlockingQualityLoopDebtForAutoExecution(row), false);
   assert.equal(isDirectorAutoExecutionChapterProcessed(row), true);
 });
 
