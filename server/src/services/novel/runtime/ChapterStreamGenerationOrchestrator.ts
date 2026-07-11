@@ -17,6 +17,7 @@ import {
   ChapterContentFinalizationService,
   type FinalizeChapterContentResult,
 } from "./ChapterContentFinalizationService";
+import { persistChapterQualityScores } from "../quality/chapterQualityScorePersist";
 
 export interface ChapterStreamGenerationAgentRuntime {
   createChapterGenRun: (novelId: string, chapterId: string, chapterOrder: number) => Promise<string>;
@@ -116,6 +117,23 @@ export class ChapterStreamGenerationOrchestrator {
           startMs,
           deferArtifactBackgroundSync: true,
         });
+        // 流式定稿不经 pipeline：finalize 只拍平列，此处写终态 QualityReport 一行。
+        // 直接调 persist（writeReport:true），避免经 novelCoreReviewService 造成循环依赖。
+        try {
+          await persistChapterQualityScores({
+            novelId,
+            chapterId,
+            score: finalized.score,
+            issues: finalized.issues,
+            writeReport: true,
+          });
+        } catch (error) {
+          console.warn("[chapter-runtime] stream quality report persist failed", {
+            novelId,
+            chapterId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
         this.emitRunStatus(helpers, {
           type: "run_status",
           runId: runStatusId,

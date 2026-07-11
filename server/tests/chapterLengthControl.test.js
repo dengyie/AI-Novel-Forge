@@ -145,11 +145,32 @@ test("chapter length control filters system audit labels from mustAdvance", () =
   ]);
 });
 
-test("resolveChapterTypeTargetWordCount prefers explicit target over type multiplier", () => {
+test("resolveChapterTypeTargetWordCount clamps explicit target into type band by default", () => {
+  // transition typeTarget = 2800 * 0.8 = 2240; band [2016, 2464]
   assert.equal(resolveChapterTypeTargetWordCount({
     baseWordCount: 2800,
     chapterType: "transition",
     explicitTargetWordCount: 3500,
+  }), 2464);
+  assert.equal(resolveChapterTypeTargetWordCount({
+    baseWordCount: 2800,
+    chapterType: "transition",
+    explicitTargetWordCount: 1000,
+  }), 2016);
+  // within band: keep explicit
+  assert.equal(resolveChapterTypeTargetWordCount({
+    baseWordCount: 2800,
+    chapterType: "transition",
+    explicitTargetWordCount: 2200,
+  }), 2200);
+});
+
+test("resolveChapterTypeTargetWordCount can disable clamp and keep raw explicit", () => {
+  assert.equal(resolveChapterTypeTargetWordCount({
+    baseWordCount: 2800,
+    chapterType: "transition",
+    explicitTargetWordCount: 3500,
+    clampExplicitToTypeBand: false,
   }), 3500);
 });
 

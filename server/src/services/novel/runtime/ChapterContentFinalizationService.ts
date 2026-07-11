@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { ChapterRuntimePackage, GenerationContextPackage } from "@ai-novel/shared/types/chapterRuntime";
+import type { QualityScore, ReviewIssue } from "@ai-novel/shared/types/novel";
 import { prisma } from "../../../db/prisma";
 import { openConflictService } from "../../state/OpenConflictService";
 import { directorAutomationLedgerEventService } from "../director/runtime/DirectorAutomationLedgerEventService";
@@ -59,6 +60,9 @@ export interface FinalizeChapterContentResult {
   finalContent: string;
   runtimePackage: ChapterRuntimePackage;
   styleReview: StyleReviewResult;
+  /** 验收分数/问题；供流式路径写终态 QualityReport（pipeline 用 createQualityReport） */
+  score: QualityScore;
+  issues: ReviewIssue[];
 }
 
 export class ChapterContentFinalizationService {
@@ -156,7 +160,8 @@ export class ChapterContentFinalizationService {
       || runtimePackage.audit.hasBlockingIssues;
     await this.markChapterStatus(input.chapterId, needsRepair ? "needs_repair" : "pending_review");
 
-    // P2-1：定稿热路径把 acceptance score 拍平到 Chapter 列 + QualityReport。
+    // P2-1：定稿热路径只拍平 Chapter 四列；QualityReport 由 pipeline/manual
+    // createQualityReport 写终态一行，避免 retry 时每轮 finalize 再堆报告。
     // 失败只告警，不阻断定稿返回（与 fact ledger / timeline 一致）。
     try {
       await persistChapterQualityScores({
@@ -164,14 +169,49 @@ export class ChapterContentFinalizationService {
         chapterId: input.chapterId,
         score: acceptance.score,
         issues: acceptance.issues,
-        writeReport: true,
+        writeReport: false,
       });
     } catch (error) {
+      const chapterOrder = input.contextPackage.chapter.order;
       console.warn("[chapter-runtime] chapter quality score persist failed", {
         novelId: input.novelId,
         chapterId: input.chapterId,
+        chapterOrder,
         error: error instanceof Error ? error.message : String(error),
       });
+      // 结构化可观测：写入 riskFlags 标记，供债板/运营发现静默缺分。
+      try {
+        const existing = await prisma.chapter.findFirst({
+          where: { id: input.chapterId, novelId: input.novelId },
+          select: { riskFlags: true },
+        });
+        let parsed: Record<string, unknown> = {};
+        if (existing?.riskFlags?.trim()) {
+          try {
+            const value = JSON.parse(existing.riskFlags) as unknown;
+            if (value && typeof value === "object" && !Array.isArray(value)) {
+              parsed = value as Record<string, unknown>;
+            }
+          } catch {
+            parsed = {};
+          }
+        }
+        await prisma.chapter.update({
+          where: { id: input.chapterId },
+          data: {
+            riskFlags: JSON.stringify({
+              ...parsed,
+              qualityScorePersistFailed: {
+                at: new Date().toISOString(),
+                chapterOrder,
+                message: error instanceof Error ? error.message : String(error),
+              },
+            }),
+          },
+        });
+      } catch {
+        // 二次失败忽略，避免掩盖定稿主路径
+      }
     }
 
     // 时间线：热路径仍用 deferred gate；定稿后异步必达 + 上章 checkpoint 守卫。
@@ -234,6 +274,8 @@ export class ChapterContentFinalizationService {
       finalContent,
       runtimePackage,
       styleReview,
+      score: acceptance.score,
+      issues: acceptance.issues,
     };
   }
 

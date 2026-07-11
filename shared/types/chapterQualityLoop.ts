@@ -47,6 +47,11 @@ export interface ChapterQualityLoopAssessment {
   blockingObligations?: ChapterExecutionMissingObligation[];
   budget?: ChapterQualityLoopBudget | null;
   signals: ChapterQualityLoopSignal[];
+  /**
+   * 不参与 recommendedAction 的可观测标签（如 length_over_hard）。
+   * 来自 acceptance riskTags，写入 riskFlags.qualityLoop 供债板/运营读取。
+   */
+  observabilityTags?: string[];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -418,7 +423,7 @@ function buildRollingWindowSignal(input: ChapterQualityLoopAssessmentInput): Cha
       issueCodes: replanRecommendation.blockingIssueIds.slice(0, 8),
     };
   }
-  const reportIssues = input.runtimePackage?.audit.reports.flatMap((report) => report.issues) ?? [];
+  const reportIssues = input.runtimePackage?.audit?.reports?.flatMap((report) => report.issues) ?? [];
   const blockingReportIssues = reportIssues.filter((issue) => (
     issue.severity === "high" || issue.severity === "critical"
   ));
@@ -465,6 +470,22 @@ function resolveAction(overallStatus: ChapterQualityLoopSignalStatus, signals: C
   return "continue";
 }
 
+const LENGTH_OBSERVABILITY_TAG_PREFIX = "length_";
+
+function extractLengthObservabilityTags(
+  runtimePackage: ChapterRuntimePackage | null | undefined,
+): string[] {
+  const riskTags = runtimePackage?.meta?.riskTags;
+  if (!Array.isArray(riskTags)) {
+    return [];
+  }
+  return Array.from(new Set(
+    riskTags
+      .map((tag) => String(tag).trim())
+      .filter((tag) => tag.startsWith(LENGTH_OBSERVABILITY_TAG_PREFIX)),
+  ));
+}
+
 export function buildChapterQualityLoopAssessment(
   input: ChapterQualityLoopAssessmentInput,
 ): ChapterQualityLoopAssessment {
@@ -485,6 +506,7 @@ export function buildChapterQualityLoopAssessment(
     previousRepairHistory: input.previousRepairHistory,
   });
   const effectiveAction = budget?.nextAction === "hard_stop" ? "manual_gate" : recommendedAction;
+  const observabilityTags = extractLengthObservabilityTags(input.runtimePackage);
   return {
     chapterId: input.chapterId,
     chapterOrder: input.chapterOrder ?? input.runtimePackage?.context.chapter.order ?? null,
@@ -500,5 +522,6 @@ export function buildChapterQualityLoopAssessment(
     blockingObligations: input.runtimePackage?.failureClassification.blockingObligations ?? [],
     budget,
     signals,
+    ...(observabilityTags.length > 0 ? { observabilityTags } : {}),
   };
 }

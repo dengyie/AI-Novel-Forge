@@ -219,31 +219,48 @@ export const CHAPTER_TYPE_LENGTH_MULTIPLIERS = {
 export type ChapterLengthTypeKey = keyof typeof CHAPTER_TYPE_LENGTH_MULTIPLIERS;
 
 /**
- * 按章型解析目标字数。显式 target 优先；否则 base × 分型倍率。
- * base 通常来自 novel.defaultChapterLength 或规划默认。
+ * 按章型解析目标字数。
+ * - base 通常来自 novel.defaultChapterLength（其次章上历史 target / 规划默认）
+ * - 无显式 target：base × 分型倍率
+ * - 有显式 target 且已知章型：夹逼到 typeTarget × [0.9, 1.1]，避免 LLM 目标完全绕过分型
+ * - 无章型时保留显式 target
  */
 export function resolveChapterTypeTargetWordCount(input: {
   baseWordCount: number | null | undefined;
   chapterType?: ChapterLengthTypeKey | string | null;
   explicitTargetWordCount?: number | null;
+  /** 默认 true：有章型时把显式 target 夹进分型带 */
+  clampExplicitToTypeBand?: boolean;
 }): number | null {
-  if (
-    Number.isFinite(input.explicitTargetWordCount)
-    && (input.explicitTargetWordCount ?? 0) > 0
-  ) {
-    return Math.round(input.explicitTargetWordCount as number);
-  }
-  if (!Number.isFinite(input.baseWordCount) || (input.baseWordCount ?? 0) <= 0) {
-    return null;
-  }
-  const base = Math.round(input.baseWordCount as number);
+  const clampExplicit = input.clampExplicitToTypeBand !== false;
+  const base = Number.isFinite(input.baseWordCount) && (input.baseWordCount ?? 0) > 0
+    ? Math.round(input.baseWordCount as number)
+    : null;
   const key = input.chapterType && input.chapterType in CHAPTER_TYPE_LENGTH_MULTIPLIERS
     ? (input.chapterType as ChapterLengthTypeKey)
     : null;
-  if (!key) {
-    return base;
+  const typeTarget = base != null
+    ? (key ? Math.max(200, Math.round(base * CHAPTER_TYPE_LENGTH_MULTIPLIERS[key])) : base)
+    : null;
+  const explicit = Number.isFinite(input.explicitTargetWordCount)
+    && (input.explicitTargetWordCount ?? 0) > 0
+    ? Math.round(input.explicitTargetWordCount as number)
+    : null;
+
+  if (explicit != null) {
+    if (clampExplicit && typeTarget != null && key) {
+      const softMin = Math.max(200, Math.floor(typeTarget * 0.9));
+      const softMax = Math.ceil(typeTarget * 1.1);
+      if (explicit < softMin) {
+        return softMin;
+      }
+      if (explicit > softMax) {
+        return softMax;
+      }
+    }
+    return explicit;
   }
-  return Math.max(200, Math.round(base * CHAPTER_TYPE_LENGTH_MULTIPLIERS[key]));
+  return typeTarget;
 }
 
 export type LengthBudgetBand = "within_soft" | "under_soft" | "over_soft" | "over_hard";

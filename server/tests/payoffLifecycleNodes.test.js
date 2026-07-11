@@ -22,9 +22,11 @@ test("buildPayoffLifecycleNodes marks setup→paid progression", () => {
 
 test("buildPayoffLifecycleNodes treats overdue/failed as branch terminals", () => {
   const overdue = buildPayoffLifecycleNodes("overdue");
-  assert.ok(overdue.some((n) => n.stage === "overdue" && n.current));
-  assert.ok(overdue.some((n) => n.stage === "pending_payoff" && n.reached));
+  assert.equal(overdue.filter((n) => n.current).length, 1);
+  assert.equal(overdue.find((n) => n.current)?.stage, "overdue");
+  assert.ok(overdue.some((n) => n.stage === "pending_payoff" && n.reached && !n.current));
 
   const failed = buildPayoffLifecycleNodes("failed");
-  assert.ok(failed.some((n) => n.stage === "failed" && n.current));
+  assert.equal(failed.filter((n) => n.current).length, 1);
+  assert.equal(failed.find((n) => n.current)?.stage, "failed");
 });

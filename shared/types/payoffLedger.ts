@@ -122,12 +122,13 @@ export function buildPayoffLifecycleNodes(
     ];
   }
   if (status === "overdue") {
+    // 旁路终态：进度标到 pending 为止；仅 overdue 为 current（与 failed 对称，避免双高亮）。
     return [
-      ...LIFECYCLE_ORDER.slice(0, 3).map((stage, index) => ({
+      ...LIFECYCLE_ORDER.slice(0, 3).map((stage) => ({
         stage,
         labelZh: LIFECYCLE_LABELS[stage],
         reached: true,
-        current: index === 2,
+        current: false,
       })),
       {
         stage: "overdue",

@@ -3,11 +3,15 @@ import { prisma } from "../../../db/prisma";
 
 /**
  * Chapter 列上的可运营分数字段（schema 已有，finalize 热路径历史上未写入）。
- * QualityScore 六维 → 四列拍平：
+ * QualityScore 六维 → 四列拍平（schema 仅四列，repetition/engagement 只进 QualityReport）：
  * - qualityScore ← overall
  * - continuityScore ← coherence（连贯/连续）
- * - characterScore ← voice（角色声口/人物感）
+ * - characterScore ← voice（角色声口/人物感；非独立「人物连续性」审计分，导出/看板勿当 character arc 分）
  * - pacingScore ← pacing
+ *
+ * 写路径所有权：
+ * - finalize：writeReport=false，只更新 Chapter 列（含 retry 中间次）
+ * - createQualityReport / manual review：writeReport=true，终态一行 QualityReport + 列
  */
 export interface ChapterQualityScoreColumns {
   qualityScore: number;

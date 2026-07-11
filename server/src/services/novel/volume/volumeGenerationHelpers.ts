@@ -631,11 +631,15 @@ export async function generateChapterTaskSheetDetail(params: {
       taskSheet: existingChapter.taskSheet,
       conflictLevel: existingChapter.conflictLevel,
     });
+    // base：书默认章长 → 章上历史 target → 2200；显式 target 会按分型带夹逼
+    const baseWordCount = params.promptInput.novel.defaultChapterLength
+      ?? existingChapter.targetWordCount
+      ?? 2200;
     const resolvedTarget = resolveChapterTypeTargetWordCount({
-      baseWordCount: 2200,
+      baseWordCount,
       chapterType,
       explicitTargetWordCount: existingChapter.targetWordCount,
-    }) ?? 2200;
+    }) ?? baseWordCount;
     const scenePlan = normalizeChapterScenePlan(
       existingChapter.sceneCards,
       resolvedTarget,
@@ -698,12 +702,15 @@ export async function generateChapterTaskSheetDetail(params: {
         taskSheet: generated.output.taskSheet,
         conflictLevel: generated.output.conflictLevel,
       });
-      // P2-2：LLM 显式 target 优先；缺失时按章型倍率从 base 推导。
+      // P2-2：base 用 defaultChapterLength；LLM 显式 target 夹逼到分型 ±10%。
+      const baseWordCount = promptInput.novel.defaultChapterLength
+        ?? promptInput.targetChapter.targetWordCount
+        ?? 2200;
       const resolvedTarget = resolveChapterTypeTargetWordCount({
-        baseWordCount: promptInput.targetChapter.targetWordCount ?? 2200,
+        baseWordCount,
         chapterType,
         explicitTargetWordCount: generated.output.targetWordCount,
-      }) ?? 2200;
+      }) ?? baseWordCount;
       const scenePlan = normalizeChapterScenePlan(
         generated.output.sceneCards,
         resolvedTarget,

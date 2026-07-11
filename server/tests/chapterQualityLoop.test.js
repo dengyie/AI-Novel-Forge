@@ -38,6 +38,28 @@ test("buildChapterQualityLoopAssessment continues when quality signals are valid
   assert.equal(assessment.signals.length, 4);
 });
 
+test("buildChapterQualityLoopAssessment copies length riskTags into observabilityTags without changing action", () => {
+  const assessment = buildChapterQualityLoopAssessment({
+    chapterId: "chapter-length",
+    chapterOrder: 3,
+    score: score(),
+    issues: [],
+    evaluatedAt: "2026-04-30T00:00:00.000Z",
+    runtimePackage: {
+      meta: {
+        riskTags: ["length_over_hard", "ending_hook", "length_over_soft"],
+      },
+      failureClassification: { code: null, blockingObligations: [] },
+      context: { chapter: { order: 3 } },
+      audit: { reports: [], openIssues: [], hasBlockingIssues: false },
+      timelineCheck: { status: "passed", score: 1, issues: [] },
+    },
+  });
+
+  assert.equal(assessment.recommendedAction, "continue");
+  assert.deepEqual(assessment.observabilityTags, ["length_over_hard", "length_over_soft"]);
+});
+
 test("buildChapterQualityLoopAssessment requires patch-first repair for local quality risk", () => {
   const assessment = buildChapterQualityLoopAssessment({
     chapterId: "chapter-2",

@@ -167,7 +167,11 @@ export default function BookPayoffLedgerCard(props: BookPayoffLedgerCardProps) {
                 <>
                   <Badge variant="outline">埋设 {ledgerSummary?.setupCount ?? 0}</Badge>
                   <Badge variant="outline">提示 {ledgerSummary?.hintedCount ?? 0}</Badge>
-                  <Badge variant="outline">待兑现 {ledgerSummary?.pendingPayoffCount ?? ledgerSummary?.pendingCount ?? 0}</Badge>
+                  {typeof ledgerSummary?.pendingPayoffCount === "number" ? (
+                    <Badge variant="outline">待兑现 {ledgerSummary.pendingPayoffCount}</Badge>
+                  ) : (
+                    <Badge variant="outline">未终态 {ledgerSummary?.pendingCount ?? 0}</Badge>
+                  )}
                   <Badge variant={ledgerSummary?.urgentCount ? "secondary" : "outline"}>
                     紧急 {ledgerSummary?.urgentCount ?? 0}
                   </Badge>

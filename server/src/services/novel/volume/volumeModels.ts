@@ -58,6 +58,8 @@ export interface VolumeGenerationNovel {
   first30ChapterPromise: string | null;
   commercialTagsJson: string | null;
   estimatedChapterCount: number | null;
+  /** 默认章长；分型目标字数 base 优先取此字段 */
+  defaultChapterLength?: number | null;
   narrativePov: string | null;
   pacePreference: string | null;
   emotionIntensity: string | null;
