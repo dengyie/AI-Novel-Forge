@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
+  buildGenreBeatBoardSnapshot,
   buildQualityDebtBoardResult,
   buildVolumeReplanQualityDebtGate,
   QUALITY_DEBT_VOLUME_REPLAN_GATE_THRESHOLD,
@@ -173,4 +174,69 @@ test("range-scoped replan gate ignores debts outside startOrder-endOrder", () =>
   assert.equal(board.blockingReplanCount, 6);
   assert.equal(board.shouldPause, true);
   assert.match(board.reason, /当前债板章节范围/);
+});
+
+test("genreBeat snapshot reports shortfalls without forcing director fuse", () => {
+  const combatHeavy = Array.from({ length: 12 }, (_, index) => ({
+    order: index + 1,
+    title: `巷口伏击${index + 1}`,
+    taskSheet: "开场交手，中段追击，结尾突围。",
+    summary: "主角突围并反杀追兵。",
+  }));
+  const snapshot = buildGenreBeatBoardSnapshot({
+    framing: {
+      sellingPoint: "轻松养成与资源收集",
+      competingFeel: "日常成长 + 打宝",
+      first30ChapterPromise: "前三十章稳定养成与收集反馈",
+    },
+    chapters: combatHeavy,
+    windowSize: 30,
+  });
+  assert.equal(snapshot.status, "observed");
+  assert.equal(snapshot.labeledChapterCount, 12);
+  assert.ok(snapshot.coverage.shortfalls.some((item) => item.kind === "nurture" || item.kind === "collect"));
+  assert.equal(snapshot.coverage.meetsPrimaryQuota, false);
+  assert.match(snapshot.summaryLine, /主配额未达标|shortfall|养成|收集/);
+
+  const board = buildQualityDebtBoardResult({
+    novelId: "n-genre",
+    chapters: [{
+      id: "c1",
+      order: 1,
+      title: "开篇",
+      riskFlags: riskFlags({
+        overallStatus: "valid",
+        recommendedAction: "continue",
+        rootCauseCode: "none",
+      }),
+    }],
+    genreBeat: {
+      framing: {
+        sellingPoint: "轻松养成",
+        first30ChapterPromise: "养成与收集",
+      },
+      chapters: combatHeavy,
+      windowSize: 30,
+    },
+  });
+  assert.ok(board.genreBeatSnapshot);
+  assert.equal(board.genreBeatSnapshot.status, "observed");
+  assert.equal(board.genreBeatSnapshot.coverage.meetsPrimaryQuota, false);
+});
+
+test("genreBeat snapshot null when genreBeat input omitted", () => {
+  const board = buildQualityDebtBoardResult({
+    novelId: "n-legacy",
+    chapters: [{
+      id: "c1",
+      order: 1,
+      title: "开篇",
+      riskFlags: riskFlags({
+        overallStatus: "valid",
+        recommendedAction: "continue",
+        rootCauseCode: "none",
+      }),
+    }],
+  });
+  assert.equal(board.genreBeatSnapshot, null);
 });

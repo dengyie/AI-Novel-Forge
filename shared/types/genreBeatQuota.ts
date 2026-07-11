@@ -2,8 +2,8 @@
  * 品类 beat 配额（纯函数）：从 sellingPoint / competingFeel / first30ChapterPromise
  * 推导前 N 章养成/收集等占比目标，并提供近窗场景 Jaccard 多样性信号。
  *
- * 交付状态：library-ready / partial — 已 export + 单测，**尚未**接入 director /
- * rolling_window / volume 报告。调用方自行决定是否强制换场景；勿宣称运行时已生效。
+ * 交付状态：observed on quality-debt board（`genreBeatSnapshot`）— 前 N 章覆盖 +
+ * 近窗 Jaccard 只读观测；**仍不**接导演熔断 / 强制换场景。
  */
 
 export const GENRE_BEAT_KINDS = [

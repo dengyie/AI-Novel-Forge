@@ -221,6 +221,27 @@ export async function getNovelQualityDebt(id: string) {
         startOrder: number | null;
         endOrder: number | null;
       };
+      genreBeatSnapshot: {
+        status: "observed";
+        windowSize: number;
+        labeledChapterCount: number;
+        summaryLine: string;
+        coverage: {
+          meetsPrimaryQuota: boolean;
+          shortfalls: Array<{
+            kind: string;
+            expectedMin: number;
+            actual: number;
+            labelZh: string;
+          }>;
+        };
+        sceneDiversity: {
+          shouldForce: boolean;
+          averageJaccard: number;
+          threshold: number;
+          window: number;
+        };
+      } | null;
     }>
   >(`/novels/${id}/quality-debt`);
   return data;

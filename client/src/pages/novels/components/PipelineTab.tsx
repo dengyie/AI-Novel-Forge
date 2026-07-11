@@ -98,6 +98,27 @@ interface PipelineTabProps {
       startOrder: number | null;
       endOrder: number | null;
     };
+    genreBeatSnapshot?: {
+      status: "observed";
+      windowSize: number;
+      labeledChapterCount: number;
+      summaryLine: string;
+      coverage: {
+        meetsPrimaryQuota: boolean;
+        shortfalls: Array<{
+          kind: string;
+          expectedMin: number;
+          actual: number;
+          labelZh: string;
+        }>;
+      };
+      sceneDiversity: {
+        shouldForce: boolean;
+        averageJaccard: number;
+        threshold: number;
+        window: number;
+      };
+    } | null;
     items: Array<{
       chapterId: string;
       chapterOrder: number;
@@ -284,6 +305,21 @@ export default function PipelineTab(props: PipelineTabProps) {
                   replan 累计 {qualityDebtBoard.volumeReplanGate.blockingReplanCount} / 阈值 {qualityDebtBoard.volumeReplanGate.threshold}（债板默认全书 scope=board；流水线按 job 区间计）。
                 </div>
               )}
+              {qualityDebtBoard.genreBeatSnapshot ? (
+                <div className="rounded-xl border bg-background/70 px-3 py-2 text-xs text-muted-foreground">
+                  <div className="font-medium text-foreground">品类 beat 观测（不熔断）</div>
+                  <div className="mt-1">{qualityDebtBoard.genreBeatSnapshot.summaryLine}</div>
+                  {!qualityDebtBoard.genreBeatSnapshot.coverage.meetsPrimaryQuota
+                    && qualityDebtBoard.genreBeatSnapshot.coverage.shortfalls.length > 0 ? (
+                    <div className="mt-1 text-amber-800">
+                      shortfall：
+                      {qualityDebtBoard.genreBeatSnapshot.coverage.shortfalls
+                        .map((item) => `${item.labelZh} ${item.actual}/${item.expectedMin}`)
+                        .join(" · ")}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
               <div className="space-y-2 text-xs">
                 {qualityDebtBoard.items
                   .filter((item) => item.riskClassification === "blocking")

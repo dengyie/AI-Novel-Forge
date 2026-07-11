@@ -4,6 +4,14 @@ import {
   type ChapterQualityLoopRiskClassification,
   type ChapterQualityLoopSignalStatus,
 } from "@ai-novel/shared/types/chapterQualityLoop";
+import {
+  classifyGenreBeatFromText,
+  evaluateGenreBeatCoverage,
+  shouldForceSceneDiversity,
+  type GenreBeatCoverageResult,
+  type GenreBeatKind,
+  type GenreFramingInput,
+} from "@ai-novel/shared/types/genreBeatQuota";
 
 /**
  * 运行范围内（pipeline job 的 startOrder–endOrder，或债板聚合的章节集合）
@@ -11,6 +19,11 @@ import {
  * 注意：不是物理「卷」实体；命名保留 volume 前缀以兼容已发布 API 字段。
  */
 export const QUALITY_DEBT_VOLUME_REPLAN_GATE_THRESHOLD = 3;
+
+/** 品类 beat 报告默认窗口（前 N 章）。 */
+export const GENRE_BEAT_BOARD_WINDOW_SIZE = 30;
+/** 近窗场景 Jaccard 多样性窗口。 */
+export const GENRE_BEAT_SCENE_DIVERSITY_WINDOW = 5;
 
 export interface QualityDebtChapterRow {
   id?: string;
@@ -60,11 +73,44 @@ export interface VolumeReplanQualityDebtGate {
   endOrder: number | null;
 }
 
+/**
+ * 品类 beat 观测快照（只读报告，不熔断 auto director）。
+ * status=observed：已接线 quality-debt；强制换场景仍由调用方决定。
+ */
+export interface GenreBeatBoardSnapshot {
+  status: "observed";
+  windowSize: number;
+  labeledChapterCount: number;
+  coverage: GenreBeatCoverageResult;
+  chapterBeatKinds: Array<{
+    chapterOrder: number;
+    kind: GenreBeatKind;
+  }>;
+  sceneDiversity: {
+    shouldForce: boolean;
+    averageJaccard: number;
+    threshold: number;
+    window: number;
+  };
+  /** 人类可读摘要；不替代 coverage 结构字段 */
+  summaryLine: string;
+}
+
 export interface QualityDebtBoardResult {
   novelId: string;
   items: QualityDebtBoardItem[];
   summary: QualityDebtBoardSummary;
   volumeReplanGate: VolumeReplanQualityDebtGate;
+  /** 品类 beat / 近窗多样性观测；无章文本时仍返回空覆盖结构 */
+  genreBeatSnapshot: GenreBeatBoardSnapshot | null;
+}
+
+export interface GenreBeatChapterLabelSource {
+  order: number;
+  title?: string | null;
+  taskSheet?: string | null;
+  summary?: string | null;
+  purpose?: string | null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -280,6 +326,71 @@ export function buildQualityDebtBoardSummary(items: QualityDebtBoardItem[]): Qua
   return summary;
 }
 
+export function buildGenreBeatBoardSnapshot(input: {
+  framing?: GenreFramingInput | null;
+  chapters: GenreBeatChapterLabelSource[];
+  windowSize?: number;
+  diversityWindow?: number;
+}): GenreBeatBoardSnapshot {
+  const windowSize = Math.max(1, Math.floor(input.windowSize ?? GENRE_BEAT_BOARD_WINDOW_SIZE));
+  const diversityWindow = Math.max(2, Math.floor(input.diversityWindow ?? GENRE_BEAT_SCENE_DIVERSITY_WINDOW));
+  const ordered = [...input.chapters]
+    .filter((chapter) => typeof chapter.order === "number" && Number.isFinite(chapter.order))
+    .sort((left, right) => left.order - right.order)
+    .slice(0, windowSize);
+
+  const chapterBeatKinds = ordered.map((chapter) => {
+    const blob = [
+      chapter.title,
+      chapter.taskSheet,
+      chapter.summary,
+      chapter.purpose,
+    ].filter(Boolean).join("\n");
+    return {
+      chapterOrder: chapter.order,
+      kind: classifyGenreBeatFromText(blob),
+    };
+  });
+  const coverage = evaluateGenreBeatCoverage({
+    chapterLabels: chapterBeatKinds.map((item) => item.kind),
+    windowSize,
+    framing: input.framing ?? null,
+  });
+  const recentTexts = ordered
+    .map((chapter) => [
+      chapter.title,
+      chapter.summary,
+      chapter.taskSheet,
+      chapter.purpose,
+    ].filter(Boolean).join(" "))
+    .filter((text) => text.trim().length > 0);
+  const sceneDiversity = shouldForceSceneDiversity({
+    recentTexts: recentTexts.slice(-diversityWindow),
+    window: diversityWindow,
+  });
+  const shortfallText = coverage.shortfalls.length > 0
+    ? coverage.shortfalls.map((item) => `${item.labelZh}${item.actual}/${item.expectedMin}`).join("、")
+    : "主配额无 shortfall";
+  const summaryLine = [
+    `前${coverage.windowSize}章已标注${chapterBeatKinds.length}`,
+    coverage.meetsPrimaryQuota ? "主配额达标" : "主配额未达标",
+    shortfallText,
+    sceneDiversity.shouldForce
+      ? `近窗同质偏高(J=${sceneDiversity.averageJaccard.toFixed(2)})建议换场景`
+      : `近窗多样性可接受(J=${sceneDiversity.averageJaccard.toFixed(2)})`,
+  ].join("；");
+
+  return {
+    status: "observed",
+    windowSize: coverage.windowSize,
+    labeledChapterCount: chapterBeatKinds.length,
+    coverage,
+    chapterBeatKinds,
+    sceneDiversity,
+    summaryLine,
+  };
+}
+
 export function buildQualityDebtBoardResult(input: {
   novelId: string;
   chapters: Array<Required<Pick<QualityDebtChapterRow, "id" | "order">> & QualityDebtChapterRow>;
@@ -287,6 +398,13 @@ export function buildQualityDebtBoardResult(input: {
   /** 可选：将 volumeReplanGate 限制在该序区间（默认对传入 chapters 全集） */
   gateStartOrder?: number | null;
   gateEndOrder?: number | null;
+  /** 可选：品类 framing + 章文本；缺省则 genreBeatSnapshot=null */
+  genreBeat?: {
+    framing?: GenreFramingInput | null;
+    chapters?: GenreBeatChapterLabelSource[] | null;
+    windowSize?: number;
+    diversityWindow?: number;
+  } | null;
 }): QualityDebtBoardResult {
   const items = input.chapters
     .map((chapter) => buildQualityDebtBoardItem(chapter))
@@ -301,10 +419,19 @@ export function buildQualityDebtBoardResult(input: {
   });
   // keep summary aligned with gate counter
   summary.blockingReplanCount = volumeReplanGate.blockingReplanCount;
+  const genreBeatSnapshot = input.genreBeat
+    ? buildGenreBeatBoardSnapshot({
+      framing: input.genreBeat.framing,
+      chapters: input.genreBeat.chapters ?? [],
+      windowSize: input.genreBeat.windowSize,
+      diversityWindow: input.genreBeat.diversityWindow,
+    })
+    : null;
   return {
     novelId: input.novelId,
     items,
     summary,
     volumeReplanGate,
+    genreBeatSnapshot,
   };
 }
