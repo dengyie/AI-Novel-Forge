@@ -22,6 +22,7 @@ import {
   type ChapterTimelineFinalizationService,
   type ChapterTimelineGateResult,
 } from "./ChapterTimelineFinalizationService";
+import { persistChapterQualityScores } from "../quality/chapterQualityScorePersist";
 
 export interface ChapterContentFinalizationAgentRuntime {
   finishChapterGenRun: (runId: string, summary: string, durationMs: number) => Promise<void>;
@@ -154,6 +155,24 @@ export class ChapterContentFinalizationService {
       || timelineCheck.status === "failed"
       || runtimePackage.audit.hasBlockingIssues;
     await this.markChapterStatus(input.chapterId, needsRepair ? "needs_repair" : "pending_review");
+
+    // P2-1：定稿热路径把 acceptance score 拍平到 Chapter 列 + QualityReport。
+    // 失败只告警，不阻断定稿返回（与 fact ledger / timeline 一致）。
+    try {
+      await persistChapterQualityScores({
+        novelId: input.novelId,
+        chapterId: input.chapterId,
+        score: acceptance.score,
+        issues: acceptance.issues,
+        writeReport: true,
+      });
+    } catch (error) {
+      console.warn("[chapter-runtime] chapter quality score persist failed", {
+        novelId: input.novelId,
+        chapterId: input.chapterId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
 
     // 时间线：热路径仍用 deferred gate；定稿后异步必达 + 上章 checkpoint 守卫。
     // 失败只告警，不阻断定稿返回（与 fact ledger 一致）。

@@ -29,25 +29,24 @@ import {
   type AuditContextOperation,
   assembleChapterAuditContextPackage,
 } from "./runtime/repair/chapterAuditContext";
+import { persistChapterQualityScores } from "./quality/chapterQualityScorePersist";
 
+/**
+ * 审校/流水线写 QualityReport，并拍平到 Chapter 可运营分数字段。
+ * 实现集中在 quality/chapterQualityScorePersist，避免 finalize 与 review 循环依赖。
+ */
 export async function createQualityReport(
   novelId: string,
   chapterId: string,
   score: QualityScore,
   issues: ReviewIssue[],
 ) {
-  await prisma.qualityReport.create({
-    data: {
-      novelId,
-      chapterId,
-      coherence: score.coherence,
-      repetition: score.repetition,
-      pacing: score.pacing,
-      voice: score.voice,
-      engagement: score.engagement,
-      overall: score.overall,
-      issues: issues.length > 0 ? JSON.stringify(issues) : null,
-    },
+  await persistChapterQualityScores({
+    novelId,
+    chapterId,
+    score,
+    issues,
+    writeReport: true,
   });
 }
 
