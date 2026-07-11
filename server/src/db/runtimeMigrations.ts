@@ -374,6 +374,10 @@ export async function ensureRuntimeDatabaseReady(): Promise<void> {
   // Desktop + web SQLite both self-migrate so production (pxed) does not depend on
   // hand-run SQL after every schema change. PostgreSQL is a no-op here.
   // Opt out: AI_NOVEL_SKIP_RUNTIME_MIGRATIONS=true
+  //
+  // Legacy production DBs (push/hand-SQL, no _prisma_migrations history) are handled by:
+  // 1) isMigrationAlreadySatisfied → mark finished without re-running SQL
+  // 2) if apply still hits "already exists", mark finished and continue (idempotent bootstrap)
   const skip = process.env.AI_NOVEL_SKIP_RUNTIME_MIGRATIONS === "true"
     || process.env.AI_NOVEL_SKIP_RUNTIME_MIGRATIONS === "1";
   if (skip) {
@@ -400,6 +404,7 @@ export async function ensureRuntimeDatabaseReady(): Promise<void> {
 
   try {
     createMigrationsTable(database);
+    const legacy = hasLegacyApplicationTables(database);
 
     for (const migrationName of listMigrationNames(migrationsDir)) {
       if (isMigrationRecorded(database, migrationName)) {
@@ -410,12 +415,26 @@ export async function ensureRuntimeDatabaseReady(): Promise<void> {
       const migrationSql = fs.readFileSync(migrationFilePath, "utf8");
       const checksum = crypto.createHash("sha256").update(migrationSql).digest("hex");
 
-      if (hasLegacyApplicationTables(database) && isMigrationAlreadySatisfied(database, migrationSql)) {
+      if (legacy && isMigrationAlreadySatisfied(database, migrationSql)) {
         markMigrationFinished(database, migrationName, checksum);
         continue;
       }
 
-      applyMigration(database, migrationsDir, migrationName);
+      try {
+        applyMigration(database, migrationsDir, migrationName);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const alreadyExists = /already exists/i.test(message);
+        // Legacy push DBs: schema objects exist but expectation parser missed them.
+        if (legacy && alreadyExists) {
+          console.warn(
+            `[db] migration ${migrationName} skipped (already exists on legacy DB): ${message}`,
+          );
+          markMigrationFinished(database, migrationName, checksum);
+          continue;
+        }
+        throw error;
+      }
     }
 
     ensureSchemaColumnBackfills(database);
