@@ -46,6 +46,43 @@ test("buildDirectorQualityRepairRisk keeps replan notices blocking", () => {
   assert.equal(risk.affectedChapterCount, 1);
 });
 
+test("buildDirectorQualityRepairRisk treats genre beat shortfall as hard pause not replan", () => {
+  const risk = buildDirectorQualityRepairRisk({
+    noticeCode: "PIPELINE_GENRE_BEAT_SHORTFALL",
+    noticeSummary: "品类主配额未达标，已暂停后续自动成书",
+    payload: JSON.stringify({
+      genreBeatAlertDetails: [
+        "第30章后，前30章品类主配额未达标（养成/关系0/11），已暂停后续自动成书。",
+      ],
+    }),
+    remainingChapterCount: 10,
+    totalChapterCount: 40,
+  });
+
+  assert.equal(risk.riskLevel, "genre_beat_shortfall");
+  assert.equal(risk.autoContinuable, false);
+  assert.equal(risk.noticeCode, "PIPELINE_GENRE_BEAT_SHORTFALL");
+  assert.match(risk.reason, /品类主配额|GENRE_BEAT_PIPELINE_PAUSE/);
+  assert.notEqual(risk.riskLevel, "replan");
+});
+
+test("buildDirectorQualityRepairRisk prefers replan over genre beat shortfall", () => {
+  const risk = buildDirectorQualityRepairRisk({
+    noticeCode: "PIPELINE_GENRE_BEAT_SHORTFALL",
+    noticeSummary: "mixed",
+    payload: JSON.stringify({
+      replanAlertDetails: ["第9章需要重规划"],
+      genreBeatAlertDetails: ["前30章品类主配额未达标"],
+    }),
+    remainingChapterCount: 2,
+    totalChapterCount: 20,
+  });
+
+  assert.equal(risk.riskLevel, "replan");
+  assert.equal(risk.autoContinuable, false);
+  assert.equal(risk.noticeCode, "PIPELINE_REPLAN_REQUIRED");
+});
+
 test("buildDirectorQualityRepairRisk keeps unclassified heavy repair notices manual", () => {
   const risk = buildDirectorQualityRepairRisk({
     noticeSummary: "大范围修复需要确认",

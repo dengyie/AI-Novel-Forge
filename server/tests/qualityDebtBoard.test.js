@@ -299,21 +299,40 @@ test("shouldPauseForGenreBeatShortfall only when complete window fails primary q
     assert.equal(partial.coverage.windowProgress, "in_progress");
     assert.equal(shouldPauseForGenreBeatShortfall(partial), false, "in-progress shortfall must not pause");
 
-    // diversity recommendForce must not alone pause
+    // diversity recommendForce must not alone pause: combat framing + combat texts
+    // → primary quota ok, but near-duplicate texts force recommendForce.
     const diversityOnly = buildGenreBeatBoardSnapshot({
-      framing: { sellingPoint: "战斗热血" },
+      framing: {
+        sellingPoint: "战斗热血对决杀伐高压",
+        competingFeel: "升级打怪爽点战斗",
+        first30ChapterPromise: "前三十章持续战斗对决与热血交手",
+      },
       chapters: Array.from({ length: 30 }, (_, index) => ({
         order: index + 1,
-        title: "同质逃亡",
-        taskSheet: "城门逃亡雨夜追兵压迫再逃亡",
-        summary: "城门逃亡雨夜追兵压迫再逃亡",
+        title: `巷口伏击${index + 1}`,
+        taskSheet: "开场交手，中段追击，结尾突围反杀。",
+        summary: "主角突围并反杀追兵，战斗对决收束。",
       })),
       windowSize: 30,
     });
-    // even if recommendForce true, pause only depends on meetsPrimaryQuota+complete
-    if (diversityOnly.coverage.meetsPrimaryQuota) {
-      assert.equal(shouldPauseForGenreBeatShortfall(diversityOnly), false);
-    }
+    assert.equal(diversityOnly.coverage.windowProgress, "complete");
+    assert.equal(
+      diversityOnly.coverage.meetsPrimaryQuota,
+      true,
+      "combat-primary fixture must meet primary quota so diversity is isolated",
+    );
+    assert.equal(diversityOnly.sceneDiversity.recommendForce, true);
+    assert.equal(
+      shouldPauseForGenreBeatShortfall(diversityOnly),
+      false,
+      "recommendForce alone must never pause pipeline",
+    );
+
+    const reasonWithAnchor = formatGenreBeatShortfallPauseReason(failSnapshot, {
+      lastChapterOrder: 30,
+    });
+    assert.match(reasonWithAnchor, /第30章后/);
+    assert.match(reasonWithAnchor, /品类主配额未达标/);
 
     process.env.GENRE_BEAT_PIPELINE_PAUSE = "0";
     assert.equal(isGenreBeatPipelinePauseEnabled(), false);

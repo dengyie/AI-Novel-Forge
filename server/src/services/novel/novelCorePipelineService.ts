@@ -692,6 +692,7 @@ export class NovelCorePipelineService {
     let totalRetryCount = Math.max(existingJob?.retryCount ?? 0, 0);
     const qualityAlertDetails = [...(persistedPayload.qualityAlertDetails ?? [])];
     const replanAlertDetails = [...(persistedPayload.replanAlertDetails ?? [])];
+    const genreBeatAlertDetails = [...(persistedPayload.genreBeatAlertDetails ?? [])];
     const recoverableRepairDetails = [...(persistedPayload.recoverableRepairDetails ?? [])];
 
     try {
@@ -788,14 +789,35 @@ export class NovelCorePipelineService {
             endOrder: options.endOrder,
           });
 
-        // 品类主配额（前 N 章满窗 shortfall）熔断：启动 seed；窗内章完成后内存刷新 taskSheet/summary。
+        // 品类主配额（前 N 章满窗 shortfall）熔断：启动 seed；窗内章完成后从 DB 重读 title/taskSheet/summary。
         // 未满窗只观测不熔断；sceneDiversity.recommendForce 永不触发本门。
+        // 原因写入 genreBeatAlertDetails（≠ replanAlertDetails），notice=PIPELINE_GENRE_BEAT_SHORTFALL。
         const genreBeatWindowSize = GENRE_BEAT_BOARD_WINDOW_SIZE;
         const genreBeatFraming = {
           sellingPoint: novel.bookSellingPoint ?? null,
           competingFeel: novel.competingFeel ?? null,
           first30ChapterPromise: novel.first30ChapterPromise ?? null,
         };
+        const genreBeatLabelSelect = {
+          id: true,
+          order: true,
+          title: true,
+          taskSheet: true,
+          chapterSummary: { select: { summary: true } },
+        } as const;
+        const mapGenreBeatLabelRow = (row: {
+          id: string;
+          order: number;
+          title: string | null;
+          taskSheet: string | null;
+          chapterSummary: { summary: string | null } | null;
+        }): GenreBeatChapterLabelSource & { id: string } => ({
+          id: row.id,
+          order: row.order,
+          title: row.title,
+          taskSheet: row.taskSheet,
+          summary: row.chapterSummary?.summary ?? null,
+        });
         const genreBeatSeedRows = await prisma.chapter.findMany({
           where: {
             novelId,
@@ -803,25 +825,10 @@ export class NovelCorePipelineService {
           },
           orderBy: { order: "asc" },
           take: genreBeatWindowSize,
-          select: {
-            id: true,
-            order: true,
-            title: true,
-            taskSheet: true,
-            chapterSummary: { select: { summary: true } },
-          },
+          select: genreBeatLabelSelect,
         });
         const genreBeatByChapterId = new Map<string, GenreBeatChapterLabelSource & { id: string }>(
-          genreBeatSeedRows.map((row) => [
-            row.id,
-            {
-              id: row.id,
-              order: row.order,
-              title: row.title,
-              taskSheet: row.taskSheet,
-              summary: row.chapterSummary?.summary ?? null,
-            },
-          ]),
+          genreBeatSeedRows.map((row) => [row.id, mapGenreBeatLabelRow(row)]),
         );
         const evaluateGenreBeatGate = () => {
           const snapshot = buildGenreBeatBoardSnapshot({
@@ -834,6 +841,35 @@ export class NovelCorePipelineService {
             shouldPause: shouldPauseForGenreBeatShortfall(snapshot),
           };
         };
+        const refreshGenreBeatLabelFromDb = async (chapterId: string, chapterOrder: number) => {
+          if (chapterOrder > genreBeatWindowSize) {
+            return;
+          }
+          const row = await prisma.chapter.findUnique({
+            where: { id: chapterId },
+            select: genreBeatLabelSelect,
+          });
+          if (!row) {
+            return;
+          }
+          genreBeatByChapterId.set(row.id, mapGenreBeatLabelRow(row));
+        };
+        const recordGenreBeatPause = (snapshot: ReturnType<typeof buildGenreBeatBoardSnapshot>, lastChapterOrder?: number | null) => {
+          const detail = formatGenreBeatShortfallPauseReason(snapshot, {
+            lastChapterOrder: lastChapterOrder ?? null,
+          });
+          if (!genreBeatAlertDetails.includes(detail)) {
+            genreBeatAlertDetails.push(detail);
+          }
+          logPipelineWarn("品类主配额满窗 shortfall 熔断，停止后续章节流水线", {
+            jobId,
+            order: lastChapterOrder ?? null,
+            windowSize: snapshot.coverage.windowSize,
+            labeledChapterCount: snapshot.coverage.labeledChapterCount,
+            meetsPrimaryQuota: snapshot.coverage.meetsPrimaryQuota,
+            shortfalls: snapshot.coverage.shortfalls,
+          });
+        };
 
         // Phase 3：JIT 预取服务（N+1 章执行预取）
         const prefetchVolumeService = new NovelVolumeService();
@@ -842,6 +878,44 @@ export class NovelCorePipelineService {
             prefetchVolumeService.ensureChapterExecutionContract(nId, cId, opts),
         });
         const isAutopilotMode = runtimePayload.controlPolicy?.advanceMode === "full_book_autopilot";
+
+        // 进环前：窗已 complete 且 primary shortfall 时直接停，避免 startOrder>window 时再白写一章。
+        {
+          const genreGateBeforeLoop = evaluateGenreBeatGate();
+          if (genreGateBeforeLoop.shouldPause) {
+            recordGenreBeatPause(genreGateBeforeLoop.snapshot, null);
+            const finalStatus: "succeeded" = "succeeded";
+            await this.updateJobSafe(jobId, {
+              status: finalStatus,
+              error: null,
+              heartbeatAt: null,
+              currentStage: null,
+              currentItemKey: null,
+              currentItemLabel: null,
+              cancelRequestedAt: null,
+              finishedAt: new Date(),
+              payload: this.stringifyPipelinePayload({
+                ...runtimePayload,
+                qualityAlertDetails,
+                replanAlertDetails,
+                genreBeatAlertDetails,
+                recoverableRepairDetails,
+              }),
+            });
+            logPipelineInfo("任务执行结束", {
+              jobId,
+              status: finalStatus,
+              qualityAlertCount: qualityAlertDetails.length,
+              genreBeatAlertCount: genreBeatAlertDetails.length,
+              stopReason: "genre_beat_shortfall_before_loop",
+            });
+            void novelEventBus.emit({
+              type: "pipeline:completed",
+              payload: { novelId, jobId, status: finalStatus },
+            }).catch(() => {});
+            return;
+          }
+        }
 
         for (let chapterIndex = 0; chapterIndex < chaptersToProcess.length; chapterIndex++) {
           const chapter = chaptersToProcess[chapterIndex];
@@ -1044,16 +1118,8 @@ export class NovelCorePipelineService {
             }
           }
 
-          // 窗内章：刷新品类标注内存（title/taskSheet 可能在本章生成后变化）。
-          if (chapter.order <= genreBeatWindowSize) {
-            genreBeatByChapterId.set(chapter.id, {
-              id: chapter.id,
-              order: chapter.order,
-              title: chapter.title,
-              taskSheet: chapter.taskSheet ?? null,
-              summary: genreBeatByChapterId.get(chapter.id)?.summary ?? null,
-            });
-          }
+          // 窗内章：从 DB 重读 title/taskSheet/summary（禁止用 job 启动时的 chapter 快照覆盖）。
+          await refreshGenreBeatLabelFromDb(chapter.id, chapter.order);
 
           // job 运行范围 replan 质量债熔断：内存计数达阈值则停止后续章（不每章扫库）。
           if (!shouldStopAfterCurrentChapter) {
@@ -1077,22 +1143,12 @@ export class NovelCorePipelineService {
           }
 
           // 品类主配额满窗 shortfall 熔断（与 replan gate / diversity soft-force 解耦）。
+          // 原因进 genreBeatAlertDetails，不进 replanAlertDetails。
           if (!shouldStopAfterCurrentChapter) {
             const genreGate = evaluateGenreBeatGate();
             if (genreGate.shouldPause) {
-              const detail = formatGenreBeatShortfallPauseReason(genreGate.snapshot);
-              if (!replanAlertDetails.includes(detail)) {
-                replanAlertDetails.push(detail);
-              }
+              recordGenreBeatPause(genreGate.snapshot, chapter.order);
               shouldStopAfterCurrentChapter = true;
-              logPipelineWarn("品类主配额满窗 shortfall 熔断，停止后续章节流水线", {
-                jobId,
-                order: chapter.order,
-                windowSize: genreGate.snapshot.coverage.windowSize,
-                labeledChapterCount: genreGate.snapshot.coverage.labeledChapterCount,
-                meetsPrimaryQuota: genreGate.snapshot.coverage.meetsPrimaryQuota,
-                shortfalls: genreGate.snapshot.coverage.shortfalls,
-              });
             }
           }
 
@@ -1121,6 +1177,7 @@ export class NovelCorePipelineService {
               ...runtimePayload,
               qualityAlertDetails,
               replanAlertDetails,
+              genreBeatAlertDetails,
               recoverableRepairDetails,
             }),
           });
@@ -1132,10 +1189,12 @@ export class NovelCorePipelineService {
             retryCount: totalRetryCount,
           });
           if (shouldStopAfterCurrentChapter) {
-            logPipelineWarn("章节触发重规划，已停止后续章节流水线", {
+            logPipelineWarn("章节触发熔断，已停止后续章节流水线", {
               jobId,
               order: chapter.order,
               remaining: Math.max(0, totalCount - completed),
+              replanAlertCount: replanAlertDetails.length,
+              genreBeatAlertCount: genreBeatAlertDetails.length,
             });
             break;
           }
@@ -1166,6 +1225,7 @@ export class NovelCorePipelineService {
             ...runtimePayload,
             qualityAlertDetails,
             replanAlertDetails,
+            genreBeatAlertDetails,
             recoverableRepairDetails,
           }),
         });
@@ -1173,6 +1233,7 @@ export class NovelCorePipelineService {
           jobId,
           status: finalStatus,
           qualityAlertCount: qualityAlertDetails.length,
+          genreBeatAlertCount: genreBeatAlertDetails.length,
         });
         void novelEventBus.emit({
           type: "pipeline:completed",
@@ -1193,6 +1254,7 @@ export class NovelCorePipelineService {
             ...runtimePayload,
             qualityAlertDetails,
             replanAlertDetails,
+            genreBeatAlertDetails,
             recoverableRepairDetails,
           }),
         });
@@ -1225,6 +1287,7 @@ export class NovelCorePipelineService {
           ...runtimePayload,
           qualityAlertDetails,
           replanAlertDetails,
+          genreBeatAlertDetails,
           recoverableRepairDetails,
         }),
       });

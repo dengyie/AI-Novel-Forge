@@ -223,6 +223,8 @@ export interface PipelinePayload extends LLMGenerateOptions {
   artifactSyncMode?: ArtifactSyncMode;
   qualityAlertDetails?: string[];
   replanAlertDetails?: string[];
+  /** 品类主配额满窗 shortfall 熔断明细（≠ replan；见 PIPELINE_GENRE_BEAT_SHORTFALL） */
+  genreBeatAlertDetails?: string[];
   recoverableRepairDetails?: string[];
   backgroundSync?: PipelineBackgroundSyncState;
 }

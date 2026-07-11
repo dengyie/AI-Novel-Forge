@@ -18,7 +18,11 @@ import {
   type DirectorAutoExecutionRange,
 } from "./novelDirectorAutoExecution";
 import { buildDirectorSessionState } from "../runtime/novelDirectorHelpers";
-import { PIPELINE_REPLAN_NOTICE_CODE, parsePipelinePayload } from "../../pipelineJobState";
+import {
+  PIPELINE_GENRE_BEAT_SHORTFALL_NOTICE_CODE,
+  PIPELINE_REPLAN_NOTICE_CODE,
+  parsePipelinePayload,
+} from "../../pipelineJobState";
 import { buildDirectorQualityRepairRisk } from "../phases/novelDirectorQualityRepairRisk";
 
 export type AutoExecutionResumeStage = "chapter" | "pipeline";
@@ -210,6 +214,8 @@ export async function resolveQualityRepairNoticeAction(
   checkpointState: DirectorAutoExecutionState;
   qualityRepairRisk: DirectorQualityRepairRisk;
 }> {
+  // replan → replan_required；品类 shortfall 等其它硬停仍走 chapter_batch_ready + autoContinuable=false，
+  // 避免被 continue/recovery 当成「大纲重规划」路径。
   const checkpointType = input.noticeCode === PIPELINE_REPLAN_NOTICE_CODE
     ? "replan_required"
     : "chapter_batch_ready";
@@ -230,22 +236,29 @@ export async function resolveQualityRepairNoticeAction(
   const isAiDriverExecution = isDirectorAutoExecutionRunMode(input.request.runMode);
   const isFullBookAutopilot = isFullBookAutopilotRunMode(input.request.runMode);
   const hasQualityAlertDetails = (parsePipelinePayload(input.payload).qualityAlertDetails?.length ?? 0) > 0;
+  const isHardPauseNotice = input.noticeCode === PIPELINE_REPLAN_NOTICE_CODE
+    || input.noticeCode === PIPELINE_GENRE_BEAT_SHORTFALL_NOTICE_CODE
+    || qualityRepairRisk.autoContinuable === false;
   const shouldNotifyAndContinueAiDriverQualityNotice = checkpointType === "chapter_batch_ready"
     && qualityRepairRisk.autoContinuable
+    && !isHardPauseNotice
     && isAiDriverExecution
     && hasQualityAlertDetails;
   const canSkipCurrentQualityRepair = Boolean(
     input.skipCurrentQualityRepair
-    && isAiDriverExecution,
+    && isAiDriverExecution
+    && !isHardPauseNotice,
   );
   const canContinueAfterExplicitApproval = Boolean(
     input.approveAutoExecutionScope
     && checkpointType === "chapter_batch_ready"
     && remainingChapterCount > 0
-    && isAiDriverExecution,
+    && isAiDriverExecution
+    && !isHardPauseNotice,
   );
   const canAutoContinueByPolicy = checkpointType === "chapter_batch_ready"
     && remainingChapterCount > 0
+    && !isHardPauseNotice
     && (
       isFullBookAutopilot
       || shouldNotifyAndContinueAiDriverQualityNotice

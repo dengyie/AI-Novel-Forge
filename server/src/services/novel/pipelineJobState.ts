@@ -27,6 +27,8 @@ const PIPELINE_BACKGROUND_ACTIVITY_LABELS: Record<PipelineBackgroundSyncKind, st
 
 export const PIPELINE_QUALITY_NOTICE_CODE = "PIPELINE_QUALITY_REVIEW";
 export const PIPELINE_REPLAN_NOTICE_CODE = "PIPELINE_REPLAN_REQUIRED";
+/** 品类主配额满窗 shortfall 暂停后续成书（≠ 大纲/结构 replan） */
+export const PIPELINE_GENRE_BEAT_SHORTFALL_NOTICE_CODE = "PIPELINE_GENRE_BEAT_SHORTFALL";
 
 export type PipelineActiveStage = (typeof PIPELINE_ACTIVE_STAGES)[number];
 
@@ -245,6 +247,7 @@ export function parsePipelinePayload(payload: string | null | undefined): Pipeli
       controlPolicy: normalizeControlPolicy(parsed.controlPolicy),
       qualityAlertDetails: normalizeStringList(parsed.qualityAlertDetails ?? parsed.failedDetails),
       replanAlertDetails: normalizeStringList(parsed.replanAlertDetails),
+      genreBeatAlertDetails: normalizeStringList(parsed.genreBeatAlertDetails),
       recoverableRepairDetails: normalizeStringList(parsed.recoverableRepairDetails),
       backgroundSync: normalizePipelineBackgroundSync(parsed.backgroundSync),
     };
@@ -256,6 +259,7 @@ export function parsePipelinePayload(payload: string | null | undefined): Pipeli
 export function stringifyPipelinePayload(input: PipelinePayload): string {
   const qualityAlertDetails = normalizeStringList(input.qualityAlertDetails) ?? [];
   const replanAlertDetails = normalizeStringList(input.replanAlertDetails) ?? [];
+  const genreBeatAlertDetails = normalizeStringList(input.genreBeatAlertDetails) ?? [];
   const recoverableRepairDetails = normalizeStringList(input.recoverableRepairDetails) ?? [];
   const backgroundSync = normalizePipelineBackgroundSync(input.backgroundSync);
   return JSON.stringify({
@@ -275,6 +279,7 @@ export function stringifyPipelinePayload(input: PipelinePayload): string {
     ...(input.controlPolicy ? { controlPolicy: normalizeControlPolicy(input.controlPolicy) ?? input.controlPolicy } : {}),
     ...(qualityAlertDetails.length > 0 ? { qualityAlertDetails } : {}),
     ...(replanAlertDetails.length > 0 ? { replanAlertDetails } : {}),
+    ...(genreBeatAlertDetails.length > 0 ? { genreBeatAlertDetails } : {}),
     ...(recoverableRepairDetails.length > 0 ? { recoverableRepairDetails } : {}),
     ...(backgroundSync?.activities?.length ? { backgroundSync } : {}),
   });
@@ -349,13 +354,49 @@ export function getPipelineReplanNotice(details: string[] | undefined): Pipeline
   };
 }
 
+export function getPipelineGenreBeatNotice(details: string[] | undefined): PipelineJobDecorations {
+  const genreBeatAlertDetails = normalizeStringList(details) ?? [];
+  if (genreBeatAlertDetails.length === 0) {
+    return {
+      displayStatus: null,
+      noticeCode: null,
+      noticeSummary: null,
+      qualityAlertDetails: [],
+      recoverableRepairDetails: [],
+      backgroundActivityLabels: [],
+    };
+  }
+  const firstChapterOrder = extractFirstReplanChapterOrder(genreBeatAlertDetails);
+  const summaryPrefix = firstChapterOrder
+    ? `已执行至第 ${firstChapterOrder} 章，品类主配额未达标已暂停`
+    : "品类主配额未达标，已暂停后续自动成书";
+  return {
+    displayStatus: "品类配额熔断暂停",
+    noticeCode: PIPELINE_GENRE_BEAT_SHORTFALL_NOTICE_CODE,
+    noticeSummary: `${summaryPrefix}：${genreBeatAlertDetails.join("; ")}`,
+    qualityAlertDetails: [],
+    recoverableRepairDetails: [],
+    backgroundActivityLabels: [],
+  };
+}
+
+function pickSucceededPipelineNotice(payload: PipelinePayload): PipelineJobDecorations {
+  const replanNotice = getPipelineReplanNotice(payload.replanAlertDetails);
+  if (replanNotice.noticeCode) {
+    return replanNotice;
+  }
+  const genreBeatNotice = getPipelineGenreBeatNotice(payload.genreBeatAlertDetails);
+  if (genreBeatNotice.noticeCode) {
+    return genreBeatNotice;
+  }
+  return getPipelineQualityNotice(payload.qualityAlertDetails, payload.recoverableRepairDetails);
+}
+
 export function decoratePipelineJob<T extends PipelineJobLike>(job: T): DecoratedPipelineJob<T> {
   const payload = parsePipelinePayload(job.payload);
   const qualityNotice = getPipelineQualityNotice(payload.qualityAlertDetails, payload.recoverableRepairDetails);
   const notice = job.status === "succeeded"
-    ? (getPipelineReplanNotice(payload.replanAlertDetails).noticeCode
-      ? getPipelineReplanNotice(payload.replanAlertDetails)
-      : qualityNotice)
+    ? pickSucceededPipelineNotice(payload)
     : qualityNotice.noticeSummary
       ? {
         ...qualityNotice,

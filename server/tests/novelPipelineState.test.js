@@ -273,6 +273,37 @@ test("decoratePipelineJob describes replan notices without completed-range wordi
   assert.doesNotMatch(decorated.noticeSummary, /自动执行完成/);
 });
 
+test("decoratePipelineJob describes genre beat shortfall without replan notice code", () => {
+  const decorated = decoratePipelineJob({
+    id: "job-genre",
+    status: "succeeded",
+    payload: JSON.stringify({
+      genreBeatAlertDetails: [
+        "第30章后，前30章品类主配额未达标（养成/关系0/11），已暂停后续自动成书。",
+      ],
+    }),
+  });
+
+  assert.equal(decorated.noticeCode, "PIPELINE_GENRE_BEAT_SHORTFALL");
+  assert.match(decorated.noticeSummary, /品类主配额未达标/);
+  assert.match(decorated.noticeSummary, /第 30 章/);
+  assert.doesNotMatch(decorated.noticeSummary, /后续需重规划/);
+  assert.notEqual(decorated.noticeCode, "PIPELINE_REPLAN_REQUIRED");
+});
+
+test("decoratePipelineJob prefers replan notice over genre beat shortfall", () => {
+  const decorated = decoratePipelineJob({
+    id: "job-mixed",
+    status: "succeeded",
+    payload: JSON.stringify({
+      replanAlertDetails: ["第9章需要重规划"],
+      genreBeatAlertDetails: ["前30章品类主配额未达标"],
+    }),
+  });
+
+  assert.equal(decorated.noticeCode, "PIPELINE_REPLAN_REQUIRED");
+});
+
 test("executePipeline stops remaining chapters after a replan recommendation", async () => {
   const original = {
     generationFindUnique: prisma.generationJob.findUnique,

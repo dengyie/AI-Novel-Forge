@@ -1,5 +1,6 @@
 import type { DirectorQualityRepairRisk } from "@ai-novel/shared/types/novelDirector";
 import {
+  PIPELINE_GENRE_BEAT_SHORTFALL_NOTICE_CODE,
   PIPELINE_QUALITY_NOTICE_CODE,
   PIPELINE_REPLAN_NOTICE_CODE,
   parsePipelinePayload,
@@ -27,6 +28,9 @@ function buildReason(input: {
 }): string {
   if (input.noticeCode === PIPELINE_REPLAN_NOTICE_CODE) {
     return "质量检查要求先处理重规划，后续章节需要人工确认后再继续。";
+  }
+  if (input.noticeCode === PIPELINE_GENRE_BEAT_SHORTFALL_NOTICE_CODE) {
+    return "前窗品类主配额未达标，已暂停后续自动成书；请调整卖点/前窗 beat 或关闭 GENRE_BEAT_PIPELINE_PAUSE 后再继续。";
   }
   if (input.repairMode === "heavy_repair") {
     return "本次修复属于大范围返工，建议人工确认修复结果后再继续章节执行。";
@@ -57,11 +61,14 @@ export function buildDirectorQualityRepairRisk(
   const noticeCode = input.noticeCode?.trim() || null;
   const repairMode = payload.repairMode ?? null;
   const replanCount = normalizeCount(payload.replanAlertDetails?.length);
+  const genreBeatCount = normalizeCount(payload.genreBeatAlertDetails?.length);
   const qualityCount = normalizeCount(payload.qualityAlertDetails?.length);
   const recoverableRepairCount = normalizeCount(payload.recoverableRepairDetails?.length);
   const affectedChapterCount = noticeCode === PIPELINE_REPLAN_NOTICE_CODE
     ? replanCount
-    : Math.max(qualityCount, recoverableRepairCount);
+    : noticeCode === PIPELINE_GENRE_BEAT_SHORTFALL_NOTICE_CODE
+      ? genreBeatCount
+      : Math.max(qualityCount, recoverableRepairCount);
   const remainingChapterCount = normalizeCount(input.remainingChapterCount);
   const totalChapterCount = Math.max(1, normalizeCount(input.totalChapterCount) || remainingChapterCount || 1);
   const largeScopeThreshold = Math.max(3, Math.ceil(totalChapterCount * 0.25));
@@ -69,6 +76,7 @@ export function buildDirectorQualityRepairRisk(
     || qualityCount > 0
     || recoverableRepairCount > 0;
 
+  // replan 优先于品类 shortfall：结构债必须先处理。
   if (noticeCode === PIPELINE_REPLAN_NOTICE_CODE || replanCount > 0) {
     return {
       riskLevel: "replan",
@@ -82,6 +90,23 @@ export function buildDirectorQualityRepairRisk(
       noticeCode: PIPELINE_REPLAN_NOTICE_CODE,
       repairMode,
       affectedChapterCount: replanCount,
+      remainingChapterCount,
+    };
+  }
+
+  if (noticeCode === PIPELINE_GENRE_BEAT_SHORTFALL_NOTICE_CODE || genreBeatCount > 0) {
+    return {
+      riskLevel: "genre_beat_shortfall",
+      autoContinuable: false,
+      reason: buildReason({
+        noticeCode: PIPELINE_GENRE_BEAT_SHORTFALL_NOTICE_CODE,
+        repairMode,
+        affectedChapterCount: Math.max(genreBeatCount, 1),
+        remainingChapterCount,
+      }),
+      noticeCode: PIPELINE_GENRE_BEAT_SHORTFALL_NOTICE_CODE,
+      repairMode,
+      affectedChapterCount: Math.max(genreBeatCount, 1),
       remainingChapterCount,
     };
   }

@@ -284,7 +284,12 @@ export interface DirectorAutoExecutionState extends DirectorAutoExecutionPlan {
   circuitBreaker?: DirectorCircuitBreakerState | null;
 }
 
-export type DirectorQualityRepairRiskLevel = "low" | "large_scope" | "replan";
+export type DirectorQualityRepairRiskLevel =
+  | "low"
+  | "large_scope"
+  | "replan"
+  /** 品类主配额满窗 shortfall：不可 auto-continue，但非大纲重规划 */
+  | "genre_beat_shortfall";
 
 export interface DirectorQualityRepairRisk {
   riskLevel: DirectorQualityRepairRiskLevel;

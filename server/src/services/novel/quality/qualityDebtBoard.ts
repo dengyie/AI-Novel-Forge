@@ -135,13 +135,20 @@ export function shouldPauseForGenreBeatShortfall(
 
 export function formatGenreBeatShortfallPauseReason(
   snapshot: GenreBeatBoardSnapshot,
+  options?: { lastChapterOrder?: number | null },
 ): string {
   const shortfallText = snapshot.coverage.shortfalls.length > 0
     ? snapshot.coverage.shortfalls
       .map((item) => `${item.labelZh}${item.actual}/${item.expectedMin}`)
       .join("、")
     : "主配额未达标";
-  return `前 ${snapshot.coverage.windowSize} 章品类主配额未达标（${shortfallText}），已暂停后续自动成书。`;
+  const lastOrder = typeof options?.lastChapterOrder === "number"
+    && Number.isFinite(options.lastChapterOrder)
+    && options.lastChapterOrder > 0
+    ? Math.round(options.lastChapterOrder)
+    : null;
+  const anchor = lastOrder != null ? `第${lastOrder}章后，` : "";
+  return `${anchor}前${snapshot.coverage.windowSize}章品类主配额未达标（${shortfallText}），已暂停后续自动成书。`;
 }
 
 export interface QualityDebtBoardResult {
