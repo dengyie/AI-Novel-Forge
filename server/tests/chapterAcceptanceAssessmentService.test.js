@@ -106,3 +106,35 @@ test("normalizeAssessment routes soft-only missing obligations with patchable_ob
   assert.equal(normalized.status, "continue_with_risk");
   assert.equal(normalized.missingObligations[0].kind, "payoff_touch");
 });
+
+test("intentional offscreen character_appearance stays soft and does not hard-block", () => {
+  const normalized = normalizeAssessment(createAssessment({
+    status: "accepted",
+    missingObligations: [{
+      kind: "character_appearance",
+      summary: "配角春桃未出场。",
+      evidence: "正文未出现春桃；该角色他章计划 / offscreen。",
+    }],
+    repairability: "patchable_obligation_gap",
+    decisionReason: "非必须出场角色可延后。",
+  }), "字".repeat(3600), 3000);
+
+  assert.equal(normalized.status, "continue_with_risk");
+  assert.match(normalized.missingObligations[0].summary, /可延后|offscreen/);
+});
+
+test("must_on_page character_appearance is hard and routes to repairable", () => {
+  const normalized = normalizeAssessment(createAssessment({
+    status: "accepted",
+    missingObligations: [{
+      kind: "character_appearance",
+      summary: "林逸（must_on_page；已缺席 3 章，须本场可见）未出场。",
+      evidence: "正文没有林逸的可见行动。",
+    }],
+    repairability: "patchable_obligation_gap",
+    decisionReason: "必须出场角色缺席需补丁。",
+  }), "字".repeat(3600), 3000);
+
+  assert.equal(normalized.status, "repairable");
+  assert.equal(normalized.continuePolicy, "repair_once");
+});

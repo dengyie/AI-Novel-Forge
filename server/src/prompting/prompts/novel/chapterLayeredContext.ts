@@ -41,6 +41,10 @@ import {
   takeUnique,
   toListBlock,
 } from "./chapterLayeredContextShared";
+import {
+  selectMustOnPageAppearanceLabels,
+  selectOffscreenDeferLabels,
+} from "./characterAppearanceObligation";
 import { RUNTIME_PROMPT_BUDGET_PROFILES } from "./promptBudgetProfiles";
 import { timelinePromptAdapter } from "../../../modules/timeline/timeline-prompt-adapter";
 
@@ -336,22 +340,17 @@ function buildChapterExecutionObligationContract(input: {
     requiredPayoffTouches: uniqueStrings(input.payoffDirectives.map((item) => (
       `${item.operation}: ${item.title}`
     ))),
-    requiredCharacterAppearances: uniqueStrings(input.characterBehaviorGuides
-      .filter((guide) => (
-        guide.shouldPreferAppearance
-        || guide.plannedChapterOrders.includes(input.chapterOrder)
-      ))
-      .map((guide) => {
-        if (guide.absenceRisk === "high" && guide.absenceSpan > 0) {
-          return `${guide.name}（已缺席 ${guide.absenceSpan} 章，宜自然带出）`;
-        }
-        return guide.name;
-      })),
+    requiredCharacterAppearances: uniqueStrings(
+      selectMustOnPageAppearanceLabels(input.characterBehaviorGuides, input.chapterOrder),
+    ),
     requiredGoalChanges: uniqueStrings([
       ...(input.chapterStateGoal?.targetRelationships ?? []),
       ...(input.chapterStateGoal?.targetConflicts ?? []),
     ]),
-    canDefer: uniqueStrings(input.ledgerPendingItems.map((item) => item.title)),
+    canDefer: uniqueStrings([
+      ...input.ledgerPendingItems.map((item) => item.title),
+      ...selectOffscreenDeferLabels(input.characterBehaviorGuides, input.chapterOrder),
+    ]),
     forbiddenCrossings: uniqueStrings([
       ...input.protectedSecrets,
       ...(input.chapterBoundary?.doNotCross ?? []),

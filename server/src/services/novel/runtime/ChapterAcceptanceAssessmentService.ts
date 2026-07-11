@@ -15,6 +15,7 @@ import {
 } from "../../../prompting/prompts/novel/chapterAcceptance.prompts";
 import { openConflictService } from "../../state/OpenConflictService";
 import { normalizeScore, ruleScore } from "../novelP0Utils";
+import { isSoftOffscreenCharacterAppearanceMissing } from "../../../prompting/prompts/novel/characterAppearanceObligation";
 
 export interface ChapterAcceptanceAssessmentInput {
   novelId: string;
@@ -90,8 +91,19 @@ function missingObligationToReviewIssue(obligation: ChapterExecutionMissingOblig
     : obligation.kind === "forbidden_crossing"
       ? "coherence"
       : "pacing";
+  const softOffscreen = isSoftOffscreenCharacterAppearanceMissing(obligation);
+  const severity: ReviewIssue["severity"] = obligation.kind === "forbidden_crossing"
+    ? "high"
+    : softOffscreen
+      ? "low"
+      : obligation.kind === "character_appearance"
+        && /must_on_page|必须出场|连续缺席|已缺席\s*\d+\s*章/.test(
+          `${obligation.summary ?? ""}\n${obligation.evidence ?? ""}`,
+        )
+        ? "high"
+        : "medium";
   return {
-    severity: obligation.kind === "forbidden_crossing" ? "high" : "medium",
+    severity,
     category,
     evidence: obligation.evidence?.trim() || obligation.summary,
     fixSuggestion: obligation.summary,
@@ -122,7 +134,19 @@ function isLengthDirective(directive: AcceptanceRepairDirective): boolean {
 }
 
 function isHardMissingObligation(obligation: ChapterExecutionMissingObligation): boolean {
-  return obligation.kind === "must_hit_now" || obligation.kind === "forbidden_crossing";
+  if (obligation.kind === "must_hit_now" || obligation.kind === "forbidden_crossing") {
+    return true;
+  }
+  // must_on_page 连续缺席 / 本章计划出场：升 patch 硬义务；故意 offscreen 不硬阻断。
+  if (obligation.kind === "character_appearance") {
+    if (isSoftOffscreenCharacterAppearanceMissing(obligation)) {
+      return false;
+    }
+    return /must_on_page|必须出场|连续缺席|已缺席\s*\d+\s*章/.test(
+      `${obligation.summary ?? ""}\n${obligation.evidence ?? ""}`,
+    );
+  }
+  return false;
 }
 
 function shouldDropLengthIssue(input: {
@@ -174,7 +198,18 @@ export function normalizeAssessment(
 ): ChapterAcceptanceAssessmentOutput {
   const reconciled = reconcileLengthAssessment(output, content, targetWordCount);
   const score = normalizeScore(reconciled.score ?? ruleScore(content));
-  const missingObligations = reconciled.missingObligations ?? [];
+  // 故意 offscreen 的 character_appearance 保留在 missing 列表供审计，但不抬升 hard repair。
+  const missingObligations = (reconciled.missingObligations ?? []).map((obligation) => {
+    if (!isSoftOffscreenCharacterAppearanceMissing(obligation)) {
+      return obligation;
+    }
+    return {
+      ...obligation,
+      summary: obligation.summary?.includes("offscreen") || obligation.summary?.includes("可延后")
+        ? obligation.summary
+        : `${obligation.summary}（可延后出场/offscreen，不记硬缺席）`,
+    };
+  });
   const hasHighRisk = reconciled.blockingIssues.some((issue) => issue.severity === "high" || issue.severity === "critical");
   const hasHardMissingObligation = missingObligations.some(isHardMissingObligation);
   const hasSoftOnlyMissingObligations = missingObligations.length > 0 && !hasHardMissingObligation;
