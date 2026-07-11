@@ -22,6 +22,8 @@ export interface ChapterGraphLLMOptions {
   model?: string;
   temperature?: number;
   taskType?: TaskType;
+  /** 导演 / pipeline 取消穿透：中断 LLM 流，避免取消后继续定稿发布 */
+  signal?: AbortSignal;
 }
 
 export interface ChapterGraphGenerateOptions extends ChapterGraphLLMOptions {
@@ -231,6 +233,7 @@ export class ChapterWritingGraph {
         chapterId: input.chapter.id,
         stage: "writer_extend",
         triggerReason: "length_recovery",
+        signal: input.options.signal,
       },
     });
     const appended = completion.output.trim();
@@ -310,12 +313,20 @@ export class ChapterWritingGraph {
         chapterId: input.chapter.id,
         stage: "writer_draft",
         triggerReason: "chapter_initial_draft",
+        signal: input.options.signal,
       },
     });
 
     return {
       stream: streamed.stream as AsyncIterable<BaseMessageChunk>,
       onDone: async (fullContent: string) => {
+        // 已取消：禁止 onDone 路径继续定稿/落库（避免 partial final publish）
+        if (input.options.signal?.aborted) {
+          const reason = input.options.signal.reason;
+          throw reason instanceof Error
+            ? reason
+            : new Error("章节生成已取消，跳过正文定稿。");
+        }
         const completed = await streamed.complete.catch(() => null);
         const rawContent = completed?.output ?? fullContent;
         const normalized = await this.continuityNode(

@@ -50,6 +50,7 @@ export class DirectorWorker {
    */
   stop(): void {
     this.stopped = true;
+    this.queue.stopStaleLeaseScanner();
     taskDispatcher.notify();
   }
 
@@ -74,11 +75,18 @@ export class DirectorWorker {
       `[director.worker] started workerId=${this.queue.workerId} slots=${this.queue.executionSlots} pollMs=${this.queue.pollMs} leaseMs=${this.queue.leaseMs}`,
     );
 
+    // stale lease 后台扫描：与 lease 热路径解耦
+    this.queue.startStaleLeaseScanner();
+
     const runners = Array.from({ length: this.queue.executionSlots }, (_, i) =>
       this.runSlot(`slot-${i + 1}`),
     );
     this.runnersDone = Promise.all(runners).then(() => undefined);
-    await this.runnersDone;
+    try {
+      await this.runnersDone;
+    } finally {
+      this.queue.stopStaleLeaseScanner();
+    }
   }
 
   private async runSlot(slotId: string): Promise<void> {

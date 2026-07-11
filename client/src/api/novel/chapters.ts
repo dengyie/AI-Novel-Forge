@@ -69,8 +69,16 @@ export async function updateNovelChapter(
     pacingScore: number;
     riskFlags: string;
   }>,
+  config?: {
+    /** 交给 axios 拦截器：这些状态码不自动 toast（由调用方自定义 UX） */
+    silentErrorStatuses?: number[];
+  },
 ) {
-  const { data } = await apiClient.put<ApiResponse<Chapter>>(`/novels/${id}/chapters/${chapterId}`, payload);
+  const { data } = await apiClient.put<ApiResponse<Chapter>>(
+    `/novels/${id}/chapters/${chapterId}`,
+    payload,
+    config,
+  );
   return data;
 }
 

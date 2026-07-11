@@ -32,6 +32,8 @@ export interface PipelineRuntimeInput extends ChapterRuntimeRequestInput {
   auditMode?: "light" | "full" | "repair_only";
   qualityThreshold?: number;
   repairMode?: "detect_only" | "light_repair" | "heavy_repair" | "continuity_only" | "character_only" | "ending_only";
+  /** 取消穿透到 LLM stream；与 onCheckCancelled 互补（轮询间隙 vs 流内中断） */
+  signal?: AbortSignal;
 }
 
 /**
@@ -106,6 +108,7 @@ interface RunPipelineChapterDeps {
     chapterId: string;
     request: ChapterRuntimeRequestInput;
     assembled: AssembledRuntimeChapter;
+    signal?: AbortSignal;
   }) => Promise<{
     content: string;
     lengthControl?: ChapterRuntimePackage["lengthControl"];
@@ -169,6 +172,7 @@ export async function runPipelineChapterWithRuntime(
     qualityThreshold = 75,
     repairMode = "light_repair",
     artifactSyncMode = "adaptive",
+    signal: cancelSignal,
     ...requestInput
   } = options;
   const effectiveMaxRetries = Math.max(0, Math.min(maxRetries, 1));
@@ -201,6 +205,7 @@ export async function runPipelineChapterWithRuntime(
         request,
         assembled,
         hooks,
+        signal: cancelSignal,
       });
       content = generatedDraft.content;
       latestLengthControl = generatedDraft.lengthControl;
@@ -372,6 +377,7 @@ async function generateNonEmptyDraftFromWriter(input: {
   request: ChapterRuntimeRequestInput;
   assembled: AssembledRuntimeChapter;
   hooks: PipelineRuntimeHooks;
+  signal?: AbortSignal;
 }): Promise<{
   content: string;
   lengthControl?: ChapterRuntimePackage["lengthControl"];
@@ -387,6 +393,7 @@ async function generateNonEmptyDraftFromWriter(input: {
         chapterId: input.chapterId,
         request: input.request,
         assembled: input.assembled,
+        signal: input.signal,
       });
       const content = assertChapterContentNotEmpty(generatedDraft.content, {
         novelId: input.novelId,

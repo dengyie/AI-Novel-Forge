@@ -780,20 +780,15 @@ export class DirectorCommandService {
     allowTerminalReuse?: boolean;
     preserveLastError?: boolean;
   }): Promise<DirectorCommandAcceptedResponse> {
-    let row = await this.workflowService.getTaskById(input.taskId);
+    const row = await this.workflowService.getTaskById(input.taskId);
     if (!row) {
       throw new AppError("Task not found.", 404);
     }
     if (row.lane !== "auto_director") {
       throw new AppError("Only auto director workflow tasks can be queued as director commands.", 400);
     }
-    const recoveredStaleLeaseCount = await this.recoverStaleLeases(new Date(), { taskId: input.taskId });
-    if (recoveredStaleLeaseCount > 0) {
-      row = await this.workflowService.getTaskById(input.taskId);
-      if (!row) {
-        throw new AppError("Task not found.", 404);
-      }
-    }
+    // stale lease recovery 已迁到 DirectorTaskQueue 后台节流扫描，
+    // 不再在每次 enqueue 热路径同步扫库（避免命令风暴时放大延迟）。
     const reusableCommand = await prisma.directorRunCommand.findFirst({
       where: {
         taskId: input.taskId,

@@ -818,6 +818,7 @@ export class NovelCorePipelineService {
             hasDraft: Boolean((chapter.content ?? "").trim()),
           });
 
+          const chapterAbort = new AbortController();
           const heartbeatTimer = setInterval(() => {
             void this.updateJobSafe(jobId, {
               heartbeatAt: new Date(),
@@ -830,6 +831,14 @@ export class NovelCorePipelineService {
                 totalCount,
                 stage: activeStage,
               }),
+            });
+            // 心跳间隙轮询取消：触发 AbortSignal 穿透到 LLM stream
+            void this.ensurePipelineNotCancelled(jobId).catch((error) => {
+              if (!chapterAbort.signal.aborted) {
+                chapterAbort.abort(
+                  error instanceof Error ? error : new Error("PIPELINE_CANCELLED"),
+                );
+              }
             });
           }, PIPELINE_HEARTBEAT_INTERVAL_MS);
           heartbeatTimer.unref?.();
@@ -849,6 +858,7 @@ export class NovelCorePipelineService {
               qualityThreshold,
               repairMode: runtimePayload.repairMode,
               artifactSyncMode: runtimePayload.artifactSyncMode,
+              signal: chapterAbort.signal,
             },
             {
               onCheckCancelled: () => this.ensurePipelineNotCancelled(jobId),

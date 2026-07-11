@@ -53,6 +53,7 @@ import {
   buildSceneDiversityForceDirective,
   GENRE_BEAT_SCENE_DIVERSITY_WINDOW,
 } from "@ai-novel/shared/types/genreBeatQuota";
+import { timelineContextService } from "../../../modules/timeline";
 
 export { buildBlockingPendingReviewProposalWhere } from "./context/pendingReviewContext";
 
@@ -281,6 +282,7 @@ export class GenerationContextAssembler {
       styleContext,
       payoffLedger,
       characterResourceContext,
+      timelineContext,
     ] = await Promise.all([
       this.worldContextGateway.getWorldContextBlock(novelId, { purpose: "chapter" }),
       pendingReviewProposalCountPromise,
@@ -356,6 +358,21 @@ export class GenerationContextAssembler {
         chapterOrder: chapter.order,
         ...(resourceCharacterIds.length > 0 ? { characterIds: resourceCharacterIds } : {}),
       }).catch(() => null),
+      // 写作路径重新注入 timelineContext：writer prompt 仍 required timeline_context，
+      // quality gate 在 null 时只能降级 warning，无法做完整时间线检测。
+      timelineContextService.buildForChapter({
+        novelId,
+        chapterId,
+        chapterIndex: chapter.order,
+      }).catch((error) => {
+        console.warn("[context-assembler] timelineContext build failed; writing with empty timeline fallback", {
+          novelId,
+          chapterId,
+          chapterOrder: chapter.order,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return null;
+      }),
     ]);
 
     const resolvedStateDrivenContext = await contextAssemblyService.build({
@@ -368,9 +385,6 @@ export class GenerationContextAssembler {
       openAuditIssueCount: openAuditIssues.length,
       hasRepairableDraft: Boolean(chapter.content?.trim()),
     });
-    // Phase 2 缺陷5：timelineContext 在写作路径已不消费（PR-B 已移除），
-    // 停止每章构建，将 timelineContext 置 null。ChapterQualityGateService
-    // 对 null 有防御处理（直接跳过 timeline 检查）。
     const canonicalState = resolvedStateDrivenContext.snapshot;
 
     const canonicalLedger = buildRuntimeLedgerFromCanonical(canonicalState);
@@ -577,8 +591,7 @@ export class GenerationContextAssembler {
       ledgerUrgentItems: canonicalLedger.ledgerUrgentItems,
       ledgerOverdueItems: canonicalLedger.ledgerOverdueItems,
       ledgerSummary: canonicalLedger.ledgerSummary,
-      // Phase 2 缺陷5：timelineContext 停止构建，写作路径已不消费
-      timelineContext: null,
+      timelineContext,
       characterResourceContext,
       contextGatingDecisions: [] as GenerationContextPackage["contextGatingDecisions"],
       chapterChangeFlags: {

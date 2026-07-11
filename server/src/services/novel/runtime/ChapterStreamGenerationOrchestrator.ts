@@ -76,12 +76,23 @@ export class ChapterStreamGenerationOrchestrator {
       novelTitle: assembled.novel.title,
       chapter: assembled.chapter,
       contextPackage: assembled.contextPackage,
-      options: request,
+      options: {
+        ...request,
+        // ChapterRuntimeRequestInput 当前无 signal 字段；预留透传位给未来扩展
+        signal: (options as { signal?: AbortSignal }).signal,
+      },
     });
 
     return {
       stream: writerResult.stream,
       onDone: async (fullContent: string, helpers: StreamDoneHelpers) => {
+        const cancelSignal = (options as { signal?: AbortSignal }).signal;
+        if (cancelSignal?.aborted) {
+          const reason = cancelSignal.reason;
+          throw reason instanceof Error
+            ? reason
+            : new Error("章节生成已取消，跳过正文定稿。");
+        }
         const runStatusId = traceRunId ?? `chapter-runtime:${chapterId}`;
         this.emitRunStatus(helpers, {
           type: "run_status",
@@ -191,12 +202,19 @@ export class ChapterStreamGenerationOrchestrator {
     chapterId: string;
     request: ChapterRuntimeRequestInput;
     assembled: AssembledRuntimeChapter;
+    signal?: AbortSignal;
   }): Promise<{
     content: string;
     lengthControl?: ChapterRuntimePackage["lengthControl"];
     artifactsAlreadySynced?: boolean;
     backgroundSyncDeferred?: boolean;
   }> {
+    if (input.signal?.aborted) {
+      const reason = input.signal.reason;
+      throw reason instanceof Error
+        ? reason
+        : new Error("章节生成已取消。");
+    }
     const writerResult = await this.deps.chapterWritingGraph.createChapterStream({
       novelId: input.novelId,
       novelTitle: input.assembled.novel.title,
@@ -205,11 +223,18 @@ export class ChapterStreamGenerationOrchestrator {
       options: {
         ...input.request,
         deferArtifactBackgroundSync: true,
+        signal: input.signal,
       },
     });
 
     let fullContent = "";
     for await (const chunk of writerResult.stream) {
+      if (input.signal?.aborted) {
+        const reason = input.signal.reason;
+        throw reason instanceof Error
+          ? reason
+          : new Error("章节生成已取消。");
+      }
       fullContent += toText(chunk.content);
     }
     const normalized = await writerResult.onDone(fullContent);
@@ -311,6 +336,7 @@ export class ChapterStreamGenerationOrchestrator {
         chapterId: input.chapterId,
         request: input.request,
         assembled: input.assembled,
+        signal: (input.request as { signal?: AbortSignal }).signal,
       });
       return {
         finalContent: retryDraft.content,

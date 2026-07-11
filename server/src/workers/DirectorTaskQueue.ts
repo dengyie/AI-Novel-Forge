@@ -72,6 +72,8 @@ export class DirectorTaskQueue {
   private readonly gates = new Map<string, ResourceGate>();
   private readonly commandService: DirectorCommandService;
   private lastStaleScan = 0;
+  private staleScanTimer: NodeJS.Timeout | null = null;
+  private staleScanInFlight = false;
 
   constructor(
     options: DirectorTaskQueueOptions = {},
@@ -87,8 +89,33 @@ export class DirectorTaskQueue {
     this.commandService = commandService;
   }
 
+  /**
+   * 启动后台 stale-lease 扫描。leaseNext / enqueue 热路径不再同步扫库。
+   * 幂等：重复 start 不会开多个 timer。
+   */
+  startStaleLeaseScanner(): void {
+    if (this.staleScanTimer) {
+      return;
+    }
+    // 启动时先扫一次，避免冷启动后 stale lease 要等一个完整周期
+    void this.scanStaleLeasesInBackground();
+    this.staleScanTimer = setInterval(() => {
+      void this.scanStaleLeasesInBackground();
+    }, this.staleScanMs);
+    this.staleScanTimer.unref?.();
+  }
+
+  stopStaleLeaseScanner(): void {
+    if (!this.staleScanTimer) {
+      return;
+    }
+    clearInterval(this.staleScanTimer);
+    this.staleScanTimer = null;
+  }
+
   async leaseNext(slotId: string): Promise<LeasedTask | null> {
-    await this.maybeScanStale();
+    // stale lease recovery 已迁到 startStaleLeaseScanner 后台节流，
+    // lease 热路径只做 claim，避免每个 slot 轮询都扫库。
     const now = new Date();
     const leaseOwner = `${this.workerId}:${slotId}`;
     const leaseExpiresAt = new Date(now.getTime() + this.leaseMs);
@@ -174,15 +201,24 @@ export class DirectorTaskQueue {
     await taskDispatcher.waitForSignal(this.pollMs);
   }
 
-  private async maybeScanStale(): Promise<void> {
-    const now = Date.now();
-    if (now - this.lastStaleScan < this.staleScanMs) {
+  private async scanStaleLeasesInBackground(): Promise<void> {
+    if (this.staleScanInFlight) {
       return;
     }
-    this.lastStaleScan = now;
-    const recovered = await this.commandService.recoverStaleLeases(new Date());
-    if (recovered > 0) {
-      taskDispatcher.notify();
+    this.staleScanInFlight = true;
+    try {
+      this.lastStaleScan = Date.now();
+      const recovered = await this.commandService.recoverStaleLeases(new Date());
+      if (recovered > 0) {
+        taskDispatcher.notify();
+      }
+    } catch (error) {
+      console.warn(
+        "[task-queue] background stale lease scan failed",
+        error instanceof Error ? error.message : String(error),
+      );
+    } finally {
+      this.staleScanInFlight = false;
     }
   }
 }
