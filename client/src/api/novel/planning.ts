@@ -181,6 +181,51 @@ export async function getNovelQualityReport(id: string) {
   return data;
 }
 
+/** 质量债板：qualityLoop 聚合 + 运行范围/全书 replan 熔断信号 */
+export async function getNovelQualityDebt(id: string) {
+  const { data } = await apiClient.get<
+    ApiResponse<{
+      novelId: string;
+      items: Array<{
+        chapterId: string;
+        chapterOrder: number;
+        title: string | null;
+        generationState: string | null;
+        chapterStatus: string | null;
+        overallStatus: string | null;
+        recommendedAction: string | null;
+        rootCauseCode: string | null;
+        terminalAction: string | null;
+        riskClassification: "none" | "blocking" | "non_blocking_quality_debt";
+        evaluatedAt: string | null;
+        pauseReason: string | null;
+      }>;
+      summary: {
+        totalWithQualityLoop: number;
+        invalidCount: number;
+        riskCount: number;
+        validCount: number;
+        patchRepairCount: number;
+        replanCount: number;
+        manualGateCount: number;
+        blockingCount: number;
+        nonBlockingDebtCount: number;
+        blockingReplanCount: number;
+      };
+      volumeReplanGate: {
+        threshold: number;
+        blockingReplanCount: number;
+        shouldPause: boolean;
+        reason: string | null;
+        scope: "range" | "board";
+        startOrder: number | null;
+        endOrder: number | null;
+      };
+    }>
+  >(`/novels/${id}/quality-debt`);
+  return data;
+}
+
 export async function generateChapterHook(
   id: string,
   payload?: {

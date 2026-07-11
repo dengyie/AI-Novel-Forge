@@ -16,6 +16,7 @@ export const queryKeys = {
     chapterTraces: (novelId: string, chapterId: string) => ["novels", "chapter-traces", novelId, chapterId] as const,
     pipelineJob: (id: string, jobId: string) => ["novels", "pipeline", id, jobId] as const,
     qualityReport: (id: string) => ["novels", "quality-report", id] as const,
+    qualityDebt: (id: string) => ["novels", "quality-debt", id] as const,
     state: (id: string) => ["novels", "state", id] as const,
     latestStateSnapshot: (id: string) => ["novels", "state-snapshots", id, "latest"] as const,
     payoffLedger: (id: string, chapterOrder?: number) => ["novels", "payoff-ledger", id, chapterOrder ?? "latest"] as const,

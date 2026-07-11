@@ -44,6 +44,7 @@ import {
   getNovelPipelineJob,
   getNovelVolumeWorkspace,
   getNovelQualityReport,
+  getNovelQualityDebt,
   replanNovel,
 } from "@/api/novel";
 import { flattenStoryModeTreeOptions, getStoryModeTree } from "@/api/storyMode";
@@ -356,6 +357,11 @@ export default function NovelEdit() {
   const qualityReportQuery = useQuery({
     queryKey: queryKeys.novels.qualityReport(id),
     queryFn: () => getNovelQualityReport(id),
+    enabled: Boolean(id && shouldLoadQualityReport),
+  });
+  const qualityDebtQuery = useQuery({
+    queryKey: queryKeys.novels.qualityDebt(id),
+    queryFn: () => getNovelQualityDebt(id),
     enabled: Boolean(id && shouldLoadQualityReport),
   });
   const volumeWorkspaceQuery = useQuery({
@@ -1000,6 +1006,7 @@ export default function NovelEdit() {
     if (targetTabs.has("pipeline")) {
       invalidations.push(
         queryClient.invalidateQueries({ queryKey: queryKeys.novels.qualityReport(id) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.novels.qualityDebt(id) }),
         queryClient.invalidateQueries({ queryKey: queryKeys.novels.latestStateSnapshot(id) }),
         queryClient.invalidateQueries({ queryKey: queryKeys.novels.payoffLedger(id, payoffLedgerChapterOrder) }),
         queryClient.invalidateQueries({ queryKey: queryKeys.novels.characterResources(id) }),
@@ -2052,6 +2059,7 @@ export default function NovelEdit() {
     await queryClient.invalidateQueries({ queryKey: queryKeys.novels.detail(id) });
     await queryClient.invalidateQueries({ queryKey: queryKeys.novels.volumeWorkspace(id) });
     await queryClient.invalidateQueries({ queryKey: queryKeys.novels.qualityReport(id) });
+    await queryClient.invalidateQueries({ queryKey: queryKeys.novels.qualityDebt(id) });
     await queryClient.invalidateQueries({ queryKey: queryKeys.novels.latestStateSnapshot(id) });
     await queryClient.invalidateQueries({ queryKey: ["novels", "payoff-ledger", id] });
     await queryClient.invalidateQueries({ queryKey: queryKeys.novels.worldSlice(id) });
@@ -2539,7 +2547,7 @@ export default function NovelEdit() {
     onAbortStream: handleAbortChapterStream,
     directorTakeoverEntry: undefined,
   };
-  const pipelineTab = { novelId: id, worldInjectionSummary, hasCharacters, onGoToCharacterTab: goToCharacterTab, pipelineForm, onPipelineFormChange: (field: "startOrder" | "endOrder" | "maxRetries" | "runMode" | "autoReview" | "autoRepair" | "skipCompleted" | "qualityThreshold" | "repairMode", value: number | boolean | string) => setPipelineForm((prev) => ({ ...prev, [field]: value } as typeof prev)), maxOrder, onGenerateBible: () => void bibleSSE.start(`/novels/${id}/bible/generate`, { provider: llm.provider, model: llm.model, temperature: 0.6 }), onAbortBible: bibleSSE.abort, isBibleStreaming: bibleSSE.isStreaming, bibleStreamContent: bibleSSE.content, onGenerateBeats: () => void beatsSSE.start(`/novels/${id}/beats/generate`, { provider: llm.provider, model: llm.model, targetChapters: pipelineForm.endOrder }), onAbortBeats: beatsSSE.abort, isBeatsStreaming: beatsSSE.isStreaming, beatsStreamContent: beatsSSE.content, onRunPipeline: (patch?: Partial<typeof pipelineForm>) => runPipelineMutation.mutate(patch), isRunningPipeline: runPipelineMutation.isPending, pipelineMessage, pipelineJob: pipelineJobQuery.data?.data, chapters, selectedChapterId, onSelectedChapterChange: setSelectedChapterId, onReviewChapter: () => reviewMutation.mutate(), isReviewing: reviewMutation.isPending, onRepairChapter: () => { setRepairBeforeContent(selectedChapter?.content ?? ""); setRepairAfterContent(""); setActiveRepairStream(selectedChapter ? { chapterId: selectedChapter.id, chapterLabel: `第${selectedChapter.order}章 ${selectedChapter.title || "未命名章节"}` } : null); void repairSSE.start(`/novels/${id}/chapters/${selectedChapterId}/repair`, { provider: llm.provider, model: llm.model, reviewIssues: reviewResult?.issues ?? [], auditIssueIds: openAuditIssueIds }); }, isRepairing: repairSSE.isStreaming, onGenerateHook: () => hookMutation.mutate(), isGeneratingHook: hookMutation.isPending, reviewResult, repairBeforeContent, repairAfterContent, repairStreamContent: repairSSE.content, isRepairStreaming: repairSSE.isStreaming, onAbortRepair: handleAbortRepair, qualitySummary, chapterReports: qualityReportQuery.data?.data?.chapterReports ?? [], bible, plotBeats };
+  const pipelineTab = { novelId: id, worldInjectionSummary, hasCharacters, onGoToCharacterTab: goToCharacterTab, pipelineForm, onPipelineFormChange: (field: "startOrder" | "endOrder" | "maxRetries" | "runMode" | "autoReview" | "autoRepair" | "skipCompleted" | "qualityThreshold" | "repairMode", value: number | boolean | string) => setPipelineForm((prev) => ({ ...prev, [field]: value } as typeof prev)), maxOrder, onGenerateBible: () => void bibleSSE.start(`/novels/${id}/bible/generate`, { provider: llm.provider, model: llm.model, temperature: 0.6 }), onAbortBible: bibleSSE.abort, isBibleStreaming: bibleSSE.isStreaming, bibleStreamContent: bibleSSE.content, onGenerateBeats: () => void beatsSSE.start(`/novels/${id}/beats/generate`, { provider: llm.provider, model: llm.model, targetChapters: pipelineForm.endOrder }), onAbortBeats: beatsSSE.abort, isBeatsStreaming: beatsSSE.isStreaming, beatsStreamContent: beatsSSE.content, onRunPipeline: (patch?: Partial<typeof pipelineForm>) => runPipelineMutation.mutate(patch), isRunningPipeline: runPipelineMutation.isPending, pipelineMessage, pipelineJob: pipelineJobQuery.data?.data, chapters, selectedChapterId, onSelectedChapterChange: setSelectedChapterId, onReviewChapter: () => reviewMutation.mutate(), isReviewing: reviewMutation.isPending, onRepairChapter: () => { setRepairBeforeContent(selectedChapter?.content ?? ""); setRepairAfterContent(""); setActiveRepairStream(selectedChapter ? { chapterId: selectedChapter.id, chapterLabel: `第${selectedChapter.order}章 ${selectedChapter.title || "未命名章节"}` } : null); void repairSSE.start(`/novels/${id}/chapters/${selectedChapterId}/repair`, { provider: llm.provider, model: llm.model, reviewIssues: reviewResult?.issues ?? [], auditIssueIds: openAuditIssueIds }); }, isRepairing: repairSSE.isStreaming, onGenerateHook: () => hookMutation.mutate(), isGeneratingHook: hookMutation.isPending, reviewResult, repairBeforeContent, repairAfterContent, repairStreamContent: repairSSE.content, isRepairStreaming: repairSSE.isStreaming, onAbortRepair: handleAbortRepair, qualitySummary, chapterReports: qualityReportQuery.data?.data?.chapterReports ?? [], qualityDebtBoard: qualityDebtQuery.data?.data ?? null, bible, plotBeats };
   const characterTab = {
     novelId: id,
     llmProvider: llm.provider,

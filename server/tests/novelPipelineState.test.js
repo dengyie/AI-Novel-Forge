@@ -115,7 +115,7 @@ test("executePipeline skips chapters already marked for deferred continue when s
   };
 
   const updates = [];
-  let capturedChapterQuery = null;
+  let capturedSkipCompletedQuery = null;
   prisma.generationJob.findUnique = async (input) => {
     if (input.select?.startedAt) {
       return {
@@ -153,7 +153,14 @@ test("executePipeline skips chapters already marked for deferred continue when s
     title: "测试小说",
   });
   prisma.chapter.findMany = async (input) => {
-    capturedChapterQuery = input;
+    // quality-debt 熔断会再查 riskFlags/order；只捕获 skipCompleted 章节加载查询
+    const selectKeys = input.select ? Object.keys(input.select).sort().join(",") : "";
+    if (selectKeys === "order,riskFlags") {
+      return [];
+    }
+    if (input.where?.NOT?.AND) {
+      capturedSkipCompletedQuery = input;
+    }
     return [
       { id: "chapter-terminal", order: 4, title: "第四章", content: "正文", chapterStatus: "pending_review" },
     ];
@@ -192,7 +199,8 @@ test("executePipeline skips chapters already marked for deferred continue when s
       maxRetries: 5,
     });
 
-    const skipConditions = capturedChapterQuery.where.NOT.AND[2].OR;
+    assert.ok(capturedSkipCompletedQuery, "expected skipCompleted chapter load query");
+    const skipConditions = capturedSkipCompletedQuery.where.NOT.AND[2].OR;
     const terminalContinueCondition = skipConditions.find((condition) => Array.isArray(condition.AND));
     assert.equal(terminalContinueCondition.AND[0].riskFlags.not, null);
     assert.equal(terminalContinueCondition.AND[1].riskFlags.contains, '"terminalAction":"defer_and_continue"');

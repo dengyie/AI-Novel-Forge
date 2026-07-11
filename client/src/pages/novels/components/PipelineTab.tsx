@@ -76,6 +76,38 @@ interface PipelineTabProps {
     overall: number;
     issues?: string | null;
   }>;
+  qualityDebtBoard?: {
+    summary: {
+      totalWithQualityLoop: number;
+      invalidCount: number;
+      riskCount: number;
+      validCount: number;
+      patchRepairCount: number;
+      replanCount: number;
+      manualGateCount: number;
+      blockingCount: number;
+      nonBlockingDebtCount: number;
+      blockingReplanCount: number;
+    };
+    volumeReplanGate: {
+      threshold: number;
+      blockingReplanCount: number;
+      shouldPause: boolean;
+      reason: string | null;
+      scope: "range" | "board";
+      startOrder: number | null;
+      endOrder: number | null;
+    };
+    items: Array<{
+      chapterId: string;
+      chapterOrder: number;
+      title: string | null;
+      recommendedAction: string | null;
+      rootCauseCode: string | null;
+      riskClassification: string;
+      overallStatus: string | null;
+    }>;
+  } | null;
   bible?: NovelBible | null;
   plotBeats: PlotBeat[];
 }
@@ -136,6 +168,7 @@ export default function PipelineTab(props: PipelineTabProps) {
     onAbortRepair,
     qualitySummary,
     chapterReports,
+    qualityDebtBoard,
     bible,
     plotBeats,
     directorTakeoverEntry,
@@ -201,6 +234,67 @@ export default function PipelineTab(props: PipelineTabProps) {
             </div>
           </div>
           {pipelineMessage ? <div className="text-sm text-muted-foreground">{pipelineMessage}</div> : null}
+        </CardContent>
+      </Card>
+
+      <Card className="border-0 bg-muted/15 shadow-none">
+        <CardHeader>
+          <CardTitle>质量债板</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {qualityDebtBoard ? (
+            <>
+              <div className="grid gap-3 md:grid-cols-4">
+                <div className="rounded-xl bg-background/70 p-3">
+                  <div className="text-xs text-muted-foreground">板上条目</div>
+                  <div className="mt-1 text-sm font-semibold">{qualityDebtBoard.summary.totalWithQualityLoop}</div>
+                </div>
+                <div className="rounded-xl bg-background/70 p-3">
+                  <div className="text-xs text-muted-foreground">blocking / replan</div>
+                  <div className="mt-1 text-sm font-semibold">{qualityDebtBoard.summary.blockingCount} / {qualityDebtBoard.summary.blockingReplanCount}</div>
+                </div>
+                <div className="rounded-xl bg-background/70 p-3">
+                  <div className="text-xs text-muted-foreground">non-blocking 债</div>
+                  <div className="mt-1 text-sm font-semibold">{qualityDebtBoard.summary.nonBlockingDebtCount}</div>
+                </div>
+                <div className="rounded-xl bg-background/70 p-3">
+                  <div className="text-xs text-muted-foreground">熔断</div>
+                  <div className="mt-1 text-sm font-semibold">
+                    {qualityDebtBoard.volumeReplanGate.shouldPause ? "应暂停" : "未触发"}
+                    <span className="ml-1 text-xs font-normal text-muted-foreground">({qualityDebtBoard.volumeReplanGate.scope})</span>
+                  </div>
+                </div>
+              </div>
+              {qualityDebtBoard.volumeReplanGate.reason ? (
+                <div className="rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                  {qualityDebtBoard.volumeReplanGate.reason}
+                </div>
+              ) : (
+                <div className="text-xs text-muted-foreground">
+                  replan 累计 {qualityDebtBoard.volumeReplanGate.blockingReplanCount} / 阈值 {qualityDebtBoard.volumeReplanGate.threshold}（债板默认全书 scope=board；流水线按 job 区间计）。
+                </div>
+              )}
+              <div className="space-y-2 text-xs">
+                {qualityDebtBoard.items
+                  .filter((item) => item.riskClassification === "blocking")
+                  .slice(0, 12)
+                  .map((item) => (
+                    <div key={item.chapterId} className="flex items-center justify-between rounded-md border bg-background/70 px-3 py-2">
+                      <span>
+                        第{item.chapterOrder}章 {item.title || ""}
+                        <span className="ml-2 text-muted-foreground">{item.recommendedAction}/{item.rootCauseCode || "-"}</span>
+                      </span>
+                      <Badge variant="secondary">{item.riskClassification}</Badge>
+                    </div>
+                  ))}
+                {qualityDebtBoard.items.filter((item) => item.riskClassification === "blocking").length === 0 ? (
+                  <div className="text-muted-foreground">当前无 blocking 质量债条目。</div>
+                ) : null}
+              </div>
+            </>
+          ) : (
+            <div className="text-sm text-muted-foreground">打开本页后将加载质量债板。</div>
+          )}
         </CardContent>
       </Card>
 
