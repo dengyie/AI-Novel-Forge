@@ -11,6 +11,7 @@ import type {
   DirectorAutoExecutionState,
 } from "@ai-novel/shared/types/novelDirector";
 import { parseChapterScenePlan } from "@ai-novel/shared/types/chapterLengthControl";
+import { classifyChapterQualityLoopRiskFlags } from "@ai-novel/shared/types/chapterQualityLoop";
 import { resolveDirectorQualityLoopBudgetNextAction } from "../runtime/DirectorQualityLoopBudgetLedgerService";
 import {
   buildPipelineBackgroundActivityLabels,
@@ -51,6 +52,8 @@ export interface DirectorAutoExecutionChapterRef {
   expectation?: string | null;
   generationState?: ChapterGenerationState | null;
   chapterStatus?: "unplanned" | "pending_generation" | "generating" | "pending_review" | "needs_repair" | "completed" | null;
+  /** 可选：有值时用于判断 blocking replan 质量债是否阻断 auto-advance */
+  riskFlags?: string | null;
 }
 
 export function normalizeDirectorAutoExecutionPlan(
@@ -241,8 +244,24 @@ function isDirectorAutoExecutionChapterCompleted(chapter: DirectorAutoExecutionC
     || chapter.chapterStatus === "completed";
 }
 
+/**
+ * blocking replan / manual_gate 质量债不得视为 auto-execution 已处理，否则导演会跳过并继续堆章。
+ * 无 riskFlags 字段时保持旧语义（兼容未加载该列的调用方）。
+ */
+export function hasBlockingQualityLoopDebtForAutoExecution(
+  chapter: Pick<DirectorAutoExecutionChapterRef, "riskFlags">,
+): boolean {
+  if (!Object.prototype.hasOwnProperty.call(chapter, "riskFlags")) {
+    return false;
+  }
+  return classifyChapterQualityLoopRiskFlags(chapter.riskFlags) === "blocking";
+}
+
 export function isDirectorAutoExecutionChapterProcessed(chapter: DirectorAutoExecutionChapterRef): boolean {
   if (!hasDirectorAutoExecutionChapterContent(chapter)) {
+    return false;
+  }
+  if (hasBlockingQualityLoopDebtForAutoExecution(chapter)) {
     return false;
   }
   if (isDirectorAutoExecutionChapterCompleted(chapter)) {

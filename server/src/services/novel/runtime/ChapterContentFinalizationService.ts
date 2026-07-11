@@ -17,6 +17,11 @@ import {
   buildProseQualityAuditReport,
   detectProseQuality,
 } from "./proseQuality/ProseQualityDetector";
+import {
+  chapterTimelineFinalizationService,
+  type ChapterTimelineFinalizationService,
+  type ChapterTimelineGateResult,
+} from "./ChapterTimelineFinalizationService";
 
 export interface ChapterContentFinalizationAgentRuntime {
   finishChapterGenRun: (runId: string, summary: string, durationMs: number) => Promise<void>;
@@ -29,6 +34,11 @@ export interface ChapterContentFinalizationServiceDeps {
   agentRuntime: ChapterContentFinalizationAgentRuntime;
   // 生成后去 AI 味双轮自审改写。生产用默认实例；测试可注入 stub 验证接入。
   postGenerationStyleReviewRunner?: Pick<PostGenerationStyleReviewRunner, "run">;
+  /** 时间线异步定稿；热路径仍 defer extract，但必须调度补齐 + 上章守卫 */
+  timelineFinalizer?: Pick<
+    ChapterTimelineFinalizationService,
+    "finalizeCurrentContent" | "ensurePreviousChapterFinalized"
+  >;
 }
 
 export interface FinalizeChapterContentInput {
@@ -56,6 +66,10 @@ export class ChapterContentFinalizationService {
   private readonly plannerService: ChapterRuntimePlannerPort;
   private readonly agentRuntime: ChapterContentFinalizationAgentRuntime;
   private readonly postGenerationStyleReviewRunner: Pick<PostGenerationStyleReviewRunner, "run">;
+  private readonly timelineFinalizer: Pick<
+    ChapterTimelineFinalizationService,
+    "finalizeCurrentContent" | "ensurePreviousChapterFinalized"
+  >;
 
   constructor(deps: ChapterContentFinalizationServiceDeps) {
     this.qualityGateService = deps.qualityGateService;
@@ -63,6 +77,7 @@ export class ChapterContentFinalizationService {
     this.plannerService = deps.plannerService;
     this.agentRuntime = deps.agentRuntime;
     this.postGenerationStyleReviewRunner = deps.postGenerationStyleReviewRunner ?? new PostGenerationStyleReviewRunner();
+    this.timelineFinalizer = deps.timelineFinalizer ?? chapterTimelineFinalizationService;
   }
 
   async finalizeChapterContent(input: FinalizeChapterContentInput): Promise<FinalizeChapterContentResult> {
@@ -139,6 +154,25 @@ export class ChapterContentFinalizationService {
       || timelineCheck.status === "failed"
       || runtimePackage.audit.hasBlockingIssues;
     await this.markChapterStatus(input.chapterId, needsRepair ? "needs_repair" : "pending_review");
+
+    // 时间线：热路径仍用 deferred gate；定稿后异步必达 + 上章 checkpoint 守卫。
+    // 失败只告警，不阻断定稿返回（与 fact ledger 一致）。
+    void this.scheduleTimelineFinalization({
+      novelId: input.novelId,
+      chapterId: input.chapterId,
+      content: finalContent,
+      contextPackage: input.contextPackage,
+      request: input.request,
+      qualityDebt: needsRepair,
+      timelineGate,
+    }).catch((error) => {
+      console.warn("[chapter-runtime] timeline finalization schedule failed", {
+        novelId: input.novelId,
+        chapterId: input.chapterId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+
     if (!needsRepair) {
       // 保证义务账本在下一章 JIT 上下文组装前完成；失败只告警，不阻断定稿返回。
       try {
@@ -207,6 +241,48 @@ export class ChapterContentFinalizationService {
     await prisma.chapter.update({
       where: { id: chapterId },
       data: { chapterStatus },
+    });
+  }
+
+  /**
+   * 定稿后异步补齐时间线：先守卫上章 checkpoint，再 finalize 本章。
+   * 失败由调用方 catch 告警，不阻断定稿返回。
+   */
+  private async scheduleTimelineFinalization(input: {
+    novelId: string;
+    chapterId: string;
+    content: string;
+    contextPackage: GenerationContextPackage;
+    request: ChapterRuntimeRequestInput;
+    qualityDebt: boolean;
+    timelineGate?: ChapterTimelineGateResult | null;
+  }): Promise<void> {
+    const request = {
+      provider: input.request.provider,
+      model: input.request.model,
+      temperature: input.request.temperature,
+    };
+    await this.timelineFinalizer.ensurePreviousChapterFinalized({
+      novelId: input.novelId,
+      currentChapterOrder: input.contextPackage.chapter.order,
+      request,
+    }).catch((error) => {
+      console.warn("[chapter-runtime] previous chapter timeline finalization failed", {
+        novelId: input.novelId,
+        chapterId: input.chapterId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+    await this.timelineFinalizer.finalizeCurrentContent({
+      novelId: input.novelId,
+      chapterId: input.chapterId,
+      content: input.content,
+      contextPackage: input.contextPackage,
+      request,
+      timelineGate: input.timelineGate ?? null,
+      qualityDebt: input.qualityDebt,
+      sourceStage: "chapter_content_finalization",
+      reason: input.qualityDebt ? "post_finalize_with_quality_debt" : "post_finalize_async",
     });
   }
 

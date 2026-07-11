@@ -383,3 +383,16 @@ test("volume chapter list prompt keeps hard contract failures blocking after sem
     setPromptRunnerStructuredInvokerForTests();
   }
 });
+
+test("normalizeChapterTitleForUniqueness matches diversity normalize semantics", () => {
+  const {
+    normalizeChapterTitleForUniqueness,
+    getChapterTitleDiversityIssue,
+  } = require("../dist/services/novel/volume/chapterTitleDiversity.js");
+  assert.equal(
+    normalizeChapterTitleForUniqueness("  铁笼突围  "),
+    normalizeChapterTitleForUniqueness("铁笼突围"),
+  );
+  const issue = getChapterTitleDiversityIssue(["铁笼突围", "铁笼突围"]);
+  assert.match(issue || "", /重复/);
+});

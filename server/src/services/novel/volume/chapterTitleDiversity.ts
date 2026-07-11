@@ -12,6 +12,10 @@ const CHAPTER_TITLE_SOFT_SENTENCE_CHARS = 12;
 const CHAPTER_TITLE_FIRST_PERSON_PATTERN =
   /(^|[，,：:？?！!、\s])我|我的|我们|替我|为我|给我|把我|追杀我|杀我|救我|我[亲也却已又将把用拿看暗]/u;
 
+export function normalizeChapterTitleForUniqueness(title: string): string {
+  return normalizeChapterTitle(title);
+}
+
 function normalizeChapterTitle(title: string): string {
   return title
     .replace(/^["'“”‘’《》〈〉「」『』【】]+|["'“”‘’《》〈〉「」『』【】]+$/gu, "")

@@ -22,6 +22,30 @@ import {
   UpdateNovelInput,
 } from "./novelCoreShared";
 import { queueRagDelete, queueRagUpsert } from "./novelCoreSupport";
+import { normalizeChapterTitleForUniqueness } from "./volume/chapterTitleDiversity";
+
+
+async function assertChapterTitleUniqueInNovel(input: {
+  novelId: string;
+  title: string;
+  excludeChapterId?: string;
+}): Promise<void> {
+  const normalized = normalizeChapterTitleForUniqueness(input.title);
+  if (!normalized) {
+    return;
+  }
+  const siblings = await prisma.chapter.findMany({
+    where: {
+      novelId: input.novelId,
+      ...(input.excludeChapterId ? { id: { not: input.excludeChapterId } } : {}),
+    },
+    select: { id: true, title: true, order: true },
+  });
+  const conflict = siblings.find((row) => normalizeChapterTitleForUniqueness(row.title) === normalized);
+  if (conflict) {
+    throw new Error(`章节标题与第 ${conflict.order} 章重复：${input.title.trim()}。请确保同书内标题唯一。`);
+  }
+}
 
 export class NovelCoreCrudService {
   private readonly novelContinuationService = new NovelContinuationService();
@@ -415,6 +439,7 @@ export class NovelCoreCrudService {
   }
 
   async createChapter(novelId: string, input: ChapterInput) {
+    await assertChapterTitleUniqueInNovel({ novelId, title: input.title });
     const chapter = await prisma.chapter.create({
       data: {
         novelId,
@@ -462,6 +487,13 @@ export class NovelCoreCrudService {
     const exists = await prisma.chapter.findFirst({ where: { id: chapterId, novelId }, select: { id: true } });
     if (!exists) {
       throw new Error("章节不存在");
+    }
+    if (typeof input.title === "string") {
+      await assertChapterTitleUniqueInNovel({
+        novelId,
+        title: input.title,
+        excludeChapterId: chapterId,
+      });
     }
 
     const chapter = await prisma.chapter.update({

@@ -18,6 +18,7 @@ import {
 import { ensureNovelCharacters } from "./novelCoreSupport";
 import { createQualityReport } from "./novelCoreReviewService";
 import { chapterQualityLoopService } from "./quality/ChapterQualityLoopService";
+import { buildVolumeReplanQualityDebtGate } from "./quality/qualityDebtBoard";
 import { buildPipelineLeaseClaimWhere, buildStaleRecoverablePipelineJobWhere, selectPrimaryPipelineJob } from "./pipelineJobDedup";
 import { buildPipelineCurrentItemLabel, buildPipelineStageProgress, decoratePipelineJob as decoratePipelineJobRow, isPipelineActiveStage, parsePipelinePayload as parsePipelineJobPayload, stringifyPipelinePayload as stringifyPipelineJobPayload, type DecoratedPipelineJob, type PipelineActiveStage, type PipelineJobLike } from "./pipelineJobState";
 
@@ -904,6 +905,28 @@ export class NovelCorePipelineService {
               shouldStopAfterCurrentChapter = true;
             } else if (!qualityAlertDetails.includes(detail)) {
               qualityAlertDetails.push(detail);
+            }
+          }
+
+          // 卷级 replan 质量债熔断：全书/区间内 blocking replan 累计 ≥ 阈值则停止后续章。
+          if (!shouldStopAfterCurrentChapter) {
+            const debtRows = await prisma.chapter.findMany({
+              where: { novelId },
+              select: { riskFlags: true },
+            });
+            const volumeGate = buildVolumeReplanQualityDebtGate({ chapters: debtRows });
+            if (volumeGate.shouldPause) {
+              const detail = volumeGate.reason ?? "卷内 replan 质量债已达熔断阈值。";
+              if (!replanAlertDetails.includes(detail)) {
+                replanAlertDetails.push(detail);
+              }
+              shouldStopAfterCurrentChapter = true;
+              logPipelineWarn("卷级 replan 质量债熔断，停止后续章节流水线", {
+                jobId,
+                order: chapter.order,
+                blockingReplanCount: volumeGate.blockingReplanCount,
+                threshold: volumeGate.threshold,
+              });
             }
           }
 

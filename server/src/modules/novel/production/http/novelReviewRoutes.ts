@@ -2,7 +2,9 @@ import type { Router } from "express";
 import type { ApiResponse } from "@ai-novel/shared/types/api";
 import { z } from "zod";
 import { streamToSSE } from "../../../../llm/streaming";
+import { AppError } from "../../../../middleware/errorHandler";
 import { validate } from "../../../../middleware/validate";
+import { qualityDebtBoardService } from "../../../../services/novel/quality/QualityDebtBoardService";
 import type { NovelApplicationServices } from "../../../../services/novel/application/NovelApplicationContracts";
 import type { ChapterRuntimeCoordinator } from "../../../../services/novel/runtime/ChapterRuntimeCoordinator";
 import { stepModuleRunner } from "../../../../services/novel/director/workflowStepRuntime/StepModuleRunner";
@@ -196,6 +198,25 @@ export function registerNovelReviewRoutes(input: RegisterNovelReviewRoutesInput)
         message: "Quality report loaded.",
       } satisfies ApiResponse<typeof data>);
     } catch (error) {
+      next(error);
+    }
+  });
+
+  // 质量债务板：聚合 riskFlags.qualityLoop，含卷级 replan 熔断计数（只读）。
+  router.get("/:id/quality-debt", validate({ params: idParamsSchema }), async (req, res, next) => {
+    try {
+      const { id } = req.params as z.infer<typeof idParamsSchema>;
+      const data = await qualityDebtBoardService.listNovelQualityDebt(id);
+      res.status(200).json({
+        success: true,
+        data,
+        message: "Quality debt board loaded.",
+      } satisfies ApiResponse<typeof data>);
+    } catch (error) {
+      if (error instanceof Error && error.message === "小说不存在") {
+        next(new AppError(error.message, 404));
+        return;
+      }
       next(error);
     }
   });
