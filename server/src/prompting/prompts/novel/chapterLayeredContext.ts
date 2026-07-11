@@ -403,8 +403,8 @@ export function buildChapterReviewContext(
     structureObligations: takeUnique([
       ...writeContext.chapterMission.mustAdvance,
       ...writeContext.chapterMission.mustPreserve,
-      ...writeContext.obligationContract.mustHitNow.map((item) => `must hit now: ${item}`),
-      ...writeContext.obligationContract.requiredCharacterAppearances.map((item) => `required character appearance: ${item}`),
+      ...writeContext.obligationContract.mustHitNow.map((item) => `本章必须命中: ${item}`),
+      ...writeContext.obligationContract.requiredCharacterAppearances.map((item) => `必须出场的角色: ${item}`),
       ...writeContext.obligationContract.requiredGoalChanges.map((item) => `required goal change: ${item}`),
       ...writeContext.payoffDirectives.map((item) => `payoff directive: ${item.operation} ${item.title}${item.forbiddenReveal ? ` / protected: ${item.forbiddenReveal}` : ""}`),
       ...(writeContext.chapterStateGoal?.targetConflicts ?? []).map((item) => `state conflict: ${item}`),
@@ -441,8 +441,8 @@ export function buildChapterRepairContext(input: {
     structureObligations: takeUnique([
       ...writeContext.chapterMission.mustAdvance,
       ...writeContext.chapterMission.mustPreserve,
-      ...writeContext.obligationContract.mustHitNow.map((item) => `must hit now: ${item}`),
-      ...writeContext.obligationContract.requiredCharacterAppearances.map((item) => `required character appearance: ${item}`),
+      ...writeContext.obligationContract.mustHitNow.map((item) => `本章必须命中: ${item}`),
+      ...writeContext.obligationContract.requiredCharacterAppearances.map((item) => `必须出场的角色: ${item}`),
       ...writeContext.obligationContract.requiredGoalChanges.map((item) => `required goal change: ${item}`),
       ...writeContext.payoffDirectives.map((item) => `payoff directive: ${item.operation} ${item.title}${item.forbiddenReveal ? ` / protected: ${item.forbiddenReveal}` : ""}`),
       ...(writeContext.chapterStateGoal?.targetConflicts ?? []).map((item) => `state conflict: ${item}`),

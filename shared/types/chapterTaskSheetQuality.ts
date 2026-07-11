@@ -26,6 +26,25 @@ export const CHAPTER_TASK_SHEET_QUALITY_STATUS = [
 
 export type ChapterTaskSheetQualityStatus = typeof CHAPTER_TASK_SHEET_QUALITY_STATUS[number];
 
+/** 章节任务单叙事分型：用于义务负载与写作指令差异，不是物理卷类型。 */
+export const CHAPTER_TASK_SHEET_TYPES = [
+  "emotion",
+  "combat",
+  "explore",
+  "transition",
+] as const;
+
+export type ChapterTaskSheetType = typeof CHAPTER_TASK_SHEET_TYPES[number];
+
+export interface ChapterTaskSheetObligationBudget {
+  chapterType: ChapterTaskSheetType;
+  /** 建议的 must-hit / payoff 类义务上限（情感章更低） */
+  maxHardObligationHints: number;
+  /** taskSheet 中建议的短句/条目上限 */
+  maxTaskSheetBulletHints: number;
+  labelZh: string;
+}
+
 export interface ChapterExecutionContractQualityCandidate {
   novelId: string;
   volumeId?: string | null;
@@ -44,6 +63,8 @@ export interface ChapterExecutionContractQualityCandidate {
   payoffRefs?: string[] | null;
   taskSheet?: string | null;
   sceneCards?: string | null;
+  /** 可选：上游已判定的章型；缺省则从文本推断 */
+  chapterType?: ChapterTaskSheetType | null;
 }
 
 export interface ChapterTaskSheetQualityIssue {
@@ -176,10 +197,150 @@ function createQualityIssue(
   };
 }
 
+/** 质量环/失败分类等内部 code，不得写入作家可读 taskSheet / 写作指令正文。 */
+const INTERNAL_QUALITY_CODE_PATTERN = /\b(?:payoff_missing_progress|draft_obligation_unmet|draft_repair_exhausted|draft_generation_failed|replan_required|replan_window|hard_stop|must_hit_now|forbidden_crossing|prose_[a-z0-9_]+|timeline_[a-z0-9_]+|rootCauseCode|recommendedAction)\b/gi;
+
+export function stripInternalQualityCodes(text: string | null | undefined): string {
+  if (!text) {
+    return "";
+  }
+  return text
+    .replace(INTERNAL_QUALITY_CODE_PATTERN, "")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+export function containsInternalQualityCodes(text: string | null | undefined): boolean {
+  if (!text?.trim()) {
+    return false;
+  }
+  INTERNAL_QUALITY_CODE_PATTERN.lastIndex = 0;
+  return INTERNAL_QUALITY_CODE_PATTERN.test(text);
+}
+
+export function getChapterTaskSheetObligationBudget(
+  chapterType: ChapterTaskSheetType,
+): ChapterTaskSheetObligationBudget {
+  switch (chapterType) {
+    case "emotion":
+      return {
+        chapterType,
+        maxHardObligationHints: 2,
+        maxTaskSheetBulletHints: 4,
+        labelZh: "情感/关系",
+      };
+    case "combat":
+      return {
+        chapterType,
+        maxHardObligationHints: 5,
+        maxTaskSheetBulletHints: 8,
+        labelZh: "战斗/对抗",
+      };
+    case "explore":
+      return {
+        chapterType,
+        maxHardObligationHints: 4,
+        maxTaskSheetBulletHints: 7,
+        labelZh: "探索/发现",
+      };
+    case "transition":
+    default:
+      return {
+        chapterType: "transition",
+        maxHardObligationHints: 3,
+        maxTaskSheetBulletHints: 5,
+        labelZh: "过渡/转场",
+      };
+  }
+}
+
+function scoreChapterTypeHints(blob: string): Record<ChapterTaskSheetType, number> {
+  const text = blob.toLowerCase();
+  const score: Record<ChapterTaskSheetType, number> = {
+    emotion: 0,
+    combat: 0,
+    explore: 0,
+    transition: 0,
+  };
+  const bump = (type: ChapterTaskSheetType, weight: number, patterns: RegExp[]) => {
+    for (const pattern of patterns) {
+      if (pattern.test(text)) {
+        score[type] += weight;
+      }
+    }
+  };
+  bump("emotion", 3, [/情感|关系|羁绊|告白|心动|和解|误会|陪伴|安慰|愧疚|吃醋|亲密|养成/]);
+  bump("combat", 3, [/战斗|对决|交手|厮杀|追击|突围|杀|战|冲突升级|敌人|伏击|对轰/]);
+  bump("explore", 3, [/探索|调查|搜|发现|线索|遗迹|地图|情报|潜入|勘察|解密/]);
+  bump("transition", 2, [/过渡|转场|赶路|休整|安顿|整理|铺垫|衔接|喘息|整备/]);
+  return score;
+}
+
+/**
+ * 从标题/摘要/目标/任务单推断章型。显式 chapterType 优先。
+ * 冲突强度高时偏向 combat；无明显信号则 transition。
+ */
+export function inferChapterTaskSheetType(
+  candidate: Pick<
+    ChapterExecutionContractQualityCandidate,
+    "title" | "summary" | "purpose" | "exclusiveEvent" | "taskSheet" | "conflictLevel" | "chapterType"
+  >,
+): ChapterTaskSheetType {
+  if (
+    candidate.chapterType
+    && (CHAPTER_TASK_SHEET_TYPES as readonly string[]).includes(candidate.chapterType)
+  ) {
+    return candidate.chapterType;
+  }
+  const blob = [
+    candidate.title,
+    candidate.summary,
+    candidate.purpose,
+    candidate.exclusiveEvent,
+    candidate.taskSheet,
+  ].filter(Boolean).join("\n");
+  const scores = scoreChapterTypeHints(blob);
+  if (typeof candidate.conflictLevel === "number") {
+    if (candidate.conflictLevel >= 70) {
+      scores.combat += 2;
+    } else if (candidate.conflictLevel <= 30) {
+      scores.emotion += 1;
+      scores.transition += 1;
+    }
+  }
+  let best: ChapterTaskSheetType = "transition";
+  let bestScore = -1;
+  for (const type of CHAPTER_TASK_SHEET_TYPES) {
+    if (scores[type] > bestScore) {
+      best = type;
+      bestScore = scores[type];
+    }
+  }
+  return bestScore <= 0 ? "transition" : best;
+}
+
+function countTaskSheetBulletHints(taskSheet: string): number {
+  const lines = taskSheet
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length >= 2) {
+    return lines.length;
+  }
+  const parts = taskSheet
+    .split(/[；;。!！?？]/u)
+    .map((part) => part.trim())
+    .filter((part) => part.length >= 4);
+  return Math.max(parts.length, taskSheet.trim() ? 1 : 0);
+}
+
 export function assessChapterExecutionContractShape(
   candidate: ChapterExecutionContractQualityCandidate,
 ): ChapterTaskSheetQualityGateResult {
   const issues: ChapterTaskSheetQualityIssue[] = [];
+  const chapterType = inferChapterTaskSheetType(candidate);
+  const budget = getChapterTaskSheetObligationBudget(chapterType);
 
   if (!hasText(candidate.purpose)) {
     issues.push(createQualityIssue(
@@ -210,13 +371,40 @@ export function assessChapterExecutionContractShape(
     ));
   }
 
-  if (!hasText(candidate.taskSheet)) {
+  const taskSheetText = candidate.taskSheet?.trim() ?? "";
+  if (!taskSheetText) {
     issues.push(createQualityIssue(
       "missing_task_sheet",
       "task_sheet",
       "章节任务单缺失。",
       "生成可交给正文写作器执行的任务单，覆盖冲突对象、推进要求、情绪基调和收尾要求。",
     ));
+  } else {
+    if (containsInternalQualityCodes(taskSheetText)) {
+      issues.push(createQualityIssue(
+        "task_sheet_internal_codes",
+        "task_sheet",
+        "任务单含内部质量/失败 code，不能交给作家指令。",
+        "删掉 payoff_missing_progress、draft_obligation_unmet、replan_required 等内部标识，改写为自然语言推进要求。",
+        "high",
+      ));
+    }
+    const bulletHints = countTaskSheetBulletHints(taskSheetText);
+    const payoffCount = Array.isArray(candidate.payoffRefs)
+      ? candidate.payoffRefs.map((item) => String(item ?? "").trim()).filter(Boolean).length
+      : 0;
+    const hardHints = Math.max(payoffCount, Math.ceil(bulletHints / 2));
+    if (hardHints > budget.maxHardObligationHints || bulletHints > budget.maxTaskSheetBulletHints) {
+      issues.push(createQualityIssue(
+        "task_sheet_type_overload",
+        "task_sheet",
+        `当前推断为「${budget.labelZh}」章，任务单义务偏多（建议硬义务≤${budget.maxHardObligationHints}、条目≤${budget.maxTaskSheetBulletHints}）。`,
+        chapterType === "emotion"
+          ? "情感章优先 1-2 个关系/情绪兑现点，把系统义务与战斗目标拆到邻章。"
+          : "按章型收束必达项：保留本章独占事件与收尾钩子，其余 payoff/角色转折拆到邻章。",
+        "medium",
+      ));
+    }
   }
 
   const scenePlan = parseChapterScenePlan(candidate.sceneCards, {
@@ -236,9 +424,22 @@ export function assessChapterExecutionContractShape(
       status: "passed",
       canEnterExecution: true,
       issues: [],
-      summary: "章节执行合同结构完整，可进入语义可用性评估。",
+      summary: `章节执行合同结构完整（章型：${budget.labelZh}），可进入语义可用性评估。`,
       repairGuidance: [],
       confidence: 1,
+    };
+  }
+
+  // 仅 medium 过载且无硬缺失时仍可进入语义评估，避免把分型建议当死门。
+  const blocking = issues.filter((issue) => issue.severity === "high");
+  if (blocking.length === 0) {
+    return {
+      status: "passed",
+      canEnterExecution: true,
+      issues,
+      summary: `章节执行合同可进入语义评估（章型：${budget.labelZh}；存在分型负载提示）。`,
+      repairGuidance: issues.map((issue) => issue.repairHint),
+      confidence: 0.9,
     };
   }
 

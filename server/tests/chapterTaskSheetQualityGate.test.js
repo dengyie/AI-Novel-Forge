@@ -5,6 +5,10 @@ const {
   assessChapterExecutionContractShape,
   aiChapterTaskSheetQualityAssessmentSchema,
   formatChapterTaskSheetQualityFailure,
+  inferChapterTaskSheetType,
+  getChapterTaskSheetObligationBudget,
+  stripInternalQualityCodes,
+  containsInternalQualityCodes,
 } = require("../../shared/dist/types/chapterTaskSheetQuality.js");
 const {
   ChapterTaskSheetQualityGateService,
@@ -197,6 +201,68 @@ test("chapter task sheet quality service passes usable semantic assessments", as
   assert.equal(result.canEnterExecution, true);
   assert.equal(result.status, "passed");
   assert.equal(result.confidence, 0.9);
+});
+
+test("inferChapterTaskSheetType distinguishes emotion vs combat and budgets emotion lower", () => {
+  const emotionType = inferChapterTaskSheetType({
+    title: "雨夜和解",
+    summary: "两人摊开误会，重建羁绊。",
+    purpose: "推进情感关系并完成和解。",
+    exclusiveEvent: "第一次坦诚心意",
+    taskSheet: "用对话与陪伴完成情感兑现，控制节奏。",
+    conflictLevel: 25,
+  });
+  const combatType = inferChapterTaskSheetType({
+    title: "巷口伏击",
+    summary: "主角突围并反杀追兵。",
+    purpose: "打赢遭遇战并夺取出口。",
+    exclusiveEvent: "第一次击溃追兵小队",
+    taskSheet: "开场交手，中段追击，结尾突围。",
+    conflictLevel: 85,
+  });
+  assert.equal(emotionType, "emotion");
+  assert.equal(combatType, "combat");
+  const emotionBudget = getChapterTaskSheetObligationBudget(emotionType);
+  const combatBudget = getChapterTaskSheetObligationBudget(combatType);
+  assert.ok(emotionBudget.maxHardObligationHints < combatBudget.maxHardObligationHints);
+});
+
+test("task sheet with internal quality codes is blocked; strip removes them", () => {
+  const dirty = "推进资源危机；payoff_missing_progress；draft_obligation_unmet 后收尾。";
+  assert.equal(containsInternalQualityCodes(dirty), true);
+  const cleaned = stripInternalQualityCodes(dirty);
+  assert.equal(containsInternalQualityCodes(cleaned), false);
+  assert.match(cleaned, /资源危机/);
+
+  const result = assessChapterExecutionContractShape(buildCandidate({
+    taskSheet: dirty,
+  }));
+  assert.equal(result.canEnterExecution, false);
+  assert.ok(result.issues.some((issue) => issue.id === "task_sheet_internal_codes"));
+});
+
+test("emotion chapter overloaded task sheet yields type overload hint without hard-blocking alone", () => {
+  const heavyEmotionSheet = [
+    "情绪基调：压抑后回温。",
+    "冲突对象：旧误会。",
+    "推进1：摊牌。",
+    "推进2：系统任务结算。",
+    "推进3：据点战准备。",
+    "推进4：多线 payoff 同时触达。",
+    "推进5：角色战力复核。",
+    "收尾：再埋下一章钩子。",
+  ].join("\n");
+  const result = assessChapterExecutionContractShape(buildCandidate({
+    title: "雨夜和解",
+    purpose: "推进情感关系并完成和解。",
+    exclusiveEvent: "第一次坦诚心意",
+    taskSheet: heavyEmotionSheet,
+    conflictLevel: 20,
+    payoffRefs: ["关系回温", "系统结算", "据点战", "战力复核", "下一章钩子"],
+  }));
+  assert.ok(result.issues.some((issue) => issue.id === "task_sheet_type_overload"));
+  // medium-only overload remains enterable for semantic assessor
+  assert.equal(result.canEnterExecution, true);
 });
 
 test("chapter task sheet quality prompt is registered as a product prompt asset", () => {

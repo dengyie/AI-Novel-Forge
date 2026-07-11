@@ -3,6 +3,7 @@ import { parseChapterScenePlan, serializeChapterScenePlan } from "@ai-novel/shar
 import {
   assessChapterExecutionContractShape,
   formatChapterTaskSheetQualityFailure,
+  stripInternalQualityCodes,
 } from "@ai-novel/shared/types/chapterTaskSheetQuality";
 import type { VolumePlanDocument } from "@ai-novel/shared/types/novel";
 import { prisma } from "../../../db/prisma";
@@ -124,7 +125,8 @@ export class ChapterExecutionContractService {
     if (!targetChapter?.taskSheet?.trim() || !targetChapter.sceneCards?.trim()) {
       throw new Error("AI 未返回完整的章节执行合同。");
     }
-    const taskSheet = targetChapter.taskSheet.trim();
+    const taskSheet = stripInternalQualityCodes(targetChapter.taskSheet.trim());
+    targetChapter.taskSheet = taskSheet;
     const scenePlan = parseChapterScenePlan(targetChapter.sceneCards, {
       targetWordCount: targetChapter.targetWordCount ?? chapter.targetWordCount ?? undefined,
     });
