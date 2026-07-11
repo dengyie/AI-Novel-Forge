@@ -2,11 +2,13 @@
  * 品类 beat 配额（纯函数）：从 sellingPoint / competingFeel / first30ChapterPromise
  * 推导前 N 章养成/收集等占比目标，并提供近窗场景 Jaccard 多样性信号。
  *
- * 交付状态：
- * - quality-debt board：`genreBeatSnapshot` 观测（含 recommendForce + advisory）
- * - 章节生成：`buildSceneDiversityForceDirective` → writeContext 软注入
- *   （doNotCross / riskNotes / recentScenePatterns）
- * - **仍不**接 volumeReplanGate.shouldPause / 导演熔断
+ * 交付状态（两套近窗，勿混为一谈）：
+ * - quality-debt board：`genreBeatSnapshot.sceneDiversity` = **品类前 N 章**内
+ *   近 diversityWindow 的观测（recommendForce + advisory）；用于债板展示。
+ * - 章节生成：`buildSceneDiversityForceDirective` 在 Assembler 用 **当前章前序 N 章**
+ *   重算 → writeContext 仅软注入 `riskNotes` + `recentScenePatterns`。
+ * - **禁止**写入 doNotCross / forbiddenCrossings（acceptance 硬合同）。
+ * - **仍不**接 volumeReplanGate.shouldPause / 导演熔断。
  */
 
 /** 近窗场景多样性默认窗口（章数） */
@@ -395,8 +397,9 @@ export function buildSceneDiversityForceDirective(input: {
 
   const jLabel = signal.averageJaccard.toFixed(2);
   const riskNotes = [
-    `scene_diversity_force: 近窗 Jaccard=${jLabel}≥${signal.threshold}，本章必须切换场景类型、地点或冲突形态；禁止复用近${signal.window}章相同的时间/地点/冲突骨架与开场结构`,
+    `scene_diversity_force: 写作近邻窗 Jaccard=${jLabel}≥${signal.threshold}，本章必须切换场景类型、地点或冲突骨架；禁止复用近${signal.window}章同质摘要/任务单的冲突推进方式与开场结构`,
   ];
+  // 条目是近邻章摘要/任务 blob 截断，不是结构化 time+location；prompt 文案须与此一致
   const scenePatterns = Array.from(new Set(
     (input.recentTexts ?? [])
       .map((text) => compactScenePattern(text))

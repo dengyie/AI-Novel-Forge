@@ -310,3 +310,204 @@ test("assembler refreshes chapter execution fields after chapter plan regenerati
     characterResourceLedgerService.buildContext = originals.buildCharacterResourceContext;
   }
 });
+
+test("assembler injects sceneDiversityForce from prior-chapter lookback when texts are near-duplicate", async () => {
+  const now = new Date();
+  const repeatedBlob = "城门逃亡雨夜追兵压迫再逃亡";
+  const originals = {
+    novelFindUnique: prisma.novel.findUnique,
+    chapterFindFirst: prisma.chapter.findFirst,
+    stateChangeProposalCount: prisma.stateChangeProposal.count,
+    stateChangeProposalFindMany: prisma.stateChangeProposal.findMany,
+    auditIssueFindMany: prisma.auditIssue.findMany,
+    novelBibleFindUnique: prisma.novelBible.findUnique,
+    chapterSummaryFindMany: prisma.chapterSummary.findMany,
+    consistencyFactFindMany: prisma.consistencyFact.findMany,
+    chapterFindMany: prisma.chapter.findMany,
+    creativeDecisionFindMany: prisma.creativeDecision.findMany,
+    ensureChapterPlan: plannerService.ensureChapterPlan,
+    buildPlanPromptBlock: plannerService.buildPlanPromptBlock,
+    buildStateContext: contextAssemblyService.build,
+    buildReferenceForStage: novelReferenceService.buildReferenceForStage,
+    getCharacterDynamics: characterDynamicsQueryService.getOverview,
+    buildRagContext: ragServices.hybridRetrievalService.buildContextBlock,
+    getPayoffLedger: payoffLedgerSyncService.getPayoffLedger,
+    buildCharacterResourceContext: characterResourceLedgerService.buildContext,
+  };
+
+  try {
+    prisma.novel.findUnique = async () => ({
+      id: "novel-1",
+      title: "测试小说",
+      world: null,
+      genre: { name: "玄幻" },
+      characters: [],
+      storyMacroPlan: null,
+      volumePlans: [],
+      primaryStoryMode: null,
+      secondaryStoryMode: null,
+      targetAudience: null,
+      bookSellingPoint: null,
+      first30ChapterPromise: null,
+      narrativePov: null,
+      pacePreference: null,
+      emotionIntensity: null,
+      styleTone: null,
+      outline: null,
+      structuredOutline: null,
+      estimatedChapterCount: 40,
+    });
+    prisma.chapter.findFirst = async () => ({
+      id: "chapter-40",
+      title: "第40章",
+      order: 40,
+      content: null,
+      expectation: "换场景推进",
+      targetWordCount: 2200,
+      conflictLevel: 3,
+      revealLevel: 2,
+      mustAvoid: "旧禁止",
+      taskSheet: "新任务单",
+      sceneCards: createSceneCards("新合同"),
+      hook: "钩子",
+    });
+    prisma.stateChangeProposal.count = async () => 0;
+    prisma.stateChangeProposal.findMany = async () => [];
+    prisma.auditIssue.findMany = async () => [];
+    prisma.novelBible.findUnique = async () => null;
+    prisma.chapterSummary.findMany = async () => [];
+    prisma.consistencyFactFindMany = async () => [];
+    prisma.creativeDecisionFindMany = async () => [];
+
+    // Discriminate findMany by select shape: diversity uses taskSheet + chapterSummary; tail/opening use content.
+    prisma.chapter.findMany = async (args = {}) => {
+      const select = args.select || {};
+      if (select.taskSheet || select.chapterSummary) {
+        return [5, 4, 3, 2, 1].map((order) => ({
+          order,
+          title: `第${order}章逃亡`,
+          taskSheet: repeatedBlob,
+          chapterSummary: { summary: repeatedBlob },
+        }));
+      }
+      if (select.content) {
+        // opening compare / previous tail
+        return [{
+          order: 39,
+          title: "第39章",
+          content: "尾段内容用于 previousChapterTail。",
+        }];
+      }
+      return [];
+    };
+
+    plannerService.ensureChapterPlan = async () => ({
+      id: "plan-40",
+      chapterId: "chapter-40",
+      planRole: "pressure",
+      phaseLabel: "中段",
+      title: "计划",
+      objective: "推进",
+      participantsJson: "[]",
+      revealsJson: "[]",
+      riskNotesJson: JSON.stringify([
+        "plan-risk-1", "plan-risk-2", "plan-risk-3", "plan-risk-4", "plan-risk-5",
+      ]),
+      mustAdvanceJson: "[]",
+      mustPreserveJson: "[]",
+      sourceIssueIdsJson: "[]",
+      replannedFromPlanId: null,
+      hookTarget: "钩子",
+      rawPlanJson: null,
+      scenes: [],
+      createdAt: now,
+      updatedAt: now,
+    });
+    plannerService.buildPlanPromptBlock = async () => "";
+    contextAssemblyService.build = async () => ({
+      snapshot: createCanonicalSnapshot(),
+      nextAction: "write_chapter",
+      chapterStateGoal: null,
+      protectedSecrets: ["s1", "s2", "s3", "s4"],
+    });
+    novelReferenceService.buildReferenceForStage = async () => "";
+    characterDynamicsQueryService.getOverview = async () => null;
+    ragServices.hybridRetrievalService.buildContextBlock = async () => "";
+    payoffLedgerSyncService.getPayoffLedger = async () => ({ items: [] });
+    characterResourceLedgerService.buildContext = async () => null;
+
+    const assembler = new GenerationContextAssembler();
+    assembler.worldContextGateway = {
+      getWorldContextBlock: async () => ({
+        promptBlock: "世界上下文",
+        rawSlice: null,
+      }),
+    };
+    assembler.continuationService = {
+      buildChapterContextPack: async () => ({
+        enabled: false,
+        sourceType: null,
+        sourceId: null,
+        sourceTitle: null,
+        systemRule: "",
+        humanBlock: "",
+        antiCopyCorpus: [],
+      }),
+    };
+    assembler.styleBindingService = {
+      resolveForGeneration: async () => ({
+        matchedBindings: [],
+        compiledBlocks: null,
+        effectiveStyleProfileId: null,
+        taskStyleProfileId: null,
+        activeSourceTargets: [],
+        activeSourceLabels: [],
+        globalAntiAiRuleIds: [],
+        styleAntiAiRuleIds: [],
+        sanitizedGenerationProfile: null,
+      }),
+    };
+
+    const assembled = await assembler.assemble("novel-1", "chapter-40", {});
+    const force = assembled.contextPackage.sceneDiversityForce;
+    assert.ok(force, "sceneDiversityForce should be present when prior chapters are near-duplicate");
+    assert.equal(force.shouldForce, true);
+    assert.equal(force.advisory, true);
+    assert.ok(force.riskNotes.some((item) => item.includes("scene_diversity_force")));
+    assert.ok(
+      assembled.contextPackage.chapterWriteContext.chapterMission.riskNotes.some(
+        (item) => item.includes("scene_diversity_force"),
+      ),
+      "force note must survive plan/secrets volume on write context",
+    );
+    assert.ok(
+      assembled.contextPackage.chapterWriteContext.recentScenePatterns.length > 0,
+    );
+    // soft only: must not pollute hard boundary
+    assert.ok(
+      !assembled.contextPackage.chapterWriteContext.chapterBoundary.doNotCross.some(
+        (item) => item.includes("scene_diversity_force"),
+      ),
+    );
+  } finally {
+    prisma.novel.findUnique = originals.novelFindUnique;
+    prisma.chapter.findFirst = originals.chapterFindFirst;
+    prisma.stateChangeProposal.count = originals.stateChangeProposalCount;
+    prisma.stateChangeProposal.findMany = originals.stateChangeProposalFindMany;
+    prisma.auditIssue.findMany = originals.auditIssueFindMany;
+    prisma.novelBible.findUnique = originals.novelBibleFindUnique;
+    prisma.chapterSummary.findMany = originals.chapterSummaryFindMany;
+    prisma.consistencyFact.findMany = originals.consistencyFactFindMany;
+    prisma.chapter.findMany = originals.chapterFindMany;
+    prisma.creativeDecisionFindMany = originals.creativeDecisionFindMany;
+    plannerService.ensureChapterPlan = originals.ensureChapterPlan;
+    plannerService.buildPlanPromptBlock = originals.buildPlanPromptBlock;
+    contextAssemblyService.build = originals.buildStateContext;
+    novelReferenceService.buildReferenceForStage = originals.buildReferenceForStage;
+    characterDynamicsQueryService.getOverview = originals.getCharacterDynamics;
+    ragServices.hybridRetrievalService.buildContextBlock = originals.buildRagContext;
+    payoffLedgerSyncService.getPayoffLedger = originals.getPayoffLedger;
+    characterResourceLedgerService.buildContext = originals.buildCharacterResourceContext;
+  }
+});
+

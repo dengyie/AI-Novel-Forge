@@ -88,7 +88,9 @@ export interface GenreBeatBoardSnapshot {
     kind: GenreBeatKind;
   }>;
   /**
-   * 近窗多样性观测。recommendForce 仅为建议，**不**等同 volumeReplanGate.shouldPause。
+   * 品类前 N 章窗口内的近邻多样性观测（≠ 章节生成 Assembler 的写作近邻 soft-force）。
+   * recommendForce 仅为债板建议，**不**等同 volumeReplanGate.shouldPause，
+   * 也**不**保证当前写作章一定注入 sceneDiversityForce。
    * advisory 恒为 true，防止被误接导演熔断。
    */
   sceneDiversity: {

@@ -58,7 +58,10 @@ export { buildBlockingPendingReviewProposalWhere } from "./context/pendingReview
 
 const OPENING_COMPARE_LIMIT = 3;
 const OPENING_SLICE_LENGTH = 220;
-/** 近窗场景多样性：取前序章 taskSheet/summary/title 做 Jaccard 软强制 */
+/**
+ * 写作近邻窗：当前章 order 之前最近 N 章（title/taskSheet/summary）做 Jaccard 软强制。
+ * 与 quality-debt 的「品类前 30 章内近 5」观测窗不同；两套信号独立。
+ */
 const SCENE_DIVERSITY_LOOKBACK = GENRE_BEAT_SCENE_DIVERSITY_WINDOW;
 
 const runtimeChapterSelect = {
@@ -313,7 +316,7 @@ export class GenerationContextAssembler {
         take: 1,
         select: { order: true, title: true, content: true },
       }),
-      // 近窗多样性：前 N 章 title/taskSheet + summary（与 quality-debt 观测口径对齐）
+      // 写作近邻多样性：当前章前序 N 章 title/taskSheet + summary（≠ 债板前 30 观测窗）
       prisma.chapter.findMany({
         where: {
           novelId,
@@ -506,7 +509,7 @@ export class GenerationContextAssembler {
 
     const previousChapterTail = extractChapterTail(recentChapters[0]?.content);
 
-    // 近窗同质 → 软强制换场景（advisory；不接 volumeReplanGate）
+    // 写作近邻同质 → 软强制换场景（advisory；不接 volumeReplanGate；≠ 债板 recommendForce 窗）
     const sceneDiversityRecentTexts = [...sceneDiversitySourceChapters]
       .sort((left, right) => left.order - right.order)
       .map((row) => [

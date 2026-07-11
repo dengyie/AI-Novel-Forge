@@ -192,11 +192,12 @@ export function buildChapterMissionContext(contextPackage: GenerationContextPack
       ...(stateGoal?.targetRelationships ?? []),
       ...(contextPackage.plan?.mustPreserve ?? []),
     ], 5),
+    // diversity soft-force 必须优先保留：takeUnique 按插入序截断，
+    // 若放在 secrets/plan 之后，高压章（多 protectedSecrets + plan.riskNotes）会静默丢掉 force。
     riskNotes: takeUnique([
+      ...(diversityForce?.shouldForce ? (diversityForce.riskNotes ?? []) : []),
       ...(contextPackage.protectedSecrets ?? []),
       ...(contextPackage.plan?.riskNotes ?? []),
-      // 近窗同质：软强制换场景（不接导演熔断）
-      ...(diversityForce?.shouldForce ? (diversityForce.riskNotes ?? []) : []),
     ], 8),
   };
 }
@@ -956,7 +957,7 @@ export function buildChapterWriterContextBlocks(
           `Opening anti-repeat hint:\n${writeContext.openingAntiRepeatHint}`,
           writeContext.recentScenePatterns.length > 0
             ? toListBlock(
-              "Scene pattern blacklist — do NOT repeat these exact time+location+action combinations",
+              "近窗同质片段（写作近邻摘要/任务单截断）— 勿复用相同冲突骨架、地点氛围与开场推进方式",
               writeContext.recentScenePatterns.slice(0, 6),
             )
             : "",

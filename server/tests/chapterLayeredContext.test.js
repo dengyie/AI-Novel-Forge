@@ -902,8 +902,43 @@ test("sceneDiversityForce injects soft constraints into write context and openin
   const missionBlock = assertNonEmptyBlock(writerBlocks, "chapter_mission");
   assert.match(missionBlock.content, /scene_diversity_force/);
   const openingBlock = assertNonEmptyBlock(writerBlocks, "opening_constraints");
-  assert.match(openingBlock.content, /Scene pattern blacklist/);
+  assert.match(openingBlock.content, /近窗同质片段/);
+  assert.match(openingBlock.content, /冲突骨架/);
   assert.match(openingBlock.content, /城门逃亡雨夜追兵/);
+});
+
+test("sceneDiversityForce riskNotes survive takeUnique when secrets/plan already fill the bucket", () => {
+  const contextPackage = createContextPackage();
+  contextPackage.protectedSecrets = [
+    "secret-1", "secret-2", "secret-3", "secret-4",
+  ];
+  contextPackage.plan.riskNotes = [
+    "plan-risk-1", "plan-risk-2", "plan-risk-3", "plan-risk-4", "plan-risk-5",
+  ];
+  contextPackage.sceneDiversityForce = {
+    shouldForce: true,
+    averageJaccard: 0.9,
+    threshold: 0.55,
+    window: 5,
+    advisory: true,
+    riskNotes: ["scene_diversity_force: must keep this note under truncation pressure"],
+    scenePatterns: ["同质片段A"],
+    summaryLine: "force",
+  };
+
+  const writeContext = buildChapterWriteContext({
+    bookContract: contextPackage.bookContract,
+    macroConstraints: contextPackage.macroConstraints,
+    volumeWindow: contextPackage.volumeWindow,
+    contextPackage,
+  });
+
+  assert.ok(
+    writeContext.chapterMission.riskNotes.some((item) => item.includes("scene_diversity_force")),
+    "diversity force must not be truncated away by secrets/plan volume",
+  );
+  assert.ok(writeContext.chapterMission.riskNotes[0].includes("scene_diversity_force"));
+  assert.ok(writeContext.recentScenePatterns.includes("同质片段A"));
 });
 
 test("sceneDiversityForce idle leaves existing constraints unchanged", () => {

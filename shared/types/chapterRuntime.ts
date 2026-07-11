@@ -770,8 +770,10 @@ export const generationContextPackageSchema = z.object({
   previousChapterTail: z.string().nullable().optional(),
   openingHint: z.string(),
   /**
-   * 近窗场景多样性软强制（仅写作路径）。
-   * advisory 恒 true；不得据此设置 volumeReplanGate.shouldPause。
+   * 写作近邻窗场景多样性软强制（仅写作路径；≠ 债板前 N 章观测窗）。
+   * Assembler 用当前章 order 前序 N 章 title/taskSheet/summary 计算。
+   * advisory 恒 true；不得据此设置 volumeReplanGate.shouldPause；
+   * 不得写入 doNotCross / forbiddenCrossings。
    */
   sceneDiversityForce: z.object({
     shouldForce: z.boolean(),
