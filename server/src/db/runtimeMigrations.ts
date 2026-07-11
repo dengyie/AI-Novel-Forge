@@ -424,7 +424,7 @@ export async function ensureRuntimeDatabaseReady(): Promise<void> {
         applyMigration(database, migrationsDir, migrationName);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        const alreadyExists = /already exists/i.test(message);
+        const alreadyExists = /already exists|duplicate column/i.test(message);
         // Legacy push DBs: schema objects exist but expectation parser missed them.
         if (legacy && alreadyExists) {
           console.warn(
