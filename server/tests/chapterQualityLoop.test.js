@@ -430,3 +430,17 @@ test("quality loop projection keeps replan required blocking even when deferred"
   assert.equal(classifyChapterQualityLoopRiskFlags(riskFlags), "blocking");
   assert.equal(hasContinuableChapterQualityLoopRiskFlags(riskFlags), false);
 });
+
+test("quality loop projection treats valid continue as none despite residual blockingObligations", () => {
+  const riskFlags = JSON.stringify({
+    qualityLoop: {
+      overallStatus: "valid",
+      recommendedAction: "continue",
+      rootCauseCode: "draft_obligation_unmet",
+      blockingObligations: [{ kind: "must_hit_now", summary: "历史快照残留义务" }],
+    },
+  });
+
+  assert.equal(classifyChapterQualityLoopRiskFlags(riskFlags), "none");
+  assert.equal(hasContinuableChapterQualityLoopRiskFlags(riskFlags), true);
+});

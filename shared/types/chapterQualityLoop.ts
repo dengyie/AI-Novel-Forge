@@ -89,11 +89,13 @@ export function classifyChapterQualityLoopRisk(
   if (recommendedAction === "manual_gate") {
     return "blocking";
   }
-  if (hasBlockingObligations(qualityLoop.blockingObligations)) {
-    return "blocking";
-  }
+  // 已放行写流：assessment 为 valid+continue 时，勿因历史快照里残留的 blockingObligations 误标 blocking。
+  // 样板书曾出现 approved/completed 章仍带 draft_obligation_unmet + obligations 数组，导致债务板噪声与误熔断信号。
   if (qualityLoop.overallStatus === "valid" && recommendedAction === "continue") {
     return "none";
+  }
+  if (hasBlockingObligations(qualityLoop.blockingObligations)) {
+    return "blocking";
   }
   // 仅时间线 deferred 风险：continue 放行写流，记 non-blocking 债，不挡 auto-execution。
   if (
