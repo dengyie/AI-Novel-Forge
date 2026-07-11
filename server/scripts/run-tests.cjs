@@ -18,6 +18,8 @@ const integrationTests = new Set([
   "promptWorkbench.test.js",
   "ragCompatibilityBootstrap.test.js",
   "runtimeMigrations.test.js",
+  // real sqlite + prisma:push — slow; not part of fast suite
+  "taskRetentionRunOnce.test.js",
 ]);
 
 function listTestFiles(directory) {

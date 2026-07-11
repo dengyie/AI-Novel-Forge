@@ -90,6 +90,19 @@ export class DirectorTaskQueue {
   }
 
   /**
+   * 最近一次后台 stale-lease 扫描完成时间（epoch ms）。0 表示尚未完成过扫描。
+   * 供运维探活 / 诊断用，不进入热路径。
+   */
+  getLastStaleScanAt(): number {
+    return this.lastStaleScan;
+  }
+
+  /** 后台扫描 timer 是否已启动（幂等 start 后为 true）。 */
+  isStaleLeaseScannerRunning(): boolean {
+    return this.staleScanTimer != null;
+  }
+
+  /**
    * 启动后台 stale-lease 扫描。leaseNext / enqueue 热路径不再同步扫库。
    * 幂等：重复 start 不会开多个 timer。
    */
@@ -207,9 +220,11 @@ export class DirectorTaskQueue {
     }
     this.staleScanInFlight = true;
     try {
-      this.lastStaleScan = Date.now();
       const recovered = await this.commandService.recoverStaleLeases(new Date());
+      // 仅在扫描成功后刷新时间戳，避免失败被误读为“刚扫过”
+      this.lastStaleScan = Date.now();
       if (recovered > 0) {
+        console.info(`[task-queue] background stale lease scan recovered=${recovered}`);
         taskDispatcher.notify();
       }
     } catch (error) {

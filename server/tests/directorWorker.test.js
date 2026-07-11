@@ -174,6 +174,89 @@ test("director task queue leases directly from director run commands", async (t)
   assert.equal(calls[1][1].where.id, "command-queued-1");
 });
 
+test("stale lease scanner is idempotent and records last successful scan time", async () => {
+  let recoverCalls = 0;
+  const commandService = {
+    renewLease: async () => true,
+    markCommandRunning: async () => {},
+    markCommandSucceeded: async () => {},
+    markCommandCancelled: async () => {},
+    markCommandFailed: async () => {},
+    recoverStaleLeases: async () => {
+      recoverCalls += 1;
+      await delay(20);
+      return 2;
+    },
+    getCommandById: async () => null,
+  };
+
+  const queue = new DirectorTaskQueue(
+    {
+      workerId: "worker-stale-scan",
+      leaseMs: 1000,
+      // large interval so setInterval does not fire again during the test
+      staleScanMs: 60_000,
+    },
+    commandService,
+  );
+
+  assert.equal(queue.getLastStaleScanAt(), 0);
+  assert.equal(queue.isStaleLeaseScannerRunning(), false);
+
+  queue.startStaleLeaseScanner();
+  queue.startStaleLeaseScanner();
+  assert.equal(queue.isStaleLeaseScannerRunning(), true);
+
+  // wait for the initial background scan started by startStaleLeaseScanner
+  const deadline = Date.now() + 1000;
+  while (queue.getLastStaleScanAt() === 0 && Date.now() < deadline) {
+    await delay(10);
+  }
+
+  const firstScanAt = queue.getLastStaleScanAt();
+  assert.ok(firstScanAt > 0, "successful scan must update lastStaleScan");
+  assert.equal(recoverCalls, 1, "idempotent start must not open a second timer/scan race");
+
+  queue.stopStaleLeaseScanner();
+  assert.equal(queue.isStaleLeaseScannerRunning(), false);
+  // stop does not clear last successful scan timestamp
+  assert.equal(queue.getLastStaleScanAt(), firstScanAt);
+});
+
+test("stale lease scanner does not advance lastStaleScan when recover fails", async () => {
+  const commandService = {
+    renewLease: async () => true,
+    markCommandRunning: async () => {},
+    markCommandSucceeded: async () => {},
+    markCommandCancelled: async () => {},
+    markCommandFailed: async () => {},
+    recoverStaleLeases: async () => {
+      throw new Error("scan boom");
+    },
+    getCommandById: async () => null,
+  };
+
+  const queue = new DirectorTaskQueue(
+    {
+      workerId: "worker-stale-scan-fail",
+      leaseMs: 1000,
+      staleScanMs: 60_000,
+    },
+    commandService,
+  );
+
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    queue.startStaleLeaseScanner();
+    await delay(50);
+    assert.equal(queue.getLastStaleScanAt(), 0, "failed scan must not look like a successful heartbeat");
+  } finally {
+    console.warn = warn;
+    queue.stopStaleLeaseScanner();
+  }
+});
+
 test("task dispatcher notifies waiting slots immediately", async () => {
   const start = Date.now();
   const waitPromise = taskDispatcher.waitForSignal(5000);
