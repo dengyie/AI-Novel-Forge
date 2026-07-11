@@ -49,6 +49,7 @@ interface ImageAssetFileInput {
   url: string;
   mimeType?: string | null;
   metadata?: string | null;
+  storageRoot?: string;
   s3Client?: Pick<S3Client, "send">;
 }
 
@@ -181,6 +182,27 @@ export function parseImageAssetMetadata(metadata: string | null | undefined): Pa
   }
 }
 
+/**
+ * Reject path traversal: resolved local file must stay under storage root.
+ * Uses path.relative so `/root` does not accept `/root-evil` as a prefix match.
+ */
+export function assertLocalPathInsideStorageRoot(
+  localPath: string,
+  storageRoot: string,
+): string {
+  const resolvedRoot = path.resolve(storageRoot);
+  const resolvedPath = path.resolve(localPath);
+  const relative = path.relative(resolvedRoot, resolvedPath);
+  if (
+    relative === ".."
+    || relative.startsWith(`..${path.sep}`)
+    || path.isAbsolute(relative)
+  ) {
+    throw new AppError("Image asset path is outside the configured storage root.", 400);
+  }
+  return resolvedPath;
+}
+
 export async function persistGeneratedImageAsset(input: PersistGeneratedImageInput): Promise<PersistedGeneratedImage> {
   const image = await readImageBuffer({
     url: input.url,
@@ -247,13 +269,16 @@ export async function resolveImageAssetFile(input: ImageAssetFileInput): Promise
     throw new AppError("Image asset is not stored locally yet.", 404);
   }
 
+  const storageRoot = input.storageRoot ?? resolveGeneratedImagesRoot();
+  const safePath = assertLocalPathInsideStorageRoot(localPath, storageRoot);
+
   try {
-    await fs.access(localPath);
+    await fs.access(safePath);
   } catch {
     throw new AppError("Local image asset file was not found.", 404);
   }
 
-  return { localPath, mimeType: input.mimeType ?? null };
+  return { localPath: safePath, mimeType: input.mimeType ?? null };
 }
 
 export async function resolveLocalImageAssetFile(input: ImageAssetFileInput): Promise<{ localPath: string }> {
@@ -296,8 +321,17 @@ export async function removeLocalImageAssetFile(input: {
     return;
   }
 
+  const storageRoot = input.storageRoot ?? resolveGeneratedImagesRoot();
+  let safePath: string;
   try {
-    await fs.unlink(localPath);
+    safePath = assertLocalPathInsideStorageRoot(localPath, storageRoot);
+  } catch {
+    // Do not delete files outside the storage root even if metadata is poisoned.
+    return;
+  }
+
+  try {
+    await fs.unlink(safePath);
   } catch (error) {
     const fsError = error as NodeJS.ErrnoException;
     if (fsError?.code !== "ENOENT") {
@@ -305,8 +339,7 @@ export async function removeLocalImageAssetFile(input: {
     }
   }
 
-  const storageRoot = input.storageRoot ?? resolveGeneratedImagesRoot();
-  let currentDirectory = path.dirname(localPath);
+  let currentDirectory = path.dirname(safePath);
   const normalizedStorageRoot = path.resolve(storageRoot);
 
   while (currentDirectory.startsWith(normalizedStorageRoot) && currentDirectory !== normalizedStorageRoot) {

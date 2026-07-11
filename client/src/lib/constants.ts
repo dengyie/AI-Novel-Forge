@@ -5,6 +5,7 @@ type ViteRuntimeEnv = Partial<ImportMetaEnv> & {
   VITE_API_BASE_URL?: string;
   VITE_API_TIMEOUT_MS?: string;
   VITE_APP_VERSION?: string;
+  VITE_API_AUTH_TOKEN?: string;
 };
 type BrowserLocation = Pick<Location, "protocol" | "hostname" | "origin">;
 
@@ -122,3 +123,6 @@ function parseApiTimeoutMs(rawValue: string | number | undefined): number {
 }
 
 export const API_TIMEOUT_MS = parseApiTimeoutMs(runtimeConfig.apiTimeoutMs ?? viteEnv.VITE_API_TIMEOUT_MS);
+
+/** Optional API token for production token auth (must match server API_AUTH_TOKEN). */
+export const API_AUTH_TOKEN = (viteEnv.VITE_API_AUTH_TOKEN ?? "").trim();

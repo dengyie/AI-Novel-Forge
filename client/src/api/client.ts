@@ -1,6 +1,6 @@
 import axios, { AxiosError } from "axios";
 import type { ApiResponse } from "@ai-novel/shared/types/api";
-import { API_BASE_URL, API_TIMEOUT_MS } from "@/lib/constants";
+import { API_AUTH_TOKEN, API_BASE_URL, API_TIMEOUT_MS } from "@/lib/constants";
 import { toast } from "@/components/ui/toast";
 
 export interface ApiHttpError extends Error {
@@ -18,6 +18,11 @@ export const apiClient = axios.create({
   baseURL: API_BASE_URL,
   timeout: API_TIMEOUT_MS,
 });
+
+if (API_AUTH_TOKEN) {
+  apiClient.defaults.headers.common["X-API-Token"] = API_AUTH_TOKEN;
+  apiClient.defaults.headers.common.Authorization = `Bearer ${API_AUTH_TOKEN}`;
+}
 
 const AUTO_DISMISS_SERVER_ERROR_TOAST = {
   duration: 4000,
@@ -37,6 +42,12 @@ apiClient.interceptors.response.use(
     if (!status) {
       title = "网络连接失败，请检查网络后重试。";
       description = undefined;
+    } else if (status === 401) {
+      title = backendError ?? "未授权，请检查 API 令牌配置。";
+      description = backendMessage && backendMessage !== title ? backendMessage : undefined;
+    } else if (status === 429) {
+      title = backendError ?? "请求过于频繁，请稍后再试。";
+      description = backendMessage && backendMessage !== title ? backendMessage : undefined;
     } else if (status >= 500) {
       title = backendError ?? "服务器错误，请稍后重试。";
       description = backendMessage && backendMessage !== title ? backendMessage : undefined;

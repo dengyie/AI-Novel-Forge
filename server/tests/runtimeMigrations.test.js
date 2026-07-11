@@ -232,3 +232,56 @@ test("ensureRuntimeDatabaseReady records a missing migration when schema is alre
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
+
+
+test("web SQLite runtime migrates when AI_NOVEL_RUNTIME is not desktop", async () => {
+  const { tempDir, databasePath } = createTempDatabaseFile();
+  const database = new Database(databasePath);
+
+  try {
+    createMigrationTable(database);
+    createSatisfiedBookAnalysisSourceCacheSchema(database);
+
+    for (const migrationName of allMigrationNames) {
+      if (migrationName === targetMigration) {
+        continue;
+      }
+      insertMigrationRecord(database, migrationName);
+    }
+  } finally {
+    database.close();
+  }
+
+  const previousRuntime = process.env.AI_NOVEL_RUNTIME;
+  const previousDatabaseUrl = process.env.DATABASE_URL;
+  const previousSkip = process.env.AI_NOVEL_SKIP_RUNTIME_MIGRATIONS;
+  process.env.AI_NOVEL_RUNTIME = "web";
+  process.env.DATABASE_URL = `file:${databasePath}`;
+  delete process.env.AI_NOVEL_SKIP_RUNTIME_MIGRATIONS;
+
+  try {
+    await ensureRuntimeDatabaseReady();
+
+    const verifyDb = new Database(databasePath, { readonly: true });
+    try {
+      const migrationRow = verifyDb.prepare(
+        `SELECT finished_at
+         FROM "_prisma_migrations"
+         WHERE migration_name = ?
+           AND finished_at IS NOT NULL
+         LIMIT 1`,
+      ).get(targetMigration);
+      assert.ok(migrationRow, "web runtime should record satisfied migration");
+    } finally {
+      verifyDb.close();
+    }
+  } finally {
+    if (previousRuntime == null) delete process.env.AI_NOVEL_RUNTIME;
+    else process.env.AI_NOVEL_RUNTIME = previousRuntime;
+    if (previousDatabaseUrl == null) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = previousDatabaseUrl;
+    if (previousSkip == null) delete process.env.AI_NOVEL_SKIP_RUNTIME_MIGRATIONS;
+    else process.env.AI_NOVEL_SKIP_RUNTIME_MIGRATIONS = previousSkip;
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});

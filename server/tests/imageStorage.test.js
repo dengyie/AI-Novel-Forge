@@ -176,3 +176,58 @@ test("image storage resolves and deletes MinIO objects from metadata", async () 
     });
   });
 });
+
+
+test("resolveImageAssetFile rejects localPath outside storage root", async () => {
+  await withEnv({
+    IMAGE_STORAGE_DRIVER: undefined,
+  }, async () => {
+    const { imageAssetStorage } = loadModules();
+    const storageRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ai-novel-local-images-"));
+    const outside = path.join(os.tmpdir(), "ai-novel-outside-secret.txt");
+    fs.writeFileSync(outside, "secret");
+    try {
+      await assert.rejects(
+        () => imageAssetStorage.resolveImageAssetFile({
+          assetId: "asset_escape",
+          url: outside,
+          metadata: JSON.stringify({ localPath: outside, storageDriver: "local" }),
+          storageRoot,
+        }),
+        (error) => {
+          assert.match(String(error.message || error), /outside the configured storage root|Image asset path/i);
+          return true;
+        },
+      );
+      // Prefix-sibling must not pass (/root vs /root-evil style)
+      const evilSibling = `${storageRoot}-evil`;
+      fs.mkdirSync(evilSibling, { recursive: true });
+      const evilFile = path.join(evilSibling, "x.png");
+      fs.writeFileSync(evilFile, "x");
+      await assert.rejects(
+        () => imageAssetStorage.resolveImageAssetFile({
+          assetId: "asset_sibling",
+          url: evilFile,
+          metadata: JSON.stringify({ localPath: evilFile, storageDriver: "local" }),
+          storageRoot,
+        }),
+        (error) => {
+          assert.match(String(error.message || error), /outside the configured storage root|Image asset path/i);
+          return true;
+        },
+      );
+    } finally {
+      fs.rmSync(storageRoot, { recursive: true, force: true });
+      fs.rmSync(outside, { force: true });
+      fs.rmSync(`${storageRoot}-evil`, { recursive: true, force: true });
+    }
+  });
+});
+
+test("assertLocalPathInsideStorageRoot allows nested files", async () => {
+  const { imageAssetStorage } = loadModules();
+  const root = "/tmp/ai-novel-images-root";
+  const nested = path.join(root, "characters", "a", "b.png");
+  const safe = imageAssetStorage.assertLocalPathInsideStorageRoot(nested, root);
+  assert.equal(path.resolve(safe), path.resolve(nested));
+});

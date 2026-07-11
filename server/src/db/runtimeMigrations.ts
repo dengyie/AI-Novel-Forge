@@ -371,7 +371,12 @@ function ensureSchemaColumnBackfills(database: Database.Database): void {
 }
 
 export async function ensureRuntimeDatabaseReady(): Promise<void> {
-  if (resolveAppRuntimeMode() !== "desktop") {
+  // Desktop + web SQLite both self-migrate so production (pxed) does not depend on
+  // hand-run SQL after every schema change. PostgreSQL is a no-op here.
+  // Opt out: AI_NOVEL_SKIP_RUNTIME_MIGRATIONS=true
+  const skip = process.env.AI_NOVEL_SKIP_RUNTIME_MIGRATIONS === "true"
+    || process.env.AI_NOVEL_SKIP_RUNTIME_MIGRATIONS === "1";
+  if (skip) {
     return;
   }
 
@@ -380,9 +385,14 @@ export async function ensureRuntimeDatabaseReady(): Promise<void> {
     return;
   }
 
+  const runtimeMode = resolveAppRuntimeMode();
   const migrationsDir = resolveMigrationsDir();
   if (!fs.existsSync(migrationsDir)) {
-    throw new Error(`Desktop runtime migrations were not found at ${migrationsDir}.`);
+    if (runtimeMode === "desktop") {
+      throw new Error(`Desktop runtime migrations were not found at ${migrationsDir}.`);
+    }
+    console.warn(`[db] SQLite migrations dir missing at ${migrationsDir}; skip auto-migrate.`);
+    return;
   }
 
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });

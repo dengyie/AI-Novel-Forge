@@ -8,7 +8,9 @@ import helmet from "helmet";
 import morgan from "morgan";
 import type { ApiResponse } from "@ai-novel/shared/types/api";
 import { ensureRuntimeDatabaseReady } from "./db/runtimeMigrations";
+import { assertProductionAuthSafety } from "./middleware/auth";
 import { errorHandler } from "./middleware/errorHandler";
+import { createRateLimitMiddleware } from "./middleware/rateLimit";
 import { loadProviderApiKeys } from "./llm/factory";
 import astrologyRouter from "./routes/astrology";
 import agentCatalogRouter from "./routes/agentCatalog";
@@ -78,6 +80,14 @@ function parseEnvFlag(value: string | undefined, defaultValue: boolean): boolean
   return value === "true" || value === "1";
 }
 
+function parsePositiveInt(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  if (Number.isFinite(parsed) && parsed > 0) {
+    return Math.floor(parsed);
+  }
+  return fallback;
+}
+
 export function createApp() {
   getSharedNovelServices();
   const app = express();
@@ -118,6 +128,29 @@ export function createApp() {
     return `${method} ${url} ${status} ${responseTime} ms - ${contentLength}${errorSuffix}`;
   }));
   app.use(express.json({ limit: jsonBodyLimit }));
+
+  // Global inbound rate limit (single-node). Skip liveness for probes.
+  const rateLimitEnabled = process.env.API_RATE_LIMIT_DISABLED !== "true"
+    && process.env.API_RATE_LIMIT_DISABLED !== "1";
+  if (rateLimitEnabled) {
+    app.use("/api", createRateLimitMiddleware({
+      limit: parsePositiveInt(process.env.API_RATE_LIMIT_MAX, 300),
+      windowMs: parsePositiveInt(process.env.API_RATE_LIMIT_WINDOW_MS, 60_000),
+      skip: (req) => {
+        const url = req.originalUrl?.split("?")[0] ?? "";
+        return url === "/api/health" || url === "/api/health/";
+      },
+    }));
+  }
+
+  // Tighter cap on expensive LLM surfaces.
+  const expensiveRateLimit = createRateLimitMiddleware({
+    limit: parsePositiveInt(process.env.API_EXPENSIVE_RATE_LIMIT_MAX, 60),
+    windowMs: parsePositiveInt(process.env.API_EXPENSIVE_RATE_LIMIT_WINDOW_MS, 60_000),
+  });
+  app.use("/api/chat", expensiveRateLimit);
+  app.use("/api/llm", expensiveRateLimit);
+  app.use("/api/creative-hub", expensiveRateLimit);
 
   app.use("/api/health", healthRouter);
   app.use("/api/agent-catalog", agentCatalogRouter);
@@ -330,6 +363,7 @@ export async function startServer(options?: ServerStartOptions): Promise<Started
 
   const app = createApp();
   const { host, port, allowLan } = resolveServerStartOptions(options);
+  assertProductionAuthSafety({ host, allowLan });
 
   const server = await new Promise<Server>((resolve, reject) => {
     const listeningServer = app.listen(port, host, () => resolve(listeningServer));
@@ -362,7 +396,37 @@ export async function startServer(options?: ServerStartOptions): Promise<Started
 }
 
 async function bootstrap(): Promise<void> {
-  await startServer();
+  const started = await startServer();
+  let shuttingDown = false;
+
+  const shutdown = async (signal: string) => {
+    if (shuttingDown) {
+      return;
+    }
+    shuttingDown = true;
+    console.log(`[server] received ${signal}, shutting down…`);
+    const forceExit = setTimeout(() => {
+      console.error("[server] graceful shutdown timed out, forcing exit.");
+      process.exit(1);
+    }, parsePositiveInt(process.env.SHUTDOWN_TIMEOUT_MS, 20_000));
+    forceExit.unref?.();
+
+    try {
+      await started.close();
+      console.log("[server] shutdown complete.");
+      process.exit(0);
+    } catch (error) {
+      console.error("[server] shutdown failed.", error);
+      process.exit(1);
+    }
+  };
+
+  process.once("SIGTERM", () => {
+    void shutdown("SIGTERM");
+  });
+  process.once("SIGINT", () => {
+    void shutdown("SIGINT");
+  });
 }
 
 if (require.main === module) {
