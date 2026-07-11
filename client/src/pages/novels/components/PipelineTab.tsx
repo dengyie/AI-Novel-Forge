@@ -108,6 +108,8 @@ interface PipelineTabProps {
       overallStatus: string | null;
     }>;
   } | null;
+  qualityDebtBoardStatus?: "idle" | "loading" | "error" | "ready";
+  qualityDebtBoardError?: string | null;
   bible?: NovelBible | null;
   plotBeats: PlotBeat[];
 }
@@ -169,6 +171,8 @@ export default function PipelineTab(props: PipelineTabProps) {
     qualitySummary,
     chapterReports,
     qualityDebtBoard,
+    qualityDebtBoardStatus = "idle",
+    qualityDebtBoardError = null,
     bible,
     plotBeats,
     directorTakeoverEntry,
@@ -242,7 +246,13 @@ export default function PipelineTab(props: PipelineTabProps) {
           <CardTitle>质量债板</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
-          {qualityDebtBoard ? (
+          {qualityDebtBoardStatus === "loading" ? (
+            <div className="text-sm text-muted-foreground">正在加载质量债板…</div>
+          ) : qualityDebtBoardStatus === "error" ? (
+            <div className="rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-900">
+              质量债板加载失败{qualityDebtBoardError ? `：${qualityDebtBoardError}` : "，请稍后重试。"}
+            </div>
+          ) : qualityDebtBoard ? (
             <>
               <div className="grid gap-3 md:grid-cols-4">
                 <div className="rounded-xl bg-background/70 p-3">
@@ -293,7 +303,7 @@ export default function PipelineTab(props: PipelineTabProps) {
               </div>
             </>
           ) : (
-            <div className="text-sm text-muted-foreground">打开本页后将加载质量债板。</div>
+            <div className="text-sm text-muted-foreground">切换到流水线页后将加载质量债板。</div>
           )}
         </CardContent>
       </Card>

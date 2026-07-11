@@ -7,6 +7,24 @@ const reviewService = require("../dist/services/novel/novelCoreReviewService.js"
 const { NovelCorePipelineService } = require("../dist/services/novel/novelCorePipelineService.js");
 const { ChapterEmptyContentError } = require("../dist/services/novel/runtime/chapterEmptyContentError.js");
 const { decoratePipelineJob } = require("../dist/services/novel/pipelineJobState.js");
+const { chapterQualityLoopService } = require("../dist/services/novel/quality/ChapterQualityLoopService.js");
+
+function replanRiskFlags(order) {
+  return JSON.stringify({
+    qualityLoop: {
+      overallStatus: "invalid",
+      recommendedAction: "replan",
+      rootCauseCode: "replan_required",
+      terminalAction: "defer_and_continue",
+      chapterOrder: order,
+    },
+  });
+}
+
+function isRangeDebtSeedQuery(input) {
+  const selectKeys = input?.select ? Object.keys(input.select).sort().join(",") : "";
+  return selectKeys === "id,order,riskFlags";
+}
 
 test("listRecoverablePipelineJobs excludes cancellation-pending jobs", async () => {
   const originalFindMany = prisma.generationJob.findMany;
@@ -153,10 +171,11 @@ test("executePipeline skips chapters already marked for deferred continue when s
     title: "测试小说",
   });
   prisma.chapter.findMany = async (input) => {
-    // quality-debt 熔断会再查 riskFlags/order；只捕获 skipCompleted 章节加载查询
-    const selectKeys = input.select ? Object.keys(input.select).sort().join(",") : "";
-    if (selectKeys === "order,riskFlags") {
-      return [];
+    // job 启动会 seed 区间 riskFlags 熔断缓存；只捕获 skipCompleted 章节加载查询
+    if (isRangeDebtSeedQuery(input)) {
+      return [
+        { id: "chapter-terminal", order: 4, riskFlags: null },
+      ];
     }
     if (input.where?.NOT?.AND) {
       capturedSkipCompletedQuery = input;
@@ -366,6 +385,419 @@ test("executePipeline stops remaining chapters after a replan recommendation", a
     prisma.chapter.findMany = original.chapterFindMany;
     reviewService.createQualityReport = original.createQualityReport;
     novelEventBus.emit = original.emit;
+  }
+});
+
+test("executePipeline stops remaining chapters when range replan quality debt reaches threshold", async () => {
+  const original = {
+    generationFindUnique: prisma.generationJob.findUnique,
+    generationUpdate: prisma.generationJob.update,
+    novelFindUnique: prisma.novel.findUnique,
+    chapterFindMany: prisma.chapter.findMany,
+    createQualityReport: reviewService.createQualityReport,
+    emit: novelEventBus.emit,
+    recordAssessment: chapterQualityLoopService.recordAssessment,
+  };
+
+  const updates = [];
+  const processedChapters = [];
+  let rangeDebtSeedCalls = 0;
+  prisma.generationJob.findUnique = async (input) => {
+    if (input.select?.startedAt) {
+      return {
+        startedAt: null,
+        completedCount: 0,
+        totalCount: 3,
+        retryCount: 0,
+        payload: JSON.stringify({
+          provider: "deepseek",
+          model: "deepseek-chat",
+          temperature: 0.8,
+          runMode: "fast",
+          autoReview: true,
+          autoRepair: true,
+          skipCompleted: true,
+          qualityThreshold: 75,
+          repairMode: "light_repair",
+        }),
+      };
+    }
+    if (input.select?.status) {
+      return {
+        status: "running",
+        cancelRequestedAt: null,
+      };
+    }
+    throw new Error(`Unexpected generationJob.findUnique call: ${JSON.stringify(input)}`);
+  };
+  prisma.generationJob.update = async (input) => {
+    updates.push(input);
+    return input;
+  };
+  prisma.novel.findUnique = async () => ({
+    id: "novel-1",
+    title: "测试小说",
+  });
+  // 处理队列只有 12–14；seed 含 10–11 历史 replan，证明跳过章仍计入运行范围。
+  prisma.chapter.findMany = async (input) => {
+    if (isRangeDebtSeedQuery(input)) {
+      rangeDebtSeedCalls += 1;
+      return [
+        { id: "chapter-10", order: 10, riskFlags: replanRiskFlags(10) },
+        { id: "chapter-11", order: 11, riskFlags: replanRiskFlags(11) },
+        { id: "chapter-12", order: 12, riskFlags: null },
+        { id: "chapter-13", order: 13, riskFlags: null },
+        { id: "chapter-14", order: 14, riskFlags: null },
+      ];
+    }
+    return [
+      { id: "chapter-12", order: 12, title: "第十二章", content: "", chapterStatus: "unplanned" },
+      { id: "chapter-13", order: 13, title: "第十三章", content: "", chapterStatus: "unplanned" },
+      { id: "chapter-14", order: 14, title: "第十四章", content: "", chapterStatus: "unplanned" },
+    ];
+  };
+  reviewService.createQualityReport = async () => null;
+  novelEventBus.emit = async () => null;
+  chapterQualityLoopService.recordAssessment = async (input) => ({
+    chapterId: input.chapterId,
+    chapterOrder: input.chapterOrder,
+    evaluatedAt: "2026-07-12T00:00:00.000Z",
+    overallStatus: "invalid",
+    recommendedAction: "replan",
+    patchFirstRequired: true,
+    recheckRequired: true,
+    pauseReason: null,
+    rootCauseCode: "replan_required",
+    blockingObligations: [],
+    budget: null,
+    signals: [],
+  });
+
+  const service = new NovelCorePipelineService();
+  service.chapterRuntimeCoordinator.runPipelineChapter = async (_novelId, chapterId) => {
+    processedChapters.push(chapterId);
+    // 不走 stop_for_replan 即时停写；由 recordAssessment mock 写入 replan 债，触发 range 熔断。
+    return {
+      retryCountUsed: 0,
+      reviewExecuted: true,
+      score: {
+        coherence: 70,
+        repetition: 80,
+        pacing: 72,
+        voice: 74,
+        engagement: 70,
+        overall: 72,
+      },
+      issues: [],
+      pass: false,
+      runtimePackage: {
+        context: { chapter: { order: Number(String(chapterId).replace("chapter-", "")) } },
+        audit: { reports: [], openIssues: [] },
+        failureClassification: {
+          code: "replan_required",
+          summary: "需要重规划",
+          decisionReason: "窗口失配",
+          blockingObligations: [],
+        },
+      },
+    };
+  };
+
+  try {
+    await service.executePipeline("job-quality-debt-gate", "novel-1", {
+      startOrder: 10,
+      endOrder: 14,
+      provider: "deepseek",
+      model: "deepseek-chat",
+      temperature: 0.8,
+      runMode: "fast",
+      autoReview: true,
+      autoRepair: true,
+      skipCompleted: true,
+      qualityThreshold: 75,
+      repairMode: "light_repair",
+      maxRetries: 1,
+    });
+
+    assert.equal(rangeDebtSeedCalls, 1, "range debt should be seeded once per job");
+    // 历史 10/11 + 当章 12 → 阈值 3，13/14 不得继续
+    assert.deepEqual(processedChapters, ["chapter-12"]);
+    const finalUpdate = updates[updates.length - 1];
+    assert.equal(finalUpdate.data.status, "succeeded");
+    const payload = JSON.parse(finalUpdate.data.payload);
+    assert.ok(
+      payload.replanAlertDetails.some((detail) => detail.includes("运行范围") && detail.includes("3")),
+      `expected range replan gate detail, got ${JSON.stringify(payload.replanAlertDetails)}`,
+    );
+  } finally {
+    prisma.generationJob.findUnique = original.generationFindUnique;
+    prisma.generationJob.update = original.generationUpdate;
+    prisma.novel.findUnique = original.novelFindUnique;
+    prisma.chapter.findMany = original.chapterFindMany;
+    reviewService.createQualityReport = original.createQualityReport;
+    novelEventBus.emit = original.emit;
+    chapterQualityLoopService.recordAssessment = original.recordAssessment;
+  }
+});
+
+test("executePipeline range replan gate ignores debt outside job order range", async () => {
+  const original = {
+    generationFindUnique: prisma.generationJob.findUnique,
+    generationUpdate: prisma.generationJob.update,
+    novelFindUnique: prisma.novel.findUnique,
+    chapterFindMany: prisma.chapter.findMany,
+    createQualityReport: reviewService.createQualityReport,
+    emit: novelEventBus.emit,
+    recordAssessment: chapterQualityLoopService.recordAssessment,
+  };
+
+  const updates = [];
+  const processedChapters = [];
+  prisma.generationJob.findUnique = async (input) => {
+    if (input.select?.startedAt) {
+      return {
+        startedAt: null,
+        completedCount: 0,
+        totalCount: 2,
+        retryCount: 0,
+        payload: JSON.stringify({
+          provider: "deepseek",
+          model: "deepseek-chat",
+          temperature: 0.8,
+          runMode: "fast",
+          autoReview: true,
+          autoRepair: true,
+          skipCompleted: false,
+          qualityThreshold: 75,
+          repairMode: "light_repair",
+        }),
+      };
+    }
+    if (input.select?.status) {
+      return { status: "running", cancelRequestedAt: null };
+    }
+    throw new Error(`Unexpected generationJob.findUnique call: ${JSON.stringify(input)}`);
+  };
+  prisma.generationJob.update = async (input) => {
+    updates.push(input);
+    return input;
+  };
+  prisma.novel.findUnique = async () => ({ id: "novel-1", title: "测试小说" });
+  prisma.chapter.findMany = async (input) => {
+    // 区间外历史 replan 不在 seed 结果中（模拟 where order 过滤）
+    if (isRangeDebtSeedQuery(input)) {
+      return [
+        { id: "chapter-20", order: 20, riskFlags: null },
+        { id: "chapter-21", order: 21, riskFlags: null },
+      ];
+    }
+    return [
+      { id: "chapter-20", order: 20, title: "第二十章", content: "a", chapterStatus: "unplanned" },
+      { id: "chapter-21", order: 21, title: "第二十一章", content: "b", chapterStatus: "unplanned" },
+    ];
+  };
+  reviewService.createQualityReport = async () => null;
+  novelEventBus.emit = async () => null;
+  chapterQualityLoopService.recordAssessment = async (input) => ({
+    chapterId: input.chapterId,
+    chapterOrder: input.chapterOrder,
+    evaluatedAt: "2026-07-12T00:00:00.000Z",
+    overallStatus: "valid",
+    recommendedAction: "continue",
+    patchFirstRequired: false,
+    recheckRequired: false,
+    pauseReason: null,
+    rootCauseCode: "none",
+    blockingObligations: [],
+    budget: null,
+    signals: [],
+  });
+
+  const service = new NovelCorePipelineService();
+  service.chapterRuntimeCoordinator.runPipelineChapter = async (_novelId, chapterId) => {
+    processedChapters.push(chapterId);
+    return {
+      retryCountUsed: 0,
+      reviewExecuted: true,
+      score: {
+        coherence: 88,
+        repetition: 88,
+        pacing: 82,
+        voice: 80,
+        engagement: 86,
+        overall: 84,
+      },
+      issues: [],
+      pass: true,
+      runtimePackage: {
+        context: { chapter: { order: Number(String(chapterId).replace("chapter-", "")) } },
+        audit: { reports: [], openIssues: [] },
+        failureClassification: {
+          code: "none",
+          summary: "ok",
+          decisionReason: "ok",
+          blockingObligations: [],
+        },
+      },
+    };
+  };
+
+  try {
+    await service.executePipeline("job-quality-debt-out-of-range", "novel-1", {
+      startOrder: 20,
+      endOrder: 21,
+      provider: "deepseek",
+      model: "deepseek-chat",
+      temperature: 0.8,
+      runMode: "fast",
+      autoReview: true,
+      autoRepair: true,
+      skipCompleted: false,
+      qualityThreshold: 75,
+      repairMode: "light_repair",
+      maxRetries: 1,
+    });
+
+    assert.deepEqual(processedChapters, ["chapter-20", "chapter-21"]);
+    const finalUpdate = updates[updates.length - 1];
+    const payload = JSON.parse(finalUpdate.data.payload);
+    assert.equal(payload.replanAlertDetails?.length ?? 0, 0);
+  } finally {
+    prisma.generationJob.findUnique = original.generationFindUnique;
+    prisma.generationJob.update = original.generationUpdate;
+    prisma.novel.findUnique = original.novelFindUnique;
+    prisma.chapter.findMany = original.chapterFindMany;
+    reviewService.createQualityReport = original.createQualityReport;
+    novelEventBus.emit = original.emit;
+    chapterQualityLoopService.recordAssessment = original.recordAssessment;
+  }
+});
+
+test("executePipeline counts replan debt in memory when recordAssessment fails", async () => {
+  const original = {
+    generationFindUnique: prisma.generationJob.findUnique,
+    generationUpdate: prisma.generationJob.update,
+    novelFindUnique: prisma.novel.findUnique,
+    chapterFindMany: prisma.chapter.findMany,
+    createQualityReport: reviewService.createQualityReport,
+    emit: novelEventBus.emit,
+    recordAssessment: chapterQualityLoopService.recordAssessment,
+  };
+
+  const updates = [];
+  const processedChapters = [];
+  prisma.generationJob.findUnique = async (input) => {
+    if (input.select?.startedAt) {
+      return {
+        startedAt: null,
+        completedCount: 0,
+        totalCount: 2,
+        retryCount: 0,
+        payload: JSON.stringify({
+          provider: "deepseek",
+          model: "deepseek-chat",
+          temperature: 0.8,
+          runMode: "fast",
+          autoReview: true,
+          autoRepair: true,
+          skipCompleted: false,
+          qualityThreshold: 75,
+          repairMode: "light_repair",
+        }),
+      };
+    }
+    if (input.select?.status) {
+      return { status: "running", cancelRequestedAt: null };
+    }
+    throw new Error(`Unexpected generationJob.findUnique call: ${JSON.stringify(input)}`);
+  };
+  prisma.generationJob.update = async (input) => {
+    updates.push(input);
+    return input;
+  };
+  prisma.novel.findUnique = async () => ({ id: "novel-1", title: "测试小说" });
+  prisma.chapter.findMany = async (input) => {
+    if (isRangeDebtSeedQuery(input)) {
+      return [
+        { id: "chapter-1", order: 1, riskFlags: replanRiskFlags(1) },
+        { id: "chapter-2", order: 2, riskFlags: replanRiskFlags(2) },
+        { id: "chapter-3", order: 3, riskFlags: null },
+        { id: "chapter-4", order: 4, riskFlags: null },
+      ];
+    }
+    return [
+      { id: "chapter-3", order: 3, title: "第三章", content: "", chapterStatus: "unplanned" },
+      { id: "chapter-4", order: 4, title: "第四章", content: "", chapterStatus: "unplanned" },
+    ];
+  };
+  reviewService.createQualityReport = async () => null;
+  novelEventBus.emit = async () => null;
+  chapterQualityLoopService.recordAssessment = async () => {
+    throw new Error("simulated assessment write failure");
+  };
+
+  const service = new NovelCorePipelineService();
+  service.chapterRuntimeCoordinator.runPipelineChapter = async (_novelId, chapterId) => {
+    processedChapters.push(chapterId);
+    // 不走 stop_for_replan 即时停写；靠 rootCauseCode=replan_required 让 fail-open 内存 assessment 计入熔断。
+    return {
+      retryCountUsed: 0,
+      reviewExecuted: true,
+      score: {
+        coherence: 70,
+        repetition: 80,
+        pacing: 72,
+        voice: 74,
+        engagement: 70,
+        overall: 72,
+      },
+      issues: [],
+      pass: false,
+      runtimePackage: {
+        context: { chapter: { order: Number(String(chapterId).replace("chapter-", "")) } },
+        audit: { reports: [], openIssues: [] },
+        failureClassification: {
+          code: "replan_required",
+          summary: "需要重规划",
+          decisionReason: "窗口失配",
+          blockingObligations: [],
+        },
+      },
+    };
+  };
+
+  try {
+    await service.executePipeline("job-quality-debt-failopen", "novel-1", {
+      startOrder: 1,
+      endOrder: 4,
+      provider: "deepseek",
+      model: "deepseek-chat",
+      temperature: 0.8,
+      runMode: "fast",
+      autoReview: true,
+      autoRepair: true,
+      skipCompleted: false,
+      qualityThreshold: 75,
+      repairMode: "light_repair",
+      maxRetries: 1,
+    });
+
+    // recordAssessment 失败时仍用内存 assessment 并计；历史 2 + 当章 1 = 3 熔断
+    assert.deepEqual(processedChapters, ["chapter-3"]);
+    const finalUpdate = updates[updates.length - 1];
+    const payload = JSON.parse(finalUpdate.data.payload);
+    assert.ok(
+      payload.replanAlertDetails.some((detail) => detail.includes("运行范围") && detail.includes("3")),
+      `expected range gate after fail-open assessment, got ${JSON.stringify(payload.replanAlertDetails)}`,
+    );
+  } finally {
+    prisma.generationJob.findUnique = original.generationFindUnique;
+    prisma.generationJob.update = original.generationUpdate;
+    prisma.novel.findUnique = original.novelFindUnique;
+    prisma.chapter.findMany = original.chapterFindMany;
+    reviewService.createQualityReport = original.createQualityReport;
+    novelEventBus.emit = original.emit;
+    chapterQualityLoopService.recordAssessment = original.recordAssessment;
   }
 });
 

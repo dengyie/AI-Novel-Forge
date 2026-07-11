@@ -1,4 +1,8 @@
 import type { ReviewIssue } from "@ai-novel/shared/types/novel";
+import {
+  buildChapterQualityLoopAssessment,
+  type ChapterQualityLoopAssessment,
+} from "@ai-novel/shared/types/chapterQualityLoop";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "../../db/prisma";
 import { novelEventBus } from "../../events";
@@ -38,6 +42,21 @@ function clampPipelineMaxRetries(value: number | null | undefined): number {
 
 function buildEmptyChapterDetail(chapter: { order: number; title: string }): string {
   return `第${chapter.order}章「${chapter.title}」正文生成失败：模型连续未返回可保存正文，已暂停继续。`;
+}
+
+/** 熔断内存行：把 assessment 压成 riskFlags JSON，供 isBlockingReplanQualityDebt 读取。 */
+function buildQualityLoopRiskFlagsSnapshot(
+  assessment: ChapterQualityLoopAssessment,
+  source: "pipeline_review" | "repair_recheck",
+  terminalAction?: "defer_and_continue" | null,
+): string {
+  return JSON.stringify({
+    qualityLoop: {
+      ...assessment,
+      source,
+      ...(terminalAction ? { terminalAction } : {}),
+    },
+  });
 }
 
 function buildSkipCompletedChapterWhere(): Prisma.ChapterWhereInput {
@@ -735,6 +754,26 @@ export class NovelCorePipelineService {
         let completed = storedCompleted;
         const chaptersToProcess = chapters.slice(remainingStartIndex);
 
+        // job 运行范围 replan 质量债：启动时 seed 一次，章内只更新内存，避免每章扫库。
+        // 覆盖整段 options.startOrder–endOrder（含 skipCompleted 过滤掉的历史章）。
+        const rangeDebtRows = await prisma.chapter.findMany({
+          where: {
+            novelId,
+            order: { gte: options.startOrder, lte: options.endOrder },
+          },
+          select: { id: true, order: true, riskFlags: true },
+          orderBy: { order: "asc" },
+        });
+        const rangeDebtByChapterId = new Map(
+          rangeDebtRows.map((row) => [row.id, { order: row.order, riskFlags: row.riskFlags }]),
+        );
+        const evaluateRangeReplanGate = () =>
+          buildVolumeReplanQualityDebtGate({
+            chapters: Array.from(rangeDebtByChapterId.values()),
+            startOrder: options.startOrder,
+            endOrder: options.endOrder,
+          });
+
         // Phase 3：JIT 预取服务（N+1 章执行预取）
         const prefetchVolumeService = new NovelVolumeService();
         const prefetchJITService = new ChapterPlanJITService({
@@ -862,24 +901,45 @@ export class NovelCorePipelineService {
           }
           if (chapterResult.reviewExecuted) {
             await createQualityReport(novelId, chapter.id, final.score, final.issues);
-            await chapterQualityLoopService.recordAssessment({
-              novelId,
+            const assessmentSource = chapterResult.retryCountUsed > 0 ? "repair_recheck" : "pipeline_review";
+            const assessmentTerminalAction = chapterResult.pass ? null : "defer_and_continue";
+            // 先构建 assessment 供 fail-open 内存并计；DB 成功后再以同源结果更新。
+            const memoryAssessment = buildChapterQualityLoopAssessment({
               chapterId: chapter.id,
               chapterOrder: chapter.order,
               score: final.score,
               issues: final.issues,
               runtimePackage: chapterResult.runtimePackage,
-              source: chapterResult.retryCountUsed > 0 ? "repair_recheck" : "pipeline_review",
-              terminalAction: chapterResult.pass ? null : "defer_and_continue",
-              taskId: runtimePayload.workflowTaskId,
-              qualityDebtAttribution: chapterResult.qualityDebtAttribution ?? null,
-            }).catch((error) => {
+            });
+            let assessmentForMemory: ChapterQualityLoopAssessment = memoryAssessment;
+            try {
+              assessmentForMemory = await chapterQualityLoopService.recordAssessment({
+                novelId,
+                chapterId: chapter.id,
+                chapterOrder: chapter.order,
+                score: final.score,
+                issues: final.issues,
+                runtimePackage: chapterResult.runtimePackage,
+                source: assessmentSource,
+                terminalAction: assessmentTerminalAction,
+                taskId: runtimePayload.workflowTaskId,
+                qualityDebtAttribution: chapterResult.qualityDebtAttribution ?? null,
+              });
+            } catch (error) {
               logPipelineError("记录章节质量闭环状态失败", {
                 jobId,
                 novelId,
                 chapterId: chapter.id,
                 error: error instanceof Error ? error.message : String(error),
               });
+            }
+            rangeDebtByChapterId.set(chapter.id, {
+              order: chapter.order,
+              riskFlags: buildQualityLoopRiskFlagsSnapshot(
+                assessmentForMemory,
+                assessmentSource,
+                assessmentTerminalAction,
+              ),
             });
           }
 
@@ -908,20 +968,9 @@ export class NovelCorePipelineService {
             }
           }
 
-          // 卷级 replan 质量债熔断：job 运行范围（startOrder–endOrder）内 blocking replan 累计 ≥ 阈值则停止后续章。
+          // job 运行范围 replan 质量债熔断：内存计数达阈值则停止后续章（不每章扫库）。
           if (!shouldStopAfterCurrentChapter) {
-            const debtRows = await prisma.chapter.findMany({
-              where: {
-                novelId,
-                order: { gte: options.startOrder, lte: options.endOrder },
-              },
-              select: { riskFlags: true, order: true },
-            });
-            const volumeGate = buildVolumeReplanQualityDebtGate({
-              chapters: debtRows,
-              startOrder: options.startOrder,
-              endOrder: options.endOrder,
-            });
+            const volumeGate = evaluateRangeReplanGate();
             if (volumeGate.shouldPause) {
               const detail = volumeGate.reason ?? "运行范围内 replan 质量债已达熔断阈值。";
               if (!replanAlertDetails.includes(detail)) {
