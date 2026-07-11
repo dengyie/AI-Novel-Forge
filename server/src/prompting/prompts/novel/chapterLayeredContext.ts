@@ -167,6 +167,7 @@ export function buildVolumeWindowContext(seed: RuntimeVolumeSeed): VolumeWindowC
 
 export function buildChapterMissionContext(contextPackage: GenerationContextPackage): ChapterMissionContext {
   const stateGoal = contextPackage.chapterStateGoal;
+  const diversityForce = contextPackage.sceneDiversityForce;
   return {
     chapterId: contextPackage.chapter.id,
     chapterOrder: contextPackage.chapter.order,
@@ -194,7 +195,9 @@ export function buildChapterMissionContext(contextPackage: GenerationContextPack
     riskNotes: takeUnique([
       ...(contextPackage.protectedSecrets ?? []),
       ...(contextPackage.plan?.riskNotes ?? []),
-    ], 5),
+      // 近窗同质：软强制换场景（不接导演熔断）
+      ...(diversityForce?.shouldForce ? (diversityForce.riskNotes ?? []) : []),
+    ], 8),
   };
 }
 
@@ -234,6 +237,7 @@ function buildChapterBoundaryContract(
     ...scenes.flatMap((scene) => scene.forbiddenExpansion ?? []),
     lastScene?.exitState ? `不得越过本章结束态：${lastScene.exitState}` : "",
     contextPackage.chapter.hook ? `不得直接展开钩子之后的后续事件：${contextPackage.chapter.hook}` : "",
+    // 注意：sceneDiversityForce **不**进 doNotCross（会落入 forbiddenCrossings 硬合同）
   ], 12).filter(Boolean);
 
   return {
@@ -316,7 +320,12 @@ export function buildChapterWriteContext(input: {
     continuationConstraints: summarizeContinuationConstraints(input.contextPackage),
     ragFacts: [],
   completedMilestones: [],
-  recentScenePatterns: [],
+  recentScenePatterns: takeUnique(
+    input.contextPackage.sceneDiversityForce?.shouldForce
+      ? (input.contextPackage.sceneDiversityForce.scenePatterns ?? [])
+      : [],
+    6,
+  ),
   };
 }
 

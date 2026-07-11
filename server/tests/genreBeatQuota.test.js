@@ -8,6 +8,7 @@ const {
   evaluateGenreBeatCoverage,
   jaccardBiGramSimilarity,
   shouldForceSceneDiversity,
+  buildSceneDiversityForceDirective,
 } = require("../../shared/dist/types/genreBeatQuota.js");
 
 test("inferGenreBeatWeights boosts nurture/collect for cozy framing", () => {
@@ -121,4 +122,38 @@ test("rolling jaccard forces scene diversity when near-duplicate", () => {
   });
   assert.equal(diverse.shouldForce, false);
   assert.ok(jaccardBiGramSimilarity("abc", "xyz") < 0.2);
+});
+
+test("buildSceneDiversityForceDirective injects soft constraints only when shouldForce", () => {
+  const repeated = "城门逃亡雨夜追兵压迫再逃亡";
+  const forced = buildSceneDiversityForceDirective({
+    recentTexts: [repeated, repeated, repeated, repeated, repeated],
+    window: 5,
+    threshold: 0.55,
+  });
+  assert.equal(forced.shouldForce, true);
+  assert.equal(forced.advisory, true);
+  assert.ok(forced.riskNotes.some((item) => item.includes("scene_diversity_force")));
+  assert.ok(forced.riskNotes.some((item) => item.includes("禁止复用")));
+  assert.ok(forced.scenePatterns.length >= 1);
+  assert.ok(forced.summaryLine && forced.summaryLine.includes("换场景软约束"));
+  // 软约束不得暴露 doNotCross 字段，避免误入 forbiddenCrossings
+  assert.equal(Object.prototype.hasOwnProperty.call(forced, "doNotCross"), false);
+
+  const idle = buildSceneDiversityForceDirective({
+    recentTexts: [
+      "雨夜和解重建羁绊",
+      "遗迹探索发现地图",
+      "坊市收集灵石图纸",
+      "巷口伏击反杀追兵",
+      "山道休整整备干粮",
+    ],
+    window: 5,
+    threshold: 0.55,
+  });
+  assert.equal(idle.shouldForce, false);
+  assert.equal(idle.advisory, true);
+  assert.deepEqual(idle.riskNotes, []);
+  assert.deepEqual(idle.scenePatterns, []);
+  assert.equal(idle.summaryLine, null);
 });

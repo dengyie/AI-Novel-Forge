@@ -221,6 +221,7 @@ function createContextPackage() {
     ],
     previousChapterTail: "第四章尾段：主角攥紧维修通道钥匙，听见女二留下的暗号，决定立刻从外城维修区反打。",
     openingHint: "Recent openings: none.",
+    sceneDiversityForce: null,
     continuation: {
       enabled: false,
       sourceType: null,
@@ -674,7 +675,8 @@ test("chapter layered contexts carry volume mission, character duties and repair
   assert.ok(writeContext.characterHardFacts.some((item) => item.name === "女二"));
   assert.ok(writeContext.characterBehaviorGuides.some((item) => item.volumeResponsibility.includes("反压机会")));
   assert.ok(writeContext.characterBehaviorGuides.some((item) => item.absenceRisk === "high"));
-  assert.ok(writeContext.obligationContract.requiredCharacterAppearances.includes("女二（已缺席 3 章，宜自然带出）"));
+  // P1-5：must_on_page 缺席高风险标签口径为「须本场可见」（非旧文案「宜自然带出」）
+  assert.ok(writeContext.obligationContract.requiredCharacterAppearances.includes("女二（must_on_page；已缺席 3 章，须本场可见）"));
   assert.match(writeContext.narrativeProgressHint, /第 5 章 \/ 预计共 20 章/);
   assert.ok(writeContext.pendingCandidateGuards.some((item) => item.proposedName === "林策"));
   assert.ok(writeContext.openConflictSummaries.some((item) => item.includes("第一次反压仍未落地")));
@@ -867,4 +869,64 @@ test("chapter writer blocks enforce enabled critical context contracts", () => {
   const resourceBlock = assertNonEmptyBlock(writerBlocks, "character_resource_context");
   assert.match(resourceBlock.content, /维修通道钥匙/);
   assert.match(resourceBlock.content, /旧通行证/);
+});
+
+test("sceneDiversityForce injects soft constraints into write context and opening block", () => {
+  const contextPackage = createContextPackage();
+  contextPackage.sceneDiversityForce = {
+    shouldForce: true,
+    averageJaccard: 0.82,
+    threshold: 0.55,
+    window: 5,
+    advisory: true,
+    riskNotes: ["scene_diversity_force: 近窗 Jaccard=0.82≥0.55，本章必须切换场景类型、地点或冲突形态；禁止复用近5章相同的时间/地点/冲突骨架与开场结构"],
+    scenePatterns: ["城门逃亡雨夜追兵", "外城维修区反打"],
+    summaryLine: "近窗同质偏高(J=0.82)已注入换场景软约束",
+  };
+
+  const writeContext = buildChapterWriteContext({
+    bookContract: contextPackage.bookContract,
+    macroConstraints: contextPackage.macroConstraints,
+    volumeWindow: contextPackage.volumeWindow,
+    contextPackage,
+  });
+
+  // 软注入：riskNotes + scenePatterns；不得污染 doNotCross / forbiddenCrossings
+  assert.ok(writeContext.chapterMission.riskNotes.some((item) => item.includes("scene_diversity_force")));
+  assert.ok(writeContext.recentScenePatterns.includes("城门逃亡雨夜追兵"));
+  assert.ok(!writeContext.chapterBoundary.doNotCross.some((item) => item.includes("scene_diversity_force")));
+  assert.ok(!writeContext.obligationContract.forbiddenCrossings.some((item) => item.includes("scene_diversity_force")));
+  assert.ok(!writeContext.obligationContract.forbiddenCrossings.some((item) => item.includes("禁止复用近5章")));
+
+  const writerBlocks = buildChapterWriterContextBlocks(writeContext);
+  const missionBlock = assertNonEmptyBlock(writerBlocks, "chapter_mission");
+  assert.match(missionBlock.content, /scene_diversity_force/);
+  const openingBlock = assertNonEmptyBlock(writerBlocks, "opening_constraints");
+  assert.match(openingBlock.content, /Scene pattern blacklist/);
+  assert.match(openingBlock.content, /城门逃亡雨夜追兵/);
+});
+
+test("sceneDiversityForce idle leaves existing constraints unchanged", () => {
+  const contextPackage = createContextPackage();
+  contextPackage.sceneDiversityForce = {
+    shouldForce: false,
+    averageJaccard: 0.12,
+    threshold: 0.55,
+    window: 5,
+    advisory: true,
+    riskNotes: [],
+    scenePatterns: ["should-not-appear"],
+    summaryLine: null,
+  };
+
+  const writeContext = buildChapterWriteContext({
+    bookContract: contextPackage.bookContract,
+    macroConstraints: contextPackage.macroConstraints,
+    volumeWindow: contextPackage.volumeWindow,
+    contextPackage,
+  });
+
+  assert.ok(writeContext.chapterBoundary.doNotCross.some((item) => item.includes("不要提前揭露幕后黑手")));
+  assert.ok(!writeContext.chapterMission.riskNotes.some((item) => item.includes("scene_diversity_force")));
+  assert.deepEqual(writeContext.recentScenePatterns, []);
 });

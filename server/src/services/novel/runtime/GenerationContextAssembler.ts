@@ -49,11 +49,17 @@ import {
   loadPendingCharacterHardFactReviews,
 } from "./context/pendingReviewContext";
 import { buildSyntheticCharacterResourceIssues } from "./context/syntheticCharacterResourceIssues";
+import {
+  buildSceneDiversityForceDirective,
+  GENRE_BEAT_SCENE_DIVERSITY_WINDOW,
+} from "@ai-novel/shared/types/genreBeatQuota";
 
 export { buildBlockingPendingReviewProposalWhere } from "./context/pendingReviewContext";
 
 const OPENING_COMPARE_LIMIT = 3;
 const OPENING_SLICE_LENGTH = 220;
+/** 近窗场景多样性：取前序章 taskSheet/summary/title 做 Jaccard 软强制 */
+const SCENE_DIVERSITY_LOOKBACK = GENRE_BEAT_SCENE_DIVERSITY_WINDOW;
 
 const runtimeChapterSelect = {
   id: true,
@@ -265,6 +271,7 @@ export class GenerationContextAssembler {
       openAuditIssues,
       summaries,
       recentChapters,
+      sceneDiversitySourceChapters,
       decisions,
       characterDynamics,
       continuationPack,
@@ -305,6 +312,21 @@ export class GenerationContextAssembler {
         orderBy: { order: "desc" },
         take: 1,
         select: { order: true, title: true, content: true },
+      }),
+      // 近窗多样性：前 N 章 title/taskSheet + summary（与 quality-debt 观测口径对齐）
+      prisma.chapter.findMany({
+        where: {
+          novelId,
+          order: { lt: chapter.order },
+        },
+        orderBy: { order: "desc" },
+        take: SCENE_DIVERSITY_LOOKBACK,
+        select: {
+          order: true,
+          title: true,
+          taskSheet: true,
+          chapterSummary: { select: { summary: true } },
+        },
       }),
       prisma.creativeDecision.findMany({
         where: {
@@ -484,6 +506,20 @@ export class GenerationContextAssembler {
 
     const previousChapterTail = extractChapterTail(recentChapters[0]?.content);
 
+    // 近窗同质 → 软强制换场景（advisory；不接 volumeReplanGate）
+    const sceneDiversityRecentTexts = [...sceneDiversitySourceChapters]
+      .sort((left, right) => left.order - right.order)
+      .map((row) => [
+        row.title,
+        row.taskSheet,
+        row.chapterSummary?.summary,
+      ].filter(Boolean).join(" "))
+      .filter((text) => text.trim().length > 0);
+    const sceneDiversityForce = buildSceneDiversityForceDirective({
+      recentTexts: sceneDiversityRecentTexts,
+      window: SCENE_DIVERSITY_LOOKBACK,
+    });
+
     const storyWorldSlice = worldContextBlock?.rawSlice ?? null;
     const worldBlock = worldContextBlock?.promptBlock
       ?? "本书世界上下文：暂无。请根据小说基础信息、章节任务和已有连续性推进，不要凭空新增复杂世界规则。";
@@ -528,6 +564,7 @@ export class GenerationContextAssembler {
       previousChaptersSummary,
       previousChapterTail,
       openingHint,
+      sceneDiversityForce: sceneDiversityForce.shouldForce ? sceneDiversityForce : null,
       continuation: runtimeContinuation,
       styleContext,
       bookContract,

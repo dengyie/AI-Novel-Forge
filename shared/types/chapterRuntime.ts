@@ -769,6 +769,20 @@ export const generationContextPackageSchema = z.object({
   previousChaptersSummary: z.array(z.string()),
   previousChapterTail: z.string().nullable().optional(),
   openingHint: z.string(),
+  /**
+   * 近窗场景多样性软强制（仅写作路径）。
+   * advisory 恒 true；不得据此设置 volumeReplanGate.shouldPause。
+   */
+  sceneDiversityForce: z.object({
+    shouldForce: z.boolean(),
+    averageJaccard: z.number(),
+    threshold: z.number(),
+    window: z.number().int().positive(),
+    advisory: z.literal(true),
+    riskNotes: z.array(z.string()).default([]),
+    scenePatterns: z.array(z.string()).default([]),
+    summaryLine: z.string().nullable().optional(),
+  }).nullable().optional(),
   continuation: runtimeContinuationSchema,
   styleContext: runtimeStyleContextSchema.nullable().optional(),
   characterDynamics: runtimeDynamicCharacterOverviewSchema.nullable().optional(),

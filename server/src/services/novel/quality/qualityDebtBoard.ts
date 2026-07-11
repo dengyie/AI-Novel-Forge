@@ -7,6 +7,7 @@ import {
 import {
   classifyGenreBeatFromText,
   evaluateGenreBeatCoverage,
+  GENRE_BEAT_SCENE_DIVERSITY_WINDOW,
   shouldForceSceneDiversity,
   type GenreBeatCoverageResult,
   type GenreBeatKind,
@@ -22,8 +23,8 @@ export const QUALITY_DEBT_VOLUME_REPLAN_GATE_THRESHOLD = 3;
 
 /** 品类 beat 报告默认窗口（前 N 章）。 */
 export const GENRE_BEAT_BOARD_WINDOW_SIZE = 30;
-/** 近窗场景 Jaccard 多样性窗口。 */
-export const GENRE_BEAT_SCENE_DIVERSITY_WINDOW = 5;
+/** 近窗场景 Jaccard 多样性窗口（与 shared genreBeatQuota 同源）。 */
+export { GENRE_BEAT_SCENE_DIVERSITY_WINDOW };
 
 export interface QualityDebtChapterRow {
   id?: string;
@@ -75,7 +76,7 @@ export interface VolumeReplanQualityDebtGate {
 
 /**
  * 品类 beat 观测快照（只读报告，不熔断 auto director）。
- * status=observed：已接线 quality-debt；强制换场景仍由调用方决定。
+ * status=observed：已接线 quality-debt；生成路径 soft force 见 buildSceneDiversityForceDirective（仍不接 replan pause）。
  */
 export interface GenreBeatBoardSnapshot {
   status: "observed";

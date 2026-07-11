@@ -2,9 +2,17 @@
  * 品类 beat 配额（纯函数）：从 sellingPoint / competingFeel / first30ChapterPromise
  * 推导前 N 章养成/收集等占比目标，并提供近窗场景 Jaccard 多样性信号。
  *
- * 交付状态：observed on quality-debt board（`genreBeatSnapshot`）— 前 N 章覆盖 +
- * 近窗 Jaccard 只读观测；**仍不**接导演熔断 / 强制换场景。
+ * 交付状态：
+ * - quality-debt board：`genreBeatSnapshot` 观测（含 recommendForce + advisory）
+ * - 章节生成：`buildSceneDiversityForceDirective` → writeContext 软注入
+ *   （doNotCross / riskNotes / recentScenePatterns）
+ * - **仍不**接 volumeReplanGate.shouldPause / 导演熔断
  */
+
+/** 近窗场景多样性默认窗口（章数） */
+export const GENRE_BEAT_SCENE_DIVERSITY_WINDOW = 5;
+/** 近窗平均 bi-gram Jaccard 达到该阈值则 shouldForce */
+export const GENRE_BEAT_SCENE_DIVERSITY_THRESHOLD = 0.55;
 
 export const GENRE_BEAT_KINDS = [
   "nurture",
@@ -327,13 +335,82 @@ export function shouldForceSceneDiversity(input: {
   threshold: number;
   window: number;
 } {
-  const window = input.window ?? 5;
-  const threshold = input.threshold ?? 0.55;
+  const window = input.window ?? GENRE_BEAT_SCENE_DIVERSITY_WINDOW;
+  const threshold = input.threshold ?? GENRE_BEAT_SCENE_DIVERSITY_THRESHOLD;
   const averageJaccard = averageRollingSceneJaccard(input.recentTexts, window);
   return {
     shouldForce: averageJaccard >= threshold,
     averageJaccard,
     threshold,
     window,
+  };
+}
+
+/**
+ * 将 shouldForce 信号转为章节生成可消费的软约束。
+ * advisory 恒 true：禁止调用方据此设置 volumeReplanGate.shouldPause。
+ *
+ * **刻意不进 doNotCross / forbiddenCrossings**：acceptance 把 forbidden_crossing
+ * 当硬合同缺口；场景多样性只应写 riskNotes + scenePatterns（writer 可见、不 hard fail）。
+ */
+export interface SceneDiversityForceDirective {
+  shouldForce: boolean;
+  averageJaccard: number;
+  threshold: number;
+  window: number;
+  advisory: true;
+  riskNotes: string[];
+  scenePatterns: string[];
+  summaryLine: string | null;
+}
+
+function compactScenePattern(text: string, maxLength = 48): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return "";
+  }
+  return normalized.length <= maxLength
+    ? normalized
+    : `${normalized.slice(0, Math.max(1, maxLength - 1))}…`;
+}
+
+export function buildSceneDiversityForceDirective(input: {
+  recentTexts: string[];
+  window?: number;
+  threshold?: number;
+}): SceneDiversityForceDirective {
+  const signal = shouldForceSceneDiversity(input);
+  if (!signal.shouldForce) {
+    return {
+      shouldForce: false,
+      averageJaccard: signal.averageJaccard,
+      threshold: signal.threshold,
+      window: signal.window,
+      advisory: true,
+      riskNotes: [],
+      scenePatterns: [],
+      summaryLine: null,
+    };
+  }
+
+  const jLabel = signal.averageJaccard.toFixed(2);
+  const riskNotes = [
+    `scene_diversity_force: 近窗 Jaccard=${jLabel}≥${signal.threshold}，本章必须切换场景类型、地点或冲突形态；禁止复用近${signal.window}章相同的时间/地点/冲突骨架与开场结构`,
+  ];
+  const scenePatterns = Array.from(new Set(
+    (input.recentTexts ?? [])
+      .map((text) => compactScenePattern(text))
+      .filter(Boolean),
+  )).slice(-Math.max(2, signal.window));
+
+  return {
+    shouldForce: true,
+    averageJaccard: signal.averageJaccard,
+    threshold: signal.threshold,
+    window: signal.window,
+    advisory: true,
+    riskNotes,
+    scenePatterns,
+    summaryLine: `近窗同质偏高(J=${jLabel})已注入换场景软约束`,
   };
 }
