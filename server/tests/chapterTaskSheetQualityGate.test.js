@@ -241,6 +241,18 @@ test("task sheet with internal quality codes is blocked; strip removes them", ()
   assert.ok(result.issues.some((issue) => issue.id === "task_sheet_internal_codes"));
 });
 
+test("strip-only internal codes leaves empty task sheet and remains non-enterable if assessed raw", () => {
+  const onlyCodes = "payoff_missing_progress draft_obligation_unmet replan_required";
+  assert.equal(containsInternalQualityCodes(onlyCodes), true);
+  const cleaned = stripInternalQualityCodes(onlyCodes);
+  assert.equal(cleaned.trim(), "");
+  // 清洗后为空：persist 路径应 hard fail；shape 对空单也应不可执行
+  const emptyResult = assessChapterExecutionContractShape(buildCandidate({
+    taskSheet: cleaned,
+  }));
+  assert.equal(emptyResult.canEnterExecution, false);
+});
+
 test("emotion chapter overloaded task sheet yields type overload hint without hard-blocking alone", () => {
   const heavyEmotionSheet = [
     "情绪基调：压抑后回温。",

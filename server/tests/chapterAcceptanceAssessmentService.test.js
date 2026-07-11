@@ -138,3 +138,43 @@ test("must_on_page character_appearance is hard and routes to repairable", () =>
   assert.equal(normalized.status, "repairable");
   assert.equal(normalized.continuePolicy, "repair_once");
 });
+
+test("plain character_appearance missing is hard when requiredCharacterAppearances lists the name", () => {
+  // 合同已要求 must_on_page；LLM 只写「林逸未出场」也必须 hard → repairable
+  const normalized = normalizeAssessment(createAssessment({
+    status: "accepted",
+    missingObligations: [{
+      kind: "character_appearance",
+      summary: "林逸未出场。",
+      evidence: "正文无林逸可见行动。",
+    }],
+    repairability: "patchable_obligation_gap",
+    decisionReason: "必须出场角色缺席。",
+  }), "字".repeat(3600), 3000, {
+    requiredCharacterAppearances: [
+      "林逸（must_on_page；已缺席 3 章，须本场可见）",
+    ],
+  });
+
+  assert.equal(normalized.status, "repairable");
+  assert.equal(normalized.continuePolicy, "repair_once");
+});
+
+test("plain character_appearance missing stays soft without required contract match", () => {
+  const normalized = normalizeAssessment(createAssessment({
+    status: "accepted",
+    missingObligations: [{
+      kind: "character_appearance",
+      summary: "路人甲未出场。",
+      evidence: "正文未出现路人甲。",
+    }],
+    repairability: "patchable_obligation_gap",
+    decisionReason: "非合同必达角色。",
+  }), "字".repeat(3600), 3000, {
+    requiredCharacterAppearances: [
+      "林逸（must_on_page；本章计划出场）",
+    ],
+  });
+
+  assert.equal(normalized.status, "continue_with_risk");
+});

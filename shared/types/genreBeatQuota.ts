@@ -1,7 +1,9 @@
 /**
  * 品类 beat 配额（纯函数）：从 sellingPoint / competingFeel / first30ChapterPromise
  * 推导前 N 章养成/收集等占比目标，并提供近窗场景 Jaccard 多样性信号。
- * 本模块不接导演熔断；调用方自行决定是否强制换场景。
+ *
+ * 交付状态：library-ready / partial — 已 export + 单测，**尚未**接入 director /
+ * rolling_window / volume 报告。调用方自行决定是否强制换场景；勿宣称运行时已生效。
  */
 
 export const GENRE_BEAT_KINDS = [
@@ -80,7 +82,7 @@ function scoreFramingKinds(blob: string): Record<GenreBeatKind, number> {
   };
   bump("nurture", 3, [/养成|轻松|日常|关系|羁绊|陪伴|恋爱|甜|成长曲线|训练日常/]);
   bump("collect", 3, [/收集|资源|打宝|掉落|材料|背包|图纸|灵石|收获|囤货/]);
-  bump("combat", 2, [/战斗|对决|升级打怪|杀伐| paladin|热血|爽点战斗|高压/]);
+  bump("combat", 2, [/战斗|对决|升级打怪|杀伐|热血|爽点战斗|高压/]);
   bump("explore", 2, [/探索|冒险|地图|秘境|副本|发现|调查/]);
   bump("transition", 1, [/过渡|铺垫|衔接|节奏/]);
   return score;

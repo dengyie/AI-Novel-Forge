@@ -132,6 +132,50 @@ export function selectOffscreenDeferLabels(
   return labels;
 }
 
+/** missing 文案中显式 must_on_page / 连续缺席标记（增强信号，非唯一真源）。 */
+export const MUST_ON_PAGE_MISSING_TEXT_PATTERN =
+  /must_on_page|必须出场|连续缺席|已缺席\s*\d+\s*章/;
+
+export const SOFT_OFFSCREEN_MISSING_TEXT_PATTERN =
+  /offscreen|可延后|不必出场|非必须出场|背景角色|仅提及|他章计划|不记硬缺席/i;
+
+/** 从「林逸（must_on_page；…）」类标签抽出角色名。 */
+export function extractCharacterNameFromAppearanceLabel(label: string | null | undefined): string {
+  const raw = String(label ?? "").trim();
+  if (!raw) {
+    return "";
+  }
+  const paren = raw.indexOf("（");
+  if (paren > 0) {
+    return raw.slice(0, paren).trim();
+  }
+  const asciiParen = raw.indexOf("(");
+  if (asciiParen > 0) {
+    return raw.slice(0, asciiParen).trim();
+  }
+  return raw;
+}
+
+export function collectRequiredAppearanceNames(
+  requiredCharacterAppearances: string[] | null | undefined,
+): string[] {
+  const names: string[] = [];
+  const seen = new Set<string>();
+  for (const label of requiredCharacterAppearances ?? []) {
+    const name = extractCharacterNameFromAppearanceLabel(label);
+    if (!name || seen.has(name)) {
+      continue;
+    }
+    seen.add(name);
+    names.push(name);
+  }
+  return names;
+}
+
+export function isMustOnPageMissingText(text: string | null | undefined): boolean {
+  return MUST_ON_PAGE_MISSING_TEXT_PATTERN.test(String(text ?? ""));
+}
+
 /** 验收 missing 中「故意 offscreen」类 character_appearance 应降级，不抬高 hard repair。 */
 export function isSoftOffscreenCharacterAppearanceMissing(input: {
   kind?: string | null;
@@ -142,8 +186,38 @@ export function isSoftOffscreenCharacterAppearanceMissing(input: {
     return false;
   }
   const text = `${input.summary ?? ""}\n${input.evidence ?? ""}`;
-  if (/must_on_page|必须出场|连续缺席|已缺席\s*\d+\s*章/.test(text)) {
+  if (isMustOnPageMissingText(text)) {
     return false;
   }
-  return /offscreen|可延后|不必出场|非必须出场|背景角色|仅提及|他章计划|不记硬缺席/i.test(text);
+  return SOFT_OFFSCREEN_MISSING_TEXT_PATTERN.test(text);
+}
+
+/**
+ * character_appearance 是否 hard：
+ * 1) 文案显式 must_on_page / 连续缺席；或
+ * 2) missing 命中义务合同 requiredCharacterAppearances 中的角色名；
+ * 故意 offscreen 且不在 required 名单 → soft。
+ */
+export function isHardCharacterAppearanceMissing(input: {
+  kind?: string | null;
+  summary?: string | null;
+  evidence?: string | null;
+  requiredCharacterAppearances?: string[] | null;
+}): boolean {
+  if (input.kind !== "character_appearance") {
+    return false;
+  }
+  const text = `${input.summary ?? ""}\n${input.evidence ?? ""}`;
+  if (isMustOnPageMissingText(text)) {
+    return true;
+  }
+  // 义务合同真源优先于 offscreen 措辞：required 名单命中即 hard。
+  const requiredNames = collectRequiredAppearanceNames(input.requiredCharacterAppearances);
+  if (requiredNames.some((name) => name.length > 0 && text.includes(name))) {
+    return true;
+  }
+  if (isSoftOffscreenCharacterAppearanceMissing(input)) {
+    return false;
+  }
+  return false;
 }

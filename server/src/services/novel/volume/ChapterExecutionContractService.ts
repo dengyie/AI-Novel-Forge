@@ -2,6 +2,7 @@ import type { Prisma } from "@prisma/client";
 import { parseChapterScenePlan, serializeChapterScenePlan } from "@ai-novel/shared/types/chapterLengthControl";
 import {
   assessChapterExecutionContractShape,
+  containsInternalQualityCodes,
   formatChapterTaskSheetQualityFailure,
   stripInternalQualityCodes,
 } from "@ai-novel/shared/types/chapterTaskSheetQuality";
@@ -9,6 +10,7 @@ import type { VolumePlanDocument } from "@ai-novel/shared/types/novel";
 import { prisma } from "../../../db/prisma";
 import type { StyleBindingService } from "../../styleEngine/StyleBindingService";
 import { buildWriterStyleContractText } from "../../styleEngine/styleContractText";
+import { logPipelineWarn } from "../novelCoreShared";
 import type { StoryMacroPlanService } from "../storyMacro/StoryMacroPlanService";
 import type { VolumeGenerateOptions } from "./volumeModels";
 import { generateVolumePlanDocument } from "./volumeGenerationOrchestrator";
@@ -125,7 +127,21 @@ export class ChapterExecutionContractService {
     if (!targetChapter?.taskSheet?.trim() || !targetChapter.sceneCards?.trim()) {
       throw new Error("AI 未返回完整的章节执行合同。");
     }
-    const taskSheet = stripInternalQualityCodes(targetChapter.taskSheet.trim());
+    const rawTaskSheet = targetChapter.taskSheet.trim();
+    const hadInternalCodes = containsInternalQualityCodes(rawTaskSheet);
+    const taskSheet = stripInternalQualityCodes(rawTaskSheet);
+    if (hadInternalCodes) {
+      logPipelineWarn("chapter_execution_contract_stripped_internal_codes", {
+        novelId,
+        chapterId,
+        chapterOrder: chapter.order,
+        rawLength: rawTaskSheet.length,
+        cleanedLength: taskSheet.length,
+      });
+    }
+    if (!taskSheet.trim()) {
+      throw new Error("章节任务单在清洗内部质量 code 后为空，无法进入执行。");
+    }
     targetChapter.taskSheet = taskSheet;
     const scenePlan = parseChapterScenePlan(targetChapter.sceneCards, {
       targetWordCount: targetChapter.targetWordCount ?? chapter.targetWordCount ?? undefined,

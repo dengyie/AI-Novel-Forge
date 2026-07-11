@@ -15,7 +15,11 @@ import {
 } from "../../../prompting/prompts/novel/chapterAcceptance.prompts";
 import { openConflictService } from "../../state/OpenConflictService";
 import { normalizeScore, ruleScore } from "../novelP0Utils";
-import { isSoftOffscreenCharacterAppearanceMissing } from "../../../prompting/prompts/novel/characterAppearanceObligation";
+import {
+  isHardCharacterAppearanceMissing,
+  isMustOnPageMissingText,
+  isSoftOffscreenCharacterAppearanceMissing,
+} from "../../../prompting/prompts/novel/characterAppearanceObligation";
 
 export interface ChapterAcceptanceAssessmentInput {
   novelId: string;
@@ -29,6 +33,11 @@ export interface ChapterAcceptanceAssessmentInput {
   provider?: LLMProvider;
   model?: string;
   temperature?: number;
+}
+
+export interface NormalizeAssessmentOptions {
+  /** 义务合同中的必须出场角色标签（含 must_on_page 标注）。 */
+  requiredCharacterAppearances?: string[] | null;
 }
 
 export interface ChapterAcceptanceAssessmentResult {
@@ -84,7 +93,10 @@ function categoryToReviewIssueCategory(category: AcceptanceIssue["category"]): R
   return "coherence";
 }
 
-function missingObligationToReviewIssue(obligation: ChapterExecutionMissingObligation): ReviewIssue {
+function missingObligationToReviewIssue(
+  obligation: ChapterExecutionMissingObligation,
+  options: NormalizeAssessmentOptions = {},
+): ReviewIssue {
   const category: ReviewIssue["category"] = obligation.kind === "character_appearance"
     || obligation.kind === "goal_change"
     ? "logic"
@@ -92,14 +104,15 @@ function missingObligationToReviewIssue(obligation: ChapterExecutionMissingOblig
       ? "coherence"
       : "pacing";
   const softOffscreen = isSoftOffscreenCharacterAppearanceMissing(obligation);
+  const hardAppearance = isHardCharacterAppearanceMissing({
+    ...obligation,
+    requiredCharacterAppearances: options.requiredCharacterAppearances,
+  });
   const severity: ReviewIssue["severity"] = obligation.kind === "forbidden_crossing"
     ? "high"
     : softOffscreen
       ? "low"
-      : obligation.kind === "character_appearance"
-        && /must_on_page|必须出场|连续缺席|已缺席\s*\d+\s*章/.test(
-          `${obligation.summary ?? ""}\n${obligation.evidence ?? ""}`,
-        )
+      : hardAppearance || isMustOnPageMissingText(`${obligation.summary ?? ""}\n${obligation.evidence ?? ""}`)
         ? "high"
         : "medium";
   return {
@@ -133,20 +146,39 @@ function isLengthDirective(directive: AcceptanceRepairDirective): boolean {
   return includesAnyMarker(directive.instruction, [...UNDER_LENGTH_MARKERS, ...OVER_LENGTH_MARKERS]);
 }
 
-function isHardMissingObligation(obligation: ChapterExecutionMissingObligation): boolean {
+function isHardMissingObligation(
+  obligation: ChapterExecutionMissingObligation,
+  options: NormalizeAssessmentOptions = {},
+): boolean {
   if (obligation.kind === "must_hit_now" || obligation.kind === "forbidden_crossing") {
     return true;
   }
-  // must_on_page 连续缺席 / 本章计划出场：升 patch 硬义务；故意 offscreen 不硬阻断。
+  // must_on_page：文案标记或命中义务合同 requiredCharacterAppearances；故意 offscreen 不硬阻断。
   if (obligation.kind === "character_appearance") {
-    if (isSoftOffscreenCharacterAppearanceMissing(obligation)) {
-      return false;
-    }
-    return /must_on_page|必须出场|连续缺席|已缺席\s*\d+\s*章/.test(
-      `${obligation.summary ?? ""}\n${obligation.evidence ?? ""}`,
-    );
+    return isHardCharacterAppearanceMissing({
+      ...obligation,
+      requiredCharacterAppearances: options.requiredCharacterAppearances,
+    });
   }
   return false;
+}
+
+function resolveRequiredCharacterAppearances(
+  contextPackage?: GenerationContextPackage | null,
+  override?: string[] | null,
+): string[] {
+  if (Array.isArray(override) && override.length > 0) {
+    return override;
+  }
+  const write = contextPackage?.chapterWriteContext?.obligationContract?.requiredCharacterAppearances;
+  if (Array.isArray(write) && write.length > 0) {
+    return write;
+  }
+  const review = contextPackage?.chapterReviewContext?.obligationContract?.requiredCharacterAppearances;
+  if (Array.isArray(review) && review.length > 0) {
+    return review;
+  }
+  return [];
 }
 
 function shouldDropLengthIssue(input: {
@@ -195,12 +227,21 @@ export function normalizeAssessment(
   output: ChapterAcceptanceAssessmentOutput,
   content: string,
   targetWordCount?: number | null,
+  options: NormalizeAssessmentOptions = {},
 ): ChapterAcceptanceAssessmentOutput {
   const reconciled = reconcileLengthAssessment(output, content, targetWordCount);
   const score = normalizeScore(reconciled.score ?? ruleScore(content));
+  const requiredCharacterAppearances = options.requiredCharacterAppearances ?? [];
   // 故意 offscreen 的 character_appearance 保留在 missing 列表供审计，但不抬升 hard repair。
+  // 已在 required 名单的角色不得被 soft 标注冲掉硬义务。
   const missingObligations = (reconciled.missingObligations ?? []).map((obligation) => {
     if (!isSoftOffscreenCharacterAppearanceMissing(obligation)) {
+      return obligation;
+    }
+    if (isHardCharacterAppearanceMissing({
+      ...obligation,
+      requiredCharacterAppearances,
+    })) {
       return obligation;
     }
     return {
@@ -211,7 +252,9 @@ export function normalizeAssessment(
     };
   });
   const hasHighRisk = reconciled.blockingIssues.some((issue) => issue.severity === "high" || issue.severity === "critical");
-  const hasHardMissingObligation = missingObligations.some(isHardMissingObligation);
+  const hasHardMissingObligation = missingObligations.some((obligation) => (
+    isHardMissingObligation(obligation, { requiredCharacterAppearances })
+  ));
   const hasSoftOnlyMissingObligations = missingObligations.length > 0 && !hasHardMissingObligation;
   const hasRepairWork = reconciled.blockingIssues.length > 0
     || reconciled.repairDirectives.length > 0
@@ -288,14 +331,23 @@ function buildFallbackAssessment(content: string): ChapterAcceptanceAssessmentOu
 export class ChapterAcceptanceAssessmentService {
   async assess(input: ChapterAcceptanceAssessmentInput): Promise<ChapterAcceptanceAssessmentResult> {
     const assessment = await this.invokeAssessment(input).catch(() => buildFallbackAssessment(input.content));
-    const normalized = normalizeAssessment(assessment, input.content, input.targetWordCount);
+    const requiredCharacterAppearances = resolveRequiredCharacterAppearances(input.contextPackage);
+    const normalizeOptions: NormalizeAssessmentOptions = { requiredCharacterAppearances };
+    const normalized = normalizeAssessment(
+      assessment,
+      input.content,
+      input.targetWordCount,
+      normalizeOptions,
+    );
     const score = normalizeScore(normalized.score);
     const issues = normalized.blockingIssues.map((issue) => ({
       severity: issue.severity,
       category: categoryToReviewIssueCategory(issue.category),
       evidence: issue.evidence,
       fixSuggestion: issue.fixSuggestion,
-    })).concat(normalized.missingObligations.map((obligation) => missingObligationToReviewIssue(obligation)));
+    })).concat(normalized.missingObligations.map((obligation) => (
+      missingObligationToReviewIssue(obligation, normalizeOptions)
+    )));
     const auditReports = await this.persistAcceptanceReports(input, normalized, score);
     await openConflictService.syncFromAuditReports({
       novelId: input.novelId,

@@ -7,6 +7,9 @@ const {
   selectMustOnPageAppearanceLabels,
   selectOffscreenDeferLabels,
   isSoftOffscreenCharacterAppearanceMissing,
+  isHardCharacterAppearanceMissing,
+  extractCharacterNameFromAppearanceLabel,
+  collectRequiredAppearanceNames,
   MUST_ON_PAGE_ABSENCE_SPAN_THRESHOLD,
 } = require("../dist/prompting/prompts/novel/characterAppearanceObligation.js");
 
@@ -81,5 +84,30 @@ test("soft offscreen missing detector", () => {
     kind: "character_appearance",
     summary: "林逸（must_on_page；已缺席 3 章）未出场",
     evidence: "正文无林逸",
+  }), false);
+});
+
+test("hard appearance missing uses required contract names without marker text", () => {
+  assert.equal(extractCharacterNameFromAppearanceLabel("林逸（must_on_page；本章计划出场）"), "林逸");
+  assert.deepEqual(
+    collectRequiredAppearanceNames(["林逸（must_on_page）", "焰尾（must_on_page；已缺席 3 章）"]),
+    ["林逸", "焰尾"],
+  );
+  assert.equal(isHardCharacterAppearanceMissing({
+    kind: "character_appearance",
+    summary: "林逸未出场。",
+    evidence: "正文无林逸",
+    requiredCharacterAppearances: ["林逸（must_on_page；已缺席 3 章，须本场可见）"],
+  }), true);
+  assert.equal(isHardCharacterAppearanceMissing({
+    kind: "character_appearance",
+    summary: "春桃未出场（可延后出场/offscreen）",
+    evidence: "他章计划",
+    requiredCharacterAppearances: ["林逸（must_on_page）"],
+  }), false);
+  assert.equal(isHardCharacterAppearanceMissing({
+    kind: "character_appearance",
+    summary: "路人甲未出场。",
+    requiredCharacterAppearances: [],
   }), false);
 });
