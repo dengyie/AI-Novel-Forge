@@ -511,3 +511,340 @@ test("assembler injects sceneDiversityForce from prior-chapter lookback when tex
   }
 });
 
+
+test("assembler injects timelineContext from timelineContextService into write package", async () => {
+  const { timelineContextService } = require("../dist/modules/timeline/timeline-context.service.js");
+  const now = new Date();
+  const originals = {
+    novelFindUnique: prisma.novel.findUnique,
+    chapterFindFirst: prisma.chapter.findFirst,
+    stateChangeProposalCount: prisma.stateChangeProposal.count,
+    stateChangeProposalFindMany: prisma.stateChangeProposal.findMany,
+    auditIssueFindMany: prisma.auditIssue.findMany,
+    novelBibleFindUnique: prisma.novelBible.findUnique,
+    chapterSummaryFindMany: prisma.chapterSummary.findMany,
+    consistencyFactFindMany: prisma.consistencyFact.findMany,
+    chapterFindMany: prisma.chapter.findMany,
+    creativeDecisionFindMany: prisma.creativeDecision.findMany,
+    ensureChapterPlan: plannerService.ensureChapterPlan,
+    buildPlanPromptBlock: plannerService.buildPlanPromptBlock,
+    buildStateContext: contextAssemblyService.build,
+    buildReferenceForStage: novelReferenceService.buildReferenceForStage,
+    getCharacterDynamics: characterDynamicsQueryService.getOverview,
+    buildRagContext: ragServices.hybridRetrievalService.buildContextBlock,
+    getPayoffLedger: payoffLedgerSyncService.getPayoffLedger,
+    buildCharacterResourceContext: characterResourceLedgerService.buildContext,
+    buildForChapter: timelineContextService.buildForChapter,
+  };
+
+  try {
+    prisma.novel.findUnique = async () => ({
+      id: "novel-tl",
+      title: "时间线小说",
+      world: null,
+      genre: { name: "玄幻" },
+      characters: [],
+      storyMacroPlan: null,
+      volumePlans: [],
+      primaryStoryMode: null,
+      secondaryStoryMode: null,
+      targetAudience: null,
+      bookSellingPoint: null,
+      first30ChapterPromise: null,
+      narrativePov: null,
+      pacePreference: null,
+      emotionIntensity: null,
+      styleTone: null,
+      outline: null,
+      structuredOutline: null,
+      estimatedChapterCount: 40,
+    });
+    prisma.chapter.findFirst = async () => ({
+      id: "chapter-5",
+      title: "第5章",
+      order: 5,
+      content: null,
+      expectation: "推进",
+      targetWordCount: 2200,
+      conflictLevel: 2,
+      revealLevel: 1,
+      mustAvoid: null,
+      taskSheet: "任务",
+      sceneCards: createSceneCards("合同"),
+      hook: "钩子",
+    });
+    prisma.stateChangeProposal.count = async () => 0;
+    prisma.stateChangeProposal.findMany = async () => [];
+    prisma.auditIssue.findMany = async () => [];
+    prisma.novelBible.findUnique = async () => null;
+    prisma.chapterSummaryFindMany = async () => [];
+    prisma.consistencyFactFindMany = async () => [];
+    prisma.creativeDecisionFindMany = async () => [];
+    prisma.chapter.findMany = async () => [];
+    plannerService.ensureChapterPlan = async () => ({
+      id: "plan-5",
+      chapterId: "chapter-5",
+      planRole: "pressure",
+      phaseLabel: "中段",
+      title: "计划",
+      objective: "推进",
+      participantsJson: "[]",
+      revealsJson: "[]",
+      riskNotesJson: "[]",
+      mustAdvanceJson: "[]",
+      mustPreserveJson: "[]",
+      sourceIssueIdsJson: "[]",
+      replannedFromPlanId: null,
+      hookTarget: "钩子",
+      rawPlanJson: null,
+      scenes: [],
+      createdAt: now,
+      updatedAt: now,
+    });
+    plannerService.buildPlanPromptBlock = async () => "";
+    contextAssemblyService.build = async () => ({
+      snapshot: createCanonicalSnapshot(),
+      nextAction: "write_chapter",
+      chapterStateGoal: null,
+      protectedSecrets: [],
+    });
+    novelReferenceService.buildReferenceForStage = async () => "";
+    characterDynamicsQueryService.getOverview = async () => null;
+    ragServices.hybridRetrievalService.buildContextBlock = async () => "";
+    payoffLedgerSyncService.getPayoffLedger = async () => ({ items: [] });
+    characterResourceLedgerService.buildContext = async () => null;
+
+    let buildCalls = 0;
+    timelineContextService.buildForChapter = async (input) => {
+      buildCalls += 1;
+      assert.equal(input.novelId, "novel-tl");
+      assert.equal(input.chapterId, "chapter-5");
+      assert.equal(input.chapterIndex, 5);
+      return {
+        currentTime: { label: "故事第3日黄昏", storyDayIndex: 3 },
+        previousEvents: [{ id: "e1", title: "昨夜突围", summary: "逃出城门", chapterIndex: 4, storyTimeLabel: "第2日夜" }],
+        plannedEventsThisChapter: [],
+        openHooks: [{ id: "h1", title: "追兵未散", description: "仍有追兵", status: "open", priority: "high", resolveMode: "next_chapter", blocking: true }],
+        forbiddenEvents: [],
+        knownStateChanges: [],
+        continuityRequirements: ["必须立即承接上一章钩子：追兵未散。"],
+      };
+    };
+
+    const assembler = new GenerationContextAssembler();
+    assembler.worldContextGateway = {
+      getWorldContextBlock: async () => ({ promptBlock: "世界", rawSlice: null }),
+    };
+    assembler.continuationService = {
+      buildChapterContextPack: async () => ({
+        enabled: false,
+        sourceType: null,
+        sourceId: null,
+        sourceTitle: null,
+        systemRule: "",
+        humanBlock: "",
+        antiCopyCorpus: [],
+      }),
+    };
+    assembler.styleBindingService = {
+      resolveForGeneration: async () => ({
+        matchedBindings: [],
+        compiledBlocks: null,
+        effectiveStyleProfileId: null,
+        taskStyleProfileId: null,
+        activeSourceTargets: [],
+        activeSourceLabels: [],
+        globalAntiAiRuleIds: [],
+        styleAntiAiRuleIds: [],
+        sanitizedGenerationProfile: null,
+      }),
+    };
+
+    const assembled = await assembler.assemble("novel-tl", "chapter-5", {});
+    assert.equal(buildCalls, 1, "must call timelineContextService.buildForChapter on write path");
+    assert.ok(assembled.contextPackage.timelineContext, "timelineContext must be injected");
+    assert.equal(assembled.contextPackage.timelineContext.currentTime.label, "故事第3日黄昏");
+    assert.equal(assembled.contextPackage.timelineContext.openHooks[0].title, "追兵未散");
+  } finally {
+    prisma.novel.findUnique = originals.novelFindUnique;
+    prisma.chapter.findFirst = originals.chapterFindFirst;
+    prisma.stateChangeProposal.count = originals.stateChangeProposalCount;
+    prisma.stateChangeProposal.findMany = originals.stateChangeProposalFindMany;
+    prisma.auditIssue.findMany = originals.auditIssueFindMany;
+    prisma.novelBible.findUnique = originals.novelBibleFindUnique;
+    prisma.chapterSummary.findMany = originals.chapterSummaryFindMany;
+    prisma.consistencyFact.findMany = originals.consistencyFactFindMany;
+    prisma.chapter.findMany = originals.chapterFindMany;
+    prisma.creativeDecision.findMany = originals.creativeDecisionFindMany;
+    plannerService.ensureChapterPlan = originals.ensureChapterPlan;
+    plannerService.buildPlanPromptBlock = originals.buildPlanPromptBlock;
+    contextAssemblyService.build = originals.buildStateContext;
+    novelReferenceService.buildReferenceForStage = originals.buildReferenceForStage;
+    characterDynamicsQueryService.getOverview = originals.getCharacterDynamics;
+    ragServices.hybridRetrievalService.buildContextBlock = originals.buildRagContext;
+    payoffLedgerSyncService.getPayoffLedger = originals.getPayoffLedger;
+    characterResourceLedgerService.buildContext = originals.buildCharacterResourceContext;
+    timelineContextService.buildForChapter = originals.buildForChapter;
+  }
+});
+
+test("assembler falls back to null timelineContext when buildForChapter fails", async () => {
+  const { timelineContextService } = require("../dist/modules/timeline/timeline-context.service.js");
+  const now = new Date();
+  const originals = {
+    novelFindUnique: prisma.novel.findUnique,
+    chapterFindFirst: prisma.chapter.findFirst,
+    stateChangeProposalCount: prisma.stateChangeProposal.count,
+    stateChangeProposalFindMany: prisma.stateChangeProposal.findMany,
+    auditIssueFindMany: prisma.auditIssue.findMany,
+    novelBibleFindUnique: prisma.novelBible.findUnique,
+    chapterSummaryFindMany: prisma.chapterSummary.findMany,
+    consistencyFactFindMany: prisma.consistencyFact.findMany,
+    chapterFindMany: prisma.chapter.findMany,
+    creativeDecisionFindMany: prisma.creativeDecision.findMany,
+    ensureChapterPlan: plannerService.ensureChapterPlan,
+    buildPlanPromptBlock: plannerService.buildPlanPromptBlock,
+    buildStateContext: contextAssemblyService.build,
+    buildReferenceForStage: novelReferenceService.buildReferenceForStage,
+    getCharacterDynamics: characterDynamicsQueryService.getOverview,
+    buildRagContext: ragServices.hybridRetrievalService.buildContextBlock,
+    getPayoffLedger: payoffLedgerSyncService.getPayoffLedger,
+    buildCharacterResourceContext: characterResourceLedgerService.buildContext,
+    buildForChapter: timelineContextService.buildForChapter,
+  };
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    prisma.novel.findUnique = async () => ({
+      id: "novel-tl-fail",
+      title: "失败注入",
+      world: null,
+      genre: { name: "玄幻" },
+      characters: [],
+      storyMacroPlan: null,
+      volumePlans: [],
+      primaryStoryMode: null,
+      secondaryStoryMode: null,
+      targetAudience: null,
+      bookSellingPoint: null,
+      first30ChapterPromise: null,
+      narrativePov: null,
+      pacePreference: null,
+      emotionIntensity: null,
+      styleTone: null,
+      outline: null,
+      structuredOutline: null,
+      estimatedChapterCount: 10,
+    });
+    prisma.chapter.findFirst = async () => ({
+      id: "chapter-2",
+      title: "第2章",
+      order: 2,
+      content: null,
+      expectation: null,
+      targetWordCount: 2000,
+      conflictLevel: 1,
+      revealLevel: 1,
+      mustAvoid: null,
+      taskSheet: null,
+      sceneCards: createSceneCards("x"),
+      hook: null,
+    });
+    prisma.stateChangeProposal.count = async () => 0;
+    prisma.stateChangeProposal.findMany = async () => [];
+    prisma.auditIssue.findMany = async () => [];
+    prisma.novelBible.findUnique = async () => null;
+    prisma.chapterSummary.findMany = async () => [];
+    prisma.consistencyFact.findMany = async () => [];
+    prisma.creativeDecision.findMany = async () => [];
+    prisma.chapter.findMany = async () => [];
+    plannerService.ensureChapterPlan = async () => ({
+      id: "plan-2",
+      chapterId: "chapter-2",
+      planRole: "setup",
+      phaseLabel: "开篇",
+      title: "计划",
+      objective: "推进",
+      participantsJson: "[]",
+      revealsJson: "[]",
+      riskNotesJson: "[]",
+      mustAdvanceJson: "[]",
+      mustPreserveJson: "[]",
+      sourceIssueIdsJson: "[]",
+      replannedFromPlanId: null,
+      hookTarget: null,
+      rawPlanJson: null,
+      scenes: [],
+      createdAt: now,
+      updatedAt: now,
+    });
+    plannerService.buildPlanPromptBlock = async () => "";
+    contextAssemblyService.build = async () => ({
+      snapshot: createCanonicalSnapshot(),
+      nextAction: "write_chapter",
+      chapterStateGoal: null,
+      protectedSecrets: [],
+    });
+    novelReferenceService.buildReferenceForStage = async () => "";
+    characterDynamicsQueryService.getOverview = async () => null;
+    ragServices.hybridRetrievalService.buildContextBlock = async () => "";
+    payoffLedgerSyncService.getPayoffLedger = async () => ({ items: [] });
+    characterResourceLedgerService.buildContext = async () => null;
+    timelineContextService.buildForChapter = async () => {
+      throw new Error("timeline boom");
+    };
+
+    const assembler = new GenerationContextAssembler();
+    assembler.worldContextGateway = {
+      getWorldContextBlock: async () => ({ promptBlock: "世界", rawSlice: null }),
+    };
+    assembler.continuationService = {
+      buildChapterContextPack: async () => ({
+        enabled: false,
+        sourceType: null,
+        sourceId: null,
+        sourceTitle: null,
+        systemRule: "",
+        humanBlock: "",
+        antiCopyCorpus: [],
+      }),
+    };
+    assembler.styleBindingService = {
+      resolveForGeneration: async () => ({
+        matchedBindings: [],
+        compiledBlocks: null,
+        effectiveStyleProfileId: null,
+        taskStyleProfileId: null,
+        activeSourceTargets: [],
+        activeSourceLabels: [],
+        globalAntiAiRuleIds: [],
+        styleAntiAiRuleIds: [],
+        sanitizedGenerationProfile: null,
+      }),
+    };
+
+    const assembled = await assembler.assemble("novel-tl-fail", "chapter-2", {});
+    assert.equal(assembled.contextPackage.timelineContext, null);
+  } finally {
+    console.warn = warn;
+    prisma.novel.findUnique = originals.novelFindUnique;
+    prisma.chapter.findFirst = originals.chapterFindFirst;
+    prisma.stateChangeProposal.count = originals.stateChangeProposalCount;
+    prisma.stateChangeProposal.findMany = originals.stateChangeProposalFindMany;
+    prisma.auditIssue.findMany = originals.auditIssueFindMany;
+    prisma.novelBible.findUnique = originals.novelBibleFindUnique;
+    prisma.chapterSummary.findMany = originals.chapterSummaryFindMany;
+    prisma.consistencyFact.findMany = originals.consistencyFactFindMany;
+    prisma.chapter.findMany = originals.chapterFindMany;
+    prisma.creativeDecision.findMany = originals.creativeDecisionFindMany;
+    plannerService.ensureChapterPlan = originals.ensureChapterPlan;
+    plannerService.buildPlanPromptBlock = originals.buildPlanPromptBlock;
+    contextAssemblyService.build = originals.buildStateContext;
+    novelReferenceService.buildReferenceForStage = originals.buildReferenceForStage;
+    characterDynamicsQueryService.getOverview = originals.getCharacterDynamics;
+    ragServices.hybridRetrievalService.buildContextBlock = originals.buildRagContext;
+    payoffLedgerSyncService.getPayoffLedger = originals.getPayoffLedger;
+    characterResourceLedgerService.buildContext = originals.buildCharacterResourceContext;
+    timelineContextService.buildForChapter = originals.buildForChapter;
+  }
+});

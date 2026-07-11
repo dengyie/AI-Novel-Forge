@@ -4,8 +4,6 @@ import { DirectorCommandService } from "../services/novel/director/commands/Dire
 import { resourceClassForCommand } from "../services/novel/director/commands/DirectorCommandServiceHelpers";
 import { taskDispatcher } from "./TaskDispatcher";
 
-const ACTIVE_COMMAND_STATUSES = ["leased", "running"] as const;
-
 function resolveNumberEnv(name: string, fallback: number): number {
   const value = Number(process.env[name]);
   return Number.isFinite(value) && value > 0 ? value : fallback;

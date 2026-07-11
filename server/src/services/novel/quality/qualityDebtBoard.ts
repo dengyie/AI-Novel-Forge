@@ -75,8 +75,11 @@ export interface VolumeReplanQualityDebtGate {
 }
 
 /**
- * 品类 beat 观测快照（只读报告，不熔断 auto director）。
- * status=observed：已接线 quality-debt；生成路径 soft force 见 buildSceneDiversityForceDirective（仍不接 replan pause）。
+ * 品类 beat 观测快照。
+ * status=observed：已接线 quality-debt。
+ * - sceneDiversity.recommendForce：仅展示/写作 soft-force 建议，**禁止**当导演熔断。
+ * - 主配额满窗 shortfall：pipeline 用 `shouldPauseForGenreBeatShortfall` 另判，
+ *   与 volumeReplanGate / diversity recommendForce 解耦。
  */
 export interface GenreBeatBoardSnapshot {
   status: "observed";
@@ -102,6 +105,43 @@ export interface GenreBeatBoardSnapshot {
   };
   /** 人类可读摘要（含 shortfall 细节，UI 可只渲染本行） */
   summaryLine: string;
+}
+
+/**
+ * 品类主配额流水线熔断：仅 **满窗** 且 `meetsPrimaryQuota=false` 时暂停后续章。
+ * - 未满窗 shortfall 只观测，不熔断（避免开书前几章误停）。
+ * - 与 sceneDiversity.recommendForce **无关**。
+ * - `GENRE_BEAT_PIPELINE_PAUSE=0|false|off` 可 ops 关闭。
+ */
+export function isGenreBeatPipelinePauseEnabled(): boolean {
+  const raw = process.env.GENRE_BEAT_PIPELINE_PAUSE?.trim().toLowerCase();
+  if (!raw) {
+    return true;
+  }
+  return raw !== "0" && raw !== "false" && raw !== "off" && raw !== "no";
+}
+
+export function shouldPauseForGenreBeatShortfall(
+  snapshot: GenreBeatBoardSnapshot | null | undefined,
+): boolean {
+  if (!snapshot || !isGenreBeatPipelinePauseEnabled()) {
+    return false;
+  }
+  if (snapshot.coverage.windowProgress !== "complete") {
+    return false;
+  }
+  return snapshot.coverage.meetsPrimaryQuota === false;
+}
+
+export function formatGenreBeatShortfallPauseReason(
+  snapshot: GenreBeatBoardSnapshot,
+): string {
+  const shortfallText = snapshot.coverage.shortfalls.length > 0
+    ? snapshot.coverage.shortfalls
+      .map((item) => `${item.labelZh}${item.actual}/${item.expectedMin}`)
+      .join("、")
+    : "主配额未达标";
+  return `前 ${snapshot.coverage.windowSize} 章品类主配额未达标（${shortfallText}），已暂停后续自动成书。`;
 }
 
 export interface QualityDebtBoardResult {

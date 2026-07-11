@@ -8,7 +8,9 @@
  * - 章节生成：`buildSceneDiversityForceDirective` 在 Assembler 用 **当前章前序 N 章**
  *   重算 → writeContext 仅软注入 `riskNotes` + `recentScenePatterns`。
  * - **禁止**写入 doNotCross / forbiddenCrossings（acceptance 硬合同）。
- * - **仍不**接 volumeReplanGate.shouldPause / 导演熔断。
+ * - 场景多样性 **仍不**接 volumeReplanGate / 导演熔断（仅 soft-force）。
+ * - 品类主配额：满窗且 `meetsPrimaryQuota=false` 时，pipeline 可调用
+ *   `shouldPauseForGenreBeatShortfall` 暂停后续章（与 diversity recommendForce 无关）。
  */
 
 /** 近窗场景多样性默认窗口（章数） */

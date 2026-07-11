@@ -258,3 +258,71 @@ test("genreBeat snapshot empty chapters is advisory with no labels", () => {
   assert.equal(snapshot.sceneDiversity.advisory, true);
   assert.equal(snapshot.sceneDiversity.recommendForce, false);
 });
+
+test("shouldPauseForGenreBeatShortfall only when complete window fails primary quota", () => {
+  const {
+    shouldPauseForGenreBeatShortfall,
+    formatGenreBeatShortfallPauseReason,
+    isGenreBeatPipelinePauseEnabled,
+  } = require("../dist/services/novel/quality/qualityDebtBoard.js");
+
+  const previous = process.env.GENRE_BEAT_PIPELINE_PAUSE;
+  try {
+    delete process.env.GENRE_BEAT_PIPELINE_PAUSE;
+    assert.equal(isGenreBeatPipelinePauseEnabled(), true);
+
+    const framing = {
+      sellingPoint: "轻松养成与资源收集",
+      first30ChapterPromise: "前三十章稳定养成与收集反馈",
+    };
+    const combatHeavyComplete = Array.from({ length: 30 }, (_, index) => ({
+      order: index + 1,
+      title: `巷口伏击${index + 1}`,
+      taskSheet: "开场交手，中段追击，结尾突围。",
+      summary: "主角突围并反杀追兵。",
+    }));
+    const failSnapshot = buildGenreBeatBoardSnapshot({
+      framing,
+      chapters: combatHeavyComplete,
+      windowSize: 30,
+    });
+    assert.equal(failSnapshot.coverage.windowProgress, "complete");
+    assert.equal(failSnapshot.coverage.meetsPrimaryQuota, false);
+    assert.equal(shouldPauseForGenreBeatShortfall(failSnapshot), true);
+    assert.match(formatGenreBeatShortfallPauseReason(failSnapshot), /品类主配额未达标/);
+
+    const partial = buildGenreBeatBoardSnapshot({
+      framing,
+      chapters: combatHeavyComplete.slice(0, 8),
+      windowSize: 30,
+    });
+    assert.equal(partial.coverage.windowProgress, "in_progress");
+    assert.equal(shouldPauseForGenreBeatShortfall(partial), false, "in-progress shortfall must not pause");
+
+    // diversity recommendForce must not alone pause
+    const diversityOnly = buildGenreBeatBoardSnapshot({
+      framing: { sellingPoint: "战斗热血" },
+      chapters: Array.from({ length: 30 }, (_, index) => ({
+        order: index + 1,
+        title: "同质逃亡",
+        taskSheet: "城门逃亡雨夜追兵压迫再逃亡",
+        summary: "城门逃亡雨夜追兵压迫再逃亡",
+      })),
+      windowSize: 30,
+    });
+    // even if recommendForce true, pause only depends on meetsPrimaryQuota+complete
+    if (diversityOnly.coverage.meetsPrimaryQuota) {
+      assert.equal(shouldPauseForGenreBeatShortfall(diversityOnly), false);
+    }
+
+    process.env.GENRE_BEAT_PIPELINE_PAUSE = "0";
+    assert.equal(isGenreBeatPipelinePauseEnabled(), false);
+    assert.equal(shouldPauseForGenreBeatShortfall(failSnapshot), false, "ops kill-switch disables pause");
+  } finally {
+    if (previous === undefined) {
+      delete process.env.GENRE_BEAT_PIPELINE_PAUSE;
+    } else {
+      process.env.GENRE_BEAT_PIPELINE_PAUSE = previous;
+    }
+  }
+});

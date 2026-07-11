@@ -22,7 +22,14 @@ import {
 import { ensureNovelCharacters } from "./novelCoreSupport";
 import { createQualityReport } from "./novelCoreReviewService";
 import { chapterQualityLoopService } from "./quality/ChapterQualityLoopService";
-import { buildVolumeReplanQualityDebtGate } from "./quality/qualityDebtBoard";
+import {
+  buildGenreBeatBoardSnapshot,
+  buildVolumeReplanQualityDebtGate,
+  formatGenreBeatShortfallPauseReason,
+  GENRE_BEAT_BOARD_WINDOW_SIZE,
+  shouldPauseForGenreBeatShortfall,
+  type GenreBeatChapterLabelSource,
+} from "./quality/qualityDebtBoard";
 import { buildPipelineLeaseClaimWhere, buildStaleRecoverablePipelineJobWhere, selectPrimaryPipelineJob } from "./pipelineJobDedup";
 import { buildPipelineCurrentItemLabel, buildPipelineStageProgress, decoratePipelineJob as decoratePipelineJobRow, isPipelineActiveStage, parsePipelinePayload as parsePipelineJobPayload, stringifyPipelinePayload as stringifyPipelineJobPayload, type DecoratedPipelineJob, type PipelineActiveStage, type PipelineJobLike } from "./pipelineJobState";
 
@@ -781,6 +788,53 @@ export class NovelCorePipelineService {
             endOrder: options.endOrder,
           });
 
+        // 品类主配额（前 N 章满窗 shortfall）熔断：启动 seed；窗内章完成后内存刷新 taskSheet/summary。
+        // 未满窗只观测不熔断；sceneDiversity.recommendForce 永不触发本门。
+        const genreBeatWindowSize = GENRE_BEAT_BOARD_WINDOW_SIZE;
+        const genreBeatFraming = {
+          sellingPoint: novel.bookSellingPoint ?? null,
+          competingFeel: novel.competingFeel ?? null,
+          first30ChapterPromise: novel.first30ChapterPromise ?? null,
+        };
+        const genreBeatSeedRows = await prisma.chapter.findMany({
+          where: {
+            novelId,
+            order: { lte: genreBeatWindowSize },
+          },
+          orderBy: { order: "asc" },
+          take: genreBeatWindowSize,
+          select: {
+            id: true,
+            order: true,
+            title: true,
+            taskSheet: true,
+            chapterSummary: { select: { summary: true } },
+          },
+        });
+        const genreBeatByChapterId = new Map<string, GenreBeatChapterLabelSource & { id: string }>(
+          genreBeatSeedRows.map((row) => [
+            row.id,
+            {
+              id: row.id,
+              order: row.order,
+              title: row.title,
+              taskSheet: row.taskSheet,
+              summary: row.chapterSummary?.summary ?? null,
+            },
+          ]),
+        );
+        const evaluateGenreBeatGate = () => {
+          const snapshot = buildGenreBeatBoardSnapshot({
+            framing: genreBeatFraming,
+            chapters: Array.from(genreBeatByChapterId.values()),
+            windowSize: genreBeatWindowSize,
+          });
+          return {
+            snapshot,
+            shouldPause: shouldPauseForGenreBeatShortfall(snapshot),
+          };
+        };
+
         // Phase 3：JIT 预取服务（N+1 章执行预取）
         const prefetchVolumeService = new NovelVolumeService();
         const prefetchJITService = new ChapterPlanJITService({
@@ -990,6 +1044,17 @@ export class NovelCorePipelineService {
             }
           }
 
+          // 窗内章：刷新品类标注内存（title/taskSheet 可能在本章生成后变化）。
+          if (chapter.order <= genreBeatWindowSize) {
+            genreBeatByChapterId.set(chapter.id, {
+              id: chapter.id,
+              order: chapter.order,
+              title: chapter.title,
+              taskSheet: chapter.taskSheet ?? null,
+              summary: genreBeatByChapterId.get(chapter.id)?.summary ?? null,
+            });
+          }
+
           // job 运行范围 replan 质量债熔断：内存计数达阈值则停止后续章（不每章扫库）。
           if (!shouldStopAfterCurrentChapter) {
             const volumeGate = evaluateRangeReplanGate();
@@ -1007,6 +1072,26 @@ export class NovelCorePipelineService {
                 scope: volumeGate.scope,
                 startOrder: volumeGate.startOrder,
                 endOrder: volumeGate.endOrder,
+              });
+            }
+          }
+
+          // 品类主配额满窗 shortfall 熔断（与 replan gate / diversity soft-force 解耦）。
+          if (!shouldStopAfterCurrentChapter) {
+            const genreGate = evaluateGenreBeatGate();
+            if (genreGate.shouldPause) {
+              const detail = formatGenreBeatShortfallPauseReason(genreGate.snapshot);
+              if (!replanAlertDetails.includes(detail)) {
+                replanAlertDetails.push(detail);
+              }
+              shouldStopAfterCurrentChapter = true;
+              logPipelineWarn("品类主配额满窗 shortfall 熔断，停止后续章节流水线", {
+                jobId,
+                order: chapter.order,
+                windowSize: genreGate.snapshot.coverage.windowSize,
+                labeledChapterCount: genreGate.snapshot.coverage.labeledChapterCount,
+                meetsPrimaryQuota: genreGate.snapshot.coverage.meetsPrimaryQuota,
+                shortfalls: genreGate.snapshot.coverage.shortfalls,
               });
             }
           }
