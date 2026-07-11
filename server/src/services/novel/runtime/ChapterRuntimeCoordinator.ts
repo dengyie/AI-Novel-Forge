@@ -26,6 +26,9 @@ import {
   defaultChapterRuntimeAgent,
   type ChapterRuntimeAgentPort,
 } from "./ChapterRuntimeDefaultDeps";
+import {
+  chapterTimelineFinalizationService,
+} from "./ChapterTimelineFinalizationService";
 
 interface ChapterRuntimeCoordinatorDeps {
   assembler?: Pick<GenerationContextAssembler, "assemble">;
@@ -87,6 +90,17 @@ export class ChapterRuntimeCoordinator {
       agentRuntime,
       validateRequest,
       ensureNovelCharacters,
+      ensurePreviousChapterTimeline: async ({ novelId, currentChapterOrder, request }) => {
+        await chapterTimelineFinalizationService.ensurePreviousChapterFinalized({
+          novelId,
+          currentChapterOrder,
+          request: {
+            provider: request.provider,
+            model: request.model,
+            temperature: request.temperature,
+          },
+        });
+      },
     });
     this.pipelineAdapter = new ChapterPipelineRuntimeAdapter({
       streamOrchestrator: this.streamOrchestrator,

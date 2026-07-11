@@ -95,10 +95,29 @@ export function classifyChapterQualityLoopRisk(
   if (qualityLoop.overallStatus === "valid" && recommendedAction === "continue") {
     return "none";
   }
+  // 仅时间线 deferred 风险：continue 放行写流，记 non-blocking 债，不挡 auto-execution。
+  if (
+    qualityLoop.overallStatus === "risk"
+    && recommendedAction === "continue"
+    && hasTimelineExtractionDeferredSignal(qualityLoop)
+  ) {
+    return "non_blocking_quality_debt";
+  }
   if (qualityLoop.overallStatus === "risk" || qualityLoop.overallStatus === "invalid") {
     return "blocking";
   }
   return "none";
+}
+
+function hasTimelineExtractionDeferredSignal(qualityLoop: Record<string, unknown>): boolean {
+  const signals = Array.isArray(qualityLoop.signals) ? qualityLoop.signals : [];
+  return signals.some((signal) => {
+    if (!isRecord(signal) || signal.artifactType !== "continuity_state") {
+      return false;
+    }
+    const codes = Array.isArray(signal.issueCodes) ? signal.issueCodes : [];
+    return codes.some((code) => code === "timeline_extraction_deferred");
+  });
 }
 
 export function classifyChapterQualityLoopRiskFlags(
@@ -303,22 +322,57 @@ function buildContinuitySignal(input: ChapterQualityLoopAssessmentInput): Chapte
           ? SEVERITY_RANK.medium
           : 0,
   );
-  const status = worstSeverity >= SEVERITY_RANK.critical
+  let status: ChapterQualityLoopSignalStatus = worstSeverity >= SEVERITY_RANK.critical
     ? "invalid"
     : worstSeverity >= SEVERITY_RANK.high || input.score.coherence < 75
       ? "risk"
       : "valid";
+  const deferredTimeline = isTimelineExtractionDeferred(input);
+  if (deferredTimeline) {
+    // 热路径故意 defer 时 timelineCheck 多为 info/warning，不得因此记 continuity valid。
+    status = worseStatus(status, "risk");
+  }
+  const issueCodes = [
+    ...(deferredTimeline ? ["timeline_extraction_deferred"] : []),
+    ...continuityIssues.map(issueCode),
+    ...runtimeContinuityIssues.map((issue) => issue.code),
+  ].slice(0, 8);
   return {
     artifactType: "continuity_state",
     status,
-    reason: status === "valid"
-      ? "章节连续性状态可以继续使用。"
-      : "章节连续性或人物状态存在风险，需要局部修复后重新评估。",
-    issueCodes: [
-      ...continuityIssues.map(issueCode),
-      ...runtimeContinuityIssues.map((issue) => issue.code),
-    ].slice(0, 8),
+    reason: deferredTimeline
+      ? "时间线抽取仍处于 deferred，不得视为连续性健康；由异步定稿补齐后需重新评估。"
+      : status === "valid"
+        ? "章节连续性状态可以继续使用。"
+        : "章节连续性或人物状态存在风险，需要局部修复后重新评估。",
+    issueCodes,
   };
+}
+
+/** 热路径 deferred 时间线：evidence / extractorError / issue code 任一命中即视为未完成 continuity。 */
+export function isTimelineExtractionDeferred(input: ChapterQualityLoopAssessmentInput): boolean {
+  const timelineCheck = input.runtimePackage?.timelineCheck;
+  if (timelineCheck) {
+    const issues = Array.isArray(timelineCheck.issues) ? timelineCheck.issues : [];
+    if (issues.some((issue) => {
+      if (!issue || typeof issue !== "object") return false;
+      const evidence = "evidence" in issue ? String(issue.evidence ?? "") : "";
+      const type = "type" in issue ? String(issue.type ?? "") : "";
+      return evidence.includes("timeline_extraction_deferred")
+        || type === "timeline_extraction_deferred";
+    })) {
+      return true;
+    }
+  }
+  const openIssues = input.runtimePackage?.audit.openIssues ?? [];
+  if (openIssues.some((issue) => (
+    issue.code === "timeline_extraction_deferred"
+    || (typeof issue.evidence === "string" && issue.evidence.includes("timeline_extraction_deferred"))
+    || (typeof issue.description === "string" && issue.description.includes("timeline_extraction_deferred"))
+  ))) {
+    return true;
+  }
+  return false;
 }
 
 function buildProseQualitySignal(input: ChapterQualityLoopAssessmentInput): ChapterQualityLoopSignal {
@@ -379,10 +433,29 @@ function buildRollingWindowSignal(input: ChapterQualityLoopAssessmentInput): Cha
   };
 }
 
+function isDeferredTimelineOnlyRisk(signals: ChapterQualityLoopSignal[]): boolean {
+  const continuity = signals.find((signal) => signal.artifactType === "continuity_state");
+  if (!continuity || continuity.status !== "risk") {
+    return false;
+  }
+  if (!continuity.issueCodes.includes("timeline_extraction_deferred")) {
+    return false;
+  }
+  return signals.every((signal) => (
+    signal.artifactType === "continuity_state"
+      ? signal.status === "risk"
+      : signal.status === "valid"
+  ));
+}
+
 function resolveAction(overallStatus: ChapterQualityLoopSignalStatus, signals: ChapterQualityLoopSignal[]): ChapterQualityLoopAction {
   const rollingWindow = signals.find((signal) => signal.artifactType === "rolling_window_review");
   if (rollingWindow?.status === "invalid") {
     return "replan";
+  }
+  // 仅 deferred 时间线风险：可见于 continuity risk，但不强制 patch（异步定稿补齐）。
+  if (overallStatus === "risk" && isDeferredTimelineOnlyRisk(signals)) {
+    return "continue";
   }
   if (overallStatus === "risk" || overallStatus === "invalid") {
     return "patch_repair";

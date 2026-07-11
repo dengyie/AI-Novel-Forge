@@ -30,6 +30,12 @@ export interface ChapterStreamGenerationOrchestratorDeps {
   agentRuntime: ChapterStreamGenerationAgentRuntime;
   validateRequest: (input: ChapterRuntimeRequestInput) => ChapterRuntimeRequestInput;
   ensureNovelCharacters: (novelId: string, actionName: string, minCount?: number) => Promise<void>;
+  /** 下章入口：补齐上章 timeline checkpoint（失败只告警，不阻断组装） */
+  ensurePreviousChapterTimeline?: (input: {
+    novelId: string;
+    currentChapterOrder: number;
+    request: ChapterRuntimeRequestInput;
+  }) => Promise<unknown>;
 }
 
 export interface PreparedRuntimeChapter {
@@ -138,6 +144,22 @@ export class ChapterStreamGenerationOrchestrator {
     const request = this.deps.validateRequest(options);
     await this.deps.ensureNovelCharacters(novelId, "generate chapter content");
     const assembled = await this.deps.assembler.assemble(novelId, chapterId, request);
+    // 下章入口硬守卫：上章尚无 timeline checkpoint 时先补齐（stable/degraded），失败只告警。
+    // 与定稿后 async schedule 互补，覆盖「异步未完成就开下一章」的长跑缺口。
+    if (this.deps.ensurePreviousChapterTimeline && assembled.chapter.order > 1) {
+      await this.deps.ensurePreviousChapterTimeline({
+        novelId,
+        currentChapterOrder: assembled.chapter.order,
+        request,
+      }).catch((error) => {
+        console.warn("[chapter-runtime] previous chapter timeline guard failed before write", {
+          novelId,
+          chapterId,
+          chapterOrder: assembled.chapter.order,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    }
     this.deps.readinessService.assertReady(assembled.contextPackage);
     this.assertStateDrivenReady(assembled.contextPackage, request);
     return {

@@ -288,6 +288,57 @@ test("buildChapterQualityLoopChapterUpdate clears stale repair state after a val
   assert.equal(riskFlags.qualityLoop.source, "repair_recheck");
 });
 
+test("deferred timeline extraction marks continuity risk but continues without patch", () => {
+  const assessment = buildChapterQualityLoopAssessment({
+    chapterId: "chapter-deferred-timeline",
+    chapterOrder: 4,
+    score: score(),
+    issues: [],
+    runtimePackage: {
+      context: {
+        chapter: { order: 4 },
+      },
+      audit: {
+        reports: [],
+        openIssues: [{
+          code: "timeline_unclear_time_anchor",
+          auditType: "continuity",
+          severity: "low",
+          description: "时间线抽取已移出热路径。",
+          evidence: "timeline_extraction_deferred",
+        }],
+      },
+      timelineCheck: {
+        status: "warning",
+        score: 0.9,
+        issues: [{
+          type: "unclear_time_anchor",
+          severity: "info",
+          message: "时间线抽取已移出章节接收热路径。",
+          evidence: "timeline_extraction_deferred",
+        }],
+      },
+      failureClassification: {
+        code: "none",
+        blockingObligations: [],
+      },
+    },
+    evaluatedAt: "2026-07-11T00:00:00.000Z",
+  });
+
+  const continuity = assessment.signals.find((signal) => signal.artifactType === "continuity_state");
+  assert.equal(continuity?.status, "risk");
+  assert.ok(continuity?.issueCodes.includes("timeline_extraction_deferred"));
+  assert.equal(assessment.overallStatus, "risk");
+  assert.equal(assessment.recommendedAction, "continue");
+  assert.equal(assessment.patchFirstRequired, false);
+  assert.equal(assessment.recheckRequired, false);
+
+  const riskFlags = JSON.stringify({ qualityLoop: assessment });
+  assert.equal(classifyChapterQualityLoopRiskFlags(riskFlags), "non_blocking_quality_debt");
+  assert.equal(hasContinuableChapterQualityLoopRiskFlags(riskFlags), true);
+});
+
 test("buildChapterQualityLoopChapterUpdate marks exhausted auto repair as deferred continue", () => {
   const assessment = buildChapterQualityLoopAssessment({
     chapterId: "chapter-5",
