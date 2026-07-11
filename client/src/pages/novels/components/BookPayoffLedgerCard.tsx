@@ -6,6 +6,7 @@ import type {
   PayoffLedgerResponse,
   StoryStateSnapshot,
 } from "@ai-novel/shared/types/novel";
+import { buildPayoffLifecycleNodes } from "@ai-novel/shared/types/payoffLedger";
 import CollapsibleSummary from "./CollapsibleSummary";
 
 interface BookPayoffLedgerCardProps {
@@ -90,6 +91,55 @@ function sourceSummary(item: PayoffLedgerItem): string {
   return labels.length > 0 ? labels.join(" / ") : "暂无来源摘要";
 }
 
+function lifecycleTouchSummary(item: PayoffLedgerItem): string {
+  const setup = typeof item.firstSeenChapterOrder === "number"
+    ? `埋设 ch${item.firstSeenChapterOrder}`
+    : item.setupChapterId
+      ? "已埋设"
+      : null;
+  const last = typeof item.lastTouchedChapterOrder === "number"
+    ? `最近 ch${item.lastTouchedChapterOrder}`
+    : null;
+  const paid = item.currentStatus === "paid_off"
+    ? (typeof item.lastTouchedChapterOrder === "number"
+      ? `兑现 ch${item.lastTouchedChapterOrder}`
+      : "已兑现")
+    : null;
+  return [setup, last, paid].filter(Boolean).join(" · ") || "暂无章序锚点";
+}
+
+function PayoffLifecycleStrip(props: { item: PayoffLedgerItem }) {
+  const nodes = buildPayoffLifecycleNodes(props.item.currentStatus);
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-1.5" aria-label="伏笔生命周期">
+      {nodes.map((node, index) => (
+        <div key={`${node.stage}-${index}`} className="flex items-center gap-1.5">
+          {index > 0 ? (
+            <span className={cn(
+              "h-px w-3",
+              node.reached ? "bg-emerald-400" : "bg-border",
+            )}
+            />
+          ) : null}
+          <span
+            className={cn(
+              "rounded-full border px-2 py-0.5 text-[10px] leading-none",
+              node.current
+                ? "border-emerald-400 bg-emerald-50 font-medium text-emerald-900"
+                : node.reached
+                  ? "border-border/80 bg-muted/40 text-muted-foreground"
+                  : "border-dashed border-border/60 text-muted-foreground/70",
+            )}
+          >
+            {node.labelZh}
+          </span>
+        </div>
+      ))}
+      <span className="ml-1 text-[10px] text-muted-foreground">{lifecycleTouchSummary(props.item)}</span>
+    </div>
+  );
+}
+
 export default function BookPayoffLedgerCard(props: BookPayoffLedgerCardProps) {
   const { latestStateSnapshot, payoffLedger } = props;
   const ledgerItems = payoffLedger?.items ?? [];
@@ -115,7 +165,9 @@ export default function BookPayoffLedgerCard(props: BookPayoffLedgerCardProps) {
               expandedLabel="收起全书账本"
               meta={(
                 <>
-                  <Badge variant="outline">待兑现 {ledgerSummary?.pendingCount ?? 0}</Badge>
+                  <Badge variant="outline">埋设 {ledgerSummary?.setupCount ?? 0}</Badge>
+                  <Badge variant="outline">提示 {ledgerSummary?.hintedCount ?? 0}</Badge>
+                  <Badge variant="outline">待兑现 {ledgerSummary?.pendingPayoffCount ?? ledgerSummary?.pendingCount ?? 0}</Badge>
                   <Badge variant={ledgerSummary?.urgentCount ? "secondary" : "outline"}>
                     紧急 {ledgerSummary?.urgentCount ?? 0}
                   </Badge>
@@ -155,6 +207,7 @@ export default function BookPayoffLedgerCard(props: BookPayoffLedgerCardProps) {
                         <Badge variant="outline">{scopeLabel(item.scopeType)}</Badge>
                         <Badge variant="outline">{formatWindow(item)}</Badge>
                       </div>
+                      <PayoffLifecycleStrip item={item} />
                       <div className="mt-2 text-xs text-muted-foreground">{item.summary}</div>
                       <div className="mt-2 grid gap-2 text-xs text-muted-foreground sm:grid-cols-3">
                         <div>

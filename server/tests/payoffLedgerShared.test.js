@@ -200,9 +200,26 @@ test("buildPayoffLedgerResponse orders items by risk and computes summary counts
 
   assert.deepEqual(response.items.map((item) => item.ledgerKey), ["overdue", "pending", "paid"]);
   assert.equal(response.summary.pendingCount, 1);
+  assert.equal(response.summary.pendingPayoffCount, 1);
+  assert.equal(response.summary.setupCount, 0);
+  assert.equal(response.summary.hintedCount, 0);
   assert.equal(response.summary.overdueCount, 1);
   assert.equal(response.summary.paidOffCount, 1);
   assert.equal(response.updatedAt, "2026-04-05T10:00:04.000Z");
+});
+
+test("buildPayoffLedgerSummary layers setup/hinted/pending_payoff for lifecycle viz", () => {
+  const response = buildPayoffLedgerResponse([
+    createLedgerItem({ ledgerKey: "s", currentStatus: "setup", title: "埋设项" }),
+    createLedgerItem({ ledgerKey: "h", currentStatus: "hinted", title: "提示项" }),
+    createLedgerItem({ ledgerKey: "p", currentStatus: "pending_payoff", title: "待兑现项" }),
+    createLedgerItem({ ledgerKey: "paid", currentStatus: "paid_off", title: "已兑现项" }),
+  ], 10);
+  assert.equal(response.summary.setupCount, 1);
+  assert.equal(response.summary.hintedCount, 1);
+  assert.equal(response.summary.pendingPayoffCount, 1);
+  assert.equal(response.summary.pendingCount, 3);
+  assert.equal(response.summary.paidOffCount, 1);
 });
 
 test("normalizePayoffLedgerIdentity removes spacing and common punctuation", () => {

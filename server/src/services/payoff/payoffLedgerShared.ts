@@ -597,6 +597,9 @@ export function buildPayoffLedgerSummary(
     overdueCount: classified.overdueItems.length,
     paidOffCount: classified.paidOffItems.length,
     failedCount: items.filter((item) => item.currentStatus === "failed").length,
+    setupCount: items.filter((item) => item.currentStatus === "setup").length,
+    hintedCount: items.filter((item) => item.currentStatus === "hinted").length,
+    pendingPayoffCount: items.filter((item) => item.currentStatus === "pending_payoff").length,
     updatedAt: items[0]?.updatedAt ?? null,
   };
 }

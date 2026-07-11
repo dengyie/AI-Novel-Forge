@@ -246,6 +246,9 @@ export const runtimePayoffLedgerSummarySchema = z.object({
   overdueCount: z.number().int().nonnegative(),
   paidOffCount: z.number().int().nonnegative(),
   failedCount: z.number().int().nonnegative(),
+  setupCount: z.number().int().nonnegative().optional(),
+  hintedCount: z.number().int().nonnegative().optional(),
+  pendingPayoffCount: z.number().int().nonnegative().optional(),
   updatedAt: z.string().nullable().optional(),
 });
 
