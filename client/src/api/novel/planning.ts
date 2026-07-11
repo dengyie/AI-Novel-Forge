@@ -182,68 +182,76 @@ export async function getNovelQualityReport(id: string) {
 }
 
 /** 质量债板：qualityLoop 聚合 + 运行范围/全书 replan 熔断信号 */
+/** quality-debt API 客户端视图类型（与服务端 GenreBeatBoardSnapshot 观测字段对齐） */
+export type NovelQualityDebtGenreBeatSnapshot = {
+  status: "observed";
+  windowSize: number;
+  labeledChapterCount: number;
+  summaryLine: string;
+  coverage: {
+    meetsPrimaryQuota: boolean;
+    windowProgress?: "in_progress" | "complete";
+    shortfalls: Array<{
+      kind: string;
+      expectedMin: number;
+      fullWindowExpectedMin?: number;
+      actual: number;
+      labelZh: string;
+    }>;
+  };
+  sceneDiversity: {
+    recommendForce: boolean;
+    averageJaccard: number;
+    threshold: number;
+    window: number;
+    advisory: true;
+  };
+};
+
+export type NovelQualityDebtBoard = {
+  novelId: string;
+  items: Array<{
+    chapterId: string;
+    chapterOrder: number;
+    title: string | null;
+    generationState: string | null;
+    chapterStatus: string | null;
+    overallStatus: string | null;
+    recommendedAction: string | null;
+    rootCauseCode: string | null;
+    terminalAction: string | null;
+    riskClassification: "none" | "blocking" | "non_blocking_quality_debt";
+    evaluatedAt: string | null;
+    pauseReason: string | null;
+  }>;
+  summary: {
+    totalWithQualityLoop: number;
+    invalidCount: number;
+    riskCount: number;
+    validCount: number;
+    patchRepairCount: number;
+    replanCount: number;
+    manualGateCount: number;
+    blockingCount: number;
+    nonBlockingDebtCount: number;
+    blockingReplanCount: number;
+  };
+  volumeReplanGate: {
+    threshold: number;
+    blockingReplanCount: number;
+    shouldPause: boolean;
+    reason: string | null;
+    scope: "range" | "board";
+    startOrder: number | null;
+    endOrder: number | null;
+  };
+  genreBeatSnapshot: NovelQualityDebtGenreBeatSnapshot | null;
+};
+
 export async function getNovelQualityDebt(id: string) {
-  const { data } = await apiClient.get<
-    ApiResponse<{
-      novelId: string;
-      items: Array<{
-        chapterId: string;
-        chapterOrder: number;
-        title: string | null;
-        generationState: string | null;
-        chapterStatus: string | null;
-        overallStatus: string | null;
-        recommendedAction: string | null;
-        rootCauseCode: string | null;
-        terminalAction: string | null;
-        riskClassification: "none" | "blocking" | "non_blocking_quality_debt";
-        evaluatedAt: string | null;
-        pauseReason: string | null;
-      }>;
-      summary: {
-        totalWithQualityLoop: number;
-        invalidCount: number;
-        riskCount: number;
-        validCount: number;
-        patchRepairCount: number;
-        replanCount: number;
-        manualGateCount: number;
-        blockingCount: number;
-        nonBlockingDebtCount: number;
-        blockingReplanCount: number;
-      };
-      volumeReplanGate: {
-        threshold: number;
-        blockingReplanCount: number;
-        shouldPause: boolean;
-        reason: string | null;
-        scope: "range" | "board";
-        startOrder: number | null;
-        endOrder: number | null;
-      };
-      genreBeatSnapshot: {
-        status: "observed";
-        windowSize: number;
-        labeledChapterCount: number;
-        summaryLine: string;
-        coverage: {
-          meetsPrimaryQuota: boolean;
-          shortfalls: Array<{
-            kind: string;
-            expectedMin: number;
-            actual: number;
-            labelZh: string;
-          }>;
-        };
-        sceneDiversity: {
-          shouldForce: boolean;
-          averageJaccard: number;
-          threshold: number;
-          window: number;
-        };
-      } | null;
-    }>
-  >(`/novels/${id}/quality-debt`);
+  const { data } = await apiClient.get<ApiResponse<NovelQualityDebtBoard>>(
+    `/novels/${id}/quality-debt`,
+  );
   return data;
 }
 

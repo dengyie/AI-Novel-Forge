@@ -194,9 +194,13 @@ test("genreBeat snapshot reports shortfalls without forcing director fuse", () =
   });
   assert.equal(snapshot.status, "observed");
   assert.equal(snapshot.labeledChapterCount, 12);
+  assert.equal(snapshot.coverage.windowProgress, "in_progress");
   assert.ok(snapshot.coverage.shortfalls.some((item) => item.kind === "nurture" || item.kind === "collect"));
   assert.equal(snapshot.coverage.meetsPrimaryQuota, false);
-  assert.match(snapshot.summaryLine, /主配额未达标|shortfall|养成|收集/);
+  assert.match(snapshot.summaryLine, /主配额进度落后|养成|收集/);
+  assert.equal(snapshot.sceneDiversity.advisory, true);
+  assert.equal(typeof snapshot.sceneDiversity.recommendForce, "boolean");
+  assert.equal("shouldForce" in snapshot.sceneDiversity, false);
 
   const board = buildQualityDebtBoardResult({
     novelId: "n-genre",
@@ -222,6 +226,7 @@ test("genreBeat snapshot reports shortfalls without forcing director fuse", () =
   assert.ok(board.genreBeatSnapshot);
   assert.equal(board.genreBeatSnapshot.status, "observed");
   assert.equal(board.genreBeatSnapshot.coverage.meetsPrimaryQuota, false);
+  assert.equal(board.genreBeatSnapshot.sceneDiversity.advisory, true);
 });
 
 test("genreBeat snapshot null when genreBeat input omitted", () => {
@@ -239,4 +244,17 @@ test("genreBeat snapshot null when genreBeat input omitted", () => {
     }],
   });
   assert.equal(board.genreBeatSnapshot, null);
+});
+
+test("genreBeat snapshot empty chapters is advisory with no labels", () => {
+  const snapshot = buildGenreBeatBoardSnapshot({
+    framing: { sellingPoint: "轻松养成" },
+    chapters: [],
+    windowSize: 30,
+  });
+  assert.equal(snapshot.labeledChapterCount, 0);
+  assert.equal(snapshot.coverage.windowProgress, "in_progress");
+  assert.match(snapshot.summaryLine, /尚无章可标注/);
+  assert.equal(snapshot.sceneDiversity.advisory, true);
+  assert.equal(snapshot.sceneDiversity.recommendForce, false);
 });

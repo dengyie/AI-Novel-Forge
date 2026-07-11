@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import type { Chapter, NovelBible, PipelineJob, PlotBeat, QualityScore, ReviewIssue } from "@ai-novel/shared/types/novel";
+import type { NovelQualityDebtBoard } from "@/api/novel/planning";
 import AiButton from "@/components/common/AiButton";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -76,59 +77,7 @@ interface PipelineTabProps {
     overall: number;
     issues?: string | null;
   }>;
-  qualityDebtBoard?: {
-    summary: {
-      totalWithQualityLoop: number;
-      invalidCount: number;
-      riskCount: number;
-      validCount: number;
-      patchRepairCount: number;
-      replanCount: number;
-      manualGateCount: number;
-      blockingCount: number;
-      nonBlockingDebtCount: number;
-      blockingReplanCount: number;
-    };
-    volumeReplanGate: {
-      threshold: number;
-      blockingReplanCount: number;
-      shouldPause: boolean;
-      reason: string | null;
-      scope: "range" | "board";
-      startOrder: number | null;
-      endOrder: number | null;
-    };
-    genreBeatSnapshot?: {
-      status: "observed";
-      windowSize: number;
-      labeledChapterCount: number;
-      summaryLine: string;
-      coverage: {
-        meetsPrimaryQuota: boolean;
-        shortfalls: Array<{
-          kind: string;
-          expectedMin: number;
-          actual: number;
-          labelZh: string;
-        }>;
-      };
-      sceneDiversity: {
-        shouldForce: boolean;
-        averageJaccard: number;
-        threshold: number;
-        window: number;
-      };
-    } | null;
-    items: Array<{
-      chapterId: string;
-      chapterOrder: number;
-      title: string | null;
-      recommendedAction: string | null;
-      rootCauseCode: string | null;
-      riskClassification: string;
-      overallStatus: string | null;
-    }>;
-  } | null;
+  qualityDebtBoard?: NovelQualityDebtBoard | null;
   qualityDebtBoardStatus?: "idle" | "loading" | "error" | "ready";
   qualityDebtBoardError?: string | null;
   bible?: NovelBible | null;
@@ -309,15 +258,6 @@ export default function PipelineTab(props: PipelineTabProps) {
                 <div className="rounded-xl border bg-background/70 px-3 py-2 text-xs text-muted-foreground">
                   <div className="font-medium text-foreground">品类 beat 观测（不熔断）</div>
                   <div className="mt-1">{qualityDebtBoard.genreBeatSnapshot.summaryLine}</div>
-                  {!qualityDebtBoard.genreBeatSnapshot.coverage.meetsPrimaryQuota
-                    && qualityDebtBoard.genreBeatSnapshot.coverage.shortfalls.length > 0 ? (
-                    <div className="mt-1 text-amber-800">
-                      shortfall：
-                      {qualityDebtBoard.genreBeatSnapshot.coverage.shortfalls
-                        .map((item) => `${item.labelZh} ${item.actual}/${item.expectedMin}`)
-                        .join(" · ")}
-                    </div>
-                  ) : null}
                 </div>
               ) : null}
               <div className="space-y-2 text-xs">

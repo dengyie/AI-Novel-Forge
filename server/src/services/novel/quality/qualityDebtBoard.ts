@@ -86,13 +86,18 @@ export interface GenreBeatBoardSnapshot {
     chapterOrder: number;
     kind: GenreBeatKind;
   }>;
+  /**
+   * 近窗多样性观测。recommendForce 仅为建议，**不**等同 volumeReplanGate.shouldPause。
+   * advisory 恒为 true，防止被误接导演熔断。
+   */
   sceneDiversity: {
-    shouldForce: boolean;
+    recommendForce: boolean;
     averageJaccard: number;
     threshold: number;
     window: number;
+    advisory: true;
   };
-  /** 人类可读摘要；不替代 coverage 结构字段 */
+  /** 人类可读摘要（含 shortfall 细节，UI 可只渲染本行） */
   summaryLine: string;
 }
 
@@ -364,18 +369,36 @@ export function buildGenreBeatBoardSnapshot(input: {
       chapter.purpose,
     ].filter(Boolean).join(" "))
     .filter((text) => text.trim().length > 0);
-  const sceneDiversity = shouldForceSceneDiversity({
+  const diversitySignal = shouldForceSceneDiversity({
     recentTexts: recentTexts.slice(-diversityWindow),
     window: diversityWindow,
   });
+  const sceneDiversity = {
+    recommendForce: diversitySignal.shouldForce,
+    averageJaccard: diversitySignal.averageJaccard,
+    threshold: diversitySignal.threshold,
+    window: diversitySignal.window,
+    advisory: true as const,
+  };
   const shortfallText = coverage.shortfalls.length > 0
-    ? coverage.shortfalls.map((item) => `${item.labelZh}${item.actual}/${item.expectedMin}`).join("、")
+    ? coverage.shortfalls
+      .map((item) => (
+        coverage.windowProgress === "in_progress"
+          ? `${item.labelZh}${item.actual}/${item.expectedMin}(满窗${item.fullWindowExpectedMin})`
+          : `${item.labelZh}${item.actual}/${item.expectedMin}`
+      ))
+      .join("、")
     : "主配额无 shortfall";
+  const quotaPhrase = coverage.labeledChapterCount === 0
+    ? "尚无章可标注"
+    : coverage.windowProgress === "in_progress"
+      ? (coverage.meetsPrimaryQuota ? "主配额进度正常" : "主配额进度落后")
+      : (coverage.meetsPrimaryQuota ? "主配额达标" : "主配额未达标");
   const summaryLine = [
     `前${coverage.windowSize}章已标注${chapterBeatKinds.length}`,
-    coverage.meetsPrimaryQuota ? "主配额达标" : "主配额未达标",
+    quotaPhrase,
     shortfallText,
-    sceneDiversity.shouldForce
+    sceneDiversity.recommendForce
       ? `近窗同质偏高(J=${sceneDiversity.averageJaccard.toFixed(2)})建议换场景`
       : `近窗多样性可接受(J=${sceneDiversity.averageJaccard.toFixed(2)})`,
   ].join("；");

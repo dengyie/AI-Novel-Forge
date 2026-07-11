@@ -49,8 +49,47 @@ test("evaluateGenreBeatCoverage reports shortfalls and primary quota", () => {
     },
   });
   assert.equal(result.counts.combat, 20);
+  assert.equal(result.windowProgress, "complete");
+  assert.equal(result.labeledChapterCount, 30);
   assert.ok(result.shortfalls.some((item) => item.kind === "nurture" || item.kind === "collect"));
   assert.equal(result.meetsPrimaryQuota, false);
+  for (const item of result.shortfalls) {
+    assert.equal(item.expectedMin, item.fullWindowExpectedMin);
+  }
+});
+
+test("incomplete window uses progress expectedMin not full-window min", () => {
+  const framing = {
+    sellingPoint: "轻松养成与资源收集",
+    first30ChapterPromise: "前三十章稳定养成与收集反馈",
+  };
+  // 5 combat-only chapters in a 30-window: progress expected is small, not 0/10 full-window debt
+  const combatOnly = evaluateGenreBeatCoverage({
+    chapterLabels: Array.from({ length: 5 }, () => "combat"),
+    windowSize: 30,
+    framing,
+  });
+  assert.equal(combatOnly.windowProgress, "in_progress");
+  assert.equal(combatOnly.labeledChapterCount, 5);
+  assert.ok(combatOnly.shortfalls.length > 0);
+  for (const item of combatOnly.shortfalls) {
+    assert.ok(item.expectedMin <= item.fullWindowExpectedMin);
+    assert.ok(item.expectedMin <= 5);
+    assert.ok(item.fullWindowExpectedMin >= item.expectedMin);
+  }
+  assert.equal(combatOnly.meetsPrimaryQuota, false);
+
+  // even split meets progress expectedMin (ceil(n * ratio)); 6 章 3/3 → 各 expectedMin=3
+  const balanced = evaluateGenreBeatCoverage({
+    chapterLabels: ["nurture", "collect", "nurture", "collect", "nurture", "collect"],
+    windowSize: 30,
+    framing,
+  });
+  assert.equal(balanced.windowProgress, "in_progress");
+  assert.equal(balanced.meetsPrimaryQuota, true);
+  assert.equal(balanced.shortfalls.length, 0);
+  // 满窗绝对下限仍保留在 targets / fullWindowExpectedMin
+  assert.ok(balanced.targets.every((t) => t.minChapters === 15));
 });
 
 test("classifyGenreBeatFromText basic mapping", () => {

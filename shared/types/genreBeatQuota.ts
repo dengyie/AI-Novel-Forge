@@ -32,17 +32,29 @@ export interface GenreBeatQuotaTarget {
   labelZh: string;
 }
 
+export interface GenreBeatShortfall {
+  kind: GenreBeatKind;
+  /**
+   * 当前进度口径下限：窗口未满时按已标注章数 * targetRatio 取 ceil；
+   * 满窗时等于 fullWindowExpectedMin（= target.minChapters）。
+   */
+  expectedMin: number;
+  /** 满窗绝对下限（ceil(windowSize * ratio)） */
+  fullWindowExpectedMin: number;
+  actual: number;
+  labelZh: string;
+}
+
 export interface GenreBeatCoverageResult {
   windowSize: number;
+  /** 实际参与计数的章数（≤ windowSize） */
+  labeledChapterCount: number;
+  /** complete=已标满窗；in_progress=未满窗，shortfall 用进度口径 */
+  windowProgress: "in_progress" | "complete";
   counts: Record<GenreBeatKind, number>;
   ratios: Record<GenreBeatKind, number>;
   targets: GenreBeatQuotaTarget[];
-  shortfalls: Array<{
-    kind: GenreBeatKind;
-    expectedMin: number;
-    actual: number;
-    labelZh: string;
-  }>;
+  shortfalls: GenreBeatShortfall[];
   meetsPrimaryQuota: boolean;
 }
 
@@ -188,11 +200,14 @@ export function evaluateGenreBeatCoverage(input: {
     Math.floor(input.windowSize ?? (input.chapterLabels.length || 30)),
   );
   const windowLabels = input.chapterLabels.slice(0, windowSize);
+  const labeledChapterCount = windowLabels.length;
+  const windowProgress: "in_progress" | "complete" =
+    labeledChapterCount >= windowSize ? "complete" : "in_progress";
   const counts = emptyCounts();
   for (const label of windowLabels) {
     counts[label] = (counts[label] ?? 0) + 1;
   }
-  const denom = Math.max(1, windowLabels.length);
+  const denom = Math.max(1, labeledChapterCount);
   const ratios = emptyCounts();
   for (const kind of GENRE_BEAT_KINDS) {
     ratios[kind] = counts[kind] / denom;
@@ -202,22 +217,40 @@ export function evaluateGenreBeatCoverage(input: {
     framing: input.framing,
     weights: input.weights,
   });
-  const shortfalls = targets
-    .map((target) => ({
-      kind: target.kind,
-      expectedMin: target.minChapters,
-      actual: counts[target.kind] ?? 0,
-      labelZh: target.labelZh,
-    }))
+  const shortfalls: GenreBeatShortfall[] = targets
+    .map((target) => {
+      const fullWindowExpectedMin = target.minChapters;
+      // 未满窗：按已标注进度计下限，避免 5 章时仍显示 0/10 满窗假债
+      const expectedMin = labeledChapterCount === 0
+        ? 0
+        : windowProgress === "complete"
+          ? fullWindowExpectedMin
+          : Math.max(0, Math.ceil(labeledChapterCount * target.targetRatio));
+      return {
+        kind: target.kind,
+        expectedMin,
+        fullWindowExpectedMin,
+        actual: counts[target.kind] ?? 0,
+        labelZh: target.labelZh,
+      };
+    })
     .filter((item) => item.actual < item.expectedMin);
-  // 主配额：权重最高的两类（通常养成/收集）都达标则 true；窗口未满时仅检查已有 targets 的比例
+  // 主配额：权重最高两类均达到「当前口径」expectedMin（与 shortfall 同源）
   const primary = targets.slice(0, 2);
-  const meetsPrimaryQuota = primary.length === 0
-    || primary.every((target) => (counts[target.kind] ?? 0) >= target.minChapters
-      || windowLabels.length < windowSize && ratios[target.kind] + 1e-9 >= target.targetRatio * 0.85);
+  const meetsPrimaryQuota = labeledChapterCount === 0
+    || primary.length === 0
+    || primary.every((target) => {
+      const fullWindowExpectedMin = target.minChapters;
+      const expectedMin = windowProgress === "complete"
+        ? fullWindowExpectedMin
+        : Math.max(0, Math.ceil(labeledChapterCount * target.targetRatio));
+      return (counts[target.kind] ?? 0) >= expectedMin;
+    });
 
   return {
     windowSize,
+    labeledChapterCount,
+    windowProgress,
     counts,
     ratios,
     targets,
