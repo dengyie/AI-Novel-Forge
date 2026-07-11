@@ -9,7 +9,11 @@ import { ChapterArtifactSyncService } from "./ChapterArtifactSyncService";
 import { GenerationContextAssembler } from "./GenerationContextAssembler";
 import { ChapterAcceptanceAssessmentService } from "./ChapterAcceptanceAssessmentService";
 import { ChapterRuntimeReadinessService } from "./ChapterRuntimeReadinessService";
-import { chapterRuntimeRequestSchema, type ChapterRuntimeRequestInput } from "./chapterRuntimeSchema";
+import {
+  chapterRuntimeRequestSchema,
+  type ChapterRuntimeCallOptions,
+  type ChapterRuntimeRequestInput,
+} from "./chapterRuntimeSchema";
 import type {
   PipelineRuntimeHooks,
   PipelineRuntimeInput,
@@ -119,7 +123,7 @@ export class ChapterRuntimeCoordinator {
   async createChapterStream(
     novelId: string,
     chapterId: string,
-    options: ChapterRuntimeRequestInput = {},
+    options: ChapterRuntimeCallOptions = {},
     config: { includeRuntimePackage: boolean } = { includeRuntimePackage: false },
   ): Promise<{
     stream: AsyncIterable<BaseMessageChunk>;

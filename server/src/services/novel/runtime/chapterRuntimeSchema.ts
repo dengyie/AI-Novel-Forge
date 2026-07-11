@@ -24,3 +24,11 @@ export const chapterRuntimeRequestSchema = z.object({
 });
 
 export type ChapterRuntimeRequestInput = z.infer<typeof chapterRuntimeRequestSchema>;
+
+/**
+ * 运行时调用选项：在请求体字段之上附加 AbortSignal。
+ * signal 不进 zod（不可序列化），由调用方在 validate 前拆出或随 options 旁路传递。
+ */
+export type ChapterRuntimeCallOptions = ChapterRuntimeRequestInput & {
+  signal?: AbortSignal;
+};

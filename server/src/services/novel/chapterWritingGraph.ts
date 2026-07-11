@@ -16,6 +16,7 @@ import {
 import { chapterWriterPrompt } from "../../prompting/prompts/novel/chapterWriter.prompts";
 import { NovelContinuationService } from "./NovelContinuationService";
 import { assertChapterContentNotEmpty } from "./runtime/chapterEmptyContentError";
+import { throwIfChapterGenerationAborted } from "./runtime/chapterAbortGuard";
 
 export interface ChapterGraphLLMOptions {
   provider?: LLMProvider;
@@ -116,6 +117,7 @@ export class ChapterWritingGraph {
     options: ChapterGraphLLMOptions,
     continuationPack: ContinuationPack,
   ): Promise<string> {
+    throwIfChapterGenerationAborted(options.signal, "章节生成已取消。");
     const openingGuard = await this.deps.enforceOpeningDiversity(
       novelId,
       chapter.order,
@@ -123,6 +125,7 @@ export class ChapterWritingGraph {
       content,
       options,
     );
+    throwIfChapterGenerationAborted(options.signal, "章节生成已取消。");
     if (openingGuard.rewritten) {
       this.deps.logInfo("Opening diversity rewrite applied", {
         chapterOrder: chapter.order,
@@ -137,6 +140,7 @@ export class ChapterWritingGraph {
       provider: options.provider,
       model: options.model,
       temperature: options.temperature,
+      signal: options.signal,
     });
     if (continuationGuard.rewritten) {
       this.deps.logInfo("Continuation anti-copy rewrite applied", {
@@ -155,6 +159,7 @@ export class ChapterWritingGraph {
     contextPackage: GenerationContextPackage;
     options: ChapterGraphLLMOptions;
   }): Promise<string> {
+    throwIfChapterGenerationAborted(input.options.signal, "章节生成已取消。");
     const writeContext = input.contextPackage.chapterWriteContext;
     const lengthGoal = buildLengthInstruction(
       writeContext?.chapterMission.targetWordCount
@@ -321,12 +326,7 @@ export class ChapterWritingGraph {
       stream: streamed.stream as AsyncIterable<BaseMessageChunk>,
       onDone: async (fullContent: string) => {
         // 已取消：禁止 onDone 路径继续定稿/落库（避免 partial final publish）
-        if (input.options.signal?.aborted) {
-          const reason = input.options.signal.reason;
-          throw reason instanceof Error
-            ? reason
-            : new Error("章节生成已取消，跳过正文定稿。");
-        }
+        throwIfChapterGenerationAborted(input.options.signal);
         const completed = await streamed.complete.catch(() => null);
         const rawContent = completed?.output ?? fullContent;
         const normalized = await this.continuityNode(

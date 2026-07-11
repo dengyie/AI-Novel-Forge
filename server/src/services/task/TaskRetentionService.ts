@@ -485,6 +485,7 @@ export class TaskRetentionService {
         new Set([...activePipelineNovelIds, ...activeTakeoverNovelIds]),
       );
       let pipelineSupersededIds: string[] = [];
+      // GenerationJob.novelId 为必填（schema 非空），无 null-novel 桶；null 仅存在于选择器防御分支
       if (supersedeCandidateNovelIds.length > 0 || activePipelineJobs.length > 0) {
         const terminalPipelineRows = supersedeCandidateNovelIds.length > 0
           ? await prisma.generationJob.findMany({

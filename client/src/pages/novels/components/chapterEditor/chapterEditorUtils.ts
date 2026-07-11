@@ -343,3 +343,49 @@ export function getSaveStatusLabel(status: "idle" | "saving" | "saved" | "error"
   }
   return isDirty ? "待保存" : "已同步";
 }
+
+export const CHAPTER_CONTENT_CONFLICT_CODE = "CHAPTER_CONTENT_CONFLICT";
+
+/**
+ * 识别章节正文 CAS 409（依赖 axios 拦截器写入的 status + details）。
+ */
+export function isChapterContentConflictError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const httpError = error as Error & {
+    status?: number;
+    details?: { details?: { code?: string } };
+  };
+  if (httpError.status !== 409) {
+    return false;
+  }
+  return httpError.details?.details?.code === CHAPTER_CONTENT_CONFLICT_CODE;
+}
+
+export type ChapterContentSyncDecision =
+  | { action: "full_reset"; content: string }
+  | { action: "keep_local_draft"; serverContent: string };
+
+/**
+ * 服务端章节正文回流时的同步策略：
+ * - 切换章节 → 全量重置
+ * - 同章且本地 dirty / 显式保留草稿 → 只更新 saved 基线，不覆盖 draft
+ * - 同章且干净 → 跟随服务器
+ */
+export function resolveChapterContentSync(input: {
+  chapterChanged: boolean;
+  nextServerContent: string;
+  currentDraft: string;
+  currentSaved: string;
+  preserveLocalDraft: boolean;
+}): ChapterContentSyncDecision {
+  if (input.chapterChanged) {
+    return { action: "full_reset", content: input.nextServerContent };
+  }
+  const isDirty = input.currentDraft !== input.currentSaved;
+  if (input.preserveLocalDraft || isDirty) {
+    return { action: "keep_local_draft", serverContent: input.nextServerContent };
+  }
+  return { action: "full_reset", content: input.nextServerContent };
+}

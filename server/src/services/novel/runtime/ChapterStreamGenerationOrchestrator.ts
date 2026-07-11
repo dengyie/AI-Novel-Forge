@@ -6,13 +6,14 @@ import { ChapterWritingGraph } from "../chapterWritingGraph";
 import { toText } from "../novelP0Utils";
 import { GenerationContextAssembler } from "./GenerationContextAssembler";
 import { ChapterRuntimeReadinessService } from "./ChapterRuntimeReadinessService";
-import type { ChapterRuntimeRequestInput } from "./chapterRuntimeSchema";
+import type { ChapterRuntimeCallOptions, ChapterRuntimeRequestInput } from "./chapterRuntimeSchema";
 import type { AssembledRuntimeChapter } from "./chapterRuntimePipeline";
 import {
   assertChapterContentNotEmpty,
   isChapterEmptyContentError,
   type ChapterEmptyContentError,
 } from "./chapterEmptyContentError";
+import { throwIfChapterGenerationAborted } from "./chapterAbortGuard";
 import {
   ChapterContentFinalizationService,
   type FinalizeChapterContentResult,
@@ -54,12 +55,13 @@ export class ChapterStreamGenerationOrchestrator {
   async createChapterStream(
     novelId: string,
     chapterId: string,
-    options: ChapterRuntimeRequestInput = {},
+    options: ChapterRuntimeCallOptions = {},
     config: { includeRuntimePackage: boolean } = { includeRuntimePackage: false },
   ): Promise<{
     stream: AsyncIterable<BaseMessageChunk>;
     onDone: (fullContent: string, helpers: StreamDoneHelpers) => Promise<void | StreamDonePayload>;
   }> {
+    const cancelSignal = options.signal;
     const { request, assembled } = await this.prepareRuntimeChapter(novelId, chapterId, options);
     await this.markChapterStatus(chapterId, "generating");
 
@@ -78,21 +80,14 @@ export class ChapterStreamGenerationOrchestrator {
       contextPackage: assembled.contextPackage,
       options: {
         ...request,
-        // ChapterRuntimeRequestInput 当前无 signal 字段；预留透传位给未来扩展
-        signal: (options as { signal?: AbortSignal }).signal,
+        signal: cancelSignal,
       },
     });
 
     return {
       stream: writerResult.stream,
       onDone: async (fullContent: string, helpers: StreamDoneHelpers) => {
-        const cancelSignal = (options as { signal?: AbortSignal }).signal;
-        if (cancelSignal?.aborted) {
-          const reason = cancelSignal.reason;
-          throw reason instanceof Error
-            ? reason
-            : new Error("章节生成已取消，跳过正文定稿。");
-        }
+        throwIfChapterGenerationAborted(cancelSignal);
         const runStatusId = traceRunId ?? `chapter-runtime:${chapterId}`;
         this.emitRunStatus(helpers, {
           type: "run_status",
@@ -169,9 +164,11 @@ export class ChapterStreamGenerationOrchestrator {
   async prepareRuntimeChapter(
     novelId: string,
     chapterId: string,
-    options: ChapterRuntimeRequestInput = {},
+    options: ChapterRuntimeCallOptions = {},
   ): Promise<PreparedRuntimeChapter> {
-    const request = this.deps.validateRequest(options);
+    // signal 不可序列化，不进 zod；从 call options 剥离后再 validate 请求体字段
+    const { signal: _signal, ...requestInput } = options;
+    const request = this.deps.validateRequest(requestInput);
     await this.deps.ensureNovelCharacters(novelId, "generate chapter content");
     const assembled = await this.deps.assembler.assemble(novelId, chapterId, request);
     // 下章入口硬守卫：上章尚无 timeline checkpoint 时先补齐（stable/degraded），失败只告警。
@@ -210,12 +207,7 @@ export class ChapterStreamGenerationOrchestrator {
     artifactsAlreadySynced?: boolean;
     backgroundSyncDeferred?: boolean;
   }> {
-    if (input.signal?.aborted) {
-      const reason = input.signal.reason;
-      throw reason instanceof Error
-        ? reason
-        : new Error("章节生成已取消。");
-    }
+    throwIfChapterGenerationAborted(input.signal, "章节生成已取消。");
     const writerResult = await this.deps.chapterWritingGraph.createChapterStream({
       novelId: input.novelId,
       novelTitle: input.assembled.novel.title,
@@ -230,12 +222,7 @@ export class ChapterStreamGenerationOrchestrator {
 
     let fullContent = "";
     for await (const chunk of writerResult.stream) {
-      if (input.signal?.aborted) {
-        const reason = input.signal.reason;
-        throw reason instanceof Error
-          ? reason
-          : new Error("章节生成已取消。");
-      }
+      throwIfChapterGenerationAborted(input.signal, "章节生成已取消。");
       fullContent += toText(chunk.content);
     }
     const normalized = await writerResult.onDone(fullContent);

@@ -8,7 +8,6 @@ import type {
   ChapterEditorTargetRange,
 } from "@ai-novel/shared/types/novel";
 import { createNovelSnapshot, previewChapterAiRevision, updateNovelChapter } from "@/api/novel";
-import type { ApiHttpError } from "@/api/client";
 import { queryKeys } from "@/api/queryKeys";
 import { toast } from "@/components/ui/toast";
 import { useLLMStore } from "@/store/llmStore";
@@ -28,22 +27,10 @@ import {
   buildAiRevisionRequest,
   countEditorWords,
   getSaveStatusLabel,
+  isChapterContentConflictError,
   normalizeChapterContent,
+  resolveChapterContentSync,
 } from "./chapterEditorUtils";
-
-const CHAPTER_CONTENT_CONFLICT_CODE = "CHAPTER_CONTENT_CONFLICT";
-
-function isChapterContentConflictError(error: unknown): boolean {
-  if (!(error instanceof Error)) {
-    return false;
-  }
-  const httpError = error as ApiHttpError;
-  if (httpError.status !== 409) {
-    return false;
-  }
-  const payload = httpError.details as { details?: { code?: string } } | undefined;
-  return payload?.details?.code === CHAPTER_CONTENT_CONFLICT_CODE;
-}
 
 const EMPTY_SESSION: ChapterEditorSessionState = {
   sessionId: "",
@@ -93,6 +80,11 @@ export default function ChapterEditorShell(props: ChapterEditorShellProps) {
   const queryClient = useQueryClient();
   const lastPreviewRequestRef = useRef<ReturnType<typeof buildAiRevisionRequest> | null>(null);
   const normalizedChapterContent = useMemo(() => normalizeChapterContent(chapter?.content ?? ""), [chapter?.content]);
+  const chapterIdRef = useRef(chapter?.id);
+  const contentDraftRef = useRef(normalizedChapterContent);
+  const savedContentRef = useRef(normalizedChapterContent);
+  /** CAS 冲突后下一次服务端回流必须保留本地 draft */
+  const preserveLocalDraftOnSyncRef = useRef(false);
 
   const [contentDraft, setContentDraft] = useState(normalizedChapterContent);
   const [savedContent, setSavedContent] = useState(normalizedChapterContent);
@@ -105,9 +97,38 @@ export default function ChapterEditorShell(props: ChapterEditorShellProps) {
   const [selectedDiagnosticId, setSelectedDiagnosticId] = useState<string | null>(null);
 
   useEffect(() => {
+    contentDraftRef.current = contentDraft;
+  }, [contentDraft]);
+
+  useEffect(() => {
+    savedContentRef.current = savedContent;
+  }, [savedContent]);
+
+  useEffect(() => {
     const nextContent = normalizedChapterContent;
-    setContentDraft(nextContent);
-    setSavedContent(nextContent);
+    const chapterChanged = chapterIdRef.current !== chapter?.id;
+    const decision = resolveChapterContentSync({
+      chapterChanged,
+      nextServerContent: nextContent,
+      currentDraft: contentDraftRef.current,
+      currentSaved: savedContentRef.current,
+      preserveLocalDraft: preserveLocalDraftOnSyncRef.current,
+    });
+    chapterIdRef.current = chapter?.id;
+    preserveLocalDraftOnSyncRef.current = false;
+
+    if (decision.action === "keep_local_draft") {
+      // 仅对齐 saved 基线到服务器，保留本地未保存正文，避免 CAS 冲突后丢稿
+      setSavedContent(decision.serverContent);
+      savedContentRef.current = decision.serverContent;
+      setSaveStatus("error");
+      return;
+    }
+
+    setContentDraft(decision.content);
+    setSavedContent(decision.content);
+    contentDraftRef.current = decision.content;
+    savedContentRef.current = decision.content;
     setSaveStatus("idle");
     setSelection(null);
     setSelectionToolbarPosition(null);
@@ -188,8 +209,10 @@ export default function ChapterEditorShell(props: ChapterEditorShellProps) {
     onError: async (error) => {
       setSaveStatus("error");
       if (isChapterContentConflictError(error)) {
+        // 保留本地 draft：invalidate 回流时只更新 saved 基线
+        preserveLocalDraftOnSyncRef.current = true;
         await invalidateChapterQueries();
-        toast.error("正文已被其他来源更新，已重新加载最新版本。请合并本地修改后重试。");
+        toast.error("正文已被其他来源更新。本地修改已保留，请对照后重试保存。");
         return;
       }
       toast.error(error instanceof Error ? error.message : "章节保存失败。");
@@ -262,34 +285,55 @@ export default function ChapterEditorShell(props: ChapterEditorShellProps) {
       }
       const label = `chapter-editor:${chapter.order}:${session.scope}:${Date.now()}`;
       const nextContent = applyCandidateToContent(contentDraft, session.targetRange, activeCandidate.content);
-      await createNovelSnapshot(novelId, {
-        triggerType: "manual",
-        label,
-      });
-      await updateNovelChapter(
-        novelId,
-        chapter.id,
-        {
-          content: nextContent,
-          expectedContentRevision: chapter.contentRevision ?? 0,
-        },
-        { silentErrorStatuses: [409] },
-      );
+      // 先 CAS 写正文，成功后再建快照，避免 409 留下无对应正文变更的 orphan snapshot
+      try {
+        await updateNovelChapter(
+          novelId,
+          chapter.id,
+          {
+            content: nextContent,
+            expectedContentRevision: chapter.contentRevision ?? 0,
+          },
+          { silentErrorStatuses: [409] },
+        );
+      } catch (error) {
+        // 冲突时把候选合并结果挂到 error 上，onError 写入 draft，避免丢候选
+        if (isChapterContentConflictError(error)) {
+          (error as Error & { localCandidateContent?: string }).localCandidateContent = nextContent;
+        }
+        throw error;
+      }
+      try {
+        await createNovelSnapshot(novelId, {
+          triggerType: "manual",
+          label: `${label}:post-accept`,
+        });
+      } catch (snapshotError) {
+        console.warn("[chapter-editor] snapshot after accept failed", snapshotError);
+      }
       return nextContent;
     },
     onSuccess: async (nextContent) => {
       setContentDraft(nextContent);
       setSavedContent(nextContent);
+      contentDraftRef.current = nextContent;
+      savedContentRef.current = nextContent;
       setSaveStatus("saved");
       setSession(EMPTY_SESSION);
       setRevisionInstruction("");
       await invalidateChapterQueries();
-      toast.success("已应用候选版本，并创建 AI 修改前快照。");
+      toast.success("已应用候选版本（冲突安全写入后已创建快照）。");
     },
     onError: async (error) => {
       if (isChapterContentConflictError(error)) {
+        const localCandidate = (error as Error & { localCandidateContent?: string }).localCandidateContent;
+        if (typeof localCandidate === "string") {
+          setContentDraft(localCandidate);
+          contentDraftRef.current = localCandidate;
+        }
+        preserveLocalDraftOnSyncRef.current = true;
         await invalidateChapterQueries();
-        toast.error("正文已被其他来源更新，已重新加载最新版本。请重新生成候选后再应用。");
+        toast.error("正文已被其他来源更新。本地候选合并结果已保留在编辑器中，请对照后重试保存。");
         return;
       }
       toast.error(error instanceof Error ? error.message : "应用候选版本失败。");

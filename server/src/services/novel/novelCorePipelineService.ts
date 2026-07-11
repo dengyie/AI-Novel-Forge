@@ -87,6 +87,8 @@ function buildSkipCompletedChapterWhere(): Prisma.ChapterWhereInput {
 export class NovelCorePipelineService {
   private static readonly activeJobIds = new Set<string>();
   private static readonly startLocks = new Set<string>();
+  /** 运行中章节的 AbortController：cancel API 可即时 abort，不必等心跳轮询 */
+  private static readonly activeChapterAborts = new Map<string, AbortController>();
   private readonly chapterRuntimeCoordinator = new ChapterRuntimeCoordinator();
   private decoratePipelineJob<T extends PipelineJobLike | null>(
     job: T,
@@ -493,6 +495,11 @@ export class NovelCorePipelineService {
     if (job.status === "succeeded" || job.status === "failed" || job.status === "cancelled") {
       throw new Error("仅排队中或运行中的任务可取消。");
     }
+    // 即时穿透：本进程内正在生成的章节立刻 abort LLM/stream，不依赖 15s 心跳
+    const liveAbort = NovelCorePipelineService.activeChapterAborts.get(jobId);
+    if (liveAbort && !liveAbort.signal.aborted) {
+      liveAbort.abort(new Error("PIPELINE_CANCELLED"));
+    }
     if (job.status === "queued") {
       return prisma.generationJob.update({
         where: { id: jobId },
@@ -819,6 +826,7 @@ export class NovelCorePipelineService {
           });
 
           const chapterAbort = new AbortController();
+          NovelCorePipelineService.activeChapterAborts.set(jobId, chapterAbort);
           const heartbeatTimer = setInterval(() => {
             void this.updateJobSafe(jobId, {
               heartbeatAt: new Date(),
@@ -832,7 +840,7 @@ export class NovelCorePipelineService {
                 stage: activeStage,
               }),
             });
-            // 心跳间隙轮询取消：触发 AbortSignal 穿透到 LLM stream
+            // 心跳间隙轮询取消（跨进程/无 live map 时的兜底）
             void this.ensurePipelineNotCancelled(jobId).catch((error) => {
               if (!chapterAbort.signal.aborted) {
                 chapterAbort.abort(
@@ -894,6 +902,10 @@ export class NovelCorePipelineService {
             },
           ).finally(() => {
             clearInterval(heartbeatTimer);
+            const current = NovelCorePipelineService.activeChapterAborts.get(jobId);
+            if (current === chapterAbort) {
+              NovelCorePipelineService.activeChapterAborts.delete(jobId);
+            }
           });
 
           totalRetryCount += chapterResult.retryCountUsed;

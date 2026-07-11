@@ -250,6 +250,8 @@ interface RewriteOptions {
   provider?: LLMProvider;
   model?: string;
   temperature?: number;
+  /** 取消穿透：相似改写 LLM 调用可中断 */
+  signal?: AbortSignal;
 }
 
 function disabledPack(): ContinuationContextPack {
@@ -651,6 +653,7 @@ ${summaryBlock || "暂无"}`;
           provider: input.provider ?? "deepseek",
           model: input.model,
           temperature: input.temperature ?? 0.7,
+          signal: input.signal,
         },
       });
 

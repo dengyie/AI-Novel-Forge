@@ -78,6 +78,39 @@ test("pipeline supersede pushdown respects active takeover novel set", () => {
   assert.deepEqual(ids, ["pipe-old"]);
 });
 
+test("pipeline supersede pushdown includes null-novel active bucket terminals", () => {
+  const activeTakeover = new Set();
+  const rows = [
+    {
+      id: "pipe-null-active",
+      novelId: null,
+      status: "running",
+      finishedAt: null,
+      updatedAt: NOW,
+    },
+    {
+      id: "pipe-null-old",
+      novelId: null,
+      status: "failed",
+      finishedAt: ageDays(2),
+      updatedAt: ageDays(2),
+    },
+    {
+      id: "pipe-named",
+      novelId: "novel-C",
+      status: "failed",
+      finishedAt: ageDays(2),
+      updatedAt: ageDays(2),
+    },
+  ];
+  // 下推后应包含 null-novel 活跃 + 同桶终态；不含无关 novel
+  const pushed = rows.filter((row) => row.novelId == null);
+  const ids = selectSupersededGenerationJobIds(pushed, activeTakeover, NOW, CFG);
+  assert.deepEqual(ids, ["pipe-null-old"]);
+  assert.ok(!ids.includes("pipe-named"));
+  assert.ok(!ids.includes("pipe-null-active"));
+});
+
 test("age selector keep-window still holds for pure-JS fallback parity", () => {
   const rows = [];
   for (let i = 0; i < 25; i++) {
