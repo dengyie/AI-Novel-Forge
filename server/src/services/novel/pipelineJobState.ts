@@ -35,6 +35,7 @@ export type PipelineActiveStage = (typeof PIPELINE_ACTIVE_STAGES)[number];
 export interface PipelineJobLike {
   status: PipelineJobStatus;
   payload?: string | null;
+  error?: string | null;
 }
 
 export interface PipelineJobDecorations {
@@ -402,11 +403,41 @@ function pickSucceededPipelineNotice(payload: PipelinePayload): PipelineJobDecor
   return getPipelineQualityNotice(payload.qualityAlertDetails, payload.recoverableRepairDetails);
 }
 
+export const PIPELINE_JOB_TRANSPORT_AUTO_RETRY_NOTICE_CODE = "PIPELINE_JOB_TRANSPORT_AUTO_RETRY";
+
+function getPipelineJobTransportAutoRetryNotice(
+  payload: PipelinePayload,
+  job: PipelineJobLike,
+): PipelineJobDecorations | null {
+  const used = Math.max(0, Math.floor(payload.jobTransportAutoRetryCount ?? 0));
+  if (used <= 0) {
+    return null;
+  }
+  if (job.status !== "queued" && job.status !== "running") {
+    return null;
+  }
+  const errorHint = typeof job.error === "string" && job.error.trim()
+    ? job.error.trim()
+    : null;
+  return {
+    displayStatus: "瞬时失败自动重试中",
+    noticeCode: PIPELINE_JOB_TRANSPORT_AUTO_RETRY_NOTICE_CODE,
+    noticeSummary: errorHint
+      ?? `任务瞬时失败后自动重试中（已用 ${used} 次预算）。`,
+    qualityAlertDetails: payload.qualityAlertDetails ?? [],
+    recoverableRepairDetails: payload.recoverableRepairDetails ?? [],
+    backgroundActivityLabels: [],
+  };
+}
+
 export function decoratePipelineJob<T extends PipelineJobLike>(job: T): DecoratedPipelineJob<T> {
   const payload = parsePipelinePayload(job.payload);
   const qualityNotice = getPipelineQualityNotice(payload.qualityAlertDetails, payload.recoverableRepairDetails);
+  const autoRetryNotice = getPipelineJobTransportAutoRetryNotice(payload, job);
   const notice = job.status === "succeeded"
     ? pickSucceededPipelineNotice(payload)
+    : autoRetryNotice
+      ? autoRetryNotice
     : qualityNotice.noticeSummary
       ? {
         ...qualityNotice,

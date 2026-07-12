@@ -13,6 +13,8 @@ const {
 const {
   parsePipelinePayload,
   stringifyPipelinePayload,
+  decoratePipelineJob,
+  PIPELINE_JOB_TRANSPORT_AUTO_RETRY_NOTICE_CODE,
 } = require("../dist/services/novel/pipelineJobState.js");
 
 test("isPipelineJobAutoRetryableError accepts transport and empty content", () => {
@@ -73,4 +75,78 @@ test("pipeline payload round-trips jobTransportAutoRetryCount", () => {
 test("PIPELINE_JOB_TRANSPORT_AUTO_RETRY_MAX is non-negative", () => {
   assert.equal(typeof PIPELINE_JOB_TRANSPORT_AUTO_RETRY_MAX, "number");
   assert.ok(PIPELINE_JOB_TRANSPORT_AUTO_RETRY_MAX >= 0);
+});
+
+test("stringifyPipelinePayload omits jobTransportAutoRetryCount when zero", () => {
+  const raw = stringifyPipelinePayload({
+    provider: "deepseek",
+    model: "deepseek-chat",
+    jobTransportAutoRetryCount: 0,
+  });
+  const parsed = parsePipelinePayload(raw);
+  assert.equal(parsed.jobTransportAutoRetryCount, undefined);
+  assert.doesNotMatch(raw, /jobTransportAutoRetryCount/);
+});
+
+test("decoratePipelineJob surfaces queued auto-retry notice from payload count", () => {
+  const error = formatPipelineJobAutoRetryMessage({
+    originalMessage: "fetch failed: ECONNRESET",
+    nextCount: 1,
+    maxCount: 2,
+  });
+  const decorated = decoratePipelineJob({
+    id: "job-auto-retry",
+    status: "queued",
+    error,
+    payload: JSON.stringify({
+      provider: "deepseek",
+      model: "deepseek-chat",
+      jobTransportAutoRetryCount: 1,
+    }),
+  });
+  assert.equal(decorated.noticeCode, PIPELINE_JOB_TRANSPORT_AUTO_RETRY_NOTICE_CODE);
+  assert.equal(decorated.displayStatus, "瞬时失败自动重试中");
+  assert.match(decorated.noticeSummary, /1\/2/);
+  assert.match(decorated.noticeSummary, /ECONNRESET/);
+});
+
+test("decoratePipelineJob surfaces running auto-retry notice without job.error", () => {
+  const decorated = decoratePipelineJob({
+    id: "job-auto-retry-running",
+    status: "running",
+    error: null,
+    payload: JSON.stringify({
+      jobTransportAutoRetryCount: 2,
+    }),
+  });
+  assert.equal(decorated.noticeCode, PIPELINE_JOB_TRANSPORT_AUTO_RETRY_NOTICE_CODE);
+  assert.equal(decorated.displayStatus, "瞬时失败自动重试中");
+  assert.match(decorated.noticeSummary, /已用 2 次预算/);
+});
+
+test("decoratePipelineJob does not show auto-retry notice on succeeded jobs", () => {
+  const decorated = decoratePipelineJob({
+    id: "job-done",
+    status: "succeeded",
+    error: null,
+    payload: JSON.stringify({
+      jobTransportAutoRetryCount: 2,
+      qualityAlertDetails: ["债1"],
+    }),
+  });
+  assert.notEqual(decorated.noticeCode, PIPELINE_JOB_TRANSPORT_AUTO_RETRY_NOTICE_CODE);
+  assert.equal(decorated.noticeCode, "PIPELINE_QUALITY_REVIEW");
+});
+
+test("decoratePipelineJob does not show auto-retry notice when count is zero", () => {
+  const decorated = decoratePipelineJob({
+    id: "job-fresh",
+    status: "queued",
+    error: null,
+    payload: JSON.stringify({
+      jobTransportAutoRetryCount: 0,
+    }),
+  });
+  assert.equal(decorated.noticeCode, null);
+  assert.equal(decorated.displayStatus, null);
 });

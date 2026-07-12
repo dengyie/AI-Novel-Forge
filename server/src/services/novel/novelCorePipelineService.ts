@@ -912,6 +912,8 @@ export class NovelCorePipelineService {
                 replanAlertDetails,
                 genreBeatAlertDetails,
                 recoverableRepairDetails,
+                // 终态清零：避免成功/熔断暂停后 UI 仍显示瞬时重试预算
+                jobTransportAutoRetryCount: 0,
               }),
             });
             logPipelineInfo("任务执行结束", {
@@ -1259,6 +1261,8 @@ export class NovelCorePipelineService {
             replanAlertDetails,
             genreBeatAlertDetails,
             recoverableRepairDetails,
+            // 终态清零：避免成功后 payload 残留自动重试计数
+            jobTransportAutoRetryCount: 0,
           }),
         });
         logPipelineInfo("任务执行结束", {
@@ -1288,6 +1292,7 @@ export class NovelCorePipelineService {
             replanAlertDetails,
             genreBeatAlertDetails,
             recoverableRepairDetails,
+            jobTransportAutoRetryCount: 0,
           }),
         });
         void novelEventBus.emit({
