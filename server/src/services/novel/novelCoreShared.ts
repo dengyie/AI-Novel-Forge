@@ -185,6 +185,13 @@ export interface PipelineRunOptions extends LLMGenerateOptions {
   autoReview?: boolean;
   autoRepair?: boolean;
   skipCompleted?: boolean;
+  /**
+   * 分数硬门（P2-3 双轨 · 轨 A）：传入 chapterRuntimePipeline，默认 75。
+   * 只决定「分是否够 → 是否再修 / pass 标记」，**不**驱动债板 replan 熔断、
+   * director auto processed、failureClassification。
+   * 轨 B：qualityLoop（riskFlags）——义务/replan/manual_gate/blocking。
+   * 两轨并行：高分仍可能 draft_obligation_unmet；低分且 soft 义务可能 code=none。
+   */
   qualityThreshold?: number;
   repairMode?: "detect_only" | "light_repair" | "heavy_repair" | "continuity_only" | "character_only" | "ending_only";
   artifactSyncMode?: ArtifactSyncMode;

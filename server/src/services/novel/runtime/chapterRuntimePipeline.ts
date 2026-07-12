@@ -40,6 +40,13 @@ export interface PipelineRuntimeInput extends ChapterRuntimeRequestInput {
   autoReview?: boolean;
   autoRepair?: boolean;
   auditMode?: "light" | "full" | "repair_only";
+  /**
+   * 分数硬门（P2-3 双轨之一）：仅用于 `isQualityPass` 与是否再 light_repair。
+   * 默认 75，并与固定维阈（coherence/repetition/engagement）合取。
+   * **不是** qualityLoop / 债板 / replan / director blocking 的判据——那些读
+   * `riskFlags.qualityLoop`（rootCauseCode / recommendedAction 等）。
+   * 详见 novelCoreShared.PipelineRunOptions.qualityThreshold 与基础服务文档 §双轨。
+   */
   qualityThreshold?: number;
   repairMode?: "detect_only" | "light_repair" | "heavy_repair" | "continuity_only" | "character_only" | "ending_only";
   /** 取消穿透到 LLM stream；与 onCheckCancelled 互补（轮询间隙 vs 流内中断） */
@@ -157,6 +164,7 @@ interface RunPipelineChapterDeps {
   markChapterNeedsRepair: (chapterId: string) => Promise<void>;
 }
 
+/** 分维固定阈；与 options.qualityThreshold（overall）合取，见 isQualityPass / P2-3 双轨说明。 */
 const QUALITY_THRESHOLD = { coherence: 80, repetition: 75, engagement: 75 };
 const EMPTY_CONTENT_GENERATION_RETRY_LIMIT = 1;
 /** mid-stream / writer transport 瞬时失败整章重试上限（不含首次）。与 empty 重试独立计数。 */
@@ -489,6 +497,10 @@ async function syncFinalRetainedChapterArtifacts(
   });
 }
 
+/**
+ * 分数门：overall ≥ qualityThreshold 且分维 ≥ 固定阈 → 本轮可 pass。
+ * 与 qualityLoop（义务/replan/manual_gate）独立；pass=false 仍可 defer_and_continue 写债。
+ */
 function isQualityPass(score: QualityScore, qualityThreshold: number): boolean {
   return score.coherence >= QUALITY_THRESHOLD.coherence
     && score.repetition >= QUALITY_THRESHOLD.repetition

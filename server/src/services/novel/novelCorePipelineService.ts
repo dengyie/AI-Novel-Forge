@@ -66,6 +66,25 @@ const TERMINAL_CONTINUE_QUALITY_LOOP_RISK_FLAG_FRAGMENT = '"terminalAction":"def
 const REPLAN_REQUIRED_QUALITY_LOOP_RISK_FLAG_FRAGMENT = '"rootCauseCode":"replan_required"';
 const REPLAN_ACTION_QUALITY_LOOP_RISK_FLAG_FRAGMENT = '"recommendedAction":"replan"';
 
+/** P2-5：GENERATION_JOB_LEASE_ENABLED=false 进程内只告警一次，避免每 job 刷屏。 */
+let generationJobLeaseDisabledWarned = false;
+
+/**
+ * 生产默认必须开 lease。=false 时仅内存 activeJobIds，跨进程/respawn 可双跑同 job。
+ * 仅允许短时 hot-fix 回退；禁止无文档常关。
+ */
+function warnGenerationJobLeaseDisabledOnce(): void {
+  if (generationJobLeaseDisabledWarned) {
+    return;
+  }
+  generationJobLeaseDisabledWarned = true;
+  logPipelineWarn("GENERATION_JOB_LEASE_ENABLED=false：已关闭 DB 租约 CAS，仅内存 activeJobIds 去重（危）", {
+    risk: "cross_process_double_run",
+    guidance: "生产应保持默认开启；仅 short-lived hot-fix 回退，恢复后立刻去掉该 env",
+    env: "GENERATION_JOB_LEASE_ENABLED",
+  });
+}
+
 function clampPipelineMaxRetries(value: number | null | undefined): number {
   return Math.max(0, Math.min(value ?? 1, 1));
 }
@@ -732,8 +751,11 @@ export class NovelCorePipelineService {
       // 重复 dispatch，跨进程（respawn 后新实例 + 旧实例残留）dedup 必须落 DB。leaseExpiresAt
       // null 或已过期才能认领；认领成功后其它实例 updateMany 看到 status=running 且 lease
       // 未过期，count=0 → 跳过。env GENERATION_JOB_LEASE_ENABLED=false 回退到内存去重路径
-      // （只保留 activeJobIds，不做 DB CAS）——留给线上 hot-fix 回退用。
+      // （只保留 activeJobIds，不做 DB CAS）——仅 hot-fix 回退；生产禁止常关（P2-5）。
       const leaseEnabled = process.env.GENERATION_JOB_LEASE_ENABLED !== "false";
+      if (!leaseEnabled) {
+        warnGenerationJobLeaseDisabledOnce();
+      }
       if (leaseEnabled) {
         try {
           const claimed = await prisma.generationJob.updateMany({
