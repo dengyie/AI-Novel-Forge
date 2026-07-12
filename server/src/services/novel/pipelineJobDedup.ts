@@ -14,6 +14,11 @@ function normalizeMetric(value: number | null | undefined): number {
  * 构造"可恢复的僵尸流水线任务"查询谓词。心跳超时用 cutoff（now - staleThreshold），
  * 但持久化租约到期直接用 now：leaseExpiresAt 写入时已含 TTL 宽限（PIPELINE_LEASE_TTL_MS），
  * 不能再减一次 staleThreshold，否则租约分支恒晚于心跳分支触发、永远沦为冗余。
+ *
+ * 与 listRecoverablePipelineJobs 的基线一致（queued|running ∧ ¬manual ∧ 未终态 ∧ 未取消），
+ * 额外要求心跳/租约过期。auto-requeue 后的 queued（payload.jobTransportAutoRetryCount>0、
+ * heartbeat/lease 已清）在 updatedAt/heartbeat 过期后会被本 where 拾起；进程重启则走
+ * listRecoverable 全量拾起，不必等 stale。见 pipelineJobAutoRetry 契约注释。
  */
 export function buildStaleRecoverablePipelineJobWhere(input: {
   cutoff: Date;

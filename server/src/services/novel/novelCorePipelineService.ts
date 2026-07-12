@@ -34,6 +34,9 @@ import { buildPipelineLeaseClaimWhere, buildStaleRecoverablePipelineJobWhere, se
 import {
   formatPipelineJobAutoRetryMessage,
   isPipelineCancellationError,
+  normalizeJobTransportAutoRetryCount,
+  PIPELINE_JOB_AUTO_RETRY_RECOVERY_IN_PROCESS_TIMER,
+  PIPELINE_JOB_AUTO_RETRY_RECOVERY_RESUME_OR_STALE,
   PIPELINE_JOB_TRANSPORT_AUTO_RETRY_DELAY_MS,
   PIPELINE_JOB_TRANSPORT_AUTO_RETRY_MAX,
   shouldAutoRetryPipelineJob,
@@ -320,41 +323,57 @@ export class NovelCorePipelineService {
         repairMode: true,
         maxRetries: true,
         payload: true,
+        error: true,
       },
     });
     if (!job) {
       throw new Error("章节流水线任务不存在。");
     }
-      if (job.status !== "queued" && job.status !== "running") {
-        return;
-      }
-      await this.updateJobSafe(job.id, {
-        status: "queued",
-        pendingManualRecovery: false,
-        heartbeatAt: null,
-        leaseOwner: null,
-        leaseExpiresAt: null,
-        cancelRequestedAt: null,
-      });
-      const payload = this.parsePipelinePayload(job.payload);
-      this.schedulePipelineExecution(job.id, job.novelId, {
-        startOrder: job.startOrder,
-        endOrder: job.endOrder,
-        controlPolicy: payload.controlPolicy,
-        workflowTaskId: payload.workflowTaskId,
-        taskStyleProfileId: payload.taskStyleProfileId,
-        maxRetries: clampPipelineMaxRetries(job.maxRetries),
-        runMode: job.runMode ?? payload.runMode,
-        autoReview: job.autoReview ?? payload.autoReview,
-        autoRepair: job.autoRepair ?? payload.autoRepair,
-        skipCompleted: job.skipCompleted ?? payload.skipCompleted,
-        qualityThreshold: job.qualityThreshold ?? payload.qualityThreshold,
-        repairMode: job.repairMode ?? payload.repairMode,
-        artifactSyncMode: payload.artifactSyncMode,
-        provider: payload.provider,
-        model: payload.model,
-        temperature: payload.temperature,
-      });
+    if (job.status !== "queued" && job.status !== "running") {
+      return;
+    }
+    const payload = this.parsePipelinePayload(job.payload);
+    // 保留 payload（含 jobTransportAutoRetryCount）：resume 只清 lease/manual，不重置预算。
+    const jobTransportAutoRetryCount = normalizeJobTransportAutoRetryCount(
+      payload.jobTransportAutoRetryCount,
+    );
+    await this.updateJobSafe(job.id, {
+      status: "queued",
+      pendingManualRecovery: false,
+      heartbeatAt: null,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      cancelRequestedAt: null,
+    });
+    logPipelineInfo("恢复流水线任务调度", {
+      jobId: job.id,
+      novelId: job.novelId,
+      previousStatus: job.status,
+      jobTransportAutoRetryCount,
+      maxCount: PIPELINE_JOB_TRANSPORT_AUTO_RETRY_MAX,
+      recoveryPath: PIPELINE_JOB_AUTO_RETRY_RECOVERY_RESUME_OR_STALE,
+      // 与 requeue / 任务中心 notice 同源：count>0 表示瞬时失败自动重试链路中的拾起
+      autoRequeuePending: jobTransportAutoRetryCount > 0,
+      errorHint: typeof job.error === "string" && job.error.trim() ? job.error.trim() : null,
+    });
+    this.schedulePipelineExecution(job.id, job.novelId, {
+      startOrder: job.startOrder,
+      endOrder: job.endOrder,
+      controlPolicy: payload.controlPolicy,
+      workflowTaskId: payload.workflowTaskId,
+      taskStyleProfileId: payload.taskStyleProfileId,
+      maxRetries: clampPipelineMaxRetries(job.maxRetries),
+      runMode: job.runMode ?? payload.runMode,
+      autoReview: job.autoReview ?? payload.autoReview,
+      autoRepair: job.autoRepair ?? payload.autoRepair,
+      skipCompleted: job.skipCompleted ?? payload.skipCompleted,
+      qualityThreshold: job.qualityThreshold ?? payload.qualityThreshold,
+      repairMode: job.repairMode ?? payload.repairMode,
+      artifactSyncMode: payload.artifactSyncMode,
+      provider: payload.provider,
+      model: payload.model,
+      temperature: payload.temperature,
+    });
   }
 
   async startPipelineJob(novelId: string, options: PipelineRunOptions) {
@@ -740,7 +759,9 @@ export class NovelCorePipelineService {
       qualityThreshold: persistedPayload.qualityThreshold ?? options.qualityThreshold,
       repairMode: persistedPayload.repairMode ?? options.repairMode ?? "light_repair",
       artifactSyncMode: persistedPayload.artifactSyncMode ?? options.artifactSyncMode ?? "adaptive",
-      jobTransportAutoRetryCount: Math.max(0, persistedPayload.jobTransportAutoRetryCount ?? 0),
+      jobTransportAutoRetryCount: normalizeJobTransportAutoRetryCount(
+        persistedPayload.jobTransportAutoRetryCount,
+      ),
     };
     const directorTelemetryTask = runtimePayload.workflowTaskId
       ? await prisma.novelWorkflowTask.findUnique({
@@ -1375,7 +1396,9 @@ export class NovelCorePipelineService {
 
       // 章节内 empty/transport 重试耗尽后仍瞬时失败：同 job 有限次 requeue（skipCompleted 保已写章）。
       // 取消/AbortError/业务错误不 requeue。预算见 PIPELINE_JOB_TRANSPORT_AUTO_RETRY_MAX。
-      const usedJobAutoRetry = Math.max(0, runtimePayload.jobTransportAutoRetryCount ?? 0);
+      const usedJobAutoRetry = normalizeJobTransportAutoRetryCount(
+        runtimePayload.jobTransportAutoRetryCount,
+      );
       if (shouldAutoRetryPipelineJob({
         error,
         usedCount: usedJobAutoRetry,
@@ -1410,12 +1433,15 @@ export class NovelCorePipelineService {
           retryCount: totalRetryCount,
           payload: this.stringifyPipelinePayload(requeuePayload),
         });
+        // 字段与 resume 路径对齐：jobTransportAutoRetryCount + recoveryPath + maxCount
         logPipelineWarn("任务瞬时失败，排队自动重试", {
           jobId,
           novelId,
+          jobTransportAutoRetryCount: nextCount,
           nextCount,
           maxCount: PIPELINE_JOB_TRANSPORT_AUTO_RETRY_MAX,
           delayMs: PIPELINE_JOB_TRANSPORT_AUTO_RETRY_DELAY_MS,
+          recoveryPath: PIPELINE_JOB_AUTO_RETRY_RECOVERY_IN_PROCESS_TIMER,
           message,
         });
         const resumeOptions: PipelineRunOptions = {
@@ -1438,6 +1464,8 @@ export class NovelCorePipelineService {
         };
         // 必须 defer：当前仍在 schedulePipelineExecution 的 activeJobIds 保护期内，
         // 同步再调 schedule 会被 activeJobIds.has 直接跳过，job 卡在 queued。
+        // 进程若在 delay 内退出：timer 丢失，靠 resumePending / stale watchdog 拾起
+        // （queued + count 已落库；见 pipelineJobAutoRetry 契约）。
         const delayMs = PIPELINE_JOB_TRANSPORT_AUTO_RETRY_DELAY_MS;
         setTimeout(() => {
           this.schedulePipelineExecution(jobId, novelId, resumeOptions);

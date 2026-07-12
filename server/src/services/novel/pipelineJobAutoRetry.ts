@@ -1,6 +1,24 @@
 import { isChapterEmptyContentError } from "./runtime/chapterEmptyContentError";
 import { isTransientTransportError } from "../../llm/transportRetry";
 
+/**
+ * Job 层瞬时 auto-requeue 与跨进程 resume 契约（P1-2）：
+ *
+ * 1. requeue 写库：status=queued、payload.jobTransportAutoRetryCount=next、
+ *    error=formatPipelineJobAutoRetryMessage、清 lease/heartbeat。
+ * 2. 进程内：setTimeout(delay) → schedulePipelineExecution（须 defer，否则
+ *    activeJobIds 仍占用会跳过，卡在 queued）。
+ * 3. 进程在 delay 内被杀：timer 丢失，但 DB 仍为 queued + count；
+ *    启动 resumePendingPipelineJobs / watchdog listStaleRecoverable 必拾起
+ *    （where：queued|running ∧ ¬pendingManualRecovery ∧ finishedAt null ∧
+ *    cancelRequestedAt null；stale 另加心跳/租约过期）。
+ * 4. resumePipelineJob：保留 payload（含 count），清 lease 后 schedule；
+ *    executePipeline 从 payload 读回 count，预算连续。
+ * 5. 任务中心 notice 与日志统一字段：jobTransportAutoRetryCount /
+ *    noticeCode=PIPELINE_JOB_TRANSPORT_AUTO_RETRY；勿另造 DB 列叙事。
+ * 6. 不依赖「到期可调度」新字段：queued 本身即可被 resume/stale 拾起。
+ */
+
 /** 任务级瞬时失败自动 requeue 上限（不含首次执行）。默认 2。 */
 export const PIPELINE_JOB_TRANSPORT_AUTO_RETRY_MAX = Math.max(
   0,
@@ -12,6 +30,46 @@ export const PIPELINE_JOB_TRANSPORT_AUTO_RETRY_DELAY_MS = Math.max(
   0,
   Number.parseInt(process.env.PIPELINE_JOB_TRANSPORT_AUTO_RETRY_DELAY_MS ?? "3000", 10) || 0,
 );
+
+/** 日志/notice 共用 reason 码：进程内 timer 再调度 */
+export const PIPELINE_JOB_AUTO_RETRY_RECOVERY_IN_PROCESS_TIMER = "in_process_timer";
+/** 日志/notice 共用 reason 码：启动 resume 或 stale watchdog 拾起 */
+export const PIPELINE_JOB_AUTO_RETRY_RECOVERY_RESUME_OR_STALE = "resume_or_stale";
+
+/**
+ * auto-requeue 后的 queued job 是否应被 resume/stale 路径拾起。
+ * 与 listRecoverablePipelineJobs / buildStaleRecoverablePipelineJobWhere 语义对齐：
+ * 只要非 manual、未终态、未取消，queued（含 count>0）一律可恢复；count 不参与 where。
+ */
+export function isAutoRequeuedPipelineJobRecoverable(input: {
+  status: string;
+  pendingManualRecovery?: boolean | null;
+  finishedAt?: Date | string | null;
+  cancelRequestedAt?: Date | string | null;
+  jobTransportAutoRetryCount?: number | null;
+}): boolean {
+  if (input.status !== "queued" && input.status !== "running") {
+    return false;
+  }
+  if (input.pendingManualRecovery) {
+    return false;
+  }
+  if (input.finishedAt != null) {
+    return false;
+  }
+  if (input.cancelRequestedAt != null) {
+    return false;
+  }
+  return true;
+}
+
+/** 归一化 payload 中的 job 级瞬时重试已用次数（日志/notice 同源）。 */
+export function normalizeJobTransportAutoRetryCount(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.max(0, Math.floor(value));
+  }
+  return 0;
+}
 
 /**
  * 用户/流水线取消（不可 auto-requeue，应落 cancelled 而非 failed）。

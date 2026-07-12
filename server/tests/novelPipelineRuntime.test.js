@@ -137,3 +137,69 @@ test("markPendingPipelineJobsForManualRecovery settles cancellations and marks r
     ["pending", "job-running", "服务重启后任务已暂停，等待手动恢复。"],
   ]);
 });
+
+test("resumePendingPipelineJobs resumes auto-requeued queued jobs same as plain queued", async () => {
+  // 契约：listRecoverable 返回的 queued（含 auto-requeue count>0）一律 resume，不分支。
+  const calls = [];
+  const runtimeService = new NovelPipelineRuntimeService({
+    async listPendingCancellationPipelineJobs() {
+      return [];
+    },
+    async listRecoverablePipelineJobs() {
+      return [
+        { id: "job-auto-requeue", status: "queued" },
+        { id: "job-plain-queued", status: "queued" },
+      ];
+    },
+    async listStaleRecoverablePipelineJobs() {
+      return [];
+    },
+    async markPipelineJobCancelled(jobId) {
+      calls.push(["cancelled", jobId]);
+    },
+    async resumePipelineJob(jobId) {
+      calls.push(["resume", jobId]);
+    },
+    async markPipelineJobFailed(jobId, message) {
+      calls.push(["failed", jobId, message]);
+    },
+  });
+
+  await runtimeService.resumePendingPipelineJobs();
+
+  assert.deepEqual(calls, [
+    ["resume", "job-auto-requeue"],
+    ["resume", "job-plain-queued"],
+  ]);
+});
+
+test("recoverStalePipelineJobs resumes auto-requeued queued after heartbeat expiry", async () => {
+  const calls = [];
+  const runtimeService = new NovelPipelineRuntimeService({
+    async listPendingCancellationPipelineJobs() {
+      return [];
+    },
+    async listRecoverablePipelineJobs() {
+      return [];
+    },
+    async listStaleRecoverablePipelineJobs() {
+      // requeue 清 heartbeat/lease 后，updatedAt 过期即进入 stale where
+      return [{ id: "job-auto-requeue-stale", status: "queued" }];
+    },
+    async markPipelineJobCancelled(jobId) {
+      calls.push(["cancelled", jobId]);
+    },
+    async resumePipelineJob(jobId) {
+      calls.push(["resume", jobId]);
+    },
+    async markPipelineJobFailed(jobId, message) {
+      calls.push(["failed", jobId, message]);
+    },
+  });
+
+  await runtimeService.recoverStalePipelineJobs(new Date("2026-07-12T12:00:00.000Z"), 60_000);
+
+  assert.deepEqual(calls, [
+    ["resume", "job-auto-requeue-stale"],
+  ]);
+});

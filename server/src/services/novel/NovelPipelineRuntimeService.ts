@@ -81,6 +81,8 @@ export class NovelPipelineRuntimeService {
     rows: Array<{ id: string; status: string }>,
     recoveryMessage: string,
   ): Promise<void> {
+    // resume 路径会打 jobTransportAutoRetryCount 日志；此处只保证每条可恢复行被调用。
+    // auto-requeue 的 queued（count>0）与普通 queued/running 同一拾起通道，不分支。
     for (const row of rows) {
       try {
         await this.pipelineService.resumePipelineJob(row.id);

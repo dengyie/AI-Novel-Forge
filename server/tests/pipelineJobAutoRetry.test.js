@@ -6,7 +6,11 @@ const {
   isPipelineJobAutoRetryableError,
   shouldAutoRetryPipelineJob,
   formatPipelineJobAutoRetryMessage,
+  isAutoRequeuedPipelineJobRecoverable,
+  normalizeJobTransportAutoRetryCount,
   PIPELINE_JOB_TRANSPORT_AUTO_RETRY_MAX,
+  PIPELINE_JOB_AUTO_RETRY_RECOVERY_IN_PROCESS_TIMER,
+  PIPELINE_JOB_AUTO_RETRY_RECOVERY_RESUME_OR_STALE,
 } = require("../dist/services/novel/pipelineJobAutoRetry.js");
 const {
   ChapterEmptyContentError,
@@ -17,6 +21,9 @@ const {
   decoratePipelineJob,
   PIPELINE_JOB_TRANSPORT_AUTO_RETRY_NOTICE_CODE,
 } = require("../dist/services/novel/pipelineJobState.js");
+const {
+  buildStaleRecoverablePipelineJobWhere,
+} = require("../dist/services/novel/pipelineJobDedup.js");
 
 test("isPipelineCancellationError covers cancel messages and AbortError abort text", () => {
   assert.equal(isPipelineCancellationError(new Error("PIPELINE_CANCELLED")), true);
@@ -176,4 +183,73 @@ test("decoratePipelineJob does not show auto-retry notice when count is zero", (
   });
   assert.equal(decorated.noticeCode, null);
   assert.equal(decorated.displayStatus, null);
+});
+
+test("normalizeJobTransportAutoRetryCount floors finite non-negative", () => {
+  assert.equal(normalizeJobTransportAutoRetryCount(2.9), 2);
+  assert.equal(normalizeJobTransportAutoRetryCount(-1), 0);
+  assert.equal(normalizeJobTransportAutoRetryCount(null), 0);
+  assert.equal(normalizeJobTransportAutoRetryCount("3"), 0);
+  assert.equal(normalizeJobTransportAutoRetryCount(Number.NaN), 0);
+});
+
+test("isAutoRequeuedPipelineJobRecoverable matches resume/stale base filter", () => {
+  // auto-requeue 后典型行：queued + count>0 + lease/heartbeat 已清
+  assert.equal(isAutoRequeuedPipelineJobRecoverable({
+    status: "queued",
+    pendingManualRecovery: false,
+    finishedAt: null,
+    cancelRequestedAt: null,
+    jobTransportAutoRetryCount: 1,
+  }), true);
+  // count 不参与 where：count=0 的普通 queued 同样可恢复
+  assert.equal(isAutoRequeuedPipelineJobRecoverable({
+    status: "queued",
+    jobTransportAutoRetryCount: 0,
+  }), true);
+  assert.equal(isAutoRequeuedPipelineJobRecoverable({
+    status: "running",
+    jobTransportAutoRetryCount: 2,
+  }), true);
+  assert.equal(isAutoRequeuedPipelineJobRecoverable({
+    status: "queued",
+    pendingManualRecovery: true,
+    jobTransportAutoRetryCount: 1,
+  }), false);
+  assert.equal(isAutoRequeuedPipelineJobRecoverable({
+    status: "failed",
+    jobTransportAutoRetryCount: 1,
+  }), false);
+  assert.equal(isAutoRequeuedPipelineJobRecoverable({
+    status: "queued",
+    finishedAt: new Date(),
+    jobTransportAutoRetryCount: 1,
+  }), false);
+  assert.equal(isAutoRequeuedPipelineJobRecoverable({
+    status: "queued",
+    cancelRequestedAt: new Date(),
+    jobTransportAutoRetryCount: 1,
+  }), false);
+});
+
+test("stale recoverable where includes auto-requeued queued base predicates", () => {
+  const now = new Date("2026-07-12T12:00:00.000Z");
+  const cutoff = new Date(now.getTime() - 180_000);
+  const where = buildStaleRecoverablePipelineJobWhere({ cutoff, now });
+  // 与 isAutoRequeuedPipelineJobRecoverable 基线一致；count 不在 where 中
+  assert.deepEqual(where.status, { in: ["queued", "running"] });
+  assert.equal(where.pendingManualRecovery, false);
+  assert.equal(where.finishedAt, null);
+  assert.equal(where.cancelRequestedAt, null);
+  assert.ok(Array.isArray(where.OR));
+  // heartbeat null + updatedAt 过期：requeue 清 heartbeat 后 watchdog 可拾起
+  const nullHeartbeat = where.OR.find(
+    (clause) => clause.heartbeatAt === null && clause.updatedAt,
+  );
+  assert.ok(nullHeartbeat, "stale where must cover requeued jobs with cleared heartbeat");
+});
+
+test("recovery path reason codes are stable for log/notice alignment", () => {
+  assert.equal(PIPELINE_JOB_AUTO_RETRY_RECOVERY_IN_PROCESS_TIMER, "in_process_timer");
+  assert.equal(PIPELINE_JOB_AUTO_RETRY_RECOVERY_RESUME_OR_STALE, "resume_or_stale");
 });
