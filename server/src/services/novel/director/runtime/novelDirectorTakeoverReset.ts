@@ -10,6 +10,7 @@ import {
 import type { DirectorTakeoverResolvedPlan } from "./novelDirectorTakeover";
 import type { DirectorTakeoverLoadedState } from "./novelDirectorTakeoverRuntime";
 import { resetDirectorDownstreamChapterState } from "../recovery/novelDirectorDownstreamReset";
+import { chapterStatePairAfterPlannedReset } from "../../chapterLifecycleState";
 
 interface DirectorTakeoverResetDeps {
   getVolumeWorkspace: (novelId: string) => Promise<VolumePlanDocument>;
@@ -352,6 +353,7 @@ async function resetQualityRepairOutputs(
         where: { id: { in: withContentIds } },
         data: {
           generationState: "drafted",
+          // 有正文但 takeover 回退运营态：保留 drafted，运营归 unplanned（非 planned 成对）
           chapterStatus: "unplanned",
           repairHistory: null,
           qualityScore: null,
@@ -367,8 +369,7 @@ async function resetQualityRepairOutputs(
       await tx.chapter.updateMany({
         where: { id: { in: emptyIds } },
         data: {
-          generationState: "planned",
-          chapterStatus: "unplanned",
+          ...chapterStatePairAfterPlannedReset(),
           repairHistory: null,
           qualityScore: null,
           continuityScore: null,

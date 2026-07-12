@@ -11,6 +11,7 @@ import {
 import { prisma } from "../../../db/prisma";
 import type { VolumeUpdateReason } from "../../../events";
 import { contentRevisionBumpData } from "../chapterContentCas";
+import { chapterStatePairAfterPlannedReset } from "../chapterLifecycleState";
 import {
   buildVolumeSyncPlan,
   hasPayoffLedgerRelevantPlanChanges,
@@ -140,10 +141,7 @@ export class VolumeChapterSyncService {
             taskSheet: item.chapter.taskSheet?.trim() || null,
             sceneCards: item.chapter.sceneCards ?? null,
             ...(!item.preserveWorkflowState
-              ? {
-                generationState: "planned",
-                chapterStatus: "unplanned",
-              }
+              ? chapterStatePairAfterPlannedReset()
               : {}),
             ...(item.clearContent
               ? { content: "", ...contentRevisionBumpData() }

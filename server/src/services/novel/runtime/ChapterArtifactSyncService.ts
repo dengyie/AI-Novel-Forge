@@ -4,6 +4,7 @@ import { withSqliteRetry } from "../../../db/sqliteRetry";
 import { ragServices } from "../../rag";
 import { briefSummary, extractFacts } from "../novelP0Utils";
 import { contentRevisionBumpData } from "../chapterContentCas";
+import { chapterStatePairAfterDraftSave } from "../chapterLifecycleState";
 import { chapterArtifactBackgroundSyncService } from "./ChapterArtifactBackgroundSyncService";
 import { assertChapterContentNotEmpty } from "./chapterEmptyContentError";
 import type { ArtifactSyncMode } from "../novelCoreShared";
@@ -39,8 +40,7 @@ export class ChapterArtifactSyncService {
         where: { id: chapterId },
         data: {
           content: safeContent,
-          generationState,
-          chapterStatus: "generating",
+          ...chapterStatePairAfterDraftSave(generationState),
           // 生成/定稿旁路写正文：系统权威写，不走 expected CAS，但仍 bump revision
           // 以便随后的人工编辑能检测到「生成已覆盖」。
           ...contentRevisionBumpData(),

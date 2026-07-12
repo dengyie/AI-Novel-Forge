@@ -38,6 +38,7 @@ import {
   PIPELINE_JOB_TRANSPORT_AUTO_RETRY_MAX,
   shouldAutoRetryPipelineJob,
 } from "./pipelineJobAutoRetry";
+import { resolveUnhandledPipelineFailureTerminalUpdate } from "./pipelineJobTerminalGuard";
 import { buildPipelineCurrentItemLabel, buildPipelineStageProgress, decoratePipelineJob as decoratePipelineJobRow, isPipelineActiveStage, parsePipelinePayload as parsePipelineJobPayload, stringifyPipelinePayload as stringifyPipelineJobPayload, type DecoratedPipelineJob, type PipelineActiveStage, type PipelineJobLike } from "./pipelineJobState";
 
 export { buildPipelineCurrentItemLabel, buildPipelineStageProgress } from "./pipelineJobState";
@@ -612,6 +613,53 @@ export class NovelCorePipelineService {
     });
   }
 
+  /**
+   * 调度层兜底：executePipeline 在内层 try 之外抛错时，仍保证 job 离开 running。
+   * 已是 succeeded/failed/cancelled/queued（含 auto-requeue）则不覆盖。
+   */
+  private async ensurePipelineJobTerminalAfterUnhandledError(jobId: string, error: unknown): Promise<void> {
+    try {
+      const job = await prisma.generationJob.findUnique({
+        where: { id: jobId },
+        select: {
+          status: true,
+          cancelRequestedAt: true,
+        },
+      });
+      const terminal = resolveUnhandledPipelineFailureTerminalUpdate({
+        status: job?.status,
+        cancelRequestedAt: job?.cancelRequestedAt ?? null,
+        error,
+      });
+      if (!terminal) {
+        return;
+      }
+      await this.updateJobSafe(jobId, {
+        status: terminal.status,
+        error: terminal.error,
+        finishedAt: new Date(),
+        heartbeatAt: null,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+        currentStage: null,
+        currentItemKey: null,
+        currentItemLabel: null,
+        cancelRequestedAt: terminal.status === "cancelled" ? null : undefined,
+      });
+      logPipelineWarn("流水线调度兜底写入终态", {
+        jobId,
+        status: terminal.status,
+        error: terminal.error,
+      });
+    } catch (guardError) {
+      logPipelineWarn("流水线调度兜底终态写库失败", {
+        jobId,
+        error: guardError instanceof Error ? guardError.message : String(guardError),
+        original: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   private schedulePipelineExecution(jobId: string, novelId: string, options: PipelineRunOptions): void {
     if (NovelCorePipelineService.activeJobIds.has(jobId)) {
       return;
@@ -653,8 +701,9 @@ export class NovelCorePipelineService {
         }
       }
       await this.executePipeline(jobId, novelId, options)
-        .catch(() => {
-          // 防止后台任务未处理拒绝导致进程不稳定
+        .catch(async (error) => {
+          // 防止未处理 rejection 拖垮进程；并保证 job 不永久卡在 running。
+          await this.ensurePipelineJobTerminalAfterUnhandledError(jobId, error);
         })
         .finally(() => {
           NovelCorePipelineService.activeJobIds.delete(jobId);

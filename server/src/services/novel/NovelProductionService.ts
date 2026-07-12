@@ -6,6 +6,7 @@ import { WorldService } from "../world/WorldService";
 import { getSharedNovelServices } from "./application/sharedNovelServices";
 import { collectStream, extractJsonArray, parseStructuredOutline } from "./novelProductionHelpers";
 import { novelProductionStatusService, type ProductionStatusResult } from "./NovelProductionStatusService";
+import { chapterStatePairAfterPlannedReset } from "./chapterLifecycleState";
 
 interface NovelLlmOptions {
   provider?: LLMProvider;
@@ -317,7 +318,7 @@ export class NovelProductionService {
             order: chapter.order,
             content: "",
             expectation: chapter.summary,
-            generationState: "planned",
+            ...chapterStatePairAfterPlannedReset(),
           },
         });
         createdCount += 1;

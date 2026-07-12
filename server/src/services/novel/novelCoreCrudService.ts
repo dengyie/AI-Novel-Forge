@@ -16,6 +16,7 @@ import {
   createChapterNotFoundError,
   initialContentRevisionForCreate,
 } from "./chapterContentCas";
+import { chapterStatePairAfterPlannedReset } from "./chapterLifecycleState";
 import {
   ChapterInput,
   CreateNovelInput,
@@ -455,7 +456,6 @@ export class NovelCoreCrudService {
         content: initialContent,
         contentRevision: initialContentRevisionForCreate(initialContent),
         expectation: input.expectation,
-        chapterStatus: input.chapterStatus,
         targetWordCount: input.targetWordCount ?? null,
         conflictLevel: input.conflictLevel ?? null,
         revealLevel: input.revealLevel ?? null,
@@ -468,7 +468,9 @@ export class NovelCoreCrudService {
         characterScore: input.characterScore ?? null,
         pacingScore: input.pacingScore ?? null,
         riskFlags: input.riskFlags ?? null,
-        generationState: "planned",
+        // generationState 固定 planned；chapterStatus 优先调用方，缺省走成对 unplanned
+        generationState: chapterStatePairAfterPlannedReset().generationState,
+        chapterStatus: input.chapterStatus ?? chapterStatePairAfterPlannedReset().chapterStatus,
       },
     });
 

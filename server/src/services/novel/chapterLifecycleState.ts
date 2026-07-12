@@ -39,6 +39,28 @@ export function chapterStatePairAfterPipelineApproval(): ChapterStatePairPatch {
 }
 
 /**
+ * 草稿/修复稿落库（正文写入中）：generation 前进，运营态保持 generating。
+ */
+export function chapterStatePairAfterDraftSave(
+  generationState: "drafted" | "repaired",
+): ChapterStatePairPatch {
+  return {
+    generationState,
+    chapterStatus: "generating",
+  };
+}
+
+/**
+ * 大纲/目录新建或下游重置回规划：成对 planned + unplanned。
+ */
+export function chapterStatePairAfterPlannedReset(): ChapterStatePairPatch {
+  return {
+    generationState: "planned",
+    chapterStatus: "unplanned",
+  };
+}
+
+/**
  * 将 `generationState` 升为 `approved` 时，顺带保证 `chapterStatus` 与用户可见「已完成」一致。
  * 对已处于 `generationState === "approved"` 的更新可安全重复调用。
  */

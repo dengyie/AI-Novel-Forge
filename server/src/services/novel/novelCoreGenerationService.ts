@@ -23,6 +23,7 @@ import {
 import { titleGenerationService } from "../title/TitleGenerationService";
 import { WorldContextGateway, type WorldContextPurpose } from "./worldContext/WorldContextGateway";
 import { normalizeNovelBiblePayload } from "./novelBiblePersistence";
+import { chapterStatePairAfterPlannedReset } from "./chapterLifecycleState";
 import {
   ChapterGenerateOptions,
   DEFAULT_ESTIMATED_CHAPTER_COUNT,
@@ -266,7 +267,7 @@ export class NovelCoreGenerationService {
             order: chapter.order,
             content: "",
             expectation: chapter.summary,
-            generationState: "planned",
+            ...chapterStatePairAfterPlannedReset(),
           },
         });
       }),

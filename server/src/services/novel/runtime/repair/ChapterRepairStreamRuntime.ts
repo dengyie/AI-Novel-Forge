@@ -6,6 +6,10 @@ import { streamTextPrompt } from "../../../../prompting/core/promptRunner";
 import { withChapterRepairContext } from "../../../../prompting/prompts/novel/chapterLayeredContext";
 import { auditService } from "../../../audit/AuditService";
 import { contentRevisionBumpData } from "../../chapterContentCas";
+import {
+  chapterStatePairAfterDraftSave,
+  chapterStatePairAfterPipelineApproval,
+} from "../../chapterLifecycleState";
 import { ChapterPatchRepairFailedError } from "../../chapterPatchRepairService";
 import {
   isPass,
@@ -187,7 +191,7 @@ export class ChapterRepairStreamRuntime {
       where: { id: input.chapterId },
       data: {
         content: repairedContent,
-        generationState: "repaired",
+        ...chapterStatePairAfterDraftSave("repaired"),
         // 修复旁路写正文：系统权威写，不走 expected CAS，但仍 bump revision
         ...contentRevisionBumpData(),
       },
@@ -214,7 +218,7 @@ export class ChapterRepairStreamRuntime {
     if (isPass(review.score)) {
       await prisma.chapter.update({
         where: { id: input.chapterId },
-        data: { generationState: "approved" },
+        data: chapterStatePairAfterPipelineApproval(),
       });
       if (input.options.auditIssueIds?.length) {
         const resolveAuditIssues = this.deps.resolveAuditIssues
