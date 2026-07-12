@@ -34,8 +34,19 @@ test("isPipelineCancellationError covers cancel messages and AbortError abort te
     isPipelineCancellationError(Object.assign(new Error("Request aborted."), { name: "AbortError" })),
     true,
   );
+  // 任意 AbortError（含无 abort 关键词）与 plain "aborted" → 取消
+  assert.equal(
+    isPipelineCancellationError(Object.assign(new Error("wall clock"), { name: "AbortError" })),
+    true,
+  );
+  assert.equal(isPipelineCancellationError(new Error("aborted")), true);
+  assert.equal(isPipelineCancellationError(new Error("The operation was aborted")), true);
   assert.equal(isPipelineCancellationError(new Error("fetch failed: ECONNRESET")), false);
   assert.equal(isPipelineCancellationError(new Error("502 Bad Gateway")), false);
+  assert.equal(
+    isPipelineCancellationError(Object.assign(new Error("wall clock"), { name: "TimeoutError" })),
+    false,
+  );
 });
 
 test("isPipelineJobAutoRetryableError accepts transport and empty content", () => {

@@ -43,7 +43,11 @@ import {
   PIPELINE_JOB_TRANSPORT_AUTO_RETRY_MAX,
   shouldAutoRetryPipelineJob,
 } from "./pipelineJobAutoRetry";
-import { resolveUnhandledPipelineFailureTerminalUpdate } from "./pipelineJobTerminalGuard";
+import {
+  buildPipelineJobAutoRequeueCasWhere,
+  buildUnhandledPipelineFailureTerminalCasWhere,
+  resolveUnhandledPipelineFailureTerminalUpdate,
+} from "./pipelineJobTerminalGuard";
 import { buildPipelineCurrentItemLabel, buildPipelineStageProgress, decoratePipelineJob as decoratePipelineJobRow, isPipelineActiveStage, parsePipelinePayload as parsePipelineJobPayload, stringifyPipelinePayload as stringifyPipelineJobPayload, type DecoratedPipelineJob, type PipelineActiveStage, type PipelineJobLike } from "./pipelineJobState";
 
 export { buildPipelineCurrentItemLabel, buildPipelineStageProgress } from "./pipelineJobState";
@@ -637,6 +641,7 @@ export class NovelCorePipelineService {
   /**
    * 调度层兜底：executePipeline 在内层 try 之外抛错时，仍保证 job 离开 running。
    * 已是 succeeded/failed/cancelled/queued（含 auto-requeue）则不覆盖。
+   * 写库用 status=running CAS，避免 read→write 窗口覆盖并发 requeue/cancel。
    */
   private async ensurePipelineJobTerminalAfterUnhandledError(jobId: string, error: unknown): Promise<void> {
     try {
@@ -655,7 +660,7 @@ export class NovelCorePipelineService {
       if (!terminal) {
         return;
       }
-      await this.updateJobSafe(jobId, {
+      const casData = {
         status: terminal.status,
         error: terminal.error,
         finishedAt: new Date(),
@@ -665,12 +670,48 @@ export class NovelCorePipelineService {
         currentStage: null,
         currentItemKey: null,
         currentItemLabel: null,
-        cancelRequestedAt: terminal.status === "cancelled" ? null : undefined,
-      });
+        ...(terminal.status === "cancelled" ? { cancelRequestedAt: null } : {}),
+      };
+      // 最多 3 次：仅当仍 running 时写入，防止盖掉 queued requeue / 其它终态
+      let applied = false;
+      let lastError: unknown;
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        try {
+          const result = await prisma.generationJob.updateMany({
+            where: buildUnhandledPipelineFailureTerminalCasWhere(jobId),
+            data: casData,
+          });
+          if (result.count === 0) {
+            logPipelineWarn("流水线调度兜底终态 CAS 未命中（已离开 running）", {
+              jobId,
+              intendedStatus: terminal.status,
+              priorStatus: job?.status ?? null,
+            });
+            return;
+          }
+          applied = true;
+          break;
+        } catch (writeError) {
+          lastError = writeError;
+          if (attempt < 3) {
+            await new Promise((resolve) => setTimeout(resolve, 50 * attempt));
+            continue;
+          }
+        }
+      }
+      if (!applied) {
+        logPipelineWarn("流水线调度兜底终态写库失败", {
+          jobId,
+          error: lastError instanceof Error ? lastError.message : String(lastError),
+          original: error instanceof Error ? error.message : String(error),
+        });
+        return;
+      }
       logPipelineWarn("流水线调度兜底写入终态", {
         jobId,
         status: terminal.status,
         error: terminal.error,
+        cas: "status=running",
       });
     } catch (guardError) {
       logPipelineWarn("流水线调度兜底终态写库失败", {
@@ -1173,6 +1214,8 @@ export class NovelCorePipelineService {
               runtimePackage: chapterResult.runtimePackage,
             });
             let assessmentForMemory: ChapterQualityLoopAssessment = memoryAssessment;
+            // fail-open 时 catch 内已 set 同源 snapshot；成功路径在下方 set
+            let rangeDebtSeededFromFailOpen = false;
             try {
               assessmentForMemory = await chapterQualityLoopService.recordAssessment({
                 novelId,
@@ -1193,14 +1236,10 @@ export class NovelCorePipelineService {
                 assessmentSource,
                 assessmentTerminalAction,
               );
-              let memoryQualityLoop: Record<string, unknown> | null = null;
-              try {
-                const parsed = JSON.parse(memoryRiskFlags) as { qualityLoop?: Record<string, unknown> };
-                memoryQualityLoop = parsed?.qualityLoop ?? null;
-              } catch {
-                memoryQualityLoop = null;
-              }
-              const chapterBlocksReplanGate = isBlockingReplanQualityDebt(memoryQualityLoop);
+              // assessment 本体即可判 replan blocking，避免 JSON 往返
+              const chapterBlocksReplanGate = isBlockingReplanQualityDebt(
+                assessmentForMemory as unknown as Record<string, unknown>,
+              );
               const failOpenMetrics = noteQualityLoopPersistFailOpen({
                 chapterId: chapter.id,
                 jobId,
@@ -1233,17 +1272,26 @@ export class NovelCorePipelineService {
                 projectedShouldPause: projectedGate.shouldPause,
                 failOpenTotal: failOpenMetrics.total,
                 failOpenBlockingReplanMemoryCount: failOpenMetrics.blockingReplanMemoryCount,
+                // 运维：进程内计数，重启清零；扫日志字段 failOpen=true
+                failOpenScope: "process_local",
                 error: error instanceof Error ? error.message : String(error),
               });
+              rangeDebtByChapterId.set(chapter.id, {
+                order: chapter.order,
+                riskFlags: memoryRiskFlags,
+              });
+              rangeDebtSeededFromFailOpen = true;
             }
-            rangeDebtByChapterId.set(chapter.id, {
-              order: chapter.order,
-              riskFlags: buildQualityLoopRiskFlagsSnapshot(
-                assessmentForMemory,
-                assessmentSource,
-                assessmentTerminalAction,
-              ),
-            });
+            if (!rangeDebtSeededFromFailOpen) {
+              rangeDebtByChapterId.set(chapter.id, {
+                order: chapter.order,
+                riskFlags: buildQualityLoopRiskFlagsSnapshot(
+                  assessmentForMemory,
+                  assessmentSource,
+                  assessmentTerminalAction,
+                ),
+              });
+            }
           }
 
           if (chapterResult.reviewExecuted && !chapterResult.pass) {
@@ -1462,27 +1510,101 @@ export class NovelCorePipelineService {
           recoverableRepairDetails,
           jobTransportAutoRetryCount: nextCount,
         };
-        await this.updateJobSafe(jobId, {
-          status: "queued",
-          error: retryMessage,
-          finishedAt: null,
-          heartbeatAt: null,
-          leaseOwner: null,
-          leaseExpiresAt: null,
-          cancelRequestedAt: null,
-          currentStage: "queued",
-          currentItemKey: null,
-          currentItemLabel: null,
-          pendingManualRecovery: false,
-          retryCount: totalRetryCount,
-          payload: this.stringifyPipelinePayload(requeuePayload),
-        });
+        // CAS：仅 running 且 cancelRequestedAt 仍 null 才 requeue，避免取消竞态清掉 cancel 并再排队
+        let requeued = false;
+        try {
+          const result = await prisma.generationJob.updateMany({
+            where: buildPipelineJobAutoRequeueCasWhere(jobId),
+            data: {
+              status: "queued",
+              error: retryMessage,
+              finishedAt: null,
+              heartbeatAt: null,
+              leaseOwner: null,
+              leaseExpiresAt: null,
+              currentStage: "queued",
+              currentItemKey: null,
+              currentItemLabel: null,
+              pendingManualRecovery: false,
+              retryCount: totalRetryCount,
+              payload: this.stringifyPipelinePayload(requeuePayload),
+            },
+          });
+          requeued = result.count > 0;
+        } catch (requeueError) {
+          logPipelineWarn("任务自动重试写库失败", {
+            jobId,
+            novelId,
+            error: requeueError instanceof Error ? requeueError.message : String(requeueError),
+          });
+          requeued = false;
+        }
+        if (!requeued) {
+          // 可能已 cancel 或离开 running：若仍请求取消则收口 cancelled，否则落 failed
+          const latest = await prisma.generationJob.findUnique({
+            where: { id: jobId },
+            select: { status: true, cancelRequestedAt: true },
+          });
+          if (latest?.cancelRequestedAt || latest?.status === "cancelled") {
+            await this.updateJobSafe(jobId, {
+              status: "cancelled",
+              error: null,
+              heartbeatAt: null,
+              currentStage: null,
+              currentItemKey: null,
+              currentItemLabel: null,
+              cancelRequestedAt: null,
+              finishedAt: new Date(),
+              payload: this.stringifyPipelinePayload({
+                ...runtimePayload,
+                qualityAlertDetails,
+                replanAlertDetails,
+                genreBeatAlertDetails,
+                recoverableRepairDetails,
+                jobTransportAutoRetryCount: 0,
+              }),
+            });
+            void novelEventBus.emit({
+              type: "pipeline:completed",
+              payload: { novelId, jobId, status: "cancelled" },
+            }).catch(() => {});
+            return;
+          }
+          if (latest?.status === "queued" || latest?.status === "succeeded" || latest?.status === "failed") {
+            // 并发路径已处理，不再二次写
+            return;
+          }
+          await this.updateJobSafe(jobId, {
+            status: "failed",
+            error: message,
+            finishedAt: new Date(),
+            payload: this.stringifyPipelinePayload({
+              ...runtimePayload,
+              qualityAlertDetails,
+              replanAlertDetails,
+              genreBeatAlertDetails,
+              recoverableRepairDetails,
+              jobTransportAutoRetryCount: usedJobAutoRetry,
+            }),
+          });
+          logPipelineError("任务执行异常（自动重试 CAS 未命中）", {
+            jobId,
+            novelId,
+            message,
+            jobTransportAutoRetryCount: usedJobAutoRetry,
+            latestStatus: latest?.status ?? null,
+          });
+          void novelEventBus.emit({
+            type: "pipeline:completed",
+            payload: { novelId, jobId, status: "failed" },
+          }).catch(() => {});
+          return;
+        }
         // 字段与 resume 路径对齐：jobTransportAutoRetryCount + recoveryPath + maxCount
         logPipelineWarn("任务瞬时失败，排队自动重试", {
           jobId,
           novelId,
           jobTransportAutoRetryCount: nextCount,
-          nextCount,
           maxCount: PIPELINE_JOB_TRANSPORT_AUTO_RETRY_MAX,
           delayMs: PIPELINE_JOB_TRANSPORT_AUTO_RETRY_DELAY_MS,
           recoveryPath: PIPELINE_JOB_AUTO_RETRY_RECOVERY_IN_PROCESS_TIMER,

@@ -3,6 +3,8 @@ const assert = require("node:assert/strict");
 
 const {
   resolveUnhandledPipelineFailureTerminalUpdate,
+  buildUnhandledPipelineFailureTerminalCasWhere,
+  buildPipelineJobAutoRequeueCasWhere,
 } = require("../dist/services/novel/pipelineJobTerminalGuard.js");
 
 test("resolveUnhandledPipelineFailureTerminalUpdate skips terminal and queued statuses", () => {
@@ -51,6 +53,21 @@ test("resolveUnhandledPipelineFailureTerminalUpdate cancels when cancel flag or 
     }),
     { status: "cancelled", error: null },
   );
+  // plain Error("aborted") / bare AbortError → cancelled（与 transport 对齐）
+  assert.deepEqual(
+    resolveUnhandledPipelineFailureTerminalUpdate({
+      status: "running",
+      error: new Error("aborted"),
+    }),
+    { status: "cancelled", error: null },
+  );
+  assert.deepEqual(
+    resolveUnhandledPipelineFailureTerminalUpdate({
+      status: "running",
+      error: Object.assign(new Error("wall clock"), { name: "AbortError" }),
+    }),
+    { status: "cancelled", error: null },
+  );
 });
 
 test("resolveUnhandledPipelineFailureTerminalUpdate uses fallback message for empty errors", () => {
@@ -61,4 +78,16 @@ test("resolveUnhandledPipelineFailureTerminalUpdate uses fallback message for em
     }),
     { status: "failed", error: "流水线执行异常（调度兜底）" },
   );
+});
+
+test("terminal and requeue CAS where only match running (and requeue requires no cancel)", () => {
+  assert.deepEqual(buildUnhandledPipelineFailureTerminalCasWhere("job-1"), {
+    id: "job-1",
+    status: "running",
+  });
+  assert.deepEqual(buildPipelineJobAutoRequeueCasWhere("job-2"), {
+    id: "job-2",
+    status: "running",
+    cancelRequestedAt: null,
+  });
 });

@@ -7,6 +7,9 @@ import { isPipelineCancellationError } from "./pipelineJobAutoRetry";
  * 对 `queued` 一律不覆盖：auto-requeue 会把 job 写回 queued；默认 lease CAS 在调度入口
  * 已把 status 置 running，因此「仍 queued 却冒泡」主要是 requeue 成功路径，不应盖成 failed。
  * GENERATION_JOB_LEASE_ENABLED=false 且 execute 在写 running 前抛错的边角，仍依赖 resume/watchdog。
+ *
+ * 真正写库时必须配合 {@link buildUnhandledPipelineFailureTerminalCasWhere}：
+ * 仅 status=running 可被覆盖，避免 read→write 窗口内 requeue/cancel 被盖回 failed。
  */
 export function resolveUnhandledPipelineFailureTerminalUpdate(input: {
   status: string | null | undefined;
@@ -36,4 +39,34 @@ export function resolveUnhandledPipelineFailureTerminalUpdate(input: {
       : String(input.error);
   const message = raw.trim() || "流水线执行异常（调度兜底）";
   return { status: "failed", error: message };
+}
+
+/**
+ * 调度兜底终态写库 CAS 谓词：只允许覆盖仍为 running 的行。
+ * 与 resolve 配套；updateMany count=0 表示并发已离开 running，应跳过。
+ */
+export function buildUnhandledPipelineFailureTerminalCasWhere(jobId: string): {
+  id: string;
+  status: "running";
+} {
+  return {
+    id: jobId,
+    status: "running",
+  };
+}
+
+/**
+ * auto-requeue 写回 queued 的 CAS：必须仍 running 且未请求取消。
+ * 避免 cancel 竞态下把 cancelRequestedAt 清掉并再次排队。
+ */
+export function buildPipelineJobAutoRequeueCasWhere(jobId: string): {
+  id: string;
+  status: "running";
+  cancelRequestedAt: null;
+} {
+  return {
+    id: jobId,
+    status: "running",
+    cancelRequestedAt: null,
+  };
 }

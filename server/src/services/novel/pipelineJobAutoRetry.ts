@@ -73,12 +73,20 @@ export function normalizeJobTransportAutoRetryCount(value: unknown): number {
 
 /**
  * 用户/流水线取消（不可 auto-requeue，应落 cancelled 而非 failed）。
- * 与章节层 cancel 文案、abort(reason=PIPELINE_CANCELLED) 对齐。
- * AbortError + abort 类文案：reason 丢失时的取消透传形态，按取消处理。
+ * 与章节层 cancel 文案、abort(reason=PIPELINE_CANCELLED) 对齐；
+ * 与 transport `isCancellationLikeTransportError` 口径对齐（避免 llm↔novel 环依赖故双份）。
+ *
+ * - 任意 AbortError → 取消（含空 message / 无 abort 关键词）
+ * - sleep/signal 透传的普通 Error("aborted") 等文案 → 取消
+ * - PIPELINE_CANCELLED / 章节生成已取消 等 → 取消
  */
 export function isPipelineCancellationError(error: unknown): boolean {
   if (!error) {
     return false;
+  }
+  // 与 transport 一致：AbortError 一律非瞬时、job 层一律 cancelled
+  if (error instanceof Error && error.name === "AbortError") {
+    return true;
   }
   const msg = error instanceof Error
     ? error.message
@@ -96,12 +104,17 @@ export function isPipelineCancellationError(error: unknown): boolean {
   ) {
     return true;
   }
-  // reason 丢失后的取消透传：AbortError + abort 类文案 → 按取消收口
-  if (error instanceof Error && error.name === "AbortError") {
-    const lower = msg.toLowerCase();
-    return lower.includes("abort") || lower.includes("cancel") || lower.includes("取消");
+  // TimeoutError 另走瞬时失败，不在此匹配
+  if (error instanceof Error && error.name === "TimeoutError") {
+    return false;
   }
-  return false;
+  const lower = msg.toLowerCase();
+  // reason 丢失后的取消透传（含 sleep abort → new Error("aborted")）；与 transport 文案表对齐
+  return lower === "aborted"
+    || lower.includes("request aborted")
+    || lower.includes("the operation was aborted")
+    || lower.includes("user cancelled")
+    || lower.includes("cancelled mid-flight");
 }
 
 /**

@@ -13,6 +13,11 @@ test("isCancellationLikeTransportError covers AbortError and cancel messages", (
     isCancellationLikeTransportError(Object.assign(new Error("Request aborted."), { name: "AbortError" })),
     true,
   );
+  assert.equal(
+    isCancellationLikeTransportError(Object.assign(new Error("wall clock"), { name: "AbortError" })),
+    true,
+  );
+  assert.equal(isCancellationLikeTransportError(new Error("aborted")), true);
   assert.equal(isCancellationLikeTransportError(new Error("PIPELINE_CANCELLED")), true);
   assert.equal(isCancellationLikeTransportError(new Error("章节生成已取消。")), true);
   assert.equal(isCancellationLikeTransportError(new Error("user cancelled")), true);

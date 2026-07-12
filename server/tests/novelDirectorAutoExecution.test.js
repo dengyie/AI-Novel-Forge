@@ -217,6 +217,50 @@ test("blocking qualityLoop debt is never processed even with pending_review cont
   assert.equal(isDirectorAutoExecutionChapterProcessed(validChapter), true);
 });
 
+test("soft-only obligation (failure code none + continue_with_risk) is not blocking for auto-execution", () => {
+  // P2-6 收口后 soft missing → failureClassification.code=none；若 qualityLoop 也记 continue
+  // 且无 blockingObligations，导演应视为可 processed（不挡堆章）。
+  const softOnlyFlags = JSON.stringify({
+    qualityLoop: {
+      overallStatus: "risk",
+      recommendedAction: "continue",
+      rootCauseCode: "none",
+      blockingObligations: [],
+      terminalAction: "defer_and_continue",
+    },
+  });
+  const softChapter = {
+    id: "chapter-soft",
+    order: 7,
+    content: "有正文",
+    generationState: "reviewed",
+    chapterStatus: "pending_review",
+    riskFlags: softOnlyFlags,
+  };
+  assert.equal(hasBlockingQualityLoopDebtForAutoExecution(softChapter), false);
+  assert.equal(isDirectorAutoExecutionChapterProcessed(softChapter), true);
+
+  // 对比：仍带 hard blockingObligations 的 draft_obligation_unmet 不得 processed
+  const hardObligationFlags = JSON.stringify({
+    qualityLoop: {
+      overallStatus: "invalid",
+      recommendedAction: "patch_repair",
+      rootCauseCode: "draft_obligation_unmet",
+      blockingObligations: [{ kind: "must_hit_now", summary: "硬义务" }],
+    },
+  });
+  const hardChapter = {
+    id: "chapter-hard-ob",
+    order: 8,
+    content: "有正文",
+    generationState: "reviewed",
+    chapterStatus: "pending_review",
+    riskFlags: hardObligationFlags,
+  };
+  assert.equal(hasBlockingQualityLoopDebtForAutoExecution(hardChapter), true);
+  assert.equal(isDirectorAutoExecutionChapterProcessed(hardChapter), false);
+});
+
 test("auto execution does not treat empty reviewed chapters as processed", () => {
   const emptyReviewedChapter = {
     id: "chapter-empty",

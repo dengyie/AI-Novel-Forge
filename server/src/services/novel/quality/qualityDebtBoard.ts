@@ -213,6 +213,9 @@ export function isBlockingReplanQualityDebt(
  * qualityLoop 落库失败时的 fail-open 可观测（P2-2）。
  * 流水线仍用内存 assessment 并计 replan gate，但 DB riskFlags 可能缺本次债；
  * 计数/日志避免「该停未持久化」静默。
+ *
+ * 范围：进程内内存（重启清零）；运维扫 pipeline 日志 `failOpen=true` /
+ * `failOpenScope=process_local`，暂无 HTTP 导出。
  */
 export interface QualityLoopPersistFailOpenMetrics {
   /** 进程内累计 fail-open 次数 */
