@@ -22,7 +22,10 @@ import {
   type StructuredOutputProfile,
   type StructuredOutputStrategy,
 } from "./structuredOutput";
-import { getStructuredFallbackSettings } from "./structuredFallbackSettings";
+import {
+  getStructuredFallbackSettings,
+  resolveStructuredFallbackChain,
+} from "./structuredFallbackSettings";
 import { extractLlmTokenUsage } from "./usageTracking";
 import { runWithEnforcedTimeout } from "./invokeTimeout";
 import {
@@ -377,53 +380,63 @@ export async function invokeStructuredLlmDetailed<T>(input: StructuredInvokeInpu
     structuredStrategy: input.structuredStrategy,
   });
   const fallbackSettings = input.disableFallbackModel ? null : await getStructuredFallbackSettings();
-  const fallbackEnabled = Boolean(
-    fallbackSettings?.enabled
-    && fallbackSettings.model.trim().length > 0
-    && !(
-      fallbackSettings.provider === primaryTarget.provider
-      && fallbackSettings.model === primaryTarget.model
-    ),
-  );
+  const fallbackChain = fallbackSettings
+    ? resolveStructuredFallbackChain(fallbackSettings, {
+      provider: primaryTarget.provider,
+      model: primaryTarget.model,
+    })
+    : [];
+  const fallbackAvailable = fallbackChain.length > 0;
 
   try {
     return await tryStructuredStrategies({
       baseInput: input,
       target: primaryTarget,
-      fallbackAvailable: fallbackEnabled,
+      fallbackAvailable,
       fallbackUsed: false,
     });
   } catch (primaryError) {
-    if (!fallbackEnabled || !fallbackSettings) {
+    if (!fallbackAvailable) {
       throw primaryError;
     }
 
-    const fallbackTarget = await resolveAttemptTarget({
-      provider: fallbackSettings.provider,
-      model: fallbackSettings.model,
-      temperature: fallbackSettings.temperature,
-      maxTokens: fallbackSettings.maxTokens ?? undefined,
-      taskType: input.taskType ?? "planner",
-    });
-    try {
-      return await tryStructuredStrategies({
-        baseInput: {
-          ...input,
-          provider: fallbackTarget.provider,
-          model: fallbackTarget.model,
-          temperature: fallbackTarget.temperature,
-          maxTokens: fallbackTarget.maxTokens,
-          disableFallbackModel: true,
-        },
-        target: fallbackTarget,
-        fallbackAvailable: true,
-        fallbackUsed: true,
-      });
-    } catch (fallbackError) {
-      throw fallbackError instanceof StructuredOutputError
-        ? fallbackError
-        : primaryError;
+    // Multi-hop cascade: e.g. grok-4.5 → deepseek-v4-pro → deepseek-v4-flash.
+    // Each hop runs the full structured strategy sequence; disable nested fallback.
+    let lastError: unknown = primaryError;
+    for (let hopIndex = 0; hopIndex < fallbackChain.length; hopIndex += 1) {
+      const hop = fallbackChain[hopIndex]!;
+      const remainingAfterThisHop = hopIndex < fallbackChain.length - 1;
+      try {
+        const fallbackTarget = await resolveAttemptTarget({
+          provider: hop.provider,
+          model: hop.model,
+          temperature: hop.temperature,
+          maxTokens: hop.maxTokens ?? undefined,
+          taskType: input.taskType ?? "planner",
+        });
+        return await tryStructuredStrategies({
+          baseInput: {
+            ...input,
+            provider: fallbackTarget.provider,
+            model: fallbackTarget.model,
+            temperature: fallbackTarget.temperature,
+            maxTokens: fallbackTarget.maxTokens,
+            disableFallbackModel: true,
+          },
+          target: fallbackTarget,
+          fallbackAvailable: remainingAfterThisHop,
+          fallbackUsed: true,
+        });
+      } catch (fallbackError) {
+        lastError = fallbackError instanceof StructuredOutputError
+          ? fallbackError
+          : lastError;
+        // continue to next hop
+      }
     }
+    throw lastError instanceof StructuredOutputError
+      ? lastError
+      : primaryError;
   }
 }
 

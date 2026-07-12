@@ -396,6 +396,9 @@ test("GET and PUT /api/llm/structured-fallback expose the global fallback config
     model: "deepseek-chat",
     temperature: 0.2,
     maxTokens: null,
+    chain: [
+      { provider: "deepseek", model: "deepseek-chat", temperature: 0.2, maxTokens: null },
+    ],
   });
   structuredFallbackSettings.saveStructuredFallbackSettings = async (input) => {
     savedPayload = input;
@@ -405,6 +408,9 @@ test("GET and PUT /api/llm/structured-fallback expose the global fallback config
       model: "gpt-4o-mini",
       temperature: 0.15,
       maxTokens: 2048,
+      chain: [
+        { provider: "openai", model: "gpt-4o-mini", temperature: 0.15, maxTokens: 2048 },
+      ],
     };
   };
 

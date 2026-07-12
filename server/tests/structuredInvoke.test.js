@@ -290,6 +290,9 @@ test("invokeStructuredLlmDetailed degrades to prompt JSON before using fallback 
     model: "deepseek-chat",
     temperature: 0.2,
     maxTokens: null,
+    chain: [
+      { provider: "deepseek", model: "deepseek-chat", temperature: 0.2, maxTokens: null },
+    ],
   });
 
   try {
@@ -379,6 +382,9 @@ test("invokeStructuredLlmDetailed switches to the configured fallback model afte
     model: "deepseek-chat",
     temperature: 0.2,
     maxTokens: null,
+    chain: [
+      { provider: "deepseek", model: "deepseek-chat", temperature: 0.2, maxTokens: null },
+    ],
   });
 
   try {
@@ -400,6 +406,90 @@ test("invokeStructuredLlmDetailed switches to the configured fallback model afte
     assert.deepEqual(calls, [
       { provider: "openai", strategy: "json_schema" },
       { provider: "deepseek", strategy: "json_object" },
+    ]);
+  } finally {
+    factory.resolveLLMClientOptions = originalResolveOptions;
+    factory.createLLMFromResolvedOptions = originalCreateLLM;
+    structuredFallbackSettings.getStructuredFallbackSettings = originalGetFallbackSettings;
+  }
+});
+
+test("invokeStructuredLlmDetailed walks multi-hop cascade until a hop succeeds", async () => {
+  const originalResolveOptions = factory.resolveLLMClientOptions;
+  const originalCreateLLM = factory.createLLMFromResolvedOptions;
+  const originalGetFallbackSettings = structuredFallbackSettings.getStructuredFallbackSettings;
+  const calls = [];
+
+  factory.resolveLLMClientOptions = async (provider, options = {}) => {
+    const resolvedProvider = provider ?? "openai";
+    const resolvedModel = options.model ?? "gpt-4o-mini";
+    const baseURL = options.baseURL ?? "https://api.openai.com/v1";
+    const structuredProfile = options.executionMode === "structured"
+      ? resolveStructuredOutputProfile({
+        provider: resolvedProvider,
+        model: resolvedModel,
+        baseURL,
+        executionMode: "structured",
+      })
+      : null;
+    return {
+      provider: resolvedProvider,
+      providerName: resolvedProvider,
+      model: resolvedModel,
+      temperature: options.temperature ?? 0.3,
+      apiKey: "test-key",
+      baseURL,
+      maxTokens: options.maxTokens,
+      reasoningEnabled: !(structuredProfile?.requiresNonThinkingForStructured),
+      modelKwargs: undefined,
+      includeRawResponse: false,
+      executionMode: options.executionMode ?? "plain",
+      structuredProfile,
+      structuredStrategy: options.structuredStrategy ?? null,
+      reasoningForcedOff: Boolean(structuredProfile?.requiresNonThinkingForStructured),
+      taskType: options.taskType,
+      promptMeta: options.promptMeta,
+    };
+  };
+  factory.createLLMFromResolvedOptions = (resolved) => ({
+    invoke: async () => {
+      calls.push({ model: resolved.model });
+      if (resolved.model === "grok-4.5" || resolved.model === "deepseek-v4-pro") {
+        throw new Error(`${resolved.model} failed`);
+      }
+      return { content: "{\"value\":\"flash-ok\"}" };
+    },
+  });
+  structuredFallbackSettings.getStructuredFallbackSettings = async () => ({
+    enabled: true,
+    provider: "openai",
+    model: "deepseek-v4-pro",
+    temperature: 0.2,
+    maxTokens: null,
+    chain: [
+      { provider: "openai", model: "deepseek-v4-pro", temperature: 0.2, maxTokens: null },
+      { provider: "openai", model: "deepseek-v4-flash", temperature: 0.2, maxTokens: null },
+    ],
+  });
+
+  try {
+    const result = await structuredInvoke.invokeStructuredLlmDetailed({
+      provider: "openai",
+      model: "grok-4.5",
+      label: "structured.invoke.multi-hop",
+      taskType: "planner",
+      schema: z.object({ value: z.string() }),
+      systemPrompt: "只返回 JSON。",
+      userPrompt: "给我一个 value。",
+      disableFallbackModel: false,
+    });
+
+    assert.deepEqual(result.data, { value: "flash-ok" });
+    assert.equal(result.diagnostics.fallbackUsed, true);
+    assert.deepEqual(calls.map((c) => c.model), [
+      "grok-4.5",
+      "deepseek-v4-pro",
+      "deepseek-v4-flash",
     ]);
   } finally {
     factory.resolveLLMClientOptions = originalResolveOptions;
@@ -461,6 +551,9 @@ test("invokeStructuredLlmDetailed retries transient transport_error before faili
     model: "deepseek-chat",
     temperature: 0.2,
     maxTokens: null,
+    chain: [
+      { provider: "deepseek", model: "deepseek-chat", temperature: 0.2, maxTokens: null },
+    ],
   });
 
   try {
@@ -535,6 +628,9 @@ test("invokeStructuredLlmDetailed does not retry non-transient errors", async ()
     model: "deepseek-chat",
     temperature: 0.2,
     maxTokens: null,
+    chain: [
+      { provider: "deepseek", model: "deepseek-chat", temperature: 0.2, maxTokens: null },
+    ],
   });
 
   try {

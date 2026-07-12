@@ -6,24 +6,50 @@ const STRUCTURED_FALLBACK_PROVIDER_KEY = "structuredFallback.provider";
 const STRUCTURED_FALLBACK_MODEL_KEY = "structuredFallback.model";
 const STRUCTURED_FALLBACK_TEMPERATURE_KEY = "structuredFallback.temperature";
 const STRUCTURED_FALLBACK_MAX_TOKENS_KEY = "structuredFallback.maxTokens";
+/** Ordered multi-hop cascade as JSON array. First hop mirrors legacy provider/model keys. */
+const STRUCTURED_FALLBACK_CHAIN_KEY = "structuredFallback.chain";
 
-const DEFAULT_STRUCTURED_FALLBACK_SETTINGS: StructuredFallbackSettings = {
-  enabled: false,
-  provider: "deepseek",
-  model: "deepseek-v4-flash",
-  temperature: 0.2,
-  maxTokens: null,
-};
-
-let cachedSettings: StructuredFallbackSettings | null = null;
-
-export interface StructuredFallbackSettings {
-  enabled: boolean;
+export interface StructuredFallbackModel {
   provider: LLMProvider;
   model: string;
   temperature: number;
   maxTokens: number | null;
 }
+
+export interface StructuredFallbackSettings {
+  enabled: boolean;
+  /** Legacy first-hop fields (kept for API/UI compat; equal to chain[0] when chain non-empty). */
+  provider: LLMProvider;
+  model: string;
+  temperature: number;
+  maxTokens: number | null;
+  /** Ordered cascade after primary model failure. Empty means use [provider/model/...]. */
+  chain: StructuredFallbackModel[];
+}
+
+const DEFAULT_STRUCTURED_FALLBACK_SETTINGS: StructuredFallbackSettings = {
+  enabled: false,
+  provider: "openai",
+  model: "deepseek-v4-pro",
+  temperature: 0.2,
+  maxTokens: null,
+  chain: [
+    {
+      provider: "openai",
+      model: "deepseek-v4-pro",
+      temperature: 0.2,
+      maxTokens: null,
+    },
+    {
+      provider: "openai",
+      model: "deepseek-v4-flash",
+      temperature: 0.2,
+      maxTokens: null,
+    },
+  ],
+};
+
+let cachedSettings: StructuredFallbackSettings | null = null;
 
 function isMissingTableError(error: unknown): boolean {
   return (
@@ -44,10 +70,10 @@ function normalizeModel(value: string | undefined | null): string {
 }
 
 function clampTemperature(value: number | undefined | null): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    return DEFAULT_STRUCTURED_FALLBACK_SETTINGS.temperature;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.min(2, Math.max(0, value));
   }
-  return Math.min(2, Math.max(0, value));
+  return DEFAULT_STRUCTURED_FALLBACK_SETTINGS.temperature;
 }
 
 function normalizeMaxTokens(value: number | string | undefined | null): number | null {
@@ -65,13 +91,116 @@ function normalizeMaxTokens(value: number | string | undefined | null): number |
   return Math.min(32768, normalized);
 }
 
-function buildSettingsFromEntries(entries: Map<string, string>): StructuredFallbackSettings {
+function normalizeHop(input: Partial<StructuredFallbackModel> | null | undefined): StructuredFallbackModel | null {
+  if (!input || typeof input !== "object") {
+    return null;
+  }
+  const model = typeof input.model === "string" ? input.model.trim() : "";
+  if (!model) {
+    return null;
+  }
   return {
-    enabled: entries.get(STRUCTURED_FALLBACK_ENABLED_KEY) === "true",
+    provider: normalizeProvider(input.provider),
+    model,
+    temperature: clampTemperature(input.temperature),
+    maxTokens: normalizeMaxTokens(input.maxTokens),
+  };
+}
+
+function parseChainJson(raw: string | undefined | null): StructuredFallbackModel[] {
+  if (!raw?.trim()) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    const hops: StructuredFallbackModel[] = [];
+    for (const item of parsed) {
+      const hop = normalizeHop(item as Partial<StructuredFallbackModel>);
+      if (hop) {
+        hops.push(hop);
+      }
+    }
+    return hops;
+  } catch {
+    return [];
+  }
+}
+
+function hopKey(hop: Pick<StructuredFallbackModel, "provider" | "model">): string {
+  return `${hop.provider}::${hop.model}`;
+}
+
+/** Deduplicate hops by provider+model, preserving first occurrence order. */
+export function dedupeFallbackChain(chain: StructuredFallbackModel[]): StructuredFallbackModel[] {
+  const seen = new Set<string>();
+  const result: StructuredFallbackModel[] = [];
+  for (const hop of chain) {
+    const key = hopKey(hop);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    result.push(hop);
+  }
+  return result;
+}
+
+/**
+ * Resolve the runtime cascade for a primary attempt target.
+ * Skips hops identical to the primary model; dedupes consecutive/duplicate hops.
+ */
+export function resolveStructuredFallbackChain(
+  settings: StructuredFallbackSettings,
+  primary: Pick<StructuredFallbackModel, "provider" | "model">,
+): StructuredFallbackModel[] {
+  if (!settings.enabled) {
+    return [];
+  }
+  const base = settings.chain.length > 0
+    ? settings.chain
+    : [{
+      provider: settings.provider,
+      model: settings.model,
+      temperature: settings.temperature,
+      maxTokens: settings.maxTokens,
+    }];
+  const primaryKey = hopKey(primary);
+  return dedupeFallbackChain(base).filter((hop) => hopKey(hop) !== primaryKey && hop.model.trim().length > 0);
+}
+
+function buildSettingsFromEntries(entries: Map<string, string>): StructuredFallbackSettings {
+  const legacy: StructuredFallbackModel = {
     provider: normalizeProvider(entries.get(STRUCTURED_FALLBACK_PROVIDER_KEY)),
     model: normalizeModel(entries.get(STRUCTURED_FALLBACK_MODEL_KEY)),
     temperature: clampTemperature(Number(entries.get(STRUCTURED_FALLBACK_TEMPERATURE_KEY))),
     maxTokens: normalizeMaxTokens(entries.get(STRUCTURED_FALLBACK_MAX_TOKENS_KEY)),
+  };
+  let chain = parseChainJson(entries.get(STRUCTURED_FALLBACK_CHAIN_KEY));
+  if (chain.length === 0) {
+    // Pre-chain installs: single hop from legacy keys.
+    chain = [legacy];
+  }
+  chain = dedupeFallbackChain(chain);
+  const first = chain[0] ?? legacy;
+  return {
+    enabled: entries.get(STRUCTURED_FALLBACK_ENABLED_KEY) === "true",
+    provider: first.provider,
+    model: first.model,
+    temperature: first.temperature,
+    maxTokens: first.maxTokens,
+    chain,
+  };
+}
+
+function mirrorLegacyFromChain(chain: StructuredFallbackModel[]): StructuredFallbackModel {
+  return chain[0] ?? {
+    provider: DEFAULT_STRUCTURED_FALLBACK_SETTINGS.provider,
+    model: DEFAULT_STRUCTURED_FALLBACK_SETTINGS.model,
+    temperature: DEFAULT_STRUCTURED_FALLBACK_SETTINGS.temperature,
+    maxTokens: DEFAULT_STRUCTURED_FALLBACK_SETTINGS.maxTokens,
   };
 }
 
@@ -89,6 +218,7 @@ export async function getStructuredFallbackSettings(forceRefresh = false): Promi
             STRUCTURED_FALLBACK_MODEL_KEY,
             STRUCTURED_FALLBACK_TEMPERATURE_KEY,
             STRUCTURED_FALLBACK_MAX_TOKENS_KEY,
+            STRUCTURED_FALLBACK_CHAIN_KEY,
           ],
         },
       },
@@ -98,22 +228,74 @@ export async function getStructuredFallbackSettings(forceRefresh = false): Promi
     return cachedSettings;
   } catch (error) {
     if (isMissingTableError(error)) {
-      cachedSettings = { ...DEFAULT_STRUCTURED_FALLBACK_SETTINGS };
+      cachedSettings = { ...DEFAULT_STRUCTURED_FALLBACK_SETTINGS, chain: [...DEFAULT_STRUCTURED_FALLBACK_SETTINGS.chain] };
       return cachedSettings;
     }
     throw error;
   }
 }
 
-export async function saveStructuredFallbackSettings(input: Partial<StructuredFallbackSettings>): Promise<StructuredFallbackSettings> {
+export async function saveStructuredFallbackSettings(
+  input: Partial<StructuredFallbackSettings>,
+): Promise<StructuredFallbackSettings> {
   const previous = await getStructuredFallbackSettings(true);
+
+  let chain: StructuredFallbackModel[];
+  if (Array.isArray(input.chain)) {
+    chain = dedupeFallbackChain(
+      input.chain
+        .map((hop) => normalizeHop(hop))
+        .filter((hop): hop is StructuredFallbackModel => hop !== null),
+    );
+    if (chain.length === 0 && (input.provider || input.model || previous.model)) {
+      // Explicit empty chain with legacy fields → single hop.
+      chain = [{
+        provider: normalizeProvider(input.provider ?? previous.provider),
+        model: normalizeModel(input.model ?? previous.model),
+        temperature: clampTemperature(input.temperature ?? previous.temperature),
+        maxTokens: normalizeMaxTokens(
+          input.maxTokens !== undefined ? input.maxTokens : previous.maxTokens,
+        ),
+      }];
+    }
+  } else if (input.provider !== undefined || input.model !== undefined
+    || input.temperature !== undefined || input.maxTokens !== undefined) {
+    // Legacy partial update: replace first hop, keep remaining hops if model changed.
+    const first: StructuredFallbackModel = {
+      provider: normalizeProvider(input.provider ?? previous.provider),
+      model: normalizeModel(input.model ?? previous.model),
+      temperature: clampTemperature(input.temperature ?? previous.temperature),
+      maxTokens: normalizeMaxTokens(
+        input.maxTokens !== undefined ? input.maxTokens : previous.maxTokens,
+      ),
+    };
+    const rest = previous.chain.slice(1).filter((hop) => hopKey(hop) !== hopKey(first));
+    chain = dedupeFallbackChain([first, ...rest]);
+  } else {
+    chain = previous.chain.length > 0
+      ? previous.chain
+      : [{
+        provider: previous.provider,
+        model: previous.model,
+        temperature: previous.temperature,
+        maxTokens: previous.maxTokens,
+      }];
+  }
+
+  if (chain.length === 0) {
+    chain = [...DEFAULT_STRUCTURED_FALLBACK_SETTINGS.chain];
+  }
+
+  const first = mirrorLegacyFromChain(chain);
   const next: StructuredFallbackSettings = {
     enabled: input.enabled ?? previous.enabled,
-    provider: normalizeProvider(input.provider ?? previous.provider),
-    model: normalizeModel(input.model ?? previous.model),
-    temperature: clampTemperature(input.temperature ?? previous.temperature),
-    maxTokens: normalizeMaxTokens(input.maxTokens ?? previous.maxTokens),
+    provider: first.provider,
+    model: first.model,
+    temperature: first.temperature,
+    maxTokens: first.maxTokens,
+    chain,
   };
+
   try {
     await prisma.$transaction([
       prisma.appSetting.upsert({
@@ -139,7 +321,15 @@ export async function saveStructuredFallbackSettings(input: Partial<StructuredFa
       prisma.appSetting.upsert({
         where: { key: STRUCTURED_FALLBACK_MAX_TOKENS_KEY },
         update: { value: next.maxTokens == null ? "" : String(next.maxTokens) },
-        create: { key: STRUCTURED_FALLBACK_MAX_TOKENS_KEY, value: next.maxTokens == null ? "" : String(next.maxTokens) },
+        create: {
+          key: STRUCTURED_FALLBACK_MAX_TOKENS_KEY,
+          value: next.maxTokens == null ? "" : String(next.maxTokens),
+        },
+      }),
+      prisma.appSetting.upsert({
+        where: { key: STRUCTURED_FALLBACK_CHAIN_KEY },
+        update: { value: JSON.stringify(next.chain) },
+        create: { key: STRUCTURED_FALLBACK_CHAIN_KEY, value: JSON.stringify(next.chain) },
       }),
     ]);
     cachedSettings = next;
@@ -151,4 +341,9 @@ export async function saveStructuredFallbackSettings(input: Partial<StructuredFa
     }
     throw error;
   }
+}
+
+/** Test helper: clear in-process cache between cases. */
+export function resetStructuredFallbackSettingsCacheForTests(): void {
+  cachedSettings = null;
 }

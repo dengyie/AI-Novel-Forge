@@ -24,12 +24,21 @@ const llmTestSchema = z.object({
   probeMode: z.enum(["plain", "structured", "both"]).optional(),
 });
 
+const structuredFallbackHopSchema = z.object({
+  provider: z.string().trim().min(1),
+  model: z.string().trim().min(1),
+  temperature: z.number().min(0).max(2).optional(),
+  maxTokens: z.union([z.number().int().min(64).max(32768), z.null()]).optional(),
+});
+
 const structuredFallbackSchema = z.object({
   enabled: z.boolean().optional(),
   provider: z.string().trim().min(1).optional(),
   model: z.string().trim().min(1).optional(),
   temperature: z.number().min(0).max(2).optional(),
   maxTokens: z.union([z.number().int().min(64).max(32768), z.null()]).optional(),
+  /** Ordered multi-hop cascade. When set, first hop also mirrors legacy provider/model. */
+  chain: z.array(structuredFallbackHopSchema).max(8).optional(),
 });
 
 router.use(authMiddleware);
@@ -140,10 +149,23 @@ router.put(
   async (req, res, next) => {
     try {
       const body = req.body as z.infer<typeof structuredFallbackSchema>;
-      if ((body.enabled ?? false) && (!body.provider || !body.model)) {
-        throw new AppError("启用结构化备用模型时，provider 和 model 不能为空。", 400);
+      const hasChain = Array.isArray(body.chain) && body.chain.length > 0;
+      if ((body.enabled ?? false) && !hasChain && (!body.provider || !body.model)) {
+        throw new AppError("启用结构化备用模型时，provider/model 或 chain 不能为空。", 400);
       }
-      const data = await saveStructuredFallbackSettings(body);
+      const data = await saveStructuredFallbackSettings({
+        enabled: body.enabled,
+        provider: body.provider as Parameters<typeof saveStructuredFallbackSettings>[0]["provider"],
+        model: body.model,
+        temperature: body.temperature,
+        maxTokens: body.maxTokens,
+        chain: body.chain?.map((hop) => ({
+          provider: hop.provider as NonNullable<Parameters<typeof saveStructuredFallbackSettings>[0]["chain"]>[number]["provider"],
+          model: hop.model,
+          temperature: hop.temperature ?? 0.2,
+          maxTokens: hop.maxTokens ?? null,
+        })),
+      });
       res.status(200).json({
         success: true,
         data,

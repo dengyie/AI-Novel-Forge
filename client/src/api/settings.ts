@@ -168,12 +168,21 @@ export interface ModelRouteConnectivityResponse {
   statuses: ModelRouteConnectivityStatus[];
 }
 
+export interface StructuredFallbackHop {
+  provider: LLMProvider;
+  model: string;
+  temperature: number;
+  maxTokens: number | null;
+}
+
 export interface StructuredFallbackSettings {
   enabled: boolean;
   provider: LLMProvider;
   model: string;
   temperature: number;
   maxTokens: number | null;
+  /** Ordered multi-hop cascade after primary failure. First hop mirrors provider/model. */
+  chain?: StructuredFallbackHop[];
 }
 
 export interface AutoDirectorChannelConfig {

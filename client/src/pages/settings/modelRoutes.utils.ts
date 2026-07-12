@@ -20,6 +20,9 @@ export interface RouteDraft {
 
 export interface StructuredFallbackDraft extends RouteDraft {
   enabled: boolean;
+  /** Optional second hop (e.g. deepseek-v4-flash after pro). Empty = single-hop. */
+  secondaryProvider: string;
+  secondaryModel: string;
 }
 
 export type ConnectivityState = "idle" | "checking" | "healthy" | "failed";

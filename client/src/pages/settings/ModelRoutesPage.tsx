@@ -228,14 +228,23 @@ export default function ModelRoutesPage() {
     if (structuredFallbackDraft) {
       return structuredFallbackDraft;
     }
+    const chain = structuredFallback?.chain ?? [];
+    const first = chain[0];
+    const second = chain[1];
     return {
       enabled: structuredFallback?.enabled ?? false,
-      provider: structuredFallback?.provider ?? "deepseek",
-      model: structuredFallback?.model ?? "deepseek-chat",
-      temperature: structuredFallback != null ? String(structuredFallback.temperature) : "0.2",
-      maxTokens: structuredFallback?.maxTokens != null ? String(structuredFallback.maxTokens) : "",
+      provider: first?.provider ?? structuredFallback?.provider ?? "openai",
+      model: first?.model ?? structuredFallback?.model ?? "deepseek-v4-pro",
+      temperature: structuredFallback != null
+        ? String(first?.temperature ?? structuredFallback.temperature)
+        : "0.2",
+      maxTokens: (first?.maxTokens ?? structuredFallback?.maxTokens) != null
+        ? String(first?.maxTokens ?? structuredFallback?.maxTokens)
+        : "",
       requestProtocol: "auto",
       structuredResponseFormat: "auto",
+      secondaryProvider: second?.provider ?? "openai",
+      secondaryModel: second?.model ?? "deepseek-v4-flash",
     };
   }
 
@@ -381,7 +390,7 @@ export default function ModelRoutesPage() {
         <CardHeader>
           <CardTitle>结构化备用模型</CardTitle>
           <CardDescription>
-            主模型能对话但 JSON 不稳时，可在所有结构化任务上统一启用备用模型。
+            主模型结构化失败后按顺序降级：一级备用 → 二级备用（例如 grok 失败 → deepseek-v4-pro → deepseek-v4-flash）。仅作用于结构化调用路径。
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -389,7 +398,7 @@ export default function ModelRoutesPage() {
             <div>
               <div className="font-medium">启用全局结构化回退</div>
               <div className="text-sm text-muted-foreground">
-                主模型的结构化策略全部失败后，才会切到这套备用模型。
+                主模型的结构化策略全部失败后，才会进入降级链。
               </div>
             </div>
             <Switch
@@ -398,27 +407,78 @@ export default function ModelRoutesPage() {
             />
           </div>
 
-          <ModelRouteFields
-            draft={fallbackDraft}
-            providerConfigs={providerConfigs}
-            providerOptions={providerOptions}
-            onPatch={patchStructuredFallbackDraft}
-            temperaturePlaceholder="0.2"
-            maxTokensPlaceholder="留空则使用系统默认"
-            modelEmptyText="这个服务商没有可选模型"
-            manualModelPlaceholder="也可以手动输入模型名"
-          />
+          <div className="space-y-2">
+            <div className="text-sm font-medium">一级备用（优先）</div>
+            <ModelRouteFields
+              draft={fallbackDraft}
+              providerConfigs={providerConfigs}
+              providerOptions={providerOptions}
+              onPatch={patchStructuredFallbackDraft}
+              temperaturePlaceholder="0.2"
+              maxTokensPlaceholder="留空则使用系统默认"
+              modelEmptyText="这个服务商没有可选模型"
+              manualModelPlaceholder="也可以手动输入模型名"
+            />
+          </div>
+
+          <div className="space-y-2 rounded-md border p-3">
+            <div className="text-sm font-medium">二级备用（一级也失败时）</div>
+            <div className="text-xs text-muted-foreground mb-2">
+              留空模型名则只使用一级备用。建议 flash 作为最后兜底。
+            </div>
+            <ModelRouteFields
+              draft={{
+                provider: fallbackDraft.secondaryProvider || "openai",
+                model: fallbackDraft.secondaryModel || "",
+                temperature: fallbackDraft.temperature,
+                maxTokens: fallbackDraft.maxTokens,
+                requestProtocol: "auto",
+                structuredResponseFormat: "auto",
+              }}
+              providerConfigs={providerConfigs}
+              providerOptions={providerOptions}
+              onPatch={(patch) => patchStructuredFallbackDraft({
+                secondaryProvider: patch.provider ?? fallbackDraft.secondaryProvider,
+                secondaryModel: patch.model ?? fallbackDraft.secondaryModel,
+              })}
+              temperaturePlaceholder="0.2"
+              maxTokensPlaceholder="与一级共用"
+              modelEmptyText="这个服务商没有可选模型"
+              manualModelPlaceholder="例如 deepseek-v4-flash"
+            />
+          </div>
 
           <div className="flex items-center justify-end gap-2">
             <Button
               size="sm"
-              onClick={() => saveStructuredFallbackMutation.mutate({
-                enabled: fallbackDraft.enabled,
-                provider: fallbackDraft.provider,
-                model: fallbackDraft.model,
-                temperature: Number(fallbackDraft.temperature || 0.2),
-                maxTokens: fallbackDraft.maxTokens.trim() ? Number(fallbackDraft.maxTokens) : null,
-              })}
+              onClick={() => {
+                const temperature = Number(fallbackDraft.temperature || 0.2);
+                const maxTokens = fallbackDraft.maxTokens.trim() ? Number(fallbackDraft.maxTokens) : null;
+                const chain = [
+                  {
+                    provider: fallbackDraft.provider as StructuredFallbackSettings["provider"],
+                    model: fallbackDraft.model,
+                    temperature,
+                    maxTokens,
+                  },
+                ];
+                if (fallbackDraft.secondaryModel.trim()) {
+                  chain.push({
+                    provider: (fallbackDraft.secondaryProvider || fallbackDraft.provider) as StructuredFallbackSettings["provider"],
+                    model: fallbackDraft.secondaryModel.trim(),
+                    temperature,
+                    maxTokens,
+                  });
+                }
+                saveStructuredFallbackMutation.mutate({
+                  enabled: fallbackDraft.enabled,
+                  provider: fallbackDraft.provider as StructuredFallbackSettings["provider"],
+                  model: fallbackDraft.model,
+                  temperature,
+                  maxTokens,
+                  chain,
+                });
+              }}
               disabled={saveStructuredFallbackMutation.isPending || !fallbackDraft.provider.trim() || !fallbackDraft.model.trim()}
             >
               {saveStructuredFallbackMutation.isPending ? "保存中..." : "保存备用模型"}
