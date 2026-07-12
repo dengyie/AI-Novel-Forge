@@ -1055,12 +1055,14 @@ test("executePipeline auto-requeues empty chapter failure within job transport b
   const original = {
     generationFindUnique: prisma.generationJob.findUnique,
     generationUpdate: prisma.generationJob.update,
+    generationUpdateMany: prisma.generationJob.updateMany,
     novelFindUnique: prisma.novel.findUnique,
     chapterFindMany: prisma.chapter.findMany,
     emit: novelEventBus.emit,
   };
 
   const updates = [];
+  const updateManys = [];
   prisma.generationJob.findUnique = async (input) => {
     if (input.select?.startedAt) {
       return {
@@ -1092,6 +1094,11 @@ test("executePipeline auto-requeues empty chapter failure within job transport b
   prisma.generationJob.update = async (input) => {
     updates.push(input);
     return input;
+  };
+  // Milestone P：requeue 走 running ∧ cancelRequestedAt null 的 CAS updateMany
+  prisma.generationJob.updateMany = async (input) => {
+    updateManys.push(input);
+    return { count: 1 };
   };
   prisma.novel.findUnique = async () => ({
     id: "novel-1",
@@ -1149,16 +1156,21 @@ test("executePipeline auto-requeues empty chapter failure within job transport b
       maxRetries: 1,
     });
 
-    const finalUpdate = updates[updates.length - 1];
-    assert.equal(finalUpdate.data.status, "queued");
-    assert.match(String(finalUpdate.data.error ?? ""), /自动重试/);
-    assert.match(finalUpdate.data.payload, /jobTransportAutoRetryCount/);
-    assert.match(finalUpdate.data.payload, /qualityAlertDetails/);
-    assert.match(finalUpdate.data.payload, /第3章/);
+    assert.ok(updateManys.length >= 1, "requeue must use generationJob.updateMany CAS");
+    const requeueWrite = updateManys[updateManys.length - 1];
+    assert.equal(requeueWrite.data.status, "queued");
+    assert.match(String(requeueWrite.data.error ?? ""), /自动重试/);
+    assert.match(requeueWrite.data.payload, /jobTransportAutoRetryCount/);
+    assert.match(requeueWrite.data.payload, /qualityAlertDetails/);
+    assert.match(requeueWrite.data.payload, /第3章/);
+    assert.equal(requeueWrite.where?.id, "job-empty");
+    assert.equal(requeueWrite.where?.status, "running");
+    assert.equal(requeueWrite.where?.cancelRequestedAt, null);
     // delay path uses setTimeout; zero-delay or schedule may be deferred
   } finally {
     prisma.generationJob.findUnique = original.generationFindUnique;
     prisma.generationJob.update = original.generationUpdate;
+    prisma.generationJob.updateMany = original.generationUpdateMany;
     prisma.novel.findUnique = original.novelFindUnique;
     prisma.chapter.findMany = original.chapterFindMany;
     novelEventBus.emit = original.emit;
