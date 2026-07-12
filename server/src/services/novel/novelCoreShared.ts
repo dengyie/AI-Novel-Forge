@@ -226,6 +226,11 @@ export interface PipelinePayload extends LLMGenerateOptions {
   /** 品类主配额满窗 shortfall 熔断明细（≠ replan；见 PIPELINE_GENRE_BEAT_SHORTFALL） */
   genreBeatAlertDetails?: string[];
   recoverableRepairDetails?: string[];
+  /**
+   * 任务级瞬时失败自动 requeue 已用次数（不含章节内 empty/transport 重试）。
+   * 达预算后终态 failed，需人工 retryPipelineJob。
+   */
+  jobTransportAutoRetryCount?: number;
   backgroundSync?: PipelineBackgroundSyncState;
 }
 

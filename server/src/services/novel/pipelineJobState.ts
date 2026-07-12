@@ -249,6 +249,11 @@ export function parsePipelinePayload(payload: string | null | undefined): Pipeli
       replanAlertDetails: normalizeStringList(parsed.replanAlertDetails),
       genreBeatAlertDetails: normalizeStringList(parsed.genreBeatAlertDetails),
       recoverableRepairDetails: normalizeStringList(parsed.recoverableRepairDetails),
+      jobTransportAutoRetryCount:
+        typeof parsed.jobTransportAutoRetryCount === "number"
+        && Number.isFinite(parsed.jobTransportAutoRetryCount)
+          ? Math.max(0, Math.floor(parsed.jobTransportAutoRetryCount))
+          : undefined,
       backgroundSync: normalizePipelineBackgroundSync(parsed.backgroundSync),
     };
   } catch {
@@ -281,6 +286,11 @@ export function stringifyPipelinePayload(input: PipelinePayload): string {
     ...(replanAlertDetails.length > 0 ? { replanAlertDetails } : {}),
     ...(genreBeatAlertDetails.length > 0 ? { genreBeatAlertDetails } : {}),
     ...(recoverableRepairDetails.length > 0 ? { recoverableRepairDetails } : {}),
+    ...(typeof input.jobTransportAutoRetryCount === "number"
+      && Number.isFinite(input.jobTransportAutoRetryCount)
+      && input.jobTransportAutoRetryCount > 0
+      ? { jobTransportAutoRetryCount: Math.max(0, Math.floor(input.jobTransportAutoRetryCount)) }
+      : {}),
     ...(backgroundSync?.activities?.length ? { backgroundSync } : {}),
   });
 }

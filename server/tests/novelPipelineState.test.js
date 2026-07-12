@@ -1051,7 +1051,7 @@ test("executePipeline preserves persisted quality alerts across resume", async (
   }
 });
 
-test("executePipeline records empty chapter output in failed job notice payload", async () => {
+test("executePipeline auto-requeues empty chapter failure within job transport budget", async () => {
   const original = {
     generationFindUnique: prisma.generationJob.findUnique,
     generationUpdate: prisma.generationJob.update,
@@ -1077,6 +1077,122 @@ test("executePipeline records empty chapter output in failed job notice payload"
           skipCompleted: true,
           qualityThreshold: 75,
           repairMode: "light_repair",
+          jobTransportAutoRetryCount: 0,
+        }),
+      };
+    }
+    if (input.select?.status) {
+      return {
+        status: "running",
+        cancelRequestedAt: null,
+      };
+    }
+    throw new Error(`Unexpected generationJob.findUnique call: ${JSON.stringify(input)}`);
+  };
+  prisma.generationJob.update = async (input) => {
+    updates.push(input);
+    return input;
+  };
+  prisma.novel.findUnique = async () => ({
+    id: "novel-1",
+    title: "测试小说",
+  });
+  prisma.chapter.findMany = async () => ([
+    { id: "chapter-empty", order: 3, title: "第三章", content: "" },
+  ]);
+  novelEventBus.emit = async () => null;
+
+  const service = new NovelCorePipelineService();
+  const scheduleCalls = [];
+  service.schedulePipelineExecution = (jobId, novelId, options) => {
+    scheduleCalls.push({ jobId, novelId, options });
+  };
+  service.chapterRuntimeCoordinator.runPipelineChapter = async (_novelId, _chapterId, _options, hooks) => {
+    const error = new ChapterEmptyContentError({
+      novelId: "novel-1",
+      chapterId: "chapter-empty",
+      chapterOrder: 3,
+      source: "pipeline_chapter_writer",
+      rawLength: 0,
+      trimmedLength: 0,
+    });
+    await hooks.onEmptyContent({
+      attempt: 1,
+      willRetry: true,
+      error,
+      contentLength: 0,
+      rawContentLength: 0,
+    });
+    await hooks.onEmptyContent({
+      attempt: 2,
+      willRetry: false,
+      error,
+      contentLength: 0,
+      rawContentLength: 0,
+    });
+    throw error;
+  };
+
+  try {
+    await service.executePipeline("job-empty", "novel-1", {
+      startOrder: 3,
+      endOrder: 3,
+      provider: "deepseek",
+      model: "deepseek-chat",
+      temperature: 0.8,
+      runMode: "fast",
+      autoReview: true,
+      autoRepair: true,
+      skipCompleted: true,
+      qualityThreshold: 75,
+      repairMode: "light_repair",
+      maxRetries: 1,
+    });
+
+    const finalUpdate = updates[updates.length - 1];
+    assert.equal(finalUpdate.data.status, "queued");
+    assert.match(String(finalUpdate.data.error ?? ""), /自动重试/);
+    assert.match(finalUpdate.data.payload, /jobTransportAutoRetryCount/);
+    assert.match(finalUpdate.data.payload, /qualityAlertDetails/);
+    assert.match(finalUpdate.data.payload, /第3章/);
+    // delay path uses setTimeout; zero-delay or schedule may be deferred
+  } finally {
+    prisma.generationJob.findUnique = original.generationFindUnique;
+    prisma.generationJob.update = original.generationUpdate;
+    prisma.novel.findUnique = original.novelFindUnique;
+    prisma.chapter.findMany = original.chapterFindMany;
+    novelEventBus.emit = original.emit;
+  }
+});
+
+test("executePipeline records empty chapter output in failed job notice payload after auto-retry budget", async () => {
+  const original = {
+    generationFindUnique: prisma.generationJob.findUnique,
+    generationUpdate: prisma.generationJob.update,
+    novelFindUnique: prisma.novel.findUnique,
+    chapterFindMany: prisma.chapter.findMany,
+    emit: novelEventBus.emit,
+  };
+
+  const updates = [];
+  prisma.generationJob.findUnique = async (input) => {
+    if (input.select?.startedAt) {
+      return {
+        startedAt: null,
+        completedCount: 0,
+        totalCount: 1,
+        retryCount: 0,
+        payload: JSON.stringify({
+          provider: "deepseek",
+          model: "deepseek-chat",
+          runMode: "fast",
+          autoReview: true,
+          autoRepair: true,
+          skipCompleted: true,
+          qualityThreshold: 75,
+          repairMode: "light_repair",
+          // 预算已用尽 → 终态 failed
+          jobTransportAutoRetryCount: 99,
         }),
       };
     }
