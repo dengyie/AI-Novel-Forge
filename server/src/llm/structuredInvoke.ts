@@ -29,6 +29,7 @@ import {
 import { extractLlmTokenUsage } from "./usageTracking";
 import { runWithEnforcedTimeout } from "./invokeTimeout";
 import {
+  isCancellationLikeTransportError,
   isTransientTransportError,
   sleep,
   TRANSPORT_RETRY_BACKOFF_BASE_MS,
@@ -52,11 +53,23 @@ export {
 } from "./structuredInvokeParser";
 
 export {
+  isCancellationLikeTransportError,
   isTransientTransportError,
   runWithTransportRetry,
   TRANSPORT_RETRY_MAX_ATTEMPTS,
   TRANSPORT_RETRY_BACKOFF_BASE_MS,
 } from "./transportRetry";
+
+/** Cancel/abort must not walk the multi-hop fallback chain. */
+function shouldStopStructuredFallbackCascade(
+  error: unknown,
+  signal?: AbortSignal,
+): boolean {
+  if (signal?.aborted) {
+    return true;
+  }
+  return isCancellationLikeTransportError(error);
+}
 
 export interface StructuredInvokeInput<T> {
   systemPrompt?: string;
@@ -399,11 +412,18 @@ export async function invokeStructuredLlmDetailed<T>(input: StructuredInvokeInpu
     if (!fallbackAvailable) {
       throw primaryError;
     }
+    // User/job cancel: do not spend more CPA calls on the cascade.
+    if (shouldStopStructuredFallbackCascade(primaryError, input.signal)) {
+      throw primaryError;
+    }
 
     // Multi-hop cascade: e.g. grok-4.5 → deepseek-v4-pro → deepseek-v4-flash.
     // Each hop runs the full structured strategy sequence; disable nested fallback.
     let lastError: unknown = primaryError;
     for (let hopIndex = 0; hopIndex < fallbackChain.length; hopIndex += 1) {
+      if (shouldStopStructuredFallbackCascade(lastError, input.signal)) {
+        throw lastError;
+      }
       const hop = fallbackChain[hopIndex]!;
       const remainingAfterThisHop = hopIndex < fallbackChain.length - 1;
       try {
@@ -428,15 +448,15 @@ export async function invokeStructuredLlmDetailed<T>(input: StructuredInvokeInpu
           fallbackUsed: true,
         });
       } catch (fallbackError) {
-        lastError = fallbackError instanceof StructuredOutputError
-          ? fallbackError
-          : lastError;
+        // Prefer the hop error (including non-SOE config failures) for diagnostics.
+        lastError = fallbackError;
+        if (shouldStopStructuredFallbackCascade(fallbackError, input.signal)) {
+          throw fallbackError;
+        }
         // continue to next hop
       }
     }
-    throw lastError instanceof StructuredOutputError
-      ? lastError
-      : primaryError;
+    throw lastError instanceof Error ? lastError : primaryError;
   }
 }
 

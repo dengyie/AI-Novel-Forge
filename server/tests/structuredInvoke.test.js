@@ -498,6 +498,257 @@ test("invokeStructuredLlmDetailed walks multi-hop cascade until a hop succeeds",
   }
 });
 
+test("invokeStructuredLlmDetailed does not walk cascade after primary abort/cancel", async () => {
+  const originalResolveOptions = factory.resolveLLMClientOptions;
+  const originalCreateLLM = factory.createLLMFromResolvedOptions;
+  const originalGetFallbackSettings = structuredFallbackSettings.getStructuredFallbackSettings;
+  const calls = [];
+  const controller = new AbortController();
+
+  factory.resolveLLMClientOptions = async (provider, options = {}) => {
+    const resolvedProvider = provider ?? "openai";
+    const resolvedModel = options.model ?? "grok-4.5";
+    const baseURL = options.baseURL ?? "https://api.openai.com/v1";
+    const structuredProfile = options.executionMode === "structured"
+      ? resolveStructuredOutputProfile({
+        provider: resolvedProvider,
+        model: resolvedModel,
+        baseURL,
+        executionMode: "structured",
+      })
+      : null;
+    return {
+      provider: resolvedProvider,
+      providerName: resolvedProvider,
+      model: resolvedModel,
+      temperature: options.temperature ?? 0.3,
+      apiKey: "test-key",
+      baseURL,
+      maxTokens: options.maxTokens,
+      reasoningEnabled: !(structuredProfile?.requiresNonThinkingForStructured),
+      modelKwargs: undefined,
+      includeRawResponse: false,
+      executionMode: options.executionMode ?? "plain",
+      structuredProfile,
+      structuredStrategy: options.structuredStrategy ?? null,
+      reasoningForcedOff: Boolean(structuredProfile?.requiresNonThinkingForStructured),
+      taskType: options.taskType,
+      promptMeta: options.promptMeta,
+    };
+  };
+  factory.createLLMFromResolvedOptions = (resolved) => ({
+    invoke: async () => {
+      calls.push({ model: resolved.model });
+      const err = new Error("Request aborted.");
+      err.name = "AbortError";
+      throw err;
+    },
+  });
+  structuredFallbackSettings.getStructuredFallbackSettings = async () => ({
+    enabled: true,
+    provider: "openai",
+    model: "deepseek-v4-pro",
+    temperature: 0.2,
+    maxTokens: null,
+    chain: [
+      { provider: "openai", model: "deepseek-v4-pro", temperature: 0.2, maxTokens: null },
+      { provider: "openai", model: "deepseek-v4-flash", temperature: 0.2, maxTokens: null },
+    ],
+  });
+
+  try {
+    await assert.rejects(
+      () => structuredInvoke.invokeStructuredLlmDetailed({
+        provider: "openai",
+        model: "grok-4.5",
+        label: "structured.invoke.abort.no-cascade",
+        taskType: "planner",
+        schema: z.object({ value: z.string() }),
+        systemPrompt: "只返回 JSON。",
+        userPrompt: "给我一个 value。",
+        signal: controller.signal,
+        disableFallbackModel: false,
+      }),
+      (error) => error instanceof Error && /abort|cancelled|AbortError|STRUCTURED_OUTPUT/i.test(String(error)),
+    );
+    assert.deepEqual(calls.map((c) => c.model), ["grok-4.5"]);
+  } finally {
+    factory.resolveLLMClientOptions = originalResolveOptions;
+    factory.createLLMFromResolvedOptions = originalCreateLLM;
+    structuredFallbackSettings.getStructuredFallbackSettings = originalGetFallbackSettings;
+  }
+});
+
+test("invokeStructuredLlmDetailed stops cascade when signal aborts after first hop", async () => {
+  const originalResolveOptions = factory.resolveLLMClientOptions;
+  const originalCreateLLM = factory.createLLMFromResolvedOptions;
+  const originalGetFallbackSettings = structuredFallbackSettings.getStructuredFallbackSettings;
+  const calls = [];
+  const controller = new AbortController();
+
+  factory.resolveLLMClientOptions = async (provider, options = {}) => {
+    const resolvedProvider = provider ?? "openai";
+    const resolvedModel = options.model ?? "grok-4.5";
+    const baseURL = options.baseURL ?? "https://api.openai.com/v1";
+    const structuredProfile = options.executionMode === "structured"
+      ? resolveStructuredOutputProfile({
+        provider: resolvedProvider,
+        model: resolvedModel,
+        baseURL,
+        executionMode: "structured",
+      })
+      : null;
+    return {
+      provider: resolvedProvider,
+      providerName: resolvedProvider,
+      model: resolvedModel,
+      temperature: options.temperature ?? 0.3,
+      apiKey: "test-key",
+      baseURL,
+      maxTokens: options.maxTokens,
+      reasoningEnabled: !(structuredProfile?.requiresNonThinkingForStructured),
+      modelKwargs: undefined,
+      includeRawResponse: false,
+      executionMode: options.executionMode ?? "plain",
+      structuredProfile,
+      structuredStrategy: options.structuredStrategy ?? null,
+      reasoningForcedOff: Boolean(structuredProfile?.requiresNonThinkingForStructured),
+      taskType: options.taskType,
+      promptMeta: options.promptMeta,
+    };
+  };
+  factory.createLLMFromResolvedOptions = (resolved) => ({
+    invoke: async () => {
+      calls.push({ model: resolved.model });
+      if (resolved.model === "grok-4.5") {
+        throw new Error("primary transport failed");
+      }
+      if (resolved.model === "deepseek-v4-pro") {
+        controller.abort();
+        const err = new Error("Request aborted.");
+        err.name = "AbortError";
+        throw err;
+      }
+      return { content: "{\"value\":\"should-not-reach-flash\"}" };
+    },
+  });
+  structuredFallbackSettings.getStructuredFallbackSettings = async () => ({
+    enabled: true,
+    provider: "openai",
+    model: "deepseek-v4-pro",
+    temperature: 0.2,
+    maxTokens: null,
+    chain: [
+      { provider: "openai", model: "deepseek-v4-pro", temperature: 0.2, maxTokens: null },
+      { provider: "openai", model: "deepseek-v4-flash", temperature: 0.2, maxTokens: null },
+    ],
+  });
+
+  try {
+    await assert.rejects(
+      () => structuredInvoke.invokeStructuredLlmDetailed({
+        provider: "openai",
+        model: "grok-4.5",
+        label: "structured.invoke.abort.after-hop",
+        taskType: "planner",
+        schema: z.object({ value: z.string() }),
+        systemPrompt: "只返回 JSON。",
+        userPrompt: "给我一个 value。",
+        signal: controller.signal,
+        disableFallbackModel: false,
+      }),
+    );
+    assert.deepEqual(calls.map((c) => c.model), ["grok-4.5", "deepseek-v4-pro"]);
+  } finally {
+    factory.resolveLLMClientOptions = originalResolveOptions;
+    factory.createLLMFromResolvedOptions = originalCreateLLM;
+    structuredFallbackSettings.getStructuredFallbackSettings = originalGetFallbackSettings;
+  }
+});
+
+test("invokeStructuredLlmDetailed preserves non-SOE hop error instead of primary", async () => {
+  const originalResolveOptions = factory.resolveLLMClientOptions;
+  const originalCreateLLM = factory.createLLMFromResolvedOptions;
+  const originalGetFallbackSettings = structuredFallbackSettings.getStructuredFallbackSettings;
+  const calls = [];
+
+  factory.resolveLLMClientOptions = async (provider, options = {}) => {
+    const resolvedModel = options.model ?? "grok-4.5";
+    if (resolvedModel === "deepseek-v4-pro") {
+      throw new Error("missing API key for hop pro");
+    }
+    const resolvedProvider = provider ?? "openai";
+    const baseURL = options.baseURL ?? "https://api.openai.com/v1";
+    const structuredProfile = options.executionMode === "structured"
+      ? resolveStructuredOutputProfile({
+        provider: resolvedProvider,
+        model: resolvedModel,
+        baseURL,
+        executionMode: "structured",
+      })
+      : null;
+    return {
+      provider: resolvedProvider,
+      providerName: resolvedProvider,
+      model: resolvedModel,
+      temperature: options.temperature ?? 0.3,
+      apiKey: "test-key",
+      baseURL,
+      maxTokens: options.maxTokens,
+      reasoningEnabled: !(structuredProfile?.requiresNonThinkingForStructured),
+      modelKwargs: undefined,
+      includeRawResponse: false,
+      executionMode: options.executionMode ?? "plain",
+      structuredProfile,
+      structuredStrategy: options.structuredStrategy ?? null,
+      reasoningForcedOff: Boolean(structuredProfile?.requiresNonThinkingForStructured),
+      taskType: options.taskType,
+      promptMeta: options.promptMeta,
+    };
+  };
+  factory.createLLMFromResolvedOptions = (resolved) => ({
+    invoke: async () => {
+      calls.push({ model: resolved.model });
+      if (resolved.model === "grok-4.5") {
+        throw new Error("primary structured output failed");
+      }
+      return { content: "{\"value\":\"flash-ok\"}" };
+    },
+  });
+  structuredFallbackSettings.getStructuredFallbackSettings = async () => ({
+    enabled: true,
+    provider: "openai",
+    model: "deepseek-v4-pro",
+    temperature: 0.2,
+    maxTokens: null,
+    chain: [
+      { provider: "openai", model: "deepseek-v4-pro", temperature: 0.2, maxTokens: null },
+      { provider: "openai", model: "deepseek-v4-flash", temperature: 0.2, maxTokens: null },
+    ],
+  });
+
+  try {
+    const result = await structuredInvoke.invokeStructuredLlmDetailed({
+      provider: "openai",
+      model: "grok-4.5",
+      label: "structured.invoke.hop.non-soe",
+      taskType: "planner",
+      schema: z.object({ value: z.string() }),
+      systemPrompt: "只返回 JSON。",
+      userPrompt: "给我一个 value。",
+      disableFallbackModel: false,
+    });
+    // pro hop throws during resolve; cascade continues to flash and succeeds
+    assert.deepEqual(result.data, { value: "flash-ok" });
+    assert.equal(result.diagnostics.fallbackUsed, true);
+    assert.deepEqual(calls.map((c) => c.model), ["grok-4.5", "deepseek-v4-flash"]);
+  } finally {
+    factory.resolveLLMClientOptions = originalResolveOptions;
+    factory.createLLMFromResolvedOptions = originalCreateLLM;
+    structuredFallbackSettings.getStructuredFallbackSettings = originalGetFallbackSettings;
+  }
+});
+
 test("invokeStructuredLlmDetailed retries transient transport_error before failing over", async () => {
   // 真实瞬时故障（代理抖动/连接重置）应被同策略内重试吸收，不触发 fallback。
   // 首次抛 "fetch failed: ECONNRESET"（命中 isTransientTransportError），第二次成功。
