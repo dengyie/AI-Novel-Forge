@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 
 const {
   inferGenreBeatWeights,
+  hasGenreFramingSignal,
   buildGenreBeatQuotaTargets,
   classifyGenreBeatFromText,
   evaluateGenreBeatCoverage,
@@ -20,6 +21,53 @@ test("inferGenreBeatWeights boosts nurture/collect for cozy framing", () => {
   assert.ok(weights.nurture > 0.2);
   assert.ok(weights.collect > 0.15);
   assert.ok(weights.nurture + weights.collect > weights.combat);
+  assert.equal(hasGenreFramingSignal({
+    sellingPoint: "轻松养成与资源收集",
+  }), true);
+});
+
+test("empty or keyword-less framing does not enforce primary mins (product B)", () => {
+  const emptyWeights = inferGenreBeatWeights({});
+  assert.equal(hasGenreFramingSignal({}), false);
+  assert.equal(hasGenreFramingSignal(null), false);
+  assert.equal(hasGenreFramingSignal({ sellingPoint: "   " }), false);
+  assert.equal(hasGenreFramingSignal({ sellingPoint: "一部关于勇气的故事" }), false);
+  for (const kind of Object.keys(emptyWeights)) {
+    assert.equal(emptyWeights[kind], 0, `empty framing weight ${kind} must be 0`);
+  }
+
+  const weakWeights = inferGenreBeatWeights({
+    sellingPoint: "一部关于勇气的故事",
+    competingFeel: "独创叙事",
+    first30ChapterPromise: "前三十章建立世界观",
+  });
+  for (const kind of Object.keys(weakWeights)) {
+    assert.equal(weakWeights[kind], 0);
+  }
+
+  const emptyTargets = buildGenreBeatQuotaTargets({
+    windowSize: 30,
+    framing: {},
+  });
+  assert.equal(emptyTargets.length, 0, "no framing signal → no min targets");
+
+  const weakTargets = buildGenreBeatQuotaTargets({
+    windowSize: 30,
+    framing: { sellingPoint: "一部关于勇气的故事" },
+  });
+  assert.equal(weakTargets.length, 0);
+
+  // 满窗全 combat：旧默认养成配额会 meetsPrimary=false 并 pause；现应不 enforce
+  const combatOnly = Array.from({ length: 30 }, () => "combat");
+  const coverage = evaluateGenreBeatCoverage({
+    chapterLabels: combatOnly,
+    windowSize: 30,
+    framing: {},
+  });
+  assert.equal(coverage.windowProgress, "complete");
+  assert.equal(coverage.targets.length, 0);
+  assert.equal(coverage.shortfalls.length, 0);
+  assert.equal(coverage.meetsPrimaryQuota, true, "empty framing must not fail primary quota");
 });
 
 test("buildGenreBeatQuotaTargets enforces min chapters in window", () => {

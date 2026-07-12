@@ -11,6 +11,8 @@
  * - 场景多样性 **仍不**接 volumeReplanGate / 导演熔断（仅 soft-force）。
  * - 品类主配额：满窗且 `meetsPrimaryQuota=false` 时，pipeline 可调用
  *   `shouldPauseForGenreBeatShortfall` 暂停后续章（与 diversity recommendForce 无关）。
+ * - framing 无关键词信号时权重全 0、不 enforce primary min（P1-4 产品 B），
+ *   避免空卖点新书被默认养成配额误 pause；有信号时仍按推断权重熔断。
  */
 
 /** 近窗场景多样性默认窗口（章数） */
@@ -112,18 +114,32 @@ function scoreFramingKinds(blob: string): Record<GenreBeatKind, number> {
   return score;
 }
 
+/**
+ * framing 是否含可识别品类关键词（与 inferGenreBeatWeights 同源计分）。
+ * 无信号时 buildGenreBeatQuotaTargets 不 enforce primary min，满窗不熔断（产品 B）。
+ */
+export function hasGenreFramingSignal(input: GenreFramingInput | null | undefined): boolean {
+  if (!input) {
+    return false;
+  }
+  const scores = scoreFramingKinds(framingBlob(input));
+  return GENRE_BEAT_KINDS.some((kind) => scores[kind] > 0);
+}
+
 /** 从卖点/竞品感/前30承诺推断各 beat 目标权重（未归一）。 */
 export function inferGenreBeatWeights(input: GenreFramingInput): Record<GenreBeatKind, number> {
   const scores = scoreFramingKinds(framingBlob(input));
   const sum = GENRE_BEAT_KINDS.reduce((acc, kind) => acc + scores[kind], 0);
   if (sum <= 0) {
-    // 默认偏养成+收集（样板门禁「轻松养成」方向），其余少量战斗/探索/过渡
+    // 产品 B（P1-4）：无关键词信号 → 零权重，不 enforce 任何 primary min。
+    // 旧默认 nurture+collect 会让新品类/空卖点新书在满窗时被错误 pause。
+    // 观测仍可走 classifyGenreBeatFromText；熔断仅在有 framing 信号时生效。
     return {
-      nurture: 0.35,
-      collect: 0.25,
-      combat: 0.15,
-      explore: 0.15,
-      transition: 0.1,
+      nurture: 0,
+      collect: 0,
+      combat: 0,
+      explore: 0,
+      transition: 0,
       other: 0,
     };
   }

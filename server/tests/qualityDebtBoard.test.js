@@ -328,6 +328,28 @@ test("shouldPauseForGenreBeatShortfall only when complete window fails primary q
       "recommendForce alone must never pause pipeline",
     );
 
+    // P1-4 产品 B：无 framing 信号 → 满窗 combat 也不 pause（不 enforce 默认养成配额）
+    const emptyFramingFull = buildGenreBeatBoardSnapshot({
+      framing: {},
+      chapters: combatHeavyComplete,
+      windowSize: 30,
+    });
+    assert.equal(emptyFramingFull.coverage.windowProgress, "complete");
+    assert.equal(emptyFramingFull.coverage.targets.length, 0);
+    assert.equal(emptyFramingFull.coverage.meetsPrimaryQuota, true);
+    assert.equal(
+      shouldPauseForGenreBeatShortfall(emptyFramingFull),
+      false,
+      "empty framing must not pause pipeline on default nurture quota",
+    );
+
+    const weakFramingFull = buildGenreBeatBoardSnapshot({
+      framing: { sellingPoint: "一部关于勇气的故事" },
+      chapters: combatHeavyComplete,
+      windowSize: 30,
+    });
+    assert.equal(shouldPauseForGenreBeatShortfall(weakFramingFull), false);
+
     const reasonWithAnchor = formatGenreBeatShortfallPauseReason(failSnapshot, {
       lastChapterOrder: 30,
     });
