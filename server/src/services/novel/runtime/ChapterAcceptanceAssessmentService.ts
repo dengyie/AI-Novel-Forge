@@ -147,7 +147,12 @@ function isLengthDirective(directive: AcceptanceRepairDirective): boolean {
   return includesAnyMarker(directive.instruction, [...UNDER_LENGTH_MARKERS, ...OVER_LENGTH_MARKERS]);
 }
 
-function isHardMissingObligation(
+/**
+ * 硬缺席义务：进 draft_obligation_unmet / blockingObligations。
+ * soft-only（payoff_touch、可延后出场等）只进 missing 列表与 partial coverage，
+ * 不得抬升 failureClassification（P2-6 假阳性收口）。
+ */
+export function isHardMissingObligation(
   obligation: ChapterExecutionMissingObligation,
   options: NormalizeAssessmentOptions = {},
 ): boolean {
@@ -162,6 +167,26 @@ function isHardMissingObligation(
     });
   }
   return false;
+}
+
+/** 从 missing 中拆出硬/软义务，供 runtime package failureClassification 同源使用。 */
+export function partitionHardSoftMissingObligations(
+  missingObligations: ChapterExecutionMissingObligation[] | null | undefined,
+  options: NormalizeAssessmentOptions = {},
+): {
+  hard: ChapterExecutionMissingObligation[];
+  soft: ChapterExecutionMissingObligation[];
+} {
+  const hard: ChapterExecutionMissingObligation[] = [];
+  const soft: ChapterExecutionMissingObligation[] = [];
+  for (const obligation of missingObligations ?? []) {
+    if (isHardMissingObligation(obligation, options)) {
+      hard.push(obligation);
+    } else {
+      soft.push(obligation);
+    }
+  }
+  return { hard, soft };
 }
 
 function resolveRequiredCharacterAppearances(

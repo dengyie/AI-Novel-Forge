@@ -3,7 +3,13 @@ const assert = require("node:assert/strict");
 
 const {
   normalizeAssessment,
+  isHardMissingObligation,
+  partitionHardSoftMissingObligations,
 } = require("../dist/services/novel/runtime/ChapterAcceptanceAssessmentService.js");
+const {
+  buildFailureClassification,
+  buildObligationCoverage,
+} = require("../dist/services/novel/runtime/chapterRuntimePackageBuilders.js");
 
 function createAssessment(overrides = {}) {
   return {
@@ -191,4 +197,116 @@ test("plain character_appearance missing stays soft without required contract ma
   });
 
   assert.equal(normalized.status, "continue_with_risk");
+});
+
+test("partitionHardSoftMissingObligations splits hard must_hit from soft payoff_touch", () => {
+  const softPayoff = {
+    kind: "payoff_touch",
+    summary: "补出截信计划的可见行动。",
+    evidence: "正文只回忆了计划。",
+  };
+  const hardMust = {
+    kind: "must_hit_now",
+    summary: "必须兑现本场关键转折。",
+    evidence: "正文未出现约定转折。",
+  };
+  const hardAppearance = {
+    kind: "character_appearance",
+    summary: "林逸（must_on_page）未出场。",
+    evidence: "正文无林逸。",
+  };
+  assert.equal(isHardMissingObligation(softPayoff), false);
+  assert.equal(isHardMissingObligation(hardMust), true);
+  assert.equal(isHardMissingObligation(hardAppearance), true);
+
+  const { hard, soft } = partitionHardSoftMissingObligations(
+    [softPayoff, hardMust, hardAppearance],
+  );
+  assert.equal(hard.length, 2);
+  assert.equal(soft.length, 1);
+  assert.equal(soft[0].kind, "payoff_touch");
+});
+
+test("buildFailureClassification soft-only missing is none not draft_obligation_unmet (P2-6)", () => {
+  const softOnly = [{
+    kind: "payoff_touch",
+    summary: "补出截信计划的可见行动。",
+    evidence: "正文只回忆了计划。",
+  }];
+  const acceptance = createAssessment({
+    status: "continue_with_risk",
+    missingObligations: softOnly,
+    repairability: "patchable_obligation_gap",
+    decisionReason: "软义务可后续回收。",
+  });
+  const classified = buildFailureClassification({
+    acceptance,
+    hasBlockingIssues: false,
+    replanRecommended: false,
+    missingObligations: softOnly,
+    hardMissingObligations: [],
+  });
+  assert.equal(classified.code, "none");
+  assert.deepEqual(classified.blockingObligations, []);
+  assert.match(classified.summary, /软义务|可延后/);
+
+  const coverage = buildObligationCoverage({
+    missingObligations: softOnly,
+    hasBlockingIssues: false,
+    hardMissingObligations: [],
+  });
+  assert.equal(coverage.status, "partial");
+  assert.equal(coverage.missing.length, 1);
+});
+
+test("buildFailureClassification hard missing still draft_obligation_unmet", () => {
+  const hardOnly = [{
+    kind: "must_hit_now",
+    summary: "必须兑现本场关键转折。",
+    evidence: "正文未出现约定转折。",
+  }];
+  const acceptance = createAssessment({
+    status: "repairable",
+    missingObligations: hardOnly,
+    repairability: "patchable_obligation_gap",
+    decisionReason: "硬义务未兑现。",
+  });
+  const classified = buildFailureClassification({
+    acceptance,
+    hasBlockingIssues: false,
+    replanRecommended: false,
+    missingObligations: hardOnly,
+    hardMissingObligations: hardOnly,
+  });
+  assert.equal(classified.code, "draft_obligation_unmet");
+  assert.equal(classified.blockingObligations.length, 1);
+  assert.equal(classified.blockingObligations[0].kind, "must_hit_now");
+
+  const coverage = buildObligationCoverage({
+    missingObligations: hardOnly,
+    hasBlockingIssues: false,
+    hardMissingObligations: hardOnly,
+  });
+  assert.equal(coverage.status, "unmet");
+});
+
+test("buildFailureClassification without hardMissingObligations keeps legacy all-missing-as-hard", () => {
+  // 旧调用方未传 hard 列表时：全部 missing 仍按 hard 处理，避免静默行为漂移
+  const softListed = [{
+    kind: "payoff_touch",
+    summary: "软缺口",
+    evidence: "e",
+  }];
+  const classified = buildFailureClassification({
+    acceptance: createAssessment({
+      status: "continue_with_risk",
+      missingObligations: softListed,
+      repairability: "patchable_obligation_gap",
+      decisionReason: "legacy",
+    }),
+    hasBlockingIssues: false,
+    replanRecommended: false,
+    missingObligations: softListed,
+  });
+  assert.equal(classified.code, "draft_obligation_unmet");
 });

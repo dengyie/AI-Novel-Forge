@@ -13,6 +13,7 @@ import { buildSyntheticPayoffIssues } from "../../payoff/payoffLedgerShared";
 import type { ChapterRuntimeRequestInput } from "./chapterRuntimeSchema";
 import type { StyleReviewResult } from "./PostGenerationStyleReviewRunner";
 import type { ChapterTimelineGateResult } from "./ChapterTimelineFinalizationService";
+import { partitionHardSoftMissingObligations } from "./ChapterAcceptanceAssessmentService";
 
 export type TimelineGateResult = ChapterTimelineGateResult;
 
@@ -110,6 +111,8 @@ export function rememberCacheValue<T>(cache: Map<string, Promise<T> | T>, key: s
 export function buildObligationCoverage(input: {
   missingObligations: ChapterExecutionMissingObligation[];
   hasBlockingIssues: boolean;
+  /** 硬缺席义务；未传时回退为「有 missing 且 hasBlockingIssues → unmet」旧语义 */
+  hardMissingObligations?: ChapterExecutionMissingObligation[];
 }): ChapterRuntimePackage["obligationCoverage"] {
   if (input.missingObligations.length === 0) {
     return {
@@ -118,10 +121,17 @@ export function buildObligationCoverage(input: {
       summary: "章节义务已满足。",
     };
   }
+  const hardCount = Array.isArray(input.hardMissingObligations)
+    ? input.hardMissingObligations.length
+    : null;
+  // 硬缺席或高严重审计/人工闸 → unmet；仅 soft missing → partial（可后续回收，不挡写流）
+  const unmet = hardCount != null
+    ? hardCount > 0 || input.hasBlockingIssues
+    : input.hasBlockingIssues;
   return {
-    status: input.hasBlockingIssues ? "unmet" : "partial",
+    status: unmet ? "unmet" : "partial",
     missing: input.missingObligations,
-    summary: input.hasBlockingIssues
+    summary: unmet
       ? `仍有 ${input.missingObligations.length} 项章节义务未满足。`
       : `仍有 ${input.missingObligations.length} 项章节义务需要后续回收。`,
   };
@@ -132,21 +142,30 @@ export function buildFailureClassification(input: {
   hasBlockingIssues: boolean;
   replanRecommended: boolean;
   missingObligations: ChapterExecutionMissingObligation[];
+  /**
+   * 硬缺席子集。P2-6：仅 hard 抬升 draft_obligation_unmet；
+   * soft-only missing 不得占用该 code（否则 director/债板假阳性）。
+   * 未传时为兼容旧调用：全部 missing 视为 hard（旧行为）。
+   */
+  hardMissingObligations?: ChapterExecutionMissingObligation[];
 }): ChapterRuntimePackage["failureClassification"] {
+  const hardMissing = Array.isArray(input.hardMissingObligations)
+    ? input.hardMissingObligations
+    : input.missingObligations;
   if (input.replanRecommended || input.acceptance.repairability === "plan_misalignment") {
     return {
       code: "replan_required",
       summary: "当前章节目标与计划窗口已失配，需要先调整附近章节职责。",
       decisionReason: input.acceptance.decisionReason,
-      blockingObligations: input.missingObligations,
+      blockingObligations: hardMissing.length > 0 ? hardMissing : input.missingObligations,
     };
   }
-  if (input.missingObligations.length > 0) {
+  if (hardMissing.length > 0) {
     return {
       code: "draft_obligation_unmet",
       summary: "正文已生成，但仍有本章必达义务没有兑现。",
       decisionReason: input.acceptance.decisionReason,
-      blockingObligations: input.missingObligations,
+      blockingObligations: hardMissing,
     };
   }
   if (input.hasBlockingIssues) {
@@ -157,9 +176,12 @@ export function buildFailureClassification(input: {
       blockingObligations: [],
     };
   }
+  // soft-only missing：code=none；义务仍在 obligationCoverage.partial / missing 列表
   return {
     code: "none",
-    summary: "正文已生成，可继续推进。",
+    summary: input.missingObligations.length > 0
+      ? "正文已生成；仅有可延后/软义务缺口，不记硬义务失败。"
+      : "正文已生成，可继续推进。",
     decisionReason: input.acceptance.decisionReason,
     blockingObligations: [],
   };
@@ -426,15 +448,27 @@ export function buildRuntimePackage(input: BuildRuntimePackageInput): ChapterRun
       affectedChapterOrders: [],
     };
 
+  // 硬/软义务拆分与 normalizeAssessment 同源，避免 soft missing → draft_obligation_unmet 假阳性
+  const requiredCharacterAppearances = (
+    input.contextPackage.chapterWriteContext?.obligationContract?.requiredCharacterAppearances
+    ?? input.contextPackage.chapterReviewContext?.obligationContract?.requiredCharacterAppearances
+    ?? []
+  );
+  const { hard: hardMissingObligations } = partitionHardSoftMissingObligations(
+    input.acceptance.missingObligations,
+    { requiredCharacterAppearances },
+  );
   const obligationCoverage = buildObligationCoverage({
     missingObligations: input.acceptance.missingObligations,
     hasBlockingIssues,
+    hardMissingObligations,
   });
   const failureClassification = buildFailureClassification({
     acceptance: input.acceptance,
     hasBlockingIssues,
     replanRecommended: replanRecommendation.action === "stop_for_replan",
     missingObligations: input.acceptance.missingObligations,
+    hardMissingObligations,
   });
 
   return {
