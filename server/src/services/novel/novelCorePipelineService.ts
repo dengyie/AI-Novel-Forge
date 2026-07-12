@@ -27,6 +27,8 @@ import {
   buildVolumeReplanQualityDebtGate,
   formatGenreBeatShortfallPauseReason,
   GENRE_BEAT_BOARD_WINDOW_SIZE,
+  isBlockingReplanQualityDebt,
+  noteQualityLoopPersistFailOpen,
   shouldPauseForGenreBeatShortfall,
   type GenreBeatChapterLabelSource,
 } from "./quality/qualityDebtBoard";
@@ -1185,10 +1187,52 @@ export class NovelCorePipelineService {
                 qualityDebtAttribution: chapterResult.qualityDebtAttribution ?? null,
               });
             } catch (error) {
+              // P2-2：DB 失败 fail-open——内存仍并计 gate；日志+进程计数避免静默该停未持久化
+              const memoryRiskFlags = buildQualityLoopRiskFlagsSnapshot(
+                assessmentForMemory,
+                assessmentSource,
+                assessmentTerminalAction,
+              );
+              let memoryQualityLoop: Record<string, unknown> | null = null;
+              try {
+                const parsed = JSON.parse(memoryRiskFlags) as { qualityLoop?: Record<string, unknown> };
+                memoryQualityLoop = parsed?.qualityLoop ?? null;
+              } catch {
+                memoryQualityLoop = null;
+              }
+              const chapterBlocksReplanGate = isBlockingReplanQualityDebt(memoryQualityLoop);
+              const failOpenMetrics = noteQualityLoopPersistFailOpen({
+                chapterId: chapter.id,
+                jobId,
+                chapterBlocksReplanGate,
+              });
+              // 预估写入后的范围 gate（与下方 set 同源）
+              const projectedRows = Array.from(rangeDebtByChapterId.entries())
+                .filter(([id]) => id !== chapter.id)
+                .map(([, row]) => row)
+                .concat([{
+                  order: chapter.order,
+                  riskFlags: memoryRiskFlags,
+                }]);
+              const projectedGate = buildVolumeReplanQualityDebtGate({
+                chapters: projectedRows,
+                startOrder: options.startOrder,
+                endOrder: options.endOrder,
+              });
               logPipelineError("记录章节质量闭环状态失败", {
                 jobId,
                 novelId,
                 chapterId: chapter.id,
+                chapterOrder: chapter.order,
+                failOpen: true,
+                qualityLoopPersistFailed: true,
+                chapterBlocksReplanGate,
+                memoryRootCauseCode: assessmentForMemory.rootCauseCode ?? null,
+                memoryRecommendedAction: assessmentForMemory.recommendedAction,
+                projectedBlockingReplanCount: projectedGate.blockingReplanCount,
+                projectedShouldPause: projectedGate.shouldPause,
+                failOpenTotal: failOpenMetrics.total,
+                failOpenBlockingReplanMemoryCount: failOpenMetrics.blockingReplanMemoryCount,
                 error: error instanceof Error ? error.message : String(error),
               });
             }

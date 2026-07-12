@@ -5,7 +5,11 @@ const {
   buildGenreBeatBoardSnapshot,
   buildQualityDebtBoardResult,
   buildVolumeReplanQualityDebtGate,
+  getQualityLoopPersistFailOpenMetrics,
+  isBlockingReplanQualityDebt,
+  noteQualityLoopPersistFailOpen,
   QUALITY_DEBT_VOLUME_REPLAN_GATE_THRESHOLD,
+  resetQualityLoopPersistFailOpenMetrics,
   shouldPauseVolumeForReplanQualityDebt,
 } = require("../dist/services/novel/quality/qualityDebtBoard.js");
 
@@ -366,4 +370,43 @@ test("shouldPauseForGenreBeatShortfall only when complete window fails primary q
       process.env.GENRE_BEAT_PIPELINE_PAUSE = previous;
     }
   }
+});
+
+test("qualityLoop persist fail-open metrics count blocking replan memory (P2-2)", () => {
+  resetQualityLoopPersistFailOpenMetrics();
+  assert.equal(getQualityLoopPersistFailOpenMetrics().total, 0);
+
+  noteQualityLoopPersistFailOpen({
+    chapterId: "c-soft",
+    jobId: "job-1",
+    chapterBlocksReplanGate: false,
+  });
+  let metrics = getQualityLoopPersistFailOpenMetrics();
+  assert.equal(metrics.total, 1);
+  assert.equal(metrics.blockingReplanMemoryCount, 0);
+  assert.equal(metrics.lastChapterId, "c-soft");
+  assert.equal(metrics.lastJobId, "job-1");
+  assert.ok(metrics.lastAt);
+
+  noteQualityLoopPersistFailOpen({
+    chapterId: "c-replan",
+    jobId: "job-1",
+    chapterBlocksReplanGate: true,
+  });
+  metrics = getQualityLoopPersistFailOpenMetrics();
+  assert.equal(metrics.total, 2);
+  assert.equal(metrics.blockingReplanMemoryCount, 1);
+  assert.equal(metrics.lastChapterId, "c-replan");
+
+  assert.equal(isBlockingReplanQualityDebt({
+    rootCauseCode: "replan_required",
+    recommendedAction: "replan",
+  }), true);
+  assert.equal(isBlockingReplanQualityDebt({
+    rootCauseCode: "draft_obligation_unmet",
+    recommendedAction: "patch_repair",
+  }), false);
+
+  resetQualityLoopPersistFailOpenMetrics();
+  assert.equal(getQualityLoopPersistFailOpenMetrics().total, 0);
 });

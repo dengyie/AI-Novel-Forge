@@ -209,6 +209,60 @@ export function isBlockingReplanQualityDebt(
   return false;
 }
 
+/**
+ * qualityLoop 落库失败时的 fail-open 可观测（P2-2）。
+ * 流水线仍用内存 assessment 并计 replan gate，但 DB riskFlags 可能缺本次债；
+ * 计数/日志避免「该停未持久化」静默。
+ */
+export interface QualityLoopPersistFailOpenMetrics {
+  /** 进程内累计 fail-open 次数 */
+  total: number;
+  /** 其中内存评估会抬升 blocking replan 的次数 */
+  blockingReplanMemoryCount: number;
+  lastAt: string | null;
+  lastChapterId: string | null;
+  lastJobId: string | null;
+}
+
+const qualityLoopPersistFailOpenMetrics: QualityLoopPersistFailOpenMetrics = {
+  total: 0,
+  blockingReplanMemoryCount: 0,
+  lastAt: null,
+  lastChapterId: null,
+  lastJobId: null,
+};
+
+export function getQualityLoopPersistFailOpenMetrics(): Readonly<QualityLoopPersistFailOpenMetrics> {
+  return { ...qualityLoopPersistFailOpenMetrics };
+}
+
+/** 单测重置；生产路径勿调用。 */
+export function resetQualityLoopPersistFailOpenMetrics(): void {
+  qualityLoopPersistFailOpenMetrics.total = 0;
+  qualityLoopPersistFailOpenMetrics.blockingReplanMemoryCount = 0;
+  qualityLoopPersistFailOpenMetrics.lastAt = null;
+  qualityLoopPersistFailOpenMetrics.lastChapterId = null;
+  qualityLoopPersistFailOpenMetrics.lastJobId = null;
+}
+
+export function noteQualityLoopPersistFailOpen(input: {
+  chapterId?: string | null;
+  jobId?: string | null;
+  /** 内存 assessment 是否计为 blocking replan 债 */
+  chapterBlocksReplanGate?: boolean;
+  at?: Date;
+}): QualityLoopPersistFailOpenMetrics {
+  const at = input.at ?? new Date();
+  qualityLoopPersistFailOpenMetrics.total += 1;
+  if (input.chapterBlocksReplanGate) {
+    qualityLoopPersistFailOpenMetrics.blockingReplanMemoryCount += 1;
+  }
+  qualityLoopPersistFailOpenMetrics.lastAt = at.toISOString();
+  qualityLoopPersistFailOpenMetrics.lastChapterId = input.chapterId ?? null;
+  qualityLoopPersistFailOpenMetrics.lastJobId = input.jobId ?? null;
+  return getQualityLoopPersistFailOpenMetrics();
+}
+
 export function filterChaptersByOrderRange<T extends { order?: number | null }>(
   chapters: T[],
   range?: { startOrder?: number | null; endOrder?: number | null } | null,
