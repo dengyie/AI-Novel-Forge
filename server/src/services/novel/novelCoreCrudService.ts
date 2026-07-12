@@ -437,6 +437,10 @@ export class NovelCoreCrudService {
     await prisma.novel.delete({ where: { id } });
   }
 
+  /**
+   * 返回章节全行（含 riskFlags）。导演 auto-execution 用本接口判定 blocking 债，
+   * 禁止改成省略 riskFlags 的 select 投影，否则会静默跳过有债章节。
+   */
   async listChapters(novelId: string) {
     return prisma.chapter.findMany({
       where: { novelId },

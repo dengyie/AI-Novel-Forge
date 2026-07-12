@@ -5,7 +5,8 @@
  * 代理抖动 / 渠道切换 / 超时 / 连接重置 等可安全重试；
  * 持续性业务错误（schema、空正文策略错误等）不在此层处理。
  *
- * 调用方应在 signal 已 abort 时停止重试（用户取消 / 流水线取消）。
+ * 取消 / AbortError 不是瞬时故障：不得重试（与 job 层 isPipelineCancellationError 对齐）。
+ * 调用方仍应在 signal 已 abort 时停止重试（用户取消 / 流水线取消）。
  */
 
 export const TRANSPORT_RETRY_MAX_ATTEMPTS = Math.max(
@@ -21,7 +22,7 @@ export const TRANSPORT_RETRY_BACKOFF_BASE_MS = Math.max(
 const TRANSIENT_TRANSPORT_ERROR_PATTERNS = [
   "timed out",
   "timeout",
-  "aborted",
+  // 注意：不匹配 "aborted"——AbortError / 取消透传不得当瞬时重试（见 isCancellationLikeTransportError）
   "econnreset",
   "econnrefused",
   "enetunreach",
@@ -41,7 +42,49 @@ const TRANSIENT_TRANSPORT_ERROR_PATTERNS = [
   "service unavailable",
 ];
 
+/**
+ * 取消 / abort 形态：transport 层不得当瞬时重试。
+ * 与 pipelineJobAutoRetry.isPipelineCancellationError 口径对齐（不必 import 以免 llm↔novel 环依赖）。
+ */
+export function isCancellationLikeTransportError(error: unknown): boolean {
+  if (!error) {
+    return false;
+  }
+  if (error instanceof Error && error.name === "AbortError") {
+    return true;
+  }
+  const msg = error instanceof Error
+    ? error.message
+    : typeof error === "string"
+      ? error
+      : String(error);
+  if (!msg) {
+    return false;
+  }
+  if (
+    msg === "PIPELINE_CANCELLED"
+    || msg.includes("PIPELINE_CANCELLED")
+    || msg.includes("章节生成已取消")
+    || msg.includes("任务仍在取消")
+  ) {
+    return true;
+  }
+  const lower = msg.toLowerCase();
+  // TimeoutError 另走瞬时
+  if (error instanceof Error && error.name === "TimeoutError") {
+    return false;
+  }
+  return lower === "aborted"
+    || lower.includes("request aborted")
+    || lower.includes("the operation was aborted")
+    || lower.includes("user cancelled")
+    || lower.includes("cancelled mid-flight");
+}
+
 export function isTransientTransportError(error: unknown): boolean {
+  if (isCancellationLikeTransportError(error)) {
+    return false;
+  }
   const message = error instanceof Error
     ? error.message
     : typeof error === "string"
@@ -51,7 +94,8 @@ export function isTransientTransportError(error: unknown): boolean {
     return false;
   }
   const lower = message.toLowerCase();
-  if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
+  // TimeoutError 仍瞬时；AbortError 已在 isCancellationLikeTransportError 排除
+  if (error instanceof Error && error.name === "TimeoutError") {
     return true;
   }
   return TRANSIENT_TRANSPORT_ERROR_PATTERNS.some((pattern) => lower.includes(pattern));
@@ -88,7 +132,7 @@ export interface TransportRetryOptions {
  * 对瞬时 transport 错误做有限重试。
  * - 首次 + maxAttempts 次重试（默认共 5 次）
  * - signal 已 abort 时不重试（用户/流水线取消）
- * - 非瞬时错误立即抛出
+ * - AbortError / 取消文案 / 非瞬时错误立即抛出
  */
 export async function runWithTransportRetry<T>(
   run: (attempt: number) => Promise<T>,

@@ -5,6 +5,7 @@ const {
   buildDirectorAutoExecutionState,
   buildDirectorAutoExecutionScopeLabel,
   buildDirectorAutoExecutionPipelineOptions,
+  hasBlockingQualityLoopDebtForAutoExecution,
   isDirectorAutoExecutionChapterProcessed,
   normalizeDirectorAutoExecutionPlan,
   resolveDirectorAutoExecutionRange,
@@ -151,6 +152,71 @@ test("resolveDirectorAutoExecutionRepairMode escalates repeated chapter quality 
   assert.equal(repairMode, "heavy_repair");
 });
 
+test("blocking qualityLoop debt is never processed even with pending_review content", () => {
+  const replanFlags = JSON.stringify({
+    qualityLoop: {
+      overallStatus: "invalid",
+      recommendedAction: "replan",
+      rootCauseCode: "replan_required",
+    },
+  });
+  const patchFlags = JSON.stringify({
+    qualityLoop: {
+      overallStatus: "invalid",
+      recommendedAction: "patch_repair",
+      rootCauseCode: "draft_obligation_unmet",
+    },
+  });
+  const replanChapter = {
+    id: "chapter-replan",
+    order: 3,
+    content: "有正文",
+    generationState: "reviewed",
+    chapterStatus: "pending_review",
+    riskFlags: replanFlags,
+  };
+  const patchChapter = {
+    id: "chapter-patch",
+    order: 4,
+    content: "有正文",
+    generationState: "reviewed",
+    chapterStatus: "pending_review",
+    riskFlags: patchFlags,
+  };
+  const cleanChapter = {
+    id: "chapter-clean",
+    order: 5,
+    content: "有正文",
+    generationState: "reviewed",
+    chapterStatus: "pending_review",
+    riskFlags: null,
+  };
+  const validContinueFlags = JSON.stringify({
+    qualityLoop: {
+      overallStatus: "valid",
+      recommendedAction: "continue",
+    },
+  });
+  const validChapter = {
+    id: "chapter-valid",
+    order: 6,
+    content: "有正文",
+    generationState: "reviewed",
+    chapterStatus: "pending_review",
+    riskFlags: validContinueFlags,
+  };
+
+  assert.equal(hasBlockingQualityLoopDebtForAutoExecution(replanChapter), true);
+  assert.equal(hasBlockingQualityLoopDebtForAutoExecution(patchChapter), true);
+  assert.equal(hasBlockingQualityLoopDebtForAutoExecution(cleanChapter), false);
+  assert.equal(hasBlockingQualityLoopDebtForAutoExecution(validChapter), false);
+
+  assert.equal(isDirectorAutoExecutionChapterProcessed(replanChapter), false);
+  assert.equal(isDirectorAutoExecutionChapterProcessed(patchChapter), false);
+  assert.equal(isDirectorAutoExecutionChapterProcessed(cleanChapter), true);
+  assert.equal(isDirectorAutoExecutionChapterProcessed(validChapter), true);
+});
+
 test("auto execution does not treat empty reviewed chapters as processed", () => {
   const emptyReviewedChapter = {
     id: "chapter-empty",
@@ -165,6 +231,7 @@ test("auto execution does not treat empty reviewed chapters as processed", () =>
     content: "正文内容",
     generationState: "reviewed",
     chapterStatus: "pending_review",
+    riskFlags: null,
   };
 
   assert.equal(isDirectorAutoExecutionChapterProcessed(emptyReviewedChapter), false);

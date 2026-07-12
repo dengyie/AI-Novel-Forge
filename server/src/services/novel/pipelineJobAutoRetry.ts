@@ -52,8 +52,8 @@ export function isPipelineCancellationError(error: unknown): boolean {
  * - 空正文（章节内 empty 重试已耗尽时，常为渠道空回）
  * - 取消 / AbortError / 业务错误 → false
  *
- * 注意：isTransientTransportError 会把 AbortError/"aborted" 当瞬时；
- * job 层必须先排除取消与 AbortError，避免取消被 requeue。
+ * transport 层 isTransientTransportError 已排除 AbortError/取消文案；
+ * job 层仍先硬挡 isPipelineCancellationError，双层保险。
  */
 export function isPipelineJobAutoRetryableError(error: unknown): boolean {
   if (!error) {
@@ -62,7 +62,7 @@ export function isPipelineJobAutoRetryableError(error: unknown): boolean {
   if (isPipelineCancellationError(error)) {
     return false;
   }
-  // AbortError 可能是取消透传丢失 reason 后的形态；job 层宁可不 requeue
+  // 双保险：即使 transport 分类漂移，AbortError 也不 requeue
   if (error instanceof Error && error.name === "AbortError") {
     return false;
   }
