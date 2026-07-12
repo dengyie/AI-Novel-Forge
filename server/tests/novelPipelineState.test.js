@@ -1281,3 +1281,187 @@ test("executePipeline records empty chapter output in failed job notice payload 
     novelEventBus.emit = original.emit;
   }
 });
+
+function mockPipelineJobBasics(input) {
+  const updates = [];
+  prisma.generationJob.findUnique = async (query) => {
+    if (query.select?.startedAt) {
+      return {
+        startedAt: null,
+        completedCount: 0,
+        totalCount: 1,
+        retryCount: 0,
+        payload: JSON.stringify({
+          provider: "deepseek",
+          model: "deepseek-chat",
+          runMode: "fast",
+          autoReview: true,
+          autoRepair: true,
+          skipCompleted: true,
+          qualityThreshold: 75,
+          repairMode: "light_repair",
+          ...(input.payloadExtras ?? {}),
+        }),
+      };
+    }
+    if (query.select?.status) {
+      return {
+        status: "running",
+        cancelRequestedAt: null,
+      };
+    }
+    throw new Error(`Unexpected generationJob.findUnique call: ${JSON.stringify(query)}`);
+  };
+  prisma.generationJob.update = async (query) => {
+    updates.push(query);
+    return query;
+  };
+  prisma.novel.findUnique = async () => ({
+    id: "novel-1",
+    title: "测试小说",
+  });
+  prisma.chapter.findMany = async () => ([
+    { id: "chapter-1", order: 1, title: "第一章", content: input.chapterContent ?? "" },
+  ]);
+  novelEventBus.emit = async () => null;
+  return updates;
+}
+
+test("executePipeline marks 章节生成已取消 as cancelled and does not auto-requeue", async () => {
+  const original = {
+    generationFindUnique: prisma.generationJob.findUnique,
+    generationUpdate: prisma.generationJob.update,
+    novelFindUnique: prisma.novel.findUnique,
+    chapterFindMany: prisma.chapter.findMany,
+    emit: novelEventBus.emit,
+  };
+  const updates = mockPipelineJobBasics({
+    payloadExtras: { jobTransportAutoRetryCount: 0 },
+  });
+  const service = new NovelCorePipelineService();
+  service.chapterRuntimeCoordinator.runPipelineChapter = async () => {
+    throw new Error("章节生成已取消。");
+  };
+  try {
+    await service.executePipeline("job-cancel-zh", "novel-1", {
+      startOrder: 1,
+      endOrder: 1,
+      provider: "deepseek",
+      model: "deepseek-chat",
+      temperature: 0.8,
+      runMode: "fast",
+      autoReview: true,
+      autoRepair: true,
+      skipCompleted: true,
+      qualityThreshold: 75,
+      repairMode: "light_repair",
+      maxRetries: 1,
+    });
+    const finalUpdate = updates[updates.length - 1];
+    assert.equal(finalUpdate.data.status, "cancelled");
+    assert.doesNotMatch(String(finalUpdate.data.error ?? ""), /自动重试/);
+    assert.doesNotMatch(finalUpdate.data.payload ?? "", /jobTransportAutoRetryCount/);
+  } finally {
+    prisma.generationJob.findUnique = original.generationFindUnique;
+    prisma.generationJob.update = original.generationUpdate;
+    prisma.novel.findUnique = original.novelFindUnique;
+    prisma.chapter.findMany = original.chapterFindMany;
+    novelEventBus.emit = original.emit;
+  }
+});
+
+test("executePipeline marks AbortError Request aborted as cancelled not requeued", async () => {
+  const original = {
+    generationFindUnique: prisma.generationJob.findUnique,
+    generationUpdate: prisma.generationJob.update,
+    novelFindUnique: prisma.novel.findUnique,
+    chapterFindMany: prisma.chapter.findMany,
+    emit: novelEventBus.emit,
+  };
+  const updates = mockPipelineJobBasics({});
+  const service = new NovelCorePipelineService();
+  service.chapterRuntimeCoordinator.runPipelineChapter = async () => {
+    throw Object.assign(new Error("Request aborted."), { name: "AbortError" });
+  };
+  try {
+    await service.executePipeline("job-cancel-abort", "novel-1", {
+      startOrder: 1,
+      endOrder: 1,
+      provider: "deepseek",
+      model: "deepseek-chat",
+      temperature: 0.8,
+      runMode: "fast",
+      autoReview: true,
+      autoRepair: true,
+      skipCompleted: true,
+      qualityThreshold: 75,
+      repairMode: "light_repair",
+      maxRetries: 1,
+    });
+    const finalUpdate = updates[updates.length - 1];
+    assert.equal(finalUpdate.data.status, "cancelled");
+    assert.notEqual(finalUpdate.data.status, "queued");
+  } finally {
+    prisma.generationJob.findUnique = original.generationFindUnique;
+    prisma.generationJob.update = original.generationUpdate;
+    prisma.novel.findUnique = original.novelFindUnique;
+    prisma.chapter.findMany = original.chapterFindMany;
+    novelEventBus.emit = original.emit;
+  }
+});
+
+test("executePipeline clears jobTransportAutoRetryCount on success and error on running start", async () => {
+  const original = {
+    generationFindUnique: prisma.generationJob.findUnique,
+    generationUpdate: prisma.generationJob.update,
+    novelFindUnique: prisma.novel.findUnique,
+    chapterFindMany: prisma.chapter.findMany,
+    emit: novelEventBus.emit,
+  };
+  const updates = mockPipelineJobBasics({
+    payloadExtras: { jobTransportAutoRetryCount: 1 },
+    chapterContent: "已有正文",
+  });
+  const service = new NovelCorePipelineService();
+  service.chapterRuntimeCoordinator.runPipelineChapter = async () => ({
+    retryCountUsed: 0,
+    score: {
+      coherence: 88,
+      repetition: 88,
+      pacing: 82,
+      voice: 80,
+      engagement: 86,
+      overall: 84,
+    },
+    issues: [],
+    pass: true,
+  });
+  try {
+    await service.executePipeline("job-success-clear", "novel-1", {
+      startOrder: 1,
+      endOrder: 1,
+      provider: "deepseek",
+      model: "deepseek-chat",
+      temperature: 0.8,
+      runMode: "fast",
+      autoReview: true,
+      autoRepair: true,
+      skipCompleted: true,
+      qualityThreshold: 75,
+      repairMode: "light_repair",
+      maxRetries: 1,
+    });
+    const runningStart = updates.find((item) => item.data?.status === "running");
+    assert.ok(runningStart, "expected running start update");
+    assert.equal(runningStart.data.error, null);
+    const finalUpdate = updates[updates.length - 1];
+    assert.equal(finalUpdate.data.status, "succeeded");
+    assert.doesNotMatch(finalUpdate.data.payload ?? "", /jobTransportAutoRetryCount/);
+  } finally {
+    prisma.generationJob.findUnique = original.generationFindUnique;
+    prisma.generationJob.update = original.generationUpdate;
+    prisma.novel.findUnique = original.novelFindUnique;
+    prisma.chapter.findMany = original.chapterFindMany;
+    novelEventBus.emit = original.emit;
+  }
+});

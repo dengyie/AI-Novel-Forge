@@ -33,6 +33,7 @@ import {
 import { buildPipelineLeaseClaimWhere, buildStaleRecoverablePipelineJobWhere, selectPrimaryPipelineJob } from "./pipelineJobDedup";
 import {
   formatPipelineJobAutoRetryMessage,
+  isPipelineCancellationError,
   PIPELINE_JOB_TRANSPORT_AUTO_RETRY_DELAY_MS,
   PIPELINE_JOB_TRANSPORT_AUTO_RETRY_MAX,
   shouldAutoRetryPipelineJob,
@@ -41,6 +42,7 @@ import { buildPipelineCurrentItemLabel, buildPipelineStageProgress, decoratePipe
 
 export { buildPipelineCurrentItemLabel, buildPipelineStageProgress } from "./pipelineJobState";
 export {
+  isPipelineCancellationError,
   isPipelineJobAutoRetryableError,
   shouldAutoRetryPipelineJob,
   PIPELINE_JOB_TRANSPORT_AUTO_RETRY_MAX,
@@ -628,6 +630,8 @@ export class NovelCorePipelineService {
             where: buildPipelineLeaseClaimWhere({ jobId, now: new Date() }),
             data: {
               status: "running",
+              // 清掉 auto-requeue 残留的 error，避免 running 期间仍展示失败文案
+              error: null,
               leaseOwner: `pipeline-${process.pid}`,
               leaseExpiresAt: new Date(Date.now() + PIPELINE_LEASE_TTL_MS),
             },
@@ -719,6 +723,7 @@ export class NovelCorePipelineService {
       }, async () => {
         await this.updateJobSafe(jobId, {
           status: "running",
+          error: null,
           pendingManualRecovery: false,
           startedAt: existingJob?.startedAt ?? new Date(),
           heartbeatAt: new Date(),
@@ -1277,9 +1282,11 @@ export class NovelCorePipelineService {
         }).catch(() => {});
       });
     } catch (error) {
-      if (error instanceof Error && error.message === "PIPELINE_CANCELLED") {
+      // 取消文案 / AbortError 统一落 cancelled，禁止 auto-requeue（见 isPipelineCancellationError）。
+      if (isPipelineCancellationError(error)) {
         await this.updateJobSafe(jobId, {
           status: "cancelled",
+          error: null,
           heartbeatAt: null,
           currentStage: null,
           currentItemKey: null,
@@ -1318,7 +1325,7 @@ export class NovelCorePipelineService {
       }
 
       // 章节内 empty/transport 重试耗尽后仍瞬时失败：同 job 有限次 requeue（skipCompleted 保已写章）。
-      // 取消/业务错误不 requeue。预算见 PIPELINE_JOB_TRANSPORT_AUTO_RETRY_MAX。
+      // 取消/AbortError/业务错误不 requeue。预算见 PIPELINE_JOB_TRANSPORT_AUTO_RETRY_MAX。
       const usedJobAutoRetry = Math.max(0, runtimePayload.jobTransportAutoRetryCount ?? 0);
       if (shouldAutoRetryPipelineJob({
         error,

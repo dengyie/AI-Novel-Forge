@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
+  isPipelineCancellationError,
   isPipelineJobAutoRetryableError,
   shouldAutoRetryPipelineJob,
   formatPipelineJobAutoRetryMessage,
@@ -17,6 +18,19 @@ const {
   PIPELINE_JOB_TRANSPORT_AUTO_RETRY_NOTICE_CODE,
 } = require("../dist/services/novel/pipelineJobState.js");
 
+test("isPipelineCancellationError covers cancel messages and AbortError abort text", () => {
+  assert.equal(isPipelineCancellationError(new Error("PIPELINE_CANCELLED")), true);
+  assert.equal(isPipelineCancellationError(new Error("章节生成已取消。")), true);
+  assert.equal(isPipelineCancellationError(new Error("章节生成已取消，跳过正文定稿。")), true);
+  assert.equal(isPipelineCancellationError(new Error("任务仍在取消中")), true);
+  assert.equal(
+    isPipelineCancellationError(Object.assign(new Error("Request aborted."), { name: "AbortError" })),
+    true,
+  );
+  assert.equal(isPipelineCancellationError(new Error("fetch failed: ECONNRESET")), false);
+  assert.equal(isPipelineCancellationError(new Error("502 Bad Gateway")), false);
+});
+
 test("isPipelineJobAutoRetryableError accepts transport and empty content", () => {
   assert.equal(isPipelineJobAutoRetryableError(new Error("fetch failed: ECONNRESET")), true);
   assert.equal(isPipelineJobAutoRetryableError(new Error("Request timed out after 30000ms.")), true);
@@ -30,6 +44,14 @@ test("isPipelineJobAutoRetryableError accepts transport and empty content", () =
   );
   assert.equal(isPipelineJobAutoRetryableError(new Error("PIPELINE_CANCELLED")), false);
   assert.equal(isPipelineJobAutoRetryableError(new Error("章节生成已取消。")), false);
+  assert.equal(
+    isPipelineJobAutoRetryableError(Object.assign(new Error("Request aborted."), { name: "AbortError" })),
+    false,
+  );
+  assert.equal(
+    isPipelineJobAutoRetryableError(Object.assign(new Error("wall clock"), { name: "AbortError" })),
+    false,
+  );
   assert.equal(isPipelineJobAutoRetryableError(new Error("invalid_api_key")), false);
 });
 
@@ -40,6 +62,11 @@ test("shouldAutoRetryPipelineJob respects budget", () => {
   assert.equal(shouldAutoRetryPipelineJob({ error: err, usedCount: 2, maxCount: 2 }), false);
   assert.equal(shouldAutoRetryPipelineJob({
     error: new Error("PIPELINE_CANCELLED"),
+    usedCount: 0,
+    maxCount: 2,
+  }), false);
+  assert.equal(shouldAutoRetryPipelineJob({
+    error: Object.assign(new Error("Request aborted."), { name: "AbortError" }),
     usedCount: 0,
     maxCount: 2,
   }), false);
