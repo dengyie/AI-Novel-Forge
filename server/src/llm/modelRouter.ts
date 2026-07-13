@@ -82,7 +82,7 @@ const DEFAULT_ROUTES: Record<ModelRouteTaskType | "default", Omit<ResolvedModel,
   },
   light_review: {
     provider: "openai",
-    model: "deepseek-v4-flash",
+    model: "deepseek-v4-pro",
     temperature: 0.2,
     requestProtocol: "auto",
     structuredResponseFormat: "auto",
@@ -117,21 +117,21 @@ const DEFAULT_ROUTES: Record<ModelRouteTaskType | "default", Omit<ResolvedModel,
   },
   summary: {
     provider: "openai",
-    model: "deepseek-v4-flash",
+    model: "deepseek-v4-pro",
     temperature: 0.2,
     requestProtocol: "auto",
     structuredResponseFormat: "auto",
   },
   fact_extraction: {
     provider: "openai",
-    model: "deepseek-v4-flash",
+    model: "deepseek-v4-pro",
     temperature: 0.2,
     requestProtocol: "auto",
     structuredResponseFormat: "auto",
   },
   chat: {
     provider: "openai",
-    model: "deepseek-v4-flash",
+    model: "deepseek-v4-pro",
     temperature: 0.7,
     requestProtocol: "auto",
     structuredResponseFormat: "auto",
@@ -220,10 +220,17 @@ function applyOverrides(
     structuredResponseFormat?: ModelRouteStructuredResponseFormat;
   },
 ): ResolvedModel {
+  // Empty-string model/provider from GenerationJob payload must NOT clobber the route.
+  // Historical jobs often store provider=deepseek + model="" and then fell through to
+  // PROVIDERS.deepseek.defaultModel (previously flash), causing 300s style.rewrite aborts.
+  const overrideModel = typeof userOverride?.model === "string" ? userOverride.model.trim() : undefined;
+  const overrideProvider = typeof userOverride?.provider === "string" && userOverride.provider.trim()
+    ? userOverride.provider.trim()
+    : userOverride?.provider;
   const merged: ResolvedModel = {
     ...base,
-    ...(userOverride?.provider != null && { provider: userOverride.provider }),
-    ...(userOverride?.model != null && { model: userOverride.model }),
+    ...(overrideProvider != null && { provider: overrideProvider as LLMProvider }),
+    ...(overrideModel ? { model: overrideModel } : {}),
     ...(userOverride?.temperature != null && { temperature: userOverride.temperature }),
     ...(userOverride?.maxTokens != null && { maxTokens: userOverride.maxTokens }),
     ...(userOverride?.requestProtocol != null && { requestProtocol: userOverride.requestProtocol }),

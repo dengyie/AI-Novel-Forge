@@ -269,10 +269,12 @@ export async function resolveLLMClientOptions(
     throw new Error(`未配置 ${providerName} 的 API Key。`);
   }
 
-  const model = (resolvedModel
-    ?? dbSecret?.model
-    ?? getProviderEnvModel(resolvedProvider)
-    ?? (isBuiltInProvider(resolvedProvider) ? PROVIDERS[resolvedProvider].defaultModel : undefined)
+  // Treat blank override/route model as missing so provider default / APIKey model can apply.
+  const explicitModel = typeof resolvedModel === "string" ? resolvedModel.replace(/\x00/g, "").trim() : "";
+  const model = (explicitModel
+    || dbSecret?.model
+    || getProviderEnvModel(resolvedProvider)
+    || (isBuiltInProvider(resolvedProvider) ? PROVIDERS[resolvedProvider].defaultModel : undefined)
   )?.replace(/\x00/g, "").trim();
   if (!model) {
     throw new Error(`未配置 ${providerName} 的默认模型。`);

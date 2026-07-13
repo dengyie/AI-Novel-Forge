@@ -46,8 +46,8 @@ const DEFAULT_STRUCTURED_FALLBACK_SETTINGS: StructuredFallbackSettings = {
       maxTokens: null,
     },
     {
-      provider: "deepseek",
-      model: "deepseek-v4-flash",
+      provider: "openai",
+      model: "grok-4.5",
       temperature: 0.2,
       maxTokens: null,
     },
