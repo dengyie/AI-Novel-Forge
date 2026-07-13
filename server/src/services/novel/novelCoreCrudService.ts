@@ -1,5 +1,6 @@
 import { serializeCommercialTagsJson } from "@ai-novel/shared/types/novelFraming";
 import type { NovelAutoDirectorTaskSummary } from "@ai-novel/shared/types/novel";
+import { sanitizeChapterTaskSheetForPersistence } from "@ai-novel/shared/types/chapterTaskSheetQuality";
 import { prisma } from "../../db/prisma";
 import { AppError } from "../../middleware/errorHandler";
 import { mapNovelAutoDirectorTaskSummary } from "../task/novelWorkflowTaskSummary";
@@ -464,7 +465,7 @@ export class NovelCoreCrudService {
         conflictLevel: input.conflictLevel ?? null,
         revealLevel: input.revealLevel ?? null,
         mustAvoid: input.mustAvoid ?? null,
-        taskSheet: input.taskSheet ?? null,
+        taskSheet: sanitizeChapterTaskSheetForPersistence(input.taskSheet),
         sceneCards: input.sceneCards ?? null,
         repairHistory: input.repairHistory ?? null,
         qualityScore: input.qualityScore ?? null,
@@ -533,7 +534,10 @@ export class NovelCoreCrudService {
       conflictLevel: input.conflictLevel,
       revealLevel: input.revealLevel,
       mustAvoid: input.mustAvoid,
-      taskSheet: input.taskSheet,
+      // undefined = leave field alone; null/string = sanitize then write
+      taskSheet: input.taskSheet === undefined
+        ? undefined
+        : sanitizeChapterTaskSheetForPersistence(input.taskSheet),
       sceneCards: input.sceneCards,
       repairHistory: input.repairHistory,
       qualityScore: input.qualityScore,

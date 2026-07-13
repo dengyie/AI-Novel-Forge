@@ -15,6 +15,7 @@ import {
   resolveLengthBudgetContract,
 } from "@ai-novel/shared/types/chapterLengthControl";
 import { sanitizeCreativeMustAdvanceItems } from "@ai-novel/shared/types/chapterCreativeContract";
+import { sanitizeWriterFacingTaskSheet } from "@ai-novel/shared/types/chapterTaskSheetQuality";
 import type { ReviewIssue } from "@ai-novel/shared/types/novel";
 import type { StoryMacroPlan } from "@ai-novel/shared/types/storyMacro";
 import { createContextBlock } from "../../core/contextBudget";
@@ -180,7 +181,9 @@ export function buildChapterMissionContext(contextPackage: GenerationContextPack
       compactText(contextPackage.chapter.expectation)
       || compactText(stateGoal?.summary)
       || compactText(contextPackage.plan?.title, "Deliver the current chapter mission."),
-    taskSheet: compactText(contextPackage.chapter.taskSheet) || null,
+    taskSheet: sanitizeWriterFacingTaskSheet(
+      compactText(contextPackage.chapter.taskSheet) || null,
+    ) || null,
     targetWordCount: contextPackage.chapter.targetWordCount ?? null,
     planRole: contextPackage.plan?.planRole ?? null,
     hookTarget: compactText(contextPackage.plan?.hookTarget, "Leave a fresh tension point at the ending."),

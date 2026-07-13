@@ -219,6 +219,53 @@ export function containsInternalQualityCodes(text: string | null | undefined): b
   return INTERNAL_QUALITY_CODE_PATTERN.test(text);
 }
 
+/**
+ * Persist-path sanitize: strip internal quality/failure codes and collapse empty noise.
+ * Does not rewrite narrative obligations (no overload bullet pruning).
+ */
+export function sanitizeChapterTaskSheetForPersistence(
+  text: string | null | undefined,
+): string | null {
+  if (text == null) {
+    return null;
+  }
+  const stripped = stripInternalQualityCodes(text)
+    .replace(/^\s*[-*]\s*$/gm, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  return stripped.length > 0 ? stripped : null;
+}
+
+/** Writer-facing / layered-context sanitize (same strip, never null — empty string ok). */
+export function sanitizeWriterFacingTaskSheet(text: string | null | undefined): string {
+  return sanitizeChapterTaskSheetForPersistence(text) ?? "";
+}
+
+/**
+ * Service-layer repair for internal codes only. assess stays pure.
+ */
+export function tryAutoRepairInternalCodesOnly(
+  candidate: ChapterExecutionContractQualityCandidate,
+): {
+  repaired: ChapterExecutionContractQualityCandidate;
+  stripped: boolean;
+  emptiedTaskSheet: boolean;
+} {
+  const original = candidate.taskSheet ?? "";
+  if (!containsInternalQualityCodes(original)) {
+    return { repaired: candidate, stripped: false, emptiedTaskSheet: false };
+  }
+  const sanitized = sanitizeChapterTaskSheetForPersistence(original);
+  return {
+    repaired: {
+      ...candidate,
+      taskSheet: sanitized,
+    },
+    stripped: true,
+    emptiedTaskSheet: !sanitized,
+  };
+}
+
 export function getChapterTaskSheetObligationBudget(
   chapterType: ChapterTaskSheetType,
 ): ChapterTaskSheetObligationBudget {

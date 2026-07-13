@@ -3,6 +3,7 @@ import {
   serializeChapterScenePlan,
 } from "@ai-novel/shared/types/chapterLengthControl";
 import { sanitizeCreativeMustAdvanceItems } from "@ai-novel/shared/types/chapterCreativeContract";
+import { sanitizeChapterTaskSheetForPersistence } from "@ai-novel/shared/types/chapterTaskSheetQuality";
 import { createHash } from "node:crypto";
 import { prisma } from "../../db/prisma";
 import { enrichStoryPlan } from "./plannerPlanMetadata";
@@ -162,14 +163,21 @@ function buildPlanSceneCards(input: PersistPlanInput): string | undefined {
 }
 
 export async function persistStoryPlan(input: PersistPlanInput) {
-  const taskSheet = buildPlanTaskSheet(input);
+  // Built sheet only: undefined keeps chapter.taskSheet untouched (Prisma omit).
+  // Hash falls back to base contract so contract identity still covers existing sheets.
+  const builtTaskSheet = buildPlanTaskSheet(input);
+  const taskSheet = builtTaskSheet === undefined
+    ? undefined
+    : sanitizeChapterTaskSheetForPersistence(builtTaskSheet);
   const sceneCards = buildPlanSceneCards(input);
   const executionContractHash = input.level === "chapter"
     ? buildChapterExecutionContractHash({
       ...(input.baseExecutionContract ?? {}),
       expectation: sanitizePlanText(input.objective) || null,
       targetWordCount: input.targetWordCount ?? input.baseExecutionContract?.targetWordCount ?? null,
-      taskSheet: taskSheet ?? input.baseExecutionContract?.taskSheet ?? null,
+      taskSheet: taskSheet
+        ?? sanitizeChapterTaskSheetForPersistence(input.baseExecutionContract?.taskSheet ?? null)
+        ?? null,
       sceneCards: sceneCards ?? input.baseExecutionContract?.sceneCards ?? null,
       hook: sanitizePlanText(input.hookTarget) || null,
     })

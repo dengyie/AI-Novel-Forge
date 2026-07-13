@@ -9,6 +9,9 @@ const {
   getChapterTaskSheetObligationBudget,
   stripInternalQualityCodes,
   containsInternalQualityCodes,
+  sanitizeChapterTaskSheetForPersistence,
+  sanitizeWriterFacingTaskSheet,
+  tryAutoRepairInternalCodesOnly,
 } = require("../../shared/dist/types/chapterTaskSheetQuality.js");
 const {
   ChapterTaskSheetQualityGateService,
@@ -251,6 +254,66 @@ test("strip-only internal codes leaves empty task sheet and remains non-enterabl
     taskSheet: cleaned,
   }));
   assert.equal(emptyResult.canEnterExecution, false);
+});
+
+test("sanitizeChapterTaskSheetForPersistence strips codes and nulls empty residue", () => {
+  const dirty = "推进资源危机；payoff_missing_progress；draft_obligation_unmet 后收尾。";
+  const sanitized = sanitizeChapterTaskSheetForPersistence(dirty);
+  assert.ok(sanitized);
+  assert.equal(containsInternalQualityCodes(sanitized), false);
+  assert.match(sanitized, /资源危机/);
+  assert.match(sanitized, /收尾/);
+
+  assert.equal(sanitizeChapterTaskSheetForPersistence(null), null);
+  assert.equal(sanitizeChapterTaskSheetForPersistence(undefined), null);
+  assert.equal(
+    sanitizeChapterTaskSheetForPersistence("payoff_missing_progress replan_required"),
+    null,
+  );
+
+  // narrative prose without codes is preserved
+  const clean = "用对话完成关系推进，章末留下未兑现的线索。";
+  assert.equal(sanitizeChapterTaskSheetForPersistence(clean), clean);
+});
+
+test("sanitizeWriterFacingTaskSheet never returns null", () => {
+  assert.equal(sanitizeWriterFacingTaskSheet(null), "");
+  assert.equal(sanitizeWriterFacingTaskSheet("payoff_missing_progress"), "");
+  assert.match(
+    sanitizeWriterFacingTaskSheet("推进A；draft_obligation_unmet；收尾B"),
+    /推进A/,
+  );
+});
+
+test("tryAutoRepairInternalCodesOnly repairs only codes; assess remains pure", () => {
+  const dirty = buildCandidate({
+    taskSheet: "推进资源危机；payoff_missing_progress；后收尾。",
+  });
+  const { repaired, stripped, emptiedTaskSheet } = tryAutoRepairInternalCodesOnly(dirty);
+  assert.equal(stripped, true);
+  assert.equal(emptiedTaskSheet, false);
+  assert.equal(containsInternalQualityCodes(repaired.taskSheet), false);
+  // original candidate untouched
+  assert.equal(containsInternalQualityCodes(dirty.taskSheet), true);
+
+  const after = assessChapterExecutionContractShape(repaired);
+  assert.equal(after.canEnterExecution, true);
+  assert.ok(!after.issues.some((issue) => issue.id === "task_sheet_internal_codes"));
+
+  const onlyCodes = tryAutoRepairInternalCodesOnly(buildCandidate({
+    taskSheet: "payoff_missing_progress replan_required",
+  }));
+  assert.equal(onlyCodes.stripped, true);
+  assert.equal(onlyCodes.emptiedTaskSheet, true);
+  const emptyAssess = assessChapterExecutionContractShape(onlyCodes.repaired);
+  assert.equal(emptyAssess.canEnterExecution, false);
+  assert.ok(emptyAssess.issues.some((issue) => issue.id === "missing_task_sheet"));
+
+  const clean = tryAutoRepairInternalCodesOnly(buildCandidate({
+    taskSheet: "正常推进，无内部码。",
+  }));
+  assert.equal(clean.stripped, false);
+  assert.equal(clean.emptiedTaskSheet, false);
 });
 
 test("emotion chapter overloaded task sheet yields type overload hint without hard-blocking alone", () => {

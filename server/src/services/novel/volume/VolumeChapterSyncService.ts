@@ -7,6 +7,8 @@ import type {
 import {
   assessChapterExecutionContractShape,
   formatChapterTaskSheetQualityFailure,
+  sanitizeChapterTaskSheetForPersistence,
+  tryAutoRepairInternalCodesOnly,
 } from "@ai-novel/shared/types/chapterTaskSheetQuality";
 import { prisma } from "../../../db/prisma";
 import type { VolumeUpdateReason } from "../../../events";
@@ -119,7 +121,7 @@ export class VolumeChapterSyncService {
             conflictLevel: item.chapter.conflictLevel ?? null,
             revealLevel: item.chapter.revealLevel ?? null,
             mustAvoid: item.chapter.mustAvoid ?? null,
-            taskSheet: item.chapter.taskSheet?.trim() || null,
+            taskSheet: sanitizeChapterTaskSheetForPersistence(item.chapter.taskSheet),
             sceneCards: item.chapter.sceneCards ?? null,
           },
         });
@@ -138,7 +140,7 @@ export class VolumeChapterSyncService {
             conflictLevel: item.chapter.conflictLevel ?? null,
             revealLevel: item.chapter.revealLevel ?? null,
             mustAvoid: item.chapter.mustAvoid ?? null,
-            taskSheet: item.chapter.taskSheet?.trim() || null,
+            taskSheet: sanitizeChapterTaskSheetForPersistence(item.chapter.taskSheet),
             sceneCards: item.chapter.sceneCards ?? null,
             ...(!item.preserveWorkflowState
               ? chapterStatePairAfterPlannedReset()
@@ -200,7 +202,7 @@ export class VolumeChapterSyncService {
         if (!hasExecutionArtifact) {
           continue;
         }
-        const result = assessChapterExecutionContractShape({
+        const baseCandidate = {
           novelId: document.novelId,
           volumeId: volume.id,
           chapterId: chapter.id,
@@ -218,7 +220,13 @@ export class VolumeChapterSyncService {
           payoffRefs: chapter.payoffRefs,
           taskSheet: chapter.taskSheet,
           sceneCards: chapter.sceneCards,
-        });
+        };
+        // Service-layer only: strip internal codes before pure assess (assess stays pure).
+        const { repaired } = tryAutoRepairInternalCodesOnly(baseCandidate);
+        if (repaired.taskSheet !== chapter.taskSheet) {
+          chapter.taskSheet = repaired.taskSheet ?? undefined;
+        }
+        const result = assessChapterExecutionContractShape(repaired);
         if (!result.canEnterExecution) {
           throw new Error(`第 ${chapter.chapterOrder} 章执行合同未通过质量门禁，不能连接到章节执行区。${formatChapterTaskSheetQualityFailure(result)}`);
         }

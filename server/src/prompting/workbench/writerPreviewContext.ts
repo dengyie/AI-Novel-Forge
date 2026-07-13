@@ -2,6 +2,7 @@ import type {
   ChapterWriteContext,
   GenerationContextPackage,
 } from "@ai-novel/shared/types/chapterRuntime";
+import { sanitizeWriterFacingTaskSheet } from "@ai-novel/shared/types/chapterTaskSheetQuality";
 import {
   buildBookContractContext,
   buildChapterWriteContext,
@@ -138,17 +139,18 @@ function buildPreviewPlan(input: {
 }): NonNullable<GenerationContextPackage["plan"]> {
   const { chapter, characters } = input;
   const scenes = parseSceneCards(chapter.sceneCards);
+  const writerTaskSheet = sanitizeWriterFacingTaskSheet(chapter.taskSheet);
   const mustAdvance = [
     ...scenes.flatMap((scene) => readStringList(scene.mustAdvance)),
     chapter.expectation,
-    chapter.taskSheet,
+    writerTaskSheet,
   ].map((item) => compactPreviewText(item)).filter(Boolean).slice(0, 8);
   const mustPreserve = [
     ...scenes.flatMap((scene) => readStringList(scene.mustPreserve)),
     chapter.mustAvoid ? `不得越界：${chapter.mustAvoid}` : "",
   ].map((item) => compactPreviewText(item)).filter(Boolean).slice(0, 8);
   const objective = compactPreviewText(
-    chapter.expectation || chapter.taskSheet,
+    chapter.expectation || writerTaskSheet,
     `推进第 ${chapter.order} 章《${chapter.title || "未命名章节"}》的章节任务。`,
   );
 
@@ -234,7 +236,7 @@ function buildPreviewGenerationContextPackage(input: {
       conflictLevel: chapter.conflictLevel ?? null,
       revealLevel: chapter.revealLevel ?? null,
       mustAvoid: chapter.mustAvoid ?? null,
-      taskSheet: chapter.taskSheet ?? null,
+      taskSheet: sanitizeWriterFacingTaskSheet(chapter.taskSheet) || null,
       sceneCards: chapter.sceneCards ?? null,
       hook: chapter.hook ?? null,
       supportingContextText: "",
