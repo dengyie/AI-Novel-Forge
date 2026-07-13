@@ -52,6 +52,12 @@ import {
 } from "./runtime/novelDirectorTakeover";
 import { NovelDirectorAutoExecutionRuntime } from "./automation/novelDirectorAutoExecutionRuntime";
 import {
+  buildBatchRollReadinessFromChapters,
+  resolveNextAutoExecutionBatchRoll,
+  resolveNextPreparedExecutableWindow,
+  resolveNextUnpreparedWindow,
+} from "./automation/novelDirectorAutoExecutionBatchRollRuntime";
+import {
   loadDirectorTakeoverState,
 } from "./runtime/novelDirectorTakeoverRuntime";
 import { startDirectorTakeoverExecution } from "./runtime/novelDirectorTakeoverExecution";
@@ -143,6 +149,56 @@ export class NovelDirectorService {
     autoConfirmPendingCandidates: (novelId) => this.characterDynamicsService.autoConfirmPendingCandidates(novelId),
     isPendingReviewAutoPromotionEnabled: () => qualityDebtSettingsService.isAutoPromotionEnabled(),
     autoPromotePendingReviewProposals: (input) => this.autoPromotePendingReviewProposals(input),
+    enableBatchRoll: true,
+    resolveBatchRoll: async ({ novelId, range, autoExecution, consecutiveBatchRolls }) => {
+      const chapters = await this.novelContextService.listChapters(novelId);
+      let readiness = buildBatchRollReadinessFromChapters(chapters as Parameters<typeof buildBatchRollReadinessFromChapters>[0]);
+      // Enrich readiness from volume workspace when chapter rows lack full contracts.
+      try {
+        const workspace = await this.volumeService.getVolumes(novelId);
+        const workspaceChapters = (workspace.volumes ?? []).flatMap((volume) =>
+          (volume.chapters ?? []).map((chapter) => ({
+            id: chapter.chapterId ?? chapter.id,
+            order: chapter.chapterOrder,
+            title: chapter.title,
+            content: null,
+            purpose: chapter.purpose,
+            exclusiveEvent: chapter.exclusiveEvent,
+            endingState: chapter.endingState,
+            nextChapterEntryState: chapter.nextChapterEntryState,
+            conflictLevel: chapter.conflictLevel,
+            revealLevel: chapter.revealLevel,
+            targetWordCount: chapter.targetWordCount,
+            mustAvoid: chapter.mustAvoid,
+            taskSheet: chapter.taskSheet,
+            sceneCards: typeof chapter.sceneCards === "string"
+              ? chapter.sceneCards
+              : (chapter.sceneCards ? JSON.stringify(chapter.sceneCards) : null),
+            generationState: chapters.find((row) => row.order === chapter.chapterOrder)?.generationState ?? null,
+            chapterStatus: chapters.find((row) => row.order === chapter.chapterOrder)?.chapterStatus ?? null,
+            riskFlags: chapters.find((row) => row.order === chapter.chapterOrder)?.riskFlags ?? null,
+          })),
+        );
+        if (workspaceChapters.length > 0) {
+          readiness = buildBatchRollReadinessFromChapters(workspaceChapters as Parameters<typeof buildBatchRollReadinessFromChapters>[0]);
+        }
+      } catch {
+        // workspace optional for expand-only decisions
+      }
+      const afterOrder = range.endOrder;
+      return resolveNextAutoExecutionBatchRoll({
+        range,
+        autoExecution,
+        consecutiveBatchRolls,
+        nextPreparedExecutableWindow: resolveNextPreparedExecutableWindow({ afterOrder, readiness }),
+        nextUnpreparedWindow: resolveNextUnpreparedWindow({ afterOrder, readiness }),
+        // Phase 1: expand_range only. reenter_structured_outline → halt_for_review until
+      // a real outline+sync prepareNextAutoExecutionBatch is injected (phase later).
+      canPrepareNextBatch: false,
+      });
+    },
+    // Do not inject prepareNext until it can run structured outline + sync.
+    // Fake expand-only prepare would silently skip outline on reenter.
   });
   private readonly directorRuntimeOrchestrator = new NovelDirectorRuntimeOrchestrator({
     directorRuntime: this.directorRuntime,

@@ -8,7 +8,12 @@ import type {
 import type { NovelWorkflowCheckpoint } from "@ai-novel/shared/types/novelWorkflow";
 import type { DirectorStateProposalResolutionRunResult } from "../runtime/DirectorStateProposalResolutionService";
 import { directorAutomationLedgerEventService } from "../runtime/DirectorAutomationLedgerEventService";
-import type { DirectorAutoExecutionChapterRef } from "./novelDirectorAutoExecution";
+import type { DirectorAutoExecutionChapterRef, DirectorAutoExecutionRange } from "./novelDirectorAutoExecution";
+import type {
+  BatchRollDecision,
+  PrepareNextAutoExecutionBatchInput,
+  PrepareNextAutoExecutionBatchResult,
+} from "./novelDirectorAutoExecutionBatchRollRuntime";
 
 export type AutomationLedgerEventPort = Pick<
   typeof directorAutomationLedgerEventService,
@@ -151,4 +156,18 @@ export interface NovelDirectorAutoExecutionRuntimeDeps {
     novelId: string;
     taskId: string;
   }) => Promise<void>;
+  /**
+   * When true (default if resolveBatchRoll is injected), remaining=0 may expand/reenter
+   * instead of always recording workflow_completed.
+   */
+  enableBatchRoll?: boolean;
+  resolveBatchRoll?: (input: {
+    novelId: string;
+    range: DirectorAutoExecutionRange;
+    autoExecution: DirectorAutoExecutionState;
+    consecutiveBatchRolls: number;
+  }) => BatchRollDecision | Promise<BatchRollDecision>;
+  prepareNextAutoExecutionBatch?: (
+    input: PrepareNextAutoExecutionBatchInput,
+  ) => Promise<PrepareNextAutoExecutionBatchResult>;
 }

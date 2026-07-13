@@ -45,9 +45,167 @@ import {
   recordDirectorQualityLoopBudgetAttempt,
   resolveDirectorQualityLoopBudgetNextAction,
 } from "../runtime/DirectorQualityLoopBudgetLedgerService";
+import {
+  applyExpandRangeBatchRoll,
+  type BatchRollDecision,
+} from "./novelDirectorAutoExecutionBatchRollRuntime";
 
 export class NovelDirectorAutoExecutionRuntime {
   constructor(private readonly deps: NovelDirectorAutoExecutionRuntimeDeps) {}
+
+  private isBatchRollEnabled(): boolean {
+    if (this.deps.enableBatchRoll === false) {
+      return false;
+    }
+    return typeof this.deps.resolveBatchRoll === "function";
+  }
+
+  /**
+   * When remaining=0, optionally expand/reenter instead of workflow_completed.
+   * Returns null if caller should recordCompletedCheckpoint; otherwise new range/state to continue loop.
+   */
+  private async tryBatchRollOnRangeExhausted(input: {
+    taskId: string;
+    novelId: string;
+    request: DirectorConfirmRequest;
+    range: DirectorAutoExecutionRange;
+    autoExecution: DirectorAutoExecutionState;
+    consecutiveBatchRolls: number;
+  }): Promise<{
+    range: DirectorAutoExecutionRange;
+    autoExecution: DirectorAutoExecutionState;
+    consecutiveBatchRolls: number;
+    decision: BatchRollDecision;
+  } | null> {
+    if (!this.isBatchRollEnabled() || !this.deps.resolveBatchRoll) {
+      return null;
+    }
+    const decision = await this.deps.resolveBatchRoll({
+      novelId: input.novelId,
+      range: input.range,
+      autoExecution: input.autoExecution,
+      consecutiveBatchRolls: input.consecutiveBatchRolls,
+    });
+    if (decision.kind === "completed_scope") {
+      return null;
+    }
+    if (decision.kind === "halt_for_review") {
+      await this.deps.workflowService.markTaskFailed(
+        input.taskId,
+        decision.reason,
+        {
+          stage: "quality_repair",
+          itemKey: "batch_roll",
+          itemLabel: "批续窗暂停",
+          checkpointType: "chapter_batch_ready",
+          checkpointSummary: decision.reason,
+          chapterId: input.autoExecution.nextChapterId ?? input.range.firstChapterId,
+          progress: 0.98,
+        },
+      );
+      await syncAutoExecutionTaskState(this.deps, {
+        taskId: input.taskId,
+        novelId: input.novelId,
+        request: input.request,
+        range: input.range,
+        autoExecution: {
+          ...input.autoExecution,
+          pipelineJobId: null,
+          pipelineStatus: null,
+        },
+        isBackgroundRunning: false,
+        resumeStage: "pipeline",
+      });
+      // Signal stop without completed checkpoint: throw a soft control via special decision
+      return {
+        range: input.range,
+        autoExecution: input.autoExecution,
+        consecutiveBatchRolls: input.consecutiveBatchRolls + 1,
+        decision,
+      };
+    }
+    if (decision.kind === "expand_range" && decision.nextRange) {
+      const chapters = await this.deps.novelContextService.listChapters(input.novelId);
+      const expanded = applyExpandRangeBatchRoll({
+        previousState: input.autoExecution,
+        nextRange: decision.nextRange,
+        chapters,
+      });
+      await syncAutoExecutionTaskState(this.deps, {
+        taskId: input.taskId,
+        novelId: input.novelId,
+        request: input.request,
+        range: expanded.range,
+        autoExecution: expanded.autoExecution,
+        isBackgroundRunning: true,
+        resumeStage: "pipeline",
+      });
+      return {
+        range: expanded.range,
+        autoExecution: expanded.autoExecution,
+        consecutiveBatchRolls: input.consecutiveBatchRolls + 1,
+        decision,
+      };
+    }
+    if (decision.kind === "reenter_structured_outline" && decision.nextRange) {
+      if (!this.deps.prepareNextAutoExecutionBatch) {
+        await this.deps.workflowService.markTaskFailed(
+          input.taskId,
+          `批续窗需要细化第 ${decision.nextRange.startOrder}-${decision.nextRange.endOrder} 章，但未配置 prepareNextAutoExecutionBatch。`,
+          {
+            stage: "quality_repair",
+            itemKey: "batch_roll_outline",
+            itemLabel: "批续窗待细化",
+            checkpointType: "chapter_batch_ready",
+            checkpointSummary: decision.reason,
+            progress: 0.92,
+          },
+        );
+        await syncAutoExecutionTaskState(this.deps, {
+          taskId: input.taskId,
+          novelId: input.novelId,
+          request: input.request,
+          range: input.range,
+          autoExecution: {
+            ...input.autoExecution,
+            pipelineJobId: null,
+            pipelineStatus: null,
+          },
+          isBackgroundRunning: false,
+          resumeStage: "pipeline",
+        });
+        return {
+          range: input.range,
+          autoExecution: input.autoExecution,
+          consecutiveBatchRolls: input.consecutiveBatchRolls + 1,
+          decision: { ...decision, kind: "halt_for_review" },
+        };
+      }
+      const prepared = await this.deps.prepareNextAutoExecutionBatch({
+        novelId: input.novelId,
+        taskId: input.taskId,
+        decision,
+        previousState: input.autoExecution,
+        previousRange: input.range,
+      });
+      await syncAutoExecutionTaskState(this.deps, {
+        taskId: input.taskId,
+        novelId: input.novelId,
+        request: input.request,
+        range: prepared.range,
+        autoExecution: prepared.autoExecution,
+        isBackgroundRunning: true,
+        resumeStage: "pipeline",
+      });
+      return {
+        range: prepared.range,
+        autoExecution: prepared.autoExecution,
+        consecutiveBatchRolls: input.consecutiveBatchRolls + 1,
+        decision,
+      };
+    }
+    return null;
+  }
 
   async prepareRequestedAutoExecution(
     input: Parameters<typeof prepareRequestedAutoExecutionState>[1],
@@ -161,6 +319,7 @@ export class NovelDirectorAutoExecutionRuntime {
       // and consecutive defer-and-continue advances without any chapter succeeding.
       let consecutiveStartFailures = 0;
       let consecutiveDefers = 0;
+      let consecutiveBatchRolls = 0;
       const MAX_CONSECUTIVE_START_FAILURES = 3;
       const MAX_CONSECUTIVE_DEFERS = 5;
 
@@ -175,6 +334,24 @@ export class NovelDirectorAutoExecutionRuntime {
           allowLazyChapterPlanning,
         }));
         if ((autoExecution.remainingChapterCount ?? 0) === 0) {
+          const rolled = await this.tryBatchRollOnRangeExhausted({
+            taskId: input.taskId,
+            novelId: input.novelId,
+            request: input.request,
+            range,
+            autoExecution,
+            consecutiveBatchRolls,
+          });
+          if (rolled) {
+            if (rolled.decision.kind === "halt_for_review") {
+              return;
+            }
+            range = rolled.range;
+            autoExecution = rolled.autoExecution;
+            consecutiveBatchRolls = rolled.consecutiveBatchRolls;
+            pipelineJobId = "";
+            continue autoExecutionLoop;
+          }
           await recordCompletedCheckpoint(this.deps, {
             taskId: input.taskId,
             novelId: input.novelId,
@@ -257,6 +434,24 @@ export class NovelDirectorAutoExecutionRuntime {
             allowLazyChapterPlanning,
           }));
           if ((autoExecution.remainingChapterCount ?? 0) === 0) {
+            const rolled = await this.tryBatchRollOnRangeExhausted({
+              taskId: input.taskId,
+              novelId: input.novelId,
+              request: input.request,
+              range,
+              autoExecution,
+              consecutiveBatchRolls,
+            });
+            if (rolled) {
+              if (rolled.decision.kind === "halt_for_review") {
+                return;
+              }
+              range = rolled.range;
+              autoExecution = rolled.autoExecution;
+              consecutiveBatchRolls = rolled.consecutiveBatchRolls;
+              pipelineJobId = "";
+              continue autoExecutionLoop;
+            }
             await recordCompletedCheckpoint(this.deps, {
               taskId: input.taskId,
               novelId: input.novelId,
@@ -437,6 +632,24 @@ export class NovelDirectorAutoExecutionRuntime {
             });
             continue autoExecutionLoop;
           }
+          const rolledAfterSuccess = await this.tryBatchRollOnRangeExhausted({
+            taskId: input.taskId,
+            novelId: input.novelId,
+            request: input.request,
+            range,
+            autoExecution,
+            consecutiveBatchRolls,
+          });
+          if (rolledAfterSuccess) {
+            if (rolledAfterSuccess.decision.kind === "halt_for_review") {
+              return;
+            }
+            range = rolledAfterSuccess.range;
+            autoExecution = rolledAfterSuccess.autoExecution;
+            consecutiveBatchRolls = rolledAfterSuccess.consecutiveBatchRolls;
+            pipelineJobId = "";
+            continue autoExecutionLoop;
+          }
           await recordCompletedCheckpoint(this.deps, {
             taskId: input.taskId,
             novelId: input.novelId,
@@ -450,6 +663,24 @@ export class NovelDirectorAutoExecutionRuntime {
         }
 
         if ((autoExecution.remainingChapterCount ?? 0) === 0) {
+          const rolledAfterTerminal = await this.tryBatchRollOnRangeExhausted({
+            taskId: input.taskId,
+            novelId: input.novelId,
+            request: input.request,
+            range,
+            autoExecution,
+            consecutiveBatchRolls,
+          });
+          if (rolledAfterTerminal) {
+            if (rolledAfterTerminal.decision.kind === "halt_for_review") {
+              return;
+            }
+            range = rolledAfterTerminal.range;
+            autoExecution = rolledAfterTerminal.autoExecution;
+            consecutiveBatchRolls = rolledAfterTerminal.consecutiveBatchRolls;
+            pipelineJobId = "";
+            continue autoExecutionLoop;
+          }
           await recordCompletedCheckpoint(this.deps, {
             taskId: input.taskId,
             novelId: input.novelId,
