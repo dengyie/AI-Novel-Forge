@@ -1,94 +1,127 @@
 import { z } from "zod";
 
 const looseObjectSchema = z.record(z.string(), z.unknown());
-const looseStringArraySchema = z.array(z.string().trim().min(1)).default([]);
+
+/** Prefer arrays; accept missing/null as empty (LLM often omits optional collections). */
+const looseStringArraySchema = z.preprocess((value) => {
+  if (value == null) {
+    return [];
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed ? [trimmed] : [];
+  }
+  return value;
+}, z.array(z.string().trim().min(1)).default([]));
+
+/** Optional free text: empty string / null / whitespace → undefined. */
+const optionalText = z.preprocess((value) => {
+  if (value == null) {
+    return undefined;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  }
+  return value;
+}, z.string().optional());
 
 const worldProfileSchema = z.object({
-  summary: z.string().trim().optional(),
-  identity: z.string().trim().optional(),
-  tone: z.string().trim().optional(),
+  summary: optionalText,
+  identity: optionalText,
+  tone: optionalText,
   themes: looseStringArraySchema.optional(),
-  coreConflict: z.string().trim().optional(),
+  coreConflict: optionalText,
 }).passthrough();
 
 const worldRuleSchema = z.object({
-  id: z.string().trim().min(1).optional(),
-  name: z.string().trim().min(1).optional(),
-  summary: z.string().trim().optional(),
-  cost: z.string().trim().optional(),
-  boundary: z.string().trim().optional(),
-  enforcement: z.string().trim().optional(),
+  id: optionalText,
+  name: optionalText,
+  summary: optionalText,
+  cost: optionalText,
+  boundary: optionalText,
+  enforcement: optionalText,
 }).passthrough();
 
 const worldRulesSchema = z.object({
-  summary: z.string().trim().optional(),
-  axioms: z.array(worldRuleSchema).default([]),
+  summary: optionalText,
+  axioms: z.preprocess((value) => (value == null ? [] : value), z.array(worldRuleSchema).default([])),
   taboo: looseStringArraySchema.optional(),
   sharedConsequences: looseStringArraySchema.optional(),
 }).passthrough();
 
 const worldFactionSchema = z.object({
-  id: z.string().trim().min(1).optional(),
-  name: z.string().trim().min(1).optional(),
-  position: z.string().trim().optional(),
-  doctrine: z.string().trim().optional(),
+  id: optionalText,
+  name: optionalText,
+  position: optionalText,
+  doctrine: optionalText,
   goals: looseStringArraySchema.optional(),
   methods: looseStringArraySchema.optional(),
   representativeForceIds: looseStringArraySchema.optional(),
 }).passthrough();
 
 const worldForceSchema = z.object({
-  id: z.string().trim().min(1).optional(),
-  name: z.string().trim().min(1).optional(),
-  type: z.string().trim().optional(),
-  factionId: z.string().trim().optional(),
-  summary: z.string().trim().optional(),
-  baseOfPower: z.string().trim().optional(),
-  currentObjective: z.string().trim().optional(),
-  pressure: z.string().trim().optional(),
-  leader: z.string().trim().optional(),
-  narrativeRole: z.string().trim().optional(),
+  id: optionalText,
+  name: optionalText,
+  type: optionalText,
+  factionId: optionalText,
+  summary: optionalText,
+  baseOfPower: optionalText,
+  currentObjective: optionalText,
+  pressure: optionalText,
+  leader: optionalText,
+  narrativeRole: optionalText,
 }).passthrough();
 
 const worldLocationSchema = z.object({
-  id: z.string().trim().min(1).optional(),
-  name: z.string().trim().min(1).optional(),
-  terrain: z.string().trim().optional(),
-  summary: z.string().trim().optional(),
-  narrativeFunction: z.string().trim().optional(),
-  risk: z.string().trim().optional(),
-  entryConstraint: z.string().trim().optional(),
-  exitCost: z.string().trim().optional(),
+  id: optionalText,
+  name: optionalText,
+  terrain: optionalText,
+  summary: optionalText,
+  narrativeFunction: optionalText,
+  risk: optionalText,
+  entryConstraint: optionalText,
+  exitCost: optionalText,
   controllingForceIds: looseStringArraySchema.optional(),
 }).passthrough();
 
 const worldForceRelationSchema = z.object({
-  id: z.string().trim().min(1).optional(),
-  sourceForceId: z.string().trim().optional(),
-  targetForceId: z.string().trim().optional(),
-  relation: z.string().trim().optional(),
-  tension: z.string().trim().optional(),
-  detail: z.string().trim().optional(),
+  id: optionalText,
+  sourceForceId: optionalText,
+  targetForceId: optionalText,
+  relation: optionalText,
+  tension: optionalText,
+  detail: optionalText,
 }).passthrough();
 
 const worldLocationControlSchema = z.object({
-  id: z.string().trim().min(1).optional(),
-  forceId: z.string().trim().optional(),
-  locationId: z.string().trim().optional(),
-  relation: z.string().trim().optional(),
-  detail: z.string().trim().optional(),
+  id: optionalText,
+  forceId: optionalText,
+  locationId: optionalText,
+  relation: optionalText,
+  detail: optionalText,
 }).passthrough();
 
+/**
+ * Theme-world generation schema: keep structure, but tolerate partial LLM fills.
+ * Empty arrays / omitted collections are accepted so flash models can pass validation
+ * without multi-round repair (strict narrative quality is enforced downstream / by prompts).
+ */
 export const worldStructuredDataSchema = z.object({
-  profile: worldProfileSchema,
-  rules: worldRulesSchema,
-  factions: z.array(worldFactionSchema),
-  forces: z.array(worldForceSchema),
-  locations: z.array(worldLocationSchema),
-  relations: z.object({
-    forceRelations: z.array(worldForceRelationSchema).default([]),
-    locationControls: z.array(worldLocationControlSchema).default([]),
-  }).passthrough(),
+  profile: worldProfileSchema.default({}),
+  rules: worldRulesSchema.default({ axioms: [] }),
+  factions: z.preprocess((value) => (value == null ? [] : value), z.array(worldFactionSchema).default([])),
+  forces: z.preprocess((value) => (value == null ? [] : value), z.array(worldForceSchema).default([])),
+  locations: z.preprocess((value) => (value == null ? [] : value), z.array(worldLocationSchema).default([])),
+  relations: z.preprocess((value) => {
+    if (value == null || typeof value !== "object") {
+      return { forceRelations: [], locationControls: [] };
+    }
+    return value;
+  }, z.object({
+    forceRelations: z.preprocess((value) => (value == null ? [] : value), z.array(worldForceRelationSchema).default([])),
+    locationControls: z.preprocess((value) => (value == null ? [] : value), z.array(worldLocationControlSchema).default([])),
+  }).passthrough().default({ forceRelations: [], locationControls: [] })),
 }).passthrough();
 
 export const worldStructureSectionOutputSchema = z.union([

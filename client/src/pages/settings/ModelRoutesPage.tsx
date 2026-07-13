@@ -20,6 +20,7 @@ import ModelRouteFields from "./ModelRouteFields";
 import { MODEL_ROUTE_LABELS } from "./modelRouteLabels";
 import {
   buildRouteSavePayload,
+  coerceProviderForModelId,
   formatConnectivityStatus,
   getPreferredModel,
   getProviderDisplayName,
@@ -231,10 +232,20 @@ export default function ModelRoutesPage() {
     const chain = structuredFallback?.chain ?? [];
     const first = chain[0];
     const second = chain[1];
+    const primaryModel = first?.model ?? structuredFallback?.model ?? "deepseek-v4-pro";
+    const primaryProvider = coerceProviderForModelId(
+      first?.provider ?? structuredFallback?.provider ?? "deepseek",
+      primaryModel,
+    );
+    const secondaryModel = second?.model ?? "deepseek-v4-flash";
+    const secondaryProvider = coerceProviderForModelId(
+      second?.provider ?? primaryProvider,
+      secondaryModel,
+    );
     return {
       enabled: structuredFallback?.enabled ?? false,
-      provider: first?.provider ?? structuredFallback?.provider ?? "openai",
-      model: first?.model ?? structuredFallback?.model ?? "deepseek-v4-pro",
+      provider: primaryProvider,
+      model: primaryModel,
       temperature: structuredFallback != null
         ? String(first?.temperature ?? structuredFallback.temperature)
         : "0.2",
@@ -243,8 +254,8 @@ export default function ModelRoutesPage() {
         : "",
       requestProtocol: "auto",
       structuredResponseFormat: "auto",
-      secondaryProvider: second?.provider ?? "openai",
-      secondaryModel: second?.model ?? "deepseek-v4-flash",
+      secondaryProvider,
+      secondaryModel,
     };
   }
 
@@ -454,26 +465,36 @@ export default function ModelRoutesPage() {
               onClick={() => {
                 const temperature = Number(fallbackDraft.temperature || 0.2);
                 const maxTokens = fallbackDraft.maxTokens.trim() ? Number(fallbackDraft.maxTokens) : null;
+                const primaryModel = fallbackDraft.model.trim();
+                const primaryProvider = coerceProviderForModelId(
+                  fallbackDraft.provider.trim(),
+                  primaryModel,
+                ) as StructuredFallbackSettings["provider"];
+                const secondaryModel = fallbackDraft.secondaryModel.trim();
+                const secondaryProvider = coerceProviderForModelId(
+                  (fallbackDraft.secondaryProvider || primaryProvider).trim(),
+                  secondaryModel || primaryModel,
+                ) as StructuredFallbackSettings["provider"];
                 const chain = [
                   {
-                    provider: fallbackDraft.provider as StructuredFallbackSettings["provider"],
-                    model: fallbackDraft.model,
+                    provider: primaryProvider,
+                    model: primaryModel,
                     temperature,
                     maxTokens,
                   },
                 ];
-                if (fallbackDraft.secondaryModel.trim()) {
+                if (secondaryModel) {
                   chain.push({
-                    provider: (fallbackDraft.secondaryProvider || fallbackDraft.provider) as StructuredFallbackSettings["provider"],
-                    model: fallbackDraft.secondaryModel.trim(),
+                    provider: secondaryProvider,
+                    model: secondaryModel,
                     temperature,
                     maxTokens,
                   });
                 }
                 saveStructuredFallbackMutation.mutate({
                   enabled: fallbackDraft.enabled,
-                  provider: fallbackDraft.provider as StructuredFallbackSettings["provider"],
-                  model: fallbackDraft.model,
+                  provider: primaryProvider,
+                  model: primaryModel,
                   temperature,
                   maxTokens,
                   chain,

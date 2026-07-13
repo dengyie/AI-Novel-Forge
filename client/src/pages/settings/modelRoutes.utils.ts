@@ -51,6 +51,28 @@ export function getPreferredModel(config: APIKeyStatus | undefined): string {
   return config?.currentModel || config?.models?.[0] || "";
 }
 
+/**
+ * Keep settings UI aligned with server `coerceProviderForModelId`:
+ * deepseek-* models should not be saved under the openai provider slot when using CPA.
+ */
+export function coerceProviderForModelId(provider: string, model: string): string {
+  const id = (model ?? "").trim().toLowerCase();
+  if (!id) {
+    return provider;
+  }
+  const leaf = id.includes("/") ? (id.split("/").filter(Boolean).pop() ?? id) : id;
+  if (
+    leaf.startsWith("deepseek")
+    || leaf.includes("deepseek-v4")
+    || leaf.includes("deepseek-reasoner")
+  ) {
+    if (provider === "openai") {
+      return "deepseek";
+    }
+  }
+  return provider;
+}
+
 export function getModelOptions(providerConfigs: APIKeyStatus[], provider: string, currentModel: string): string[] {
   const config = getProviderConfig(providerConfigs, provider);
   const models = config?.models ?? [];

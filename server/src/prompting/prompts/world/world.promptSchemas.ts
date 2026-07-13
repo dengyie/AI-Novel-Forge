@@ -55,11 +55,51 @@ export const worldConsistencyIssuesSchema = z.array(z.object({
 
 export const worldLooseObjectSchema = z.record(z.string(), z.unknown());
 
+const optionalThemeText = z.preprocess((value) => {
+  if (value == null) {
+    return "未命名世界";
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : "未命名世界";
+  }
+  return value;
+}, z.string().min(1));
+
+/**
+ * Looser theme-world top-level schema: allow models to omit cover/type and still pass,
+ * so structured repair loops (flash) are less likely. Nested structure is already soft.
+ */
 export const novelThemeWorldGenerationSchema = z.object({
-  title: z.string().trim().min(1),
-  coverSummary: z.string().trim().min(1),
-  worldType: z.string().trim().min(1),
-  structuredData: worldStructuredDataSchema,
+  title: optionalThemeText,
+  coverSummary: z.preprocess((value) => {
+    if (value == null) {
+      return "待补全的世界封面概述。";
+    }
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      return trimmed.length > 0 ? trimmed : "待补全的世界封面概述。";
+    }
+    return value;
+  }, z.string().min(1)),
+  worldType: z.preprocess((value) => {
+    if (value == null) {
+      return "当代隐秘";
+    }
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      return trimmed.length > 0 ? trimmed : "当代隐秘";
+    }
+    return value;
+  }, z.string().min(1)),
+  structuredData: worldStructuredDataSchema.default({
+    profile: {},
+    rules: { axioms: [] },
+    factions: [],
+    forces: [],
+    locations: [],
+    relations: { forceRelations: [], locationControls: [] },
+  }),
 }).passthrough();
 
 export const worldImportExtractionSchema = z.object({
