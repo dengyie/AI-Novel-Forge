@@ -33,6 +33,7 @@
 - [Character Resource Ledger Plan](./plans/character-resource-ledger-plan.md)
 - [Prompt Workbench, Context and Step Runtime Plan](./plans/prompt-workbench-context-and-step-runtime-plan.md)
 - [Auto Director Execution Plane Isolation Plan](./plans/auto-director-execution-plane-isolation-plan.md)
+- [Director Self-Cycle Pipeline Plan](./plans/director-self-cycle-pipeline-plan.md)（批续窗 / 合同 strip / recovery 不回卷，监管只重启）
 - [Director Mode Module and State Refactor Checklist](./plans/director-mode-module-state-refactor-checklist.md)
 
 ### `docs/design`
