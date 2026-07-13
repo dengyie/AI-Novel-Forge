@@ -155,6 +155,121 @@ function applyAutoExecutionStateCursorToExecutableRange(
   };
 }
 
+/**
+ * True when every chapter in the state's executable window is already processed
+ * (approved/published or skip-quality debt), i.e. remaining work inside the window is 0.
+ * Used to avoid rebinding takeover executableRange to a completed batch (11–20 covering 21–30).
+ */
+export function stateRangeHasPendingWork(
+  chapterRows: TakeoverChapterRow[],
+  state: DirectorWorkflowSeedPayload["autoExecution"] | null | undefined,
+): boolean {
+  const stateRange = resolveDirectorAutoExecutionRangeFromState(state);
+  if (!stateRange) {
+    return false;
+  }
+  return chapterRows.some((chapter) => (
+    chapter.order >= stateRange.startOrder
+    && chapter.order <= stateRange.endOrder
+    && isPendingAutoExecutionChapter(chapter)
+  ));
+}
+
+/**
+ * Explicit re-scope: caller passed a plan that intentionally changes the
+ * persisted autoExecution window. Absent request is NOT a re-scope
+ * (normalizeDirectorAutoExecutionPlan(null) would invent default 1–10).
+ */
+export function isExplicitAutoExecutionRescopeRequest(input: {
+  requestedPlan?: DirectorAutoExecutionPlan | null;
+  state?: DirectorWorkflowSeedPayload["autoExecution"] | null;
+}): boolean {
+  if (input.requestedPlan == null) {
+    return false;
+  }
+  const rawMode = typeof (input.requestedPlan as { mode?: unknown }).mode === "string"
+    ? (input.requestedPlan as { mode?: string }).mode
+    : null;
+  // book / volume are intentional scope overrides relative to a chapter_range state window.
+  if (rawMode === "book" || rawMode === "volume") {
+    return true;
+  }
+  if (rawMode !== "chapter_range") {
+    return false;
+  }
+  const requested = normalizeDirectorAutoExecutionPlan(input.requestedPlan);
+  const requestedRange = resolveDirectorAutoExecutionPlanChapterRange(requested);
+  if (!requestedRange) {
+    return false;
+  }
+  const stateRange = resolveDirectorAutoExecutionRangeFromState(input.state);
+  if (!stateRange) {
+    // No prior window — first scope, not a rewind of a completed batch.
+    return true;
+  }
+  return (
+    requestedRange.startOrder !== stateRange.startOrder
+    || requestedRange.endOrder !== stateRange.endOrder
+  );
+}
+
+/**
+ * Contiguous prepared chapters after `afterOrder` that still have pending work.
+ * Pure helper for advancing executableRange past a completed batch window.
+ */
+export function resolveNextPreparedExecutableRangeFromChapters(
+  chapterRows: TakeoverChapterRow[],
+  afterOrder: number,
+  options?: { allowLazyChapterPlanning?: boolean; maxWindowSize?: number },
+): DirectorTakeoverExecutableRangeSnapshot | null {
+  const maxWindowSize = options?.maxWindowSize ?? 10;
+  const preparedPending = chapterRows
+    .filter((chapter) => (
+      chapter.order > afterOrder
+      && hasExecutableChapterPlanningContext(chapter, options?.allowLazyChapterPlanning)
+      && isPendingAutoExecutionChapter(chapter)
+    ))
+    .sort((left, right) => left.order - right.order);
+  if (preparedPending.length === 0) {
+    return null;
+  }
+  const startOrder = preparedPending[0]!.order;
+  let endOrder = startOrder;
+  for (let index = 1; index < preparedPending.length; index += 1) {
+    const order = preparedPending[index]!.order;
+    if (order !== endOrder + 1) {
+      break;
+    }
+    if ((order - startOrder + 1) > maxWindowSize) {
+      break;
+    }
+    endOrder = order;
+  }
+  // Expand end to include contiguous prepared (even already-processed) siblings in the same window.
+  const preparedOrders = new Set(
+    chapterRows
+      .filter((chapter) => (
+        chapter.order >= startOrder
+        && hasExecutableChapterPlanningContext(chapter, options?.allowLazyChapterPlanning)
+      ))
+      .map((chapter) => chapter.order),
+  );
+  while (
+    preparedOrders.has(endOrder + 1)
+    && (endOrder + 1 - startOrder + 1) <= maxWindowSize
+  ) {
+    endOrder += 1;
+  }
+  return buildPreparedRangeFromSyncedChapters(
+    chapterRows,
+    Array.from(
+      { length: endOrder - startOrder + 1 },
+      (_item, index) => startOrder + index,
+    ),
+    options,
+  );
+}
+
 function hasPreparedOutlineChapterExecutionDetail(
   chapter: VolumePlanDocument["volumes"][number]["chapters"][number] | null | undefined,
 ): boolean {
@@ -527,63 +642,113 @@ export async function loadDirectorTakeoverState(input: {
     chapterOrderMap,
   });
 
-  const executableRangeFromState = requestedAutoExecutionPlan
-    ? null
-    : buildPreparedRangeFromState(
-        chapterRows as TakeoverChapterRow[],
-        reconciledLatestAutoExecutionState,
-        { allowLazyChapterPlanning },
-      );
-  const executableRangeFromSyncedChapters = structuredOutlineCursor
-    && (structuredOutlineCursor.step === "chapter_sync" || structuredOutlineCursor.step === "completed")
-    ? buildPreparedRangeFromSyncedChapters(
-        chapterRows as TakeoverChapterRow[],
-        structuredOutlineCursor.selectedChapters.map((chapter) => chapter.chapterOrder),
-        { allowLazyChapterPlanning },
-      )
-    : null;
-  const executableRange = applyAutoExecutionStateCursorToExecutableRange(
-    executableRangeFromState
-    ? {
-        startOrder: executableRangeFromState.startOrder,
-        endOrder: executableRangeFromState.endOrder,
-        totalChapterCount: executableRangeFromState.totalChapterCount,
-        nextChapterId: executableRangeFromState.nextChapterId,
-        nextChapterOrder: executableRangeFromState.nextChapterOrder,
-      }
-    : executableRangeFromSyncedChapters,
-    reconciledLatestAutoExecutionState,
-  );
+  // Recovery priority (self-cycle P0-3):
+// 1. Explicit re-scope request (chapter_range differs from state) → do not bind state range here
+// 2. State window still has pending → keep state range (true resume)
+// 3. State window fully done → roll to next prepared pending window; never rebind completed batch
+// 4. Fall back to structured-outline cursor prepared range
+const explicitRescope = isExplicitAutoExecutionRescopeRequest({
+  requestedPlan: requestedAutoExecutionPlan,
+  state: reconciledLatestAutoExecutionState,
+});
+const stateHasPending = stateRangeHasPendingWork(
+  chapterRows as TakeoverChapterRow[],
+  reconciledLatestAutoExecutionState,
+);
+const stateRange = resolveDirectorAutoExecutionRangeFromState(reconciledLatestAutoExecutionState);
 
-  return {
-    novel,
-    storyMacroPlan,
-    bookContract: novel.bookContract ?? null,
-    snapshot: {
-      ...assets,
-      hasStoryMacroPlan: Boolean(storyMacroPlan?.storyInput?.trim() && storyMacroPlan.decomposition),
-      hasBookContract: Boolean(novel.bookContract),
-      hasVolumeStrategyPlan: assets.hasVolumeStrategyPlan,
-      firstVolumeId: assets.firstVolumeId,
-      volumeChapterRanges: assets.volumeChapterRanges,
-      structuredOutlineChapterOrders: assets.structuredOutlineChapterOrders,
-      firstVolumeBeatSheetReady,
-      firstVolumePreparedChapterCount,
-      structuredOutlineRecoveryStep: structuredOutlineCursor?.step ?? null,
-      generatedChapterCount,
-      approvedChapterCount,
-      pendingRepairChapterCount,
-      hasUnpreparedChaptersInRange: missingExecutionContractOrders.length > 0,
-      missingExecutionContractOrders,
-    },
-    activeTaskId: activeTask?.id ?? null,
-    hasActiveTask: Boolean(activeTask),
-    latestTaskId: latestTask?.id ?? null,
-    activePipelineJob: activePipelineSnapshot,
-    latestCheckpoint,
-    executableRange,
-    latestAutoExecutionState: reconciledLatestAutoExecutionState,
-  };
+let executableRangeFromState: DirectorTakeoverExecutableRangeSnapshot | null = null;
+if (!explicitRescope && stateHasPending) {
+  executableRangeFromState = buildPreparedRangeFromState(
+    chapterRows as TakeoverChapterRow[],
+    reconciledLatestAutoExecutionState,
+    { allowLazyChapterPlanning },
+  );
+} else if (!explicitRescope && stateRange && !stateHasPending) {
+  // Completed batch: advance past endOrder; do not return the finished 11–20 window.
+  executableRangeFromState = resolveNextPreparedExecutableRangeFromChapters(
+    chapterRows as TakeoverChapterRow[],
+    stateRange.endOrder,
+    { allowLazyChapterPlanning },
+  );
+}
+
+const executableRangeFromSyncedChapters = structuredOutlineCursor
+  && (structuredOutlineCursor.step === "chapter_sync" || structuredOutlineCursor.step === "completed")
+  ? buildPreparedRangeFromSyncedChapters(
+      chapterRows as TakeoverChapterRow[],
+      structuredOutlineCursor.selectedChapters.map((chapter) => chapter.chapterOrder),
+      { allowLazyChapterPlanning },
+  )
+  : null;
+
+// Prefer state-derived (resume or rolled) range; only use outline cursor when no better range.
+const preferredRange = executableRangeFromState ?? (
+  // When state window is done and no next prepared range, do NOT fall back to completed batch
+  // via outline cursor selecting the old window — leave null so recovery reenters outline.
+  stateRange && !stateHasPending && !explicitRescope
+    ? null
+    : executableRangeFromSyncedChapters
+);
+const executableRange = applyAutoExecutionStateCursorToExecutableRange(
+  preferredRange
+    ? {
+        startOrder: preferredRange.startOrder,
+        endOrder: preferredRange.endOrder,
+        totalChapterCount: preferredRange.totalChapterCount,
+        nextChapterId: preferredRange.nextChapterId,
+        nextChapterOrder: preferredRange.nextChapterOrder,
+      }
+    : null,
+  // Only apply state cursor when still resuming inside the same window.
+  stateHasPending ? reconciledLatestAutoExecutionState : null,
+);
+
+// Unprepared signal: prefer effective plan scope; when state window is complete,
+// also surface unprepared orders after that window so continue can reenter outline.
+const missingAfterCompletedState = (!stateHasPending && stateRange)
+  ? (chapterRows as TakeoverChapterRow[])
+    .filter((chapter) => (
+      chapter.order > stateRange.endOrder
+      && isPendingAutoExecutionChapter(chapter)
+      && !hasExecutableChapterPlanningContext(chapter, allowLazyChapterPlanning)
+    ))
+    .map((chapter) => chapter.order)
+    .sort((left, right) => left - right)
+  : [];
+const effectiveMissingExecutionContractOrders = missingExecutionContractOrders.length > 0
+  ? missingExecutionContractOrders
+  : missingAfterCompletedState;
+
+return {
+  novel,
+  storyMacroPlan,
+  bookContract: novel.bookContract ?? null,
+  snapshot: {
+    ...assets,
+    hasStoryMacroPlan: Boolean(storyMacroPlan?.storyInput?.trim() && storyMacroPlan.decomposition),
+    hasBookContract: Boolean(novel.bookContract),
+    hasVolumeStrategyPlan: assets.hasVolumeStrategyPlan,
+    firstVolumeId: assets.firstVolumeId,
+    volumeChapterRanges: assets.volumeChapterRanges,
+    structuredOutlineChapterOrders: assets.structuredOutlineChapterOrders,
+    firstVolumeBeatSheetReady,
+    firstVolumePreparedChapterCount,
+    structuredOutlineRecoveryStep: structuredOutlineCursor?.step ?? null,
+    generatedChapterCount,
+    approvedChapterCount,
+    pendingRepairChapterCount,
+    hasUnpreparedChaptersInRange: effectiveMissingExecutionContractOrders.length > 0,
+    missingExecutionContractOrders: effectiveMissingExecutionContractOrders,
+  },
+  activeTaskId: activeTask?.id ?? null,
+  hasActiveTask: Boolean(activeTask),
+  latestTaskId: latestTask?.id ?? null,
+  activePipelineJob: activePipelineSnapshot,
+  latestCheckpoint,
+  executableRange,
+  latestAutoExecutionState: reconciledLatestAutoExecutionState,
+};
 }
 
 export function resolveDirectorRunningStateForPhase(
