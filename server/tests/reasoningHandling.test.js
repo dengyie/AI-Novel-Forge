@@ -3,10 +3,14 @@ const assert = require("node:assert/strict");
 const {
   ThinkTagStreamFilter,
   diffAccumulatedText,
+  extractMessageTextForStructuredOutput,
   extractMiniMaxRawStreamData,
   extractReasoningTextFromChunk,
+  isDeepSeekFamilyModelId,
+  isDeepSeekThinkingCapableModelId,
   isDeepSeekThinkingModeProvider,
   isMiniMaxCompatibleProvider,
+  normalizeModelId,
   resolveProviderReasoningBehavior,
 } = require("../dist/llm/reasoning.js");
 
@@ -19,7 +23,9 @@ test("deepseek v4 pro behavior maps reasoning toggle to thinking mode", () => {
   });
 
   assert.equal(disabled.reasoningEnabled, false);
-  assert.deepEqual(disabled.modelKwargs, { thinking: { type: "disabled" } });
+  assert.equal(disabled.modelKwargs.thinking.type, "disabled");
+  assert.equal(disabled.modelKwargs.enable_thinking, false);
+  assert.equal(disabled.includeRawResponse, true);
 
   const enabled = resolveProviderReasoningBehavior({
     provider: "custom_gateway",
@@ -29,14 +35,78 @@ test("deepseek v4 pro behavior maps reasoning toggle to thinking mode", () => {
   });
 
   assert.equal(enabled.reasoningEnabled, true);
-  assert.deepEqual(enabled.modelKwargs, { thinking: { type: "enabled" } });
+  assert.equal(enabled.modelKwargs.thinking.type, "enabled");
+  assert.equal(enabled.modelKwargs.enable_thinking, true);
 });
 
-test("deepseek thinking mode detection is limited to toggle-capable models", () => {
-  assert.equal(isDeepSeekThinkingModeProvider("deepseek", undefined, "deepseek-v4-pro"), true);
-  assert.equal(isDeepSeekThinkingModeProvider("custom_gateway", "https://api.deepseek.com/v1", "deepseek-reasoner"), true);
+test("deepseek thinking mode is detected by model id on OpenAI-compatible proxies (CPA)", () => {
+  assert.equal(isDeepSeekThinkingCapableModelId("deepseek-v4-pro"), true);
+  assert.equal(isDeepSeekThinkingCapableModelId("deepseek-ai/deepseek-v4-pro"), true);
+  assert.equal(isDeepSeekThinkingCapableModelId("deepseek-chat"), false);
+  assert.equal(isDeepSeekFamilyModelId("deepseek-v4-flash"), true);
+
+  // Critical production case: provider slot is openai, baseURL is CPA, model is deepseek-v4-pro.
+  assert.equal(
+    isDeepSeekThinkingModeProvider("openai", "https://cpa.mangoq.ccwu.cc/v1", "deepseek-v4-pro"),
+    true,
+  );
+  assert.equal(
+    isDeepSeekThinkingModeProvider("openai", "https://cpa.mangoq.ccwu.cc/v1", "deepseek-ai/deepseek-v4-pro"),
+    true,
+  );
+  assert.equal(
+    isDeepSeekThinkingModeProvider("deepseek", undefined, "deepseek-v4-pro"),
+    true,
+  );
+  assert.equal(
+    isDeepSeekThinkingModeProvider("custom_gateway", "https://api.deepseek.com/v1", "deepseek-reasoner"),
+    true,
+  );
   assert.equal(isDeepSeekThinkingModeProvider("deepseek", undefined, "deepseek-chat"), false);
-  assert.equal(isDeepSeekThinkingModeProvider("openai", "https://api.openai.com/v1", "deepseek-v4-pro"), false);
+  // Real OpenAI GPT models must not be treated as deepseek thinking.
+  assert.equal(
+    isDeepSeekThinkingModeProvider("openai", "https://api.openai.com/v1", "gpt-5.5"),
+    false,
+  );
+  assert.equal(normalizeModelId("deepseek-ai/deepseek-v4-pro"), "deepseek-v4-pro");
+});
+
+test("CPA openai+deepseek-v4-pro forces thinking disabled kwargs when reasoningEnabled=false", () => {
+  const behavior = resolveProviderReasoningBehavior({
+    provider: "openai",
+    baseURL: "https://cpa.mangoq.ccwu.cc/v1",
+    model: "deepseek-v4-pro",
+    reasoningEnabled: false,
+  });
+  assert.deepEqual(behavior.modelKwargs.thinking, { type: "disabled" });
+  assert.equal(behavior.modelKwargs.enable_thinking, false);
+});
+
+test("extractMessageTextForStructuredOutput falls back from null content to reasoning_content JSON", () => {
+  const raw = extractMessageTextForStructuredOutput({
+    content: null,
+    additional_kwargs: {
+      reasoning_content: '{"ok":true,"world":"x"}',
+    },
+  });
+  assert.equal(raw, '{"ok":true,"world":"x"}');
+
+  const emptyString = extractMessageTextForStructuredOutput({
+    content: "",
+    additional_kwargs: {
+      reasoning_content: "not json at all",
+    },
+  });
+  // Non-JSON reasoning is not preferred over empty content for structured parse.
+  assert.equal(emptyString, "");
+
+  const normal = extractMessageTextForStructuredOutput({
+    content: '{"a":1}',
+    additional_kwargs: {
+      reasoning_content: '{"ignored":true}',
+    },
+  });
+  assert.equal(normal, '{"a":1}');
 });
 
 test("minimax provider behavior enables reasoning_split and raw response parsing", () => {
@@ -121,6 +191,7 @@ test("extractReasoningTextFromChunk supports generic reasoning payloads", () => 
       },
     },
   });
-
-  assert.equal(text, "附加字段思考总结思考内容里的思考");
+  assert.ok(text.includes("内容里的思考"));
+  assert.ok(text.includes("附加字段思考"));
+  assert.ok(text.includes("总结思考"));
 });

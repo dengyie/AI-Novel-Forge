@@ -185,11 +185,23 @@ export function resolveStructuredOutputProfile(input: {
       preferredStructuredStrategy: supportsJsonObject ? "json_object" : "prompt_json",
     });
   }
-  if (input.provider === "deepseek" || DEEPSEEK_HOST_PATTERN.test(host) || model.startsWith("deepseek-")) {
+  // DeepSeek family: detect by provider, official host, OR model id (CPA/OpenAI-compatible proxies).
+  const deepseekByModel = model.startsWith("deepseek-")
+    || model.includes("deepseek-v4-pro")
+    || model.includes("deepseek-reasoner")
+    || model.includes("/deepseek");
+  if (input.provider === "deepseek" || DEEPSEEK_HOST_PATTERN.test(host) || deepseekByModel) {
+    const deepseekThinkingModel = model.includes("deepseek-v4-pro")
+      || model.includes("deepseek-reasoner")
+      || normalizeModelId(model) === "deepseek-v4-pro"
+      || normalizeModelId(model) === "deepseek-reasoner";
     return buildProfile({
       family: "deepseek",
       nativeJsonObject: true,
       preferredStructuredStrategy: "json_object",
+      // Thinking models on CPA return content=null with only reasoning_content unless forced off.
+      requiresNonThinkingForStructured: deepseekThinkingModel,
+      supportsReasoningToggle: deepseekThinkingModel,
     });
   }
   if (input.provider === "grok" || GROK_HOST_PATTERN.test(host) || model.startsWith("grok-")) {

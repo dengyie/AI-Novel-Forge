@@ -42,7 +42,7 @@ import {
   wrapStructuredInvokeError,
   type StructuredInvokeResult,
 } from "./structuredInvokeParser";
-import { toText } from "../services/novel/novelP0Utils";
+import { extractMessageTextForStructuredOutput } from "./reasoning";
 import type { PromptInvocationMeta } from "../prompting/core/promptTypes";
 
 export {
@@ -250,7 +250,12 @@ async function invokeStructuredAttempt<T>(input: {
         signal ? { ...invokeOptions, signal } : invokeOptions,
       ),
     });
-    const rawContent = toText(result.content);
+    // Prefer message content; if empty (thinking models via CPA), fall back to reasoning_content JSON.
+    const rawContent = extractMessageTextForStructuredOutput(result as {
+      content?: unknown;
+      additional_kwargs?: Record<string, unknown> | null;
+      response_metadata?: Record<string, unknown> | null;
+    });
     logStructuredInvokeEvent({
       event: "invoke_done",
       label: input.baseInput.label,

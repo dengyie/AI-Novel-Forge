@@ -27,27 +27,52 @@ export interface StructuredFallbackSettings {
   chain: StructuredFallbackModel[];
 }
 
+/**
+ * Defaults prefer the **deepseek** provider slot when the model id is DeepSeek-family.
+ * Using provider=openai + deepseek-v4-pro against CPA used to skip thinking-disable and
+ * return empty structured content. Model id still works via OpenAI-compatible baseURL.
+ */
 const DEFAULT_STRUCTURED_FALLBACK_SETTINGS: StructuredFallbackSettings = {
   enabled: false,
-  provider: "openai",
+  provider: "deepseek",
   model: "deepseek-v4-pro",
   temperature: 0.2,
   maxTokens: null,
   chain: [
     {
-      provider: "openai",
+      provider: "deepseek",
       model: "deepseek-v4-pro",
       temperature: 0.2,
       maxTokens: null,
     },
     {
-      provider: "openai",
+      provider: "deepseek",
       model: "deepseek-v4-flash",
       temperature: 0.2,
       maxTokens: null,
     },
   ],
 };
+
+/** Prefer deepseek provider slot for deepseek-* model ids when hop still says openai. */
+export function coerceProviderForModelId(
+  provider: LLMProvider,
+  model: string,
+): LLMProvider {
+  const id = (model ?? "").trim().toLowerCase();
+  const leaf = id.includes("/") ? id.split("/").filter(Boolean).pop() ?? id : id;
+  if (
+    leaf.startsWith("deepseek")
+    || leaf.includes("deepseek-v4")
+    || leaf.includes("deepseek-reasoner")
+  ) {
+    // Keep explicit non-openai slots (deepseek/siliconflow/custom) as-is.
+    if (provider === "openai") {
+      return "deepseek";
+    }
+  }
+  return provider;
+}
 
 let cachedSettings: StructuredFallbackSettings | null = null;
 
@@ -99,8 +124,9 @@ function normalizeHop(input: Partial<StructuredFallbackModel> | null | undefined
   if (!model) {
     return null;
   }
+  const provider = coerceProviderForModelId(normalizeProvider(input.provider), model);
   return {
-    provider: normalizeProvider(input.provider),
+    provider,
     model,
     temperature: clampTemperature(input.temperature),
     maxTokens: normalizeMaxTokens(input.maxTokens),
@@ -172,9 +198,13 @@ export function resolveStructuredFallbackChain(
 }
 
 function buildSettingsFromEntries(entries: Map<string, string>): StructuredFallbackSettings {
+  const legacyModel = normalizeModel(entries.get(STRUCTURED_FALLBACK_MODEL_KEY));
   const legacy: StructuredFallbackModel = {
-    provider: normalizeProvider(entries.get(STRUCTURED_FALLBACK_PROVIDER_KEY)),
-    model: normalizeModel(entries.get(STRUCTURED_FALLBACK_MODEL_KEY)),
+    provider: coerceProviderForModelId(
+      normalizeProvider(entries.get(STRUCTURED_FALLBACK_PROVIDER_KEY)),
+      legacyModel,
+    ),
+    model: legacyModel,
     temperature: clampTemperature(Number(entries.get(STRUCTURED_FALLBACK_TEMPERATURE_KEY))),
     maxTokens: normalizeMaxTokens(entries.get(STRUCTURED_FALLBACK_MAX_TOKENS_KEY)),
   };
@@ -183,7 +213,13 @@ function buildSettingsFromEntries(entries: Map<string, string>): StructuredFallb
     // Pre-chain installs: single hop from legacy keys.
     chain = [legacy];
   }
-  chain = dedupeFallbackChain(chain);
+  // Re-coerce every hop so persisted provider=openai + deepseek-* is healed on read.
+  chain = dedupeFallbackChain(
+    chain.map((hop) => ({
+      ...hop,
+      provider: coerceProviderForModelId(hop.provider, hop.model),
+    })),
+  );
   const first = chain[0] ?? legacy;
   return {
     enabled: entries.get(STRUCTURED_FALLBACK_ENABLED_KEY) === "true",

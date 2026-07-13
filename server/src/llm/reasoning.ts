@@ -29,6 +29,41 @@ function normalizeOptionalText(value: string | undefined): string | undefined {
   return trimmed ? trimmed : undefined;
 }
 
+/** Strip org/prefix paths: `deepseek-ai/deepseek-v4-pro` → `deepseek-v4-pro`. */
+export function normalizeModelId(model: string | undefined | null): string {
+  const normalized = (model ?? "").trim().toLowerCase();
+  if (!normalized) {
+    return "";
+  }
+  const parts = normalized.split("/").filter(Boolean);
+  return parts.length > 0 ? (parts[parts.length - 1] ?? normalized) : normalized;
+}
+
+/**
+ * Models that expose a thinking/reasoning toggle and often return empty `content`
+ * with payload only in `reasoning_content` when thinking is left on.
+ * Detection is **model-id based** so OpenAI-compatible proxies (CPA etc.) still match.
+ */
+export function isDeepSeekThinkingCapableModelId(model: string | undefined | null): boolean {
+  const id = normalizeModelId(model);
+  if (!id) {
+    return false;
+  }
+  return id === "deepseek-v4-pro"
+    || id === "deepseek-reasoner"
+    || id.includes("deepseek-v4-pro")
+    || id.includes("deepseek-reasoner");
+}
+
+/** Any DeepSeek-family chat model id (thinking or not). */
+export function isDeepSeekFamilyModelId(model: string | undefined | null): boolean {
+  const id = normalizeModelId(model);
+  if (!id) {
+    return false;
+  }
+  return id.startsWith("deepseek") || id.includes("deepseek-");
+}
+
 function collectTextArray(value: unknown): string[] {
   if (typeof value === "string") {
     return value.trim() ? [value] : [];
@@ -86,21 +121,34 @@ export function isMiniMaxCompatibleProvider(
   return Boolean(normalizedModel && MINIMAX_MODEL_PATTERN.test(normalizedModel));
 }
 
+/**
+ * Whether this request targets a DeepSeek model that supports thinking toggle.
+ * **Model id is authoritative** so CPA/OpenAI-compatible proxies that advertise
+ * `provider=openai` + `model=deepseek-v4-pro` still force thinking off for structured calls.
+ */
 export function isDeepSeekThinkingModeProvider(
   provider: LLMProvider,
   baseURL?: string,
   model?: string,
 ): boolean {
-  const normalizedModel = normalizeOptionalText(model)?.toLowerCase();
-  const supportsThinkingToggle = normalizedModel === "deepseek-v4-pro" || normalizedModel === "deepseek-reasoner";
-  if (!supportsThinkingToggle) {
+  if (!isDeepSeekThinkingCapableModelId(model)) {
     return false;
   }
-  if (provider === "deepseek") {
+  // Model id already proves thinking capability; honor for native deepseek and common proxies.
+  if (
+    provider === "deepseek"
+    || provider === "openai"
+    || provider === "siliconflow"
+    || provider === "custom_gateway"
+  ) {
     return true;
   }
   const normalizedBaseURL = normalizeOptionalText(baseURL);
-  return Boolean(normalizedBaseURL && DEEPSEEK_HOST_PATTERN.test(normalizedBaseURL));
+  if (normalizedBaseURL && DEEPSEEK_HOST_PATTERN.test(normalizedBaseURL)) {
+    return true;
+  }
+  // Any non-empty OpenAI-compatible base URL serving these model ids (e.g. cpa.mangoq.ccwu.cc).
+  return Boolean(normalizedBaseURL);
 }
 
 export function resolveProviderReasoningBehavior(input: {
@@ -116,8 +164,10 @@ export function resolveProviderReasoningBehavior(input: {
         thinking: {
           type: input.reasoningEnabled ? "enabled" : "disabled",
         },
+        // Some OpenAI-compatible gateways only honor enable_thinking.
+        enable_thinking: input.reasoningEnabled,
       },
-      includeRawResponse: false,
+      includeRawResponse: true,
       usesAccumulatedStreamDeltas: false,
     };
   }
@@ -165,6 +215,67 @@ export function extractReasoningTextFromChunk(chunk: BaseMessageChunk): string {
     : [];
 
   return uniqueJoinedText([...directReasoning, ...contentReasoning]);
+}
+
+/**
+ * Extract text for structured JSON parsing from a chat result.
+ * Prefer normal content; if empty/null (common when thinking models return only
+ * `reasoning_content` through CPA), fall back to reasoning fields that look like JSON.
+ *
+ * Important: do **not** route `null` content through JSON.stringify (would become `"null"` / `""`).
+ */
+export function extractMessageTextForStructuredOutput(message: {
+  content?: unknown;
+  additional_kwargs?: Record<string, unknown> | null;
+  response_metadata?: Record<string, unknown> | null;
+}): string {
+  const content = message?.content;
+  if (typeof content === "string" && content.trim()) {
+    return content;
+  }
+  if (Array.isArray(content)) {
+    const joined = content.map((item) => {
+      if (typeof item === "string") {
+        return item;
+      }
+      if (item && typeof item === "object" && "text" in item && typeof (item as { text?: unknown }).text === "string") {
+        return (item as { text: string }).text;
+      }
+      return "";
+    }).join("");
+    if (joined.trim()) {
+      return joined;
+    }
+  }
+
+  const kwargs = {
+    ...(message?.response_metadata ?? {}),
+    ...(message?.additional_kwargs ?? {}),
+  } as Record<string, unknown>;
+  // Nested raw OpenAI-style message under kwargs
+  const nestedMessage = kwargs.message;
+  if (nestedMessage && typeof nestedMessage === "object") {
+    const nested = nestedMessage as { content?: unknown; reasoning_content?: unknown };
+    if (typeof nested.content === "string" && nested.content.trim()) {
+      return nested.content;
+    }
+    if (typeof nested.reasoning_content === "string" && nested.reasoning_content.trim()) {
+      const rc = nested.reasoning_content.trim();
+      if (rc.includes("{") || rc.includes("[")) {
+        return rc;
+      }
+    }
+  }
+
+  const reasoning = uniqueJoinedText([
+    ...collectTextArray(kwargs.reasoning_content),
+    ...collectTextArray(kwargs.reasoning_details),
+    ...extractReasoningTextFromSummary(kwargs.reasoning),
+  ]);
+  if (reasoning && (reasoning.includes("{") || reasoning.includes("["))) {
+    return reasoning;
+  }
+  return typeof content === "string" ? content : "";
 }
 
 export function extractMiniMaxRawStreamData(rawResponse: unknown): {

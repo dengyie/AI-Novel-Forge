@@ -7,7 +7,7 @@ import { runWithEnforcedTimeout } from "./invokeTimeout";
 import { logStructuredRepairSession } from "./repairLogging";
 import type { TaskType } from "./modelRouter";
 import type { StructuredOutputStrategy } from "./structuredOutput";
-import { toText } from "../services/novel/novelP0Utils";
+import { extractMessageTextForStructuredOutput } from "./reasoning";
 import type { PromptInvocationMeta } from "../prompting/core/promptTypes";
 
 export interface StructuredRepairInput<T> {
@@ -227,7 +227,11 @@ export async function repairWithLlm<T>(
         signal ? { ...invokeOptions, signal } : invokeOptions,
       ),
     });
-    const repairedRaw = toText(result.content);
+    const repairedRaw = extractMessageTextForStructuredOutput(result as {
+      content?: unknown;
+      additional_kwargs?: Record<string, unknown> | null;
+      response_metadata?: Record<string, unknown> | null;
+    });
     const latencyMs = Date.now() - startedAt;
     helpers.logStructuredInvokeEvent({
       event: "repair_done",
