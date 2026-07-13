@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const {
   coerceProviderForModelId,
   dedupeFallbackChain,
+  normalizeStructuredFallbackHop,
   resolveStructuredFallbackChain,
 } = require("../dist/llm/structuredFallbackSettings.js");
 
@@ -66,4 +67,32 @@ test("coerceProviderForModelId rewrites openai+deepseek-* to deepseek provider s
   assert.equal(coerceProviderForModelId("openai", "grok-4.5"), "openai");
   // leave explicit deepseek alone
   assert.equal(coerceProviderForModelId("deepseek", "deepseek-v4-pro"), "deepseek");
+});
+
+test("normalizeStructuredFallbackHop coerces openai+deepseek on save/build path", () => {
+  const hop = normalizeStructuredFallbackHop({
+    provider: "openai",
+    model: "deepseek-v4-pro",
+    temperature: 0.2,
+    maxTokens: null,
+  });
+  assert.ok(hop);
+  assert.equal(hop.provider, "deepseek");
+  assert.equal(hop.model, "deepseek-v4-pro");
+  assert.equal(hop.temperature, 0.2);
+
+  const flash = normalizeStructuredFallbackHop({
+    provider: "openai",
+    model: "deepseek-v4-flash",
+  });
+  assert.ok(flash);
+  assert.equal(flash.provider, "deepseek");
+
+  // non-deepseek stays on openai
+  const gpt = normalizeStructuredFallbackHop({
+    provider: "openai",
+    model: "gpt-5.5",
+  });
+  assert.ok(gpt);
+  assert.equal(gpt.provider, "openai");
 });

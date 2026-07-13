@@ -261,10 +261,17 @@ export default function ModelRoutesPage() {
 
   function patchStructuredFallbackDraft(patch: Partial<StructuredFallbackDraft>) {
     const current = getStructuredFallbackDraft();
-    setStructuredFallbackDraft({
+    const next: StructuredFallbackDraft = {
       ...current,
       ...patch,
-    });
+    };
+    // Keep draft aligned with server: never hold openai+deepseek-* in either hop.
+    next.provider = coerceProviderForModelId(next.provider, next.model);
+    next.secondaryProvider = coerceProviderForModelId(
+      next.secondaryProvider || "deepseek",
+      next.secondaryModel || next.model,
+    );
+    setStructuredFallbackDraft(next);
   }
 
   const fallbackDraft = getStructuredFallbackDraft();
@@ -439,7 +446,7 @@ export default function ModelRoutesPage() {
             </div>
             <ModelRouteFields
               draft={{
-                provider: fallbackDraft.secondaryProvider || "openai",
+                provider: fallbackDraft.secondaryProvider || "deepseek",
                 model: fallbackDraft.secondaryModel || "",
                 temperature: fallbackDraft.temperature,
                 maxTokens: fallbackDraft.maxTokens,
@@ -448,10 +455,17 @@ export default function ModelRoutesPage() {
               }}
               providerConfigs={providerConfigs}
               providerOptions={providerOptions}
-              onPatch={(patch) => patchStructuredFallbackDraft({
-                secondaryProvider: patch.provider ?? fallbackDraft.secondaryProvider,
-                secondaryModel: patch.model ?? fallbackDraft.secondaryModel,
-              })}
+              onPatch={(patch) => {
+                const nextModel = patch.model ?? fallbackDraft.secondaryModel;
+                const nextProvider = coerceProviderForModelId(
+                  patch.provider ?? (fallbackDraft.secondaryProvider || "deepseek"),
+                  nextModel,
+                );
+                patchStructuredFallbackDraft({
+                  secondaryProvider: nextProvider,
+                  secondaryModel: nextModel,
+                });
+              }}
               temperaturePlaceholder="0.2"
               maxTokensPlaceholder="与一级共用"
               modelEmptyText="这个服务商没有可选模型"

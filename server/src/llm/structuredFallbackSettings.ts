@@ -271,6 +271,22 @@ export async function getStructuredFallbackSettings(forceRefresh = false): Promi
   }
 }
 
+/** Build a single hop with model/provider coercion (openai+deepseek-* → deepseek). */
+export function normalizeStructuredFallbackHop(
+  input: Partial<StructuredFallbackModel> | null | undefined,
+): StructuredFallbackModel | null {
+  return normalizeHop(input);
+}
+
+function coerceChainHops(chain: StructuredFallbackModel[]): StructuredFallbackModel[] {
+  return dedupeFallbackChain(
+    chain.map((hop) => ({
+      ...hop,
+      provider: coerceProviderForModelId(hop.provider, hop.model),
+    })),
+  );
+}
+
 export async function saveStructuredFallbackSettings(
   input: Partial<StructuredFallbackSettings>,
 ): Promise<StructuredFallbackSettings> {
@@ -284,29 +300,32 @@ export async function saveStructuredFallbackSettings(
         .filter((hop): hop is StructuredFallbackModel => hop !== null),
     );
     if (chain.length === 0 && (input.provider || input.model || previous.model)) {
-      // Explicit empty chain with legacy fields → single hop.
-      chain = [{
-        provider: normalizeProvider(input.provider ?? previous.provider),
-        model: normalizeModel(input.model ?? previous.model),
-        temperature: clampTemperature(input.temperature ?? previous.temperature),
-        maxTokens: normalizeMaxTokens(
-          input.maxTokens !== undefined ? input.maxTokens : previous.maxTokens,
-        ),
-      }];
+      // Explicit empty chain with legacy fields → single hop (must coerce provider).
+      const hop = normalizeHop({
+        provider: input.provider ?? previous.provider,
+        model: input.model ?? previous.model,
+        temperature: input.temperature ?? previous.temperature,
+        maxTokens: input.maxTokens !== undefined ? input.maxTokens : previous.maxTokens,
+      });
+      chain = hop ? [hop] : [];
     }
   } else if (input.provider !== undefined || input.model !== undefined
     || input.temperature !== undefined || input.maxTokens !== undefined) {
     // Legacy partial update: replace first hop, keep remaining hops if model changed.
-    const first: StructuredFallbackModel = {
-      provider: normalizeProvider(input.provider ?? previous.provider),
-      model: normalizeModel(input.model ?? previous.model),
-      temperature: clampTemperature(input.temperature ?? previous.temperature),
-      maxTokens: normalizeMaxTokens(
-        input.maxTokens !== undefined ? input.maxTokens : previous.maxTokens,
-      ),
-    };
-    const rest = previous.chain.slice(1).filter((hop) => hopKey(hop) !== hopKey(first));
-    chain = dedupeFallbackChain([first, ...rest]);
+    const first = normalizeHop({
+      provider: input.provider ?? previous.provider,
+      model: input.model ?? previous.model,
+      temperature: input.temperature ?? previous.temperature,
+      maxTokens: input.maxTokens !== undefined ? input.maxTokens : previous.maxTokens,
+    });
+    if (!first) {
+      chain = previous.chain.length > 0
+        ? previous.chain
+        : [...DEFAULT_STRUCTURED_FALLBACK_SETTINGS.chain];
+    } else {
+      const rest = previous.chain.slice(1).filter((hop) => hopKey(hop) !== hopKey(first));
+      chain = dedupeFallbackChain([first, ...rest]);
+    }
   } else {
     chain = previous.chain.length > 0
       ? previous.chain
@@ -321,6 +340,8 @@ export async function saveStructuredFallbackSettings(
   if (chain.length === 0) {
     chain = [...DEFAULT_STRUCTURED_FALLBACK_SETTINGS.chain];
   }
+  // Persist-time heal: never write openai+deepseek-* even if a caller bypassed UI.
+  chain = coerceChainHops(chain);
 
   const first = mirrorLegacyFromChain(chain);
   const next: StructuredFallbackSettings = {
