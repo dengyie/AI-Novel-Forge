@@ -249,6 +249,92 @@ test("executable steps can force rerun instead of reusing completed facts", asyn
   assert.deepEqual(runtimeCalls[0].producedArtifacts, [produced]);
 });
 
+test("executable step modules tolerate reused completed steps without output payload", async () => {
+  const produced = buildArtifact("chapter_task_sheet", {
+    id: "chapter_task_sheet:chapter:chapter-1:Chapter:chapter-1",
+    contentRef: { table: "Chapter", id: "chapter-1" },
+  });
+  let executed = 0;
+  const runtimeCalls = [];
+  const orchestrator = new NovelDirectorRuntimeOrchestrator({
+    directorRuntime: {
+      getSnapshot: async () => null,
+      analyzeWorkspace: async () => ({ inventory: { artifacts: [produced] } }),
+      runNode: async (contract, input) => {
+        runtimeCalls.push({
+          nodeKey: contract.nodeKey,
+          reuseCompletedStep: input.reuseCompletedStep,
+        });
+        // Production DirectorNodeRunner reuse path: completed without output.
+        return {
+          status: "completed",
+          producedArtifacts: [produced],
+        };
+      },
+    },
+    workflowService: {
+      markTaskRunning: async () => undefined,
+      markTaskWaitingApproval: async () => undefined,
+    },
+    autoExecutionRuntime: {
+      runFromReady: async () => {
+        throw new Error("auto execution should not run in this test");
+      },
+    },
+  });
+
+  const module = createWorkflowStepModule(
+    {
+      id: "test.outline.detail",
+      nodeKey: "volume_chapter_detail_bundle_generate",
+      label: "Detail chapters",
+      stage: "structured_outline",
+      targetType: "global",
+      reads: ["chapter_list"],
+      writes: ["chapter_task_sheet"],
+      mayModifyUserContent: false,
+      requiresApprovalByDefault: false,
+      supportsAutoRetry: true,
+    },
+    async () => {
+      executed += 1;
+      return undefined;
+    },
+    {
+      inspectReadiness: async () => ({ ready: true, blockers: [] }),
+      inspectCompletion: async () => ({
+        stepId: "test.outline.detail",
+        completed: false,
+        completenessRatio: 0.5,
+      }),
+      buildInput: async () => undefined,
+      validateOutput: async () => ({ valid: true }),
+      inspectProgress: async () => ({
+        status: "partially_done",
+        current: 1,
+        total: 2,
+        ratio: 0.5,
+        label: "partial",
+      }),
+      recover: async () => ({ recoverable: true }),
+      completeCriteria: async () => true,
+      commit: async () => ({ producedArtifacts: [produced] }),
+    },
+  );
+
+  const result = await orchestrator.runStepModule({
+    module,
+    taskId: "task-reuse-output",
+    novelId: "novel-1",
+    reuseCompletedStep: true,
+  });
+
+  assert.equal(result, undefined);
+  assert.equal(executed, 0);
+  assert.equal(runtimeCalls.length, 1);
+  assert.equal(runtimeCalls[0].nodeKey, "volume_chapter_detail_bundle_generate");
+});
+
 test("executable steps can stop at an acceptable pause without failing completion", async () => {
   const produced = buildArtifact("character_cast", {
     id: "character_cast:novel:novel-1:CharacterCastOption:cast-1",

@@ -310,3 +310,55 @@ test("buildFailureClassification without hardMissingObligations keeps legacy all
   });
   assert.equal(classified.code, "draft_obligation_unmet");
 });
+
+test("normalizeAssessment lifts severely short chapter (under_hard) to blocking repair, never silent accepted", () => {
+  // 字数 1500 < target 2800 × 0.6 (hardMin 1680) → under_hard 必须硬阻断。
+  const content = "字".repeat(1500);
+  const normalized = normalizeAssessment(createAssessment({
+    status: "accepted",
+  }), content, 2800);
+
+  // 不得静默 approved。
+  assert.notEqual(normalized.status, "accepted");
+  // 必须进入需修复 / 需人工复查轨道（不可 continue / continue_with_risk 绕过）。
+  assert.ok(
+    normalized.status === "repairable" || normalized.status === "needs_manual_review",
+    `unexpected under_hard status ${normalized.status}`,
+  );
+  // 注入 length_under_hard 硬阻断 issue。
+  assert.ok(
+    normalized.blockingIssues.some((issue) => issue.code === "length_under_hard"),
+    "under_hard should inject a length_under_hard blocking issue",
+  );
+  // 风险标签包含 length_under_hard，便于后续非 skippable 检测。
+  assert.ok(normalized.riskTags.includes("length_under_hard"));
+  // continuePolicy 不允许是 continue（继续推进），必须是 repair_once 或 pause。
+  assert.notEqual(normalized.continuePolicy, "continue");
+});
+
+test("normalizeAssessment does not drop under-length issue when content is severely short", () => {
+  // 与上方 stale-drop 测试对照：内容远低于硬下限时，stale under-length issue 必须保留。
+  const content = "字".repeat(1200);
+  const normalized = normalizeAssessment(createAssessment({
+    status: "needs_manual_review",
+    blockingIssues: [{
+      severity: "high",
+      category: "plot",
+      code: "length_insufficient",
+      evidence: "正文估算约1200字，远低于目标2800字。",
+      fixSuggestion: "扩写到目标字数。",
+    }],
+    repairDirectives: [{
+      mode: "rewrite",
+      target: "plot",
+      instruction: "扩写正文到目标长度。",
+    }],
+    riskTags: ["length_insufficient"],
+    continuePolicy: "pause",
+  }), content, 2800);
+
+  assert.ok(
+    normalized.blockingIssues.some((issue) => issue.code === "length_insufficient" || issue.code === "length_under_hard"),
+    "under-length issue must survive when content is severely short",
+  );
+});

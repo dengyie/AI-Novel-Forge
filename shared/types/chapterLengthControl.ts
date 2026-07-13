@@ -263,23 +263,47 @@ export function resolveChapterTypeTargetWordCount(input: {
   return typeTarget;
 }
 
-export type LengthBudgetBand = "within_soft" | "under_soft" | "over_soft" | "over_hard";
+/**
+ * Hard under-length ratio: actual < target × this value is not silently approvable
+ * (must enter repair / quality checkpoint; not skippable auto_continue).
+ */
+export const LENGTH_HARD_UNDER_RATIO = 0.6;
+
+export type LengthBudgetBand =
+  | "within_soft"
+  | "under_soft"
+  | "under_hard"
+  | "over_soft"
+  | "over_hard";
 
 export interface LengthBudgetEvaluation {
   budget: LengthBudgetContract;
   actualWordCount: number;
   band: LengthBudgetBand;
-  /** 可观测标签；不单独决定 hard-block 写流 */
+  /**
+   * 可观测标签。
+   * - under_soft / over_soft / over_hard：默认不 hard-block 写流
+   * - under_hard：字数 < target×0.6，验收层应抬升 repair / 质量门，禁止静默 approved
+   */
   riskTags: string[];
   varianceRatio: number;
+  /** floor(target × LENGTH_HARD_UNDER_RATIO)；无 target 时不出现在评估里 */
+  hardMinWordCount: number;
 }
 
 export function countContentCharacters(content: string): number {
   return content.replace(/\s+/g, "").trim().length;
 }
 
+export function resolveHardMinWordCount(targetWordCount: number): number {
+  return Math.max(1, Math.floor(targetWordCount * LENGTH_HARD_UNDER_RATIO));
+}
+
 /**
- * 双界评估：softMin–softMax 为提示带，hardMax 为软上限（可观测 over_hard，默认不阻断写流）。
+ * 双界评估：
+ * - softMin–softMax 为提示带
+ * - hardMin（target×0.6）以下为 under_hard（验收 hard gate）
+ * - hardMax 为软上限（可观测 over_hard，默认不阻断写流）
  */
 export function evaluateLengthBudget(input: {
   content: string;
@@ -290,12 +314,18 @@ export function evaluateLengthBudget(input: {
     return null;
   }
   const actualWordCount = countContentCharacters(input.content);
+  const hardMinWordCount = resolveHardMinWordCount(budget.targetWordCount);
   const varianceRatio = budget.targetWordCount > 0
     ? (actualWordCount - budget.targetWordCount) / budget.targetWordCount
     : 0;
   let band: LengthBudgetBand = "within_soft";
   const riskTags: string[] = [];
-  if (actualWordCount < budget.softMinWordCount) {
+  if (actualWordCount < hardMinWordCount) {
+    band = "under_hard";
+    riskTags.push("length_under_hard");
+    // Keep soft tag too so existing under-length detectors still match.
+    riskTags.push("length_under_soft");
+  } else if (actualWordCount < budget.softMinWordCount) {
     band = "under_soft";
     riskTags.push("length_under_soft");
   } else if (actualWordCount > budget.hardMaxWordCount) {
@@ -311,6 +341,7 @@ export function evaluateLengthBudget(input: {
     band,
     riskTags,
     varianceRatio,
+    hardMinWordCount,
   };
 }
 

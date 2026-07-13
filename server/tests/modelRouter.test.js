@@ -175,3 +175,47 @@ test("resolveModel keeps strict routes non-degraded when explicitly configured",
     prisma.modelRouteConfig.findUnique = originalFindUnique;
   }
 });
+
+test("resolveModel ignores empty model override and keeps task route model", async () => {
+  const originalFindUnique = prisma.modelRouteConfig.findUnique;
+
+  prisma.modelRouteConfig.findUnique = async () => ({
+    taskType: "planner",
+    provider: "openai",
+    model: "deepseek-v4-pro",
+    temperature: 0.3,
+    maxTokens: null,
+    requestProtocol: "auto",
+    structuredResponseFormat: "auto",
+  });
+
+  try {
+    // GenerationJob payloads historically store provider=deepseek + model="".
+    // The empty model must NOT clobber the configured route model.
+    const resolved = await resolveModel("planner", {
+      provider: "deepseek",
+      model: "",
+      temperature: 0.3,
+    });
+    assert.equal(resolved.model, "deepseek-v4-pro");
+    // Empty-string override yields provider=deepseek (trimmed truthiness lets
+    // provider pass through), but the configured route model survives.
+    assert.equal(resolved.provider, "deepseek");
+  } finally {
+    prisma.modelRouteConfig.findUnique = originalFindUnique;
+  }
+});
+
+test("resolveModel ignores whitespace-only model override from stale job payload", async () => {
+  const originalFindUnique = prisma.modelRouteConfig.findUnique;
+
+  prisma.modelRouteConfig.findUnique = async () => null;
+
+  try {
+    // No configured route → default route. Whitespace model must not override.
+    const resolved = await resolveModel("writer", { model: "   " });
+    assert.equal(resolved.model, "deepseek-v4-pro");
+  } finally {
+    prisma.modelRouteConfig.findUnique = originalFindUnique;
+  }
+});

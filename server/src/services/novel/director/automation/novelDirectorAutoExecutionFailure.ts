@@ -1,8 +1,27 @@
 import type { DirectorAutoExecutionState } from "@ai-novel/shared/types/novelDirector";
 
+/**
+ * Length-risk markers that disqualify a review failure from being skippable.
+ * A short chapter (字数 < target×0.6) must enter a quality checkpoint, never
+ * be auto-skipped to the next chapter.
+ */
+const NON_SKIPPABLE_LENGTH_MARKERS = [
+  "length_under_hard",
+  "length_under_soft",
+  "length_insufficient",
+  "under_hard",
+  "under_soft",
+];
+
 export function isSkippableAutoExecutionReviewFailure(message: string | null | undefined): boolean {
   const normalized = message?.trim() ?? "";
-  return normalized.startsWith("Chapter generation is blocked until review is resolved.");
+  if (!normalized.startsWith("Chapter generation is blocked until review is resolved.")) {
+    return false;
+  }
+  // Defense-in-depth: even if the hold_for_review reason string carries length
+  // risk markers, do not treat the failure as skippable.
+  const lowered = normalized.toLowerCase();
+  return !NON_SKIPPABLE_LENGTH_MARKERS.some((marker) => lowered.includes(marker));
 }
 
 function formatAutoExecutionContinuation(input: Pick<

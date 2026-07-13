@@ -222,6 +222,10 @@ function shouldDropLengthIssue(input: {
   return false;
 }
 
+function isLengthRiskTag(tag: string): boolean {
+  return includesAnyMarker(tag, [...UNDER_LENGTH_MARKERS, ...OVER_LENGTH_MARKERS]);
+}
+
 function reconcileLengthAssessment(
   output: ChapterAcceptanceAssessmentOutput,
   content: string,
@@ -233,19 +237,42 @@ function reconcileLengthAssessment(
     return output;
   }
   const actualWordCount = dualBound?.actualWordCount ?? countChapterCharacters(content);
+  const isUnderHard = dualBound?.band === "under_hard";
   // 假阳性清理：仍以 soft 带为界（与历史 resolveTargetWordRange 一致）。
   // hardMax 超界不通过「丢弃 over issue」放行，而是靠 riskTags 可观测。
-  const blockingIssues = output.blockingIssues.filter((issue) => !shouldDropLengthIssue({
-    issue,
-    actualWordCount,
-    minWordCount: range.minWordCount,
-    maxWordCount: range.maxWordCount,
-  }));
+  // under_hard（字数 < target×0.6）例外：不得丢弃 under-length issue，必须抬升为硬阻断。
+  const blockingIssues = output.blockingIssues.filter((issue) => {
+    if (isUnderHard && isUnderLengthIssue(issue)) {
+      return true;
+    }
+    return !shouldDropLengthIssue({
+      issue,
+      actualWordCount,
+      minWordCount: range.minWordCount,
+      maxWordCount: range.maxWordCount,
+    });
+  });
+  const underHardBlockingIssue = isUnderHard
+    && !blockingIssues.some((issue) => isUnderLengthIssue(issue))
+    && dualBound
+    ? [{
+        severity: "high" as const,
+        category: "mode_fit" as const,
+        code: "length_under_hard",
+        evidence: `正文字数 ${actualWordCount} 远低于目标 ${dualBound.budget.targetWordCount}（硬下限 ${dualBound.hardMinWordCount}，目标 ×60%），未达最小可接受长度。`,
+        fixSuggestion: "重写或扩写本章，使其达到目标字数硬下限以上；不可静默通过。",
+      }]
+    : [];
+  const blockingIssuesWithHard = underHardBlockingIssue.length > 0
+    ? [...blockingIssues, ...underHardBlockingIssue]
+    : blockingIssues;
   const droppedLengthNoise = blockingIssues.length !== output.blockingIssues.length;
-  let riskTags = droppedLengthNoise
-    ? output.riskTags.filter((tag) => !includesAnyMarker(tag, [...UNDER_LENGTH_MARKERS, ...OVER_LENGTH_MARKERS]))
+  const injectedUnderHard = underHardBlockingIssue.length > 0;
+  let riskTags = (droppedLengthNoise || injectedUnderHard)
+    ? output.riskTags.filter((tag) => !isLengthRiskTag(tag))
     : [...output.riskTags];
   // P2-2：注入双界观测标签（under_soft / over_soft / over_hard），不抬升 hard-block。
+  // under_hard：字数硬下限不达标，验收层抬升 repair / quality checkpoint，禁止静默 approved。
   if (dualBound) {
     for (const tag of dualBound.riskTags) {
       if (!riskTags.includes(tag)) {
@@ -253,15 +280,25 @@ function reconcileLengthAssessment(
       }
     }
   }
-  if (!droppedLengthNoise && dualBound?.riskTags.length === 0) {
+  if (!droppedLengthNoise && !injectedUnderHard && dualBound?.riskTags.length === 0) {
     return output;
   }
+  const repairDirectives = (droppedLengthNoise || injectedUnderHard)
+    ? output.repairDirectives.filter((directive) => !isLengthDirective(directive))
+    : output.repairDirectives;
+  const underHardDirective = injectedUnderHard
+    ? [{
+        mode: "rewrite" as const,
+        target: "plot" as const,
+        instruction: `本章字数 ${actualWordCount} 远低于目标 ${dualBound!.budget.targetWordCount}（硬下限 ${dualBound!.hardMinWordCount}）。必须扩写至目标字数软下限以上，不得跳过。`,
+      }]
+    : [];
   return {
     ...output,
-    blockingIssues,
-    repairDirectives: droppedLengthNoise
-      ? output.repairDirectives.filter((directive) => !isLengthDirective(directive))
-      : output.repairDirectives,
+    blockingIssues: blockingIssuesWithHard,
+    repairDirectives: underHardDirective.length > 0
+      ? [...repairDirectives, ...underHardDirective]
+      : repairDirectives,
     riskTags,
   };
 }

@@ -235,6 +235,11 @@ export class NovelDirectorPipelineRuntime {
       if (module.id === "chapter.execution_contract.sync") {
         continue;
       }
+      // Detail bundle must re-run when plan range expands (e.g. 1-10 → 11-20);
+      // historical succeeded step reuse would short-circuit incomplete contracts.
+      const forceRerunDetail = module.nodeKey === "volume_chapter_detail_bundle_generate"
+        || module.id === "volume.chapter_detail_bundle.generate"
+        || module.id.includes("chapter_detail");
       await this.deps.runtimeOrchestrator.runStepModule({
         module,
         taskId: input.taskId,
@@ -242,6 +247,7 @@ export class NovelDirectorPipelineRuntime {
         targetId: input.novelId,
         approveCurrentGate: approval.approveCurrentGate,
         approveAutoExecutionScope: approval.approveAutoExecutionScope,
+        reuseCompletedStep: forceRerunDetail ? false : undefined,
       });
     }
   }
@@ -290,6 +296,22 @@ export class NovelDirectorPipelineRuntime {
     const shouldAutoApproveCheckpoint = this.shouldAutoApproveCheckpoint(input.input, "chapter_batch_ready");
     if (!input.approveAutoExecutionScope && !shouldAutoApproveCheckpoint) {
       return;
+    }
+    // Never enter chapter execution while plan-range chapter detail facts are incomplete.
+    // Otherwise runFromReady throws "缺少完整章节细化" after outline short-circuits.
+    const detailModule = getDirectorStructuredOutlineStepModules().find((module) => (
+      module.nodeKey === "volume_chapter_detail_bundle_generate"
+      || module.id === "volume.chapter_detail_bundle.generate"
+      || module.id.includes("chapter_detail")
+    ));
+    if (detailModule && isExecutableWorkflowStepModule(detailModule)) {
+      const facts = await inspectWorkflowStepFacts(detailModule, {
+        taskId: input.taskId,
+        novelId: input.novelId,
+      });
+      if (!facts.completed) {
+        return;
+      }
     }
     if (shouldAutoApproveCheckpoint) {
       await recordAutoDirectorAutoApprovalFromTask({

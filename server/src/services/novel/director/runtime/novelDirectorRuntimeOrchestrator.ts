@@ -306,11 +306,17 @@ export class NovelDirectorRuntimeOrchestrator {
       targetId: input.targetId ?? null,
       artifacts: preloadedArtifacts,
     };
-    if (input.reuseCompletedStep !== false) {
+    // When facts are incomplete, do not reuse a historical succeeded step by
+    // idempotency key (DirectorNodeRunner). That short-circuit previously caused
+    // structured_outline chapter_detail_bundle to no-op after 1-10, then
+    // maybeRunAutoApprovedChapters entered runFromReady and failed with missing contracts for 11-20.
+    let reuseCompletedStep = input.reuseCompletedStep;
+    if (reuseCompletedStep !== false) {
       const completion = await input.module.inspectCompletion(context);
       if (completion.completed) {
         return undefined as TOutput;
       }
+      reuseCompletedStep = false;
     }
     const readiness = await input.module.inspectReadiness(context);
     if (!readiness.ready) {
@@ -366,7 +372,7 @@ export class NovelDirectorRuntimeOrchestrator {
       supportsAutoRetry: input.module.supportsAutoRetry,
       approveCurrentGate: input.approveCurrentGate,
       approveAutoExecutionScope: input.approveAutoExecutionScope,
-      reuseCompletedStep: input.reuseCompletedStep,
+      reuseCompletedStep,
       targetType: input.targetType ?? input.module.targetType,
       targetId: input.targetId,
       waitingState: input.module.defaultWaitingState,
@@ -404,6 +410,12 @@ export class NovelDirectorRuntimeOrchestrator {
       },
       collectArtifacts: (moduleResult) => moduleResult.producedArtifacts,
     });
+    // DirectorNodeRunner may reuse a succeeded step by idempotency key and return
+    // status=completed without retaining the original output payload. Void modules
+    // (structured outline facts, etc.) treat that as a successful no-op skip.
+    if (result == null) {
+      return undefined as TOutput;
+    }
     return result.output as TOutput;
   }
 

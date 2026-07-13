@@ -224,3 +224,17 @@ test("evaluateLengthBudget reports dual-bound bands without hard-block semantics
   assert.ok(overHard?.riskTags.includes("length_over_hard"));
   assert.ok(overHard.actualWordCount > overHard.budget.hardMaxWordCount);
 });
+
+test("evaluateLengthBudget reports under_hard band below target × 0.6", () => {
+  // target 2800 → hardMin = floor(2800 × 0.6) = 1680
+  const underHard = evaluateLengthBudget({
+    content: "字".repeat(1500),
+    targetWordCount: 2800,
+  });
+  assert.equal(underHard?.band, "under_hard");
+  assert.ok(underHard?.riskTags.includes("length_under_hard"));
+  // Soft tag is also kept so existing under-length detectors still match.
+  assert.ok(underHard?.riskTags.includes("length_under_soft"));
+  assert.equal(underHard?.hardMinWordCount, 1680);
+  assert.ok(underHard.actualWordCount < underHard.hardMinWordCount);
+});
