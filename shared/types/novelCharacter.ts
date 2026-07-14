@@ -57,6 +57,10 @@ export interface Character {
   attireStyle?: string | null;
   signatureDetail?: string | null;
   voiceTexture?: string | null;
+  /** MiMo TTS 音色 id（如 茉莉）；有声书多角色绑定。 */
+  ttsVoice?: string | null;
+  /** 可选角色 style context；缺省用旁白 style 或默认 style。 */
+  ttsStyle?: string | null;
   presenceImpression?: string | null;
   arcStart?: string | null;
   arcMidpoint?: string | null;
