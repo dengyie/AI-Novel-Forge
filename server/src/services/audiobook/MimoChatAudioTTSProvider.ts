@@ -1,6 +1,10 @@
+import fs from "node:fs";
 import {
   DEFAULT_AUDIOBOOK_NARRATOR_STYLE,
+  MIMO_TTS_MODELS,
+  isAudiobookTtsMode,
   isMimoTtsPresetVoice,
+  type AudiobookTtsMode,
   type MimoTtsPresetVoice,
 } from "@ai-novel/shared/types/audiobook";
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
@@ -17,15 +21,29 @@ import { isMissingAudiobookTaskTableError } from "./audiobookErrors";
 export interface MimoTtsSynthesizeInput {
   /** 旁白/对白正文（assistant 侧） */
   text: string;
-  /** MiMo 预置 voice id */
-  voice: string;
-  /** 音色描述，放在 user 消息 */
+  /**
+   * 合成模态。缺省 preset。
+   * - preset: audio.voice = 预置名
+   * - design: user = designPrompt，禁止 audio.voice
+   * - clone: audio.voice = data:audio/wav;base64,...
+   */
+  mode?: AudiobookTtsMode | null;
+  /** preset 预置 voice id；design/clone 可空 */
+  voice?: string | null;
+  /** preset/clone 的 style（user）；design 时被 designPrompt 覆盖 */
   style?: string | null;
+  /** design 模式音色描述（user content） */
+  designPrompt?: string | null;
+  /** clone：参考音频 base64（无 DataURL 前缀）；与 refAudioPath 二选一 */
+  refAudioBase64?: string | null;
+  /** clone：参考音频文件路径（服务端读盘） */
+  refAudioPath?: string | null;
   /** 音频格式，默认 wav */
   format?: "wav" | "mp3";
   signal?: AbortSignal;
   /** 用于解析 CPA baseURL / key 的 LLM provider，默认 openai */
   provider?: LLMProvider;
+  /** 覆盖默认模型（一般不传，按 mode 选） */
   model?: string;
 }
 
@@ -34,14 +52,25 @@ export interface MimoTtsSynthesizeResult {
   format: string;
   voice: string;
   model: string;
+  mode: AudiobookTtsMode;
   raw?: unknown;
 }
 
-const DEFAULT_MIMO_TTS_MODEL = process.env.AUDIOBOOK_MIMO_TTS_MODEL?.trim() || "mimo-v2.5-tts";
+export interface MimoTtsRequestBody {
+  model: string;
+  messages: Array<{ role: "user" | "assistant"; content: string }>;
+  audio: { format: string; voice?: string };
+  stream: false;
+}
+
 const DEFAULT_PROVIDER: LLMProvider = "openai";
 const REQUEST_TIMEOUT_MS = Math.max(
   10_000,
   Number(process.env.AUDIOBOOK_MIMO_TTS_TIMEOUT_MS ?? 120_000) || 120_000,
+);
+const MAX_REF_AUDIO_BYTES = Math.max(
+  64 * 1024,
+  Number(process.env.AUDIOBOOK_CLONE_REF_MAX_BYTES ?? 8 * 1024 * 1024) || 8 * 1024 * 1024,
 );
 
 /** 仅 APIKey 表缺失时兜底；与 AudiobookTask 表无关，但 Prisma 缺表码相同 */
@@ -107,34 +136,144 @@ export function extractAudioBase64(payload: unknown): string | null {
   return null;
 }
 
+function resolveMode(input: MimoTtsSynthesizeInput): AudiobookTtsMode {
+  const raw = input.mode?.trim();
+  if (!raw) {
+    return "preset";
+  }
+  if (!isAudiobookTtsMode(raw)) {
+    throw new AppError(`不支持的 TTS 模态「${raw}」。`, 400);
+  }
+  return raw;
+}
+
+function stripDataUrlPrefix(value: string): string {
+  const trimmed = value.trim();
+  const match = /^data:audio\/[a-z0-9.+-]+;base64,(.+)$/i.exec(trimmed);
+  return match ? match[1].replace(/\s+/g, "") : trimmed.replace(/\s+/g, "");
+}
+
+function loadRefAudioBase64(input: MimoTtsSynthesizeInput): string {
+  if (input.refAudioBase64?.trim()) {
+    const bare = stripDataUrlPrefix(input.refAudioBase64);
+    if (!bare) {
+      throw new AppError("clone 参考音频 base64 为空。", 400);
+    }
+    const approxBytes = Math.floor((bare.length * 3) / 4);
+    if (approxBytes > MAX_REF_AUDIO_BYTES) {
+      throw new AppError(`clone 参考音频过大（>${MAX_REF_AUDIO_BYTES} bytes）。`, 400);
+    }
+    return bare;
+  }
+
+  const refPath = input.refAudioPath?.trim();
+  if (!refPath) {
+    throw new AppError("clone 模式需要 refAudioPath 或 refAudioBase64。", 400);
+  }
+  if (refPath.includes("\0") || refPath.includes("..")) {
+    throw new AppError("clone 参考音频路径非法。", 400);
+  }
+  if (!fs.existsSync(refPath)) {
+    throw new AppError(`clone 参考音频不存在：${refPath}`, 400);
+  }
+  const stat = fs.statSync(refPath);
+  if (!stat.isFile()) {
+    throw new AppError("clone 参考音频路径不是文件。", 400);
+  }
+  if (stat.size <= 0) {
+    throw new AppError("clone 参考音频为空文件。", 400);
+  }
+  if (stat.size > MAX_REF_AUDIO_BYTES) {
+    throw new AppError(`clone 参考音频过大（>${MAX_REF_AUDIO_BYTES} bytes）。`, 400);
+  }
+  return fs.readFileSync(refPath).toString("base64");
+}
+
+/**
+ * 构建 MiMo chat-audio 请求体（纯函数，便于单测）。
+ * 协议锚点见产品 SoT / TTS 经验：
+ * - preset: user=style, assistant=text, audio.voice=预置名
+ * - design: user=designPrompt, assistant=text, 禁止 audio.voice
+ * - clone: user=style, assistant=text, audio.voice=DataURL
+ */
+export function buildMimoTtsRequestBody(input: MimoTtsSynthesizeInput): MimoTtsRequestBody {
+  const text = input.text?.trim();
+  if (!text) {
+    throw new AppError("TTS 文本不能为空。", 400);
+  }
+
+  const mode = resolveMode(input);
+  const format = input.format ?? "wav";
+  const model = input.model?.trim() || MIMO_TTS_MODELS[mode];
+
+  if (mode === "preset") {
+    const voice = input.voice?.trim();
+    if (!voice) {
+      throw new AppError("preset 模式 TTS voice 不能为空。", 400);
+    }
+    if (!isMimoTtsPresetVoice(voice)) {
+      throw new AppError(`音色「${voice}」不在 MiMo 预置表中。`, 400);
+    }
+    const style = input.style?.trim() || DEFAULT_AUDIOBOOK_NARRATOR_STYLE;
+    return {
+      model,
+      messages: [
+        { role: "user", content: style },
+        { role: "assistant", content: text },
+      ],
+      audio: {
+        format,
+        voice: voice as MimoTtsPresetVoice,
+      },
+      stream: false,
+    };
+  }
+
+  if (mode === "design") {
+    const designPrompt = input.designPrompt?.trim() || input.style?.trim();
+    if (!designPrompt) {
+      throw new AppError("design 模式需要 ttsDesignPrompt（音色描述）。", 400);
+    }
+    return {
+      model,
+      messages: [
+        { role: "user", content: designPrompt },
+        { role: "assistant", content: text },
+      ],
+      audio: { format },
+      stream: false,
+    };
+  }
+
+  // clone
+  const refBare = loadRefAudioBase64(input);
+  const style = input.style?.trim() || DEFAULT_AUDIOBOOK_NARRATOR_STYLE;
+  return {
+    model,
+    messages: [
+      { role: "user", content: style },
+      { role: "assistant", content: text },
+    ],
+    audio: {
+      format,
+      voice: `data:audio/wav;base64,${refBare}`,
+    },
+    stream: false,
+  };
+}
+
 /**
  * MiMo TTS via CPA OpenAI-compatible chat-audio:
  * POST /v1/chat/completions
- * messages: [{role:user, content: style}, {role:assistant, content: spoken text}]
- * audio: { format, voice }
- * response: choices[0].message.audio.data (base64)
+ * 三模态：preset / design / clone（见 buildMimoTtsRequestBody）
  */
 export class MimoChatAudioTTSProvider {
   readonly providerId = "mimo-chat-audio";
 
   async synthesize(input: MimoTtsSynthesizeInput): Promise<MimoTtsSynthesizeResult> {
-    const text = input.text?.trim();
-    if (!text) {
-      throw new AppError("TTS 文本不能为空。", 400);
-    }
-
-    const voice = input.voice?.trim();
-    if (!voice) {
-      throw new AppError("TTS voice 不能为空。", 400);
-    }
-    if (!isMimoTtsPresetVoice(voice)) {
-      throw new AppError(`音色「${voice}」不在 MiMo 预置表中。`, 400);
-    }
-
-    const style = (input.style?.trim() || DEFAULT_AUDIOBOOK_NARRATOR_STYLE);
-    const format = input.format ?? "wav";
+    const mode = resolveMode(input);
+    const body = buildMimoTtsRequestBody(input);
     const llmProvider = input.provider ?? DEFAULT_PROVIDER;
-    const model = input.model?.trim() || DEFAULT_MIMO_TTS_MODEL;
 
     const resolvedBaseURL = isBuiltInProvider(llmProvider)
       ? resolveProviderBaseUrl(llmProvider)
@@ -156,18 +295,6 @@ export class MimoChatAudioTTSProvider {
     }
 
     const url = `${baseURL.replace(/\/$/, "")}/chat/completions`;
-    const body = {
-      model,
-      messages: [
-        { role: "user", content: style },
-        { role: "assistant", content: text },
-      ],
-      audio: {
-        format,
-        voice: voice as MimoTtsPresetVoice,
-      },
-      stream: false,
-    };
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -205,11 +332,18 @@ export class MimoChatAudioTTSProvider {
         throw new AppError("MiMo TTS 响应缺少 message.audio.data。", 502);
       }
 
+      const voiceLabel = mode === "preset"
+        ? (input.voice?.trim() || "")
+        : mode === "design"
+          ? "design"
+          : "clone";
+
       return {
         audioBase64,
-        format,
-        voice,
-        model,
+        format: input.format ?? "wav",
+        voice: voiceLabel,
+        model: body.model,
+        mode,
         raw: payload,
       };
     } catch (error) {

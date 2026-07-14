@@ -275,7 +275,16 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
   );
 
   const missingVoiceCharacters = useMemo(
-    () => characters.filter((character) => !character.ttsVoice?.trim()),
+    () => characters.filter((character) => {
+      const mode = character.ttsMode?.trim() || "preset";
+      if (mode === "design") {
+        return !character.ttsDesignPrompt?.trim();
+      }
+      if (mode === "clone") {
+        return !character.ttsRefAudioPath?.trim();
+      }
+      return !character.ttsVoice?.trim();
+    }),
     [characters],
   );
 

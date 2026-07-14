@@ -628,6 +628,9 @@ model Character {
   voiceTexture    String?
   ttsVoice        String?
   ttsStyle        String?
+  ttsMode         String?
+  ttsDesignPrompt String?
+  ttsRefAudioPath String?
   presenceImpression String?
   arcStart        String?
   arcMidpoint     String?

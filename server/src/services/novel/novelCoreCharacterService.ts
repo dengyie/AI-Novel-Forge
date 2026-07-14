@@ -4,6 +4,7 @@ import {
   characterEvolutionPrompt,
   characterWorldCheckPrompt,
 } from "../../prompting/prompts/novel/coreCharacter.prompts";
+import { writeCharacterVoiceRefFromBase64 } from "../audiobook/audiobookPaths";
 import { ragServices } from "../rag";
 import { queueRagDelete, queueRagUpsert } from "./novelCoreSupport";
 import { WorldContextGateway } from "./worldContext/WorldContextGateway";
@@ -40,7 +41,7 @@ export class NovelCoreCharacterService {
       };
     }
 
-    const { prohibitions, ...data } = payload;
+    const { prohibitions, ttsRefAudioBase64, ...data } = payload;
     const created = await prisma.character.create({
       data: {
         novelId,
@@ -48,6 +49,21 @@ export class NovelCoreCharacterService {
         ...(prohibitions ? { prohibitionsJson: serializeCharacterProhibitions(prohibitions) } : {}),
       },
     });
+
+    if (ttsRefAudioBase64?.trim()) {
+      const refPath = writeCharacterVoiceRefFromBase64({
+        novelId,
+        characterId: created.id,
+        base64: ttsRefAudioBase64,
+      });
+      const withRef = await prisma.character.update({
+        where: { id: created.id },
+        data: { ttsRefAudioPath: refPath, ttsMode: data.ttsMode ?? "clone" },
+      });
+      queueRagUpsert("character", withRef.id);
+      return withRef;
+    }
+
     queueRagUpsert("character", created.id);
     return created;
   }
@@ -63,14 +79,30 @@ export class NovelCoreCharacterService {
 
     const hasStateChanged = typeof input.currentState === "string" && input.currentState !== exists.currentState;
     const hasGoalChanged = typeof input.currentGoal === "string" && input.currentGoal !== exists.currentGoal;
-    const { prohibitions, ...data } = input;
+    const { prohibitions, ttsRefAudioBase64, ...data } = input;
+
+    let nextData: Record<string, unknown> = {
+      ...data,
+      ...(prohibitions ? { prohibitionsJson: serializeCharacterProhibitions(prohibitions) } : {}),
+      ...(hasStateChanged || hasGoalChanged ? { lastEvolvedAt: new Date() } : {}),
+    };
+
+    if (ttsRefAudioBase64?.trim()) {
+      const refPath = writeCharacterVoiceRefFromBase64({
+        novelId,
+        characterId,
+        base64: ttsRefAudioBase64,
+      });
+      nextData = {
+        ...nextData,
+        ttsRefAudioPath: refPath,
+        ttsMode: data.ttsMode ?? "clone",
+      };
+    }
+
     const updated = await prisma.character.update({
       where: { id: characterId },
-      data: {
-        ...data,
-        ...(prohibitions ? { prohibitionsJson: serializeCharacterProhibitions(prohibitions) } : {}),
-        ...(hasStateChanged || hasGoalChanged ? { lastEvolvedAt: new Date() } : {}),
-      },
+      data: nextData,
     });
 
     queueRagUpsert("character", updated.id);
