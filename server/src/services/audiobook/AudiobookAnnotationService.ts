@@ -72,6 +72,7 @@ export function buildNarratorOnlyAnnotation(input: {
         characterId: null,
         speakerLabel: "旁白",
         text,
+        ttsMode: "preset",
         voice: input.narrator.voice,
         style: input.narrator.style,
       }]
@@ -114,7 +115,16 @@ export class AudiobookAnnotationService {
     }
 
     const roster = input.characterVoices
-      .map((item) => `- ${item.characterName}（音色 ${item.ttsVoice}）`)
+      .map((item) => {
+        const mode = item.ttsMode?.trim() || "preset";
+        if (mode === "design") {
+          return `- ${item.characterName}（design）`;
+        }
+        if (mode === "clone") {
+          return `- ${item.characterName}（clone）`;
+        }
+        return `- ${item.characterName}（音色 ${item.ttsVoice || "未设"}）`;
+      })
       .join("\n");
 
     try {
@@ -152,14 +162,18 @@ export class AudiobookAnnotationService {
         if (raw.speakerKind === "character") {
           const matched = resolveCharacter(raw.speakerName, index);
           if (matched) {
+            const mode = matched.ttsMode?.trim() || "preset";
             segments.push({
               index: segIndex++,
               speakerKind: "character",
               characterId: matched.characterId,
               speakerLabel: matched.characterName,
               text,
-              voice: matched.ttsVoice,
+              ttsMode: mode === "design" || mode === "clone" ? mode : "preset",
+              voice: matched.ttsVoice?.trim() || "",
               style: matched.ttsStyle ?? input.narrator.style,
+              designPrompt: matched.ttsDesignPrompt ?? null,
+              refAudioPath: matched.ttsRefAudioPath ?? null,
             });
             continue;
           }
@@ -171,6 +185,7 @@ export class AudiobookAnnotationService {
           characterId: null,
           speakerLabel: "旁白",
           text,
+          ttsMode: "preset",
           voice: input.narrator.voice,
           style: input.narrator.style,
         });

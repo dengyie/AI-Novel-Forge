@@ -57,10 +57,19 @@ export interface Character {
   attireStyle?: string | null;
   signatureDetail?: string | null;
   voiceTexture?: string | null;
-  /** MiMo TTS 音色 id（如 茉莉）；有声书多角色绑定。 */
+  /**
+   * 有声书 TTS 模态：preset | design | clone。
+   * 缺省/空 = preset（兼容旧角色）。
+   */
+  ttsMode?: "preset" | "design" | "clone" | null;
+  /** preset：MiMo 预置音色 id（如 茉莉）。 */
   ttsVoice?: string | null;
-  /** 可选角色 style context；缺省用旁白 style 或默认 style。 */
+  /** 可选 style context；preset/clone 的 user 侧；design 时 designPrompt 优先。 */
   ttsStyle?: string | null;
+  /** design：音色设计文案。 */
+  ttsDesignPrompt?: string | null;
+  /** clone：参考音频落盘路径（相对 data root 或绝对，服务端校验）。 */
+  ttsRefAudioPath?: string | null;
   presenceImpression?: string | null;
   arcStart?: string | null;
   arcMidpoint?: string | null;

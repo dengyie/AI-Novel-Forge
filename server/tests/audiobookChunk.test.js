@@ -13,7 +13,8 @@ const {
   resolveAudiobookTaskDir,
   resolveChunkAudioPath,
 } = require("../dist/services/audiobook/audiobookPaths.js");
-const { extractAudioBase64 } = require("../dist/services/audiobook/MimoChatAudioTTSProvider.js");
+const { extractAudioBase64, buildMimoTtsRequestBody } = require("../dist/services/audiobook/MimoChatAudioTTSProvider.js");
+const { MIMO_TTS_MODELS, isAudiobookTtsMode } = require("../../shared/dist/types/audiobook.js");
 const { isMissingAudiobookTaskTableError } = require("../dist/services/audiobook/audiobookErrors.js");
 
 test("MiMo preset voice catalog includes product SoT voices", () => {
@@ -317,4 +318,66 @@ test("concatWavFiles inserts silenceBetweenMs between chunks", () => {
   // middle region should be zeros (silence)
   const mid = info.dataOffset + pcmA.length + Math.floor(createSilentPcm(500, 24_000, 1).length / 2);
   assert.equal(buf.readInt16LE(mid), 0);
+});
+
+
+test("isAudiobookTtsMode accepts three modes", () => {
+  assert.equal(isAudiobookTtsMode("preset"), true);
+  assert.equal(isAudiobookTtsMode("design"), true);
+  assert.equal(isAudiobookTtsMode("clone"), true);
+  assert.equal(isAudiobookTtsMode("other"), false);
+});
+
+test("buildMimoTtsRequestBody preset includes voice and style", () => {
+  const body = buildMimoTtsRequestBody({
+    text: "你好。",
+    mode: "preset",
+    voice: "茉莉",
+    style: "知性旁白",
+  });
+  assert.equal(body.model, MIMO_TTS_MODELS.preset);
+  assert.equal(body.messages[0].content, "知性旁白");
+  assert.equal(body.messages[1].content, "你好。");
+  assert.equal(body.audio.voice, "茉莉");
+  assert.equal(body.audio.format, "wav");
+});
+
+test("buildMimoTtsRequestBody design omits audio.voice", () => {
+  const body = buildMimoTtsRequestBody({
+    text: "校准新声音。",
+    mode: "design",
+    designPrompt: "青年女声，清亮不尖",
+  });
+  assert.equal(body.model, MIMO_TTS_MODELS.design);
+  assert.equal(body.messages[0].content, "青年女声，清亮不尖");
+  assert.equal(body.messages[1].content, "校准新声音。");
+  assert.equal(Object.prototype.hasOwnProperty.call(body.audio, "voice"), false);
+});
+
+test("buildMimoTtsRequestBody clone uses DataURL voice", () => {
+  const bare = Buffer.from("RIFF....WAVEfmt ").toString("base64");
+  const body = buildMimoTtsRequestBody({
+    text: "克隆测试。",
+    mode: "clone",
+    style: "语速稍慢",
+    refAudioBase64: bare,
+  });
+  assert.equal(body.model, MIMO_TTS_MODELS.clone);
+  assert.equal(body.messages[0].content, "语速稍慢");
+  assert.equal(body.audio.voice.startsWith("data:audio/wav;base64,"), true);
+  assert.equal(body.audio.voice.endsWith(bare), true);
+});
+
+test("buildMimoTtsRequestBody rejects design without prompt", () => {
+  assert.throws(
+    () => buildMimoTtsRequestBody({ text: "x", mode: "design" }),
+    /design/,
+  );
+});
+
+test("buildMimoTtsRequestBody rejects preset unknown voice", () => {
+  assert.throws(
+    () => buildMimoTtsRequestBody({ text: "x", mode: "preset", voice: "not-real" }),
+    /预置/,
+  );
 });

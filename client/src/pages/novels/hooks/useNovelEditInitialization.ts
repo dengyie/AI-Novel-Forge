@@ -31,8 +31,12 @@ interface CharacterFormState {
   attireStyle: string;
   signatureDetail: string;
   voiceTexture: string;
+  ttsMode: "preset" | "design" | "clone" | "";
   ttsVoice: string;
   ttsStyle: string;
+  ttsDesignPrompt: string;
+  ttsRefAudioPath: string;
+  ttsRefAudioBase64: string;
   presenceImpression: string;
   currentState: string;
   currentGoal: string;
@@ -73,8 +77,12 @@ const EMPTY_CHARACTER_FORM: CharacterFormState = {
   attireStyle: "",
   signatureDetail: "",
   voiceTexture: "",
+  ttsMode: "preset" as const,
   ttsVoice: "",
   ttsStyle: "",
+  ttsDesignPrompt: "",
+  ttsRefAudioPath: "",
+  ttsRefAudioBase64: "",
   presenceImpression: "",
   currentState: "",
   currentGoal: "",
@@ -221,8 +229,12 @@ export function useNovelEditInitialization({
       attireStyle: selectedCharacter.attireStyle ?? "",
       signatureDetail: selectedCharacter.signatureDetail ?? "",
       voiceTexture: selectedCharacter.voiceTexture ?? "",
+      ttsMode: (selectedCharacter.ttsMode as "preset" | "design" | "clone" | null | undefined) ?? "preset",
       ttsVoice: selectedCharacter.ttsVoice ?? "",
       ttsStyle: selectedCharacter.ttsStyle ?? "",
+      ttsDesignPrompt: selectedCharacter.ttsDesignPrompt ?? "",
+      ttsRefAudioPath: selectedCharacter.ttsRefAudioPath ?? "",
+      ttsRefAudioBase64: "",
       presenceImpression: selectedCharacter.presenceImpression ?? "",
       currentState: selectedCharacter.currentState ?? "",
       currentGoal: selectedCharacter.currentGoal ?? "",

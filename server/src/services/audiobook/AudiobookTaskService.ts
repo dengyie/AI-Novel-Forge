@@ -58,12 +58,12 @@ function buildPrecheckRejectMessage(precheck: Awaited<ReturnType<typeof audioboo
   const parts: string[] = [];
   if (precheck.missingVoices.length > 0) {
     const names = precheck.missingVoices.map((item) => item.characterName).join("、");
-    parts.push(`以下角色未配置 ttsVoice：${names}`);
+    parts.push(`以下角色未完成 TTS 绑定：${names}`);
   }
   if (precheck.blockingErrors.length > 0) {
     parts.push(...precheck.blockingErrors);
   }
-  return `有声书启动被拒绝：${parts.join("；") || "预检未通过"}。请绑定 MiMo 预置音色后重试。`;
+  return `有声书启动被拒绝：${parts.join("；") || "预检未通过"}。请按角色 ttsMode 补齐 preset/design/clone 绑定后重试。`;
 }
 
 function parseAnnotationsJson(json: string | null | undefined): AudiobookChapterAnnotation[] {
@@ -683,8 +683,11 @@ export class AudiobookTaskService {
             select: {
               id: true,
               name: true,
+              ttsMode: true,
               ttsVoice: true,
               ttsStyle: true,
+              ttsDesignPrompt: true,
+              ttsRefAudioPath: true,
             },
           },
         },
@@ -694,13 +697,29 @@ export class AudiobookTaskService {
         return;
       }
       const characterVoices = novel.characters
-        .filter((character) => Boolean(character.ttsVoice?.trim()))
-        .map((character) => ({
-          characterId: character.id,
-          characterName: character.name,
-          ttsVoice: character.ttsVoice!.trim(),
-          ttsStyle: character.ttsStyle ?? null,
-        }));
+        .map((character) => {
+          const modeRaw = character.ttsMode?.trim();
+          const ttsMode: "preset" | "design" | "clone" =
+            modeRaw === "design" || modeRaw === "clone" ? modeRaw : "preset";
+          return {
+            characterId: character.id,
+            characterName: character.name,
+            ttsMode,
+            ttsVoice: character.ttsVoice?.trim() || null,
+            ttsStyle: character.ttsStyle ?? null,
+            ttsDesignPrompt: character.ttsDesignPrompt?.trim() || null,
+            ttsRefAudioPath: character.ttsRefAudioPath?.trim() || null,
+          };
+        })
+        .filter((character) => {
+          if (character.ttsMode === "design") {
+            return Boolean(character.ttsDesignPrompt);
+          }
+          if (character.ttsMode === "clone") {
+            return Boolean(character.ttsRefAudioPath);
+          }
+          return Boolean(character.ttsVoice);
+        });
 
       const result = await audiobookPipelineService.run({
         taskId,

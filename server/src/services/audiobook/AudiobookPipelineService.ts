@@ -195,6 +195,9 @@ async function synthesizeChunkWithRetry(input: {
   text: string;
   voice: string;
   style?: string | null;
+  ttsMode?: string | null;
+  designPrompt?: string | null;
+  refAudioPath?: string | null;
   provider?: LLMProvider | null;
   signal?: AbortSignal;
   maxAttempts?: number;
@@ -203,10 +206,15 @@ async function synthesizeChunkWithRetry(input: {
   let lastError: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
+      const modeRaw = input.ttsMode?.trim();
+      const mode = modeRaw === "design" || modeRaw === "clone" ? modeRaw : "preset";
       const result = await mimoChatAudioTTSProvider.synthesize({
         text: input.text,
+        mode,
         voice: input.voice,
         style: input.style,
+        designPrompt: input.designPrompt,
+        refAudioPath: input.refAudioPath,
         format: "wav",
         provider: input.provider ?? undefined,
         signal: input.signal,
@@ -397,6 +405,9 @@ export class AudiobookPipelineService {
           text: job.text,
           voice: job.segment.voice,
           style: job.segment.style,
+          ttsMode: job.segment.ttsMode,
+          designPrompt: job.segment.designPrompt,
+          refAudioPath: job.segment.refAudioPath,
           provider: input.provider,
           signal: input.signal,
         });

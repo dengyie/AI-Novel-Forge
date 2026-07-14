@@ -208,8 +208,12 @@ export async function createNovelCharacter(
     attireStyle?: string;
     signatureDetail?: string;
     voiceTexture?: string;
+    ttsMode?: "preset" | "design" | "clone" | null;
     ttsVoice?: string | null;
     ttsStyle?: string | null;
+    ttsDesignPrompt?: string | null;
+    ttsRefAudioPath?: string | null;
+    ttsRefAudioBase64?: string | null;
     presenceImpression?: string;
     arcStart?: string;
     arcMidpoint?: string;
@@ -250,8 +254,12 @@ export async function updateNovelCharacter(
     attireStyle: string;
     signatureDetail: string;
     voiceTexture: string;
+    ttsMode: "preset" | "design" | "clone" | null;
     ttsVoice: string | null;
     ttsStyle: string | null;
+    ttsDesignPrompt: string | null;
+    ttsRefAudioPath: string | null;
+    ttsRefAudioBase64: string | null;
     presenceImpression: string;
     arcStart: string;
     arcMidpoint: string;

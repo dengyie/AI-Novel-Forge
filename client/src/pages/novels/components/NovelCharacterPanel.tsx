@@ -51,8 +51,12 @@ interface CharacterFormState {
   attireStyle: string;
   signatureDetail: string;
   voiceTexture: string;
+  ttsMode: "preset" | "design" | "clone" | "";
   ttsVoice: string;
   ttsStyle: string;
+  ttsDesignPrompt: string;
+  ttsRefAudioPath: string;
+  ttsRefAudioBase64: string;
   presenceImpression: string;
   currentState: string;
   currentGoal: string;
