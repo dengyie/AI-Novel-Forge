@@ -8,7 +8,12 @@ import {
 } from "@ai-novel/shared/types/audiobook";
 import { z } from "zod";
 import { llmProviderSchema } from "../../../../llm/providerSchema";
+import { resolveAuthMode, type RequestWithApiAuth } from "../../../../middleware/auth";
 import { validate } from "../../../../middleware/validate";
+import {
+  issueAudiobookMediaAccess,
+  verifyAudiobookMediaAccess,
+} from "../../../../services/audiobook/audiobookMediaAccess";
 import { audiobookTaskService } from "../../../../services/audiobook/AudiobookTaskService";
 import {
   resolveAudiobookTaskDir,
@@ -31,7 +36,57 @@ const chapterAudioParamsSchema = z.object({
   chapterId: z.string().trim().min(1),
 });
 
-function streamWavFile(res: import("express").Response, filePath: string, downloadName: string): void {
+function isPathInside(parent: string, target: string): boolean {
+  const resolvedParent = path.resolve(parent);
+  const resolvedTarget = path.resolve(target);
+  return resolvedTarget === resolvedParent || resolvedTarget.startsWith(`${resolvedParent}${path.sep}`);
+}
+
+function parseRangeHeader(
+  rangeHeader: string | undefined,
+  size: number,
+): { start: number; end: number } | "invalid" | null {
+  if (!rangeHeader) {
+    return null;
+  }
+  const match = /^bytes=(\d*)-(\d*)$/i.exec(rangeHeader.trim());
+  if (!match) {
+    return "invalid";
+  }
+  const startRaw = match[1];
+  const endRaw = match[2];
+  let start = startRaw ? Number(startRaw) : NaN;
+  let end = endRaw ? Number(endRaw) : NaN;
+  if (!startRaw && !endRaw) {
+    return "invalid";
+  }
+  if (!startRaw) {
+    // suffix: bytes=-N
+    const suffix = Number(endRaw);
+    if (!Number.isFinite(suffix) || suffix <= 0) {
+      return "invalid";
+    }
+    start = Math.max(0, size - suffix);
+    end = size - 1;
+  } else {
+    if (!Number.isFinite(start) || start < 0) {
+      return "invalid";
+    }
+    end = Number.isFinite(end) ? end : size - 1;
+    if (end < start || start >= size) {
+      return "invalid";
+    }
+    end = Math.min(end, size - 1);
+  }
+  return { start, end };
+}
+
+function streamWavFile(
+  req: import("express").Request,
+  res: import("express").Response,
+  filePath: string,
+  downloadName: string,
+): void {
   if (!fs.existsSync(filePath)) {
     res.status(404).json({
       success: false,
@@ -40,18 +95,90 @@ function streamWavFile(res: import("express").Response, filePath: string, downlo
     return;
   }
   const stat = fs.statSync(filePath);
+  const size = stat.size;
+  const range = parseRangeHeader(req.headers.range, size);
+
   res.setHeader("Content-Type", "audio/wav");
-  res.setHeader("Content-Length", String(stat.size));
   res.setHeader("Accept-Ranges", "bytes");
   res.setHeader("Cache-Control", "private, max-age=3600");
   res.setHeader("Content-Disposition", `inline; filename="${downloadName}"`);
+
+  if (range === "invalid") {
+    res.status(416);
+    res.setHeader("Content-Range", `bytes */${size}`);
+    res.end();
+    return;
+  }
+
+  if (range) {
+    const { start, end } = range;
+    const chunkSize = end - start + 1;
+    res.status(206);
+    res.setHeader("Content-Range", `bytes ${start}-${end}/${size}`);
+    res.setHeader("Content-Length", String(chunkSize));
+    fs.createReadStream(filePath, { start, end }).pipe(res);
+    return;
+  }
+
+  res.setHeader("Content-Length", String(size));
   fs.createReadStream(filePath).pipe(res);
 }
 
-function isPathInside(parent: string, target: string): boolean {
-  const resolvedParent = path.resolve(parent);
-  const resolvedTarget = path.resolve(target);
-  return resolvedTarget === resolvedParent || resolvedTarget.startsWith(`${resolvedParent}${path.sep}`);
+function resolvePlayableFullPath(taskDir: string, stored: string | null | undefined): string {
+  const fallback = resolveFullBookAudioPath(taskDir);
+  const raw = stored?.trim();
+  if (!raw || raw === "full-book.wav") {
+    return fallback;
+  }
+  // 兼容历史绝对路径：仅当仍落在 taskDir 内时使用
+  if (path.isAbsolute(raw) && isPathInside(taskDir, raw)) {
+    return raw;
+  }
+  const joined = path.resolve(taskDir, raw);
+  if (isPathInside(taskDir, joined)) {
+    return joined;
+  }
+  return fallback;
+}
+
+function assertMediaAccess(input: {
+  req: import("express").Request;
+  res: import("express").Response;
+  novelId: string;
+  taskId: string;
+  resource: { kind: "full" } | { kind: "chapter"; chapterId: string };
+}): boolean {
+  const headerAuthorized = Boolean((input.req as RequestWithApiAuth).apiAuthViaHeader);
+  if (headerAuthorized) {
+    return true;
+  }
+  // open 模式 middleware 已放行
+  const access = typeof input.req.query?.access === "string" ? input.req.query.access : null;
+  if (!access) {
+    // open 且无 access：允许；token 模式无 access 应在 middleware 已拦，双保险
+    if (resolveAuthMode() === "open") {
+      return true;
+    }
+    input.res.status(401).json({
+      success: false,
+      error: "未授权：缺少有效的媒体访问令牌。",
+    } satisfies ApiResponse<null>);
+    return false;
+  }
+  const ok = verifyAudiobookMediaAccess({
+    access,
+    novelId: input.novelId,
+    taskId: input.taskId,
+    resource: input.resource,
+  });
+  if (!ok) {
+    input.res.status(401).json({
+      success: false,
+      error: "未授权：媒体访问令牌无效或已过期。",
+    } satisfies ApiResponse<null>);
+    return false;
+  }
+  return true;
 }
 
 const createAudiobookTaskSchema = z.object({
@@ -223,12 +350,97 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
     },
   );
 
+  /** 签发短时媒体 URL（供 SPA 在 token 模式下给 <audio>/<a> 使用） */
+  router.post(
+    "/:id/audiobook/tasks/:taskId/media-access",
+    validate({
+      params: taskParamsSchema,
+      body: z.object({
+        resource: z.enum(["full", "chapter"]),
+        chapterId: z.string().trim().min(1).optional(),
+      }).superRefine((value, ctx) => {
+        if (value.resource === "chapter" && !value.chapterId) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "resource=chapter 时必须提供 chapterId。",
+            path: ["chapterId"],
+          });
+        }
+      }),
+    }),
+    async (req, res, next) => {
+      try {
+        const { id, taskId } = req.params as z.infer<typeof taskParamsSchema>;
+        const body = req.body as { resource: "full" | "chapter"; chapterId?: string };
+        const task = await audiobookTaskService.getTask(taskId);
+        if (!task || task.novelId !== id) {
+          res.status(404).json({
+            success: false,
+            error: "有声书任务不存在。",
+          } satisfies ApiResponse<null>);
+          return;
+        }
+        if (body.resource === "chapter" && body.chapterId && !task.chapterIds.includes(body.chapterId)) {
+          res.status(404).json({
+            success: false,
+            error: "章节不在该有声书任务范围内。",
+          } satisfies ApiResponse<null>);
+          return;
+        }
+
+        const resource = body.resource === "full"
+          ? { kind: "full" as const }
+          : { kind: "chapter" as const, chapterId: body.chapterId! };
+
+        const issued = issueAudiobookMediaAccess({
+          novelId: id,
+          taskId,
+          resource,
+        });
+
+        const pathSuffix = body.resource === "full"
+          ? `/novels/${encodeURIComponent(id)}/audiobook/tasks/${encodeURIComponent(taskId)}/audio/full`
+          : `/novels/${encodeURIComponent(id)}/audiobook/tasks/${encodeURIComponent(taskId)}/audio/chapters/${encodeURIComponent(body.chapterId!)}`;
+
+        const data = issued
+          ? {
+              urlPath: `${pathSuffix}?access=${encodeURIComponent(issued.access)}`,
+              access: issued.access,
+              expiresAt: issued.expiresAt,
+            }
+          : {
+              urlPath: pathSuffix,
+              access: null as string | null,
+              expiresAt: null as number | null,
+            };
+
+        res.status(200).json({
+          success: true,
+          data,
+          message: "媒体访问令牌已签发。",
+        } satisfies ApiResponse<typeof data>);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
   router.get(
     "/:id/audiobook/tasks/:taskId/audio/full",
     validate({ params: taskParamsSchema }),
     async (req, res, next) => {
       try {
         const { id, taskId } = req.params as z.infer<typeof taskParamsSchema>;
+        if (!assertMediaAccess({
+          req,
+          res,
+          novelId: id,
+          taskId,
+          resource: { kind: "full" },
+        })) {
+          return;
+        }
+
         const task = await audiobookTaskService.getTask(taskId);
         if (!task || task.novelId !== id) {
           res.status(404).json({
@@ -239,7 +451,7 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
         }
 
         const taskDir = resolveAudiobookTaskDir(id, taskId);
-        const preferred = task.fullAudioPath?.trim() || resolveFullBookAudioPath(taskDir);
+        const preferred = resolvePlayableFullPath(taskDir, task.fullAudioPath);
         if (!isPathInside(taskDir, preferred)) {
           res.status(400).json({
             success: false,
@@ -247,7 +459,7 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
           } satisfies ApiResponse<null>);
           return;
         }
-        streamWavFile(res, preferred, `audiobook-${taskId}-full.wav`);
+        streamWavFile(req, res, preferred, `audiobook-${taskId}-full.wav`);
       } catch (error) {
         next(error);
       }
@@ -260,6 +472,16 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
     async (req, res, next) => {
       try {
         const { id, taskId, chapterId } = req.params as z.infer<typeof chapterAudioParamsSchema>;
+        if (!assertMediaAccess({
+          req,
+          res,
+          novelId: id,
+          taskId,
+          resource: { kind: "chapter", chapterId },
+        })) {
+          return;
+        }
+
         const task = await audiobookTaskService.getTask(taskId);
         if (!task || task.novelId !== id) {
           res.status(404).json({
@@ -285,7 +507,7 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
           } satisfies ApiResponse<null>);
           return;
         }
-        streamWavFile(res, filePath, `audiobook-${taskId}-${chapterId}.wav`);
+        streamWavFile(req, res, filePath, `audiobook-${taskId}-${chapterId}.wav`);
       } catch (error) {
         next(error);
       }

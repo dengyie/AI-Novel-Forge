@@ -99,7 +99,13 @@ const {
   buildWavBuffer,
   concatWavFiles,
   createSilentPcm,
+  isValidPcmWavFile,
+  writeWavFileAtomic,
 } = require("../dist/services/audiobook/audiobookWav.js");
+const {
+  issueAudiobookMediaAccess,
+  verifyAudiobookMediaAccess,
+} = require("../dist/services/audiobook/audiobookMediaAccess.js");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -115,7 +121,7 @@ test("buildWavBuffer + parseWavInfo round-trip PCM header", () => {
   assert.equal(info.dataSize, 480);
 });
 
-test("concatWavFiles merges same-format chunks in order", () => {
+test("concatWavFiles merges same-format chunks in order (streaming)", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ab-wav-"));
   try {
     const a = buildWavBuffer(Buffer.from([1, 2, 3, 4]), { numChannels: 1, sampleRate: 24_000, bitsPerSample: 16 });
@@ -135,6 +141,7 @@ test("concatWavFiles merges same-format chunks in order", () => {
       [...merged.subarray(info.dataOffset, info.dataOffset + info.dataSize)],
       [1, 2, 3, 4, 5, 6, 7, 8],
     );
+    assert.equal(fs.existsSync(`${out}.part`), false);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -144,4 +151,59 @@ test("createSilentPcm length matches duration", () => {
   const pcm = createSilentPcm(100, 24_000, 1);
   assert.equal(pcm.length, 24_000 * 0.1 * 2);
   assert.equal(pcm.every((byte) => byte === 0), true);
+});
+
+test("isValidPcmWavFile rejects truncated wav", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ab-wav-valid-"));
+  try {
+    const good = buildWavBuffer(Buffer.alloc(100), { numChannels: 1, sampleRate: 24_000, bitsPerSample: 16 });
+    const goodPath = path.join(dir, "good.wav");
+    writeWavFileAtomic(goodPath, good);
+    assert.equal(isValidPcmWavFile(goodPath), true);
+
+    const badPath = path.join(dir, "bad.wav");
+    fs.writeFileSync(badPath, good.subarray(0, 60));
+    assert.equal(isValidPcmWavFile(badPath), false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("audiobook media access sign and verify", () => {
+  process.env.API_AUTH_TOKEN = "test-media-secret-token";
+  const issued = issueAudiobookMediaAccess({
+    novelId: "novel1",
+    taskId: "task1",
+    resource: { kind: "full" },
+    ttlSec: 120,
+  });
+  assert.ok(issued);
+  assert.equal(
+    verifyAudiobookMediaAccess({
+      access: issued.access,
+      novelId: "novel1",
+      taskId: "task1",
+      resource: { kind: "full" },
+    }),
+    true,
+  );
+  assert.equal(
+    verifyAudiobookMediaAccess({
+      access: issued.access,
+      novelId: "novel1",
+      taskId: "task-other",
+      resource: { kind: "full" },
+    }),
+    false,
+  );
+  assert.equal(
+    verifyAudiobookMediaAccess({
+      access: issued.access,
+      novelId: "novel1",
+      taskId: "task1",
+      resource: { kind: "chapter", chapterId: "c1" },
+    }),
+    false,
+  );
+  delete process.env.API_AUTH_TOKEN;
 });

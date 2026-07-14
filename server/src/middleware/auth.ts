@@ -81,6 +81,19 @@ function isHealthLivenessPath(req: Request): boolean {
   return url === "/api/health" || url === "/api/health/";
 }
 
+/**
+ * 有声书 WAV 播放/下载：原生 <audio>/<a> 无法带 Authorization。
+ * token 模式下允许携带 ?access= 短时签名令牌进入路由，由路由校验绑定关系。
+ */
+function isAudiobookMediaPath(req: Request): boolean {
+  const url = (req.originalUrl ?? req.url ?? "").split("?")[0];
+  return /\/audiobook\/tasks\/[^/]+\/audio\//.test(url);
+}
+
+export type RequestWithApiAuth = Request & {
+  apiAuthViaHeader?: boolean;
+};
+
 export function authMiddleware(req: Request, res: Response, next: NextFunction): void {
   if (isHealthLivenessPath(req)) {
     next();
@@ -104,14 +117,22 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
   }
 
   const presented = extractPresentedToken(req);
-  if (!presented || presented !== expected) {
-    const response: ApiResponse<null> = {
-      success: false,
-      error: "未授权：请提供有效的 API 令牌。",
-    };
-    res.status(401).json(response);
+  if (presented && presented === expected) {
+    (req as RequestWithApiAuth).apiAuthViaHeader = true;
+    next();
     return;
   }
 
-  next();
+  const access = typeof req.query?.access === "string" ? req.query.access : null;
+  if (isAudiobookMediaPath(req) && access) {
+    // 路由内校验 access 与 novelId/taskId/resource 绑定
+    next();
+    return;
+  }
+
+  const response: ApiResponse<null> = {
+    success: false,
+    error: "未授权：请提供有效的 API 令牌。",
+  };
+  res.status(401).json(response);
 }

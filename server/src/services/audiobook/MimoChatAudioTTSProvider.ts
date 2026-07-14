@@ -216,9 +216,14 @@ export class MimoChatAudioTTSProvider {
       if (error instanceof AppError) {
         throw error;
       }
-      if (error instanceof Error && (error.name === "AbortError" || /aborted/i.test(error.message))) {
-        // 408 Request Timeout：避免非标准 499 被网关/客户端误判
-        throw new AppError("MiMo TTS 请求已取消或超时。", 408);
+      const aborted = error instanceof Error
+        && (error.name === "AbortError" || /aborted/i.test(error.message));
+      if (aborted) {
+        // 外部取消（任务 cancel）与本地超时分开：取消不重试，超时可重试
+        if (input.signal?.aborted) {
+          throw new AppError("MiMo TTS 请求已取消。", 408);
+        }
+        throw new AppError("MiMo TTS 请求超时。", 504);
       }
       throw new AppError(
         `MiMo TTS 调用异常：${error instanceof Error ? error.message : String(error)}`,
