@@ -143,6 +143,22 @@ export interface AudiobookTaskDetail extends AudiobookTaskSummary {
   meta: Record<string, unknown>;
 }
 
+/** 查看任务标注结果（调试 / 失败章重做） */
+export interface AudiobookTaskAnnotationsView {
+  taskId: string;
+  novelId: string;
+  status: AudiobookTaskStatus;
+  annotations: AudiobookChapterAnnotation[];
+  qualityWarnings: string[];
+}
+
+export type AudiobookChapterReprocessMode = "reannotate" | "resynthesize";
+
+export interface ReprocessAudiobookChapterInput {
+  mode: AudiobookChapterReprocessMode;
+  chapterId: string;
+}
+
 export interface AudiobookVoiceCatalogItem {
   id: string;
   label: string;

@@ -1,4 +1,7 @@
 import type {
+  AudiobookChapterAnnotation,
+  AudiobookChapterReprocessMode,
+  AudiobookTaskAnnotationsView,
   AudiobookTaskDetail,
   AudiobookTaskSummary,
   CreateAudiobookTaskInput,
@@ -13,7 +16,12 @@ import {
   audiobookPipelineService,
   PipelineCancelledError,
 } from "./AudiobookPipelineService";
-import { ensureAudiobookTaskDir } from "./audiobookPaths";
+import {
+  ensureAudiobookTaskDir,
+  resolveAudiobookTaskDir,
+  wipeChapterAnnotationArtifact,
+  wipeChapterAudioArtifacts,
+} from "./audiobookPaths";
 
 const AUDIOBOOK_HEARTBEAT_INTERVAL_MS = Math.max(
   5_000,
@@ -56,6 +64,34 @@ function buildPrecheckRejectMessage(precheck: Awaited<ReturnType<typeof audioboo
     parts.push(...precheck.blockingErrors);
   }
   return `有声书启动被拒绝：${parts.join("；") || "预检未通过"}。请绑定 MiMo 预置音色后重试。`;
+}
+
+function parseAnnotationsJson(json: string | null | undefined): AudiobookChapterAnnotation[] {
+  if (!json?.trim()) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed.filter((item): item is AudiobookChapterAnnotation => {
+      return Boolean(
+        item
+        && typeof item === "object"
+        && typeof (item as AudiobookChapterAnnotation).chapterId === "string"
+        && Array.isArray((item as AudiobookChapterAnnotation).segments),
+      );
+    });
+  } catch {
+    return [];
+  }
+}
+
+function collectAnnotationWarnings(annotations: AudiobookChapterAnnotation[]): string[] {
+  return annotations
+    .filter((item) => Boolean(item.error?.trim()))
+    .map((item) => `第 ${item.chapterOrder} 章：${item.error!.trim()}`);
 }
 
 type AudiobookTaskRow = {
@@ -325,6 +361,94 @@ export class AudiobookTaskService {
     });
     this.enqueueTask(taskId);
     const detail = await this.getTask(taskId);
+    if (!detail) {
+      throw new AppError("有声书任务不存在。", 404);
+    }
+    return detail;
+  }
+
+  async getAnnotations(taskId: string): Promise<AudiobookTaskAnnotationsView> {
+    const task = await prisma.audiobookTask.findUnique({
+      where: { id: taskId },
+      select: {
+        id: true,
+        novelId: true,
+        status: true,
+        annotationsJson: true,
+      },
+    });
+    if (!task) {
+      throw new AppError("有声书任务不存在。", 404);
+    }
+    const annotations = parseAnnotationsJson(task.annotationsJson);
+    return {
+      taskId: task.id,
+      novelId: task.novelId,
+      status: task.status as AudiobookTaskAnnotationsView["status"],
+      annotations,
+      qualityWarnings: collectAnnotationWarnings(annotations),
+    };
+  }
+
+  /**
+   * 失败章 / 质量回退章重做：
+   * - reannotate：清标注 + 章音频 + 全书，resume 会重标并重合成该章
+   * - resynthesize：保留标注，仅清章音频 + 全书
+   * 仅 terminal 状态可操作；不占用 maxRetries。
+   */
+  async reprocessChapter(input: {
+    taskId: string;
+    chapterId: string;
+    mode: AudiobookChapterReprocessMode;
+  }): Promise<AudiobookTaskDetail> {
+    const task = await prisma.audiobookTask.findUnique({ where: { id: input.taskId } });
+    if (!task) {
+      throw new AppError("有声书任务不存在。", 404);
+    }
+    if (task.status !== "failed" && task.status !== "cancelled" && task.status !== "succeeded") {
+      throw new AppError("仅已完成、失败或已取消的有声书任务可重做章节。", 400);
+    }
+
+    const chapterIds = parseChapterIds(task.chapterIdsJson);
+    const chapterId = input.chapterId.trim();
+    if (!chapterIds.includes(chapterId)) {
+      throw new AppError("章节不在该有声书任务范围内。", 404);
+    }
+
+    const taskDir = resolveAudiobookTaskDir(task.novelId, task.id);
+    wipeChapterAudioArtifacts(taskDir, chapterId);
+
+    let nextAnnotationsJson = task.annotationsJson;
+    if (input.mode === "reannotate") {
+      wipeChapterAnnotationArtifact(taskDir, chapterId);
+      const remaining = parseAnnotationsJson(task.annotationsJson)
+        .filter((item) => item.chapterId !== chapterId);
+      nextAnnotationsJson = remaining.length > 0 ? JSON.stringify(remaining) : null;
+    }
+
+    const modeLabel = input.mode === "reannotate" ? "重标并重合成" : "重合成";
+    await prisma.audiobookTask.update({
+      where: { id: task.id },
+      data: {
+        status: "queued",
+        progress: 0,
+        error: null,
+        finishedAt: null,
+        startedAt: null,
+        cancelRequestedAt: null,
+        pendingManualRecovery: false,
+        heartbeatAt: null,
+        currentStage: "queued",
+        currentItemKey: chapterId,
+        currentItemLabel: `排队：${modeLabel}章节`,
+        fullAudioPath: null,
+        annotationsJson: nextAnnotationsJson,
+        summary: null,
+        resultJson: null,
+      },
+    });
+    this.enqueueTask(task.id);
+    const detail = await this.getTask(task.id);
     if (!detail) {
       throw new AppError("有声书任务不存在。", 404);
     }

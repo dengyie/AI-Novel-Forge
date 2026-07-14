@@ -350,6 +350,69 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
     },
   );
 
+  router.get(
+    "/:id/audiobook/tasks/:taskId/annotations",
+    validate({ params: taskParamsSchema }),
+    async (req, res, next) => {
+      try {
+        const { id, taskId } = req.params as z.infer<typeof taskParamsSchema>;
+        const data = await audiobookTaskService.getAnnotations(taskId);
+        if (data.novelId !== id) {
+          res.status(404).json({
+            success: false,
+            error: "有声书任务不存在。",
+          } satisfies ApiResponse<null>);
+          return;
+        }
+        res.status(200).json({
+          success: true,
+          data,
+          message: "有声书标注结果。",
+        } satisfies ApiResponse<typeof data>);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  router.post(
+    "/:id/audiobook/tasks/:taskId/chapters/:chapterId/reprocess",
+    validate({
+      params: chapterAudioParamsSchema,
+      body: z.object({
+        mode: z.enum(["reannotate", "resynthesize"]),
+      }),
+    }),
+    async (req, res, next) => {
+      try {
+        const { id, taskId, chapterId } = req.params as z.infer<typeof chapterAudioParamsSchema>;
+        const body = req.body as { mode: "reannotate" | "resynthesize" };
+        const existing = await audiobookTaskService.getTask(taskId);
+        if (!existing || existing.novelId !== id) {
+          res.status(404).json({
+            success: false,
+            error: "有声书任务不存在。",
+          } satisfies ApiResponse<null>);
+          return;
+        }
+        const data = await audiobookTaskService.reprocessChapter({
+          taskId,
+          chapterId,
+          mode: body.mode,
+        });
+        res.status(200).json({
+          success: true,
+          data,
+          message: body.mode === "reannotate"
+            ? "已排队：重标并重合成该章。"
+            : "已排队：按现有标注重合成该章。",
+        } satisfies ApiResponse<typeof data>);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
   /** 签发短时媒体 URL（供 SPA 在 token 模式下给 <audio>/<a> 使用） */
   router.post(
     "/:id/audiobook/tasks/:taskId/media-access",

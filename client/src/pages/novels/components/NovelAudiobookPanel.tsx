@@ -4,7 +4,9 @@ import {
   DEFAULT_AUDIOBOOK_NARRATOR_STYLE,
   DEFAULT_AUDIOBOOK_NARRATOR_VOICE,
   MIMO_TTS_VOICE_CATALOG,
+  type AudiobookChapterReprocessMode,
   type AudiobookScopeMode,
+  type AudiobookTaskAnnotationsView,
   type AudiobookTaskSummary,
 } from "@ai-novel/shared/types/audiobook";
 import type { Character } from "@ai-novel/shared/types/novel";
@@ -14,9 +16,11 @@ import { Input } from "@/components/ui/input";
 import {
   cancelAudiobookTask,
   createAudiobookTask,
+  getAudiobookAnnotations,
   issueAudiobookMediaUrl,
   listAudiobookTasks,
   precheckAudiobookTask,
+  reprocessAudiobookChapter,
 } from "@/api/novel/audiobook";
 import SelectControl from "@/components/common/SelectControl";
 
@@ -107,6 +111,135 @@ function TaskAudioControls(props: { novelId: string; task: AudiobookTaskSummary 
       ) : (
         <div className="text-xs text-muted-foreground">正在准备音频地址…</div>
       )}
+    </div>
+  );
+}
+
+function TaskAnnotationsPanel(props: {
+  novelId: string;
+  task: AudiobookTaskSummary;
+  onReprocessed: () => void;
+  onMessage: (text: string) => void;
+}) {
+  const { novelId, task, onReprocessed, onMessage } = props;
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [busyChapterId, setBusyChapterId] = useState<string | null>(null);
+  const [view, setView] = useState<AudiobookTaskAnnotationsView | null>(null);
+
+  const terminal = task.status === "succeeded" || task.status === "failed" || task.status === "cancelled";
+
+  async function loadAnnotations() {
+    setLoading(true);
+    try {
+      const response = await getAudiobookAnnotations(novelId, task.id);
+      setView(response.data ?? null);
+      if (!response.data) {
+        onMessage("暂无标注结果。");
+      }
+    } catch (error) {
+      onMessage(error instanceof Error ? error.message : "加载标注失败。");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleToggle() {
+    const next = !open;
+    setOpen(next);
+    if (next && !view) {
+      await loadAnnotations();
+    }
+  }
+
+  async function handleReprocess(chapterId: string, mode: AudiobookChapterReprocessMode) {
+    if (!terminal) {
+      onMessage("任务运行中，请先等待完成或取消后再重做章节。");
+      return;
+    }
+    setBusyChapterId(chapterId);
+    try {
+      await reprocessAudiobookChapter(novelId, task.id, chapterId, mode);
+      onMessage(mode === "reannotate" ? "已排队：重标并重合成该章。" : "已排队：按现有标注重合成该章。");
+      setOpen(false);
+      setView(null);
+      onReprocessed();
+    } catch (error) {
+      onMessage(error instanceof Error ? error.message : "章节重做失败。");
+    } finally {
+      setBusyChapterId(null);
+    }
+  }
+
+  return (
+    <div className="mt-2 space-y-2">
+      <Button size="sm" variant="outline" onClick={() => void handleToggle()} disabled={loading}>
+        {loading ? "加载标注..." : open ? "收起标注" : "查看标注"}
+      </Button>
+      {open ? (
+        <div className="max-h-72 space-y-2 overflow-y-auto rounded-md border bg-muted/20 p-2">
+          {!view || view.annotations.length === 0 ? (
+            <div className="text-xs text-muted-foreground">尚无标注数据（任务未完成标注或已清空）。</div>
+          ) : (
+            view.annotations.map((annotation) => (
+              <div key={annotation.chapterId} className="rounded border bg-background p-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-xs font-medium">
+                    第 {annotation.chapterOrder} 章 {annotation.chapterTitle}
+                    <span className="ml-2 text-muted-foreground">
+                      {annotation.segments.length} 段
+                    </span>
+                  </div>
+                  {terminal ? (
+                    <div className="flex flex-wrap gap-1">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={busyChapterId === annotation.chapterId}
+                        onClick={() => void handleReprocess(annotation.chapterId, "resynthesize")}
+                      >
+                        重合成
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={busyChapterId === annotation.chapterId}
+                        onClick={() => void handleReprocess(annotation.chapterId, "reannotate")}
+                      >
+                        重标+合成
+                      </Button>
+                    </div>
+                  ) : null}
+                </div>
+                {annotation.error ? (
+                  <div className="mt-1 text-xs text-amber-700">回退：{annotation.error}</div>
+                ) : null}
+                <div className="mt-1 space-y-1">
+                  {annotation.segments.slice(0, 6).map((segment) => (
+                    <div key={`${annotation.chapterId}-${segment.index}`} className="text-xs leading-5 text-muted-foreground">
+                      <span className="font-medium text-foreground">
+                        [{segment.speakerLabel}/{segment.voice}]
+                      </span>
+                      {" "}
+                      {segment.text.length > 80 ? `${segment.text.slice(0, 80)}…` : segment.text}
+                    </div>
+                  ))}
+                  {annotation.segments.length > 6 ? (
+                    <div className="text-xs text-muted-foreground">
+                      …另有 {annotation.segments.length - 6} 段
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            ))
+          )}
+          {view?.qualityWarnings?.length ? (
+            <div className="rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">
+              {view.qualityWarnings.join("；")}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -394,6 +527,14 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
                   ) : null}
                 </div>
                 <TaskAudioControls novelId={novelId} task={task} />
+                <TaskAnnotationsPanel
+                  novelId={novelId}
+                  task={task}
+                  onMessage={setMessage}
+                  onReprocessed={() => {
+                    void queryClient.invalidateQueries({ queryKey: ["novel-audiobook-tasks", novelId] });
+                  }}
+                />
               </div>
             ))}
           </div>
