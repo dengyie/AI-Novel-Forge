@@ -11,7 +11,8 @@ export type TaskKind =
   | "image_generation"
   | "agent_run"
   | "novel_workflow"
-  | "style_extraction";
+  | "style_extraction"
+  | "novel_audiobook";
 
 export type TaskStatus = "queued" | "running" | "waiting_approval" | "succeeded" | "failed" | "cancelled";
 
@@ -96,7 +97,7 @@ export interface TaskOverviewSummary {
 
 export interface RecoverableTaskSummary {
   id: string;
-  kind: Extract<TaskKind, "book_analysis" | "novel_pipeline" | "image_generation" | "novel_workflow" | "style_extraction">;
+  kind: Extract<TaskKind, "book_analysis" | "novel_pipeline" | "image_generation" | "novel_workflow" | "style_extraction" | "novel_audiobook">;
   title: string;
   ownerLabel: string;
   status: Extract<TaskStatus, "queued" | "running">;

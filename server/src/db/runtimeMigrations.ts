@@ -133,6 +133,27 @@ const REQUIRED_COLUMN_BACKFILLS = [
     columnName: "contentRevision",
     columnDefinition: `"contentRevision" INTEGER NOT NULL DEFAULT 0`,
   },
+  // 有声书：角色 TTS 音色 + 小说旁白默认（SQLite dev 幂等 ADD COLUMN）。
+  {
+    tableName: "Character",
+    columnName: "ttsVoice",
+    columnDefinition: `"ttsVoice" TEXT`,
+  },
+  {
+    tableName: "Character",
+    columnName: "ttsStyle",
+    columnDefinition: `"ttsStyle" TEXT`,
+  },
+  {
+    tableName: "Novel",
+    columnName: "audiobookNarratorVoice",
+    columnDefinition: `"audiobookNarratorVoice" TEXT`,
+  },
+  {
+    tableName: "Novel",
+    columnName: "audiobookNarratorStyle",
+    columnDefinition: `"audiobookNarratorStyle" TEXT`,
+  },
 ] as const;
 
 function resolveSqliteDatabasePath(): string | null {

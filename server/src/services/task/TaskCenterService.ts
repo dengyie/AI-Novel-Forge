@@ -17,6 +17,8 @@ import { ImageTaskAdapter } from "./adapters/ImageTaskAdapter";
 import { NovelWorkflowTaskAdapter } from "./adapters/NovelWorkflowTaskAdapter";
 import { PipelineTaskAdapter } from "./adapters/PipelineTaskAdapter";
 import { StyleExtractionTaskAdapter } from "./adapters/StyleExtractionTaskAdapter";
+import { AudiobookTaskAdapter } from "./adapters/AudiobookTaskAdapter";
+import { isMissingAudiobookTaskTableError } from "../audiobook/audiobookErrors";
 import { collectWorkflowLinkedPipelineIds } from "./taskCenterVisibility";
 import {
   compareTaskSummary,
@@ -29,6 +31,40 @@ import {
 } from "./taskCenter.shared";
 import { getArchivedTaskIdsByKind } from "./taskArchive";
 
+async function safeAudiobookOverviewGroupBy(archivedAudiobookIds: string[]) {
+  try {
+    return await prisma.audiobookTask.groupBy({
+      by: ["status"],
+      where: {
+        ...(archivedAudiobookIds.length ? { id: { notIn: archivedAudiobookIds } } : {}),
+      },
+      _count: { _all: true },
+    });
+  } catch (error) {
+    if (isMissingAudiobookTaskTableError(error)) {
+      return [] as Array<{ status: string; _count: { _all: number } }>;
+    }
+    throw error;
+  }
+}
+
+async function safeAudiobookRecoveryCount(archivedAudiobookIds: string[]): Promise<number> {
+  try {
+    return await prisma.audiobookTask.count({
+      where: {
+        status: { in: ["queued", "running"] },
+        pendingManualRecovery: true,
+        ...(archivedAudiobookIds.length ? { id: { notIn: archivedAudiobookIds } } : {}),
+      },
+    });
+  } catch (error) {
+    if (isMissingAudiobookTaskTableError(error)) {
+      return 0;
+    }
+    throw error;
+  }
+}
+
 const overviewTaskKinds: TaskKind[] = [
   "book_analysis",
   "novel_pipeline",
@@ -37,6 +73,7 @@ const overviewTaskKinds: TaskKind[] = [
   "agent_run",
   "novel_workflow",
   "style_extraction",
+  "novel_audiobook",
 ];
 
 export class TaskCenterService {
@@ -56,6 +93,8 @@ export class TaskCenterService {
 
   private readonly styleExtractionAdapter = new StyleExtractionTaskAdapter();
 
+  private readonly audiobookAdapter = new AudiobookTaskAdapter();
+
   async getOverview(): Promise<TaskOverviewSummary> {
     const archivedIdsByKind = await getArchivedTaskIdsByKind(overviewTaskKinds);
     const archivedBookIds = archivedIdsByKind.get("book_analysis") ?? [];
@@ -65,6 +104,7 @@ export class TaskCenterService {
     const archivedAgentIds = archivedIdsByKind.get("agent_run") ?? [];
     const archivedWorkflowIds = archivedIdsByKind.get("novel_workflow") ?? [];
     const archivedStyleExtractionIds = archivedIdsByKind.get("style_extraction") ?? [];
+    const archivedAudiobookIds = archivedIdsByKind.get("novel_audiobook") ?? [];
 
     const [
       bookRows,
@@ -74,11 +114,13 @@ export class TaskCenterService {
       agentRows,
       workflowRows,
       styleExtractionRows,
+      audiobookRows,
       bookRecoveryCount,
       pipelineRecoveryCount,
       imageRecoveryCount,
       workflowRecoveryCount,
       styleExtractionRecoveryCount,
+      audiobookRecoveryCount,
     ] = await Promise.all([
       prisma.bookAnalysis.groupBy({
         by: ["status"],
@@ -132,6 +174,7 @@ export class TaskCenterService {
         },
         _count: { _all: true },
       }),
+      safeAudiobookOverviewGroupBy(archivedAudiobookIds),
       prisma.bookAnalysis.count({
         where: {
           status: { in: ["queued", "running"] },
@@ -168,6 +211,7 @@ export class TaskCenterService {
           ...(archivedStyleExtractionIds.length ? { id: { notIn: archivedStyleExtractionIds } } : {}),
         },
       }),
+      safeAudiobookRecoveryCount(archivedAudiobookIds),
     ]);
 
     const overview: TaskOverviewSummary = {
@@ -176,10 +220,10 @@ export class TaskCenterService {
       failedCount: 0,
       cancelledCount: 0,
       waitingApprovalCount: 0,
-      recoveryCandidateCount: bookRecoveryCount + pipelineRecoveryCount + imageRecoveryCount + workflowRecoveryCount + styleExtractionRecoveryCount,
+      recoveryCandidateCount: bookRecoveryCount + pipelineRecoveryCount + imageRecoveryCount + workflowRecoveryCount + styleExtractionRecoveryCount + audiobookRecoveryCount,
     };
 
-    for (const rows of [bookRows, pipelineRows, knowledgeRows, imageRows, agentRows, workflowRows, styleExtractionRows]) {
+    for (const rows of [bookRows, pipelineRows, knowledgeRows, imageRows, agentRows, workflowRows, styleExtractionRows, audiobookRows]) {
       for (const row of rows) {
         const count = row._count._all;
         if (row.status === "queued") {
@@ -205,7 +249,7 @@ export class TaskCenterService {
     const keyword = normalizeKeyword(filters.keyword);
     const cursorPayload = parseCursor(filters.cursor);
 
-    const [bookTasks, novelTasks, knowledgeTasks, imageTasks, agentTasks, workflowTasks, styleExtractionTasks] = await Promise.all([
+    const [bookTasks, novelTasks, knowledgeTasks, imageTasks, agentTasks, workflowTasks, styleExtractionTasks, audiobookTasks] = await Promise.all([
       filters.kind && filters.kind !== "book_analysis"
         ? Promise.resolve<UnifiedTaskSummary[]>([])
         : this.bookAdapter.list({ status: filters.status, keyword, take: sourceTake }),
@@ -227,6 +271,9 @@ export class TaskCenterService {
       filters.kind && filters.kind !== "style_extraction"
         ? Promise.resolve<UnifiedTaskSummary[]>([])
         : this.styleExtractionAdapter.list({ status: filters.status, keyword, take: sourceTake }),
+      filters.kind && filters.kind !== "novel_audiobook"
+        ? Promise.resolve<UnifiedTaskSummary[]>([])
+        : this.audiobookAdapter.list({ status: filters.status, keyword, take: sourceTake }),
     ]);
 
     const linkedPipelineIds = filters.kind === "novel_pipeline"
@@ -236,7 +283,7 @@ export class TaskCenterService {
       ? novelTasks
       : novelTasks.filter((task) => !linkedPipelineIds.has(task.id));
 
-    const merged = [...bookTasks, ...visibleNovelTasks, ...knowledgeTasks, ...imageTasks, ...agentTasks, ...workflowTasks, ...styleExtractionTasks]
+    const merged = [...bookTasks, ...visibleNovelTasks, ...knowledgeTasks, ...imageTasks, ...agentTasks, ...workflowTasks, ...styleExtractionTasks, ...audiobookTasks]
       .sort(compareTaskSummary);
     const filteredByCursor = cursorPayload
       ? merged.filter((item) => isAfterCursor(item, cursorPayload))
@@ -268,6 +315,9 @@ export class TaskCenterService {
     }
     if (kind === "style_extraction") {
       return this.styleExtractionAdapter.detail(id);
+    }
+    if (kind === "novel_audiobook") {
+      return this.audiobookAdapter.detail(id);
     }
     return this.imageAdapter.detail(id);
   }
@@ -307,6 +357,9 @@ export class TaskCenterService {
     if (kind === "style_extraction") {
       return this.styleExtractionAdapter.retry(id);
     }
+    if (kind === "novel_audiobook") {
+      return this.audiobookAdapter.retry(id);
+    }
     throw new AppError(`Unsupported task kind: ${kind}`, 400);
   }
 
@@ -332,6 +385,9 @@ export class TaskCenterService {
     if (kind === "style_extraction") {
       return this.styleExtractionAdapter.cancel(id);
     }
+    if (kind === "novel_audiobook") {
+      return this.audiobookAdapter.cancel(id);
+    }
     throw new AppError(`Unsupported task kind: ${kind}`, 400);
   }
 
@@ -356,6 +412,9 @@ export class TaskCenterService {
     }
     if (kind === "style_extraction") {
       return this.styleExtractionAdapter.archive(id);
+    }
+    if (kind === "novel_audiobook") {
+      return this.audiobookAdapter.archive(id);
     }
     throw new AppError(`Unsupported task kind: ${kind}`, 400);
   }

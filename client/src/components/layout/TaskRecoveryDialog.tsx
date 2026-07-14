@@ -22,6 +22,9 @@ function formatTaskKind(kind: RecoverableTaskSummary["kind"]): string {
   if (kind === "style_extraction") {
     return "写法提取";
   }
+  if (kind === "novel_audiobook") {
+    return "有声书任务";
+  }
   return "图片任务";
 }
 

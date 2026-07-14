@@ -165,6 +165,10 @@ export interface Novel {
   narrativePov?: NarrativePov | null;
   pacePreference?: PacePreference | null;
   styleTone?: string | null;
+  /** 有声书旁白默认音色（MiMo preset，如 茉莉）。 */
+  audiobookNarratorVoice?: string | null;
+  /** 有声书旁白默认 style context。 */
+  audiobookNarratorStyle?: string | null;
   emotionIntensity?: EmotionIntensity | null;
   aiFreedom?: AIFreedom | null;
   postGenerationStyleReviewEnabled: boolean;

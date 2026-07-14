@@ -275,6 +275,8 @@ export class NovelCoreCrudService {
         narrativePov: input.narrativePov,
         pacePreference: input.pacePreference,
         styleTone: input.styleTone,
+        audiobookNarratorVoice: input.audiobookNarratorVoice ?? null,
+        audiobookNarratorStyle: input.audiobookNarratorStyle ?? null,
         emotionIntensity: input.emotionIntensity,
         aiFreedom: input.aiFreedom,
         postGenerationStyleReviewEnabled: input.postGenerationStyleReviewEnabled,

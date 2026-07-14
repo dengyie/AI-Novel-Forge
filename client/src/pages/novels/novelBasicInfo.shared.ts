@@ -34,6 +34,10 @@ export interface NovelBasicFormState {
   sourceKnowledgeDocumentId: string;
   continuationBookAnalysisId: string;
   continuationBookAnalysisSections: BookAnalysisSectionKey[];
+  /** 有声书旁白默认音色（MiMo preset） */
+  audiobookNarratorVoice: string;
+  /** 有声书旁白默认 style */
+  audiobookNarratorStyle: string;
 }
 
 export interface BasicInfoOption<T extends string> {
@@ -266,6 +270,8 @@ export function createDefaultNovelBasicFormState(): NovelBasicFormState {
     sourceKnowledgeDocumentId: "",
     continuationBookAnalysisId: "",
     continuationBookAnalysisSections: [],
+    audiobookNarratorVoice: "",
+    audiobookNarratorStyle: "",
   };
 }
 
@@ -424,6 +430,8 @@ export function buildNovelUpdatePayload(basicForm: NovelBasicFormState) {
         && basicForm.continuationBookAnalysisId
         ? (basicForm.continuationBookAnalysisSections.length > 0 ? basicForm.continuationBookAnalysisSections : null)
         : null,
+    audiobookNarratorVoice: basicForm.audiobookNarratorVoice.trim() || null,
+    audiobookNarratorStyle: basicForm.audiobookNarratorStyle.trim() || null,
   };
 }
 

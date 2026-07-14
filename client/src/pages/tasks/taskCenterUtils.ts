@@ -81,6 +81,9 @@ export function formatKind(kind: TaskKind): string {
   if (kind === "style_extraction") {
     return "写法提取";
   }
+  if (kind === "novel_audiobook") {
+    return "小说有声书";
+  }
   if (kind === "agent_run") {
     return "Agent 运行";
   }
