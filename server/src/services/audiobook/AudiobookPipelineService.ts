@@ -18,7 +18,14 @@ import {
   resolveChunkAudioPath,
   resolveFullBookAudioPath,
 } from "./audiobookPaths";
-import { concatWavFiles } from "./audiobookWav";
+import {
+  buildWavBuffer,
+  concatWavFiles,
+  createSilentPcm,
+  isValidPcmWavFile,
+  parseWavInfo,
+  writeWavFileAtomic,
+} from "./audiobookWav";
 import { mimoChatAudioTTSProvider } from "./MimoChatAudioTTSProvider";
 
 export type AudiobookCancelChecker = () => Promise<boolean>;
@@ -33,9 +40,14 @@ export interface AudiobookPipelineProgress {
   completedChunks: number;
   totalChunksEstimate: number;
   message: string;
-  annotations: AudiobookChapterAnnotation[];
+  /** 仅在标注完成/终态时带上全量 annotations，避免每 chunk 写库 */
+  annotations?: AudiobookChapterAnnotation[];
+  /** 标注阶段增量：刚完成的一章 */
+  annotationDelta?: AudiobookChapterAnnotation;
   chapterAudioPaths: Array<{ chapterId: string; path: string }>;
   fullAudioPath?: string | null;
+  /** 旁白回退等质量警告（聚合） */
+  qualityWarnings?: string[];
 }
 
 export interface RunAudiobookPipelineInput {
@@ -47,7 +59,6 @@ export interface RunAudiobookPipelineInput {
   provider?: LLMProvider | null;
   model?: string | null;
   temperature?: number | null;
-  /** 标注 LLM provider（与 TTS provider 可不同；缺省用 task.provider） */
   annotateProvider?: LLMProvider | null;
   annotateModel?: string | null;
   signal?: AbortSignal;
@@ -62,6 +73,7 @@ export interface RunAudiobookPipelineResult {
   completedChapterCount: number;
   completedChunks: number;
   outputDir: string;
+  qualityWarnings: string[];
 }
 
 class PipelineCancelledError extends Error {
@@ -106,10 +118,13 @@ function annotationPath(taskDir: string, chapterId: string): string {
   return path.join(taskDir, "annotations", `${chapterId}.json`);
 }
 
-function writeAnnotationFile(taskDir: string, annotation: AudiobookChapterAnnotation): void {
+function writeAnnotationFileSafe(taskDir: string, annotation: AudiobookChapterAnnotation): void {
   const dir = path.join(taskDir, "annotations");
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(annotationPath(taskDir, annotation.chapterId), JSON.stringify(annotation, null, 2), "utf8");
+  const finalPath = annotationPath(taskDir, annotation.chapterId);
+  const tmp = `${finalPath}.part`;
+  fs.writeFileSync(tmp, JSON.stringify(annotation, null, 2), "utf8");
+  fs.renameSync(tmp, finalPath);
 }
 
 function readAnnotationFile(taskDir: string, chapterId: string): AudiobookChapterAnnotation | null {
@@ -132,7 +147,7 @@ function listExistingChunkPaths(taskDir: string, chapterId: string, expectedCoun
   const paths: string[] = [];
   for (let i = 0; i < expectedCount; i += 1) {
     const chunkPath = resolveChunkAudioPath(taskDir, chapterId, i);
-    if (!fs.existsSync(chunkPath) || fs.statSync(chunkPath).size < 44) {
+    if (!isValidPcmWavFile(chunkPath)) {
       break;
     }
     paths.push(chunkPath);
@@ -158,6 +173,16 @@ function expandSegmentsToChunks(segments: AudiobookDialogueSegment[]): Array<{
     }
   }
   return items;
+}
+
+function collectQualityWarnings(annotations: AudiobookChapterAnnotation[]): string[] {
+  const warnings: string[] = [];
+  for (const annotation of annotations) {
+    if (annotation.error?.trim()) {
+      warnings.push(`第 ${annotation.chapterOrder} 章：${annotation.error.trim()}`);
+    }
+  }
+  return warnings;
 }
 
 async function synthesizeChunkWithRetry(input: {
@@ -186,6 +211,7 @@ async function synthesizeChunkWithRetry(input: {
       if (input.signal?.aborted) {
         throw error;
       }
+      // 400 客户端错误、408 取消：不重试；504 超时、502 上游：可重试
       if (error instanceof AppError && (error.statusCode === 400 || error.statusCode === 408)) {
         throw error;
       }
@@ -257,7 +283,6 @@ export class AudiobookPipelineService {
           completedChunks,
           totalChunksEstimate,
           message: `标注第 ${chapter.order} 章：${chapter.title}`,
-          annotations: [...annotations],
           chapterAudioPaths: chapterAudioPaths.map((item) => ({ chapterId: item.chapterId, path: item.path })),
         });
 
@@ -273,7 +298,7 @@ export class AudiobookPipelineService {
           temperature: input.temperature,
           signal: input.signal,
         });
-        writeAnnotationFile(taskDir, annotation);
+        writeAnnotationFileSafe(taskDir, annotation);
       }
 
       annotations.push(annotation);
@@ -289,8 +314,10 @@ export class AudiobookPipelineService {
         completedChunks,
         totalChunksEstimate,
         message: `已标注第 ${chapter.order} 章（${annotation.segments.length} 段）`,
+        annotationDelta: annotation,
         annotations: [...annotations],
         chapterAudioPaths: chapterAudioPaths.map((item) => ({ chapterId: item.chapterId, path: item.path })),
+        qualityWarnings: collectQualityWarnings(annotations),
       });
     }
 
@@ -304,7 +331,7 @@ export class AudiobookPipelineService {
       }
 
       const chapterWavPath = resolveChapterAudioPath(taskDir, chapter.id);
-      if (fs.existsSync(chapterWavPath) && fs.statSync(chapterWavPath).size >= 44) {
+      if (isValidPcmWavFile(chapterWavPath)) {
         const chunks = expandSegmentsToChunks(annotation.segments);
         completedChunks += chunks.length;
         chapterAudioPaths.push({
@@ -322,7 +349,6 @@ export class AudiobookPipelineService {
           completedChunks,
           totalChunksEstimate,
           message: `跳过已完成第 ${chapter.order} 章音频`,
-          annotations,
           chapterAudioPaths: chapterAudioPaths.map((item) => ({ chapterId: item.chapterId, path: item.path })),
         });
         continue;
@@ -331,28 +357,19 @@ export class AudiobookPipelineService {
       ensureChapterAudioDir(taskDir, chapter.id);
       const chunkJobs = expandSegmentsToChunks(annotation.segments);
       if (chunkJobs.length === 0) {
-        // 空章：写极短静音 WAV 占位（24k mono 16bit 约 50ms）
-        const silent = Buffer.alloc(44 + 2400);
-        silent.write("RIFF", 0, "ascii");
-        silent.writeUInt32LE(36 + 2400, 4);
-        silent.write("WAVE", 8, "ascii");
-        silent.write("fmt ", 12, "ascii");
-        silent.writeUInt32LE(16, 16);
-        silent.writeUInt16LE(1, 20);
-        silent.writeUInt16LE(1, 22);
-        silent.writeUInt32LE(24_000, 24);
-        silent.writeUInt32LE(48_000, 28);
-        silent.writeUInt16LE(2, 32);
-        silent.writeUInt16LE(16, 34);
-        silent.write("data", 36, "ascii");
-        silent.writeUInt32LE(2400, 40);
-        fs.writeFileSync(chapterWavPath, silent);
+        const silentPcm = createSilentPcm(50, 24_000, 1);
+        const silent = buildWavBuffer(silentPcm, {
+          numChannels: 1,
+          sampleRate: 24_000,
+          bitsPerSample: 16,
+        });
+        writeWavFileAtomic(chapterWavPath, silent);
         chapterAudioPaths.push({ chapterId: chapter.id, path: chapterWavPath, bytes: silent.length });
         continue;
       }
 
       const existing = listExistingChunkPaths(taskDir, chapter.id, chunkJobs.length);
-      let nextChunkIndex = existing.length;
+      const nextChunkIndex = existing.length;
 
       for (let i = nextChunkIndex; i < chunkJobs.length; i += 1) {
         await throwIfCancelled(input.signal, input.isCancelRequested);
@@ -367,7 +384,6 @@ export class AudiobookPipelineService {
           completedChunks: completedChunks + i,
           totalChunksEstimate,
           message: `合成第 ${chapter.order} 章 chunk ${i + 1}/${chunkJobs.length}（${job.segment.speakerLabel}）`,
-          annotations,
           chapterAudioPaths: chapterAudioPaths.map((item) => ({ chapterId: item.chapterId, path: item.path })),
         });
 
@@ -378,14 +394,16 @@ export class AudiobookPipelineService {
           provider: input.provider,
           signal: input.signal,
         });
-        const chunkPath = resolveChunkAudioPath(taskDir, chapter.id, i);
-        fs.writeFileSync(chunkPath, audioBuffer);
+        if (!isValidPcmWavBuffer(audioBuffer)) {
+          throw new AppError(`MiMo TTS 返回了非法 WAV（chunk ${i}）。`, 502);
+        }
+        writeWavFileAtomic(resolveChunkAudioPath(taskDir, chapter.id, i), audioBuffer);
       }
 
       const allChunkPaths = chunkJobs.map((_, i) => resolveChunkAudioPath(taskDir, chapter.id, i));
       for (const chunkPath of allChunkPaths) {
-        if (!fs.existsSync(chunkPath)) {
-          throw new AppError(`chunk 文件缺失：${chunkPath}`, 500);
+        if (!isValidPcmWavFile(chunkPath)) {
+          throw new AppError(`chunk 文件缺失或损坏：${chunkPath}`, 500);
         }
       }
 
@@ -399,7 +417,6 @@ export class AudiobookPipelineService {
         completedChunks: completedChunks + chunkJobs.length,
         totalChunksEstimate,
         message: `合并第 ${chapter.order} 章 WAV`,
-        annotations,
         chapterAudioPaths: chapterAudioPaths.map((item) => ({ chapterId: item.chapterId, path: item.path })),
       });
 
@@ -421,7 +438,6 @@ export class AudiobookPipelineService {
         completedChunks,
         totalChunksEstimate,
         message: `第 ${chapter.order} 章完成`,
-        annotations,
         chapterAudioPaths: chapterAudioPaths.map((item) => ({ chapterId: item.chapterId, path: item.path })),
       });
     }
@@ -447,11 +463,11 @@ export class AudiobookPipelineService {
       completedChunks,
       totalChunksEstimate,
       message: "合并全书 WAV",
-      annotations,
       chapterAudioPaths: chapterAudioPaths.map((item) => ({ chapterId: item.chapterId, path: item.path })),
     });
 
     concatWavFiles(chapterPathsOrdered, fullAudioPath);
+    const qualityWarnings = collectQualityWarnings(annotations);
 
     await input.onProgress({
       phase: "finalizing",
@@ -462,10 +478,13 @@ export class AudiobookPipelineService {
       completedChapters: orderedChapters.length,
       completedChunks,
       totalChunksEstimate,
-      message: "有声书合成完成",
+      message: qualityWarnings.length > 0
+        ? `有声书合成完成（${qualityWarnings.length} 章有标注回退警告）`
+        : "有声书合成完成",
       annotations,
       chapterAudioPaths: chapterAudioPaths.map((item) => ({ chapterId: item.chapterId, path: item.path })),
       fullAudioPath,
+      qualityWarnings,
     });
 
     return {
@@ -475,7 +494,20 @@ export class AudiobookPipelineService {
       completedChapterCount: orderedChapters.length,
       completedChunks,
       outputDir: taskDir,
+      qualityWarnings,
     };
+  }
+}
+
+function isValidPcmWavBuffer(buffer: Buffer): boolean {
+  try {
+    if (buffer.length < 44) {
+      return false;
+    }
+    const info = parseWavInfo(buffer);
+    return info.dataSize >= 2 && buffer.length >= info.dataOffset + Math.min(info.dataSize, 2);
+  } catch {
+    return false;
   }
 }
 

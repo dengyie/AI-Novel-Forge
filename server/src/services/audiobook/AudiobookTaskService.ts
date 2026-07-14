@@ -610,6 +610,11 @@ export class AudiobookTaskService {
             ratio = 0.98;
           }
           const nextProgress = Math.max(2, Math.min(99, Math.round(ratio * 100)));
+          // annotationsJson 仅在标注完成/终态写入，避免每 chunk 写放大
+          const shouldPersistAnnotations = Boolean(
+            progress.annotations
+            && (progress.phase === "annotating" || progress.phase === "finalizing"),
+          );
           await prisma.audiobookTask.updateMany({
             where: {
               id: taskId,
@@ -623,15 +628,18 @@ export class AudiobookTaskService {
               currentItemKey: progress.chapterId,
               currentItemLabel: progress.message.slice(0, 200),
               completedChapterCount: progress.completedChapters,
-              annotationsJson: JSON.stringify(progress.annotations),
+              ...(shouldPersistAnnotations
+                ? { annotationsJson: JSON.stringify(progress.annotations) }
+                : {}),
               progressJson: JSON.stringify({
                 phase: progress.phase,
                 chapterIndex: progress.chapterIndex,
                 chapterCount: progress.chapterCount,
                 completedChunks: progress.completedChunks,
                 totalChunksEstimate: progress.totalChunksEstimate,
-                chapterAudioPaths: progress.chapterAudioPaths,
-                fullAudioPath: progress.fullAudioPath ?? null,
+                chapterAudioCount: progress.chapterAudioPaths.length,
+                fullAudioReady: Boolean(progress.fullAudioPath),
+                qualityWarnings: progress.qualityWarnings ?? [],
               }),
             },
           });
@@ -643,6 +651,9 @@ export class AudiobookTaskService {
         return;
       }
 
+      const warningSuffix = result.qualityWarnings.length > 0
+        ? `；标注回退 ${result.qualityWarnings.length} 章`
+        : "";
       await prisma.audiobookTask.updateMany({
         where: {
           id: taskId,
@@ -654,18 +665,21 @@ export class AudiobookTaskService {
           progress: 100,
           finishedAt: new Date(),
           currentStage: "finalizing",
-          currentItemLabel: "有声书生成完成",
+          currentItemLabel: result.qualityWarnings.length > 0
+            ? `完成（${result.qualityWarnings.length} 章旁白回退）`
+            : "有声书生成完成",
           heartbeatAt: new Date(),
           completedChapterCount: result.completedChapterCount,
           outputDir: result.outputDir,
-          fullAudioPath: result.fullAudioPath,
+          // 存相对逻辑名，避免 DATA_ROOT 迁移后绝对路径失效
+          fullAudioPath: "full-book.wav",
           annotationsJson: JSON.stringify(result.annotations),
           resultJson: JSON.stringify({
-            chapterAudioPaths: result.chapterAudioPaths,
-            fullAudioPath: result.fullAudioPath,
+            chapterIds: result.chapterAudioPaths.map((item) => item.chapterId),
             completedChunks: result.completedChunks,
+            qualityWarnings: result.qualityWarnings,
           }),
-          summary: `有声书完成：${result.completedChapterCount} 章，${result.completedChunks} 个音频块。`,
+          summary: `有声书完成：${result.completedChapterCount} 章，${result.completedChunks} 个音频块${warningSuffix}。`,
           error: null,
         },
       });

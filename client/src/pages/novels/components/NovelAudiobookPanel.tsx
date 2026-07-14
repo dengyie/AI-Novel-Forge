@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   DEFAULT_AUDIOBOOK_NARRATOR_STYLE,
@@ -12,9 +12,9 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import {
-  buildAudiobookFullAudioUrl,
   cancelAudiobookTask,
   createAudiobookTask,
+  issueAudiobookMediaUrl,
   listAudiobookTasks,
   precheckAudiobookTask,
 } from "@/api/novel/audiobook";
@@ -50,6 +50,65 @@ function statusVariant(status: AudiobookTaskSummary["status"]): "default" | "sec
   if (status === "failed") return "destructive";
   if (status === "queued") return "secondary";
   return "outline";
+}
+
+function TaskAudioControls(props: { novelId: string; task: AudiobookTaskSummary }) {
+  const { novelId, task } = props;
+  const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  const canPlay = task.status === "succeeded" || Boolean(task.fullAudioPath);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!canPlay) {
+      setAudioUrl(null);
+      return;
+    }
+    void (async () => {
+      try {
+        const url = await issueAudiobookMediaUrl(novelId, task.id, { resource: "full" });
+        if (!cancelled) {
+          setAudioUrl(url);
+          setError("");
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : "无法签发音频地址。");
+          setAudioUrl(null);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [canPlay, novelId, task.id, task.updatedAt]);
+
+  if (!canPlay) {
+    return null;
+  }
+
+  return (
+    <div className="mt-2 space-y-2">
+      {error ? <div className="text-xs text-destructive">{error}</div> : null}
+      {audioUrl ? (
+        <>
+          <div className="flex flex-wrap gap-2">
+            <a
+              className="inline-flex h-8 items-center rounded-md border px-3 text-xs"
+              href={audioUrl}
+              target="_blank"
+              rel="noreferrer"
+            >
+              播放/下载全书
+            </a>
+          </div>
+          <audio className="w-full" controls preload="none" src={audioUrl} />
+        </>
+      ) : (
+        <div className="text-xs text-muted-foreground">正在准备音频地址…</div>
+      )}
+    </div>
+  );
 }
 
 export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
@@ -317,6 +376,11 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
                 {task.lastError ? (
                   <div className="mt-1 text-xs text-destructive">{task.lastError}</div>
                 ) : null}
+                {task.status === "succeeded" && task.currentItemLabel?.includes("旁白回退") ? (
+                  <div className="mt-1 text-xs text-amber-700">
+                    {task.currentItemLabel}
+                  </div>
+                ) : null}
                 <div className="mt-2 flex flex-wrap gap-2">
                   {(task.status === "queued" || task.status === "running") ? (
                     <Button
@@ -328,25 +392,8 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
                       取消
                     </Button>
                   ) : null}
-                  {task.status === "succeeded" || task.fullAudioPath ? (
-                    <a
-                      className="inline-flex h-8 items-center rounded-md border px-3 text-xs"
-                      href={buildAudiobookFullAudioUrl(novelId, task.id)}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      播放/下载全书
-                    </a>
-                  ) : null}
                 </div>
-                {task.status === "succeeded" ? (
-                  <audio
-                    className="mt-2 w-full"
-                    controls
-                    preload="none"
-                    src={buildAudiobookFullAudioUrl(novelId, task.id)}
-                  />
-                ) : null}
+                <TaskAudioControls novelId={novelId} task={task} />
               </div>
             ))}
           </div>
