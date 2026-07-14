@@ -407,3 +407,38 @@ test("self-cycle re-review: sanitize strips payoff_paid_without_setup and payoff
   // natural evidence/suggestion text survives.
   assert.match(sanitized, /伏笔兑现缺铺垫/);
 });
+
+// Review-3 regression: the shared INTERNAL_QUALITY_CODE_PATTERN is a module
+// singleton with the `gi` flags. containsInternalQualityCodes calls .test() on
+// that singleton, which advances its lastIndex past the first match and leaves
+// it non-zero. sanitizeChapterTaskSheetForPersistence then calls
+// stripInternalQualityCodes → text.replace(PATTERN, ""), and V8's exec-based
+// replace on a global regex resumes from the stale lastIndex, skipping every
+// code located before it. The tryAutoRepairInternalCodesOnly flow runs
+// contains → sanitize in exactly that order, so parroted codes at the TOP of a
+// taskSheet survived stripping and re-tripped the task_sheet_internal_codes
+// quality gate — deadlocking the structured-outline phase
+// ("结构化大纲恢复没有推进"). The fix resets lastIndex=0 at the start of
+// stripInternalQualityCodes. This test reproduces the contains→strip ordering.
+test("self-cycle review-3: sanitize clears all parroted internal codes even when contains() left a non-zero lastIndex (codes at top of sheet)", () => {
+  // Codes appear near the TOP of the sheet; contains() matches them and pushes
+  // lastIndex forward. A following sanitize must still strip them all.
+  const sheet = [
+    "internal_codes:[payoff_missing_progress][draft_obligation_unmet][replan_required]",
+    "章节目标：兑现 payoff_touch 这条义务。",
+    "必须推进：揭露反派真名，完成 payoff_touch。",
+    "必须保留：不提前揭晓终局。",
+  ].join("\n");
+  // contains() advances the shared singleton's lastIndex (the trigger).
+  assert.equal(containsInternalQualityCodes(sheet), true);
+  // sanitize must not depend on whatever lastIndex contains() left behind.
+  const sanitized = sanitizeChapterTaskSheetForPersistence(sheet) ?? "";
+  assert.equal(containsInternalQualityCodes(sanitized), false, "sanitized sheet must not contain internal codes");
+  assert.ok(!sanitized.includes("payoff_missing_progress"));
+  assert.ok(!sanitized.includes("draft_obligation_unmet"));
+  assert.ok(!sanitized.includes("replan_required"));
+  // legit author-facing obligation kind survives.
+  assert.match(sanitized, /payoff_touch/);
+  // natural obligations survive.
+  assert.match(sanitized, /揭露反派真名/);
+});

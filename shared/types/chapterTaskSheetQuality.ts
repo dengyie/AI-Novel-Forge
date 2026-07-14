@@ -214,6 +214,13 @@ export function stripInternalQualityCodes(text: string | null | undefined): stri
   if (!text) {
     return "";
   }
+  // Reset the shared global regex's lastIndex: a prior contains()/test() call may
+  // have advanced it past the first match. V8's String.replace on a global regex
+  // resumes exec from lastIndex when it is non-zero, which would skip every code
+  // located before that index — leaving parroted internal codes in the taskSheet
+  // and re-tripping the task_sheet_internal_codes quality gate (structured-outline
+  // phase deadlock). Resetting here makes strip independent of call ordering.
+  INTERNAL_QUALITY_CODE_PATTERN.lastIndex = 0;
   return text
     .replace(INTERNAL_QUALITY_CODE_PATTERN, "")
     .replace(/[ \t]{2,}/g, " ")
