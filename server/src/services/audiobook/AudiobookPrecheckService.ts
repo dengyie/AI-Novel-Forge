@@ -66,8 +66,10 @@ export class AudiobookPrecheckService {
       || DEFAULT_AUDIOBOOK_NARRATOR_STYLE;
 
     const warnings: string[] = [];
+    const blockingErrors: string[] = [];
+
     if (!isMimoTtsPresetVoice(narratorVoiceRaw)) {
-      warnings.push(`旁白音色「${narratorVoiceRaw}」不在 MiMo 预置表中，合成阶段可能失败。`);
+      blockingErrors.push(`旁白音色「${narratorVoiceRaw}」不在 MiMo 预置表中。`);
     }
 
     const characterVoices = novel.characters.map((character) => ({
@@ -87,11 +89,15 @@ export class AudiobookPrecheckService {
 
     for (const item of characterVoices) {
       if (item.ttsVoice && !isMimoTtsPresetVoice(item.ttsVoice)) {
-        warnings.push(`角色「${item.characterName}」音色「${item.ttsVoice}」不在 MiMo 预置表中。`);
+        blockingErrors.push(`角色「${item.characterName}」音色「${item.ttsVoice}」不在 MiMo 预置表中。`);
       }
     }
 
-    const ok = missingVoices.length === 0;
+    if (characterVoices.length === 0) {
+      warnings.push("小说尚无角色卡；对白将仅使用旁白音色。");
+    }
+
+    const ok = missingVoices.length === 0 && blockingErrors.length === 0;
 
     return {
       ok,
@@ -105,6 +111,7 @@ export class AudiobookPrecheckService {
       },
       characterVoices: characterVoices.filter((item) => item.ttsVoice),
       missingVoices,
+      blockingErrors,
       warnings,
     };
   }

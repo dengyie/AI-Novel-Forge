@@ -12,6 +12,7 @@ import {
   resolveProviderBaseUrl,
 } from "../../llm/providers";
 import { AppError } from "../../middleware/errorHandler";
+import { isMissingAudiobookTaskTableError } from "./audiobookErrors";
 
 export interface MimoTtsSynthesizeInput {
   /** 旁白/对白正文（assistant 侧） */
@@ -43,13 +44,15 @@ const REQUEST_TIMEOUT_MS = Math.max(
   Number(process.env.AUDIOBOOK_MIMO_TTS_TIMEOUT_MS ?? 120_000) || 120_000,
 );
 
-function isMissingTableError(error: unknown): boolean {
-  return (
-    typeof error === "object"
-    && error !== null
-    && "code" in error
-    && (error as { code?: string }).code === "P2021"
-  );
+/** 仅 APIKey 表缺失时兜底；与 AudiobookTask 表无关，但 Prisma 缺表码相同 */
+function isMissingApiKeyTableError(error: unknown): boolean {
+  return isMissingAudiobookTaskTableError(error)
+    || (
+      typeof error === "object"
+      && error !== null
+      && "code" in error
+      && (error as { code?: string }).code === "P2021"
+    );
 }
 
 async function resolveApiKey(provider: LLMProvider): Promise<string | undefined> {
@@ -59,7 +62,7 @@ async function resolveApiKey(provider: LLMProvider): Promise<string | undefined>
       return dbSecret.key.trim();
     }
   } catch (error) {
-    if (!isMissingTableError(error)) {
+    if (!isMissingApiKeyTableError(error)) {
       throw error;
     }
   }
@@ -76,7 +79,7 @@ async function resolveApiKey(provider: LLMProvider): Promise<string | undefined>
   return undefined;
 }
 
-function extractAudioBase64(payload: unknown): string | null {
+export function extractAudioBase64(payload: unknown): string | null {
   if (!payload || typeof payload !== "object") {
     return null;
   }
@@ -136,7 +139,14 @@ export class MimoChatAudioTTSProvider {
     const resolvedBaseURL = isBuiltInProvider(llmProvider)
       ? resolveProviderBaseUrl(llmProvider)
       : resolveProviderBaseUrl("openai");
-    const baseURL = resolvedBaseURL?.trim() || "https://cpa.mangoq.ccwu.cc/v1";
+    const baseURL = resolvedBaseURL?.trim();
+    if (!baseURL) {
+      throw new AppError(
+        "未配置 LLM/CPA baseURL，无法调用 MiMo TTS。请配置对应 provider 的 base URL。",
+        400,
+      );
+    }
+
     const apiKey = await resolveApiKey(isBuiltInProvider(llmProvider) ? llmProvider : "openai")
       ?? await resolveApiKey("openai")
       ?? await resolveApiKey("deepseek");
@@ -207,7 +217,8 @@ export class MimoChatAudioTTSProvider {
         throw error;
       }
       if (error instanceof Error && (error.name === "AbortError" || /aborted/i.test(error.message))) {
-        throw new AppError("MiMo TTS 请求已取消或超时。", 499);
+        // 408 Request Timeout：避免非标准 499 被网关/客户端误判
+        throw new AppError("MiMo TTS 请求已取消或超时。", 408);
       }
       throw new AppError(
         `MiMo TTS 调用异常：${error instanceof Error ? error.message : String(error)}`,
