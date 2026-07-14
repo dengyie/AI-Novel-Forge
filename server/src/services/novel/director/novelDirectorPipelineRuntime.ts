@@ -48,6 +48,8 @@ import {
 } from "./workflowStepRuntime/WorkflowStepModule";
 import type { DirectorPipelinePhase } from "./recovery/novelDirectorRecovery";
 import { WorldContextGateway } from "../worldContext/WorldContextGateway";
+import { persistOutlineFreezeOnStructuredOutlineReady } from "../volume/outlineFreezeService";
+import { resolveVolumeIdForChapterScope } from "../quality/settingAlignmentWorkspaceLookup";
 
 /**
  * Single source of truth for identifying the volume chapter detail bundle module.
@@ -234,6 +236,10 @@ export class NovelDirectorPipelineRuntime {
           approveAutoExecutionScope: structuredApproval.approveAutoExecutionScope,
         });
       }
+      // C1：structured_outline_ready 审批通过时写入 outline freeze snapshot（best-effort）
+      if (structuredApproval.approveCurrentGate || structuredApproval.approveAutoExecutionScope) {
+        await this.persistOutlineFreezeIfNeeded(input);
+      }
       await this.maybeRunAutoApprovedChapters(input);
       return;
     }
@@ -302,6 +308,46 @@ export class NovelDirectorPipelineRuntime {
       return null;
     }
     return workspace;
+  }
+
+  /**
+   * C1：structured_outline_ready 审批通过后写入 outline freeze snapshot。
+   * mode=off 仍写 artifact（coverage 仅信息性）；失败不阻断主路径。
+   */
+  private async persistOutlineFreezeIfNeeded(input: DirectorPipelineRunInput): Promise<void> {
+    try {
+      const workspace = await this.deps.volumeService.getVolumes(input.novelId).catch(() => null);
+      if (!workspace?.volumes?.length) {
+        return;
+      }
+      // 按当前大纲范围 / 首个有章卷解析，禁止无脑 volumes[0]
+      const plan = input.input.autoExecutionPlan;
+      const volumeId = resolveVolumeIdForChapterScope({
+        document: workspace,
+        startOrder: plan?.startOrder ?? null,
+        endOrder: plan?.endOrder ?? null,
+      }) ?? workspace.volumes.find((volume) => volume.chapters.length > 0)?.id
+        ?? null;
+      if (!volumeId) {
+        return;
+      }
+      const mode = input.input.settingQualityMode === "advisory"
+        || input.input.settingQualityMode === "enforce"
+        ? input.input.settingQualityMode
+        : "off";
+      const { document } = persistOutlineFreezeOnStructuredOutlineReady({
+        document: workspace,
+        volumeId,
+        mode,
+        actor: "director_pipeline",
+        reason: "structured_outline_ready",
+      });
+      if (document !== workspace) {
+        await this.deps.volumeService.updateVolumes(input.novelId, document);
+      }
+    } catch {
+      // freeze 为 best-effort；不得阻断 structured_outline → auto_execute
+    }
   }
 
   private async maybeRunAutoApprovedChapters(input: DirectorPipelineRunInput): Promise<void> {

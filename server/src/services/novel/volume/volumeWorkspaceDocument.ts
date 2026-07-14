@@ -11,6 +11,9 @@ import type {
   VolumeStrategyVolume,
   VolumeUncertaintyMarker,
 } from "@ai-novel/shared/types/novel";
+import type { FunctionAcceptanceTable } from "@ai-novel/shared/types/functionAcceptance";
+import { normalizeFunctionAcceptanceTables } from "@ai-novel/shared/types/functionAcceptance";
+import type { OutlineFreezeSnapshot } from "@ai-novel/shared/types/outlineFreeze";
 import {
   buildDerivedOutlineFromVolumes,
   buildDerivedStructuredOutlineFromVolumes,
@@ -405,6 +408,8 @@ export function buildVolumeWorkspaceDocument(params: {
   critiqueReport?: VolumeCritiqueReport | null;
   beatSheets?: VolumeBeatSheet[];
   rebalanceDecisions?: VolumeRebalanceDecision[];
+  functionAcceptanceTables?: FunctionAcceptanceTable[] | null;
+  outlineFreezeSnapshots?: OutlineFreezeSnapshot[] | null;
   source?: "volume" | "legacy" | "empty";
   activeVersionId?: string | null;
 }): VolumePlanDocument {
@@ -417,6 +422,15 @@ export function buildVolumeWorkspaceDocument(params: {
   const rebalanceDecisions = (params.rebalanceDecisions ?? [])
     .map((decision) => normalizeRebalanceDecision(decision, volumes))
     .filter((item): item is VolumeRebalanceDecision => Boolean(item));
+  const knownVolumeIds = volumes.map((volume) => volume.id);
+  const functionAcceptanceTables = normalizeFunctionAcceptanceTables(
+    params.functionAcceptanceTables ?? [],
+    knownVolumeIds,
+  ).filter((table) => knownVolumeIds.includes(table.volumeId));
+  const outlineFreezeSnapshots = normalizeOutlineFreezeSnapshots(
+    params.outlineFreezeSnapshots ?? [],
+    knownVolumeIds,
+  );
   return {
     novelId: params.novelId,
     workspaceVersion: "v2",
@@ -425,6 +439,8 @@ export function buildVolumeWorkspaceDocument(params: {
     critiqueReport,
     beatSheets,
     rebalanceDecisions,
+    ...(functionAcceptanceTables.length > 0 ? { functionAcceptanceTables } : {}),
+    ...(outlineFreezeSnapshots.length > 0 ? { outlineFreezeSnapshots } : {}),
     readiness: buildVolumePlanningReadiness({
       volumes,
       strategyPlan,
@@ -435,6 +451,36 @@ export function buildVolumeWorkspaceDocument(params: {
     source: params.source ?? (volumes.length > 0 ? "volume" : "empty"),
     activeVersionId: params.activeVersionId ?? null,
   };
+}
+
+function normalizeOutlineFreezeSnapshots(
+  raw: unknown,
+  knownVolumeIds: string[],
+): OutlineFreezeSnapshot[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const known = new Set(knownVolumeIds);
+  return raw.flatMap((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      return [];
+    }
+    const record = item as Record<string, unknown>;
+    const volumeId = typeof record.volumeId === "string" ? record.volumeId.trim() : "";
+    if (!volumeId || !known.has(volumeId)) {
+      return [];
+    }
+    if (record.schemaVersion !== 1) {
+      return [];
+    }
+    if (record.approvalPoint !== "structured_outline_ready") {
+      return [];
+    }
+    if (typeof record.contentHash !== "string" || typeof record.tableFingerprint !== "string") {
+      return [];
+    }
+    return [item as OutlineFreezeSnapshot];
+  });
 }
 
 export function normalizeVolumeWorkspaceDocument(
@@ -467,6 +513,14 @@ export function normalizeVolumeWorkspaceDocument(
       .map((item) => normalizeRebalanceDecision(item, volumes))
       .filter((item): item is VolumeRebalanceDecision => Boolean(item))
     : [];
+  const functionAcceptanceTables = normalizeFunctionAcceptanceTables(
+    record.functionAcceptanceTables ?? record.functionAcceptanceTable,
+    volumes.map((volume) => volume.id),
+  );
+  const outlineFreezeSnapshots = normalizeOutlineFreezeSnapshots(
+    record.outlineFreezeSnapshots,
+    volumes.map((volume) => volume.id),
+  );
   const source = record.source === "legacy" || record.source === "empty" || record.source === "volume"
     ? record.source
     : options.source ?? (volumes.length > 0 ? "volume" : "empty");
@@ -478,6 +532,8 @@ export function normalizeVolumeWorkspaceDocument(
     critiqueReport,
     beatSheets,
     rebalanceDecisions,
+    functionAcceptanceTables,
+    outlineFreezeSnapshots,
     source,
     activeVersionId,
   });
@@ -512,6 +568,21 @@ export function mergeVolumeWorkspaceInput(
       ? record.rebalanceDecisions
       : currentDocument.rebalanceDecisions;
 
+  const functionAcceptanceTables = strategyChanged || volumeLevelStructureChanged
+    ? []
+    : record.functionAcceptanceTables !== undefined
+      ? record.functionAcceptanceTables
+      : record.functionAcceptanceTable !== undefined
+        ? record.functionAcceptanceTable
+        : currentDocument.functionAcceptanceTables;
+
+  // outline freeze：章列表/策略结构大变时清空；否则保留或接受显式写入
+  const outlineFreezeSnapshots = strategyChanged || volumeLevelStructureChanged || chapterListChanged
+    ? []
+    : record.outlineFreezeSnapshots !== undefined
+      ? record.outlineFreezeSnapshots
+      : currentDocument.outlineFreezeSnapshots;
+
   return normalizeVolumeWorkspaceDocument(novelId, {
     workspaceVersion: "v2",
     novelId,
@@ -524,6 +595,8 @@ export function mergeVolumeWorkspaceInput(
         : currentDocument.critiqueReport,
     beatSheets,
     rebalanceDecisions,
+    functionAcceptanceTables,
+    outlineFreezeSnapshots,
     source: currentDocument.source,
     activeVersionId: currentDocument.activeVersionId,
   }, {

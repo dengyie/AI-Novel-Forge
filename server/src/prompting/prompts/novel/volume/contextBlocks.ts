@@ -7,6 +7,7 @@ import {
   buildBeatContextWindow,
   buildBeatSheetContext,
   buildChapterDetailDraft,
+  buildChapterFunctionPayoffContext,
   buildChapterNeighborContext,
   buildCommonNovelContext,
   buildConflictLevelCurveContext,
@@ -330,6 +331,21 @@ export function buildVolumeChapterDetailContextBlocks(input: VolumeChapterDetail
       required: true,
       content: `Existing draft:\n${buildChapterDetailDraft(input.targetChapter, input.detailMode)}`,
     }),
+    (() => {
+      const payoffContext = buildChapterFunctionPayoffContext(
+        input.targetChapter,
+        input.workspace.functionAcceptanceTables,
+      );
+      if (!payoffContext) {
+        return null;
+      }
+      return createContextBlock({
+        id: "function_payoff_short_list",
+        group: "chapter_detail_draft",
+        priority: 95,
+        content: payoffContext,
+      });
+    })(),
     createContextBlock({
       id: "volume_window",
       group: "volume_window",

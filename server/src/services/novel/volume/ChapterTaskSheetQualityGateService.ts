@@ -17,6 +17,11 @@ import {
 
 export interface ChapterTaskSheetQualityGateOptions {
   mode?: ChapterTaskSheetQualityMode;
+  /**
+   * 设定对齐质量模式（B4）。缺省 off：模板语义规则只 advisory。
+   * enforce 时 cognitive_nailing / 缺选择 / 缺现场可升 high 阻断。
+   */
+  settingQualityMode?: "off" | "advisory" | "enforce";
   provider?: LLMProvider;
   model?: string;
   temperature?: number;
@@ -60,7 +65,11 @@ export class ChapterTaskSheetQualityGateService {
     options: ChapterTaskSheetQualityGateOptions = {},
   ): Promise<ChapterTaskSheetQualityGateResult> {
     const mode = normalizeQualityMode(options.mode);
-    const shapeResult = assessChapterExecutionContractShape(candidate);
+    // B4：模板语义规则（钉认知/选择/现场）在 shape 阶段先跑；severity 随 qualityMode/settingQualityMode 升降
+    const shapeResult = assessChapterExecutionContractShape(candidate, {
+      qualityMode: mode,
+      settingQualityMode: options.settingQualityMode,
+    });
     if (!shapeResult.canEnterExecution) {
       return shapeResult;
     }

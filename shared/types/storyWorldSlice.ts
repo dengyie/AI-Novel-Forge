@@ -10,6 +10,12 @@ export const storyWorldSliceBuilderModeSchema = z.enum([
   "manual_refresh",
 ]);
 
+/** 缺省按 theme_invent 解释，保证 v1 存量兼容 */
+export const storyWorldSliceLockModeSchema = z.enum([
+  "canonical",
+  "theme_invent",
+]);
+
 export const storyWorldSliceRuleSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -47,6 +53,10 @@ export const storyWorldSliceMetaSchema = z.object({
   storyInputDigest: z.string(),
   builtFromStructuredData: z.boolean(),
   builderMode: storyWorldSliceBuilderModeSchema,
+  /** optional：缺省读路径视为 theme_invent，不触发 stale */
+  lockMode: storyWorldSliceLockModeSchema.optional(),
+  /** canonical strip 产生的发明项记录（可观测） */
+  inventViolations: z.array(z.string()).max(32).optional(),
 });
 
 export const storyWorldSliceSchema = z.object({
@@ -95,6 +105,7 @@ export const storyWorldSliceViewSchema = z.object({
 });
 
 export type StoryWorldSliceBuilderMode = z.infer<typeof storyWorldSliceBuilderModeSchema>;
+export type StoryWorldSliceLockMode = z.infer<typeof storyWorldSliceLockModeSchema>;
 export type StoryWorldSliceRule = z.infer<typeof storyWorldSliceRuleSchema>;
 export type StoryWorldSliceForce = z.infer<typeof storyWorldSliceForceSchema>;
 export type StoryWorldSliceLocation = z.infer<typeof storyWorldSliceLocationSchema>;
@@ -104,3 +115,10 @@ export type StoryWorldSlice = z.infer<typeof storyWorldSliceSchema>;
 export type StoryWorldSliceOverrides = z.infer<typeof storyWorldSliceOverridesSchema>;
 export type StoryWorldSliceOptionItem = z.infer<typeof storyWorldSliceOptionItemSchema>;
 export type StoryWorldSliceView = z.infer<typeof storyWorldSliceViewSchema>;
+
+/** 读路径：缺 lockMode 一律按 theme_invent，避免误开 canonical */
+export function resolveStoryWorldSliceLockMode(
+  lockMode: StoryWorldSliceLockMode | null | undefined,
+): StoryWorldSliceLockMode {
+  return lockMode === "canonical" ? "canonical" : "theme_invent";
+}

@@ -455,6 +455,13 @@ export function buildRecentChapterExecutionContext(
   }).join("\n\n");
 }
 
+function formatChapterFunctionIds(chapter: VolumePlan["chapters"][number]): string {
+  const ids = Array.isArray(chapter.functionIds)
+    ? chapter.functionIds.map((id) => String(id ?? "").trim()).filter(Boolean)
+    : [];
+  return ids.length > 0 ? ids.join(" | ") : "none";
+}
+
 export function buildChapterDetailDraft(
   chapter: VolumePlan["chapters"][number],
   detailMode: ChapterDetailMode,
@@ -472,6 +479,7 @@ export function buildChapterDetailDraft(
       `target word count: ${typeof chapter.targetWordCount === "number" ? chapter.targetWordCount : "none"}`,
       `must avoid: ${chapter.mustAvoid?.trim() || "none"}`,
       `payoff refs: ${chapter.payoffRefs.join(" | ") || "none"}`,
+      `function ids: ${formatChapterFunctionIds(chapter)}`,
     ].join("\n");
   }
   return [
@@ -486,6 +494,44 @@ export function buildChapterDetailDraft(
     `target word count: ${typeof chapter.targetWordCount === "number" ? chapter.targetWordCount : "none"}`,
     `must avoid: ${chapter.mustAvoid?.trim() || "none"}`,
     `payoff refs: ${chapter.payoffRefs.join(" | ") || "none"}`,
+    `function ids: ${formatChapterFunctionIds(chapter)}`,
+    "taskSheet template reminder: 独占事件 / 在场人物 / 人物选择 / 现场压力 / 功能兑付 / 禁止；禁钉认知句",
     `current task sheet draft: ${chapter.taskSheet?.trim() || "none"}`,
+  ].join("\n");
+}
+
+/**
+ * B4：把章 functionIds 解析为功能兑付短列表（给 taskSheet 生成/合同上下文用）。
+ * 无表时返回 null，避免 off 模式塞噪声。
+ */
+export function buildChapterFunctionPayoffContext(
+  chapter: VolumePlan["chapters"][number],
+  tables: import("@ai-novel/shared/types/functionAcceptance").FunctionAcceptanceTable[] | null | undefined,
+): string | null {
+  const ids = Array.isArray(chapter.functionIds)
+    ? chapter.functionIds.map((id) => String(id ?? "").trim()).filter(Boolean)
+    : [];
+  if (ids.length === 0) {
+    return null;
+  }
+  const idSet = new Set(ids);
+  const items = (tables ?? [])
+    .flatMap((table) => table.items ?? [])
+    .filter((item) => idSet.has(item.id));
+  if (items.length === 0) {
+    return [
+      "Function payoff short list (ids only; no table rows resolved):",
+      ...ids.slice(0, 6).map((id) => `- ${id}`),
+      "Write 【功能兑付】 as verifiable on-page actions; do not lecture rules.",
+    ].join("\n");
+  }
+  const lines = items.slice(0, 6).map((item) => {
+    const checks = (item.acceptanceChecks ?? []).slice(0, 3).join("；");
+    return `- ${item.id}「${item.title}」mustHappen=${item.mustHappen}${checks ? ` | checks=${checks}` : ""}`;
+  });
+  return [
+    "Function payoff short list for this chapter (put under 【功能兑付】 in taskSheet):",
+    ...lines,
+    "Write choice + scene pressure; ban cognitive nailing and rule-manual lectures.",
   ].join("\n");
 }

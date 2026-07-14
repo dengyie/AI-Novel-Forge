@@ -166,6 +166,8 @@ export interface NovelDirectorAutoExecutionRuntimeDeps {
     range: DirectorAutoExecutionRange;
     autoExecution: DirectorAutoExecutionState;
     consecutiveBatchRolls: number;
+    request?: DirectorConfirmRequest;
+    settingQualityMode?: "off" | "advisory" | "enforce";
   }) => BatchRollDecision | Promise<BatchRollDecision>;
   prepareNextAutoExecutionBatch?: (
     input: PrepareNextAutoExecutionBatchInput,

@@ -410,6 +410,7 @@ export class NovelCorePipelineService {
             qualityThreshold: options.qualityThreshold,
             repairMode: options.repairMode ?? "light_repair",
             artifactSyncMode: options.artifactSyncMode ?? "adaptive",
+            settingQualityMode: options.settingQualityMode ?? "off",
           }),
         },
       });
