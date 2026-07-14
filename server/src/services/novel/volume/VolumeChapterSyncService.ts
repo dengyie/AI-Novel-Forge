@@ -10,6 +10,7 @@ import {
   sanitizeChapterTaskSheetForPersistence,
   tryAutoRepairInternalCodesOnly,
 } from "@ai-novel/shared/types/chapterTaskSheetQuality";
+import type { SettingQualityMode } from "@ai-novel/shared/types/settingQualityPolicy";
 import { prisma } from "../../../db/prisma";
 import type { VolumeUpdateReason } from "../../../events";
 import { contentRevisionBumpData } from "../chapterContentCas";
@@ -28,6 +29,8 @@ import {
   persistActiveVolumeWorkspace,
   runVolumeWorkspaceTransaction,
 } from "./volumeWorkspacePersistence";
+import { assertDocumentFunctionCoverageForSync } from "./volumeFunctionCoverage";
+import { functionAcceptanceStatusService } from "./FunctionAcceptanceStatusService";
 
 export interface VolumeChapterSyncServiceDeps {
   ensureVolumeWorkspace: (novelId: string) => Promise<VolumePlanDocument>;
@@ -45,6 +48,8 @@ export interface VolumeChapterSyncOptions {
   emitEvent?: boolean;
   syncPayoffLedger?: boolean;
   volumeUpdateReason?: VolumeUpdateReason;
+  /** 缺省 off：不挡 sync；enforce 时校验功能覆盖 */
+  settingQualityMode?: SettingQualityMode;
 }
 
 export class VolumeChapterSyncService {
@@ -75,8 +80,27 @@ export class VolumeChapterSyncService {
     options: VolumeChapterSyncOptions = {},
   ): Promise<VolumeSyncPreview> {
     const workspace = await this.deps.ensureVolumeWorkspace(novelId);
-    const mergedDocument = mergeVolumeWorkspaceInput(novelId, workspace, { volumes: input.volumes });
+    let mergedDocument = mergeVolumeWorkspaceInput(novelId, workspace, {
+      volumes: input.volumes,
+      // 保留表：mergeVolumeWorkspaceInput 在 volumes 变更时默认保留 functionAcceptanceTables
+      functionAcceptanceTables: workspace.functionAcceptanceTables,
+    });
+    // 按章 functionIds 写回 assigned（mode 无关；纯状态骨架）
+    for (const volume of mergedDocument.volumes) {
+      if ((mergedDocument.functionAcceptanceTables ?? []).some((table) => table.volumeId === volume.id)) {
+        mergedDocument = functionAcceptanceStatusService.applyAssignments(
+          mergedDocument,
+          volume.id,
+          volume.chapters,
+        );
+      }
+    }
     this.assertSyncableChapterExecutionContracts(mergedDocument, input.executionContractChapterRange);
+    assertDocumentFunctionCoverageForSync({
+      document: mergedDocument,
+      mode: options.settingQualityMode ?? "off",
+      chapterRange: input.executionContractChapterRange,
+    });
     const shouldSyncPayoffLedger = hasPayoffLedgerRelevantPlanChanges(workspace.volumes, mergedDocument.volumes);
     const existingChapters = await prisma.chapter.findMany({
       where: { novelId },

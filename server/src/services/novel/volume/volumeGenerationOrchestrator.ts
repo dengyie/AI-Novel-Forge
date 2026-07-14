@@ -57,6 +57,12 @@ import {
   resolveBeatSheetTargetChapterCount,
 } from "./volumeBeatSheetGeneration";
 import {
+  applyFunctionTablePostChapterList,
+  resolveSettingQualityModeFromOptions,
+} from "./volumeFunctionCoverage";
+import { functionAcceptanceStatusService } from "./FunctionAcceptanceStatusService";
+import { normalizeFunctionAcceptanceTable } from "@ai-novel/shared/types/functionAcceptance";
+import {
   MAX_VOLUME_COUNT,
   buildVolumeCountGuidance,
 } from "@ai-novel/shared/types/volumePlanning";
@@ -438,15 +444,60 @@ async function generateChapterList(params: {
       targetVolumeId: targetVolume.id,
     },
   });
+  const settingQualityMode = resolveSettingQualityModeFromOptions(options.settingQualityMode);
+  const { document: withFunctionCoverage } = applyFunctionTablePostChapterList({
+    document: rebalancedDocument,
+    volumeId: targetVolume.id,
+    mode: settingQualityMode,
+    mergeMustAvoid: true,
+  });
   await options.onIntermediateDocument?.({
     scope: "chapter_list",
-    document: rebalancedDocument,
+    document: withFunctionCoverage,
     isFinal: true,
     targetVolumeId: targetVolume.id,
     targetBeatKey: options.targetBeatKey,
     generationMode: options.generationMode,
   });
-  return rebalancedDocument;
+  return withFunctionCoverage;
+}
+
+/**
+ * 导入/写入功能验收表（B2）。
+ * 不跑 LLM；source=generated 时仍可写入但 enforce 门禁会拒绝。
+ */
+function upsertFunctionTable(params: {
+  document: VolumePlanDocument;
+  options: VolumeGenerateOptions;
+}): VolumePlanDocument {
+  const { document, options } = params;
+  const targetVolume = getTargetVolume(document, options.targetVolumeId);
+  const raw = options.functionAcceptanceTable;
+  if (!raw) {
+    // 无输入时若已有表则原样；否则建空 generated 占位提示调用方
+    const existing = document.functionAcceptanceTables?.find((table) => table.volumeId === targetVolume.id);
+    if (existing) {
+      return document;
+    }
+    throw new Error("缺少 functionAcceptanceTable 输入，无法写入功能验收表。");
+  }
+  const normalized = normalizeFunctionAcceptanceTable(
+    {
+      ...raw,
+      volumeId: raw.volumeId?.trim() || targetVolume.id,
+    },
+    targetVolume.id,
+  );
+  if (!normalized) {
+    throw new Error("功能验收表格式无效。");
+  }
+  if (normalized.volumeId !== targetVolume.id) {
+    throw new Error("功能验收表 volumeId 与目标卷不一致。");
+  }
+  return functionAcceptanceStatusService.upsertTable(document, {
+    ...normalized,
+    volumeId: targetVolume.id,
+  });
 }
 
 async function generateChapterDetail(params: {
@@ -560,6 +611,7 @@ export async function generateVolumePlanDocument(params: {
     critiqueReport: workspace.critiqueReport,
     beatSheets: workspace.beatSheets,
     rebalanceDecisions: workspace.rebalanceDecisions,
+    functionAcceptanceTables: workspace.functionAcceptanceTables,
     source: workspace.source,
     activeVersionId: workspace.activeVersionId,
   });
@@ -570,15 +622,17 @@ export async function generateVolumePlanDocument(params: {
     phase: "load_context",
     label: scope === "chapter_list"
       ? "正在整理拆章上下文"
-      : scope === "beat_sheet"
-        ? "正在整理节奏板上下文"
-        : scope === "skeleton"
-          ? "正在整理卷骨架上下文"
-          : scope === "strategy"
-            ? "正在整理卷战略上下文"
-            : scope === "rebalance"
-              ? "正在整理相邻卷衔接上下文"
-              : "正在整理卷规划上下文",
+      : scope === "function_table"
+        ? "正在整理功能验收表"
+        : scope === "beat_sheet"
+          ? "正在整理节奏板上下文"
+          : scope === "skeleton"
+            ? "正在整理卷骨架上下文"
+            : scope === "strategy"
+              ? "正在整理卷战略上下文"
+              : scope === "rebalance"
+                ? "正在整理相邻卷衔接上下文"
+                : "正在整理卷规划上下文",
     options,
   });
   const { novel, storyMacroPlan } = await loadGenerationContext({
@@ -615,6 +669,12 @@ export async function generateVolumePlanDocument(params: {
       novel,
       workspace: currentWorkspace,
       storyMacroPlan,
+      options,
+    });
+  }
+  if (scope === "function_table") {
+    return upsertFunctionTable({
+      document: baseDocument,
       options,
     });
   }

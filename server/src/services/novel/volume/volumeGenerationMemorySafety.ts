@@ -7,6 +7,7 @@ const HIGH_MEMORY_VOLUME_SCOPES = new Set([
   "rebalance",
   "chapter_detail",
   "volume",
+  // function_table 为纯写入/校验，不占高内存；刻意不列入
 ]);
 
 export function isHighMemoryVolumeGeneration(options: Pick<VolumeGenerateOptions, "scope">): boolean {

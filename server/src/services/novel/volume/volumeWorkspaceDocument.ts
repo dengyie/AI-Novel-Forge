@@ -11,6 +11,8 @@ import type {
   VolumeStrategyVolume,
   VolumeUncertaintyMarker,
 } from "@ai-novel/shared/types/novel";
+import type { FunctionAcceptanceTable } from "@ai-novel/shared/types/functionAcceptance";
+import { normalizeFunctionAcceptanceTables } from "@ai-novel/shared/types/functionAcceptance";
 import {
   buildDerivedOutlineFromVolumes,
   buildDerivedStructuredOutlineFromVolumes,
@@ -405,6 +407,7 @@ export function buildVolumeWorkspaceDocument(params: {
   critiqueReport?: VolumeCritiqueReport | null;
   beatSheets?: VolumeBeatSheet[];
   rebalanceDecisions?: VolumeRebalanceDecision[];
+  functionAcceptanceTables?: FunctionAcceptanceTable[] | null;
   source?: "volume" | "legacy" | "empty";
   activeVersionId?: string | null;
 }): VolumePlanDocument {
@@ -417,6 +420,11 @@ export function buildVolumeWorkspaceDocument(params: {
   const rebalanceDecisions = (params.rebalanceDecisions ?? [])
     .map((decision) => normalizeRebalanceDecision(decision, volumes))
     .filter((item): item is VolumeRebalanceDecision => Boolean(item));
+  const knownVolumeIds = volumes.map((volume) => volume.id);
+  const functionAcceptanceTables = normalizeFunctionAcceptanceTables(
+    params.functionAcceptanceTables ?? [],
+    knownVolumeIds,
+  ).filter((table) => knownVolumeIds.includes(table.volumeId));
   return {
     novelId: params.novelId,
     workspaceVersion: "v2",
@@ -425,6 +433,7 @@ export function buildVolumeWorkspaceDocument(params: {
     critiqueReport,
     beatSheets,
     rebalanceDecisions,
+    ...(functionAcceptanceTables.length > 0 ? { functionAcceptanceTables } : {}),
     readiness: buildVolumePlanningReadiness({
       volumes,
       strategyPlan,
@@ -467,6 +476,10 @@ export function normalizeVolumeWorkspaceDocument(
       .map((item) => normalizeRebalanceDecision(item, volumes))
       .filter((item): item is VolumeRebalanceDecision => Boolean(item))
     : [];
+  const functionAcceptanceTables = normalizeFunctionAcceptanceTables(
+    record.functionAcceptanceTables ?? record.functionAcceptanceTable,
+    volumes.map((volume) => volume.id),
+  );
   const source = record.source === "legacy" || record.source === "empty" || record.source === "volume"
     ? record.source
     : options.source ?? (volumes.length > 0 ? "volume" : "empty");
@@ -478,6 +491,7 @@ export function normalizeVolumeWorkspaceDocument(
     critiqueReport,
     beatSheets,
     rebalanceDecisions,
+    functionAcceptanceTables,
     source,
     activeVersionId,
   });
@@ -512,6 +526,14 @@ export function mergeVolumeWorkspaceInput(
       ? record.rebalanceDecisions
       : currentDocument.rebalanceDecisions;
 
+  const functionAcceptanceTables = strategyChanged || volumeLevelStructureChanged
+    ? []
+    : record.functionAcceptanceTables !== undefined
+      ? record.functionAcceptanceTables
+      : record.functionAcceptanceTable !== undefined
+        ? record.functionAcceptanceTable
+        : currentDocument.functionAcceptanceTables;
+
   return normalizeVolumeWorkspaceDocument(novelId, {
     workspaceVersion: "v2",
     novelId,
@@ -524,6 +546,7 @@ export function mergeVolumeWorkspaceInput(
         : currentDocument.critiqueReport,
     beatSheets,
     rebalanceDecisions,
+    functionAcceptanceTables,
     source: currentDocument.source,
     activeVersionId: currentDocument.activeVersionId,
   }, {

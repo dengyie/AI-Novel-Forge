@@ -44,6 +44,7 @@ export interface VolumeWorkspace {
   critiqueReport: VolumeCritiqueReport | null;
   beatSheets: VolumeBeatSheet[];
   rebalanceDecisions: VolumeRebalanceDecision[];
+  functionAcceptanceTables?: import("@ai-novel/shared/types/functionAcceptance").FunctionAcceptanceTable[];
   readiness: VolumePlanningReadiness;
   source: "volume" | "legacy" | "empty";
   activeVersionId: string | null;
@@ -94,6 +95,13 @@ export interface VolumeGenerateOptions {
   taskId?: string;
   entrypoint?: string;
   chapterTaskSheetQualityMode?: ChapterTaskSheetQualityMode;
+  /**
+   * 设定对齐质量模式（B2）。缺省 off：不强制 function 表/覆盖。
+   * enforce 时 chapter_list 后跑 coverage；generated 表不可 enforce。
+   */
+  settingQualityMode?: import("@ai-novel/shared/types/settingQualityPolicy").SettingQualityMode;
+  /** 导入/覆盖功能验收表（scope=function_table 或显式写入） */
+  functionAcceptanceTable?: import("@ai-novel/shared/types/functionAcceptance").FunctionAcceptanceTable | null;
   signal?: AbortSignal;
   persistIntermediateDocuments?: boolean;
   onPhaseStart?: (event: VolumeGenerationPhaseEvent) => void | Promise<void>;
