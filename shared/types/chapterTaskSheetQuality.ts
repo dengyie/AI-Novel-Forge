@@ -65,6 +65,26 @@ export interface ChapterExecutionContractQualityCandidate {
   sceneCards?: string | null;
   /** 可选：上游已判定的章型；缺省则从文本推断 */
   chapterType?: ChapterTaskSheetType | null;
+  /**
+   * 功能验收挂载（B4）。仅用于模板提示与兑付短列表校验，不是字数闸。
+   * mode=off 时可缺省。
+   */
+  functionIds?: string[] | null;
+  /** 已解析的功能兑付短列表文案（可直接对照 taskSheet 是否覆盖） */
+  functionPayoffHints?: string[] | null;
+}
+
+export interface AssessChapterExecutionContractShapeOptions {
+  /**
+   * taskSheet 质量模式：full_book_autopilot 下 cognitive_nailing 可升为 high 阻断。
+   * 缺省按 advisory（medium，不单独阻断 canEnterExecution）。
+   */
+  qualityMode?: ChapterTaskSheetQualityMode;
+  /**
+   * 设定对齐模式：enforce 时模板硬缺口（缺选择/现场）与钉认知可升 high。
+   * 缺省 off — 规则仍产出 issue，但不因模板语义单独 hard-block。
+   */
+  settingQualityMode?: "off" | "advisory" | "enforce";
 }
 
 export interface ChapterTaskSheetQualityIssue {
@@ -399,8 +419,175 @@ function countTaskSheetBulletHints(taskSheet: string): number {
   return Math.max(parts.length, taskSheet.trim() ? 1 : 0);
 }
 
+/**
+ * B4 模板语义规则（正则/结构优先，先于 LLM）。
+ * 与 self-cycle strip 兼容：调用方应先 sanitize codes，再对本函数评估清洗后正文。
+ *
+ * 钉认知 / 缺选择 / 缺现场：默认 advisory（medium）。
+ * 仅 qualityMode=full_book_autopilot 或 settingQualityMode=enforce 时，
+ * cognitive_nailing 升 high 可阻断 canEnterExecution。
+ */
+const COGNITIVE_NAILING_PATTERNS: RegExp[] = [
+  /读者应(?:该)?理解/,
+  /读者(?:会|要|必须)?(?:明白|理解|知道|认识到)/,
+  /让读者(?:明白|理解|知道|认识到|看清)/,
+  /本章(?:主题|要表达|想说明|想传达|要传达)/,
+  /主题是[：:]/,
+  /传达主题/,
+  /钉死认知/,
+  /认知钉/,
+  /主题句[：:]/,
+  /读者(?:应当|必须)(?:得出|得到)结论/,
+];
+
+const CHOICE_PRESSURE_PATTERNS: RegExp[] = [
+  /【人物选择】/,
+  /人物选择[：:]/,
+  /有代价的?选择/,
+  /两难/,
+  /取舍/,
+  /(?:被迫|不得不|必须)(?:在|于)?.{0,12}(?:之间|之中)?选/,
+  /选择.{0,16}代价/,
+  /代价.{0,16}选择/,
+  /押上/,
+  /牺牲.{0,12}换/,
+  /(?:决定|抉择|拍板).{0,20}(?:代价|后果|风险|失去|放弃)/,
+  /放弃.{0,12}(?:换|保住|争取)/,
+];
+
+const SCENE_ANCHOR_PATTERNS: RegExp[] = [
+  /【现场压力】/,
+  /【本章独占事件】/,
+  /现场压力[：:]/,
+  /独占事件[：:]/,
+  /环境锚/,
+  /场景锚/,
+  /整体环境/,
+  /现场(?:压迫|压力|锚点)?/,
+  /(?:社会|身体|环境)压力/,
+  /(?:桥面|港口|巷口|走廊|雨夜|机舱|甲板|码头|仓库|会议室|审讯室|废楼)/,
+  /(?:冷风|潮气|灯光|警报|汽笛|腥味|血味|铁锈|硝烟|湿冷)/,
+];
+
+export type TaskSheetTemplateRuleAssessment = {
+  hasCognitiveNailing: boolean;
+  hasChoicePressure: boolean;
+  hasSceneAnchor: boolean;
+  issues: ChapterTaskSheetQualityIssue[];
+};
+
+function shouldElevateTemplateRulesToBlocking(
+  options?: AssessChapterExecutionContractShapeOptions,
+): boolean {
+  if (options?.qualityMode === "full_book_autopilot") {
+    return true;
+  }
+  if (options?.settingQualityMode === "enforce") {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * 纯规则评估 taskSheet 模板语义。输入应为 strip 后的自然语言。
+ */
+export function assessTaskSheetTemplateRules(
+  taskSheet: string | null | undefined,
+  options?: AssessChapterExecutionContractShapeOptions,
+): TaskSheetTemplateRuleAssessment {
+  const text = taskSheet?.trim() ?? "";
+  if (!text) {
+    return {
+      hasCognitiveNailing: false,
+      hasChoicePressure: false,
+      hasSceneAnchor: false,
+      issues: [],
+    };
+  }
+
+  const hasCognitiveNailing = COGNITIVE_NAILING_PATTERNS.some((pattern) => pattern.test(text));
+  const hasChoicePressure = CHOICE_PRESSURE_PATTERNS.some((pattern) => pattern.test(text));
+  const hasSceneAnchor = SCENE_ANCHOR_PATTERNS.some((pattern) => pattern.test(text));
+  const elevate = shouldElevateTemplateRulesToBlocking(options);
+  const issues: ChapterTaskSheetQualityIssue[] = [];
+
+  if (hasCognitiveNailing) {
+    issues.push(createQualityIssue(
+      "cognitive_nailing",
+      "task_sheet",
+      "任务单含「钉死认知」句（读者应理解/主题是…），应改写为人物选择与现场压力。",
+      "删掉主题说明与读者认知句；改写为有代价的选择 + 可拍摄的现场压力，不写觉悟总结。",
+      elevate ? "high" : "medium",
+    ));
+  }
+
+  if (!hasChoicePressure) {
+    issues.push(createQualityIssue(
+      "missing_choice_pressure",
+      "task_sheet",
+      "任务单缺少人物选择/代价压力。",
+      "补充【人物选择】：写具体取舍与代价，不写觉悟句。",
+      elevate ? "high" : "medium",
+    ));
+  }
+
+  if (!hasSceneAnchor) {
+    issues.push(createQualityIssue(
+      "missing_scene_anchor",
+      "task_sheet",
+      "任务单缺少现场压力/场景锚。",
+      "补充【现场压力】或【本章独占事件】：一处可拍的环境/社会/身体压力锚。",
+      elevate ? "high" : "medium",
+    ));
+  }
+
+  return {
+    hasCognitiveNailing,
+    hasChoicePressure,
+    hasSceneAnchor,
+    issues,
+  };
+}
+
+/**
+ * 功能兑付短列表（B4 合同提示，非字数闸）。
+ * 优先用已解析 hints；否则用 functionIds 生成占位行。
+ */
+export function buildFunctionPayoffShortList(input: {
+  functionIds?: string[] | null;
+  functionPayoffHints?: string[] | null;
+  maxItems?: number;
+}): string[] {
+  const maxItems = Math.max(1, Math.min(input.maxItems ?? 6, 12));
+  const hints = (input.functionPayoffHints ?? [])
+    .map((item) => String(item ?? "").trim())
+    .filter(Boolean);
+  if (hints.length > 0) {
+    return Array.from(new Set(hints)).slice(0, maxItems);
+  }
+  const ids = (input.functionIds ?? [])
+    .map((item) => String(item ?? "").trim())
+    .filter(Boolean);
+  return Array.from(new Set(ids))
+    .slice(0, maxItems)
+    .map((id) => `功能兑付 ${id}`);
+}
+
+export function formatFunctionPayoffShortListForTaskSheet(input: {
+  functionIds?: string[] | null;
+  functionPayoffHints?: string[] | null;
+  maxItems?: number;
+}): string {
+  const lines = buildFunctionPayoffShortList(input);
+  if (lines.length === 0) {
+    return "";
+  }
+  return ["【功能兑付】", ...lines.map((line) => `- ${line}`)].join("\n");
+}
+
 export function assessChapterExecutionContractShape(
   candidate: ChapterExecutionContractQualityCandidate,
+  options?: AssessChapterExecutionContractShapeOptions,
 ): ChapterTaskSheetQualityGateResult {
   const issues: ChapterTaskSheetQualityIssue[] = [];
   const chapterType = inferChapterTaskSheetType(candidate);
@@ -435,16 +622,18 @@ export function assessChapterExecutionContractShape(
     ));
   }
 
-  const taskSheetText = candidate.taskSheet?.trim() ?? "";
-  if (!taskSheetText) {
+  // strip-first：模板语义对清洗后正文评估，避免内部 code 干扰规则，也保证与 self-cycle 共存
+  const rawTaskSheet = candidate.taskSheet?.trim() ?? "";
+  const taskSheetText = sanitizeWriterFacingTaskSheet(rawTaskSheet);
+  if (!rawTaskSheet) {
     issues.push(createQualityIssue(
       "missing_task_sheet",
       "task_sheet",
       "章节任务单缺失。",
-      "生成可交给正文写作器执行的任务单，覆盖冲突对象、推进要求、情绪基调和收尾要求。",
+      "生成可交给正文写作器执行的任务单：独占事件、在场人物、人物选择、现场压力、功能兑付短列表与禁止项。",
     ));
   } else {
-    if (containsInternalQualityCodes(taskSheetText)) {
+    if (containsInternalQualityCodes(rawTaskSheet)) {
       issues.push(createQualityIssue(
         "task_sheet_internal_codes",
         "task_sheet",
@@ -453,7 +642,12 @@ export function assessChapterExecutionContractShape(
         "high",
       ));
     }
-    const bulletHints = countTaskSheetBulletHints(taskSheetText);
+    // 仅在 strip 后仍有正文时跑模板语义；空残留由 missing/internal 覆盖
+    if (taskSheetText) {
+      const templateRules = assessTaskSheetTemplateRules(taskSheetText, options);
+      issues.push(...templateRules.issues);
+    }
+    const bulletHints = countTaskSheetBulletHints(taskSheetText || rawTaskSheet);
     const payoffCount = Array.isArray(candidate.payoffRefs)
       ? candidate.payoffRefs.map((item) => String(item ?? "").trim()).filter(Boolean).length
       : 0;

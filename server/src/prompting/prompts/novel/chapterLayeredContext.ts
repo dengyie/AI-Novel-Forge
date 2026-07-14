@@ -728,6 +728,10 @@ export function buildChapterWriterContextBlocks(
         `目标：${writeContext.chapterMission.objective}`,
         `预期效果：${writeContext.chapterMission.expectation}`,
         `状态驱动的下一步动作：${writeContext.nextAction}`,
+        // B4：taskSheet 先于义务列表，写作优先落人物选择+现场压力，不钉认知
+        writeContext.chapterMission.taskSheet
+          ? `章节任务单（优先【人物选择】【现场压力】【独占事件】；禁止读者应理解/主题是…）：\n${writeContext.chapterMission.taskSheet}`
+          : "",
         writeContext.chapterMission.planRole ? `计划角色：${writeContext.chapterMission.planRole}` : "",
         wordRange.targetWordCount != null
           ? `目标篇幅：约 ${wordRange.targetWordCount} 个中文字符（可接受范围 ${wordRange.minWordCount}-${wordRange.maxWordCount}；不要明显低于最低值）。`
@@ -738,9 +742,6 @@ export function buildChapterWriterContextBlocks(
         toListBlock("必须推进", writeContext.chapterMission.mustAdvance, "无"),
         toListBlock("必须保留", writeContext.chapterMission.mustPreserve, "无"),
         toListBlock("风险提示", writeContext.chapterMission.riskNotes, "无"),
-        writeContext.chapterMission.taskSheet
-          ? `原始任务单：\n${writeContext.chapterMission.taskSheet}`
-          : "",
         writeContext.chapterMission.hookTarget ? `章末钩子：${writeContext.chapterMission.hookTarget}` : "",
       ].filter(Boolean).join("\n"),
     }),
