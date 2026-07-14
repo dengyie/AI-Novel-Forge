@@ -92,24 +92,21 @@ function TaskAudioControls(props: { novelId: string; task: AudiobookTaskSummary 
   }
 
   return (
-    <div className="mt-2 space-y-2">
-      {error ? <div className="text-xs text-destructive">{error}</div> : null}
+    <div className="mt-3 space-y-2">
+      {error ? <div className="text-sm text-destructive">{error}</div> : null}
       {audioUrl ? (
         <>
           <div className="flex flex-wrap gap-2">
-            <a
-              className="inline-flex h-8 items-center rounded-md border px-3 text-xs"
-              href={audioUrl}
-              target="_blank"
-              rel="noreferrer"
-            >
-              播放/下载全书
-            </a>
+            <Button asChild size="sm" variant="outline">
+              <a href={audioUrl} target="_blank" rel="noreferrer">
+                播放/下载全书
+              </a>
+            </Button>
           </div>
           <audio className="w-full" controls preload="none" src={audioUrl} />
         </>
       ) : (
-        <div className="text-xs text-muted-foreground">正在准备音频地址…</div>
+        <div className="text-sm text-muted-foreground">正在准备音频地址…</div>
       )}
     </div>
   );
@@ -172,26 +169,31 @@ function TaskAnnotationsPanel(props: {
   }
 
   return (
-    <div className="mt-2 space-y-2">
+    <div className="mt-3 space-y-3">
       <Button size="sm" variant="outline" onClick={() => void handleToggle()} disabled={loading}>
         {loading ? "加载标注..." : open ? "收起标注" : "查看标注"}
       </Button>
       {open ? (
-        <div className="max-h-72 space-y-2 overflow-y-auto rounded-md border bg-muted/20 p-2">
+        <div className="max-h-72 space-y-2 overflow-y-auto rounded-xl border border-border/70 bg-muted/20 p-3">
           {!view || view.annotations.length === 0 ? (
-            <div className="text-xs text-muted-foreground">尚无标注数据（任务未完成标注或已清空）。</div>
+            <div className="text-sm leading-6 text-muted-foreground">
+              尚无标注数据（任务未完成标注或已清空）。
+            </div>
           ) : (
             view.annotations.map((annotation) => (
-              <div key={annotation.chapterId} className="rounded border bg-background p-2">
+              <div
+                key={annotation.chapterId}
+                className="rounded-lg border border-border/70 bg-background p-3"
+              >
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="text-xs font-medium">
+                  <div className="text-sm font-medium text-foreground">
                     第 {annotation.chapterOrder} 章 {annotation.chapterTitle}
-                    <span className="ml-2 text-muted-foreground">
+                    <span className="ml-2 text-xs font-normal text-muted-foreground">
                       {annotation.segments.length} 段
                     </span>
                   </div>
                   {terminal ? (
-                    <div className="flex flex-wrap gap-1">
+                    <div className="flex flex-wrap gap-2">
                       <Button
                         size="sm"
                         variant="outline"
@@ -212,11 +214,14 @@ function TaskAnnotationsPanel(props: {
                   ) : null}
                 </div>
                 {annotation.error ? (
-                  <div className="mt-1 text-xs text-amber-700">回退：{annotation.error}</div>
+                  <div className="mt-2 text-xs leading-5 text-amber-800">回退：{annotation.error}</div>
                 ) : null}
-                <div className="mt-1 space-y-1">
+                <div className="mt-2 space-y-1">
                   {annotation.segments.slice(0, 6).map((segment) => (
-                    <div key={`${annotation.chapterId}-${segment.index}`} className="text-xs leading-5 text-muted-foreground">
+                    <div
+                      key={`${annotation.chapterId}-${segment.index}`}
+                      className="text-xs leading-5 text-muted-foreground"
+                    >
                       <span className="font-medium text-foreground">
                         [{segment.speakerLabel}/{segment.voice}]
                       </span>
@@ -234,7 +239,7 @@ function TaskAnnotationsPanel(props: {
             ))
           )}
           {view?.qualityWarnings?.length ? (
-            <div className="rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">
+            <div className="rounded-lg border border-amber-200/80 bg-amber-50/70 p-3 text-xs leading-6 text-amber-900">
               {view.qualityWarnings.join("；")}
             </div>
           ) : null}
@@ -354,24 +359,28 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
   }
 
   return (
-    <div className="space-y-4 rounded-xl border p-4">
-      <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <div className="text-sm font-medium">生成有声书</div>
-          <div className="mt-1 text-xs leading-5 text-muted-foreground">
-            多角色 TTS（CPA → MiMo）。请先为角色卡配置预置音色，并设置旁白默认音色。
+    <section className="space-y-4 border-t border-border/60 pt-4">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0 space-y-1">
+          <div className="text-sm font-semibold text-foreground">生成有声书</div>
+          <div className="text-sm leading-6 text-muted-foreground">
+            多角色 TTS（CPA → MiMo）。请先在「角色准备」配置预置音色，并设置旁白默认音色。
           </div>
         </div>
-        <Badge variant={missingVoiceCharacters.length > 0 ? "destructive" : "outline"}>
+        <Badge
+          className="shrink-0"
+          variant={missingVoiceCharacters.length > 0 ? "destructive" : "outline"}
+        >
           {missingVoiceCharacters.length > 0
             ? `${missingVoiceCharacters.length} 个角色缺音色`
             : "角色音色齐全"}
         </Badge>
       </div>
 
-      <div className="grid gap-3 lg:grid-cols-2">
-        <div className="space-y-2">
-          <div className="text-xs text-muted-foreground">小说默认旁白音色</div>
+      <div className="grid gap-4 lg:grid-cols-2">
+        <div className="space-y-2 rounded-xl border border-border/70 bg-muted/20 p-4">
+          <div className="text-sm font-medium text-foreground">小说默认旁白</div>
+          <div className="text-xs leading-5 text-muted-foreground">保存后供后续任务默认继承。</div>
           <SelectControl
             className="w-full rounded-md border bg-background p-2 text-sm"
             value={narratorVoice?.trim() || DEFAULT_AUDIOBOOK_NARRATOR_VOICE}
@@ -384,7 +393,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
             ))}
           </SelectControl>
           <textarea
-            className="min-h-[72px] w-full rounded-md border bg-background p-2 text-sm"
+            className="min-h-[72px] w-full rounded-md border bg-background p-2 text-sm leading-6"
             value={narratorStyle ?? DEFAULT_AUDIOBOOK_NARRATOR_STYLE}
             onChange={(event) => onNarratorChange?.({ audiobookNarratorStyle: event.target.value })}
             placeholder="旁白 style（user 消息）"
@@ -396,8 +405,9 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
           ) : null}
         </div>
 
-        <div className="space-y-2">
-          <div className="text-xs text-muted-foreground">任务范围</div>
+        <div className="space-y-2 rounded-xl border border-border/70 bg-muted/20 p-4">
+          <div className="text-sm font-medium text-foreground">任务范围</div>
+          <div className="text-xs leading-5 text-muted-foreground">选择单章、章节范围或全书后预检并创建任务。</div>
           <SelectControl
             className="w-full rounded-md border bg-background p-2 text-sm"
             value={scopeMode}
@@ -438,7 +448,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
               />
             </div>
           ) : null}
-          <div className="text-xs text-muted-foreground">本次任务旁白覆盖（可选）</div>
+          <div className="text-xs leading-5 text-muted-foreground">本次任务旁白覆盖（可选）</div>
           <SelectControl
             className="w-full rounded-md border bg-background p-2 text-sm"
             value={overrideVoice}
@@ -455,7 +465,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
       </div>
 
       {missingVoiceCharacters.length > 0 ? (
-        <div className="rounded-md border border-amber-200 bg-amber-50 p-2 text-xs leading-5 text-amber-900">
+        <div className="rounded-xl border border-amber-200/80 bg-amber-50/70 p-3 text-sm leading-6 text-amber-900">
           请先到「角色准备」为以下角色选择 MiMo 预置音色：
           {" "}
           {missingVoiceCharacters.map((character) => character.name).join("、")}
@@ -485,21 +495,26 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
       </div>
 
       {message ? (
-        <div className="rounded-md border bg-muted/30 p-2 text-xs leading-5 text-muted-foreground">
+        <div className="rounded-xl border border-border/70 bg-muted/20 px-4 py-3 text-sm leading-6 text-muted-foreground">
           {message}
         </div>
       ) : null}
 
-      <div className="space-y-2">
-        <div className="text-xs font-medium text-muted-foreground">最近任务</div>
+      <div className="space-y-3">
+        <div className="text-sm font-medium text-foreground">最近任务</div>
         {(tasksQuery.data ?? []).length === 0 ? (
-          <div className="text-xs text-muted-foreground">暂无有声书任务。</div>
+          <div className="rounded-xl border border-dashed border-border/70 bg-background p-4 text-sm leading-6 text-muted-foreground">
+            暂无有声书任务。完成音色配置后，可先预检再生成。
+          </div>
         ) : (
-          <div className="space-y-2">
+          <div className="space-y-3">
             {(tasksQuery.data ?? []).slice(0, 8).map((task) => (
-              <div key={task.id} className="rounded-lg border p-3">
+              <div
+                key={task.id}
+                className="rounded-xl border border-border/70 bg-background p-4"
+              >
                 <div className="flex flex-wrap items-center gap-2">
-                  <div className="text-sm font-medium">{task.title}</div>
+                  <div className="text-sm font-medium text-foreground">{task.title}</div>
                   <Badge variant={statusVariant(task.status)}>{statusLabel(task.status)}</Badge>
                   <span className="text-xs text-muted-foreground">
                     {task.progress}%
@@ -507,14 +522,14 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
                   </span>
                 </div>
                 {task.lastError ? (
-                  <div className="mt-1 text-xs text-destructive">{task.lastError}</div>
+                  <div className="mt-2 text-sm text-destructive">{task.lastError}</div>
                 ) : null}
                 {task.status === "succeeded" && task.currentItemLabel?.includes("旁白回退") ? (
-                  <div className="mt-1 text-xs text-amber-700">
+                  <div className="mt-2 text-xs leading-5 text-amber-800">
                     {task.currentItemLabel}
                   </div>
                 ) : null}
-                <div className="mt-2 flex flex-wrap gap-2">
+                <div className="mt-3 flex flex-wrap gap-2">
                   {(task.status === "queued" || task.status === "running") ? (
                     <Button
                       size="sm"
@@ -540,6 +555,6 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
           </div>
         )}
       </div>
-    </div>
+    </section>
   );
 }
