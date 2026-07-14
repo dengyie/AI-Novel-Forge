@@ -18,6 +18,7 @@ import { NovelWorkflowTaskAdapter } from "./adapters/NovelWorkflowTaskAdapter";
 import { PipelineTaskAdapter } from "./adapters/PipelineTaskAdapter";
 import { StyleExtractionTaskAdapter } from "./adapters/StyleExtractionTaskAdapter";
 import { AudiobookTaskAdapter } from "./adapters/AudiobookTaskAdapter";
+import { isMissingAudiobookTaskTableError } from "../audiobook/audiobookErrors";
 import { collectWorkflowLinkedPipelineIds } from "./taskCenterVisibility";
 import {
   compareTaskSummary,
@@ -29,6 +30,40 @@ import {
   type ListTasksFilters,
 } from "./taskCenter.shared";
 import { getArchivedTaskIdsByKind } from "./taskArchive";
+
+async function safeAudiobookOverviewGroupBy(archivedAudiobookIds: string[]) {
+  try {
+    return await prisma.audiobookTask.groupBy({
+      by: ["status"],
+      where: {
+        ...(archivedAudiobookIds.length ? { id: { notIn: archivedAudiobookIds } } : {}),
+      },
+      _count: { _all: true },
+    });
+  } catch (error) {
+    if (isMissingAudiobookTaskTableError(error)) {
+      return [] as Array<{ status: string; _count: { _all: number } }>;
+    }
+    throw error;
+  }
+}
+
+async function safeAudiobookRecoveryCount(archivedAudiobookIds: string[]): Promise<number> {
+  try {
+    return await prisma.audiobookTask.count({
+      where: {
+        status: { in: ["queued", "running"] },
+        pendingManualRecovery: true,
+        ...(archivedAudiobookIds.length ? { id: { notIn: archivedAudiobookIds } } : {}),
+      },
+    });
+  } catch (error) {
+    if (isMissingAudiobookTaskTableError(error)) {
+      return 0;
+    }
+    throw error;
+  }
+}
 
 const overviewTaskKinds: TaskKind[] = [
   "book_analysis",
@@ -139,13 +174,7 @@ export class TaskCenterService {
         },
         _count: { _all: true },
       }),
-      prisma.audiobookTask.groupBy({
-        by: ["status"],
-        where: {
-          ...(archivedAudiobookIds.length ? { id: { notIn: archivedAudiobookIds } } : {}),
-        },
-        _count: { _all: true },
-      }),
+      safeAudiobookOverviewGroupBy(archivedAudiobookIds),
       prisma.bookAnalysis.count({
         where: {
           status: { in: ["queued", "running"] },
@@ -182,13 +211,7 @@ export class TaskCenterService {
           ...(archivedStyleExtractionIds.length ? { id: { notIn: archivedStyleExtractionIds } } : {}),
         },
       }),
-      prisma.audiobookTask.count({
-        where: {
-          status: { in: ["queued", "running"] },
-          pendingManualRecovery: true,
-          ...(archivedAudiobookIds.length ? { id: { notIn: archivedAudiobookIds } } : {}),
-        },
-      }),
+      safeAudiobookRecoveryCount(archivedAudiobookIds),
     ]);
 
     const overview: TaskOverviewSummary = {

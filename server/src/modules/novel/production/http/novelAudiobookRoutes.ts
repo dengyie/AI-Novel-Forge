@@ -80,10 +80,15 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
           ...body,
         };
         const data = await audiobookTaskService.precheck(payload);
+        const message = data.ok
+          ? "有声书预检通过。"
+          : data.missingVoices.length > 0
+            ? "有声书预检未通过，请补齐角色音色。"
+            : "有声书预检未通过，请使用 MiMo 预置音色。";
         res.status(200).json({
           success: true,
           data,
-          message: data.ok ? "有声书预检通过。" : "有声书预检未通过，请补齐角色音色。",
+          message,
         } satisfies ApiResponse<typeof data>);
       } catch (error) {
         next(error);

@@ -13,6 +13,7 @@ import { getSharedNovelServices } from "../novel/application/sharedNovelServices
 import { DirectorCommandService } from "../novel/director/commands/DirectorCommandService";
 import { NovelWorkflowRuntimeService } from "../novel/workflow/NovelWorkflowRuntimeService";
 import { styleExtractionTaskService } from "../styleEngine/StyleExtractionTaskService";
+import { isMissingAudiobookTaskTableError } from "../audiobook/audiobookErrors";
 import { audiobookTaskService } from "../audiobook/AudiobookTaskService";
 
 interface RecoveryInitializationDeps {
@@ -209,24 +210,33 @@ export class RecoveryTaskService {
         },
         orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
       }),
-      prisma.audiobookTask.findMany({
-        where: {
-          status: { in: ["queued", "running"] },
-          pendingManualRecovery: true,
-        },
-        select: {
-          id: true,
-          novelId: true,
-          title: true,
-          status: true,
-          currentStage: true,
-          currentItemLabel: true,
-          error: true,
-          updatedAt: true,
-          novel: { select: { title: true } },
-        },
-        orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
-      }),
+      (async () => {
+        try {
+          return await prisma.audiobookTask.findMany({
+            where: {
+              status: { in: ["queued", "running"] },
+              pendingManualRecovery: true,
+            },
+            select: {
+              id: true,
+              novelId: true,
+              title: true,
+              status: true,
+              currentStage: true,
+              currentItemLabel: true,
+              error: true,
+              updatedAt: true,
+              novel: { select: { title: true } },
+            },
+            orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+          });
+        } catch (error) {
+          if (isMissingAudiobookTaskTableError(error)) {
+            return [];
+          }
+          throw error;
+        }
+      })(),
     ]);
 
     const rawItems: Array<RecoverableTaskSummary & { updatedAt: Date }> = [

@@ -98,6 +98,8 @@ export interface AudiobookPrecheckResult {
   narrator: AudiobookNarratorConfig;
   characterVoices: AudiobookCharacterVoiceConfig[];
   missingVoices: AudiobookPrecheckMissingVoice[];
+  /** 非预置音色等硬失败原因（与 missingVoices 一并决定 ok） */
+  blockingErrors: string[];
   warnings: string[];
 }
 

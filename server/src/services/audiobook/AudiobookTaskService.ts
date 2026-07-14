@@ -1,4 +1,3 @@
-import { Prisma } from "@prisma/client";
 import type {
   AudiobookTaskDetail,
   AudiobookTaskSummary,
@@ -7,6 +6,7 @@ import type {
 import { prisma } from "../../db/prisma";
 import { AppError } from "../../middleware/errorHandler";
 import { toTaskTokenUsageSummary } from "../task/taskTokenUsageSummary";
+import { isMissingAudiobookTaskTableError } from "./audiobookErrors";
 import { audiobookPrecheckService } from "./AudiobookPrecheckService";
 import { ensureAudiobookTaskDir } from "./audiobookPaths";
 
@@ -15,9 +15,7 @@ const AUDIOBOOK_HEARTBEAT_INTERVAL_MS = Math.max(
   Number(process.env.AUDIOBOOK_TASK_HEARTBEAT_INTERVAL_MS ?? 10_000) || 10_000,
 );
 
-function isMissingAudiobookTaskTableError(error: unknown): boolean {
-  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2021";
-}
+const DEFAULT_MAX_RETRIES = 1;
 
 function parseChapterIds(json: string | null | undefined): string[] {
   if (!json?.trim()) {
@@ -41,6 +39,18 @@ function buildTaskTitle(novelTitle: string, scopeMode: string, chapterCount: num
       ? `范围 ${chapterCount} 章`
       : "单章";
   return `有声书：${novelTitle}（${scopeLabel}）`;
+}
+
+function buildPrecheckRejectMessage(precheck: Awaited<ReturnType<typeof audiobookPrecheckService.precheck>>): string {
+  const parts: string[] = [];
+  if (precheck.missingVoices.length > 0) {
+    const names = precheck.missingVoices.map((item) => item.characterName).join("、");
+    parts.push(`以下角色未配置 ttsVoice：${names}`);
+  }
+  if (precheck.blockingErrors.length > 0) {
+    parts.push(...precheck.blockingErrors);
+  }
+  return `有声书启动被拒绝：${parts.join("；") || "预检未通过"}。请绑定 MiMo 预置音色后重试。`;
 }
 
 type AudiobookTaskRow = {
@@ -164,11 +174,7 @@ export class AudiobookTaskService {
   async createTask(input: CreateAudiobookTaskInput) {
     const precheck = await audiobookPrecheckService.precheck(input);
     if (!precheck.ok) {
-      const names = precheck.missingVoices.map((item) => item.characterName).join("、");
-      throw new AppError(
-        `有声书启动被拒绝：以下角色未配置 ttsVoice：${names || "（未知）"}。请先在角色卡绑定 MiMo 预置音色。`,
-        400,
-      );
+      throw new AppError(buildPrecheckRejectMessage(precheck), 400);
     }
 
     const novel = await prisma.novel.findUnique({
@@ -197,7 +203,7 @@ export class AudiobookTaskService {
         progress: 0,
         currentStage: "queued",
         currentItemLabel: "排队中",
-        maxRetries: 1,
+        maxRetries: DEFAULT_MAX_RETRIES,
       },
       include: {
         novel: { select: { id: true, title: true } },
@@ -258,17 +264,20 @@ export class AudiobookTaskService {
       throw new AppError("仅排队中或运行中的有声书任务可取消。", 400);
     }
 
+    // 无论 queued/running：先从内存队列剔除，并写 cancelRequestedAt + abort
+    this.removeFromQueue(taskId);
+    await prisma.audiobookTask.update({
+      where: { id: taskId },
+      data: {
+        cancelRequestedAt: new Date(),
+        heartbeatAt: new Date(),
+      },
+    });
+    this.activeControllers.get(taskId)?.abort();
+
     if (task.status === "queued") {
-      await this.markCancelled(task.id, task.progress);
-    } else {
-      await prisma.audiobookTask.update({
-        where: { id: taskId },
-        data: {
-          cancelRequestedAt: new Date(),
-          heartbeatAt: new Date(),
-        },
-      });
-      this.activeControllers.get(taskId)?.abort();
+      // CAS：仅当仍为 queued 时终态 cancelled，避免与已进入 execute 的 running 打架
+      await this.markCancelledIfActive(taskId, task.progress, ["queued"]);
     }
 
     const detail = await this.getTask(taskId);
@@ -285,6 +294,12 @@ export class AudiobookTaskService {
     }
     if (task.status !== "failed" && task.status !== "cancelled") {
       throw new AppError("仅失败或已取消的有声书任务可重试。", 400);
+    }
+    if (task.retryCount >= task.maxRetries) {
+      throw new AppError(
+        `有声书任务已达最大重试次数（${task.maxRetries}）。请新建任务或提高 maxRetries。`,
+        400,
+      );
     }
 
     await prisma.audiobookTask.update({
@@ -312,6 +327,10 @@ export class AudiobookTaskService {
     return detail;
   }
 
+  /**
+   * 运维/测试用：将 in-flight 任务标为 pendingManualRecovery。
+   * 生产启动路径走 resumePendingTasks（自动重入队），不调用本方法。
+   */
   async markPendingTasksForManualRecovery(): Promise<void> {
     try {
       const rows = await prisma.audiobookTask.findMany({
@@ -428,6 +447,17 @@ export class AudiobookTaskService {
     return detail;
   }
 
+  private removeFromQueue(taskId: string): void {
+    if (!this.queueSet.has(taskId)) {
+      return;
+    }
+    this.queueSet.delete(taskId);
+    const index = this.queue.indexOf(taskId);
+    if (index >= 0) {
+      this.queue.splice(index, 1);
+    }
+  }
+
   private enqueueTask(taskId: string): void {
     if (this.queueSet.has(taskId)) {
       return;
@@ -453,11 +483,15 @@ export class AudiobookTaskService {
       }
     } finally {
       this.processing = false;
+      // 执行期间若有新入队，继续消费
+      if (this.queue.length > 0) {
+        void this.processQueue();
+      }
     }
   }
 
   /**
-   * 骨架执行：仅推进到 precheck_done / ready_for_pipeline。
+   * 骨架执行：仅推进到 skeleton_ready。
    * 完整标注与合成在后续 milestone 实现；此处保证任务可创建、可取消、可恢复。
    */
   private async executeTaskSkeleton(taskId: string): Promise<void> {
@@ -469,7 +503,7 @@ export class AudiobookTaskService {
       return;
     }
     if (task.cancelRequestedAt) {
-      await this.markCancelled(task.id, task.progress);
+      await this.markCancelledIfActive(task.id, task.progress, ["queued", "running"]);
       return;
     }
 
@@ -478,8 +512,14 @@ export class AudiobookTaskService {
     const stopHeartbeat = this.startTaskHeartbeat(taskId);
 
     try {
-      await prisma.audiobookTask.update({
-        where: { id: taskId },
+      // CAS：仅 queued 可进入 running，避免覆盖 cancelled
+      const claimed = await prisma.audiobookTask.updateMany({
+        where: {
+          id: taskId,
+          status: "queued",
+          cancelRequestedAt: null,
+          pendingManualRecovery: false,
+        },
         data: {
           status: "running",
           startedAt: task.startedAt ?? new Date(),
@@ -490,26 +530,34 @@ export class AudiobookTaskService {
           error: null,
         },
       });
+      if (claimed.count === 0) {
+        if (await this.isCancelRequested(taskId)) {
+          await this.markCancelledIfActive(taskId, task.progress, ["queued", "running"]);
+        }
+        return;
+      }
 
       if (controller.signal.aborted || (await this.isCancelRequested(taskId))) {
-        await this.markCancelled(taskId, 5);
+        await this.markCancelledIfActive(taskId, 5, ["running"]);
         return;
       }
 
       const chapterIds = parseChapterIds(task.chapterIdsJson);
       if (chapterIds.length === 0) {
-        await this.markFailed(taskId, "任务缺少章节列表，无法继续。");
+        await this.markFailedIfRunning(taskId, "任务缺少章节列表，无法继续。");
         return;
       }
 
-      // 骨架：不调用 LLM/TTS，标记为需要完整流水线（后续里程碑）。
-      // 为让 TaskCenter 与 HTTP 契约可验收，骨架完成后置 failed 并写明原因，避免假成功。
-      // 若设置 AUDIOBOOK_SKELETON_MARK_SUCCEEDED=1 则标记 succeeded（仅本地联调）。
+      // 骨架：不调用 LLM/TTS。默认 failed 明确未接通流水线；本地可 MARK_SUCCEEDED。
       const markSucceeded = process.env.AUDIOBOOK_SKELETON_MARK_SUCCEEDED === "1"
         || process.env.AUDIOBOOK_SKELETON_MARK_SUCCEEDED === "true";
 
-      await prisma.audiobookTask.update({
-        where: { id: taskId },
+      const progressUpdated = await prisma.audiobookTask.updateMany({
+        where: {
+          id: taskId,
+          status: "running",
+          cancelRequestedAt: null,
+        },
         data: {
           currentStage: "skeleton_ready",
           currentItemLabel: "任务底座已就绪（标注/合成待下一阶段）",
@@ -525,15 +573,25 @@ export class AudiobookTaskService {
           }),
         },
       });
+      if (progressUpdated.count === 0) {
+        if (await this.isCancelRequested(taskId)) {
+          await this.markCancelledIfActive(taskId, 20, ["running", "queued"]);
+        }
+        return;
+      }
 
       if (controller.signal.aborted || (await this.isCancelRequested(taskId))) {
-        await this.markCancelled(taskId, 20);
+        await this.markCancelledIfActive(taskId, 20, ["running"]);
         return;
       }
 
       if (markSucceeded) {
-        await prisma.audiobookTask.update({
-          where: { id: taskId },
+        await prisma.audiobookTask.updateMany({
+          where: {
+            id: taskId,
+            status: "running",
+            cancelRequestedAt: null,
+          },
           data: {
             status: "succeeded",
             progress: 100,
@@ -544,18 +602,17 @@ export class AudiobookTaskService {
           },
         });
       } else {
-        // 保持 running→failed 明确告知尚未接通流水线，避免用户以为已生成音频。
-        await this.markFailed(
+        await this.markFailedIfRunning(
           taskId,
           "有声书骨架已就位，但标注/合成流水线尚未实现。可在后续 milestone 重试完整生成。",
         );
       }
     } catch (error) {
       if (controller.signal.aborted || (await this.isCancelRequested(taskId))) {
-        await this.markCancelled(taskId, task.progress);
+        await this.markCancelledIfActive(taskId, task.progress, ["running", "queued"]);
         return;
       }
-      await this.markFailed(
+      await this.markFailedIfRunning(
         taskId,
         error instanceof Error ? error.message : "有声书任务执行失败。",
       );
@@ -578,14 +635,28 @@ export class AudiobookTaskService {
   private async isCancelRequested(taskId: string): Promise<boolean> {
     const row = await prisma.audiobookTask.findUnique({
       where: { id: taskId },
-      select: { cancelRequestedAt: true },
+      select: { cancelRequestedAt: true, status: true },
     });
-    return Boolean(row?.cancelRequestedAt);
+    if (!row) {
+      return true;
+    }
+    if (row.status === "cancelled") {
+      return true;
+    }
+    return Boolean(row.cancelRequestedAt);
   }
 
-  private async markCancelled(taskId: string, progress: number): Promise<void> {
-    await prisma.audiobookTask.update({
-      where: { id: taskId },
+  /** CAS 终态 cancelled：仅当 status 仍在允许集合内 */
+  private async markCancelledIfActive(
+    taskId: string,
+    progress: number,
+    allowedStatuses: Array<"queued" | "running">,
+  ): Promise<void> {
+    await prisma.audiobookTask.updateMany({
+      where: {
+        id: taskId,
+        status: { in: allowedStatuses },
+      },
       data: {
         status: "cancelled",
         progress,
@@ -599,9 +670,13 @@ export class AudiobookTaskService {
     });
   }
 
-  private async markFailed(taskId: string, message: string): Promise<void> {
-    await prisma.audiobookTask.update({
-      where: { id: taskId },
+  private async markFailedIfRunning(taskId: string, message: string): Promise<void> {
+    await prisma.audiobookTask.updateMany({
+      where: {
+        id: taskId,
+        status: "running",
+        cancelRequestedAt: null,
+      },
       data: {
         status: "failed",
         finishedAt: new Date(),
