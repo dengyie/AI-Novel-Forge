@@ -105,7 +105,7 @@ test("function acceptance keywords hit pass under enforce", () => {
   assert.equal(assessment.recommendedAction, "continue");
 });
 
-test("function missing keywords hard-fail under enforce", () => {
+test("function missing keywords is soft repairable under enforce (not hard-block)", () => {
   const assessment = evaluateSettingAlignmentRules({
     chapterId: "c1",
     content: "今天天气不错，什么也没发生。",
@@ -113,8 +113,103 @@ test("function missing keywords hard-fail under enforce", () => {
     functionIds: ["fn-trust"],
     functionItems: [functionItem()],
   });
-  assert.equal(assessment.status, "blocking");
+  // 功能线索未命中：soft → repairable / patch_repair，避免转述误杀；
+  // 仍进 qualityLoop risk，enforce 下不可 defer 放行。
+  assert.equal(assessment.status, "repairable");
+  assert.equal(assessment.recommendedAction, "patch_repair");
+  const fnCheck = assessment.checks.find((c) => c.id === "function:fn-trust");
+  assert.ok(fnCheck && !fnCheck.passed && fnCheck.hard === false);
+  const signal = settingAlignmentToQualityLoopSignal(assessment);
+  assert.equal(signal.status, "risk");
+  assert.equal(signal.blockingForQualityLoop, true);
+});
+
+test("function keyword negation window does not false-pass", () => {
+  const assessment = evaluateSettingAlignmentRules({
+    chapterId: "c1",
+    content: "陆深当面托付关键事务的说法不成立，托付对话落地并未发生，承接人在场也谈不上。",
+    mode: "enforce",
+    functionIds: ["fn-trust"],
+    functionItems: [functionItem()],
+  });
+  // 正文出现锚点但被否定窗包裹 → 不得 pass
+  assert.notEqual(assessment.status, "pass");
   assert.ok(assessment.checks.some((c) => c.id === "function:fn-trust" && !c.passed));
+});
+
+test("function paraphrase without exact keyword is soft miss not hard-block", () => {
+  const assessment = evaluateSettingAlignmentRules({
+    chapterId: "c1",
+    content: "陆深把关键事务当面交给了承接人，两人确认了后续安排，现场没有外挂。",
+    mode: "enforce",
+    functionIds: ["fn-trust"],
+    functionItems: [functionItem()],
+  });
+  // 转述未命中字面关键词 → soft miss，禁止 hard-block 误杀
+  assert.notEqual(assessment.status, "blocking");
+  const fnCheck = assessment.checks.find((c) => c.id === "function:fn-trust");
+  if (fnCheck && !fnCheck.passed) {
+    assert.equal(fnCheck.hard, false);
+    assert.equal(assessment.status, "repairable");
+  }
+});
+
+test("defer_and_continue cannot mask setting invalid / enforce risk", () => {
+  const hardSetting = evaluateSettingAlignmentRules({
+    chapterId: "chapter-defer-hard",
+    content: "脱序者出现",
+    mode: "enforce",
+    hardForbiddenTerms: ["脱序者"],
+  });
+  const hardAssessment = buildChapterQualityLoopAssessment({
+    chapterId: "chapter-defer-hard",
+    chapterOrder: 1,
+    score: score({ overall: 60 }),
+    issues: [],
+    settingAlignment: hardSetting,
+  });
+  // 模拟 pipeline 误写 defer：分类器仍须 blocking
+  const hardWithDefer = {
+    ...hardAssessment,
+    terminalAction: "defer_and_continue",
+  };
+  assert.equal(classifyChapterQualityLoopRisk(hardWithDefer), "blocking");
+  assert.equal(hasBlockingQualityLoopDebtForAutoExecution({
+    riskFlags: JSON.stringify({ qualityLoop: hardWithDefer, settingAlignment: hardSetting }),
+  }), true);
+  assert.equal(isDirectorAutoExecutionChapterProcessed({
+    id: "chapter-defer-hard",
+    order: 1,
+    content: "脱序者出现",
+    generationState: "reviewed",
+    chapterStatus: "pending_review",
+    riskFlags: JSON.stringify({ qualityLoop: hardWithDefer, settingAlignment: hardSetting }),
+  }), false);
+
+  // enforce function soft miss → risk，同样不可 defer 放行
+  const softSetting = evaluateSettingAlignmentRules({
+    chapterId: "chapter-defer-soft",
+    content: "今天天气不错。",
+    mode: "enforce",
+    functionIds: ["fn-trust"],
+    functionItems: [functionItem()],
+  });
+  const softAssessment = buildChapterQualityLoopAssessment({
+    chapterId: "chapter-defer-soft",
+    chapterOrder: 2,
+    score: score({ overall: 60 }),
+    issues: [],
+    settingAlignment: softSetting,
+  });
+  const softWithDefer = {
+    ...softAssessment,
+    terminalAction: "defer_and_continue",
+  };
+  assert.equal(classifyChapterQualityLoopRisk(softWithDefer), "blocking");
+  assert.equal(hasBlockingSettingAlignmentDebt(JSON.stringify({
+    qualityLoop: softWithDefer,
+    settingAlignment: softSetting,
+  })), true);
 });
 
 test("mustNotHappen ban in content hard-fails", () => {
@@ -288,11 +383,23 @@ test("prose high score does not force setting pass under enforce", () => {
   assert.equal(classifyChapterQualityLoopRisk(assessment), "blocking");
 });
 
-test("ChapterSettingAlignmentService injects HIGH_CONFIDENCE terms", () => {
+test("ChapterSettingAlignmentService does not inject HIGH_CONFIDENCE terms by default", () => {
   const assessment = chapterSettingAlignmentService.assess({
     chapterId: "c1",
     content: "名噬回声在耳边响起。",
     mode: "enforce",
+  });
+  // 跨书默认不 hardban 源世界发明词，避免误杀
+  assert.notEqual(assessment.status, "blocking");
+  assert.ok(!assessment.checks.some((c) => c.evidence === "名噬回声"));
+});
+
+test("ChapterSettingAlignmentService injects HIGH_CONFIDENCE terms when opt-in", () => {
+  const assessment = chapterSettingAlignmentService.assess({
+    chapterId: "c1",
+    content: "名噬回声在耳边响起。",
+    mode: "enforce",
+    includeHighConfidenceInventedTerms: true,
   });
   assert.equal(assessment.status, "blocking");
   assert.ok(assessment.checks.some((c) => !c.passed && (c.evidence === "名噬回声" || c.summary.includes("名噬回声"))));
@@ -316,9 +423,45 @@ test("assessSettingAlignmentForQualityLoop returns assessment when enforce", () 
     chapterOrder: 1,
     content: "脱序者",
     mode: "enforce",
+    hardForbiddenTerms: ["脱序者"],
   });
   assert.ok(result);
   assert.equal(result.status, "blocking");
+});
+
+test("assessSettingAlignmentForQualityLoop injects functionIds from volumeDocument", () => {
+  const volumeDocument = {
+    novelId: "n1",
+    volumes: [{
+      id: "vol-1",
+      order: 1,
+      title: "卷一",
+      chapters: [{
+        id: "ch-1",
+        chapterId: "c1",
+        chapterOrder: 1,
+        title: "托付",
+        functionIds: ["fn-trust"],
+        exclusiveEvent: null,
+        mustAvoid: null,
+      }],
+    }],
+    functionAcceptanceTables: [{
+      volumeId: "vol-1",
+      items: [functionItem()],
+    }],
+  };
+  const result = assessSettingAlignmentForQualityLoop({
+    novelId: "n1",
+    chapterId: "c1",
+    chapterOrder: 1,
+    content: "今天天气不错，什么也没发生。",
+    mode: "enforce",
+    volumeDocument,
+  });
+  assert.ok(result);
+  assert.ok(result.checks.some((c) => c.id === "function:fn-trust" && !c.passed && c.hard === false));
+  assert.equal(result.status, "repairable");
 });
 
 test("required character appearance missing hard-fails enforce", () => {

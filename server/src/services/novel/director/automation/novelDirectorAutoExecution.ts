@@ -522,6 +522,7 @@ export function buildDirectorAutoExecutionPipelineOptions(input: {
   autoRepair?: boolean;
   artifactSyncMode?: ArtifactSyncMode;
   repairMode?: DirectorAutoExecutionRepairMode;
+  settingQualityMode?: import("@ai-novel/shared/types/settingQualityPolicy").SettingQualityMode;
 }) {
   const autoReview = input.autoReview ?? true;
   return {
@@ -541,6 +542,11 @@ export function buildDirectorAutoExecutionPipelineOptions(input: {
     workflowTaskId: input.workflowTaskId,
     taskStyleProfileId: input.taskStyleProfileId,
     artifactSyncMode: input.artifactSyncMode ?? "adaptive",
+    ...(input.settingQualityMode === "off"
+      || input.settingQualityMode === "advisory"
+      || input.settingQualityMode === "enforce"
+      ? { settingQualityMode: input.settingQualityMode }
+      : {}),
   };
 }
 

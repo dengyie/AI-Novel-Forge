@@ -143,6 +143,10 @@ export function buildBatchRollReadinessFromChapters(
     endingState?: string | null;
     nextChapterEntryState?: string | null;
   }>,
+  options?: {
+    settingQualityMode?: "off" | "advisory" | "enforce" | null;
+    qualityMode?: "full_book_autopilot" | "ai_copilot" | "manual" | null;
+  },
 ): BatchRollChapterReadiness[] {
   return chapters.map((chapter) => {
     const canEnterExecution = assessChapterExecutionContractShape({
@@ -160,6 +164,9 @@ export function buildBatchRollReadinessFromChapters(
       taskSheet: chapter.taskSheet ?? null,
       sceneCards: chapter.sceneCards ?? null,
       title: chapter.title ?? "",
+    }, {
+      settingQualityMode: options?.settingQualityMode ?? undefined,
+      qualityMode: options?.qualityMode ?? undefined,
     }).canEnterExecution;
     return {
       order: chapter.order,

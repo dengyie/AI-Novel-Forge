@@ -40,6 +40,11 @@ export type ChapterSettingAlignmentAssessInput = {
   llmTimedOut?: boolean;
   llmError?: string | null;
   evaluatedAt?: string | Date;
+  /**
+   * 是否注入源世界高置信发明词 hard 禁表。
+   * 默认 false：避免跨书误杀；源世界 / 显式 enforce 词表由调用方打开。
+   */
+  includeHighConfidenceInventedTerms?: boolean;
 };
 
 /**
@@ -73,9 +78,13 @@ export class ChapterSettingAlignmentService {
       forbiddenCrossings:
         input.forbiddenCrossings
         ?? fromContext.forbiddenCrossings,
+      // 全局发明词表仅在调用方显式传入 hardForbiddenTerms 或
+      // includeHighConfidenceInventedTerms=true 时启用，避免跨书误杀。
       hardForbiddenTerms: uniqueTerms([
         ...(input.hardForbiddenTerms ?? []),
-        ...HIGH_CONFIDENCE_INVENTED_TERMS,
+        ...(input.includeHighConfidenceInventedTerms === true
+          ? [...HIGH_CONFIDENCE_INVENTED_TERMS]
+          : []),
       ]),
       llmChecks: input.llmChecks,
       llmUsed: input.llmUsed,

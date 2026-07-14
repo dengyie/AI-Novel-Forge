@@ -4,7 +4,7 @@ import type {
   DirectorQualityRepairRisk,
 } from "@ai-novel/shared/types/novelDirector";
 import { isDirectorAutoExecutionRunMode, isFullBookAutopilotRunMode } from "@ai-novel/shared/types/novelDirector";
-import type { PipelineJobStatus } from "@ai-novel/shared/types/novel";
+import type { PipelineJobStatus, VolumePlanDocument } from "@ai-novel/shared/types/novel";
 import type { NovelWorkflowCheckpoint } from "@ai-novel/shared/types/novelWorkflow";
 import { buildNovelEditResumeTarget } from "../../workflow/novelWorkflow.shared";
 import {
@@ -24,6 +24,10 @@ import {
   parsePipelinePayload,
 } from "../../pipelineJobState";
 import { buildDirectorQualityRepairRisk } from "../phases/novelDirectorQualityRepairRisk";
+import {
+  projectVolumeSettingCompletion,
+  toVolumeCompletionCheckpointPayload,
+} from "../../volume/volumeSettingCompletionService";
 
 export type AutoExecutionResumeStage = "chapter" | "pipeline";
 
@@ -64,6 +68,10 @@ export interface AutoExecutionCheckpointRuntimeDeps {
     qualityRepairRisk: DirectorQualityRepairRisk;
     checkpointSummary?: string | null;
   }) => Promise<unknown>;
+  /** C3：completed_scope 时投影 volumeCompletion；缺省则跳过 */
+  volumeWorkspaceService?: {
+    getVolumes(novelId: string): Promise<VolumePlanDocument>;
+  };
 }
 
 export interface AutoExecutionCheckpointBaseInput {
@@ -118,15 +126,42 @@ export async function recordCompletedCheckpoint(
     pipelineStatus: input.pipelineStatus ?? input.autoExecution.pipelineStatus ?? null,
   };
   const scopeLabel = buildDirectorAutoExecutionScopeLabelFromState(completedState, input.range.totalChapterCount);
+  // C3：completed_scope 挂 volumeCompletion 投影（mode=off → legacy；不挡现网）
+  let volumeCompletionPayload: ReturnType<typeof toVolumeCompletionCheckpointPayload> | null = null;
+  if (deps.volumeWorkspaceService) {
+    try {
+      const workspace = await deps.volumeWorkspaceService.getVolumes(input.novelId);
+      const mode = input.request.settingQualityMode === "advisory"
+        || input.request.settingQualityMode === "enforce"
+        ? input.request.settingQualityMode
+        : "off";
+      const projection = projectVolumeSettingCompletion({
+        document: workspace,
+        volumeId: workspace.volumes[0]?.id ?? null,
+        mode,
+        proseComplete: true,
+      });
+      volumeCompletionPayload = toVolumeCompletionCheckpointPayload(projection);
+    } catch {
+      volumeCompletionPayload = null;
+    }
+  }
+  const baseSummary = buildDirectorAutoExecutionCompletedSummary({
+    title: input.request.candidate.workingTitle.trim() || input.request.title?.trim() || "当前项目",
+    scopeLabel,
+    autoReview: completedState.autoReview,
+    autoRepair: completedState.autoRepair,
+  });
+  const checkpointSummary = volumeCompletionPayload
+    && volumeCompletionPayload.volumeCompletion !== "legacy"
+    ? `${baseSummary}｜设定完成态=${volumeCompletionPayload.volumeCompletion}${
+      volumeCompletionPayload.supervisoryCloseable ? "" : "（监管默认不收工）"
+    }`
+    : baseSummary;
   await deps.workflowService.recordCheckpoint(input.taskId, {
     stage: "quality_repair",
     checkpointType: "workflow_completed",
-    checkpointSummary: buildDirectorAutoExecutionCompletedSummary({
-      title: input.request.candidate.workingTitle.trim() || input.request.title?.trim() || "当前项目",
-      scopeLabel,
-      autoReview: completedState.autoReview,
-      autoRepair: completedState.autoRepair,
-    }),
+    checkpointSummary,
     itemLabel: buildDirectorAutoExecutionCompletedLabel(scopeLabel),
     progress: 1,
     chapterId: completedState.firstChapterId ?? input.range.firstChapterId,
@@ -143,6 +178,7 @@ export async function recordCompletedCheckpoint(
         chapterId: completedState.firstChapterId ?? input.range.firstChapterId,
       }),
       autoExecution: completedState,
+      ...(volumeCompletionPayload ? { volumeCompletion: volumeCompletionPayload } : {}),
     }),
   });
 }

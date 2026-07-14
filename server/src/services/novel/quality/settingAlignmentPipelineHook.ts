@@ -4,7 +4,9 @@ import { isSettingQualityActive, resolveSettingQualityPolicy } from "@ai-novel/s
 import type { SettingAlignmentAssessment } from "@ai-novel/shared/types/settingAlignment";
 import type { FunctionAcceptanceTable } from "@ai-novel/shared/types/functionAcceptance";
 import { getFunctionTableForVolume, normalizeFunctionIds } from "@ai-novel/shared/types/functionAcceptance";
+import type { VolumePlanDocument } from "@ai-novel/shared/types/novel";
 import { chapterSettingAlignmentService } from "./ChapterSettingAlignmentService";
+import { resolveSettingAlignmentFunctionContext } from "./settingAlignmentWorkspaceLookup";
 
 export type SettingAlignmentPipelineContext = {
   novelId: string;
@@ -16,13 +18,17 @@ export type SettingAlignmentPipelineContext = {
   /**
    * 可选：卷工作区已加载的功能表与章 functionIds。
    * 缺省时 hook 内不访问 DB（保持纯/可测）；调用方按需注入。
+   * 也可传 volumeDocument，由 hook 解析 functionIds/table。
    */
   functionIds?: string[] | null;
   functionTable?: FunctionAcceptanceTable | null;
   functionAcceptanceTables?: FunctionAcceptanceTable[] | null;
   volumeId?: string | null;
+  volumeDocument?: VolumePlanDocument | null;
   mustAvoid?: string | null;
   exclusiveEvent?: string | null;
+  hardForbiddenTerms?: string[] | null;
+  includeHighConfidenceInventedTerms?: boolean;
 };
 
 /**
@@ -37,10 +43,23 @@ export function assessSettingAlignmentForQualityLoop(
     return null;
   }
 
+  const fromWorkspace = resolveSettingAlignmentFunctionContext({
+    document: input.volumeDocument,
+    chapterOrder: input.chapterOrder,
+    chapterId: input.chapterId,
+  });
+
+  const functionIds = normalizeFunctionIds(
+    input.functionIds && input.functionIds.length > 0
+      ? input.functionIds
+      : fromWorkspace.functionIds,
+  );
+  const volumeId = input.volumeId ?? fromWorkspace.volumeId;
   const functionTable = input.functionTable
+    ?? fromWorkspace.functionTable
     ?? (
-      input.volumeId
-        ? getFunctionTableForVolume(input.functionAcceptanceTables, input.volumeId)
+      volumeId
+        ? getFunctionTableForVolume(input.functionAcceptanceTables, volumeId)
         : (input.functionAcceptanceTables?.length === 1
           ? input.functionAcceptanceTables[0] ?? null
           : null)
@@ -51,12 +70,16 @@ export function assessSettingAlignmentForQualityLoop(
     chapterOrder: input.chapterOrder,
     content: input.content,
     mode,
-    functionIds: normalizeFunctionIds(input.functionIds),
+    functionIds,
     functionTable,
-    functionAcceptanceTables: input.functionAcceptanceTables,
-    volumeId: input.volumeId,
-    mustAvoid: input.mustAvoid,
-    exclusiveEvent: input.exclusiveEvent,
+    functionAcceptanceTables: input.functionAcceptanceTables
+      ?? input.volumeDocument?.functionAcceptanceTables
+      ?? null,
+    volumeId,
+    mustAvoid: input.mustAvoid ?? fromWorkspace.mustAvoid,
+    exclusiveEvent: input.exclusiveEvent ?? fromWorkspace.exclusiveEvent,
+    hardForbiddenTerms: input.hardForbiddenTerms,
+    includeHighConfidenceInventedTerms: input.includeHighConfidenceInventedTerms === true,
     contextPackage: input.contextPackage,
   });
 }

@@ -108,6 +108,11 @@ function normalizeEvaluatedAt(value: string | Date | undefined): string {
   return value instanceof Date ? value.toISOString() : value;
 }
 
+/**
+ * 验收锚点提取：优先短专名/词，避免把整句 mustHappen 当 hard 子串。
+ * - 空白分词 ≥2 字
+ * - 中文：仅在原文已是短锚（≤8 字）时用全文；长句只取显式 2–4 字片段，不硬切前缀假锚
+ */
 function extractKeywords(text: string, max = 8): string[] {
   const cleaned = text
     .replace(/[「」『』【】\[\]（）()《》<>，。！？、；：,.!?;:\s]+/g, " ")
@@ -118,32 +123,60 @@ function extractKeywords(text: string, max = 8): string[] {
   const parts = cleaned
     .split(/\s+/)
     .map((part) => part.trim())
-    .filter((part) => part.length >= 2);
-  // 中文长句：取 2–6 字滑窗关键片段（简单可测）
-  const cjkChunks: string[] = [];
+    .filter((part) => part.length >= 2 && part.length <= 12);
   const compact = cleaned.replace(/\s+/g, "");
-  if (/[一-鿿]/.test(compact) && compact.length >= 2) {
-    const take = Math.min(compact.length, 24);
-    const slice = compact.slice(0, take);
-    if (slice.length >= 4) {
-      cjkChunks.push(slice.slice(0, 4));
+  const cjkChunks: string[] = [];
+  if (/[一-鿿]/.test(compact)) {
+    // 短验收句（≤8）本身就是锚点；长句不切片前缀（避免「陆深当面托付关键事务」→「陆深当面」假通过）
+    if (compact.length >= 2 && compact.length <= 8) {
+      cjkChunks.push(compact);
     }
-    if (slice.length >= 6) {
-      cjkChunks.push(slice.slice(0, 6));
-    }
-    // 末尾专名倾向
-    if (slice.length >= 3) {
-      cjkChunks.push(slice.slice(-3));
+    // 若含顿号/逗号拆过，parts 已覆盖；否则对中等长度取首尾专名倾向短片
+    if (compact.length > 8 && compact.length <= 16) {
+      cjkChunks.push(compact.slice(0, 4));
+      cjkChunks.push(compact.slice(-4));
     }
   }
   return uniqueStrings([...parts, ...cjkChunks]).slice(0, max);
 }
 
+/**
+ * 否定判定（防「…托付对话落地的说法不成立」假通过）：
+ * - 前缀：紧邻关键词前的 没有/并非/未/并无/绝非/并没有/并未
+ * - 后缀：同句读内短窗含 不成立/谈不上/并未发生 等
+ * 注意：下一分句的「没有外挂」不得否掉上一分句的「承接人在场」。
+ */
+const NEGATION_PREFIX_PATTERN = /(?:并非|并没有|没有|并无|绝非|并未|未)[\s「」『』“”'"]*$/;
+const NEGATION_SUFFIX_PATTERN = /(?:不成立|不存在|谈不上|算不上|并不成立|并不存在|并未发生|绝非|并非)/;
+
+function isNegatedKeywordHit(content: string, idx: number, termLength: number): boolean {
+  const prefix = content.slice(Math.max(0, idx - 6), idx);
+  if (NEGATION_PREFIX_PATTERN.test(prefix)) {
+    return true;
+  }
+  // 后缀窗：到最近句读为止，最多 16 字（允许「的说法不成立」「也谈不上」）
+  const after = content.slice(idx + termLength, idx + termLength + 16);
+  const clauseEnd = after.search(/[，。！？；、,.!?;]/);
+  const suffix = clauseEnd >= 0 ? after.slice(0, clauseEnd) : after;
+  return NEGATION_SUFFIX_PATTERN.test(suffix);
+}
+
 function contentIncludesAny(content: string, needles: string[]): string | null {
   for (const needle of needles) {
     const term = needle.trim();
-    if (term.length >= 2 && content.includes(term)) {
-      return term;
+    if (term.length < 2) {
+      continue;
+    }
+    let from = 0;
+    while (from < content.length) {
+      const idx = content.indexOf(term, from);
+      if (idx < 0) {
+        break;
+      }
+      if (!isNegatedKeywordHit(content, idx, term.length)) {
+        return term;
+      }
+      from = idx + term.length;
     }
   }
   return null;
@@ -238,19 +271,21 @@ function buildFunctionChecks(
       continue;
     }
 
-    // 每个 check 至少命中一组关键词中的一个
+    // 每个 check 至少命中一组关键词中的一个。
+    // 功能线索未命中：默认 soft（repairable），避免转述兑付被 hard-block 误杀；
+    // mustNotHappen / 硬禁词 / 必出角色 仍 hard。
     const coverage = contentIncludesAllGroups(content, usableGroups);
     const passed = coverage.ok;
     checks.push({
       id: `function:${item.id}`,
       kind: "function",
       passed,
-      severity: passed ? "low" : "high",
+      severity: passed ? "low" : "medium",
       summary: passed
         ? `功能「${item.title}」验收线索命中`
         : `功能「${item.title}」验收线索未在正文出现：缺 ${coverage.missing.slice(0, 3).join("、")}`,
       evidence: coverage.hit.slice(0, 4).join("；") || undefined,
-      hard: !passed,
+      hard: false,
     });
 
     for (const ban of item.mustNotHappen ?? []) {
@@ -588,7 +623,7 @@ export function qualityLoopHasSettingBlockingSignal(qualityLoop: unknown): boole
 /**
  * 是否「qualityLoop blocking 且含 setting_alignment signal」。
  * 注意：blocking 真源仍是 qualityLoop；本函数禁止只读 settingAlignment 详情。
- * 分类逻辑内联，避免与 chapterQualityLoop 循环依赖。
+ * 与 chapterQualityLoop.classify 对齐：manual_gate / setting invalid 优先于 defer。
  */
 export function hasBlockingSettingAlignmentDebt(riskFlags: string | null | undefined): boolean {
   if (!riskFlags?.trim()) {
@@ -617,11 +652,46 @@ function classifyQualityLoopBlockingLite(
   if (loop.rootCauseCode === "replan_required" || loop.recommendedAction === "replan") {
     return "blocking";
   }
-  if (loop.terminalAction === "defer_and_continue") {
-    return "non_blocking_quality_debt";
-  }
-  if (loop.recommendedAction === "manual_gate") {
+  const signals = Array.isArray(loop.signals) ? loop.signals : [];
+  const settingSignals = signals.filter((signal) => {
+    return Boolean(
+      signal
+      && typeof signal === "object"
+      && !Array.isArray(signal)
+      && (signal as Record<string, unknown>).artifactType === "setting_alignment",
+    );
+  }) as Array<Record<string, unknown>>;
+  const hasSettingInvalid = settingSignals.some((signal) => signal.status === "invalid");
+  const hasSettingRisk = settingSignals.some((signal) => signal.status === "risk");
+  const settingAdvisoryOnly = hasSettingRisk && settingSignals.every((signal) => {
+    if (signal.status === "valid") {
+      return true;
+    }
+    if (signal.status !== "risk") {
+      return false;
+    }
+    const reason = typeof signal.reason === "string" ? signal.reason : "";
+    return reason.includes("advisory") || reason.includes("不阻断");
+  }) && signals.every((signal) => {
+    if (!signal || typeof signal !== "object" || Array.isArray(signal)) {
+      return true;
+    }
+    const record = signal as Record<string, unknown>;
+    if (record.artifactType === "setting_alignment") {
+      return record.status === "risk" || record.status === "valid";
+    }
+    return record.status === "valid";
+  });
+  // 与主分类器一致：设定硬失败 / manual_gate 不被 defer 降级
+  if (loop.recommendedAction === "manual_gate" || hasSettingInvalid) {
     return "blocking";
+  }
+  if (loop.terminalAction === "defer_and_continue") {
+    // enforce 设定 risk（非 advisory-only）同样不可 defer 放行
+    if (hasSettingRisk && !settingAdvisoryOnly) {
+      return "blocking";
+    }
+    return "non_blocking_quality_debt";
   }
   if (loop.overallStatus === "valid" && loop.recommendedAction === "continue") {
     return "none";

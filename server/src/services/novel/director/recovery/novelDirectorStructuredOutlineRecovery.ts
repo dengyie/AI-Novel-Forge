@@ -71,6 +71,10 @@ function hasPreparedOutlineChapterBoundary(chapter: VolumeChapterPlan | null): b
 
 export function hasPreparedOutlineChapterExecutionDetail(
   chapter: VolumeChapterPlan | null,
+  options?: {
+    settingQualityMode?: "off" | "advisory" | "enforce" | null;
+    qualityMode?: "full_book_autopilot" | "ai_copilot" | "manual" | null;
+  },
 ): boolean {
   if (!chapter) {
     return false;
@@ -93,6 +97,9 @@ export function hasPreparedOutlineChapterExecutionDetail(
     payoffRefs: chapter.payoffRefs,
     taskSheet: chapter.taskSheet,
     sceneCards: chapter.sceneCards,
+  }, {
+    settingQualityMode: options?.settingQualityMode ?? undefined,
+    qualityMode: options?.qualityMode ?? undefined,
   }).canEnterExecution;
 }
 

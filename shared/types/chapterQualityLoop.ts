@@ -77,6 +77,34 @@ function hasBlockingObligations(value: unknown): boolean {
   return Array.isArray(value) && value.length > 0;
 }
 
+function hasSettingAlignmentHardInvalidSignal(qualityLoop: Record<string, unknown>): boolean {
+  const signals = Array.isArray(qualityLoop.signals) ? qualityLoop.signals : [];
+  return signals.some((signal) => {
+    return isRecord(signal)
+      && signal.artifactType === "setting_alignment"
+      && signal.status === "invalid";
+  });
+}
+
+/**
+ * enforce 设定债务（含 soft function miss → risk）：不可被 defer 降级。
+ * advisory-only（reason 含 advisory/不阻断 且 continue）仍允许 non-blocking。
+ */
+function hasEnforceSettingAlignmentDebt(qualityLoop: Record<string, unknown>): boolean {
+  if (hasSettingAlignmentHardInvalidSignal(qualityLoop)) {
+    return true;
+  }
+  if (hasSettingAlignmentAdvisoryOnlySignal(qualityLoop)) {
+    return false;
+  }
+  const signals = Array.isArray(qualityLoop.signals) ? qualityLoop.signals : [];
+  return signals.some((signal) => {
+    return isRecord(signal)
+      && signal.artifactType === "setting_alignment"
+      && (signal.status === "risk" || signal.status === "invalid");
+  });
+}
+
 export function classifyChapterQualityLoopRisk(
   qualityLoop: unknown,
 ): ChapterQualityLoopRiskClassification {
@@ -91,11 +119,20 @@ export function classifyChapterQualityLoopRisk(
   ) {
     return "blocking";
   }
-  if (qualityLoop.terminalAction === "defer_and_continue") {
-    return "non_blocking_quality_debt";
-  }
-  if (recommendedAction === "manual_gate") {
+  // 设定硬失败 / manual_gate 不可被 defer_and_continue 降级为 non-blocking。
+  // pipeline 常在 prose 未达标时写 terminalAction=defer_and_continue；若同时存在
+  // setting_alignment 债务，导演仍必须视为未 processed，禁止无脑放行。
+  if (
+    recommendedAction === "manual_gate"
+    || hasSettingAlignmentHardInvalidSignal(qualityLoop)
+  ) {
     return "blocking";
+  }
+  if (qualityLoop.terminalAction === "defer_and_continue") {
+    if (hasEnforceSettingAlignmentDebt(qualityLoop)) {
+      return "blocking";
+    }
+    return "non_blocking_quality_debt";
   }
   // 已放行写流：assessment 为 valid+continue 时，勿因历史快照里残留的 blockingObligations 误标 blocking。
   // 样板书曾出现 approved/completed 章仍带 draft_obligation_unmet + obligations 数组，导致债务板噪声与误熔断信号。

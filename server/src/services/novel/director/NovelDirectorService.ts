@@ -150,9 +150,20 @@ export class NovelDirectorService {
     isPendingReviewAutoPromotionEnabled: () => qualityDebtSettingsService.isAutoPromotionEnabled(),
     autoPromotePendingReviewProposals: (input) => this.autoPromotePendingReviewProposals(input),
     enableBatchRoll: true,
-    resolveBatchRoll: async ({ novelId, range, autoExecution, consecutiveBatchRolls }) => {
+    resolveBatchRoll: async ({ novelId, range, autoExecution, consecutiveBatchRolls, request, settingQualityMode }) => {
+      const mode = settingQualityMode
+        ?? (request?.settingQualityMode === "advisory" || request?.settingQualityMode === "enforce"
+          ? request.settingQualityMode
+          : "off");
+      const readinessOptions = {
+        settingQualityMode: mode,
+        qualityMode: isFullBookAutopilotRunMode(request?.runMode) ? "full_book_autopilot" as const : undefined,
+      };
       const chapters = await this.novelContextService.listChapters(novelId);
-      let readiness = buildBatchRollReadinessFromChapters(chapters as Parameters<typeof buildBatchRollReadinessFromChapters>[0]);
+      let readiness = buildBatchRollReadinessFromChapters(
+        chapters as Parameters<typeof buildBatchRollReadinessFromChapters>[0],
+        readinessOptions,
+      );
       // Enrich readiness from volume workspace when chapter rows lack full contracts.
       try {
         const workspace = await this.volumeService.getVolumes(novelId);
@@ -180,7 +191,10 @@ export class NovelDirectorService {
           })),
         );
         if (workspaceChapters.length > 0) {
-          readiness = buildBatchRollReadinessFromChapters(workspaceChapters as Parameters<typeof buildBatchRollReadinessFromChapters>[0]);
+          readiness = buildBatchRollReadinessFromChapters(
+            workspaceChapters as Parameters<typeof buildBatchRollReadinessFromChapters>[0],
+            readinessOptions,
+          );
         }
       } catch {
         // workspace optional for expand-only decisions

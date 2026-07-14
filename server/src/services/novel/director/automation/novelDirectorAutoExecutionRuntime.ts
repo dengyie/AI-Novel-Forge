@@ -85,6 +85,11 @@ export class NovelDirectorAutoExecutionRuntime {
       range: input.range,
       autoExecution: input.autoExecution,
       consecutiveBatchRolls: input.consecutiveBatchRolls,
+      request: input.request,
+      settingQualityMode: input.request.settingQualityMode === "advisory"
+        || input.request.settingQualityMode === "enforce"
+        ? input.request.settingQualityMode
+        : "off",
     });
     if (decision.kind === "completed_scope") {
       return null;
@@ -424,6 +429,7 @@ export class NovelDirectorAutoExecutionRuntime {
               autoRepair: autoExecution.autoRepair,
               artifactSyncMode: autoExecution.artifactSyncMode,
               repairMode: resolveDirectorAutoExecutionRepairMode(autoExecution),
+              settingQualityMode: input.request.settingQualityMode ?? "off",
             }),
           );
           pipelineJobId = job.id;
