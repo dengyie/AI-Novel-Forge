@@ -25,6 +25,7 @@ import {
 } from "./novelCoreShared";
 import { createQualityReport } from "./novelCoreReviewService";
 import { chapterQualityLoopService } from "./quality/ChapterQualityLoopService";
+import { assessSettingAlignmentForQualityLoop } from "./quality/settingAlignmentPipelineHook";
 import {
   buildGenreBeatBoardSnapshot,
   buildVolumeReplanQualityDebtGate,
@@ -104,6 +105,7 @@ export async function executePipelineJob(
     qualityThreshold: persistedPayload.qualityThreshold ?? options.qualityThreshold,
     repairMode: persistedPayload.repairMode ?? options.repairMode ?? "light_repair",
     artifactSyncMode: persistedPayload.artifactSyncMode ?? options.artifactSyncMode ?? "adaptive",
+    settingQualityMode: persistedPayload.settingQualityMode ?? options.settingQualityMode ?? "off",
     jobTransportAutoRetryCount: normalizeJobTransportAutoRetryCount(
       persistedPayload.jobTransportAutoRetryCount,
     ),
@@ -507,6 +509,32 @@ export async function executePipelineJob(
           await createQualityReport(novelId, chapter.id, final.score, final.issues);
           const assessmentSource = chapterResult.retryCountUsed > 0 ? "repair_recheck" : "pipeline_review";
           const assessmentTerminalAction = chapterResult.pass ? null : "defer_and_continue";
+          // B3：mode=off 时 null；advisory|enforce 规则段归并 qualityLoop（详情写 settingAlignment）
+          let settingAlignment = null as ReturnType<typeof assessSettingAlignmentForQualityLoop>;
+          try {
+            const finalContent = chapterResult.runtimePackage?.draft?.content
+              ?? chapter.content
+              ?? "";
+            settingAlignment = assessSettingAlignmentForQualityLoop({
+              novelId,
+              chapterId: chapter.id,
+              chapterOrder: chapter.order,
+              content: typeof finalContent === "string" ? finalContent : "",
+              mode: runtimePayload.settingQualityMode ?? "off",
+              contextPackage: chapterResult.runtimePackage?.context ?? null,
+              mustAvoid: chapterResult.runtimePackage?.context?.chapter?.mustAvoid
+                ?? null,
+            });
+          } catch (error) {
+            logPipelineWarn("设定对齐规则段评估失败，跳过 setting signal", {
+              jobId,
+              novelId,
+              chapterId: chapter.id,
+              chapterOrder: chapter.order,
+              error: error instanceof Error ? error.message : String(error),
+            });
+            settingAlignment = null;
+          }
           // 先构建 assessment 供 fail-open 内存并计；DB 成功后再以同源结果更新。
           const memoryAssessment = buildChapterQualityLoopAssessment({
             chapterId: chapter.id,
@@ -514,6 +542,7 @@ export async function executePipelineJob(
             score: final.score,
             issues: final.issues,
             runtimePackage: chapterResult.runtimePackage,
+            settingAlignment,
           });
           let assessmentForMemory: ChapterQualityLoopAssessment = memoryAssessment;
           // fail-open 时 catch 内已 set 同源 snapshot；成功路径在下方 set
@@ -530,6 +559,7 @@ export async function executePipelineJob(
               terminalAction: assessmentTerminalAction,
               taskId: runtimePayload.workflowTaskId,
               qualityDebtAttribution: chapterResult.qualityDebtAttribution ?? null,
+              settingAlignment,
             });
           } catch (error) {
             // P2-2：DB 失败 fail-open——内存仍并计 gate；日志+进程计数避免静默该停未持久化
@@ -537,6 +567,7 @@ export async function executePipelineJob(
               assessmentForMemory,
               assessmentSource,
               assessmentTerminalAction,
+              settingAlignment,
             );
             // assessment 本体即可判 replan blocking，避免 JSON 往返
             const chapterBlocksReplanGate = isBlockingReplanQualityDebt(
@@ -591,6 +622,7 @@ export async function executePipelineJob(
                 assessmentForMemory,
                 assessmentSource,
                 assessmentTerminalAction,
+                settingAlignment,
               ),
             });
           }
