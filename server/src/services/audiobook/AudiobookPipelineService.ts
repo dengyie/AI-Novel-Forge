@@ -12,6 +12,12 @@ import { AppError } from "../../middleware/errorHandler";
 import { audiobookAnnotationService } from "./AudiobookAnnotationService";
 import { splitTextForTts } from "./audiobookChunk";
 import {
+  resolveBetweenChapterGapMs,
+  resolveInterChunkGapMs,
+  speakerKeyFromSegment,
+  type AudiobookChunkSpeakerRef,
+} from "./audiobookGap";
+import {
   ensureAudiobookTaskDir,
   ensureChapterAudioDir,
   resolveChapterAudioPath,
@@ -407,6 +413,23 @@ export class AudiobookPipelineService {
         }
       }
 
+      const chunkGapMs: number[] = [];
+      for (let i = 0; i < chunkJobs.length - 1; i += 1) {
+        const prevJob = chunkJobs[i];
+        const nextJob = chunkJobs[i + 1];
+        const prevRef: AudiobookChunkSpeakerRef = {
+          speakerKey: speakerKeyFromSegment(prevJob.segment),
+          speakerKind: prevJob.segment.speakerKind === "character" ? "character" : "narrator",
+          text: prevJob.text,
+        };
+        const nextRef: AudiobookChunkSpeakerRef = {
+          speakerKey: speakerKeyFromSegment(nextJob.segment),
+          speakerKind: nextJob.segment.speakerKind === "character" ? "character" : "narrator",
+          text: nextJob.text,
+        };
+        chunkGapMs.push(resolveInterChunkGapMs(prevRef, nextRef));
+      }
+
       await input.onProgress({
         phase: "merging",
         chapterIndex,
@@ -420,7 +443,7 @@ export class AudiobookPipelineService {
         chapterAudioPaths: chapterAudioPaths.map((item) => ({ chapterId: item.chapterId, path: item.path })),
       });
 
-      const merged = concatWavFiles(allChunkPaths, chapterWavPath);
+      const merged = concatWavFiles(allChunkPaths, chapterWavPath, chunkGapMs);
       completedChunks += chunkJobs.length;
       chapterAudioPaths.push({
         chapterId: chapter.id,
@@ -466,7 +489,10 @@ export class AudiobookPipelineService {
       chapterAudioPaths: chapterAudioPaths.map((item) => ({ chapterId: item.chapterId, path: item.path })),
     });
 
-    concatWavFiles(chapterPathsOrdered, fullAudioPath);
+    const betweenChapterGaps = chapterPathsOrdered.length > 1
+      ? Array.from({ length: chapterPathsOrdered.length - 1 }, () => resolveBetweenChapterGapMs())
+      : [];
+    concatWavFiles(chapterPathsOrdered, fullAudioPath, betweenChapterGaps);
     const qualityWarnings = collectQualityWarnings(annotations);
 
     await input.onProgress({
