@@ -138,6 +138,7 @@ export interface BasicTabProps {
   isSaving: boolean;
   projectQuickStart?: ReactNode;
   directorTakeoverEntry?: ReactNode;
+  audiobookPanel?: ReactNode;
 }
 
 export interface StoryMacroTabProps {
@@ -538,6 +539,8 @@ export interface CharacterTabViewProps {
     attireStyle: string;
     signatureDetail: string;
     voiceTexture: string;
+    ttsVoice: string;
+    ttsStyle: string;
     presenceImpression: string;
     currentState: string;
     currentGoal: string;
@@ -555,6 +558,8 @@ export interface CharacterTabViewProps {
       | "attireStyle"
       | "signatureDetail"
       | "voiceTexture"
+      | "ttsVoice"
+      | "ttsStyle"
       | "presenceImpression"
       | "currentState"
       | "currentGoal",

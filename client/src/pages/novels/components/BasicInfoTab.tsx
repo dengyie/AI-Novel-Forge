@@ -85,6 +85,15 @@ export default function BasicInfoTab(props: BasicTabProps) {
         />
       </SectionBlock>
 
+      {props.audiobookPanel ? (
+        <SectionBlock
+          title="有声书"
+          description="多角色 TTS 任务：先配置角色卡音色与旁白默认，再预检并生成章/全书 WAV。"
+        >
+          {props.audiobookPanel}
+        </SectionBlock>
+      ) : null}
+
       <DetailDisclosure
         title="写法建议"
         description="确认本书的叙述口味、表达密度和风格参考，帮助后续章节保持统一。"

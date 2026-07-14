@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import type { Router } from "express";
 import type { ApiResponse } from "@ai-novel/shared/types/api";
 import {
@@ -8,6 +10,11 @@ import { z } from "zod";
 import { llmProviderSchema } from "../../../../llm/providerSchema";
 import { validate } from "../../../../middleware/validate";
 import { audiobookTaskService } from "../../../../services/audiobook/AudiobookTaskService";
+import {
+  resolveAudiobookTaskDir,
+  resolveChapterAudioPath,
+  resolveFullBookAudioPath,
+} from "../../../../services/audiobook/audiobookPaths";
 
 const novelParamsSchema = z.object({
   id: z.string().trim().min(1),
@@ -17,6 +24,35 @@ const taskParamsSchema = z.object({
   id: z.string().trim().min(1),
   taskId: z.string().trim().min(1),
 });
+
+const chapterAudioParamsSchema = z.object({
+  id: z.string().trim().min(1),
+  taskId: z.string().trim().min(1),
+  chapterId: z.string().trim().min(1),
+});
+
+function streamWavFile(res: import("express").Response, filePath: string, downloadName: string): void {
+  if (!fs.existsSync(filePath)) {
+    res.status(404).json({
+      success: false,
+      error: "音频文件不存在。",
+    } satisfies ApiResponse<null>);
+    return;
+  }
+  const stat = fs.statSync(filePath);
+  res.setHeader("Content-Type", "audio/wav");
+  res.setHeader("Content-Length", String(stat.size));
+  res.setHeader("Accept-Ranges", "bytes");
+  res.setHeader("Cache-Control", "private, max-age=3600");
+  res.setHeader("Content-Disposition", `inline; filename="${downloadName}"`);
+  fs.createReadStream(filePath).pipe(res);
+}
+
+function isPathInside(parent: string, target: string): boolean {
+  const resolvedParent = path.resolve(parent);
+  const resolvedTarget = path.resolve(target);
+  return resolvedTarget === resolvedParent || resolvedTarget.startsWith(`${resolvedParent}${path.sep}`);
+}
 
 const createAudiobookTaskSchema = z.object({
   scopeMode: z.enum(["chapter", "range", "full"]),
@@ -181,6 +217,75 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
           data,
           message: "有声书任务取消请求已提交。",
         } satisfies ApiResponse<typeof data>);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  router.get(
+    "/:id/audiobook/tasks/:taskId/audio/full",
+    validate({ params: taskParamsSchema }),
+    async (req, res, next) => {
+      try {
+        const { id, taskId } = req.params as z.infer<typeof taskParamsSchema>;
+        const task = await audiobookTaskService.getTask(taskId);
+        if (!task || task.novelId !== id) {
+          res.status(404).json({
+            success: false,
+            error: "有声书任务不存在。",
+          } satisfies ApiResponse<null>);
+          return;
+        }
+
+        const taskDir = resolveAudiobookTaskDir(id, taskId);
+        const preferred = task.fullAudioPath?.trim() || resolveFullBookAudioPath(taskDir);
+        if (!isPathInside(taskDir, preferred)) {
+          res.status(400).json({
+            success: false,
+            error: "音频路径非法。",
+          } satisfies ApiResponse<null>);
+          return;
+        }
+        streamWavFile(res, preferred, `audiobook-${taskId}-full.wav`);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  router.get(
+    "/:id/audiobook/tasks/:taskId/audio/chapters/:chapterId",
+    validate({ params: chapterAudioParamsSchema }),
+    async (req, res, next) => {
+      try {
+        const { id, taskId, chapterId } = req.params as z.infer<typeof chapterAudioParamsSchema>;
+        const task = await audiobookTaskService.getTask(taskId);
+        if (!task || task.novelId !== id) {
+          res.status(404).json({
+            success: false,
+            error: "有声书任务不存在。",
+          } satisfies ApiResponse<null>);
+          return;
+        }
+        if (!task.chapterIds.includes(chapterId)) {
+          res.status(404).json({
+            success: false,
+            error: "章节不在该有声书任务范围内。",
+          } satisfies ApiResponse<null>);
+          return;
+        }
+
+        const taskDir = resolveAudiobookTaskDir(id, taskId);
+        const filePath = resolveChapterAudioPath(taskDir, chapterId);
+        if (!isPathInside(taskDir, filePath)) {
+          res.status(400).json({
+            success: false,
+            error: "音频路径非法。",
+          } satisfies ApiResponse<null>);
+          return;
+        }
+        streamWavFile(res, filePath, `audiobook-${taskId}-${chapterId}.wav`);
       } catch (error) {
         next(error);
       }

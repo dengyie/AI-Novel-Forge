@@ -51,6 +51,8 @@ interface CharacterFormState {
   attireStyle: string;
   signatureDetail: string;
   voiceTexture: string;
+  ttsVoice: string;
+  ttsStyle: string;
   presenceImpression: string;
   currentState: string;
   currentGoal: string;
