@@ -3,8 +3,10 @@ const assert = require("node:assert/strict");
 
 const {
   assessChapterExecutionContractShape,
+  assessTaskSheetTemplateRules,
   aiChapterTaskSheetQualityAssessmentSchema,
   formatChapterTaskSheetQualityFailure,
+  formatFunctionPayoffShortListForTaskSheet,
   inferChapterTaskSheetType,
   getChapterTaskSheetObligationBudget,
   stripInternalQualityCodes,
@@ -84,7 +86,13 @@ function buildCandidate(overrides = {}) {
     targetWordCount: 3000,
     mustAvoid: "不要提前揭示幕后主使，不要复写下一章核心事件。",
     payoffRefs: ["资源危机"],
-    taskSheet: "本章以资源危机开场，主角从被动承压转为主动试探，结尾留下更危险的证据入口。",
+    taskSheet: [
+      "【本章独占事件】主角第一次确认资源危机来自内部。",
+      "【在场人物】主角必须露脸；幕后主使故意 offscreen。",
+      "【人物选择】主角在公开对质与私下取证之间做有代价的选择，押上内部人脉。",
+      "【现场压力】雨夜仓库潮气与警报灯把身体与社会压力压到同一现场。",
+      "【禁止】不要提前揭示幕后主使，不要复写下一章核心事件。",
+    ].join("\n"),
     sceneCards: buildSceneCards(),
     ...overrides,
   };
@@ -346,4 +354,152 @@ test("chapter task sheet quality prompt is registered as a product prompt asset"
     "utf8",
   );
   assert.match(registrySource, /novel\.volume\.chapter_task_sheet_quality@v1/);
+});
+
+function buildB4TaskSheet(overrides = {}) {
+  return {
+    cognitive: "读者应理解本章主题是信任崩塌。",
+    good: [
+      "【本章独占事件】陆深当面托付关键事务。",
+      "【在场人物】陆深与承接人必须露脸。",
+      "【人物选择】承接人在公开接盘与暗中拆局之间做有代价的选择，牺牲安全换筹码。",
+      "【现场压力】雨夜港口潮气与汽笛把环境锚压在桥面。",
+      "【功能兑付】- 托付对话落地；承接人在场",
+      "【禁止】说明书讲规则、未注册设定发明。",
+    ].join("\n"),
+    ...overrides,
+  };
+}
+
+test("B4: cognitive_nailing rule hits and elevates under enforce", () => {
+  const nailing = "本章主题是信任崩塌，让读者明白没有人可以托付。";
+  const rules = assessTaskSheetTemplateRules(nailing, { settingQualityMode: "off" });
+  assert.equal(rules.hasCognitiveNailing, true);
+  assert.ok(rules.issues.some((issue) => issue.id === "cognitive_nailing" && issue.severity === "medium"));
+
+  const enforceRules = assessTaskSheetTemplateRules(nailing, { settingQualityMode: "enforce" });
+  assert.ok(enforceRules.issues.some((issue) => issue.id === "cognitive_nailing" && issue.severity === "high"));
+
+  const shape = assessChapterExecutionContractShape(buildCandidate({
+    taskSheet: nailing,
+  }), { settingQualityMode: "enforce" });
+  assert.equal(shape.canEnterExecution, false);
+  assert.ok(shape.issues.some((issue) => issue.id === "cognitive_nailing"));
+});
+
+test("B4: choice + scene anchor passes template rules", () => {
+  const good = buildB4TaskSheet().good;
+  const rules = assessTaskSheetTemplateRules(good);
+  assert.equal(rules.hasCognitiveNailing, false);
+  assert.equal(rules.hasChoicePressure, true);
+  assert.equal(rules.hasSceneAnchor, true);
+  assert.equal(rules.issues.length, 0);
+
+  const shape = assessChapterExecutionContractShape(buildCandidate({
+    taskSheet: good,
+  }));
+  assert.equal(shape.canEnterExecution, true);
+  assert.ok(!shape.issues.some((issue) => [
+    "cognitive_nailing",
+    "missing_choice_pressure",
+    "missing_scene_anchor",
+  ].includes(issue.id)));
+});
+
+test("B4: strip internal codes then template rules still score narrative (no false damage)", () => {
+  const dirty = [
+    "【本章独占事件】陆深当面托付关键事务。",
+    "【人物选择】承接人做有代价的选择，押上旧关系。",
+    "【现场压力】港口潮气与汽笛压住桥面。",
+    "payoff_missing_progress draft_obligation_unmet",
+  ].join("\n");
+  assert.equal(containsInternalQualityCodes(dirty), true);
+  const sanitized = sanitizeWriterFacingTaskSheet(dirty);
+  assert.equal(containsInternalQualityCodes(sanitized), false);
+  assert.match(sanitized, /有代价的选择/);
+  assert.match(sanitized, /港口潮气/);
+
+  const rules = assessTaskSheetTemplateRules(sanitized);
+  assert.equal(rules.hasChoicePressure, true);
+  assert.equal(rules.hasSceneAnchor, true);
+  assert.equal(rules.hasCognitiveNailing, false);
+
+  // shape 对 dirty 原单：internal codes high + 清洗后模板仍评估
+  const shape = assessChapterExecutionContractShape(buildCandidate({ taskSheet: dirty }));
+  assert.equal(shape.canEnterExecution, false); // internal codes high
+  assert.ok(shape.issues.some((issue) => issue.id === "task_sheet_internal_codes"));
+  // 不应因 strip 误伤把选择/现场判缺失
+  assert.ok(!shape.issues.some((issue) => issue.id === "missing_choice_pressure"));
+  assert.ok(!shape.issues.some((issue) => issue.id === "missing_scene_anchor"));
+});
+
+test("B4: default off/advisory does not hard-block on missing choice alone", () => {
+  const weak = "本章推进托付，情绪压抑，收尾留钩子。";
+  const shape = assessChapterExecutionContractShape(buildCandidate({
+    taskSheet: weak,
+  }), { settingQualityMode: "off", qualityMode: "ai_copilot" });
+  assert.ok(shape.issues.some((issue) => issue.id === "missing_choice_pressure"));
+  assert.ok(shape.issues.some((issue) => issue.id === "missing_scene_anchor"));
+  // medium only → 仍可进语义评估
+  assert.equal(shape.canEnterExecution, true);
+});
+
+test("B4: full_book_autopilot elevates template gaps to blocking", () => {
+  const weak = "本章推进托付，情绪压抑，收尾留钩子。";
+  const shape = assessChapterExecutionContractShape(buildCandidate({
+    taskSheet: weak,
+  }), { qualityMode: "full_book_autopilot" });
+  assert.equal(shape.canEnterExecution, false);
+  assert.ok(shape.issues.some((issue) => issue.id === "missing_choice_pressure" && issue.severity === "high"));
+});
+
+test("B4: function payoff short list formats from ids/hints", () => {
+  const fromIds = formatFunctionPayoffShortListForTaskSheet({
+    functionIds: ["fn-trust", "fn-bridge"],
+  });
+  assert.match(fromIds, /【功能兑付】/);
+  assert.match(fromIds, /fn-trust/);
+
+  const fromHints = formatFunctionPayoffShortListForTaskSheet({
+    functionPayoffHints: ["托付对话落地", "承接人在场"],
+  });
+  assert.match(fromHints, /托付对话落地/);
+  assert.equal(formatFunctionPayoffShortListForTaskSheet({ functionIds: [] }), "");
+});
+
+test("B4: chapter detail task_sheet prompt includes template contract sections", () => {
+  const {
+    volumeChapterTaskSheetPrompt,
+  } = require("../dist/prompting/prompts/novel/volume/chapterDetail.prompts.js");
+  const messages = volumeChapterTaskSheetPrompt.render({
+    novel: { title: "t" },
+    workspace: { volumes: [], functionAcceptanceTables: [] },
+    storyMacroPlan: null,
+    strategyPlan: null,
+    targetVolume: { id: "v1", chapters: [] },
+    targetBeatSheet: null,
+    targetChapter: {
+      id: "c1",
+      title: "第一章",
+      summary: "",
+      purpose: "",
+      exclusiveEvent: "",
+      endingState: "",
+      nextChapterEntryState: "",
+      conflictLevel: 40,
+      revealLevel: 30,
+      targetWordCount: 3000,
+      mustAvoid: "",
+      payoffRefs: [],
+      functionIds: ["fn-trust"],
+      taskSheet: null,
+      sceneCards: null,
+    },
+    detailMode: "task_sheet",
+  }, { blocks: [] });
+  const systemText = String(messages[0].content);
+  assert.match(systemText, /【人物选择】/);
+  assert.match(systemText, /【现场压力】/);
+  assert.match(systemText, /钉死认知|钉认知/);
+  assert.match(systemText, /禁止写入内部质量/);
 });

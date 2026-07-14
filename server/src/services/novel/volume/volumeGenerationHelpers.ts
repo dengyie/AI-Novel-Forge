@@ -98,6 +98,7 @@ export function setVolumeChapterListPartialStatus(
     critiqueReport: document.critiqueReport,
     beatSheets: document.beatSheets,
     rebalanceDecisions: document.rebalanceDecisions,
+    functionAcceptanceTables: document.functionAcceptanceTables,
     source: "volume",
     activeVersionId: document.activeVersionId,
   });
@@ -239,6 +240,13 @@ export function assertScopeReadiness(
     }
     return;
   }
+  if (scope === "function_table") {
+    if (!document.strategyPlan) {
+      throw new Error("请先生成卷战略建议，再写入功能验收表。");
+    }
+    getTargetVolume(document, targetVolumeId);
+    return;
+  }
   if (scope === "beat_sheet") {
     if (!document.strategyPlan) {
       throw new Error("请先生成卷战略建议，再生成当前卷节奏板。");
@@ -280,6 +288,7 @@ export function mergeStrategyPlan(document: VolumePlanDocument, strategyPlan: Vo
     critiqueReport: null,
     beatSheets: [],
     rebalanceDecisions: [],
+    functionAcceptanceTables: [],
     source: "volume",
     activeVersionId: document.activeVersionId,
   });
@@ -293,6 +302,7 @@ export function mergeCritiqueReport(document: VolumePlanDocument, critiqueReport
     critiqueReport,
     beatSheets: document.beatSheets,
     rebalanceDecisions: document.rebalanceDecisions,
+    functionAcceptanceTables: document.functionAcceptanceTables,
     source: "volume",
     activeVersionId: document.activeVersionId,
   });
@@ -349,6 +359,7 @@ export function mergeSkeleton(document: VolumePlanDocument, generatedVolumes: Ar
     critiqueReport: document.critiqueReport,
     beatSheets: [],
     rebalanceDecisions: [],
+    functionAcceptanceTables: [],
     source: "volume",
     activeVersionId: document.activeVersionId,
   });
@@ -376,6 +387,7 @@ export function mergeBeatSheet(
     critiqueReport: document.critiqueReport,
     beatSheets: nextBeatSheets,
     rebalanceDecisions: document.rebalanceDecisions,
+    functionAcceptanceTables: document.functionAcceptanceTables,
     source: "volume",
     activeVersionId: document.activeVersionId,
   });
@@ -448,6 +460,9 @@ export function mergeChapterList(
           taskSheet: existingChapter?.taskSheet ?? null,
           sceneCards: existingChapter?.sceneCards ?? null,
           payoffRefs: existingChapter?.payoffRefs ?? [],
+          ...(existingChapter?.functionIds !== undefined
+            ? { functionIds: existingChapter.functionIds }
+            : {}),
           createdAt: existingChapter?.createdAt ?? new Date(0).toISOString(),
           updatedAt: existingChapter?.updatedAt ?? new Date(0).toISOString(),
         });
@@ -487,6 +502,7 @@ export function mergeChapterList(
     critiqueReport: document.critiqueReport,
     beatSheets: document.beatSheets,
     rebalanceDecisions: document.rebalanceDecisions,
+    functionAcceptanceTables: document.functionAcceptanceTables,
     source: "volume",
     activeVersionId: document.activeVersionId,
   });
@@ -586,6 +602,7 @@ export function mergeChapterDetail(params: {
     critiqueReport: document.critiqueReport,
     beatSheets: document.beatSheets,
     rebalanceDecisions: document.rebalanceDecisions,
+    functionAcceptanceTables: document.functionAcceptanceTables,
     source: "volume",
     activeVersionId: document.activeVersionId,
   });
@@ -781,6 +798,7 @@ export function mergeRebalance(
     critiqueReport: document.critiqueReport,
     beatSheets: document.beatSheets,
     rebalanceDecisions: nextDecisions,
+    functionAcceptanceTables: document.functionAcceptanceTables,
     source: "volume",
     activeVersionId: document.activeVersionId,
   });

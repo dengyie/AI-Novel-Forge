@@ -195,6 +195,11 @@ export interface PipelineRunOptions extends LLMGenerateOptions {
   qualityThreshold?: number;
   repairMode?: "detect_only" | "light_repair" | "heavy_repair" | "continuity_only" | "character_only" | "ending_only";
   artifactSyncMode?: ArtifactSyncMode;
+  /**
+   * B3 设定对齐总开关。缺省 / off：不跑规则、不写 setting_alignment signal。
+   * advisory|enforce：规则段进 qualityLoop；blocking 仅 enforce 归并后生效。
+   */
+  settingQualityMode?: import("@ai-novel/shared/types/settingQualityPolicy").SettingQualityMode;
 }
 
 export type PipelineBackgroundSyncKind = "artifact_delta" | "character_dynamics" | "state_snapshot" | "payoff_ledger" | "character_resources" | "canonical_state";
@@ -228,6 +233,8 @@ export interface PipelinePayload extends LLMGenerateOptions {
   qualityThreshold?: number;
   repairMode?: "detect_only" | "light_repair" | "heavy_repair" | "continuity_only" | "character_only" | "ending_only";
   artifactSyncMode?: ArtifactSyncMode;
+  /** B3 设定对齐；缺省 off，与 PipelineRunOptions 同语义 */
+  settingQualityMode?: import("@ai-novel/shared/types/settingQualityPolicy").SettingQualityMode;
   qualityAlertDetails?: string[];
   replanAlertDetails?: string[];
   /** 品类主配额满窗 shortfall 熔断明细（≠ replan；见 PIPELINE_GENRE_BEAT_SHORTFALL） */

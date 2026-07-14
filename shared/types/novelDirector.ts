@@ -641,6 +641,11 @@ export interface DirectorConfirmRequest extends DirectorProjectContextInput, Dir
   workflowTaskId?: string;
   autoExecutionPlan?: DirectorAutoExecutionPlan;
   autoApproval?: DirectorAutoApprovalConfig;
+  /**
+   * 设定质量模式（默认 off）。仅 enforce/advisory 激活设定门禁；
+   * 写入 pipeline / BatchRoll readiness / freeze / volumeCompletion 投影。
+   */
+  settingQualityMode?: import("./settingQualityPolicy.js").SettingQualityMode;
 }
 
 export interface DirectorPlanScene {

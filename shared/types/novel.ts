@@ -59,6 +59,7 @@ export type VolumeGenerationScope =
   | "strategy"
   | "strategy_critique"
   | "skeleton"
+  | "function_table"
   | "beat_sheet"
   | "chapter_list"
   | "chapter_detail"
@@ -69,6 +70,13 @@ export type StoryPlanLevel = "book" | "arc" | "chapter";
 export type StoryPlanRole = "setup" | "progress" | "pressure" | "turn" | "payoff" | "cooldown";
 export type AuditType = "continuity" | "character" | "plot" | "mode_fit";
 export type AuditIssueStatus = "open" | "resolved" | "ignored";
+export type {
+  FunctionAcceptanceItem,
+  FunctionAcceptanceSource,
+  FunctionAcceptanceStatus,
+  FunctionAcceptanceTable,
+  FunctionCoverageResult,
+} from "./functionAcceptance";
 export type {
   CharacterResourceContext,
   CharacterResourceEvent,
@@ -738,6 +746,11 @@ export interface VolumeChapterPlan {
   sceneCards?: string | null;
   styleContract?: string | null;
   payoffRefs: string[];
+  /**
+   * 功能验收表挂载（B2）。mode=off 可缺省；normalize 往返必须保留。
+   * SoT 在 volume contentJson / workspace；非 DB 列。
+   */
+  functionIds?: string[];
   createdAt: string;
   updatedAt: string;
 }
@@ -897,6 +910,16 @@ export interface VolumePlanDocument {
   critiqueReport: VolumeCritiqueReport | null;
   beatSheets: VolumeBeatSheet[];
   rebalanceDecisions: VolumeRebalanceDecision[];
+  /**
+   * 功能验收表（B2）。按 volumeId 分表；mode=off 可空。
+   * 单卷书通常 0–1 张；normalize 往返保留。
+   */
+  functionAcceptanceTables?: import("./functionAcceptance").FunctionAcceptanceTable[];
+  /**
+   * C1 outline freeze snapshots（挂现网 structured_outline_ready 审批）。
+   * mode=off 可空；不新建平行 checkpointType。
+   */
+  outlineFreezeSnapshots?: import("./outlineFreeze").OutlineFreezeSnapshot[];
   readiness: VolumePlanningReadiness;
   derivedOutline: string;
   derivedStructuredOutline: string;

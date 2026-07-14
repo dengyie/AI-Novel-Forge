@@ -49,6 +49,7 @@ export function buildQualityLoopRiskFlagsSnapshot(
   assessment: ChapterQualityLoopAssessment,
   source: "pipeline_review" | "repair_recheck",
   terminalAction?: "defer_and_continue" | null,
+  settingAlignment?: unknown,
 ): string {
   return JSON.stringify({
     qualityLoop: {
@@ -56,6 +57,8 @@ export function buildQualityLoopRiskFlagsSnapshot(
       source,
       ...(terminalAction ? { terminalAction } : {}),
     },
+    // 详情 only；blocking 只读 qualityLoop
+    ...(settingAlignment ? { settingAlignment } : {}),
   });
 }
 

@@ -5,6 +5,7 @@ import {
   buildChapterQualityLoopAssessment,
   type ChapterQualityLoopAssessment,
 } from "@ai-novel/shared/types/chapterQualityLoop";
+import type { SettingAlignmentAssessment } from "@ai-novel/shared/types/settingAlignment";
 import { prisma } from "../../../db/prisma";
 import { directorAutomationLedgerEventService } from "../director/runtime/DirectorAutomationLedgerEventService";
 import type { QualityDebtAttribution } from "../runtime/chapterRuntimePipeline";
@@ -22,6 +23,11 @@ interface RecordChapterQualityLoopInput {
   runId?: string | null;
   /** 阶段0 归因数据：仅在 terminalAction=defer_and_continue 时有意义 */
   qualityDebtAttribution?: QualityDebtAttribution | null;
+  /**
+   * B3 设定对齐：归并进 qualityLoop signal；完整 assessment 写入 riskFlags.settingAlignment。
+   * 缺省不跑设定对齐（与 mode=off 一致）。
+   */
+  settingAlignment?: SettingAlignmentAssessment | null;
 }
 
 type ChapterQualityLoopChapter = {
@@ -51,6 +57,7 @@ function serializeRiskFlags(
   source: RecordChapterQualityLoopInput["source"],
   terminalAction?: RecordChapterQualityLoopInput["terminalAction"],
   qualityDebtAttribution?: RecordChapterQualityLoopInput["qualityDebtAttribution"],
+  settingAlignment?: SettingAlignmentAssessment | null,
 ): string {
   const parsed = parseJsonObject(previous);
   return JSON.stringify({
@@ -61,6 +68,8 @@ function serializeRiskFlags(
       ...(terminalAction ? { terminalAction } : {}),
       ...(qualityDebtAttribution ? { qualityDebtAttribution } : {}),
     },
+    // 详情 only：不参与 hasBlocking*；blocking 只读 qualityLoop
+    ...(settingAlignment ? { settingAlignment } : {}),
   });
 }
 
@@ -108,6 +117,7 @@ export function buildChapterQualityLoopChapterUpdate(
   source: RecordChapterQualityLoopInput["source"],
   terminalAction?: RecordChapterQualityLoopInput["terminalAction"],
   qualityDebtAttribution?: RecordChapterQualityLoopInput["qualityDebtAttribution"],
+  settingAlignment?: SettingAlignmentAssessment | null,
 ): Prisma.ChapterUpdateInput {
   const nextRepairHistory = appendRepairHistory(chapter.repairHistory, assessment, terminalAction);
   const shouldContinueChapter = assessment.recommendedAction === "continue" || terminalAction === "defer_and_continue";
@@ -115,7 +125,14 @@ export function buildChapterQualityLoopChapterUpdate(
     ? resolveContinuableChapterStatus(chapter)
     : "needs_repair";
   return {
-    riskFlags: serializeRiskFlags(chapter.riskFlags, assessment, source, terminalAction, qualityDebtAttribution),
+    riskFlags: serializeRiskFlags(
+      chapter.riskFlags,
+      assessment,
+      source,
+      terminalAction,
+      qualityDebtAttribution,
+      settingAlignment,
+    ),
     ...(nextRepairHistory !== undefined ? { repairHistory: nextRepairHistory } : {}),
     ...(nextChapterStatus ? { chapterStatus: nextChapterStatus } : {}),
   };
@@ -145,10 +162,18 @@ export class ChapterQualityLoopService {
       issues: input.issues,
       runtimePackage: input.runtimePackage,
       previousRepairHistory: chapter.repairHistory,
+      settingAlignment: input.settingAlignment,
     });
     await prisma.chapter.update({
       where: { id: input.chapterId },
-      data: buildChapterQualityLoopChapterUpdate(chapter, assessment, input.source, input.terminalAction ?? null, input.qualityDebtAttribution),
+      data: buildChapterQualityLoopChapterUpdate(
+        chapter,
+        assessment,
+        input.source,
+        input.terminalAction ?? null,
+        input.qualityDebtAttribution,
+        input.settingAlignment,
+      ),
     });
     await directorAutomationLedgerEventService.recordQualityLoopAssessment({
       taskId: input.taskId,

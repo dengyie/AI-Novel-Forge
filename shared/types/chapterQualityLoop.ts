@@ -4,12 +4,15 @@ import type {
   ChapterExecutionMissingObligation,
   ChapterFailureClassification,
 } from "./chapterRuntime.js";
+import type { SettingAlignmentAssessment } from "./settingAlignment.js";
+import { settingAlignmentToQualityLoopSignal } from "./settingAlignment.js";
 
 export const CHAPTER_QUALITY_LOOP_ARTIFACT_TYPES = [
   "chapter_retention_contract",
   "continuity_state",
   "rolling_window_review",
   "prose_quality",
+  "setting_alignment",
 ] as const;
 
 export type ChapterQualityLoopArtifactType = typeof CHAPTER_QUALITY_LOOP_ARTIFACT_TYPES[number];
@@ -74,6 +77,34 @@ function hasBlockingObligations(value: unknown): boolean {
   return Array.isArray(value) && value.length > 0;
 }
 
+function hasSettingAlignmentHardInvalidSignal(qualityLoop: Record<string, unknown>): boolean {
+  const signals = Array.isArray(qualityLoop.signals) ? qualityLoop.signals : [];
+  return signals.some((signal) => {
+    return isRecord(signal)
+      && signal.artifactType === "setting_alignment"
+      && signal.status === "invalid";
+  });
+}
+
+/**
+ * enforce 设定债务（含 soft function miss → risk）：不可被 defer 降级。
+ * advisory-only（reason 含 advisory/不阻断 且 continue）仍允许 non-blocking。
+ */
+function hasEnforceSettingAlignmentDebt(qualityLoop: Record<string, unknown>): boolean {
+  if (hasSettingAlignmentHardInvalidSignal(qualityLoop)) {
+    return true;
+  }
+  if (hasSettingAlignmentAdvisoryOnlySignal(qualityLoop)) {
+    return false;
+  }
+  const signals = Array.isArray(qualityLoop.signals) ? qualityLoop.signals : [];
+  return signals.some((signal) => {
+    return isRecord(signal)
+      && signal.artifactType === "setting_alignment"
+      && (signal.status === "risk" || signal.status === "invalid");
+  });
+}
+
 export function classifyChapterQualityLoopRisk(
   qualityLoop: unknown,
 ): ChapterQualityLoopRiskClassification {
@@ -88,11 +119,20 @@ export function classifyChapterQualityLoopRisk(
   ) {
     return "blocking";
   }
-  if (qualityLoop.terminalAction === "defer_and_continue") {
-    return "non_blocking_quality_debt";
-  }
-  if (recommendedAction === "manual_gate") {
+  // 设定硬失败 / manual_gate 不可被 defer_and_continue 降级为 non-blocking。
+  // pipeline 常在 prose 未达标时写 terminalAction=defer_and_continue；若同时存在
+  // setting_alignment 债务，导演仍必须视为未 processed，禁止无脑放行。
+  if (
+    recommendedAction === "manual_gate"
+    || hasSettingAlignmentHardInvalidSignal(qualityLoop)
+  ) {
     return "blocking";
+  }
+  if (qualityLoop.terminalAction === "defer_and_continue") {
+    if (hasEnforceSettingAlignmentDebt(qualityLoop)) {
+      return "blocking";
+    }
+    return "non_blocking_quality_debt";
   }
   // 已放行写流：assessment 为 valid+continue 时，勿因历史快照里残留的 blockingObligations 误标 blocking。
   // 样板书曾出现 approved/completed 章仍带 draft_obligation_unmet + obligations 数组，导致债务板噪声与误熔断信号。
@@ -110,10 +150,48 @@ export function classifyChapterQualityLoopRisk(
   ) {
     return "non_blocking_quality_debt";
   }
+  // advisory setting_alignment only：risk + continue，不挡 processed / auto-execution。
+  if (
+    qualityLoop.overallStatus === "risk"
+    && recommendedAction === "continue"
+    && hasSettingAlignmentAdvisoryOnlySignal(qualityLoop)
+  ) {
+    return "non_blocking_quality_debt";
+  }
   if (qualityLoop.overallStatus === "risk" || qualityLoop.overallStatus === "invalid") {
     return "blocking";
   }
   return "none";
+}
+
+function hasSettingAlignmentAdvisoryOnlySignal(qualityLoop: Record<string, unknown>): boolean {
+  const signals = Array.isArray(qualityLoop.signals) ? qualityLoop.signals : [];
+  const settingSignals = signals.filter((signal) => {
+    return isRecord(signal) && signal.artifactType === "setting_alignment";
+  });
+  if (settingSignals.length === 0) {
+    return false;
+  }
+  const hasAdvisoryRisk = settingSignals.some((signal) => {
+    if (!isRecord(signal) || signal.status !== "risk") {
+      return false;
+    }
+    const reason = typeof signal.reason === "string" ? signal.reason : "";
+    return reason.includes("advisory") || reason.includes("不阻断");
+  });
+  if (!hasAdvisoryRisk) {
+    return false;
+  }
+  // 其它 artifact 必须 valid，否则仍按主路径 blocking/risk 处理
+  return signals.every((signal) => {
+    if (!isRecord(signal)) {
+      return true;
+    }
+    if (signal.artifactType === "setting_alignment") {
+      return signal.status === "risk" || signal.status === "valid";
+    }
+    return signal.status === "valid";
+  });
 }
 
 function hasTimelineExtractionDeferredSignal(qualityLoop: Record<string, unknown>): boolean {
@@ -156,6 +234,11 @@ export interface ChapterQualityLoopAssessmentInput {
   runtimePackage?: ChapterRuntimePackage | null;
   evaluatedAt?: string | Date;
   previousRepairHistory?: string | null;
+  /**
+   * B3 设定对齐评估。缺省 / mode=off 不注入 setting_alignment signal。
+   * blocking 只经本 builder 归并进 qualityLoop；详情由调用方写 riskFlags.settingAlignment。
+   */
+  settingAlignment?: SettingAlignmentAssessment | null;
 }
 
 const SEVERITY_RANK: Record<ReviewIssue["severity"], number> = {
@@ -455,19 +538,63 @@ function isDeferredTimelineOnlyRisk(signals: ChapterQualityLoopSignal[]): boolea
   ));
 }
 
+function isSettingAlignmentOnlyNonBlockingRisk(signals: ChapterQualityLoopSignal[]): boolean {
+  const setting = signals.find((signal) => signal.artifactType === "setting_alignment");
+  if (!setting || setting.status === "valid") {
+    return false;
+  }
+  // advisory 映射：issueCodes 仍有值但 reason 标明 advisory / 不阻断
+  const advisoryHint = setting.reason.includes("advisory") || setting.reason.includes("不阻断");
+  if (!advisoryHint) {
+    return false;
+  }
+  return signals.every((signal) => (
+    signal.artifactType === "setting_alignment"
+      ? signal.status === "risk"
+      : signal.status === "valid"
+  ));
+}
+
 function resolveAction(overallStatus: ChapterQualityLoopSignalStatus, signals: ChapterQualityLoopSignal[]): ChapterQualityLoopAction {
   const rollingWindow = signals.find((signal) => signal.artifactType === "rolling_window_review");
   if (rollingWindow?.status === "invalid") {
     return "replan";
   }
+  const setting = signals.find((signal) => signal.artifactType === "setting_alignment");
+  if (setting?.status === "invalid") {
+    // enforce hard：优先 manual_gate（与 settingAlignment recommendedAction 对齐，避免被 patch 降级）
+    return "manual_gate";
+  }
   // 仅 deferred 时间线风险：可见于 continuity risk，但不强制 patch（异步定稿补齐）。
   if (overallStatus === "risk" && isDeferredTimelineOnlyRisk(signals)) {
     return "continue";
+  }
+  // advisory setting-only：risk signal 供债板/可观测，不抬升 repair/blocking
+  if (overallStatus === "risk" && isSettingAlignmentOnlyNonBlockingRisk(signals)) {
+    return "continue";
+  }
+  if (setting?.status === "risk" && !isSettingAlignmentOnlyNonBlockingRisk(signals)) {
+    return "patch_repair";
   }
   if (overallStatus === "risk" || overallStatus === "invalid") {
     return "patch_repair";
   }
   return "continue";
+}
+
+function buildSettingAlignmentSignal(
+  input: ChapterQualityLoopAssessmentInput,
+): ChapterQualityLoopSignal | null {
+  if (!input.settingAlignment) {
+    return null;
+  }
+  const mapped = settingAlignmentToQualityLoopSignal(input.settingAlignment);
+  return {
+    artifactType: "setting_alignment",
+    status: mapped.status,
+    reason: mapped.reason,
+    issueCodes: mapped.issueCodes,
+  };
 }
 
 const LENGTH_OBSERVABILITY_TAG_PREFIX = "length_";
@@ -489,12 +616,14 @@ function extractLengthObservabilityTags(
 export function buildChapterQualityLoopAssessment(
   input: ChapterQualityLoopAssessmentInput,
 ): ChapterQualityLoopAssessment {
-  const signals = [
+  const baseSignals = [
     buildRetentionSignal(input),
     buildContinuitySignal(input),
     buildProseQualitySignal(input),
     buildRollingWindowSignal(input),
   ];
+  const settingSignal = buildSettingAlignmentSignal(input);
+  const signals = settingSignal ? [...baseSignals, settingSignal] : baseSignals;
   const overallStatus = signals.reduce<ChapterQualityLoopSignalStatus>(
     (status, signal) => worseStatus(status, signal.status),
     "valid",
@@ -507,17 +636,29 @@ export function buildChapterQualityLoopAssessment(
   });
   const effectiveAction = budget?.nextAction === "hard_stop" ? "manual_gate" : recommendedAction;
   const observabilityTags = extractLengthObservabilityTags(input.runtimePackage);
+  const settingOnlyAdvisory = settingSignal
+    ? isSettingAlignmentOnlyNonBlockingRisk(signals)
+    : false;
+  // advisory setting-only：overall 保持 risk 可见，但 continue → classify 走 non_blocking/none 边界
+  // 与 deferred timeline 一致：risk + continue 时 classify 读 non_blocking_quality_debt 路径
+  const pauseReason = effectiveAction === "manual_gate"
+    ? (
+      settingSignal?.status === "invalid"
+        ? "设定对齐硬失败，需要确认修复边界后再继续。"
+        : "章节质量存在不可自动放行的问题，需要确认修复边界。"
+    )
+    : null;
   return {
     chapterId: input.chapterId,
     chapterOrder: input.chapterOrder ?? input.runtimePackage?.context.chapter.order ?? null,
     evaluatedAt: normalizeEvaluatedAt(input.evaluatedAt),
-    overallStatus,
+    overallStatus: settingOnlyAdvisory && recommendedAction === "continue"
+      ? "risk"
+      : overallStatus,
     recommendedAction: effectiveAction,
     patchFirstRequired: budget?.nextAction === "patch_repair" || effectiveAction === "patch_repair",
     recheckRequired: effectiveAction !== "continue",
-    pauseReason: effectiveAction === "manual_gate"
-      ? "章节质量存在不可自动放行的问题，需要确认修复边界。"
-      : null,
+    pauseReason,
     rootCauseCode: input.runtimePackage?.failureClassification.code ?? null,
     blockingObligations: input.runtimePackage?.failureClassification.blockingObligations ?? [],
     budget,

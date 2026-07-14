@@ -3,9 +3,16 @@ import type { LLMProvider } from "@ai-novel/shared/types/llm";
 import type {
   StoryWorldSlice,
   StoryWorldSliceBuilderMode,
+  StoryWorldSliceLockMode,
   StoryWorldSliceOverrides,
   StoryWorldSliceView,
 } from "@ai-novel/shared/types/storyWorldSlice";
+import type { SettingQualityPolicy } from "@ai-novel/shared/types/settingQualityPolicy";
+import {
+  DEFAULT_SETTING_QUALITY_POLICY,
+  resolveSettingQualityPolicy,
+  resolveStoryWorldSliceLockModeFromPolicy,
+} from "@ai-novel/shared/types/settingQualityPolicy";
 import { prisma } from "../../../db/prisma";
 import { runStructuredPrompt } from "../../../prompting/core/promptRunner";
 import { storyWorldSlicePrompt } from "../../../prompting/prompts/storyWorldSlice/storyWorldSlice.prompts";
@@ -14,6 +21,10 @@ import {
   buildWorldStructureFromLegacySource,
   parseWorldStructurePayload,
 } from "../../world/worldStructure";
+import {
+  applyCanonicalStoryWorldSliceGuard,
+  buildStructureOnlyStoryWorldSliceFallback,
+} from "./storyWorldSliceCanonicalGuard";
 import {
   buildStoryWorldSliceView,
   normalizeStoryWorldSlice,
@@ -25,6 +36,9 @@ import {
 interface EnsureStoryWorldSliceOptions {
   storyInput?: string;
   builderMode?: StoryWorldSliceBuilderMode;
+  /** 缺省 off：不跑 canonical strip，与现网一致 */
+  settingQualityPolicy?: SettingQualityPolicy | null;
+  entityRegistry?: string[] | null;
 }
 
 interface RefreshStoryWorldSliceOptions extends EnsureStoryWorldSliceOptions {
@@ -169,12 +183,53 @@ export class NovelWorldSliceService {
       || input.slice.metadata.storyInputDigest !== input.storyInputDigest;
   }
 
+  private resolveBuildLockMode(
+    policy: SettingQualityPolicy | null | undefined,
+  ): StoryWorldSliceLockMode {
+    const resolved = resolveSettingQualityPolicy(policy ?? DEFAULT_SETTING_QUALITY_POLICY);
+    return resolveStoryWorldSliceLockModeFromPolicy(resolved);
+  }
+
+  /**
+   * normalize 后可选 canonical guard；永不因 guard 失败抛垮调用方。
+   * violations 过多时降级 structure-only fallback。
+   */
+  private finalizeBuiltSlice(input: {
+    slice: StoryWorldSlice;
+    structure: Parameters<typeof applyCanonicalStoryWorldSliceGuard>[0]["structure"];
+    lockMode: StoryWorldSliceLockMode;
+    entityRegistry?: string[] | null;
+  }): StoryWorldSlice {
+    try {
+      const guarded = applyCanonicalStoryWorldSliceGuard({
+        slice: input.slice,
+        structure: input.structure,
+        entityRegistry: input.entityRegistry,
+        lockMode: input.lockMode,
+      });
+      if (
+        input.lockMode === "canonical"
+        && guarded.violations.length >= 8
+      ) {
+        return buildStructureOnlyStoryWorldSliceFallback(guarded.slice, input.structure);
+      }
+      return guarded.slice;
+    } catch (error) {
+      console.warn("[story-world-slice] canonical guard failed, using structure-only fallback", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return buildStructureOnlyStoryWorldSliceFallback(input.slice, input.structure);
+    }
+  }
+
   private async invokeSliceModel(input: {
     novel: Awaited<ReturnType<NovelWorldSliceService["getNovelContext"]>>;
     activeWorld: ActiveWorldSource;
     storyInput: string;
     overrides: StoryWorldSliceOverrides;
     builderMode: StoryWorldSliceBuilderMode;
+    lockMode?: StoryWorldSliceLockMode;
+    entityRegistry?: string[] | null;
   } & Pick<RefreshStoryWorldSliceOptions, "provider" | "model" | "temperature">): Promise<StoryWorldSlice> {
     const world = input.activeWorld;
     if (!world.structureJson?.trim()) {
@@ -191,35 +246,66 @@ export class NovelWorldSliceService {
       ? parsedPayload.bindingSupport
       : buildWorldBindingSupport(structure);
     const storyInputDigest = buildStoryInputDigest(input.storyInput);
-    const result = await runStructuredPrompt({
-      asset: storyWorldSlicePrompt,
-      promptInput: {
-        novel: input.novel,
+    const lockMode = input.lockMode ?? "theme_invent";
+    let normalized: StoryWorldSlice;
+    try {
+      const result = await runStructuredPrompt({
+        asset: storyWorldSlicePrompt,
+        promptInput: {
+          novel: input.novel,
+          structure,
+          bindingSupport,
+          storyInput: input.storyInput,
+          overrides: input.overrides,
+          builderMode: input.builderMode,
+        },
+        options: {
+          provider: input.provider,
+          model: input.model,
+          temperature: input.temperature ?? 0.25,
+        },
+      });
+      const parsed = result.output;
+
+      normalized = normalizeStoryWorldSlice({
+        raw: parsed,
+        storyId: input.novel.id,
+        worldId: world.id,
+        sourceWorldUpdatedAt: world.updatedAt.toISOString(),
+        storyInputDigest,
+        builtFromStructuredData: parsedPayload.hasStructuredData,
+        builderMode: input.builderMode,
         structure,
         bindingSupport,
-        storyInput: input.storyInput,
         overrides: input.overrides,
+        lockMode,
+      });
+    } catch (error) {
+      console.warn("[story-world-slice] LLM/normalize failed, structure-only fallback", {
+        novelId: input.novel.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      const skeleton = normalizeStoryWorldSlice({
+        raw: {},
+        storyId: input.novel.id,
+        worldId: world.id,
+        sourceWorldUpdatedAt: world.updatedAt.toISOString(),
+        storyInputDigest,
+        builtFromStructuredData: parsedPayload.hasStructuredData,
         builderMode: input.builderMode,
-      },
-      options: {
-        provider: input.provider,
-        model: input.model,
-        temperature: input.temperature ?? 0.25,
-      },
-    });
-    const parsed = result.output;
+        structure,
+        bindingSupport,
+        overrides: input.overrides,
+        lockMode: "canonical",
+      });
+      return buildStructureOnlyStoryWorldSliceFallback(skeleton, structure);
+    }
 
-    return normalizeStoryWorldSlice({
-      raw: parsed,
-      storyId: input.novel.id,
-      worldId: world.id,
-      sourceWorldUpdatedAt: world.updatedAt.toISOString(),
-      storyInputDigest,
-      builtFromStructuredData: parsedPayload.hasStructuredData,
-      builderMode: input.builderMode,
+    return this.finalizeBuiltSlice({
+      slice: normalized,
       structure,
-      bindingSupport,
-      overrides: input.overrides,
+      lockMode,
+      entityRegistry: input.entityRegistry,
     });
   }
 
@@ -314,12 +400,15 @@ export class NovelWorldSliceService {
     if (!stale) {
       return currentSlice;
     }
+    const lockMode = this.resolveBuildLockMode(options.settingQualityPolicy);
     const nextSlice = await this.invokeSliceModel({
       novel,
       activeWorld,
       storyInput,
       overrides,
       builderMode: options.builderMode ?? "runtime",
+      lockMode,
+      entityRegistry: options.entityRegistry,
     });
     await this.persistSlice(novelId, nextSlice, overrides);
     return nextSlice;
@@ -348,6 +437,7 @@ export class NovelWorldSliceService {
       });
     }
     const { storyInput, source } = this.resolveStoryInput(novel, options.storyInput);
+    const lockMode = this.resolveBuildLockMode(options.settingQualityPolicy);
     const slice = await this.invokeSliceModel({
       novel,
       activeWorld,
@@ -357,6 +447,8 @@ export class NovelWorldSliceService {
       provider: options.provider,
       model: options.model,
       temperature: options.temperature,
+      lockMode,
+      entityRegistry: options.entityRegistry,
     });
     await this.persistSlice(novelId, slice, overrides);
 

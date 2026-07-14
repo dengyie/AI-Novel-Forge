@@ -245,6 +245,12 @@ export function parsePipelinePayload(payload: string | null | undefined): Pipeli
           ? parsed.repairMode
           : undefined,
       artifactSyncMode: normalizeArtifactSyncMode(parsed.artifactSyncMode),
+      settingQualityMode:
+        parsed.settingQualityMode === "off"
+        || parsed.settingQualityMode === "advisory"
+        || parsed.settingQualityMode === "enforce"
+          ? parsed.settingQualityMode
+          : undefined,
       controlPolicy: normalizeControlPolicy(parsed.controlPolicy),
       qualityAlertDetails: normalizeStringList(parsed.qualityAlertDetails ?? parsed.failedDetails),
       replanAlertDetails: normalizeStringList(parsed.replanAlertDetails),
@@ -282,6 +288,11 @@ export function stringifyPipelinePayload(input: PipelinePayload): string {
     qualityThreshold: input.qualityThreshold ?? null,
     repairMode: input.repairMode ?? "light_repair",
     artifactSyncMode: input.artifactSyncMode ?? "adaptive",
+    ...(input.settingQualityMode === "off"
+      || input.settingQualityMode === "advisory"
+      || input.settingQualityMode === "enforce"
+      ? { settingQualityMode: input.settingQualityMode }
+      : {}),
     ...(input.controlPolicy ? { controlPolicy: normalizeControlPolicy(input.controlPolicy) ?? input.controlPolicy } : {}),
     ...(qualityAlertDetails.length > 0 ? { qualityAlertDetails } : {}),
     ...(replanAlertDetails.length > 0 ? { replanAlertDetails } : {}),

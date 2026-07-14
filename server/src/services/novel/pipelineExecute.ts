@@ -26,6 +26,16 @@ import {
 import { createQualityReport } from "./novelCoreReviewService";
 import { chapterQualityLoopService } from "./quality/ChapterQualityLoopService";
 import {
+  buildUnavailableSettingAlignmentAssessment,
+  chapterRiskFlagsIndicateSettingAlignmentPass,
+} from "@ai-novel/shared/types/settingAlignment";
+import { assessSettingAlignmentForQualityLoop } from "./quality/settingAlignmentPipelineHook";
+import {
+  resolveSettingAlignmentFunctionContext,
+  shouldSuppressDeferForSettingAlignment,
+} from "./quality/settingAlignmentWorkspaceLookup";
+import { functionAcceptanceStatusService } from "./volume/FunctionAcceptanceStatusService";
+import {
   buildGenreBeatBoardSnapshot,
   buildVolumeReplanQualityDebtGate,
   formatGenreBeatShortfallPauseReason,
@@ -104,6 +114,7 @@ export async function executePipelineJob(
     qualityThreshold: persistedPayload.qualityThreshold ?? options.qualityThreshold,
     repairMode: persistedPayload.repairMode ?? options.repairMode ?? "light_repair",
     artifactSyncMode: persistedPayload.artifactSyncMode ?? options.artifactSyncMode ?? "adaptive",
+    settingQualityMode: persistedPayload.settingQualityMode ?? options.settingQualityMode ?? "off",
     jobTransportAutoRetryCount: normalizeJobTransportAutoRetryCount(
       persistedPayload.jobTransportAutoRetryCount,
     ),
@@ -310,6 +321,27 @@ export async function executePipelineJob(
           prefetchVolumeService.ensureChapterExecutionContract(nId, cId, opts),
       });
       const isAutopilotMode = runtimePayload.controlPolicy?.advanceMode === "full_book_autopilot";
+      // B3：卷工作区一次加载，供设定对齐注入 functionIds/功能表。
+      // enforce 下加载失败 → fail-closed（unavailable assessment），禁止当「无债」放行。
+      let settingAlignmentVolumeDocument: Awaited<ReturnType<NovelVolumeService["getVolumes"]>> | null = null;
+      let settingAlignmentWorkspaceUnavailableReason: string | null = null;
+      const settingQualityMode = runtimePayload.settingQualityMode ?? "off";
+      if (settingQualityMode === "advisory" || settingQualityMode === "enforce") {
+        try {
+          settingAlignmentVolumeDocument = await prefetchVolumeService.getVolumes(novelId);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          settingAlignmentWorkspaceUnavailableReason = `卷工作区加载失败，设定对齐上下文不可用：${message}`;
+          logPipelineWarn(settingAlignmentWorkspaceUnavailableReason, {
+            jobId,
+            novelId,
+            settingQualityMode,
+            failClosed: settingQualityMode === "enforce",
+            error: message,
+          });
+          settingAlignmentVolumeDocument = null;
+        }
+      }
 
       // 进环前：窗已 complete 且 primary shortfall 时直接停，避免 startOrder>window 时再白写一章。
       {
@@ -506,7 +538,69 @@ export async function executePipelineJob(
         if (chapterResult.reviewExecuted) {
           await createQualityReport(novelId, chapter.id, final.score, final.issues);
           const assessmentSource = chapterResult.retryCountUsed > 0 ? "repair_recheck" : "pipeline_review";
-          const assessmentTerminalAction = chapterResult.pass ? null : "defer_and_continue";
+          // B3：mode=off 时 null；advisory|enforce 规则段归并 qualityLoop（详情写 settingAlignment）
+          // enforce 下 workspace/assess 失败 → unavailable fail-closed，禁止 null 当无债
+          let settingAlignment = null as ReturnType<typeof assessSettingAlignmentForQualityLoop>
+            | ReturnType<typeof buildUnavailableSettingAlignmentAssessment>;
+          const finalContent = chapterResult.runtimePackage?.draft?.content
+            ?? chapter.content
+            ?? "";
+          if (
+            (settingQualityMode === "enforce" || settingQualityMode === "advisory")
+            && settingAlignmentWorkspaceUnavailableReason
+            && !settingAlignmentVolumeDocument
+          ) {
+            settingAlignment = buildUnavailableSettingAlignmentAssessment({
+              chapterId: chapter.id,
+              chapterOrder: chapter.order,
+              mode: settingQualityMode,
+              reason: settingAlignmentWorkspaceUnavailableReason,
+            });
+          } else {
+            try {
+              settingAlignment = assessSettingAlignmentForQualityLoop({
+                novelId,
+                chapterId: chapter.id,
+                chapterOrder: chapter.order,
+                content: typeof finalContent === "string" ? finalContent : "",
+                mode: settingQualityMode,
+                contextPackage: chapterResult.runtimePackage?.context ?? null,
+                mustAvoid: chapterResult.runtimePackage?.context?.chapter?.mustAvoid
+                  ?? null,
+                volumeDocument: settingAlignmentVolumeDocument,
+                // 跨书默认不注入源世界发明词 hardban；仅硬编码 hardForbiddenTerms 或调用方显式 opt-in
+                includeHighConfidenceInventedTerms: false,
+              });
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              logPipelineWarn("设定对齐规则段评估失败", {
+                jobId,
+                novelId,
+                chapterId: chapter.id,
+                chapterOrder: chapter.order,
+                settingQualityMode,
+                failClosed: settingQualityMode === "enforce",
+                error: message,
+              });
+              if (settingQualityMode === "enforce" || settingQualityMode === "advisory") {
+                settingAlignment = buildUnavailableSettingAlignmentAssessment({
+                  chapterId: chapter.id,
+                  chapterOrder: chapter.order,
+                  mode: settingQualityMode,
+                  reason: `设定对齐规则段评估失败：${message}`,
+                });
+              } else {
+                settingAlignment = null;
+              }
+            }
+          }
+          // 设定债务不可 defer 放行：prose 未达标时也禁止 terminalAction 盖掉 setting gate
+          const suppressDeferForSetting = shouldSuppressDeferForSettingAlignment(settingAlignment);
+          const assessmentTerminalAction = (
+            chapterResult.pass || suppressDeferForSetting
+          )
+            ? null
+            : "defer_and_continue";
           // 先构建 assessment 供 fail-open 内存并计；DB 成功后再以同源结果更新。
           const memoryAssessment = buildChapterQualityLoopAssessment({
             chapterId: chapter.id,
@@ -514,6 +608,7 @@ export async function executePipelineJob(
             score: final.score,
             issues: final.issues,
             runtimePackage: chapterResult.runtimePackage,
+            settingAlignment,
           });
           let assessmentForMemory: ChapterQualityLoopAssessment = memoryAssessment;
           // fail-open 时 catch 内已 set 同源 snapshot；成功路径在下方 set
@@ -530,18 +625,95 @@ export async function executePipelineJob(
               terminalAction: assessmentTerminalAction,
               taskId: runtimePayload.workflowTaskId,
               qualityDebtAttribution: chapterResult.qualityDebtAttribution ?? null,
+              settingAlignment,
             });
+            // enforce + 规则段 pass：写回功能 satisfied（累积 assigned 章 pass，不阻断 pipeline）
+            if (
+              settingQualityMode === "enforce"
+              && settingAlignment
+              && settingAlignment.status === "pass"
+              && settingAlignmentVolumeDocument
+            ) {
+              try {
+                const fnCtx = resolveSettingAlignmentFunctionContext({
+                  document: settingAlignmentVolumeDocument,
+                  chapterOrder: chapter.order,
+                  chapterId: chapter.id,
+                });
+                if (fnCtx.volumeId && fnCtx.functionIds.length > 0) {
+                  const assignedOrders = Array.from(new Set(
+                    fnCtx.functionIds.flatMap((functionId) => {
+                      const item = fnCtx.functionTable?.items.find((row) => row.id === functionId);
+                      const stored = item?.assignedChapterOrders ?? [];
+                      if (stored.length > 0) {
+                        return stored;
+                      }
+                      // assigned 空：从当前卷章 functionIds 反推
+                      const volume = settingAlignmentVolumeDocument?.volumes
+                        .find((row) => row.id === fnCtx.volumeId);
+                      return (volume?.chapters ?? [])
+                        .filter((row) => (row.functionIds ?? []).includes(functionId))
+                        .map((row) => row.chapterOrder);
+                    }),
+                  )).filter((order) => Number.isFinite(order) && order > 0);
+                  // 累积：历史章 riskFlags 已 pass + 当前章
+                  const siblingChapters = assignedOrders.length > 0
+                    ? await prisma.chapter.findMany({
+                      where: {
+                        novelId,
+                        order: { in: assignedOrders },
+                      },
+                      select: { order: true, riskFlags: true },
+                    }).catch(() => [] as Array<{ order: number; riskFlags: string | null }>)
+                    : [];
+                  const passedChapterOrders = Array.from(new Set([
+                    chapter.order,
+                    ...siblingChapters
+                      .filter((row) => chapterRiskFlagsIndicateSettingAlignmentPass(row.riskFlags))
+                      .map((row) => row.order),
+                  ])).sort((a, b) => a - b);
+                  const nextDocument = functionAcceptanceStatusService.markSatisfiedFromAlignmentPass({
+                    document: settingAlignmentVolumeDocument,
+                    volumeId: fnCtx.volumeId,
+                    functionIds: fnCtx.functionIds,
+                    passedChapterOrders,
+                  });
+                  if (nextDocument !== settingAlignmentVolumeDocument) {
+                    await prefetchVolumeService.updateVolumes(novelId, nextDocument);
+                    settingAlignmentVolumeDocument = nextDocument;
+                  }
+                }
+              } catch (satisfiedError) {
+                logPipelineWarn("功能 satisfied 写回失败（不阻断）", {
+                  jobId,
+                  novelId,
+                  chapterId: chapter.id,
+                  chapterOrder: chapter.order,
+                  error: satisfiedError instanceof Error
+                    ? satisfiedError.message
+                    : String(satisfiedError),
+                });
+              }
+            }
           } catch (error) {
-            // P2-2：DB 失败 fail-open——内存仍并计 gate；日志+进程计数避免静默该停未持久化
+            // DB 失败：内存仍并计 gate。enforce 设定债时额外 best-effort 写 stub riskFlags，
+            // 避免导演读 DB 时当 processed 无脑放行。
             const memoryRiskFlags = buildQualityLoopRiskFlagsSnapshot(
               assessmentForMemory,
               assessmentSource,
               assessmentTerminalAction,
+              settingAlignment,
             );
             // assessment 本体即可判 replan blocking，避免 JSON 往返
             const chapterBlocksReplanGate = isBlockingReplanQualityDebt(
               assessmentForMemory as unknown as Record<string, unknown>,
             );
+            const settingDebtBlocksProcessed = shouldSuppressDeferForSettingAlignment(settingAlignment)
+              || (
+                settingQualityMode === "enforce"
+                && settingAlignment
+                && settingAlignment.status !== "pass"
+              );
             const failOpenMetrics = noteQualityLoopPersistFailOpen({
               chapterId: chapter.id,
               jobId,
@@ -565,9 +737,10 @@ export async function executePipelineJob(
               novelId,
               chapterId: chapter.id,
               chapterOrder: chapter.order,
-              failOpen: true,
+              failOpen: !settingDebtBlocksProcessed,
               qualityLoopPersistFailed: true,
               chapterBlocksReplanGate,
+              settingDebtBlocksProcessed,
               memoryRootCauseCode: assessmentForMemory.rootCauseCode ?? null,
               memoryRecommendedAction: assessmentForMemory.recommendedAction,
               projectedBlockingReplanCount: projectedGate.blockingReplanCount,
@@ -578,6 +751,26 @@ export async function executePipelineJob(
               failOpenScope: "process_local",
               error: error instanceof Error ? error.message : String(error),
             });
+            if (settingDebtBlocksProcessed) {
+              // enforce 设定债：再试一次最小 stub 落库，保证 processed=false
+              try {
+                await prisma.chapter.update({
+                  where: { id: chapter.id },
+                  data: {
+                    riskFlags: memoryRiskFlags,
+                    chapterStatus: "needs_repair",
+                  },
+                });
+              } catch (stubError) {
+                logPipelineError("设定债 stub riskFlags 二次落库失败", {
+                  jobId,
+                  novelId,
+                  chapterId: chapter.id,
+                  chapterOrder: chapter.order,
+                  error: stubError instanceof Error ? stubError.message : String(stubError),
+                });
+              }
+            }
             rangeDebtByChapterId.set(chapter.id, {
               order: chapter.order,
               riskFlags: memoryRiskFlags,
@@ -591,6 +784,7 @@ export async function executePipelineJob(
                 assessmentForMemory,
                 assessmentSource,
                 assessmentTerminalAction,
+                settingAlignment,
               ),
             });
           }

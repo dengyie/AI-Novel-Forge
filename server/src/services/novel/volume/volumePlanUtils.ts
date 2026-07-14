@@ -59,6 +59,7 @@ const volumeChapterInputSchema = z.object({
   sceneCards: z.string().trim().nullable().optional(),
   styleContract: z.string().trim().nullable().optional(),
   payoffRefs: z.array(z.string().trim().min(1)).optional(),
+  functionIds: z.array(z.string().trim().min(1)).max(32).optional(),
 }).passthrough();
 
 const volumeInputSchema = z.object({
@@ -118,6 +119,7 @@ export const volumeGenerationSchema = z.object({
           sceneCards: z.string().trim().optional().nullable(),
           styleContract: z.string().trim().optional().nullable(),
           payoffRefs: z.array(z.string().trim().min(1)).default([]),
+          functionIds: z.array(z.string().trim().min(1)).max(32).optional(),
         }),
       ).min(1),
     }),
@@ -240,6 +242,9 @@ function sanitizeVolumeChapter(
     sceneCards: normalizeText(chapter.sceneCards),
     styleContract: normalizeText(chapter.styleContract),
     payoffRefs: (chapter.payoffRefs ?? []).map((item) => item.trim()).filter(Boolean),
+    ...(chapter.functionIds !== undefined
+      ? { functionIds: parseLooseStringArray(chapter.functionIds) }
+      : {}),
     createdAt: new Date(0).toISOString(),
     updatedAt: new Date(0).toISOString(),
   };
@@ -334,6 +339,7 @@ function normalizeLegacyChapter(raw: unknown, index: number): VolumeChapterPlan 
     sceneCards,
     styleContract,
     payoffRefs: parseLooseStringArray(raw.payoffRefs ?? raw.payoff_refs),
+    functionIds: parseLooseStringArray(raw.functionIds ?? raw.function_ids),
     createdAt: new Date(0).toISOString(),
     updatedAt: new Date(0).toISOString(),
   };
@@ -642,6 +648,9 @@ export function buildDerivedStructuredOutlineFromVolumes(volumes: VolumePlan[]):
             task_sheet: chapter.taskSheet ?? undefined,
             scene_cards: chapter.sceneCards ?? undefined,
             payoff_refs: chapter.payoffRefs,
+            ...(chapter.functionIds && chapter.functionIds.length > 0
+              ? { function_ids: chapter.functionIds }
+              : {}),
           })),
       })),
   }, null, 2);
