@@ -202,11 +202,13 @@ function createQualityIssue(
  *
  * 注意：`payoff_*` 不使用裸通配 `payoff_[a-z0-9_]+`，因为 `payoff_touch` 是合法的作家义务 kind
  * （directorRuntime / chapterRuntime），`payoff_directives` 是合法上下文分组——通配会误删这些自然义务条目。
- * 仅匹配内部质量信号 code：payoff_missing_progress / payoff_overdue / payoff_regressed /
- * payoff_premature_overdue_demoted（由 PayoffLedgerSync / payoffLedgerShared 产出，流入 riskFlags/审计
- * issue，属内部 code，不应回灌进作家可读 taskSheet）。
+ * 仅匹配内部质量信号 code（由 PayoffLedgerSync / payoffLedgerShared 产出，流入 riskFlags/审计
+ * issue，经 NovelPromptMaterialExporter/workspaceDiagnosis 格式化为 `[sev/code] ...` 作家上下文，
+ * 属内部 code，不应再被 LLM 鹦鹉回灌进作家可读 taskSheet）：payoff_missing_progress / payoff_overdue /
+ * payoff_regressed / payoff_premature_overdue_demoted / payoff_paid_without_setup / payoff_window_extended。
+ * 新增同类内部信号 code 时需在此显式补全——不使用通配是为了保留 payoff_touch 等合法面向作家的 kind。
  */
-const INTERNAL_QUALITY_CODE_PATTERN = /\b(?:payoff_missing_progress|payoff_overdue|payoff_regressed|payoff_premature_overdue_demoted|draft_obligation_unmet|draft_repair_exhausted|draft_generation_failed|replan_required|replan_window|hard_stop|must_hit_now|forbidden_crossing|prose_[a-z0-9_]+|timeline_[a-z0-9_]+|rootCauseCode|recommendedAction)\b/gi;
+const INTERNAL_QUALITY_CODE_PATTERN = /\b(?:payoff_missing_progress|payoff_overdue|payoff_regressed|payoff_premature_overdue_demoted|payoff_paid_without_setup|payoff_window_extended|draft_obligation_unmet|draft_repair_exhausted|draft_generation_failed|replan_required|replan_window|hard_stop|must_hit_now|forbidden_crossing|prose_[a-z0-9_]+|timeline_[a-z0-9_]+|rootCauseCode|recommendedAction)\b/gi;
 
 export function stripInternalQualityCodes(text: string | null | undefined): string {
   if (!text) {

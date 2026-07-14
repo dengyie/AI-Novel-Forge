@@ -386,3 +386,24 @@ test("self-cycle fix: containsInternalQualityCodes flags payoff_regressed as int
   // payoff_touch is NOT an internal quality code (it's an obligation kind).
   assert.equal(containsInternalQualityCodes("兑现 payoff_touch 义务"), false);
 });
+
+// P3-2 second-review gap: payoff_paid_without_setup / payoff_window_extended are also
+// internal signal codes (PayoffLedgerShared emits them into audit issue.code, which
+// NovelPromptMaterialExporter formats as `[sev/code] ...` writer context → can be
+// parroted into taskSheet). The explicit enumeration must cover them, not just the
+// first four. Legit payoff_touch / payoff_directives must still survive.
+test("self-cycle re-review: sanitize strips payoff_paid_without_setup and payoff_window_extended too", () => {
+  const sheet = [
+    "审校问题：[high/payoff_paid_without_setup] 伏笔兑现缺铺垫；建议补足前置。",
+    "窗顺延 code:[payoff_window_extended] 被鹦鹉回灌，必须清除。",
+    "仍要保留：完成 payoff_touch 这条义务。",
+  ].join("\n");
+  const sanitized = sanitizeChapterTaskSheetForPersistence(sheet) ?? "";
+  assert.equal(containsInternalQualityCodes(sanitized), false);
+  assert.ok(!sanitized.includes("payoff_paid_without_setup"));
+  assert.ok(!sanitized.includes("payoff_window_extended"));
+  // legit author-facing obligation kind survives.
+  assert.match(sanitized, /payoff_touch/);
+  // natural evidence/suggestion text survives.
+  assert.match(sanitized, /伏笔兑现缺铺垫/);
+});
