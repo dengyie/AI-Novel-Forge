@@ -70,6 +70,11 @@ export interface Character {
   ttsDesignPrompt?: string | null;
   /** clone：参考音频落盘路径（相对 data root 或绝对，服务端校验）。 */
   ttsRefAudioPath?: string | null;
+  /**
+   * 有声书说话人别名（JSON 数组字符串或解析后数组）。
+   * 用于 LLM 标注 speakerName 归一（外号/称呼）。
+   */
+  ttsSpeakerAliases?: string | string[] | null;
   presenceImpression?: string | null;
   arcStart?: string | null;
   arcMidpoint?: string | null;

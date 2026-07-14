@@ -122,6 +122,10 @@ export function resolveFullBookAudioPath(taskDir: string): string {
   return path.join(taskDir, "full-book.wav");
 }
 
+export function resolveFullBookM4bPath(taskDir: string): string {
+  return path.join(taskDir, "full-book.m4b");
+}
+
 export function resolveChapterAnnotationPath(taskDir: string, chapterId: string): string {
   const safeChapterId = assertSafePathSegment(chapterId, "chapterId");
   return path.join(taskDir, "annotations", `${safeChapterId}.json`);
@@ -153,6 +157,8 @@ export function wipeChapterAudioArtifacts(taskDir: string, chapterId: string): v
   }
   safeUnlink(resolveFullBookAudioPath(taskDir));
   safeUnlink(`${resolveFullBookAudioPath(taskDir)}.part`);
+  safeUnlink(resolveFullBookM4bPath(taskDir));
+  safeUnlink(`${resolveFullBookM4bPath(taskDir)}.part`);
 }
 
 export function wipeChapterAnnotationArtifact(taskDir: string, chapterId: string): void {

@@ -545,6 +545,7 @@ export interface CharacterTabViewProps {
     ttsDesignPrompt: string;
     ttsRefAudioPath: string;
     ttsRefAudioBase64: string;
+    ttsSpeakerAliases: string;
     presenceImpression: string;
     currentState: string;
     currentGoal: string;
@@ -568,6 +569,7 @@ export interface CharacterTabViewProps {
       | "ttsDesignPrompt"
       | "ttsRefAudioPath"
       | "ttsRefAudioBase64"
+      | "ttsSpeakerAliases"
       | "presenceImpression"
       | "currentState"
       | "currentGoal",

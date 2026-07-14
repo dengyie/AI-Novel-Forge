@@ -5,6 +5,7 @@ import {
   characterWorldCheckPrompt,
 } from "../../prompting/prompts/novel/coreCharacter.prompts";
 import { writeCharacterVoiceRefFromBase64 } from "../audiobook/audiobookPaths";
+import { parseSpeakerAliases } from "../audiobook/AudiobookTaskService";
 import { ragServices } from "../rag";
 import { queueRagDelete, queueRagUpsert } from "./novelCoreSupport";
 import { WorldContextGateway } from "./worldContext/WorldContextGateway";
@@ -15,6 +16,22 @@ import {
   LLMGenerateOptions,
 } from "./novelCoreShared";
 import { serializeCharacterProhibitions } from "./characters/characterHardFacts";
+
+function normalizeTtsSpeakerAliases(
+  value: string | string[] | null | undefined,
+): string | null | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value === null) {
+    return null;
+  }
+  const aliases = parseSpeakerAliases(value);
+  if (aliases.length === 0) {
+    return null;
+  }
+  return JSON.stringify(aliases);
+}
 
 export class NovelCoreCharacterService {
   private readonly worldContextGateway = new WorldContextGateway();
@@ -41,11 +58,13 @@ export class NovelCoreCharacterService {
       };
     }
 
-    const { prohibitions, ttsRefAudioBase64, ...data } = payload;
+    const { prohibitions, ttsRefAudioBase64, ttsSpeakerAliases, ...data } = payload;
+    const aliasesJson = normalizeTtsSpeakerAliases(ttsSpeakerAliases);
     const created = await prisma.character.create({
       data: {
         novelId,
         ...data,
+        ...(aliasesJson !== undefined ? { ttsSpeakerAliases: aliasesJson } : {}),
         ...(prohibitions ? { prohibitionsJson: serializeCharacterProhibitions(prohibitions) } : {}),
       },
     });
@@ -79,10 +98,12 @@ export class NovelCoreCharacterService {
 
     const hasStateChanged = typeof input.currentState === "string" && input.currentState !== exists.currentState;
     const hasGoalChanged = typeof input.currentGoal === "string" && input.currentGoal !== exists.currentGoal;
-    const { prohibitions, ttsRefAudioBase64, ...data } = input;
+    const { prohibitions, ttsRefAudioBase64, ttsSpeakerAliases, ...data } = input;
+    const aliasesJson = normalizeTtsSpeakerAliases(ttsSpeakerAliases);
 
     let nextData: Record<string, unknown> = {
       ...data,
+      ...(aliasesJson !== undefined ? { ttsSpeakerAliases: aliasesJson } : {}),
       ...(prohibitions ? { prohibitionsJson: serializeCharacterProhibitions(prohibitions) } : {}),
       ...(hasStateChanged || hasGoalChanged ? { lastEvolvedAt: new Date() } : {}),
     };
