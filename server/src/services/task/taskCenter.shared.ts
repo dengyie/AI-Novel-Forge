@@ -5,7 +5,7 @@ import type {
 } from "@ai-novel/shared/types/task";
 
 export interface ListTasksFilters {
-  kind?: "book_analysis" | "novel_pipeline" | "knowledge_document" | "image_generation" | "agent_run" | "novel_workflow" | "style_extraction";
+  kind?: "book_analysis" | "novel_pipeline" | "knowledge_document" | "image_generation" | "agent_run" | "novel_workflow" | "style_extraction" | "novel_audiobook";
   status?: TaskStatus;
   keyword?: string;
   limit?: number;
@@ -67,6 +67,16 @@ export const STYLE_EXTRACTION_TASK_STEPS = [
   { key: "extracting_features", label: "提取写法特征" },
   { key: "building_profile", label: "整理保留策略" },
   { key: "saving_profile", label: "自动保存写法" },
+  { key: "finalizing", label: "收尾" },
+] as const;
+
+export const AUDIOBOOK_TASK_STEPS = [
+  { key: "queued", label: "排队" },
+  { key: "preparing", label: "准备任务" },
+  { key: "annotating", label: "章节说话人标注" },
+  { key: "synthesizing", label: "TTS 合成" },
+  { key: "merging", label: "合并音频" },
+  { key: "skeleton_ready", label: "骨架就绪" },
   { key: "finalizing", label: "收尾" },
 ] as const;
 

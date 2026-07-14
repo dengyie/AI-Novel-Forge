@@ -39,7 +39,7 @@ export async function listRecoveryCandidates() {
   return data;
 }
 
-export async function resumeRecoveryCandidate(kind: Extract<TaskKind, "book_analysis" | "novel_pipeline" | "image_generation" | "novel_workflow" | "style_extraction">, id: string) {
+export async function resumeRecoveryCandidate(kind: Extract<TaskKind, "book_analysis" | "novel_pipeline" | "image_generation" | "novel_workflow" | "style_extraction" | "novel_audiobook">, id: string) {
   const { data } = await apiClient.post<ApiResponse<{ kind: string; id: string; command?: DirectorCommandAcceptedResponse | null }>>(`/tasks/recovery-candidates/${kind}/${id}/resume`, {});
   return data;
 }
