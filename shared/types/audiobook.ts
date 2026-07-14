@@ -22,6 +22,26 @@ export const DEFAULT_AUDIOBOOK_NARRATOR_STYLE =
 
 export const AUDIOBOOK_CHUNK_MAX_CHARS = 550;
 
+/**
+ * 章内 chunk 硬拼接时的语义停顿（毫秒）。
+ * 实际接缝静音 ≈ 模型自带尾/头静音 + 下表插入值。
+ * 取值偏保守，优先消除「贴肉」听感。
+ */
+export const AUDIOBOOK_GAP_MS = {
+  /** 同一说话人续读（长旁白被切块） */
+  sameSpeaker: 180,
+  /** 旁白 ↔ 角色 */
+  narratorCharacter: 420,
+  /** 不同角色对白 */
+  characterCharacter: 320,
+  /** 短句（≤ shortUtteranceChars）额外加成 */
+  shortUtteranceBonus: 120,
+  /** 触发短句加成的字数阈值 */
+  shortUtteranceChars: 15,
+  /** 章与章之间 */
+  betweenChapters: 700,
+} as const;
+
 export type AudiobookTaskStatus =
   | "queued"
   | "running"
