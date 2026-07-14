@@ -4,6 +4,7 @@ import type {
   StoryWorldSliceElement,
   StoryWorldSliceForce,
   StoryWorldSliceLocation,
+  StoryWorldSliceLockMode,
   StoryWorldSliceOverrides,
   StoryWorldSliceRule,
   StoryWorldSliceView,
@@ -228,6 +229,9 @@ export function normalizeStoryWorldSlice(input: {
   structure: WorldStructuredData;
   bindingSupport: WorldBindingSupport;
   overrides: StoryWorldSliceOverrides;
+  /** optional：缺省不写 lockMode（读路径按 theme_invent） */
+  lockMode?: StoryWorldSliceLockMode | null;
+  inventViolations?: string[] | null;
 }): StoryWorldSlice {
   const record = normalizeRecord(input.raw);
   const requiredRuleIds = new Set(input.overrides.requiredRuleIds ?? []);
@@ -324,6 +328,10 @@ export function normalizeStoryWorldSlice(input: {
       storyInputDigest: input.storyInputDigest,
       builtFromStructuredData: input.builtFromStructuredData,
       builderMode: input.builderMode,
+      ...(input.lockMode ? { lockMode: input.lockMode } : {}),
+      ...(input.inventViolations && input.inventViolations.length > 0
+        ? { inventViolations: input.inventViolations.slice(0, 32) }
+        : {}),
     },
   };
 

@@ -18,6 +18,8 @@ export * from "./types/task";
 export * from "./types/world";
 export * from "./types/novelWorld";
 export * from "./types/worldWizard";
+export * from "./types/storyWorldSlice";
+export * from "./types/settingQualityPolicy";
 export * from "./types/writingFormula";
 export * from "./types/styleEngine";
 export * from "./types/storyMacro";
