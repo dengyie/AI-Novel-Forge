@@ -178,13 +178,21 @@ function buildWavHeaderOnly(
 /**
  * 拼接同格式 PCM WAV 文件列表（顺序）。空列表抛错。
  * 流式写入：先扫格式与 dataSize，再写 header + 顺序 append PCM，避免全书 2× 内存。
+ *
+ * @param silenceBetweenMs 段间插入静音（毫秒）。长度应为 paths.length-1；
+ *   缺省/更短则按 0；更长忽略多余项。仅支持 16-bit PCM（与 createSilentPcm 一致）。
  */
-export function concatWavFiles(inputPaths: string[], outputPath: string): {
+export function concatWavFiles(
+  inputPaths: string[],
+  outputPath: string,
+  silenceBetweenMs?: ReadonlyArray<number>,
+): {
   bytes: number;
   chunks: number;
   sampleRate: number;
   numChannels: number;
   bitsPerSample: number;
+  silenceInsertedMs: number;
 } {
   if (inputPaths.length === 0) {
     throw new Error("没有可拼接的 WAV 文件。");
@@ -227,6 +235,22 @@ export function concatWavFiles(inputPaths: string[], outputPath: string): {
   if (!baseFormat) {
     throw new Error("无法解析 WAV 格式。");
   }
+  if (baseFormat.bitsPerSample !== 16) {
+    throw new Error(`concat 仅支持 16-bit PCM，当前为 ${baseFormat.bitsPerSample}bit。`);
+  }
+
+  const gaps: number[] = [];
+  let silenceInsertedMs = 0;
+  for (let i = 0; i < segments.length - 1; i += 1) {
+    const raw = silenceBetweenMs?.[i];
+    const ms = typeof raw === "number" && Number.isFinite(raw) ? Math.max(0, Math.floor(raw)) : 0;
+    gaps.push(ms);
+    if (ms > 0) {
+      const silent = createSilentPcm(ms, baseFormat.sampleRate, baseFormat.numChannels);
+      totalDataSize += silent.length;
+      silenceInsertedMs += ms;
+    }
+  }
 
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
   const tmpPath = `${outputPath}.part`;
@@ -236,27 +260,32 @@ export function concatWavFiles(inputPaths: string[], outputPath: string): {
     fs.writeSync(outFd, header, 0, header.length, 0);
     let writeOffset = 44;
     const copyBuf = Buffer.alloc(1024 * 1024);
-    for (const segment of segments) {
-      if (segment.dataSize <= 0) {
-        continue;
-      }
-      const inFd = fs.openSync(segment.path, "r");
-      try {
-        let remaining = segment.dataSize;
-        let readPos = segment.dataOffset;
-        while (remaining > 0) {
-          const toRead = Math.min(copyBuf.length, remaining);
-          const n = fs.readSync(inFd, copyBuf, 0, toRead, readPos);
-          if (n <= 0) {
-            break;
+    for (let segIndex = 0; segIndex < segments.length; segIndex += 1) {
+      const segment = segments[segIndex];
+      if (segment.dataSize > 0) {
+        const inFd = fs.openSync(segment.path, "r");
+        try {
+          let remaining = segment.dataSize;
+          let readPos = segment.dataOffset;
+          while (remaining > 0) {
+            const toRead = Math.min(copyBuf.length, remaining);
+            const n = fs.readSync(inFd, copyBuf, 0, toRead, readPos);
+            if (n <= 0) {
+              break;
+            }
+            fs.writeSync(outFd, copyBuf, 0, n, writeOffset);
+            writeOffset += n;
+            readPos += n;
+            remaining -= n;
           }
-          fs.writeSync(outFd, copyBuf, 0, n, writeOffset);
-          writeOffset += n;
-          readPos += n;
-          remaining -= n;
+        } finally {
+          fs.closeSync(inFd);
         }
-      } finally {
-        fs.closeSync(inFd);
+      }
+      if (segIndex < gaps.length && gaps[segIndex] > 0) {
+        const silent = createSilentPcm(gaps[segIndex], baseFormat.sampleRate, baseFormat.numChannels);
+        fs.writeSync(outFd, silent, 0, silent.length, writeOffset);
+        writeOffset += silent.length;
       }
     }
   } finally {
@@ -272,6 +301,7 @@ export function concatWavFiles(inputPaths: string[], outputPath: string): {
     sampleRate: baseFormat.sampleRate,
     numChannels: baseFormat.numChannels,
     bitsPerSample: baseFormat.bitsPerSample,
+    silenceInsertedMs,
   };
 }
 

@@ -20,6 +20,7 @@
 - 合成流水线：`AudiobookPipelineService`
   - 段切块 ≤550 字 → 每 chunk 原子落盘 `chunk-####.wav`
   - 章合并 `chapter.wav` → 全书 `full-book.wav`（流式 PCM 拼接）
+  - **段间语义停顿**（`AUDIOBOOK_GAP_MS` + `audiobookGap.ts`）：旁白↔角色 420ms、角色↔角色 320ms、同说话人续块 180ms；短句(≤15字) +120ms；章间 700ms。合并时插入静音，不改 TTS 产物。
   - resume：已有 annotation / 合法 chapter.wav / 连续合法 chunk 则跳过
 - 产物路径：`storage/audiobooks/{novelId}/{taskId}/`（磁盘，非 PG base64；id 段拒绝 `..`/`/`）
 - TaskCenter / Recovery 已注册 `novel_audiobook`；缺表 `P2021` 时 overview/list/recovery **降级为空**
