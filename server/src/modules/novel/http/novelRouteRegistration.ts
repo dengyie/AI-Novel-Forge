@@ -18,6 +18,7 @@ import { registerNovelStoryMacroRoutes } from "../planning/http/novelStoryMacroR
 import { registerNovelStorylineRoutes } from "../planning/http/novelStorylineRoutes";
 import { registerNovelVolumeRoutes } from "../planning/http/novelVolumeRoutes";
 import { registerNovelWorldSliceRoutes } from "../setup/http/novelWorldSliceRoutes";
+import { registerNovelAudiobookRoutes } from "../production/http/novelAudiobookRoutes";
 import novelChapterSummaryRouter from "../production/http/novelChapterSummary";
 import novelDecisionsRouter from "../state/http/novelDecisions";
 import type { NovelHttpServices } from "./novelHttpServices";
@@ -74,6 +75,9 @@ function forwardBusinessError(error: unknown, next: (err?: unknown) => void): bo
 
 export function registerNovelHttpRoutes(router: Router, services: NovelHttpServices): void {
   const { novelService, novelDraftOptimizeService } = services;
+
+  // 必须在 /:id 之前注册，避免 /audiobook/voices 被当成 novelId。
+  registerNovelAudiobookRoutes({ router });
 
   registerNovelBaseRoutes({
     router,

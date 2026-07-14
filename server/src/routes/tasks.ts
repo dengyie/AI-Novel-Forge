@@ -14,7 +14,7 @@ const router = Router();
 const autoDirectorFollowUpService = new AutoDirectorFollowUpService();
 const autoDirectorFollowUpActionExecutor = new AutoDirectorFollowUpActionExecutor();
 
-const kindSchema = z.enum(["book_analysis", "novel_pipeline", "knowledge_document", "image_generation", "agent_run", "novel_workflow", "style_extraction"]);
+const kindSchema = z.enum(["book_analysis", "novel_pipeline", "knowledge_document", "image_generation", "agent_run", "novel_workflow", "style_extraction", "novel_audiobook"]);
 const statusSchema = z.enum(["queued", "running", "waiting_approval", "succeeded", "failed", "cancelled"]);
 
 const listQuerySchema = z.object({
@@ -40,7 +40,7 @@ const retryBodySchema = z.object({
   batchAlreadyStartedCount: z.number().int().min(0).optional(),
 });
 
-const recoveryTaskKindSchema = z.enum(["book_analysis", "novel_pipeline", "image_generation", "novel_workflow", "style_extraction"]);
+const recoveryTaskKindSchema = z.enum(["book_analysis", "novel_pipeline", "image_generation", "novel_workflow", "style_extraction", "novel_audiobook"]);
 
 const recoveryTaskParamsSchema = z.object({
   kind: recoveryTaskKindSchema,

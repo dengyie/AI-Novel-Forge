@@ -15,6 +15,7 @@ const TASK_TOOL_KIND_VALUES = [
   "image_generation",
   "agent_run",
   "style_extraction",
+  "novel_audiobook",
 ] as const satisfies readonly Exclude<TaskKind, "knowledge_document">[];
 
 const TASK_STATUS_VALUES = [

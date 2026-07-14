@@ -15,6 +15,7 @@ export * from "./types/novelCharacter";
 export * from "./types/pagination";
 export * from "./types/agent";
 export * from "./types/task";
+export * from "./types/audiobook";
 export * from "./types/world";
 export * from "./types/novelWorld";
 export * from "./types/worldWizard";

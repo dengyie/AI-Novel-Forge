@@ -18,6 +18,10 @@ import CharacterFocusSummary from "./CharacterFocusSummary";
 import { isProtagonistCharacter } from "./characterAssetWorkspace.helpers";
 import { getLastAppearanceChapter } from "./characterPanel.utils";
 import SelectControl from "@/components/common/SelectControl";
+import {
+  DEFAULT_AUDIOBOOK_NARRATOR_STYLE,
+  MIMO_TTS_VOICE_CATALOG,
+} from "@ai-novel/shared/types/audiobook";
 
 interface CharacterFormState {
   name: string;
@@ -31,6 +35,8 @@ interface CharacterFormState {
   attireStyle: string;
   signatureDetail: string;
   voiceTexture: string;
+  ttsVoice: string;
+  ttsStyle: string;
   presenceImpression: string;
   currentState: string;
   currentGoal: string;
@@ -516,7 +522,25 @@ export default function CharacterAssetWorkspace(props: CharacterAssetWorkspacePr
                     <option value="female">性别：女</option>
                     <option value="other">性别：其他</option>
                   </SelectControl>
+                  <SelectControl
+                    className="w-full rounded-md border bg-background p-2 text-sm"
+                    value={characterForm.ttsVoice}
+                    onChange={(event) => onCharacterFormChange("ttsVoice", event.target.value)}
+                  >
+                    <option value="">有声书音色：未配置（阻断生成）</option>
+                    {MIMO_TTS_VOICE_CATALOG.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.label}{item.description ? ` · ${item.description}` : ""}
+                      </option>
+                    ))}
+                  </SelectControl>
                 </div>
+                <textarea
+                  className="min-h-[72px] w-full rounded-md border bg-background p-2 text-sm"
+                  placeholder={`有声书说话 style（默认可参考：${DEFAULT_AUDIOBOOK_NARRATOR_STYLE.slice(0, 24)}…）`}
+                  value={characterForm.ttsStyle}
+                  onChange={(event) => onCharacterFormChange("ttsStyle", event.target.value)}
+                />
                 <div className="grid gap-2 md:grid-cols-2">
                   <Input
                     placeholder="当前状态（例如：重伤闭关）"

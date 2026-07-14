@@ -47,6 +47,7 @@ export default function TaskCenterFilterPanel({
           <option value="knowledge_document">知识库索引</option>
           <option value="image_generation">图片生成</option>
           <option value="style_extraction">写法提取</option>
+          <option value="novel_audiobook">小说有声书</option>
           <option value="agent_run">Agent 运行</option>
         </SelectControl>
         <SelectControl

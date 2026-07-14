@@ -26,6 +26,8 @@ export interface CreateNovelInput {
   narrativePov?: "first_person" | "third_person" | "mixed";
   pacePreference?: "slow" | "balanced" | "fast";
   styleTone?: string;
+  audiobookNarratorVoice?: string | null;
+  audiobookNarratorStyle?: string | null;
   emotionIntensity?: "low" | "medium" | "high";
   aiFreedom?: "low" | "medium" | "high";
   postGenerationStyleReviewEnabled?: boolean;
@@ -55,6 +57,8 @@ export interface UpdateNovelInput {
   narrativePov?: "first_person" | "third_person" | "mixed" | null;
   pacePreference?: "slow" | "balanced" | "fast" | null;
   styleTone?: string | null;
+  audiobookNarratorVoice?: string | null;
+  audiobookNarratorStyle?: string | null;
   emotionIntensity?: "low" | "medium" | "high" | null;
   aiFreedom?: "low" | "medium" | "high" | null;
   postGenerationStyleReviewEnabled?: boolean;
@@ -135,6 +139,8 @@ export interface CharacterInput {
   attireStyle?: string;
   signatureDetail?: string;
   voiceTexture?: string;
+  ttsVoice?: string | null;
+  ttsStyle?: string | null;
   presenceImpression?: string;
   arcStart?: string;
   arcMidpoint?: string;

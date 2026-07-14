@@ -46,6 +46,8 @@ interface CharacterFormState {
   attireStyle: string;
   signatureDetail: string;
   voiceTexture: string;
+  ttsVoice: string;
+  ttsStyle: string;
   presenceImpression: string;
   currentState: string;
   currentGoal: string;
@@ -258,6 +260,8 @@ export function useNovelCharacterMutations(input: UseNovelCharacterMutationsInpu
         attireStyle: characterForm.attireStyle,
         signatureDetail: characterForm.signatureDetail,
         voiceTexture: characterForm.voiceTexture,
+        ttsVoice: characterForm.ttsVoice.trim() || null,
+        ttsStyle: characterForm.ttsStyle.trim() || null,
         presenceImpression: characterForm.presenceImpression,
         currentState: characterForm.currentState,
         currentGoal: characterForm.currentGoal,

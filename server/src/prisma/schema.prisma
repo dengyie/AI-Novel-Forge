@@ -325,6 +325,8 @@ model Novel {
   narrativePov      NarrativePov?
   pacePreference    PacePreference?
   styleTone         String?
+  audiobookNarratorVoice String?
+  audiobookNarratorStyle String?
   emotionIntensity  EmotionIntensity?
   aiFreedom         AIFreedom?
   postGenerationStyleReviewEnabled Boolean @default(true)
@@ -404,6 +406,7 @@ model Novel {
   imageTasks         ImageGenerationTask[]
   imageAssets        ImageAsset[]
   sideEffectJobs     NovelSideEffectJob[]
+  audiobookTasks     AudiobookTask[]
   novelWorld         NovelWorld?
   factEntries        NovelFactEntry[]
   createdAt          DateTime    @default(now())
@@ -623,6 +626,8 @@ model Character {
   attireStyle     String?
   signatureDetail String?
   voiceTexture    String?
+  ttsVoice        String?
+  ttsStyle        String?
   presenceImpression String?
   arcStart        String?
   arcMidpoint     String?
@@ -1060,6 +1065,51 @@ model StyleExtractionTask {
   @@index([status, updatedAt])
   @@index([createdStyleProfileId])
   @@index([sourceType, sourceRefId])
+}
+
+model AudiobookTask {
+  id                    String            @id @default(cuid())
+  novelId               String
+  novel                 Novel             @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  title                 String
+  scopeMode             String
+  chapterIdsJson        String            @default("[]")
+  chapterCount          Int               @default(0)
+  completedChapterCount Int               @default(0)
+  narratorVoice         String
+  narratorStyle         String
+  provider              String?
+  model                 String?
+  temperature           Float?
+  status                PipelineJobStatus @default(queued)
+  progress              Float             @default(0)
+  retryCount            Int               @default(0)
+  maxRetries            Int               @default(1)
+  pendingManualRecovery Boolean           @default(false)
+  heartbeatAt           DateTime?
+  currentStage          String?
+  currentItemKey        String?
+  currentItemLabel      String?
+  cancelRequestedAt     DateTime?
+  error                 String?
+  summary               String?
+  annotationsJson       String?
+  progressJson          String?
+  resultJson            String?
+  outputDir             String?
+  fullAudioPath         String?
+  startedAt             DateTime?
+  finishedAt            DateTime?
+  promptTokens          Int               @default(0)
+  completionTokens      Int               @default(0)
+  totalTokens           Int               @default(0)
+  llmCallCount          Int               @default(0)
+  lastTokenRecordedAt   DateTime?
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+
+  @@index([novelId, updatedAt])
+  @@index([status, updatedAt])
 }
 
 model ImageAsset {
