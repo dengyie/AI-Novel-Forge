@@ -28,6 +28,7 @@ import {
   projectVolumeSettingCompletion,
   toVolumeCompletionCheckpointPayload,
 } from "../../volume/volumeSettingCompletionService";
+import { resolveVolumeIdForChapterScope } from "../../quality/settingAlignmentWorkspaceLookup";
 
 export type AutoExecutionResumeStage = "chapter" | "pipeline";
 
@@ -135,9 +136,15 @@ export async function recordCompletedCheckpoint(
         || input.request.settingQualityMode === "enforce"
         ? input.request.settingQualityMode
         : "off";
+      const volumeId = resolveVolumeIdForChapterScope({
+        document: workspace,
+        startOrder: input.range.startOrder,
+        endOrder: input.range.endOrder,
+        chapterOrder: input.range.endOrder,
+      });
       const projection = projectVolumeSettingCompletion({
         document: workspace,
-        volumeId: workspace.volumes[0]?.id ?? null,
+        volumeId,
         mode,
         proseComplete: true,
       });

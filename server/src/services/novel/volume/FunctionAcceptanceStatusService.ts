@@ -71,7 +71,7 @@ export class FunctionAcceptanceStatusService {
 
   /**
    * alignment 规则段全部 pass 后调用：仅当 item 的全部 assigned 章都在 passedChapterOrders 内才 satisfied。
-   * Phase 3 会接入 finalization；此处提供可测骨架。
+   * assigned 空时从 document 章 functionIds 反推挂载序，避免「能检不能标」。
    */
   markSatisfiedFromAlignmentPass(input: {
     document: VolumePlanDocument;
@@ -86,17 +86,36 @@ export class FunctionAcceptanceStatusService {
     if (!table) {
       return input.document;
     }
-    const passed = new Set(input.passedChapterOrders);
+    const volume = input.document.volumes.find((item) => item.id === input.volumeId);
+    const derivedOrdersByFunctionId = new Map<string, number[]>();
+    for (const chapter of volume?.chapters ?? []) {
+      for (const id of normalizeFunctionIds(chapter.functionIds)) {
+        const list = derivedOrdersByFunctionId.get(id) ?? [];
+        list.push(chapter.chapterOrder);
+        derivedOrdersByFunctionId.set(id, list);
+      }
+    }
+    const passed = new Set(
+      input.passedChapterOrders.filter((order) => Number.isFinite(order) && order > 0),
+    );
     const readyIds = normalizeFunctionIds(input.functionIds).filter((id) => {
       const item = table.items.find((row) => row.id === id);
       if (!item) {
         return false;
       }
-      const assigned = item.assignedChapterOrders ?? [];
-      if (assigned.length === 0) {
+      if (item.status === "satisfied" || item.status === "missed") {
         return false;
       }
-      return assigned.every((order) => passed.has(order));
+      const stored = item.assignedChapterOrders ?? [];
+      const derived = derivedOrdersByFunctionId.get(id) ?? [];
+      // 优先 stored；空则用章挂载反推；仍空则无法安全 satisfied
+      const assigned = (stored.length > 0 ? stored : derived)
+        .filter((order) => Number.isFinite(order) && order > 0);
+      const uniqueAssigned = Array.from(new Set(assigned)).sort((a, b) => a - b);
+      if (uniqueAssigned.length === 0) {
+        return false;
+      }
+      return uniqueAssigned.every((order) => passed.has(order));
     });
     if (readyIds.length === 0) {
       return input.document;

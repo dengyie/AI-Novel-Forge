@@ -49,6 +49,7 @@ import {
 import type { DirectorPipelinePhase } from "./recovery/novelDirectorRecovery";
 import { WorldContextGateway } from "../worldContext/WorldContextGateway";
 import { persistOutlineFreezeOnStructuredOutlineReady } from "../volume/outlineFreezeService";
+import { resolveVolumeIdForChapterScope } from "../quality/settingAlignmentWorkspaceLookup";
 
 /**
  * Single source of truth for identifying the volume chapter detail bundle module.
@@ -319,7 +320,14 @@ export class NovelDirectorPipelineRuntime {
       if (!workspace?.volumes?.length) {
         return;
       }
-      const volumeId = workspace.volumes[0]?.id;
+      // 按当前大纲范围 / 首个有章卷解析，禁止无脑 volumes[0]
+      const plan = input.input.autoExecutionPlan;
+      const volumeId = resolveVolumeIdForChapterScope({
+        document: workspace,
+        startOrder: plan?.startOrder ?? null,
+        endOrder: plan?.endOrder ?? null,
+      }) ?? workspace.volumes.find((volume) => volume.chapters.length > 0)?.id
+        ?? null;
       if (!volumeId) {
         return;
       }

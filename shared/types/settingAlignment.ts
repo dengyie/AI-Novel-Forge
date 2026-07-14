@@ -456,6 +456,99 @@ function emptyPassAssessment(input: SettingAlignmentRuleInput): SettingAlignment
   };
 }
 
+/**
+ * enforce 下上下文不可用（workspace 加载失败 / 规则段崩溃）时的 fail-closed 评估。
+ * - off：仍 pass（不注入）
+ * - advisory：soft risk，不挡
+ * - enforce：hard blocking + manual_gate，禁止当「无债」放行
+ */
+export function buildUnavailableSettingAlignmentAssessment(input: {
+  chapterId: string;
+  chapterOrder?: number | null;
+  mode: SettingQualityMode;
+  reason: string;
+  evaluatedAt?: string | Date;
+}): SettingAlignmentAssessment {
+  const mode = input.mode ?? "off";
+  if (mode === "off") {
+    return emptyPassAssessment({
+      chapterId: input.chapterId,
+      chapterOrder: input.chapterOrder,
+      content: "",
+      mode: "off",
+      evaluatedAt: input.evaluatedAt,
+    });
+  }
+  const reason = input.reason.trim() || "设定对齐上下文不可用";
+  const hard = mode === "enforce";
+  return {
+    chapterId: input.chapterId,
+    chapterOrder: input.chapterOrder ?? null,
+    status: hard ? "blocking" : "repairable",
+    score: hard ? 0 : 70,
+    checks: [{
+      id: "setting:unavailable",
+      kind: "function",
+      passed: false,
+      severity: hard ? "high" : "medium",
+      summary: reason,
+      hard,
+    }],
+    recommendedAction: hard ? "manual_gate" : "continue",
+    ruleEngineVersion: SETTING_ALIGNMENT_RULE_ENGINE_VERSION,
+    llmUsed: false,
+    mode,
+    evaluatedAt: normalizeEvaluatedAt(input.evaluatedAt),
+  };
+}
+
+/**
+ * riskFlags 是否表明该章设定对齐已 pass（供多章功能 satisfied 累积）。
+ * 只认 qualityLoop.setting_alignment=valid 或详情 settingAlignment.status=pass。
+ */
+export function chapterRiskFlagsIndicateSettingAlignmentPass(
+  riskFlags: string | null | undefined,
+): boolean {
+  if (!riskFlags?.trim()) {
+    return false;
+  }
+  try {
+    const parsed = JSON.parse(riskFlags) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return false;
+    }
+    const root = parsed as Record<string, unknown>;
+    const detail = root.settingAlignment;
+    if (detail && typeof detail === "object" && !Array.isArray(detail)) {
+      if ((detail as { status?: unknown }).status === "pass") {
+        return true;
+      }
+    }
+    const qualityLoop = root.qualityLoop;
+    if (!qualityLoop || typeof qualityLoop !== "object" || Array.isArray(qualityLoop)) {
+      return false;
+    }
+    const signals = Array.isArray((qualityLoop as { signals?: unknown }).signals)
+      ? (qualityLoop as { signals: unknown[] }).signals
+      : [];
+    const settingSignals = signals.filter((signal) => {
+      return Boolean(
+        signal
+        && typeof signal === "object"
+        && !Array.isArray(signal)
+        && (signal as { artifactType?: unknown }).artifactType === "setting_alignment",
+      );
+    }) as Array<Record<string, unknown>>;
+    if (settingSignals.length === 0) {
+      // 无 setting signal：可能是 mode=off 历史章，不计入 enforce 累积 pass
+      return false;
+    }
+    return settingSignals.every((signal) => signal.status === "valid");
+  } catch {
+    return false;
+  }
+}
+
 function computeScore(checks: SettingAlignmentCheck[]): number {
   if (checks.length === 0) {
     return 100;

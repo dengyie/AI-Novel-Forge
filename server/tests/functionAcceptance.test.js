@@ -347,6 +347,24 @@ test("FunctionAcceptanceStatusService markSatisfiedFromAlignmentPass needs all a
   assert.equal(table.items.find((item) => item.id === "fn-trust").status, "satisfied");
 });
 
+test("markSatisfiedFromAlignmentPass derives assigned from chapter functionIds when empty", () => {
+  const service = new FunctionAcceptanceStatusService();
+  // 表未 applyAssignments：assignedChapterOrders 空，但章上挂了 functionIds
+  const document = buildVolumeWorkspaceDocument({
+    novelId: "novel-1",
+    volumes: [buildBaseVolume({ 3: ["fn-trust"] })],
+    functionAcceptanceTables: [buildImportTable("volume-1")],
+  });
+  const next = service.markSatisfiedFromAlignmentPass({
+    document,
+    volumeId: "volume-1",
+    functionIds: ["fn-trust"],
+    passedChapterOrders: [3],
+  });
+  const table = getFunctionTableForVolume(next.functionAcceptanceTables, "volume-1");
+  assert.equal(table.items.find((item) => item.id === "fn-trust").status, "satisfied");
+});
+
 test("normalizeFunctionIds dedupes", () => {
   assert.deepEqual(normalizeFunctionIds(["a", "a", " b ", ""]), ["a", "b"]);
 });

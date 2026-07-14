@@ -39,6 +39,7 @@ import { novelFramingSuggestionService } from "../NovelFramingSuggestionService"
 import { StoryMacroPlanService } from "../storyMacro/StoryMacroPlanService";
 import { NovelVolumeService } from "../volume/NovelVolumeService";
 import { projectVolumeSettingCompletion } from "../volume/volumeSettingCompletionService";
+import { resolveVolumeIdForChapterScope } from "../quality/settingAlignmentWorkspaceLookup";
 import { NovelWorkflowService } from "../workflow/NovelWorkflowService";
 import { NovelDirectorCandidateStageService } from "./phases/novelDirectorCandidateStage";
 import { resolveDirectorBookFraming } from "./runtime/novelDirectorFraming";
@@ -201,9 +202,14 @@ export class NovelDirectorService {
         }
         // 仅 enforce 把 prose_complete_only 升为 halt；advisory 只投影详情不挡窗尽
         if (mode === "enforce") {
+          const volumeId = resolveVolumeIdForChapterScope({
+            document: workspace,
+            startOrder: range.startOrder,
+            endOrder: range.endOrder,
+          });
           const projection = projectVolumeSettingCompletion({
             document: workspace,
-            volumeId: workspace.volumes[0]?.id ?? null,
+            volumeId,
             mode,
             proseComplete: true,
           });

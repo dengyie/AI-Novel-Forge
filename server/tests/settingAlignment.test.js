@@ -6,8 +6,15 @@ const {
   settingAlignmentToQualityLoopSignal,
   qualityLoopHasSettingBlockingSignal,
   hasBlockingSettingAlignmentDebt,
+  buildUnavailableSettingAlignmentAssessment,
+  chapterRiskFlagsIndicateSettingAlignmentPass,
   SETTING_ALIGNMENT_RULE_ENGINE_VERSION,
 } = require("@ai-novel/shared/types/settingAlignment");
+
+const {
+  resolveVolumeIdForChapterScope,
+  shouldSuppressDeferForSettingAlignment,
+} = require("../dist/services/novel/quality/settingAlignmentWorkspaceLookup.js");
 
 const {
   buildChapterQualityLoopAssessment,
@@ -520,4 +527,143 @@ test("mode=off qualityLoop assessment has no setting_alignment signal", () => {
   assert.equal(assessment.signals.length, 4);
   assert.ok(assessment.signals.every((s) => s.artifactType !== "setting_alignment"));
   assert.equal(assessment.recommendedAction, "continue");
+});
+
+test("unavailable assessment fail-closes enforce and blocks processed", () => {
+  const unavailable = buildUnavailableSettingAlignmentAssessment({
+    chapterId: "c-missing",
+    chapterOrder: 5,
+    mode: "enforce",
+    reason: "卷工作区加载失败，设定对齐上下文不可用",
+  });
+  assert.equal(unavailable.status, "blocking");
+  assert.equal(unavailable.recommendedAction, "manual_gate");
+  assert.equal(shouldSuppressDeferForSettingAlignment(unavailable), true);
+
+  const assessment = buildChapterQualityLoopAssessment({
+    chapterId: "c-missing",
+    chapterOrder: 5,
+    score: score({ overall: 95 }),
+    issues: [],
+    settingAlignment: unavailable,
+  });
+  assert.equal(classifyChapterQualityLoopRisk(assessment), "blocking");
+  assert.equal(hasBlockingQualityLoopDebtForAutoExecution({
+    riskFlags: JSON.stringify({ qualityLoop: assessment, settingAlignment: unavailable }),
+  }), true);
+  assert.equal(isDirectorAutoExecutionChapterProcessed({
+    id: "c-missing",
+    order: 5,
+    content: "有正文",
+    generationState: "reviewed",
+    chapterStatus: "pending_review",
+    riskFlags: JSON.stringify({ qualityLoop: assessment, settingAlignment: unavailable }),
+  }), false);
+});
+
+test("unavailable assessment advisory is soft non-blocking", () => {
+  const unavailable = buildUnavailableSettingAlignmentAssessment({
+    chapterId: "c-adv",
+    chapterOrder: 1,
+    mode: "advisory",
+    reason: "评估失败",
+  });
+  assert.equal(unavailable.status, "repairable");
+  assert.equal(shouldSuppressDeferForSettingAlignment(unavailable), false);
+  const assessment = buildChapterQualityLoopAssessment({
+    chapterId: "c-adv",
+    chapterOrder: 1,
+    score: score(),
+    issues: [],
+    settingAlignment: unavailable,
+  });
+  assert.notEqual(classifyChapterQualityLoopRisk(assessment), "blocking");
+});
+
+test("chapterRiskFlagsIndicateSettingAlignmentPass only on valid/pass", () => {
+  const passAssessment = evaluateSettingAlignmentRules({
+    chapterId: "c1",
+    content: "陆深当面托付关键事务，托付对话落地，承接人在场。",
+    mode: "enforce",
+    functionIds: ["fn-trust"],
+    functionItems: [functionItem()],
+  });
+  const passQl = buildChapterQualityLoopAssessment({
+    chapterId: "c1",
+    chapterOrder: 1,
+    score: score(),
+    issues: [],
+    settingAlignment: passAssessment,
+  });
+  assert.equal(chapterRiskFlagsIndicateSettingAlignmentPass(JSON.stringify({
+    qualityLoop: passQl,
+    settingAlignment: passAssessment,
+  })), true);
+
+  const miss = evaluateSettingAlignmentRules({
+    chapterId: "c2",
+    content: "走廊空无一人。",
+    mode: "enforce",
+    functionIds: ["fn-trust"],
+    functionItems: [functionItem()],
+  });
+  const missQl = buildChapterQualityLoopAssessment({
+    chapterId: "c2",
+    chapterOrder: 2,
+    score: score(),
+    issues: [],
+    settingAlignment: miss,
+  });
+  assert.equal(chapterRiskFlagsIndicateSettingAlignmentPass(JSON.stringify({
+    qualityLoop: missQl,
+    settingAlignment: miss,
+  })), false);
+
+  assert.equal(chapterRiskFlagsIndicateSettingAlignmentPass(null), false);
+  assert.equal(chapterRiskFlagsIndicateSettingAlignmentPass("{}"), false);
+});
+
+test("resolveVolumeIdForChapterScope prefers chapter order over volumes[0]", () => {
+  const document = {
+    novelId: "n1",
+    volumes: [
+      {
+        id: "vol-1",
+        order: 1,
+        title: "卷一",
+        chapters: [
+          { id: "v1c1", chapterId: "c1", chapterOrder: 1, title: "一", functionIds: [] },
+          { id: "v1c2", chapterId: "c2", chapterOrder: 2, title: "二", functionIds: [] },
+        ],
+      },
+      {
+        id: "vol-2",
+        order: 2,
+        title: "卷二",
+        chapters: [
+          { id: "v2c1", chapterId: "c21", chapterOrder: 21, title: "廿一", functionIds: ["fn-x"] },
+          { id: "v2c2", chapterId: "c22", chapterOrder: 22, title: "廿二", functionIds: [] },
+        ],
+      },
+    ],
+    functionAcceptanceTables: [],
+  };
+  assert.equal(resolveVolumeIdForChapterScope({
+    document,
+    chapterOrder: 21,
+  }), "vol-2");
+  assert.equal(resolveVolumeIdForChapterScope({
+    document,
+    startOrder: 21,
+    endOrder: 30,
+  }), "vol-2");
+  assert.equal(resolveVolumeIdForChapterScope({
+    document,
+    chapterId: "c2",
+  }), "vol-1");
+  // 无匹配时回退首个有章卷，而非强制 null
+  assert.equal(resolveVolumeIdForChapterScope({
+    document,
+    chapterOrder: 999,
+  }), "vol-1");
 });
