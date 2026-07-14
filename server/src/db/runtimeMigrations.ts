@@ -160,6 +160,11 @@ const REQUIRED_COLUMN_BACKFILLS = [
     columnDefinition: `"ttsRefAudioPath" TEXT`,
   },
   {
+    tableName: "Character",
+    columnName: "ttsSpeakerAliases",
+    columnDefinition: `"ttsSpeakerAliases" TEXT`,
+  },
+  {
     tableName: "Novel",
     columnName: "audiobookNarratorVoice",
     columnDefinition: `"audiobookNarratorVoice" TEXT`,

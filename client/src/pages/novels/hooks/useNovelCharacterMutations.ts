@@ -52,6 +52,7 @@ interface CharacterFormState {
   ttsDesignPrompt: string;
   ttsRefAudioPath: string;
   ttsRefAudioBase64: string;
+  ttsSpeakerAliases: string;
   presenceImpression: string;
   currentState: string;
   currentGoal: string;
@@ -270,6 +271,7 @@ export function useNovelCharacterMutations(input: UseNovelCharacterMutationsInpu
         ttsDesignPrompt: characterForm.ttsDesignPrompt.trim() || null,
         ttsRefAudioPath: characterForm.ttsRefAudioPath.trim() || null,
         ttsRefAudioBase64: characterForm.ttsRefAudioBase64.trim() || null,
+        ttsSpeakerAliases: characterForm.ttsSpeakerAliases.trim() || null,
         presenceImpression: characterForm.presenceImpression,
         currentState: characterForm.currentState,
         currentGoal: characterForm.currentGoal,

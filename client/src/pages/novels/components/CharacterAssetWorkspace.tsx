@@ -41,6 +41,7 @@ interface CharacterFormState {
   ttsDesignPrompt: string;
   ttsRefAudioPath: string;
   ttsRefAudioBase64: string;
+  ttsSpeakerAliases: string;
   presenceImpression: string;
   currentState: string;
   currentGoal: string;
@@ -594,6 +595,11 @@ export default function CharacterAssetWorkspace(props: CharacterAssetWorkspacePr
                   placeholder={`有声书说话 style（默认可参考：${DEFAULT_AUDIOBOOK_NARRATOR_STYLE.slice(0, 24)}…）`}
                   value={characterForm.ttsStyle}
                   onChange={(event) => onCharacterFormChange("ttsStyle", event.target.value)}
+                />
+                <Input
+                  placeholder="说话人别名（外号/称呼，顿号或逗号分隔，如：远哥、小远）"
+                  value={characterForm.ttsSpeakerAliases}
+                  onChange={(event) => onCharacterFormChange("ttsSpeakerAliases", event.target.value)}
                 />
                 <div className="grid gap-2 md:grid-cols-2">
                   <Input

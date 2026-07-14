@@ -95,17 +95,28 @@ export interface AudiobookMediaAccessResult {
 export async function issueAudiobookMediaUrl(
   novelId: string,
   taskId: string,
-  resource: { resource: "full" } | { resource: "chapter"; chapterId: string },
+  resource:
+    | { resource: "full" }
+    | { resource: "full_m4b" }
+    | { resource: "chapter"; chapterId: string },
 ): Promise<string> {
+  const body = resource.resource === "full"
+    ? { resource: "full" as const }
+    : resource.resource === "full_m4b"
+      ? { resource: "full_m4b" as const }
+      : { resource: "chapter" as const, chapterId: resource.chapterId };
   const { data } = await apiClient.post<ApiResponse<AudiobookMediaAccessResult>>(
     `/novels/${novelId}/audiobook/tasks/${taskId}/media-access`,
-    resource.resource === "full"
-      ? { resource: "full" }
-      : { resource: "chapter", chapterId: resource.chapterId },
+    body,
   );
   const path = data.data?.urlPath;
   if (!path) {
-    // 回退：open 模式裸路径
+    if (resource.resource === "full_m4b") {
+      return buildAudiobookFullM4bUrl(novelId, taskId);
+    }
+    if (resource.resource === "chapter") {
+      return buildAudiobookChapterAudioUrl(novelId, taskId, resource.chapterId);
+    }
     return buildAudiobookFullAudioUrl(novelId, taskId);
   }
   const base = API_BASE_URL.replace(/\/$/, "");
@@ -118,6 +129,11 @@ export async function issueAudiobookMediaUrl(
 export function buildAudiobookFullAudioUrl(novelId: string, taskId: string): string {
   const base = API_BASE_URL.replace(/\/$/, "");
   return `${base}/novels/${encodeURIComponent(novelId)}/audiobook/tasks/${encodeURIComponent(taskId)}/audio/full`;
+}
+
+export function buildAudiobookFullM4bUrl(novelId: string, taskId: string): string {
+  const base = API_BASE_URL.replace(/\/$/, "");
+  return `${base}/novels/${encodeURIComponent(novelId)}/audiobook/tasks/${encodeURIComponent(taskId)}/audio/full.m4b`;
 }
 
 export function buildAudiobookChapterAudioUrl(

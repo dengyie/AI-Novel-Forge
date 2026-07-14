@@ -11,6 +11,7 @@ import {
 } from "@ai-novel/shared/types/audiobook";
 import { prisma } from "../../db/prisma";
 import { AppError } from "../../middleware/errorHandler";
+import { parseSpeakerAliases } from "./AudiobookTaskService";
 
 function parseScopeMode(value: string | undefined): AudiobookScopeMode {
   if (value === "chapter" || value === "range" || value === "full") {
@@ -70,6 +71,7 @@ export class AudiobookPrecheckService {
             ttsStyle: true,
             ttsDesignPrompt: true,
             ttsRefAudioPath: true,
+            ttsSpeakerAliases: true,
           },
           orderBy: { createdAt: "asc" },
         },
@@ -114,6 +116,7 @@ export class AudiobookPrecheckService {
         ttsStyle: character.ttsStyle ?? null,
         ttsDesignPrompt: character.ttsDesignPrompt?.trim() || "",
         ttsRefAudioPath: character.ttsRefAudioPath?.trim() || "",
+        speakerAliases: parseSpeakerAliases(character.ttsSpeakerAliases),
       };
     });
 
@@ -190,6 +193,7 @@ export class AudiobookPrecheckService {
           ttsStyle: item.ttsStyle,
           ttsDesignPrompt: item.ttsDesignPrompt || null,
           ttsRefAudioPath: item.ttsRefAudioPath || null,
+          speakerAliases: item.speakerAliases,
         })),
       missingVoices,
       blockingErrors,

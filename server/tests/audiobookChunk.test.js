@@ -8,7 +8,11 @@ const {
   isMimoTtsPresetVoice,
   DEFAULT_AUDIOBOOK_NARRATOR_VOICE,
 } = require("../../shared/dist/types/audiobook.js");
-const { splitTextForTts } = require("../dist/services/audiobook/audiobookChunk.js");
+const {
+  splitTextForTts,
+  coalesceSegmentsBySpeaker,
+  expandSegmentsToChunkJobs,
+} = require("../dist/services/audiobook/audiobookChunk.js");
 const {
   resolveAudiobookTaskDir,
   resolveChunkAudioPath,
@@ -64,6 +68,124 @@ test("splitTextForTts preserves interior whitespace across chunks", () => {
   assert.equal(chunks.join("").includes("\n\n"), true);
 });
 
+test("coalesceSegmentsBySpeaker merges consecutive same speaker", () => {
+  const segments = [
+    {
+      index: 0,
+      speakerKind: "narrator",
+      characterId: null,
+      speakerLabel: "旁白",
+      text: "夜色渐深。",
+      ttsMode: "preset",
+      voice: "茉莉",
+      style: "旁白",
+    },
+    {
+      index: 1,
+      speakerKind: "narrator",
+      characterId: null,
+      speakerLabel: "旁白",
+      text: "长街只剩脚步声。",
+      ttsMode: "preset",
+      voice: "茉莉",
+      style: "旁白",
+    },
+    {
+      index: 2,
+      speakerKind: "character",
+      characterId: "c1",
+      speakerLabel: "林远",
+      text: "别回头。",
+      ttsMode: "preset",
+      voice: "白桦",
+      style: null,
+    },
+    {
+      index: 3,
+      speakerKind: "character",
+      characterId: "c1",
+      speakerLabel: "林远",
+      text: "跟我走。",
+      ttsMode: "preset",
+      voice: "白桦",
+      style: null,
+    },
+  ];
+  const merged = coalesceSegmentsBySpeaker(segments);
+  assert.equal(merged.length, 2);
+  assert.equal(merged[0].text, "夜色渐深。\n长街只剩脚步声。");
+  assert.equal(merged[1].text, "别回头。\n跟我走。");
+  assert.equal(merged[0].index, 0);
+  assert.equal(merged[1].index, 1);
+});
+
+test("coalesceSegmentsBySpeaker does not merge different voice config", () => {
+  const segments = [
+    {
+      index: 0,
+      speakerKind: "character",
+      characterId: "c1",
+      speakerLabel: "林远",
+      text: "一句。",
+      ttsMode: "preset",
+      voice: "白桦",
+      style: "平静",
+    },
+    {
+      index: 1,
+      speakerKind: "character",
+      characterId: "c1",
+      speakerLabel: "林远",
+      text: "二句。",
+      ttsMode: "preset",
+      voice: "白桦",
+      style: "急促",
+    },
+  ];
+  const merged = coalesceSegmentsBySpeaker(segments);
+  assert.equal(merged.length, 2);
+});
+
+test("expandSegmentsToChunkJobs groups then splits long text", () => {
+  const longA = "甲。".repeat(300);
+  const longB = "乙。".repeat(10);
+  const segments = [
+    {
+      index: 0,
+      speakerKind: "narrator",
+      characterId: null,
+      speakerLabel: "旁白",
+      text: longA.slice(0, 200),
+      ttsMode: "preset",
+      voice: "茉莉",
+    },
+    {
+      index: 1,
+      speakerKind: "narrator",
+      characterId: null,
+      speakerLabel: "旁白",
+      text: longA.slice(200),
+      ttsMode: "preset",
+      voice: "茉莉",
+    },
+    {
+      index: 2,
+      speakerKind: "character",
+      characterId: "c2",
+      speakerLabel: "苏沫",
+      text: longB,
+      ttsMode: "preset",
+      voice: "冰糖",
+    },
+  ];
+  const jobs = expandSegmentsToChunkJobs(segments);
+  assert.equal(jobs.length >= 2, true);
+  assert.equal(jobs.every((job) => job.text.length <= AUDIOBOOK_CHUNK_MAX_CHARS), true);
+  const narratorJobs = jobs.filter((job) => job.segment.speakerKind === "narrator");
+  assert.equal(narratorJobs.length >= 1, true);
+  assert.equal(narratorJobs[0].segment.text.includes("\n"), true);
+});
+
 test("audiobookPaths rejects path traversal segments", () => {
   assert.throws(() => resolveAudiobookTaskDir("../etc", "task1"), /非法/);
   assert.throws(() => resolveAudiobookTaskDir("novel1", "a/b"), /非法/);
@@ -105,10 +227,12 @@ test("wipeChapterAudioArtifacts removes chapter audio and full-book only", () =>
     const chunk = resolveChunkAudioPath(root, chapterId, 0);
     const chapterWav = resolveChapterAudioPath(root, chapterId);
     const full = resolveFullBookAudioPath(root);
+    const fullM4b = path.join(root, "full-book.m4b");
     const ann = resolveChapterAnnotationPath(root, chapterId);
     fs.writeFileSync(chunk, Buffer.alloc(48));
     fs.writeFileSync(chapterWav, Buffer.alloc(48));
     fs.writeFileSync(full, Buffer.alloc(48));
+    fs.writeFileSync(fullM4b, Buffer.alloc(48));
     fs.mkdirSync(path.dirname(ann), { recursive: true });
     fs.writeFileSync(ann, "{}");
 
@@ -116,6 +240,7 @@ test("wipeChapterAudioArtifacts removes chapter audio and full-book only", () =>
     assert.equal(fs.existsSync(chunk), false);
     assert.equal(fs.existsSync(chapterWav), false);
     assert.equal(fs.existsSync(full), false);
+    assert.equal(fs.existsSync(fullM4b), false);
     assert.equal(fs.existsSync(ann), true);
 
     wipeChapterAnnotationArtifact(root, chapterId);
@@ -240,6 +365,31 @@ test("audiobook media access sign and verify", () => {
       novelId: "novel1",
       taskId: "task1",
       resource: { kind: "chapter", chapterId: "c1" },
+    }),
+    false,
+  );
+  const m4bIssued = issueAudiobookMediaAccess({
+    novelId: "novel1",
+    taskId: "task1",
+    resource: { kind: "full_m4b" },
+    ttlSec: 120,
+  });
+  assert.ok(m4bIssued);
+  assert.equal(
+    verifyAudiobookMediaAccess({
+      access: m4bIssued.access,
+      novelId: "novel1",
+      taskId: "task1",
+      resource: { kind: "full_m4b" },
+    }),
+    true,
+  );
+  assert.equal(
+    verifyAudiobookMediaAccess({
+      access: m4bIssued.access,
+      novelId: "novel1",
+      taskId: "task1",
+      resource: { kind: "full" },
     }),
     false,
   );
@@ -380,4 +530,77 @@ test("buildMimoTtsRequestBody rejects preset unknown voice", () => {
     () => buildMimoTtsRequestBody({ text: "x", mode: "preset", voice: "not-real" }),
     /预置/,
   );
+});
+
+
+const { parseSpeakerAliases } = require("../dist/services/audiobook/AudiobookTaskService.js");
+const {
+  buildM4bFfmetadata,
+  encodeFullBookM4b,
+  resolveFfmpegBinary,
+} = require("../dist/services/audiobook/audiobookM4b.js");
+
+test("parseSpeakerAliases accepts JSON array and delimiter strings", () => {
+  assert.deepEqual(parseSpeakerAliases(null), []);
+  assert.deepEqual(parseSpeakerAliases(""), []);
+  assert.deepEqual(parseSpeakerAliases(["远哥", " 小远 ", ""]), ["远哥", "小远"]);
+  assert.deepEqual(parseSpeakerAliases('["远哥","小远"]'), ["远哥", "小远"]);
+  assert.deepEqual(parseSpeakerAliases("远哥、小远,阿远"), ["远哥", "小远", "阿远"]);
+});
+
+test("buildM4bFfmetadata writes chapter blocks with ms timebase", () => {
+  const meta = buildM4bFfmetadata({
+    title: "测试书=标题",
+    chapters: [
+      { title: "第一章", startMs: 0, endMs: 1000 },
+      { title: "第二章;夜", startMs: 1000, endMs: 2500 },
+    ],
+  });
+  assert.equal(meta.includes(";FFMETADATA1"), true);
+  assert.equal(meta.includes("title=测试书\\=标题") || meta.includes("title=测试书\=标题"), true);
+  assert.equal(meta.includes("TIMEBASE=1/1000"), true);
+  assert.equal(meta.includes("START=0"), true);
+  assert.equal(meta.includes("END=1000"), true);
+  assert.equal(meta.includes("START=1000"), true);
+  assert.equal(meta.includes("END=2500"), true);
+  assert.equal(meta.includes("title=第二章\\;夜") || meta.includes("title=第二章\;夜"), true);
+});
+
+test("encodeFullBookM4b skips when ffmpeg is unavailable", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ab-m4b-"));
+  const prevFfmpeg = process.env.AUDIOBOOK_FFMPEG_PATH;
+  const prevFfmpeg2 = process.env.FFMPEG_PATH;
+  const prevPath = process.env.PATH;
+  try {
+    const wav = buildWavBuffer(Buffer.alloc(4800), { numChannels: 1, sampleRate: 24_000, bitsPerSample: 16 });
+    const full = path.join(dir, "full-book.wav");
+    fs.writeFileSync(full, wav);
+    process.env.AUDIOBOOK_FFMPEG_PATH = path.join(dir, "missing-ffmpeg-binary");
+    process.env.FFMPEG_PATH = path.join(dir, "missing-ffmpeg-binary");
+    process.env.PATH = "";
+    const result = encodeFullBookM4b({
+      taskDir: dir,
+      bookTitle: "无 ffmpeg 书",
+      chapters: [],
+    });
+    assert.equal(result.status, "skipped");
+    assert.equal(result.path, null);
+    assert.match(result.reason || "", /ffmpeg/);
+
+    const missing = encodeFullBookM4b({
+      taskDir: path.join(dir, "no-wav"),
+      bookTitle: "x",
+      chapters: [],
+    });
+    assert.equal(missing.status, "failed");
+    assert.equal(Boolean(missing.reason), true);
+  } finally {
+    if (prevFfmpeg === undefined) delete process.env.AUDIOBOOK_FFMPEG_PATH;
+    else process.env.AUDIOBOOK_FFMPEG_PATH = prevFfmpeg;
+    if (prevFfmpeg2 === undefined) delete process.env.FFMPEG_PATH;
+    else process.env.FFMPEG_PATH = prevFfmpeg2;
+    if (prevPath === undefined) delete process.env.PATH;
+    else process.env.PATH = prevPath;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

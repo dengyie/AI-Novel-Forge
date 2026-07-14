@@ -80,6 +80,8 @@ export interface AudiobookCharacterVoiceConfig {
   ttsDesignPrompt?: string | null;
   /** clone：参考音频相对/绝对路径（服务端可读）。 */
   ttsRefAudioPath?: string | null;
+  /** 说话人别名（称呼/外号），用于标注 speakerName 归一。 */
+  speakerAliases?: string[] | null;
 }
 
 export interface AudiobookNarratorConfig {

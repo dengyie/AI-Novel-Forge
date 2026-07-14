@@ -59,6 +59,7 @@ function statusVariant(status: AudiobookTaskSummary["status"]): "default" | "sec
 function TaskAudioControls(props: { novelId: string; task: AudiobookTaskSummary }) {
   const { novelId, task } = props;
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [m4bUrl, setM4bUrl] = useState<string | null>(null);
   const [error, setError] = useState("");
   const canPlay = task.status === "succeeded" || Boolean(task.fullAudioPath);
 
@@ -66,19 +67,25 @@ function TaskAudioControls(props: { novelId: string; task: AudiobookTaskSummary 
     let cancelled = false;
     if (!canPlay) {
       setAudioUrl(null);
+      setM4bUrl(null);
       return;
     }
     void (async () => {
       try {
-        const url = await issueAudiobookMediaUrl(novelId, task.id, { resource: "full" });
+        const [url, m4b] = await Promise.all([
+          issueAudiobookMediaUrl(novelId, task.id, { resource: "full" }),
+          issueAudiobookMediaUrl(novelId, task.id, { resource: "full_m4b" }).catch(() => null),
+        ]);
         if (!cancelled) {
           setAudioUrl(url);
+          setM4bUrl(m4b);
           setError("");
         }
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : "无法签发音频地址。");
           setAudioUrl(null);
+          setM4bUrl(null);
         }
       }
     })();
@@ -99,11 +106,21 @@ function TaskAudioControls(props: { novelId: string; task: AudiobookTaskSummary 
           <div className="flex flex-wrap gap-2">
             <Button asChild size="sm" variant="outline">
               <a href={audioUrl} target="_blank" rel="noreferrer">
-                播放/下载全书
+                播放/下载全书 WAV
               </a>
             </Button>
+            {m4bUrl ? (
+              <Button asChild size="sm" variant="outline">
+                <a href={m4bUrl} download>
+                  下载 m4b
+                </a>
+              </Button>
+            ) : null}
           </div>
           <audio className="w-full" controls preload="none" src={audioUrl} />
+          <p className="text-xs text-muted-foreground">
+            m4b 依赖运行环境 ffmpeg；若点击下载 404，说明本任务未成功封装 m4b，WAV 仍可用。
+          </p>
         </>
       ) : (
         <div className="text-sm text-muted-foreground">正在准备音频地址…</div>

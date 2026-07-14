@@ -19,6 +19,7 @@ import {
   resolveAudiobookTaskDir,
   resolveChapterAudioPath,
   resolveFullBookAudioPath,
+  resolveFullBookM4bPath,
 } from "../../../../services/audiobook/audiobookPaths";
 
 const novelParamsSchema = z.object({
@@ -81,11 +82,13 @@ function parseRangeHeader(
   return { start, end };
 }
 
-function streamWavFile(
+function streamAudioFile(
   req: import("express").Request,
   res: import("express").Response,
   filePath: string,
   downloadName: string,
+  contentType: string,
+  disposition: "inline" | "attachment" = "inline",
 ): void {
   if (!fs.existsSync(filePath)) {
     res.status(404).json({
@@ -98,10 +101,10 @@ function streamWavFile(
   const size = stat.size;
   const range = parseRangeHeader(req.headers.range, size);
 
-  res.setHeader("Content-Type", "audio/wav");
+  res.setHeader("Content-Type", contentType);
   res.setHeader("Accept-Ranges", "bytes");
   res.setHeader("Cache-Control", "private, max-age=3600");
-  res.setHeader("Content-Disposition", `inline; filename="${downloadName}"`);
+  res.setHeader("Content-Disposition", `${disposition}; filename="${downloadName}"`);
 
   if (range === "invalid") {
     res.status(416);
@@ -122,6 +125,15 @@ function streamWavFile(
 
   res.setHeader("Content-Length", String(size));
   fs.createReadStream(filePath).pipe(res);
+}
+
+function streamWavFile(
+  req: import("express").Request,
+  res: import("express").Response,
+  filePath: string,
+  downloadName: string,
+): void {
+  streamAudioFile(req, res, filePath, downloadName, "audio/wav", "inline");
 }
 
 function resolvePlayableFullPath(taskDir: string, stored: string | null | undefined): string {
@@ -146,7 +158,7 @@ function assertMediaAccess(input: {
   res: import("express").Response;
   novelId: string;
   taskId: string;
-  resource: { kind: "full" } | { kind: "chapter"; chapterId: string };
+  resource: { kind: "full" } | { kind: "full_m4b" } | { kind: "chapter"; chapterId: string };
 }): boolean {
   const headerAuthorized = Boolean((input.req as RequestWithApiAuth).apiAuthViaHeader);
   if (headerAuthorized) {
@@ -419,7 +431,7 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
     validate({
       params: taskParamsSchema,
       body: z.object({
-        resource: z.enum(["full", "chapter"]),
+        resource: z.enum(["full", "full_m4b", "chapter"]),
         chapterId: z.string().trim().min(1).optional(),
       }).superRefine((value, ctx) => {
         if (value.resource === "chapter" && !value.chapterId) {
@@ -434,7 +446,7 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
     async (req, res, next) => {
       try {
         const { id, taskId } = req.params as z.infer<typeof taskParamsSchema>;
-        const body = req.body as { resource: "full" | "chapter"; chapterId?: string };
+        const body = req.body as { resource: "full" | "full_m4b" | "chapter"; chapterId?: string };
         const task = await audiobookTaskService.getTask(taskId);
         if (!task || task.novelId !== id) {
           res.status(404).json({
@@ -453,7 +465,9 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
 
         const resource = body.resource === "full"
           ? { kind: "full" as const }
-          : { kind: "chapter" as const, chapterId: body.chapterId! };
+          : body.resource === "full_m4b"
+            ? { kind: "full_m4b" as const }
+            : { kind: "chapter" as const, chapterId: body.chapterId! };
 
         const issued = issueAudiobookMediaAccess({
           novelId: id,
@@ -463,7 +477,9 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
 
         const pathSuffix = body.resource === "full"
           ? `/novels/${encodeURIComponent(id)}/audiobook/tasks/${encodeURIComponent(taskId)}/audio/full`
-          : `/novels/${encodeURIComponent(id)}/audiobook/tasks/${encodeURIComponent(taskId)}/audio/chapters/${encodeURIComponent(body.chapterId!)}`;
+          : body.resource === "full_m4b"
+            ? `/novels/${encodeURIComponent(id)}/audiobook/tasks/${encodeURIComponent(taskId)}/audio/full.m4b`
+            : `/novels/${encodeURIComponent(id)}/audiobook/tasks/${encodeURIComponent(taskId)}/audio/chapters/${encodeURIComponent(body.chapterId!)}`;
 
         const data = issued
           ? {
@@ -571,6 +587,61 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
           return;
         }
         streamWavFile(req, res, filePath, `audiobook-${taskId}-${chapterId}.wav`);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  router.get(
+    "/:id/audiobook/tasks/:taskId/audio/full.m4b",
+    validate({ params: taskParamsSchema }),
+    async (req, res, next) => {
+      try {
+        const { id, taskId } = req.params as z.infer<typeof taskParamsSchema>;
+        if (!assertMediaAccess({
+          req,
+          res,
+          novelId: id,
+          taskId,
+          resource: { kind: "full_m4b" },
+        })) {
+          return;
+        }
+
+        const task = await audiobookTaskService.getTask(taskId);
+        if (!task || task.novelId !== id) {
+          res.status(404).json({
+            success: false,
+            error: "有声书任务不存在。",
+          } satisfies ApiResponse<null>);
+          return;
+        }
+
+        const taskDir = resolveAudiobookTaskDir(id, taskId);
+        const filePath = resolveFullBookM4bPath(taskDir);
+        if (!isPathInside(taskDir, filePath)) {
+          res.status(400).json({
+            success: false,
+            error: "音频路径非法。",
+          } satisfies ApiResponse<null>);
+          return;
+        }
+        if (!fs.existsSync(filePath)) {
+          res.status(404).json({
+            success: false,
+            error: "m4b 尚未生成（本机/运行环境可能缺少 ffmpeg，或任务仍在进行）。",
+          } satisfies ApiResponse<null>);
+          return;
+        }
+        streamAudioFile(
+          req,
+          res,
+          filePath,
+          `audiobook-${taskId}-full.m4b`,
+          "audio/mp4",
+          "attachment",
+        );
       } catch (error) {
         next(error);
       }

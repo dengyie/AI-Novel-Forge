@@ -9,6 +9,7 @@ const DEFAULT_TTL_SEC = Math.max(
 
 export type AudiobookMediaResource =
   | { kind: "full" }
+  | { kind: "full_m4b" }
   | { kind: "chapter"; chapterId: string };
 
 function resolveSigningSecret(): string | null {
@@ -40,6 +41,9 @@ function safeEqual(a: string, b: string): boolean {
 function resourceKey(resource: AudiobookMediaResource): string {
   if (resource.kind === "full") {
     return "full";
+  }
+  if (resource.kind === "full_m4b") {
+    return "full_m4b";
   }
   return `chapter:${resource.chapterId}`;
 }

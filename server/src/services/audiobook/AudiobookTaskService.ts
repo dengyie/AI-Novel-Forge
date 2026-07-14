@@ -45,6 +45,30 @@ function parseChapterIds(json: string | null | undefined): string[] {
   }
 }
 
+/** 角色 ttsSpeakerAliases：JSON 数组或逗号/顿号分隔。 */
+export function parseSpeakerAliases(raw: string | string[] | null | undefined): string[] {
+  if (Array.isArray(raw)) {
+    return raw.map((item) => String(item).trim()).filter(Boolean).slice(0, 24);
+  }
+  const text = raw?.trim();
+  if (!text) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    if (Array.isArray(parsed)) {
+      return parsed.map((item) => String(item).trim()).filter(Boolean).slice(0, 24);
+    }
+  } catch {
+    // fall through to delimiter split
+  }
+  return text
+    .split(/[,，、;；|/\n]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .slice(0, 24);
+}
+
 function buildTaskTitle(novelTitle: string, scopeMode: string, chapterCount: number): string {
   const scopeLabel = scopeMode === "full"
     ? "全书"
@@ -679,6 +703,7 @@ export class AudiobookTaskService {
       const novel = await prisma.novel.findUnique({
         where: { id: task.novelId },
         select: {
+          title: true,
           characters: {
             select: {
               id: true,
@@ -688,6 +713,7 @@ export class AudiobookTaskService {
               ttsStyle: true,
               ttsDesignPrompt: true,
               ttsRefAudioPath: true,
+              ttsSpeakerAliases: true,
             },
           },
         },
@@ -709,6 +735,7 @@ export class AudiobookTaskService {
             ttsStyle: character.ttsStyle ?? null,
             ttsDesignPrompt: character.ttsDesignPrompt?.trim() || null,
             ttsRefAudioPath: character.ttsRefAudioPath?.trim() || null,
+            speakerAliases: parseSpeakerAliases(character.ttsSpeakerAliases),
           };
         })
         .filter((character) => {
@@ -724,6 +751,7 @@ export class AudiobookTaskService {
       const result = await audiobookPipelineService.run({
         taskId,
         novelId: task.novelId,
+        novelTitle: novel.title,
         chapterIds,
         narrator: {
           voice: task.narratorVoice,
@@ -821,8 +849,15 @@ export class AudiobookTaskService {
             chapterIds: result.chapterAudioPaths.map((item) => item.chapterId),
             completedChunks: result.completedChunks,
             qualityWarnings: result.qualityWarnings,
+            m4b: {
+              status: result.m4b.status,
+              path: result.m4b.relativePath,
+              reason: result.m4b.reason ?? null,
+              bytes: result.m4b.bytes ?? null,
+              chapterCount: result.m4b.chapterCount ?? null,
+            },
           }),
-          summary: `有声书完成：${result.completedChapterCount} 章，${result.completedChunks} 个音频块${warningSuffix}。`,
+          summary: `有声书完成：${result.completedChapterCount} 章，${result.completedChunks} 个音频块${warningSuffix}${result.m4b.status === "ready" ? "，含 m4b" : ""}。`,
           error: null,
         },
       });

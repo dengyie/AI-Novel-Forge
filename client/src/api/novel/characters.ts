@@ -214,6 +214,7 @@ export async function createNovelCharacter(
     ttsDesignPrompt?: string | null;
     ttsRefAudioPath?: string | null;
     ttsRefAudioBase64?: string | null;
+    ttsSpeakerAliases?: string | string[] | null;
     presenceImpression?: string;
     arcStart?: string;
     arcMidpoint?: string;
@@ -260,6 +261,7 @@ export async function updateNovelCharacter(
     ttsDesignPrompt: string | null;
     ttsRefAudioPath: string | null;
     ttsRefAudioBase64: string | null;
+    ttsSpeakerAliases: string | string[] | null;
     presenceImpression: string;
     arcStart: string;
     arcMidpoint: string;

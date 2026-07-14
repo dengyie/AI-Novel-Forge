@@ -59,7 +59,7 @@ export const audiobookChapterAnnotatePrompt: PromptAsset<
       "规则：",
       "1. speakerKind 只能是 narrator 或 character。",
       "2. 引号内的直接引语通常归 character；叙述、动作、心理描写归 narrator。",
-      "3. character 的 speakerName 必须尽量匹配「角色表」中的名字；无法匹配时仍写原文称呼，后续系统会回退旁白。",
+      "3. character 的 speakerName 必须尽量匹配「角色表」中的正式名；若正文用外号/称呼，优先映射到角色表正式名（角色表可含别名）。无法匹配时仍写原文称呼，后续系统会回退旁白。",
       "4. 不要改写正文语义；可做最小切分与标点整理，但不要扩写、不要删剧情。",
       "5. 合并连续同一说话人的短句为一段，避免碎片化；单段不宜超过约 500 字。",
       "6. 覆盖整章正文主线内容；不要输出空 segments。",

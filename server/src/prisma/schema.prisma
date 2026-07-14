@@ -631,6 +631,8 @@ model Character {
   ttsMode         String?
   ttsDesignPrompt String?
   ttsRefAudioPath String?
+  /** JSON string array of speaker aliases for audiobook annotation. */
+  ttsSpeakerAliases String?
   presenceImpression String?
   arcStart        String?
   arcMidpoint     String?
