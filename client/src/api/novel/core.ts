@@ -139,6 +139,8 @@ export async function updateNovel(
     worldId: string | null;
     outline: string | null;
     structuredOutline: string | null;
+    audiobookNarratorVoice: string | null;
+    audiobookNarratorStyle: string | null;
   }>,
 ) {
   const { data } = await apiClient.put<ApiResponse<Novel>>(`/novels/${id}`, payload);

@@ -438,6 +438,10 @@ const promptAssetLoaderEntries: PromptAssetLoaderEntry[] = [
     load: () => require("./prompts/payoff/payoffLedgerSync.prompts").payoffLedgerSyncPrompt as UnknownPromptAsset,
   },
   {
+    key: "audiobook.chapter.annotate@v1",
+    load: () => require("./prompts/audiobook/audiobookChapterAnnotate.prompts").audiobookChapterAnnotatePrompt as UnknownPromptAsset,
+  },
+  {
     key: "state.snapshot.extract@v4",
     load: () => require("./prompts/state/state.prompts").stateSnapshotPrompt as UnknownPromptAsset,
   },

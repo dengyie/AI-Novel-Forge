@@ -31,6 +31,8 @@ interface CharacterFormState {
   attireStyle: string;
   signatureDetail: string;
   voiceTexture: string;
+  ttsVoice: string;
+  ttsStyle: string;
   presenceImpression: string;
   currentState: string;
   currentGoal: string;
@@ -71,6 +73,8 @@ const EMPTY_CHARACTER_FORM: CharacterFormState = {
   attireStyle: "",
   signatureDetail: "",
   voiceTexture: "",
+  ttsVoice: "",
+  ttsStyle: "",
   presenceImpression: "",
   currentState: "",
   currentGoal: "",
@@ -136,6 +140,8 @@ export function useNovelEditInitialization({
       sourceKnowledgeDocumentId: detail.sourceKnowledgeDocumentId ?? "",
       continuationBookAnalysisId: detail.continuationBookAnalysisId ?? "",
       continuationBookAnalysisSections: detail.continuationBookAnalysisSections ?? [],
+      audiobookNarratorVoice: detail.audiobookNarratorVoice ?? "",
+      audiobookNarratorStyle: detail.audiobookNarratorStyle ?? "",
     });
     if (hydrateVolumeDraftFromDetail) {
       setVolumeDraft(detail.volumes ?? []);
@@ -215,6 +221,8 @@ export function useNovelEditInitialization({
       attireStyle: selectedCharacter.attireStyle ?? "",
       signatureDetail: selectedCharacter.signatureDetail ?? "",
       voiceTexture: selectedCharacter.voiceTexture ?? "",
+      ttsVoice: selectedCharacter.ttsVoice ?? "",
+      ttsStyle: selectedCharacter.ttsStyle ?? "",
       presenceImpression: selectedCharacter.presenceImpression ?? "",
       currentState: selectedCharacter.currentState ?? "",
       currentGoal: selectedCharacter.currentGoal ?? "",

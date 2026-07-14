@@ -3,11 +3,16 @@ import type {
   AudiobookTaskSummary,
   CreateAudiobookTaskInput,
 } from "@ai-novel/shared/types/audiobook";
+import type { LLMProvider } from "@ai-novel/shared/types/llm";
 import { prisma } from "../../db/prisma";
 import { AppError } from "../../middleware/errorHandler";
 import { toTaskTokenUsageSummary } from "../task/taskTokenUsageSummary";
 import { isMissingAudiobookTaskTableError } from "./audiobookErrors";
 import { audiobookPrecheckService } from "./AudiobookPrecheckService";
+import {
+  audiobookPipelineService,
+  PipelineCancelledError,
+} from "./AudiobookPipelineService";
 import { ensureAudiobookTaskDir } from "./audiobookPaths";
 
 const AUDIOBOOK_HEARTBEAT_INTERVAL_MS = Math.max(
@@ -155,8 +160,7 @@ function toDetail(row: AudiobookTaskRow): AudiobookTaskDetail {
 }
 
 /**
- * 有声书任务骨架：precheck 硬门禁、创建/取消/恢复、队列占位。
- * 完整 LLM 标注与 TTS 合成流水线留给后续 milestone。
+ * 有声书任务：precheck 硬门禁、创建/取消/恢复、标注→TTS→章/全书 WAV 流水线。
  */
 export class AudiobookTaskService {
   private readonly queue: string[] = [];
@@ -479,7 +483,7 @@ export class AudiobookTaskService {
           continue;
         }
         this.queueSet.delete(taskId);
-        await this.executeTaskSkeleton(taskId);
+        await this.executeTask(taskId);
       }
     } finally {
       this.processing = false;
@@ -491,10 +495,10 @@ export class AudiobookTaskService {
   }
 
   /**
-   * 骨架执行：仅推进到 skeleton_ready。
-   * 完整标注与合成在后续 milestone 实现；此处保证任务可创建、可取消、可恢复。
+   * 执行完整流水线：LLM 按章标注 → chunk TTS → 章/全书 WAV。
+   * resume：已存在 chapter.wav / chunk-*.wav / annotations 时跳过。
    */
-  private async executeTaskSkeleton(taskId: string): Promise<void> {
+  private async executeTask(taskId: string): Promise<void> {
     const task = await prisma.audiobookTask.findUnique({ where: { id: taskId } });
     if (!task) {
       return;
@@ -512,7 +516,6 @@ export class AudiobookTaskService {
     const stopHeartbeat = this.startTaskHeartbeat(taskId);
 
     try {
-      // CAS：仅 queued 可进入 running，避免覆盖 cancelled
       const claimed = await prisma.audiobookTask.updateMany({
         where: {
           id: taskId,
@@ -526,7 +529,7 @@ export class AudiobookTaskService {
           heartbeatAt: new Date(),
           currentStage: "preparing",
           currentItemLabel: "准备有声书任务",
-          progress: 5,
+          progress: 2,
           error: null,
         },
       });
@@ -538,7 +541,7 @@ export class AudiobookTaskService {
       }
 
       if (controller.signal.aborted || (await this.isCancelRequested(taskId))) {
-        await this.markCancelledIfActive(taskId, 5, ["running"]);
+        await this.markCancelledIfActive(taskId, 2, ["running"]);
         return;
       }
 
@@ -548,67 +551,130 @@ export class AudiobookTaskService {
         return;
       }
 
-      // 骨架：不调用 LLM/TTS。默认 failed 明确未接通流水线；本地可 MARK_SUCCEEDED。
-      const markSucceeded = process.env.AUDIOBOOK_SKELETON_MARK_SUCCEEDED === "1"
-        || process.env.AUDIOBOOK_SKELETON_MARK_SUCCEEDED === "true";
+      // 执行期用任务快照 chapterIds + 当前角色音色表（不重做 scope 解析）
+      const novel = await prisma.novel.findUnique({
+        where: { id: task.novelId },
+        select: {
+          characters: {
+            select: {
+              id: true,
+              name: true,
+              ttsVoice: true,
+              ttsStyle: true,
+            },
+          },
+        },
+      });
+      if (!novel) {
+        await this.markFailedIfRunning(taskId, "小说不存在。");
+        return;
+      }
+      const characterVoices = novel.characters
+        .filter((character) => Boolean(character.ttsVoice?.trim()))
+        .map((character) => ({
+          characterId: character.id,
+          characterName: character.name,
+          ttsVoice: character.ttsVoice!.trim(),
+          ttsStyle: character.ttsStyle ?? null,
+        }));
 
-      const progressUpdated = await prisma.audiobookTask.updateMany({
+      const result = await audiobookPipelineService.run({
+        taskId,
+        novelId: task.novelId,
+        chapterIds,
+        narrator: {
+          voice: task.narratorVoice,
+          style: task.narratorStyle,
+        },
+        characterVoices,
+        provider: (task.provider as LLMProvider | null) ?? null,
+        model: task.model,
+        temperature: task.temperature,
+        signal: controller.signal,
+        isCancelRequested: () => this.isCancelRequested(taskId),
+        onProgress: async (progress) => {
+          if (await this.isCancelRequested(taskId)) {
+            return;
+          }
+          const annotateWeight = 0.25;
+          const synthWeight = 0.7;
+          let ratio = 0.05;
+          if (progress.phase === "annotating") {
+            ratio = 0.05 + annotateWeight * ((progress.chapterIndex + 1) / Math.max(1, progress.chapterCount));
+          } else if (progress.phase === "synthesizing" || progress.phase === "merging") {
+            const chunkRatio = progress.totalChunksEstimate > 0
+              ? progress.completedChunks / progress.totalChunksEstimate
+              : progress.completedChapters / Math.max(1, progress.chapterCount);
+            ratio = 0.05 + annotateWeight + synthWeight * Math.min(1, chunkRatio);
+          } else if (progress.phase === "finalizing") {
+            ratio = 0.98;
+          }
+          const nextProgress = Math.max(2, Math.min(99, Math.round(ratio * 100)));
+          await prisma.audiobookTask.updateMany({
+            where: {
+              id: taskId,
+              status: "running",
+              cancelRequestedAt: null,
+            },
+            data: {
+              progress: nextProgress,
+              heartbeatAt: new Date(),
+              currentStage: progress.phase,
+              currentItemKey: progress.chapterId,
+              currentItemLabel: progress.message.slice(0, 200),
+              completedChapterCount: progress.completedChapters,
+              annotationsJson: JSON.stringify(progress.annotations),
+              progressJson: JSON.stringify({
+                phase: progress.phase,
+                chapterIndex: progress.chapterIndex,
+                chapterCount: progress.chapterCount,
+                completedChunks: progress.completedChunks,
+                totalChunksEstimate: progress.totalChunksEstimate,
+                chapterAudioPaths: progress.chapterAudioPaths,
+                fullAudioPath: progress.fullAudioPath ?? null,
+              }),
+            },
+          });
+        },
+      });
+
+      if (controller.signal.aborted || (await this.isCancelRequested(taskId))) {
+        await this.markCancelledIfActive(taskId, 95, ["running"]);
+        return;
+      }
+
+      await prisma.audiobookTask.updateMany({
         where: {
           id: taskId,
           status: "running",
           cancelRequestedAt: null,
         },
         data: {
-          currentStage: "skeleton_ready",
-          currentItemLabel: "任务底座已就绪（标注/合成待下一阶段）",
-          progress: 20,
+          status: "succeeded",
+          progress: 100,
+          finishedAt: new Date(),
+          currentStage: "finalizing",
+          currentItemLabel: "有声书生成完成",
           heartbeatAt: new Date(),
-          summary: markSucceeded
-            ? "有声书骨架任务完成（未执行 TTS）。"
-            : "有声书任务底座已创建。完整 LLM 标注与 MiMo 合成流水线尚未在本 milestone 实现。",
-          progressJson: JSON.stringify({
-            phase: "skeleton",
-            chapterIds,
-            narratorVoice: task.narratorVoice,
+          completedChapterCount: result.completedChapterCount,
+          outputDir: result.outputDir,
+          fullAudioPath: result.fullAudioPath,
+          annotationsJson: JSON.stringify(result.annotations),
+          resultJson: JSON.stringify({
+            chapterAudioPaths: result.chapterAudioPaths,
+            fullAudioPath: result.fullAudioPath,
+            completedChunks: result.completedChunks,
           }),
+          summary: `有声书完成：${result.completedChapterCount} 章，${result.completedChunks} 个音频块。`,
+          error: null,
         },
       });
-      if (progressUpdated.count === 0) {
-        if (await this.isCancelRequested(taskId)) {
-          await this.markCancelledIfActive(taskId, 20, ["running", "queued"]);
-        }
-        return;
-      }
-
-      if (controller.signal.aborted || (await this.isCancelRequested(taskId))) {
-        await this.markCancelledIfActive(taskId, 20, ["running"]);
-        return;
-      }
-
-      if (markSucceeded) {
-        await prisma.audiobookTask.updateMany({
-          where: {
-            id: taskId,
-            status: "running",
-            cancelRequestedAt: null,
-          },
-          data: {
-            status: "succeeded",
-            progress: 100,
-            finishedAt: new Date(),
-            currentStage: "finalizing",
-            currentItemLabel: "骨架完成",
-            heartbeatAt: new Date(),
-          },
-        });
-      } else {
-        await this.markFailedIfRunning(
-          taskId,
-          "有声书骨架已就位，但标注/合成流水线尚未实现。可在后续 milestone 重试完整生成。",
-        );
-      }
     } catch (error) {
-      if (controller.signal.aborted || (await this.isCancelRequested(taskId))) {
+      if (
+        error instanceof PipelineCancelledError
+        || controller.signal.aborted
+        || (await this.isCancelRequested(taskId))
+      ) {
         await this.markCancelledIfActive(taskId, task.progress, ["running", "queued"]);
         return;
       }

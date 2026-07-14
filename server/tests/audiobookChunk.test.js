@@ -93,3 +93,55 @@ test("isMissingAudiobookTaskTableError rejects plain errors", () => {
   assert.equal(isMissingAudiobookTaskTableError(null), false);
   assert.equal(isMissingAudiobookTaskTableError({ code: "P2021" }), false);
 });
+
+const {
+  parseWavInfo,
+  buildWavBuffer,
+  concatWavFiles,
+  createSilentPcm,
+} = require("../dist/services/audiobook/audiobookWav.js");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+
+test("buildWavBuffer + parseWavInfo round-trip PCM header", () => {
+  const pcm = Buffer.alloc(480); // 10ms @ 24k mono 16-bit
+  const wav = buildWavBuffer(pcm, { numChannels: 1, sampleRate: 24_000, bitsPerSample: 16 });
+  const info = parseWavInfo(wav);
+  assert.equal(info.numChannels, 1);
+  assert.equal(info.sampleRate, 24_000);
+  assert.equal(info.bitsPerSample, 16);
+  assert.equal(info.audioFormat, 1);
+  assert.equal(info.dataSize, 480);
+});
+
+test("concatWavFiles merges same-format chunks in order", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ab-wav-"));
+  try {
+    const a = buildWavBuffer(Buffer.from([1, 2, 3, 4]), { numChannels: 1, sampleRate: 24_000, bitsPerSample: 16 });
+    const b = buildWavBuffer(Buffer.from([5, 6, 7, 8]), { numChannels: 1, sampleRate: 24_000, bitsPerSample: 16 });
+    const pathA = path.join(dir, "a.wav");
+    const pathB = path.join(dir, "b.wav");
+    const out = path.join(dir, "out.wav");
+    fs.writeFileSync(pathA, a);
+    fs.writeFileSync(pathB, b);
+    const result = concatWavFiles([pathA, pathB], out);
+    assert.equal(result.chunks, 2);
+    assert.equal(result.sampleRate, 24_000);
+    const merged = fs.readFileSync(out);
+    const info = parseWavInfo(merged);
+    assert.equal(info.dataSize, 8);
+    assert.deepEqual(
+      [...merged.subarray(info.dataOffset, info.dataOffset + info.dataSize)],
+      [1, 2, 3, 4, 5, 6, 7, 8],
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("createSilentPcm length matches duration", () => {
+  const pcm = createSilentPcm(100, 24_000, 1);
+  assert.equal(pcm.length, 24_000 * 0.1 * 2);
+  assert.equal(pcm.every((byte) => byte === 0), true);
+});

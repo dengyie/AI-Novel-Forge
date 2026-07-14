@@ -208,6 +208,8 @@ export async function createNovelCharacter(
     attireStyle?: string;
     signatureDetail?: string;
     voiceTexture?: string;
+    ttsVoice?: string | null;
+    ttsStyle?: string | null;
     presenceImpression?: string;
     arcStart?: string;
     arcMidpoint?: string;
@@ -248,6 +250,8 @@ export async function updateNovelCharacter(
     attireStyle: string;
     signatureDetail: string;
     voiceTexture: string;
+    ttsVoice: string | null;
+    ttsStyle: string | null;
     presenceImpression: string;
     arcStart: string;
     arcMidpoint: string;

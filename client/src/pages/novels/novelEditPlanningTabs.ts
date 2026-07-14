@@ -57,6 +57,7 @@ interface BuildNovelEditPlanningTabsInput {
   isSavingWorldSliceOverrides: boolean;
   onBasicFormChange: (patch: Partial<NovelBasicFormState>) => void;
   onSaveBasic: () => void;
+  audiobookPanel?: BasicTabProps["audiobookPanel"];
   onImportNovelWorld: (payload: NovelWorldImportInput) => void;
   onCreateManualNovelWorld: (payload?: NovelWorldManualInput) => void;
   onGenerateNovelWorld: (payload: NovelWorldGenerateInput) => void;
@@ -198,6 +199,7 @@ export function buildNovelEditPlanningTabs(input: BuildNovelEditPlanningTabsInpu
     isSaving: input.isSavingBasic,
     projectQuickStart: input.projectQuickStart,
     directorTakeoverEntry: input.basicDirectorTakeoverEntry,
+    audiobookPanel: input.audiobookPanel,
   };
 
   const outlineTab: OutlineTabViewProps = {
