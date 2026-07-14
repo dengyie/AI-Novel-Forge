@@ -49,6 +49,20 @@ import {
 import type { DirectorPipelinePhase } from "./recovery/novelDirectorRecovery";
 import { WorldContextGateway } from "../worldContext/WorldContextGateway";
 
+/**
+ * Single source of truth for identifying the volume chapter detail bundle module.
+ * Used to force re-run of its succeeded step when the plan range expands (so a stale
+ * "completed" detail bundle from the prior window doesn't short-circuit the
+ * incomplete contracts of the new window) and to gate chapter execution on its
+ * facts being complete (otherwise runFromReady throws "缺少完整章节细化").
+ * Keep all matching conventions here rather than scattering string comparisons.
+ */
+function isChapterDetailBundleModule(module: Pick<WorkflowStepModuleDescriptor, "id" | "nodeKey">): boolean {
+  return module.nodeKey === "volume_chapter_detail_bundle_generate"
+    || module.id === "volume.chapter_detail_bundle.generate"
+    || module.id.includes("chapter_detail");
+}
+
 export interface DirectorPipelineRunInput {
   taskId: string;
   novelId: string;
@@ -237,9 +251,7 @@ export class NovelDirectorPipelineRuntime {
       }
       // Detail bundle must re-run when plan range expands (e.g. 1-10 → 11-20);
       // historical succeeded step reuse would short-circuit incomplete contracts.
-      const forceRerunDetail = module.nodeKey === "volume_chapter_detail_bundle_generate"
-        || module.id === "volume.chapter_detail_bundle.generate"
-        || module.id.includes("chapter_detail");
+      const forceRerunDetail = isChapterDetailBundleModule(module);
       await this.deps.runtimeOrchestrator.runStepModule({
         module,
         taskId: input.taskId,
@@ -299,11 +311,7 @@ export class NovelDirectorPipelineRuntime {
     }
     // Never enter chapter execution while plan-range chapter detail facts are incomplete.
     // Otherwise runFromReady throws "缺少完整章节细化" after outline short-circuits.
-    const detailModule = getDirectorStructuredOutlineStepModules().find((module) => (
-      module.nodeKey === "volume_chapter_detail_bundle_generate"
-      || module.id === "volume.chapter_detail_bundle.generate"
-      || module.id.includes("chapter_detail")
-    ));
+    const detailModule = getDirectorStructuredOutlineStepModules().find((module) => isChapterDetailBundleModule(module));
     if (detailModule && isExecutableWorkflowStepModule(detailModule)) {
       const facts = await inspectWorkflowStepFacts(detailModule, {
         taskId: input.taskId,

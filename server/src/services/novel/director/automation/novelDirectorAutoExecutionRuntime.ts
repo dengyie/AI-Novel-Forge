@@ -322,9 +322,46 @@ export class NovelDirectorAutoExecutionRuntime {
       let consecutiveBatchRolls = 0;
       const MAX_CONSECUTIVE_START_FAILURES = 3;
       const MAX_CONSECUTIVE_DEFERS = 5;
+      // Independent safety net: the batch-roll cap lives inside the replaceable
+      // resolveBatchRoll decision function, so a non-default implementation that
+      // bypasses it (or a readiness/remaining inconsistency causing expand_range
+      // with no real progress) could otherwise loop forever. Cap total iterations
+      // regardless of which branch produced them.
+      const MAX_RUN_FROM_READY_ITERATIONS = 200;
+      let runFromReadyIterations = 0;
 
       autoExecutionLoop:
       while (true) {
+      runFromReadyIterations += 1;
+      if (runFromReadyIterations > MAX_RUN_FROM_READY_ITERATIONS) {
+        await this.deps.workflowService.markTaskFailed(
+          input.taskId,
+          `自动执行循环已超过 ${MAX_RUN_FROM_READY_ITERATIONS} 次迭代上限，已停止以防止死循环。`,
+          {
+            stage: "quality_repair",
+            itemKey: "batch_roll",
+            itemLabel: "自动执行循环超限",
+            checkpointType: "chapter_batch_ready",
+            checkpointSummary: `连续迭代超过 ${MAX_RUN_FROM_READY_ITERATIONS} 次仍未推进，可能存在 readiness 与实际章节数据不一致或决策函数未执行 cap。`,
+            chapterId: autoExecution.nextChapterId ?? range.firstChapterId,
+            progress: 0.93,
+          },
+        );
+        await syncAutoExecutionTaskState(this.deps, {
+          taskId: input.taskId,
+          novelId: input.novelId,
+          request: input.request,
+          range,
+          autoExecution: {
+            ...autoExecution,
+            pipelineJobId: null,
+            pipelineStatus: null,
+          },
+          isBackgroundRunning: false,
+          resumeStage: "pipeline",
+        });
+        return;
+      }
       if (!pipelineJobId) {
         ({ range, autoExecution } = await resolveAutoExecutionRuntimeRangeAndState(this.deps, {
           novelId: input.novelId,
@@ -957,6 +994,29 @@ export class NovelDirectorAutoExecutionRuntime {
       return;
       }
     } catch (error) {
+      // Safety net: ensure the task is not left in a phantom "running" state
+      // (isBackgroundRunning) if runFromReady threw before reaching a terminal
+      // markTaskRunning/markTaskFailed/markTaskCompleted call. A lingering running
+      // state would block forceResume on the next continue. The original error is
+      // re-thrown so the caller still sees the real root cause — this does not mask
+      // or swallow it, only guarantees the persisted auto-execution flag is cleared.
+      try {
+        await syncAutoExecutionTaskState(this.deps, {
+          taskId: input.taskId,
+          novelId: input.novelId,
+          request: input.request,
+          range,
+          autoExecution: {
+            ...autoExecution,
+            pipelineJobId: null,
+            pipelineStatus: null,
+          },
+          isBackgroundRunning: false,
+          resumeStage: input.resumeStage,
+        });
+      } catch {
+        // best-effort cleanup; the original error below is the signal that matters
+      }
       throw error;
     }
   }

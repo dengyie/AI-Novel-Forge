@@ -453,6 +453,14 @@ export class NovelDirectorContinueRuntime {
       ...resolveDirectorRunningStateForPhase(phase === "book_contract" ? "story_macro" : phase),
       volumeId: recoveryResumeTarget?.volumeId,
       chapterId: recoveryResumeTarget?.chapterId,
+      // The phase branch leaves the chapter-level checkpoint (e.g. replan_required /
+      // chapter_batch_ready) to re-enter a structured phase. Clear it so the next
+      // continue is not misclassified by shouldSkipCurrentQualityRepair (which treats
+      // a lingering replan_required checkpoint as a skip-quality-repair signal and
+      // forces runMode into auto_to_execution, bypassing the outline phase this
+      // branch intends to run). The auto_execution branch already clears it (L346-354);
+      // this makes the phase branch symmetric.
+      clearCheckpoint: true,
     });
     this.deps.scheduleBackgroundRun(taskId, async () => {
       await this.runDirectorPipeline({

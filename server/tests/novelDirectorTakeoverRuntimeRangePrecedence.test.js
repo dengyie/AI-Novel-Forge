@@ -170,6 +170,41 @@ test("stateRangeHasPendingWork is false when all chapters in state window are ap
   }), true);
 });
 
+// P2-1 fix regression: a chapter carrying blocking replan/manual_gate qualityLoop
+// in riskFlags must be treated as pending (not processed), so the takeover loader
+// (which now selects riskFlags) detects the blocking debt and does not roll past it.
+// Before the fix, the takeover findMany select omitted riskFlags → the chapter was
+// misclassified as processed → stateRangeHasPendingWork=false → wrong roll skipped repair.
+test("stateRangeHasPendingWork treats blocking-riskFlags chapter as pending (riskFlags loaded)", () => {
+  const blockingRiskFlags = JSON.stringify({
+    qualityLoop: {
+      chapterOrder: 12,
+      overallStatus: "invalid",
+      recommendedAction: "replan",
+      rootCauseCode: "replan_required",
+      budget: { attempt: 1, maxAttempts: 3, nextAction: "patch_repair", exhausted: false },
+    },
+  });
+  // Chapter 12 is "reviewed" + "pending_review" (would normally look processed),
+  // but its riskFlags mark blocking replan debt → must be pending (not processed).
+  const chapters = [11, 12, 13].map((order) => buildContractChapter(order, {
+    generationState: "approved",
+    chapterStatus: "completed",
+    content: `正文${order}`,
+  }));
+  chapters[1].generationState = "reviewed";
+  chapters[1].chapterStatus = "pending_review";
+  chapters[1].content = "正文12";
+  chapters[1].riskFlags = blockingRiskFlags;
+  const state = { enabled: true, mode: "chapter_range", startOrder: 11, endOrder: 13 };
+  assert.equal(stateRangeHasPendingWork(chapters, state), true,
+    "chapter 12 has blocking replan debt → must be pending → window has work");
+  // Sanity: without riskFlags the same chapter is still processed (reviewed+pending_review).
+  chapters[1].riskFlags = null;
+  assert.equal(stateRangeHasPendingWork(chapters, state), false,
+    "without blocking riskFlags, reviewed+pending_review chapter is processed");
+});
+
 test("isExplicitAutoExecutionRescopeRequest detects chapter_range override", () => {
   assert.equal(isExplicitAutoExecutionRescopeRequest({
     requestedPlan: { mode: "chapter_range", startOrder: 21, endOrder: 30 },

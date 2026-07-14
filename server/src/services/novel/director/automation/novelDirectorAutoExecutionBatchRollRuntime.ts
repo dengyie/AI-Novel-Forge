@@ -228,10 +228,18 @@ export function buildExpandedAutoExecutionRange(input: {
   const selected = input.chapters
     .filter((chapter) => chapter.order >= input.nextRange.startOrder && chapter.order <= input.nextRange.endOrder)
     .sort((left, right) => left.order - right.order);
+  // Shrink endOrder to the last persisted chapter in the window so the downstream
+  // scope runtime's findMissingChapterOrders never throws "缺少第 N 章" when the
+  // decision was made from workspace-enriched readiness but DB rows lag behind
+  // (workspace has the contract ready, listChapters hasn't persisted the row yet).
+  // Without this, expand → runFromReady → resolveAutoExecutionRuntimeRangeAndState
+  // throws and the auto-recovery path silently aborts instead of auto-resuming.
+  const resolvedStartOrder = selected.length > 0 ? selected[0]!.order : input.nextRange.startOrder;
+  const resolvedEndOrder = selected.length > 0 ? selected[selected.length - 1]!.order : input.nextRange.endOrder;
   return {
-    startOrder: input.nextRange.startOrder,
-    endOrder: input.nextRange.endOrder,
-    totalChapterCount: Math.max(input.nextRange.endOrder - input.nextRange.startOrder + 1, selected.length),
+    startOrder: resolvedStartOrder,
+    endOrder: resolvedEndOrder,
+    totalChapterCount: Math.max(resolvedEndOrder - resolvedStartOrder + 1, selected.length),
     firstChapterId: selected[0]?.id ?? null,
   };
 }

@@ -7,6 +7,7 @@ const assert = require("node:assert/strict");
 const {
   resolveNextAutoExecutionBatchRoll,
   applyExpandRangeBatchRoll,
+  buildExpandedAutoExecutionRange,
   DEFAULT_MAX_CONSECUTIVE_BATCH_ROLLS,
   resolveContiguousWindowFromOrders,
   resolveNextUnpreparedWindow,
@@ -316,4 +317,72 @@ test("self-cycle: within-soft and over-hard chapters do not false-trigger under_
   const normalized = normalizeAssessment(buildAssessment({ status: "accepted" }), "字".repeat(3000), 3000);
   // A full-length chapter with no blocking issues stays accepted.
   assert.equal(normalized.status, "accepted");
+});
+
+// ---------- Review-fix regression tests ----------
+
+// P2-2: expand_range must shrink endOrder to persisted chapters so the scope
+// runtime's findMissingChapterOrders never throws when workspace readiness leads
+// listChapters rows (workspace has contract ready, DB row not persisted yet).
+test("self-cycle fix: buildExpandedAutoExecutionRange shrinks endOrder to persisted chapters in window", () => {
+  // Workspace decided to expand to 21-30, but listChapters only has rows 21-25.
+  // The expand must shrink to 21-25, not build a 21-30 range that would throw
+  // "缺少第 26… 章" downstream.
+  const chapters = [21, 22, 23, 24, 25].map((order) => ({
+    id: `chapter-${order}`,
+    order,
+    generationState: "planned",
+    chapterStatus: "pending_generation",
+    content: "",
+    targetWordCount: 3000,
+  }));
+  const range = buildExpandedAutoExecutionRange({
+    nextRange: { startOrder: 21, endOrder: 30 },
+    chapters,
+  });
+  assert.equal(range.startOrder, 21);
+  assert.equal(range.endOrder, 25, "endOrder must shrink to last persisted chapter (25), not 30");
+  assert.equal(range.totalChapterCount, 5);
+  assert.equal(range.firstChapterId, "chapter-21");
+});
+
+test("self-cycle fix: buildExpandedAutoExecutionRange keeps full window when all chapters persisted", () => {
+  const chapters = Array.from({ length: 10 }, (_v, i) => {
+    const order = 21 + i;
+    return { id: `chapter-${order}`, order, generationState: "planned", chapterStatus: "pending_generation", content: "", targetWordCount: 3000 };
+  });
+  const range = buildExpandedAutoExecutionRange({
+    nextRange: { startOrder: 21, endOrder: 30 },
+    chapters,
+  });
+  assert.equal(range.startOrder, 21);
+  assert.equal(range.endOrder, 30);
+  assert.equal(range.totalChapterCount, 10);
+});
+
+// P3-2: payoff_* internal quality codes (regressed/overdue/missing_progress) must be
+// stripped, but the legit author-facing obligation kind "payoff_touch" must survive.
+test("self-cycle fix: sanitize strips payoff_regressed/payoff_overdue/payoff_missing_progress but preserves payoff_touch obligation", () => {
+  const sheet = [
+    "章节目标：兑现 payoff_touch 这条义务。", // payoff_touch is a legit obligation kind — must survive
+    "internal_codes:[payoff_missing_progress][payoff_regressed][payoff_overdue]",
+    "必须推进：揭露反派真名。",
+  ].join("\n");
+  const sanitized = sanitizeChapterTaskSheetForPersistence(sheet) ?? "";
+  assert.equal(containsInternalQualityCodes(sanitized), false);
+  // Internal payoff quality codes stripped.
+  assert.ok(!sanitized.includes("payoff_missing_progress"));
+  assert.ok(!sanitized.includes("payoff_regressed"));
+  assert.ok(!sanitized.includes("payoff_overdue"));
+  // Legit obligation kind preserved.
+  assert.match(sanitized, /payoff_touch/);
+  // Natural obligation preserved.
+  assert.match(sanitized, /揭露反派真名/);
+});
+
+test("self-cycle fix: containsInternalQualityCodes flags payoff_regressed as internal code", () => {
+  assert.equal(containsInternalQualityCodes("taskSheet with payoff_regressed noise"), true);
+  assert.equal(containsInternalQualityCodes("taskSheet with payoff_overdue noise"), true);
+  // payoff_touch is NOT an internal quality code (it's an obligation kind).
+  assert.equal(containsInternalQualityCodes("兑现 payoff_touch 义务"), false);
 });

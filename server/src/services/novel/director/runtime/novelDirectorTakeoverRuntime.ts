@@ -53,6 +53,12 @@ interface TakeoverChapterRow {
   mustAvoid: string | null;
   taskSheet: string | null;
   sceneCards: string | null;
+  // Required so isPendingAutoExecutionChapter → isDirectorAutoExecutionChapterProcessed
+  // → hasBlockingQualityLoopDebtForAutoExecution → classifyChapterQualityLoopRiskFlags
+  // can detect blocking replan/manual_gate quality debt. Without this column the
+  // classifier returns "none" and a blocking-debt chapter is misclassified as processed
+  // (→ wrong roll / skipped repair). listChapters already loads this; takeover must too.
+  riskFlags: string | null;
 }
 
 function hasPersistedChapterContent(chapter: Pick<TakeoverChapterRow, "content"> | null | undefined): boolean {
@@ -558,6 +564,7 @@ export async function loadDirectorTakeoverState(input: {
         mustAvoid: true,
         taskSheet: true,
         sceneCards: true,
+        riskFlags: true,
       },
     }),
     prisma.generationJob.findFirst({
