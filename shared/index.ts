@@ -22,6 +22,8 @@ export * from "./types/storyWorldSlice";
 export * from "./types/settingQualityPolicy";
 export * from "./types/functionAcceptance";
 export * from "./types/settingAlignment";
+export * from "./types/outlineFreeze";
+export * from "./types/volumeSettingCompletion";
 export * from "./types/writingFormula";
 export * from "./types/styleEngine";
 export * from "./types/storyMacro";

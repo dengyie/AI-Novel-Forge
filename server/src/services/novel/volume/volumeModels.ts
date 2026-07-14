@@ -45,6 +45,7 @@ export interface VolumeWorkspace {
   beatSheets: VolumeBeatSheet[];
   rebalanceDecisions: VolumeRebalanceDecision[];
   functionAcceptanceTables?: import("@ai-novel/shared/types/functionAcceptance").FunctionAcceptanceTable[];
+  outlineFreezeSnapshots?: import("@ai-novel/shared/types/outlineFreeze").OutlineFreezeSnapshot[];
   readiness: VolumePlanningReadiness;
   source: "volume" | "legacy" | "empty";
   activeVersionId: string | null;

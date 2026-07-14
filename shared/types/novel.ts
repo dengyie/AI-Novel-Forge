@@ -915,6 +915,11 @@ export interface VolumePlanDocument {
    * 单卷书通常 0–1 张；normalize 往返保留。
    */
   functionAcceptanceTables?: import("./functionAcceptance").FunctionAcceptanceTable[];
+  /**
+   * C1 outline freeze snapshots（挂现网 structured_outline_ready 审批）。
+   * mode=off 可空；不新建平行 checkpointType。
+   */
+  outlineFreezeSnapshots?: import("./outlineFreeze").OutlineFreezeSnapshot[];
   readiness: VolumePlanningReadiness;
   derivedOutline: string;
   derivedStructuredOutline: string;
