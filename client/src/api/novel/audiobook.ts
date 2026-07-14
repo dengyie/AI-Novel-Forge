@@ -1,8 +1,10 @@
 import type { ApiResponse } from "@ai-novel/shared/types/api";
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
 import type {
+  AudiobookChapterReprocessMode,
   AudiobookPrecheckResult,
   AudiobookScopeMode,
+  AudiobookTaskAnnotationsView,
   AudiobookTaskDetail,
   AudiobookTaskSummary,
   AudiobookVoiceCatalogItem,
@@ -59,6 +61,26 @@ export async function getAudiobookTask(novelId: string, taskId: string) {
 export async function cancelAudiobookTask(novelId: string, taskId: string) {
   const { data } = await apiClient.post<ApiResponse<AudiobookTaskDetail>>(
     `/novels/${novelId}/audiobook/tasks/${taskId}/cancel`,
+  );
+  return data;
+}
+
+export async function getAudiobookAnnotations(novelId: string, taskId: string) {
+  const { data } = await apiClient.get<ApiResponse<AudiobookTaskAnnotationsView>>(
+    `/novels/${novelId}/audiobook/tasks/${taskId}/annotations`,
+  );
+  return data;
+}
+
+export async function reprocessAudiobookChapter(
+  novelId: string,
+  taskId: string,
+  chapterId: string,
+  mode: AudiobookChapterReprocessMode,
+) {
+  const { data } = await apiClient.post<ApiResponse<AudiobookTaskDetail>>(
+    `/novels/${novelId}/audiobook/tasks/${taskId}/chapters/${chapterId}/reprocess`,
+    { mode },
   );
   return data;
 }
@@ -121,4 +143,11 @@ export function audiobookAudioRequestHeaders(): Record<string, string> {
   };
 }
 
-export type { AudiobookScopeMode, AudiobookTaskDetail, AudiobookTaskSummary, AudiobookPrecheckResult };
+export type {
+  AudiobookScopeMode,
+  AudiobookTaskDetail,
+  AudiobookTaskSummary,
+  AudiobookPrecheckResult,
+  AudiobookTaskAnnotationsView,
+  AudiobookChapterReprocessMode,
+};

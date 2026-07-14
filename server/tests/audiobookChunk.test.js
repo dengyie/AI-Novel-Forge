@@ -71,6 +71,58 @@ test("audiobookPaths rejects path traversal segments", () => {
   assert.equal(dir.includes("task_xyz"), true);
 });
 
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const {
+  wipeChapterAudioArtifacts,
+  wipeChapterAnnotationArtifact,
+  resolveChapterAudioPath,
+  resolveFullBookAudioPath,
+  resolveChapterAnnotationPath,
+  ensureChapterAudioDir,
+} = require("../dist/services/audiobook/audiobookPaths.js");
+const {
+  parseWavInfo,
+  buildWavBuffer,
+  concatWavFiles,
+  createSilentPcm,
+  isValidPcmWavFile,
+  writeWavFileAtomic,
+} = require("../dist/services/audiobook/audiobookWav.js");
+const {
+  issueAudiobookMediaAccess,
+  verifyAudiobookMediaAccess,
+} = require("../dist/services/audiobook/audiobookMediaAccess.js");
+
+test("wipeChapterAudioArtifacts removes chapter audio and full-book only", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ab-wipe-"));
+  try {
+    const chapterId = "ch01";
+    ensureChapterAudioDir(root, chapterId);
+    const chunk = resolveChunkAudioPath(root, chapterId, 0);
+    const chapterWav = resolveChapterAudioPath(root, chapterId);
+    const full = resolveFullBookAudioPath(root);
+    const ann = resolveChapterAnnotationPath(root, chapterId);
+    fs.writeFileSync(chunk, Buffer.alloc(48));
+    fs.writeFileSync(chapterWav, Buffer.alloc(48));
+    fs.writeFileSync(full, Buffer.alloc(48));
+    fs.mkdirSync(path.dirname(ann), { recursive: true });
+    fs.writeFileSync(ann, "{}");
+
+    wipeChapterAudioArtifacts(root, chapterId);
+    assert.equal(fs.existsSync(chunk), false);
+    assert.equal(fs.existsSync(chapterWav), false);
+    assert.equal(fs.existsSync(full), false);
+    assert.equal(fs.existsSync(ann), true);
+
+    wipeChapterAnnotationArtifact(root, chapterId);
+    assert.equal(fs.existsSync(ann), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("extractAudioBase64 reads message.audio.data", () => {
   assert.equal(extractAudioBase64(null), null);
   assert.equal(extractAudioBase64({ choices: [] }), null);
@@ -93,22 +145,6 @@ test("isMissingAudiobookTaskTableError rejects plain errors", () => {
   assert.equal(isMissingAudiobookTaskTableError(null), false);
   assert.equal(isMissingAudiobookTaskTableError({ code: "P2021" }), false);
 });
-
-const {
-  parseWavInfo,
-  buildWavBuffer,
-  concatWavFiles,
-  createSilentPcm,
-  isValidPcmWavFile,
-  writeWavFileAtomic,
-} = require("../dist/services/audiobook/audiobookWav.js");
-const {
-  issueAudiobookMediaAccess,
-  verifyAudiobookMediaAccess,
-} = require("../dist/services/audiobook/audiobookMediaAccess.js");
-const fs = require("node:fs");
-const os = require("node:os");
-const path = require("node:path");
 
 test("buildWavBuffer + parseWavInfo round-trip PCM header", () => {
   const pcm = Buffer.alloc(480); // 10ms @ 24k mono 16-bit

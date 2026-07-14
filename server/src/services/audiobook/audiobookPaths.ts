@@ -59,3 +59,42 @@ export function resolveChapterAudioPath(taskDir: string, chapterId: string): str
 export function resolveFullBookAudioPath(taskDir: string): string {
   return path.join(taskDir, "full-book.wav");
 }
+
+export function resolveChapterAnnotationPath(taskDir: string, chapterId: string): string {
+  const safeChapterId = assertSafePathSegment(chapterId, "chapterId");
+  return path.join(taskDir, "annotations", `${safeChapterId}.json`);
+}
+
+/** 删除文件；不存在则忽略。 */
+export function safeUnlink(filePath: string): void {
+  try {
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * 清除单章音频产物（chunk + chapter.wav + .part），保留 annotations 由调用方决定。
+ * 同时删除全书 full-book.wav（章变则全书必须重拼）。
+ */
+export function wipeChapterAudioArtifacts(taskDir: string, chapterId: string): void {
+  const chapterDir = resolveChapterAudioDir(taskDir, chapterId);
+  if (fs.existsSync(chapterDir)) {
+    for (const name of fs.readdirSync(chapterDir)) {
+      if (name.startsWith("chunk-") || name === "chapter.wav" || name.endsWith(".part")) {
+        safeUnlink(path.join(chapterDir, name));
+      }
+    }
+  }
+  safeUnlink(resolveFullBookAudioPath(taskDir));
+  safeUnlink(`${resolveFullBookAudioPath(taskDir)}.part`);
+}
+
+export function wipeChapterAnnotationArtifact(taskDir: string, chapterId: string): void {
+  const ann = resolveChapterAnnotationPath(taskDir, chapterId);
+  safeUnlink(ann);
+  safeUnlink(`${ann}.part`);
+}
