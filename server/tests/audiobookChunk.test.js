@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 
 const {
   AUDIOBOOK_CHUNK_MAX_CHARS,
+  AUDIOBOOK_GAP_MS,
   MIMO_TTS_PRESET_VOICES,
   isMimoTtsPresetVoice,
   DEFAULT_AUDIOBOOK_NARRATOR_VOICE,
@@ -242,4 +243,78 @@ test("audiobook media access sign and verify", () => {
     false,
   );
   delete process.env.API_AUTH_TOKEN;
+});
+
+
+const {
+  classifyChunkGap,
+  resolveInterChunkGapMs,
+  resolveBetweenChapterGapMs,
+  speakerKeyFromSegment,
+} = require("../dist/services/audiobook/audiobookGap.js");
+
+test("speakerKeyFromSegment distinguishes narrator and characters", () => {
+  assert.equal(speakerKeyFromSegment({ speakerKind: "narrator", speakerLabel: "旁白" }), "narrator");
+  assert.equal(
+    speakerKeyFromSegment({ speakerKind: "character", characterId: "c1", speakerLabel: "何屿" }),
+    "character:c1",
+  );
+  assert.equal(
+    speakerKeyFromSegment({ speakerKind: "character", speakerLabel: "路人" }),
+    "label:路人",
+  );
+});
+
+test("resolveInterChunkGapMs applies semantic pause table and short-utterance bonus", () => {
+  const narrator = { speakerKey: "narrator", speakerKind: "narrator", text: "他走进教室。" + "甲".repeat(40) };
+  const heYu = { speakerKey: "character:c1", speakerKind: "character", text: "赵助教。" };
+  const huang = { speakerKey: "character:c2", speakerKind: "character", text: "走，吃饭。" };
+
+  assert.equal(classifyChunkGap(narrator, heYu), "narrator_character");
+  assert.equal(classifyChunkGap(heYu, huang), "character_character");
+  assert.equal(classifyChunkGap(narrator, { ...narrator, text: "续。" }), "same_speaker");
+
+  // long narrator -> character: base only
+  assert.equal(resolveInterChunkGapMs(narrator, heYu), AUDIOBOOK_GAP_MS.narratorCharacter);
+  // short character -> narrator: base + bonus
+  assert.equal(
+    resolveInterChunkGapMs(heYu, narrator),
+    AUDIOBOOK_GAP_MS.narratorCharacter + AUDIOBOOK_GAP_MS.shortUtteranceBonus,
+  );
+  // short character -> other character
+  assert.equal(
+    resolveInterChunkGapMs(heYu, huang),
+    AUDIOBOOK_GAP_MS.characterCharacter + AUDIOBOOK_GAP_MS.shortUtteranceBonus,
+  );
+  // same speaker continuation
+  assert.equal(
+    resolveInterChunkGapMs(narrator, { ...narrator, text: "下一块。" }),
+    AUDIOBOOK_GAP_MS.sameSpeaker,
+  );
+  assert.equal(resolveBetweenChapterGapMs(), AUDIOBOOK_GAP_MS.betweenChapters);
+});
+
+test("concatWavFiles inserts silenceBetweenMs between chunks", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ab-gap-"));
+  const fmt = { numChannels: 1, sampleRate: 24_000, bitsPerSample: 16 };
+  // 100ms tone-ish non-zero pcm + 100ms
+  const pcmA = Buffer.alloc(24_000 * 2 * 0.1);
+  for (let i = 0; i < pcmA.length; i += 2) pcmA.writeInt16LE(1000, i);
+  const pcmB = Buffer.alloc(24_000 * 2 * 0.1);
+  for (let i = 0; i < pcmB.length; i += 2) pcmB.writeInt16LE(-1000, i);
+  const a = path.join(tmp, "a.wav");
+  const b = path.join(tmp, "b.wav");
+  const out = path.join(tmp, "out.wav");
+  fs.writeFileSync(a, buildWavBuffer(pcmA, fmt));
+  fs.writeFileSync(b, buildWavBuffer(pcmB, fmt));
+
+  const merged = concatWavFiles([a, b], out, [500]);
+  assert.equal(merged.silenceInsertedMs, 500);
+  const buf = fs.readFileSync(out);
+  const info = parseWavInfo(buf);
+  const expectedPcmBytes = pcmA.length + pcmB.length + createSilentPcm(500, 24_000, 1).length;
+  assert.equal(info.dataSize, expectedPcmBytes);
+  // middle region should be zeros (silence)
+  const mid = info.dataOffset + pcmA.length + Math.floor(createSilentPcm(500, 24_000, 1).length / 2);
+  assert.equal(buf.readInt16LE(mid), 0);
 });
