@@ -38,6 +38,7 @@ import { getSharedNovelServices } from "../application/sharedNovelServices";
 import { novelFramingSuggestionService } from "../NovelFramingSuggestionService";
 import { StoryMacroPlanService } from "../storyMacro/StoryMacroPlanService";
 import { NovelVolumeService } from "../volume/NovelVolumeService";
+import { projectVolumeSettingCompletion } from "../volume/volumeSettingCompletionService";
 import { NovelWorkflowService } from "../workflow/NovelWorkflowService";
 import { NovelDirectorCandidateStageService } from "./phases/novelDirectorCandidateStage";
 import { resolveDirectorBookFraming } from "./runtime/novelDirectorFraming";
@@ -164,7 +165,9 @@ export class NovelDirectorService {
         chapters as Parameters<typeof buildBatchRollReadinessFromChapters>[0],
         readinessOptions,
       );
-      // Enrich readiness from volume workspace when chapter rows lack full contracts.
+      // Enrich readiness + C3 volumeCompletion from one workspace load.
+      let volumeCompletionKind: "legacy" | "setting_complete" | "prose_complete_only" | "forced" | null = null;
+      let supervisoryCloseable: boolean | null = null;
       try {
         const workspace = await this.volumeService.getVolumes(novelId);
         const workspaceChapters = (workspace.volumes ?? []).flatMap((volume) =>
@@ -196,6 +199,17 @@ export class NovelDirectorService {
             readinessOptions,
           );
         }
+        // 仅 enforce 把 prose_complete_only 升为 halt；advisory 只投影详情不挡窗尽
+        if (mode === "enforce") {
+          const projection = projectVolumeSettingCompletion({
+            document: workspace,
+            volumeId: workspace.volumes[0]?.id ?? null,
+            mode,
+            proseComplete: true,
+          });
+          volumeCompletionKind = projection.kind;
+          supervisoryCloseable = projection.supervisoryCloseable;
+        }
       } catch {
         // workspace optional for expand-only decisions
       }
@@ -207,8 +221,10 @@ export class NovelDirectorService {
         nextPreparedExecutableWindow: resolveNextPreparedExecutableWindow({ afterOrder, readiness }),
         nextUnpreparedWindow: resolveNextUnpreparedWindow({ afterOrder, readiness }),
         // Phase 1: expand_range only. reenter_structured_outline → halt_for_review until
-      // a real outline+sync prepareNextAutoExecutionBatch is injected (phase later).
-      canPrepareNextBatch: false,
+        // a real outline+sync prepareNextAutoExecutionBatch is injected (phase later).
+        canPrepareNextBatch: false,
+        volumeCompletionKind,
+        supervisoryCloseable,
       });
     },
     // Do not inject prepareNext until it can run structured outline + sync.

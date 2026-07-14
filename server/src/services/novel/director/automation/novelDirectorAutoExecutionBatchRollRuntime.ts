@@ -188,6 +188,13 @@ export function resolveNextAutoExecutionBatchRoll(input: {
   consecutiveBatchRolls: number;
   maxConsecutiveBatchRolls?: number;
   canPrepareNextBatch?: boolean;
+  /**
+   * C3：窗尽且无下一窗时，enforce 下 prose_complete_only（功能未 satisfied）
+   * 不得静默 completed_scope → workflow_completed；应 halt_for_review。
+   * mode=off/legacy 或不传 → 保持 completed_scope。
+   */
+  volumeCompletionKind?: "legacy" | "setting_complete" | "prose_complete_only" | "forced" | null;
+  supervisoryCloseable?: boolean | null;
 }): BatchRollDecision {
   const maxRolls = input.maxConsecutiveBatchRolls ?? DEFAULT_MAX_CONSECUTIVE_BATCH_ROLLS;
   if (input.consecutiveBatchRolls >= maxRolls) {
@@ -219,6 +226,15 @@ export function resolveNextAutoExecutionBatchRoll(input: {
       kind: "reenter_structured_outline",
       reason: `当前窗 ${input.range.startOrder}-${input.range.endOrder} 已完成，下一窗 ${unprepared.startOrder}-${unprepared.endOrder} 需结构化大纲细化后进入执行。`,
       nextRange: unprepared,
+    };
+  }
+
+  // 无后续窗：仅 prose_complete_only（enforce 投影）禁止静默 workflow_completed。
+  // mode=off/legacy、setting_complete、forced、advisory 不经此路径或保持 completed_scope。
+  if (input.volumeCompletionKind === "prose_complete_only") {
+    return {
+      kind: "halt_for_review",
+      reason: `当前执行范围 ${input.range.startOrder}-${input.range.endOrder} 章面已写满，但功能验收未全部 satisfied（prose_complete_only）。监管默认不收工，需补兑付或 force_complete_volume。`,
     };
   }
 

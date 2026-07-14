@@ -137,7 +137,7 @@ test("function keyword negation window does not false-pass", () => {
   assert.ok(assessment.checks.some((c) => c.id === "function:fn-trust" && !c.passed));
 });
 
-test("function paraphrase without exact keyword is soft miss not hard-block", () => {
+test("function paraphrase without exact keyword recovers via soft semantic accept", () => {
   const assessment = evaluateSettingAlignmentRules({
     chapterId: "c1",
     content: "陆深把关键事务当面交给了承接人，两人确认了后续安排，现场没有外挂。",
@@ -145,13 +145,47 @@ test("function paraphrase without exact keyword is soft miss not hard-block", ()
     functionIds: ["fn-trust"],
     functionItems: [functionItem()],
   });
-  // 转述未命中字面关键词 → soft miss，禁止 hard-block 误杀
+  // 转述：语义兑付锚（交给/确认了后续）应 recovery pass，永不 hard-block
   assert.notEqual(assessment.status, "blocking");
   const fnCheck = assessment.checks.find((c) => c.id === "function:fn-trust");
-  if (fnCheck && !fnCheck.passed) {
-    assert.equal(fnCheck.hard, false);
-    assert.equal(assessment.status, "repairable");
-  }
+  assert.ok(fnCheck);
+  assert.equal(fnCheck.hard, false);
+  assert.equal(fnCheck.passed, true);
+  assert.equal(assessment.status, "pass");
+  assert.match(fnCheck.summary, /语义兑付|验收线索命中/);
+});
+
+test("function semantic miss remains soft repairable not hard-block", () => {
+  const assessment = evaluateSettingAlignmentRules({
+    chapterId: "c1",
+    content: "走廊空无一人，只有风声。",
+    mode: "enforce",
+    functionIds: ["fn-trust"],
+    functionItems: [functionItem()],
+  });
+  assert.equal(assessment.status, "repairable");
+  const fnCheck = assessment.checks.find((c) => c.id === "function:fn-trust");
+  assert.ok(fnCheck && !fnCheck.passed && fnCheck.hard === false);
+});
+
+test("llmChecks soft only never hard-block even when marked hard", () => {
+  const assessment = evaluateSettingAlignmentRules({
+    chapterId: "c1",
+    content: "走廊空无一人。",
+    mode: "enforce",
+    functionIds: [],
+    llmUsed: true,
+    llmChecks: [{
+      id: "llm:semantic:fn-trust",
+      kind: "function",
+      passed: false,
+      severity: "high",
+      summary: "LLM 认为托付未兑付",
+      hard: true,
+    }],
+  });
+  assert.notEqual(assessment.status, "blocking");
+  assert.ok(assessment.checks.every((c) => c.id !== "llm:semantic:fn-trust" || c.hard === false));
 });
 
 test("defer_and_continue cannot mask setting invalid / enforce risk", () => {

@@ -73,6 +73,41 @@ test("resolveNextAutoExecutionBatchRoll completes when no next window", () => {
   assert.equal(decision.kind, "completed_scope");
 });
 
+test("resolveNextAutoExecutionBatchRoll halts on prose_complete_only without next window", () => {
+  const decision = resolveNextAutoExecutionBatchRoll({
+    range: { startOrder: 31, endOrder: 40, totalChapterCount: 10, firstChapterId: "c31" },
+    autoExecution: { enabled: true, remainingChapterCount: 0, mode: "chapter_range" },
+    consecutiveBatchRolls: 0,
+    volumeCompletionKind: "prose_complete_only",
+    supervisoryCloseable: false,
+  });
+  assert.equal(decision.kind, "halt_for_review");
+  assert.match(decision.reason, /prose_complete_only|功能验收/);
+});
+
+test("resolveNextAutoExecutionBatchRoll still expands when prose_complete_only but next window ready", () => {
+  const decision = resolveNextAutoExecutionBatchRoll({
+    range: { startOrder: 11, endOrder: 20, totalChapterCount: 10, firstChapterId: "c11" },
+    autoExecution: { enabled: true, remainingChapterCount: 0, mode: "chapter_range", startOrder: 11, endOrder: 20 },
+    consecutiveBatchRolls: 0,
+    nextPreparedExecutableWindow: { startOrder: 21, endOrder: 30 },
+    volumeCompletionKind: "prose_complete_only",
+  });
+  // 有下一窗时优先 expand，不在中段因卷完成态 halt
+  assert.equal(decision.kind, "expand_range");
+});
+
+test("resolveNextAutoExecutionBatchRoll setting_complete remains completed_scope", () => {
+  const decision = resolveNextAutoExecutionBatchRoll({
+    range: { startOrder: 31, endOrder: 40, totalChapterCount: 10, firstChapterId: "c31" },
+    autoExecution: { enabled: true, remainingChapterCount: 0, mode: "chapter_range" },
+    consecutiveBatchRolls: 0,
+    volumeCompletionKind: "setting_complete",
+    supervisoryCloseable: true,
+  });
+  assert.equal(decision.kind, "completed_scope");
+});
+
 test("resolveNextAutoExecutionBatchRoll halts after max consecutive rolls", () => {
   const decision = resolveNextAutoExecutionBatchRoll({
     range: { startOrder: 1, endOrder: 10, totalChapterCount: 10, firstChapterId: "c1" },

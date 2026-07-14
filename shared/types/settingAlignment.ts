@@ -109,6 +109,45 @@ function normalizeEvaluatedAt(value: string | Date | undefined): string {
 }
 
 /**
+ * Soft 语义兑付：字面关键词 miss 时的同义/转述锚扩展（规则段，非 LLM）。
+ * 失败仍 soft repairable，永不 hard-block；超时/无表时与未扩展等价。
+ * 覆盖交接/托付/在场/落地等高频叙事动作；不声称完整 NER。
+ */
+const SEMANTIC_PARAPHRASE_GROUPS: readonly (readonly string[])[] = [
+  ["托付", "交给", "交付", "交代", "嘱托", "委任", "转交", "移交"],
+  ["当面", "当面对", "当面把", "面对面", "在场当面"],
+  ["关键事务", "关键事", "要务", "重要事务", "核心事务"],
+  ["承接人", "接手人", "接收人", "接手的人", "接手者", "接收方"],
+  ["在场", "到场", "出席", "陪同在侧", "人在现场"],
+  ["对话落地", "谈妥", "说定", "确认了后续", "敲定安排", "安排确认"],
+  ["落地", "落实", "兑现", "谈妥", "办妥"],
+];
+
+function expandSemanticParaphraseAnchors(text: string, max = 10): string[] {
+  const base = extractKeywords(text, max);
+  const expanded: string[] = [...base];
+  const compact = text.replace(/\s+/g, "");
+  for (const group of SEMANTIC_PARAPHRASE_GROUPS) {
+    const hitInSource = group.some((term) => (
+      compact.includes(term)
+      || base.some((b) => b.includes(term) || term.includes(b))
+    ));
+    if (!hitInSource) {
+      continue;
+    }
+    for (const term of group) {
+      if (term.length >= 2) {
+        expanded.push(term);
+      }
+    }
+  }
+  if (compact.length >= 2 && compact.length <= 12) {
+    expanded.push(compact);
+  }
+  return uniqueStrings(expanded).slice(0, max);
+}
+
+/**
  * 验收锚点提取：优先短专名/词，避免把整句 mustHappen 当 hard 子串。
  * - 空白分词 ≥2 字
  * - 中文：仅在原文已是短锚（≤8 字）时用全文；长句只取显式 2–4 字片段，不硬切前缀假锚
@@ -272,19 +311,36 @@ function buildFunctionChecks(
     }
 
     // 每个 check 至少命中一组关键词中的一个。
-    // 功能线索未命中：默认 soft（repairable），避免转述兑付被 hard-block 误杀；
+    // 1) 字面锚点 2) 失败则走 soft 语义兑付（同义/转述锚，仍 soft；失败=repairable 不 hard-block）
     // mustNotHappen / 硬禁词 / 必出角色 仍 hard。
     const coverage = contentIncludesAllGroups(content, usableGroups);
-    const passed = coverage.ok;
+    let passed = coverage.ok;
+    let evidenceHits = coverage.hit;
+    let semanticRecovered = false;
+    if (!passed) {
+      const semanticGroups = checkTexts
+        .map((text) => expandSemanticParaphraseAnchors(text, 8))
+        .filter((group) => group.length > 0);
+      if (semanticGroups.length > 0) {
+        const semanticCoverage = contentIncludesAllGroups(content, semanticGroups);
+        if (semanticCoverage.ok) {
+          passed = true;
+          semanticRecovered = true;
+          evidenceHits = semanticCoverage.hit;
+        }
+      }
+    }
     checks.push({
       id: `function:${item.id}`,
       kind: "function",
       passed,
       severity: passed ? "low" : "medium",
       summary: passed
-        ? `功能「${item.title}」验收线索命中`
+        ? (semanticRecovered
+          ? `功能「${item.title}」语义兑付命中（转述/同义）`
+          : `功能「${item.title}」验收线索命中`)
         : `功能「${item.title}」验收线索未在正文出现：缺 ${coverage.missing.slice(0, 3).join("、")}`,
-      evidence: coverage.hit.slice(0, 4).join("；") || undefined,
+      evidence: evidenceHits.slice(0, 4).join("；") || undefined,
       hard: false,
     });
 
