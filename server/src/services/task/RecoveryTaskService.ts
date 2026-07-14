@@ -13,6 +13,7 @@ import { getSharedNovelServices } from "../novel/application/sharedNovelServices
 import { DirectorCommandService } from "../novel/director/commands/DirectorCommandService";
 import { NovelWorkflowRuntimeService } from "../novel/workflow/NovelWorkflowRuntimeService";
 import { styleExtractionTaskService } from "../styleEngine/StyleExtractionTaskService";
+import { audiobookTaskService } from "../audiobook/AudiobookTaskService";
 
 interface RecoveryInitializationDeps {
   /**
@@ -26,6 +27,7 @@ interface RecoveryInitializationDeps {
   // 章节流水线：resumePendingPipelineJobs → resumePipelineJob（skipCompleted 跳已成功章节）
   resumePendingPipelineJobs(): Promise<unknown>;
   resumePendingStyleTasks(): Promise<unknown>;
+  resumePendingAudiobookTasks(): Promise<unknown>;
 }
 
 interface AutoDirectorRecoveryCommandPort {
@@ -81,6 +83,7 @@ export class RecoveryTaskService {
       resumePendingAutoDirectorTasks: () => this.novelWorkflowRuntimeService.resumePendingAutoDirectorTasks(),
       resumePendingPipelineJobs: () => this.novelPipelineRuntimeService.resumePendingPipelineJobs(),
       resumePendingStyleTasks: () => styleExtractionTaskService.resumePendingTasks(),
+      resumePendingAudiobookTasks: () => audiobookTaskService.resumePendingTasks(),
     },
   ) {}
 
@@ -92,6 +95,7 @@ export class RecoveryTaskService {
         this.initializationDeps.resumePendingAutoDirectorTasks(),
         this.initializationDeps.resumePendingPipelineJobs(),
         this.initializationDeps.resumePendingStyleTasks(),
+        this.initializationDeps.resumePendingAudiobookTasks(),
       ]).then(() => undefined);
     }
     return this.initializationPromise;
@@ -110,6 +114,7 @@ export class RecoveryTaskService {
       bookRows,
       imageRows,
       styleExtractionRows,
+      audiobookRows,
     ] = await Promise.all([
       prisma.novelWorkflowTask.findMany({
         where: {
@@ -204,6 +209,24 @@ export class RecoveryTaskService {
         },
         orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
       }),
+      prisma.audiobookTask.findMany({
+        where: {
+          status: { in: ["queued", "running"] },
+          pendingManualRecovery: true,
+        },
+        select: {
+          id: true,
+          novelId: true,
+          title: true,
+          status: true,
+          currentStage: true,
+          currentItemLabel: true,
+          error: true,
+          updatedAt: true,
+          novel: { select: { title: true } },
+        },
+        orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+      }),
     ]);
 
     const rawItems: Array<RecoverableTaskSummary & { updatedAt: Date }> = [
@@ -275,6 +298,19 @@ export class RecoveryTaskService {
         recoveryHint: row.error?.trim() || "写法提取任务已暂停，等待恢复。",
         updatedAt: row.updatedAt,
       })),
+      ...audiobookRows.map((row) => ({
+        id: row.id,
+        kind: "novel_audiobook" as const,
+        title: row.title,
+        ownerLabel: row.novel?.title?.trim() || row.title,
+        status: toRunningStatus(row.status),
+        currentStage: row.currentStage,
+        currentItemLabel: row.currentItemLabel,
+        resumeAction: "恢复有声书任务",
+        sourceRoute: `/novels/${row.novelId}/edit?stage=basic`,
+        recoveryHint: row.error?.trim() || "有声书任务已暂停，等待恢复。",
+        updatedAt: row.updatedAt,
+      })),
     ];
 
     const items = rawItems.sort((left, right) => {
@@ -307,6 +343,10 @@ export class RecoveryTaskService {
     }
     if (kind === "style_extraction") {
       await styleExtractionTaskService.resumeTask(id);
+      return null;
+    }
+    if (kind === "novel_audiobook") {
+      await audiobookTaskService.resumeTask(id);
       return null;
     }
     throw new AppError(`Unsupported recovery task kind: ${kind}`, 400);

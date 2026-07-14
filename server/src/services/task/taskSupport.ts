@@ -59,6 +59,9 @@ export function buildTaskRecoveryHint(kind: TaskKind, status: TaskStatus): strin
     if (kind === "style_extraction") {
       return "建议检查参考文本是否完整、模型是否可用，以及当前保留策略是否适合自动保存后再重试。";
     }
+    if (kind === "novel_audiobook") {
+      return "建议检查角色卡 ttsVoice 是否齐全、旁白音色是否在 MiMo 预置表、CPA 密钥是否可用后再重试。";
+    }
     return "建议检查提示词、模型配置和目标资源状态后再重试。";
   }
   if (status === "waiting_approval") {
@@ -76,6 +79,9 @@ export function buildTaskRecoveryHint(kind: TaskKind, status: TaskStatus): strin
     }
     if (kind === "style_extraction") {
       return "当前写法提取任务仍在排队，建议先到任务中心查看进度，稍后会自动保存结果。";
+    }
+    if (kind === "novel_audiobook") {
+      return "当前有声书任务仍在排队，建议确认 CPA MiMo TTS 与章节正文是否可用。";
     }
     return "当前任务仍在排队，建议确认工作线程和模型服务是否可用。";
   }
