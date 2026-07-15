@@ -26,6 +26,7 @@ import {
   reprocessAudiobookChapter,
   suggestAudiobookVoicePlan,
 } from "@/api/novel/audiobook";
+import { queryKeys } from "@/api/queryKeys";
 import SelectControl from "@/components/common/SelectControl";
 
 interface ChapterOption {
@@ -442,13 +443,15 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
     onSuccess: async (data) => {
       setMessage(
         data
-          ? `已写入 ${data.applied.length} 个角色音色，跳过 ${data.skipped.length}。请刷新页面查看角色卡。`
+          ? `已写入 ${data.applied.length} 个角色音色，跳过 ${data.skipped.length}。角色卡缓存已刷新。`
           : "音色已写入。",
       );
       setVoicePlanItems([]);
       setVoicePlanOverwrite(false);
-      await queryClient.invalidateQueries({ queryKey: ["novel", novelId] });
-      await queryClient.invalidateQueries({ queryKey: ["novel-characters", novelId] });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.novels.detail(novelId) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.novels.characters(novelId) }),
+      ]);
     },
     onError: (error) => {
       setMessage(error instanceof Error ? error.message : "写入音色失败。");

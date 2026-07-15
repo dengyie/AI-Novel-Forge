@@ -74,7 +74,6 @@ import { buildNovelEditPlanningTabs } from "./novelEditPlanningTabs";
 import type { ChapterReviewResult } from "./chapterPlanning.shared";
 import type { NovelEditTakeoverState, NovelTaskDrawerState } from "./components/NovelEditView.types";
 import NovelExistingProjectTakeoverDialog from "./components/NovelExistingProjectTakeoverDialog";
-import NovelAudiobookPanel from "./components/NovelAudiobookPanel";
 import { syncNovelWorkflowStageSilently, workflowStageFromTab } from "./novelWorkflow.client";
 import { isNovelWorkspaceFlowTab, scopeFromWorkspaceTab, tabFromDirectorDisplayStage, tabFromDirectorProgress, tabFromScope, type NovelWorkspaceFlowTab } from "./novelWorkspaceNavigation";
 import { resolveChapterTitleWarning } from "@/lib/directorTaskNotice";
@@ -2367,22 +2366,6 @@ export default function NovelEdit() {
     isSavingWorldSliceOverrides,
     onBasicFormChange: (patch) => setBasicForm((prev) => patchNovelBasicForm(prev, patch)),
     onSaveBasic: () => saveBasicMutation.mutate(),
-    audiobookPanel: (
-      <NovelAudiobookPanel
-        novelId={id}
-        chapters={chapters.map((chapter) => ({
-          id: chapter.id,
-          order: chapter.order,
-          title: chapter.title,
-        }))}
-        characters={characters}
-        narratorVoice={basicForm.audiobookNarratorVoice}
-        narratorStyle={basicForm.audiobookNarratorStyle}
-        onNarratorChange={(patch) => setBasicForm((prev) => patchNovelBasicForm(prev, patch))}
-        onSaveNarrator={() => saveBasicMutation.mutate()}
-        isSavingNarrator={saveBasicMutation.isPending}
-      />
-    ),
     onImportNovelWorld: importNovelWorld,
     onCreateManualNovelWorld: createManualNovelWorld,
     onGenerateNovelWorld: generateNovelWorld,

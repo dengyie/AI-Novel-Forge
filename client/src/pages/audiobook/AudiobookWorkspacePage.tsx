@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Headphones, BookOpenText, Search } from "lucide-react";
 import { getNovelList } from "@/api/novel";
@@ -10,30 +10,29 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 
 const PAGE_SIZE = 50;
+const SEARCH_DEBOUNCE_MS = 300;
 
 export default function AudiobookWorkspacePage() {
-  const navigate = useNavigate();
   const [keyword, setKeyword] = useState("");
+  const [debouncedKeyword, setDebouncedKeyword] = useState("");
   const [page, setPage] = useState(1);
 
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedKeyword(keyword.trim());
+      setPage(1);
+    }, SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [keyword]);
+
   const novelListQuery = useQuery({
-    queryKey: queryKeys.novels.list(page, PAGE_SIZE),
-    queryFn: () => getNovelList({ page, limit: PAGE_SIZE }),
+    queryKey: queryKeys.novels.list(page, PAGE_SIZE, debouncedKeyword),
+    queryFn: () => getNovelList({ page, limit: PAGE_SIZE, q: debouncedKeyword || undefined }),
     staleTime: 30_000,
   });
 
   const items = novelListQuery.data?.data?.items ?? [];
   const totalPages = novelListQuery.data?.data?.totalPages ?? 1;
-
-  const filtered = useMemo(() => {
-    const q = keyword.trim().toLowerCase();
-    if (!q) return items;
-    return items.filter((novel) => {
-      const title = novel.title?.toLowerCase() ?? "";
-      const desc = novel.description?.toLowerCase() ?? "";
-      return title.includes(q) || desc.includes(q);
-    });
-  }, [items, keyword]);
 
   return (
     <div className="mx-auto max-w-4xl space-y-6 px-4 py-6">
@@ -83,14 +82,16 @@ export default function AudiobookWorkspacePage() {
             </div>
           ) : null}
 
-          {!novelListQuery.isLoading && !novelListQuery.isError && filtered.length === 0 ? (
+          {!novelListQuery.isLoading && !novelListQuery.isError && items.length === 0 ? (
             <div className="py-10 text-center text-sm text-muted-foreground">
-              {items.length === 0 ? "还没有小说。请先在「小说列表」创建作品。" : "没有匹配的小说。"}
+              {debouncedKeyword
+                ? "没有匹配的小说。"
+                : "还没有小说。请先在「小说列表」创建作品。"}
             </div>
           ) : null}
 
           <div className="space-y-3">
-            {filtered.map((novel) => (
+            {items.map((novel) => (
               <div
                 key={novel.id}
                 className="flex flex-col gap-3 rounded-xl border border-border/70 bg-muted/20 p-4 sm:flex-row sm:items-center sm:justify-between"
@@ -109,12 +110,8 @@ export default function AudiobookWorkspacePage() {
                   </div>
                 </div>
                 <div className="flex shrink-0 flex-wrap gap-2">
-                  <Button
-                    type="button"
-                    size="sm"
-                    onClick={() => navigate(`/audiobook/novels/${novel.id}`)}
-                  >
-                    打开有声书
+                  <Button type="button" size="sm" asChild>
+                    <Link to={`/audiobook/novels/${novel.id}`}>打开有声书</Link>
                   </Button>
                   <Button type="button" size="sm" variant="outline" asChild>
                     <Link to={`/novels/${novel.id}/edit`}>编辑小说</Link>

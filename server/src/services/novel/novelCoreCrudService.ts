@@ -66,9 +66,19 @@ export class NovelCoreCrudService {
     }
   }
 
-  async listNovels({ page, limit }: PaginationInput) {
+  async listNovels({ page, limit, q }: PaginationInput) {
+    const keyword = typeof q === "string" ? q.trim() : "";
+    const where = keyword
+      ? {
+          title: {
+            contains: keyword,
+          },
+        }
+      : undefined;
+
     const [items, total] = await Promise.all([
       prisma.novel.findMany({
+        where,
         skip: (page - 1) * limit,
         take: limit,
         orderBy: { updatedAt: "desc" },
@@ -111,7 +121,7 @@ export class NovelCoreCrudService {
           _count: { select: { chapters: true, characters: true, plotBeats: true } },
         },
       }),
-      prisma.novel.count(),
+      prisma.novel.count({ where }),
     ]);
 
     const latestAutoDirectorTaskByNovelId = await this.listLatestVisibleAutoDirectorTasksByNovelIds(
