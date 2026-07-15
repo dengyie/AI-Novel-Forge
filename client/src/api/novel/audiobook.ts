@@ -8,6 +8,12 @@ import type {
   AudiobookTaskDetail,
   AudiobookTaskSummary,
   AudiobookVoiceCatalogItem,
+  AudiobookVoicePlanApplyInput,
+  AudiobookVoicePlanApplyResult,
+  AudiobookVoicePlanSuggestInput,
+  AudiobookVoicePlanSuggestResult,
+  AudiobookVoicePreviewInput,
+  AudiobookVoicePreviewResult,
   CreateAudiobookTaskInput,
 } from "@ai-novel/shared/types/audiobook";
 import { API_AUTH_TOKEN, API_BASE_URL } from "@/lib/constants";
@@ -15,6 +21,39 @@ import { apiClient } from "../client";
 
 export async function listAudiobookVoices() {
   const { data } = await apiClient.get<ApiResponse<AudiobookVoiceCatalogItem[]>>("/novels/audiobook/voices");
+  return data;
+}
+
+export async function suggestAudiobookVoicePlan(
+  novelId: string,
+  payload: AudiobookVoicePlanSuggestInput = {},
+) {
+  const { data } = await apiClient.post<ApiResponse<AudiobookVoicePlanSuggestResult>>(
+    `/novels/${novelId}/audiobook/voice-plan/suggest`,
+    payload,
+  );
+  return data;
+}
+
+export async function applyAudiobookVoicePlan(
+  novelId: string,
+  payload: AudiobookVoicePlanApplyInput,
+) {
+  const { data } = await apiClient.post<ApiResponse<AudiobookVoicePlanApplyResult>>(
+    `/novels/${novelId}/audiobook/voice-plan/apply`,
+    payload,
+  );
+  return data;
+}
+
+export async function previewAudiobookVoice(
+  novelId: string,
+  payload: AudiobookVoicePreviewInput,
+) {
+  const { data } = await apiClient.post<ApiResponse<AudiobookVoicePreviewResult>>(
+    `/novels/${novelId}/audiobook/voice-preview`,
+    payload,
+  );
   return data;
 }
 

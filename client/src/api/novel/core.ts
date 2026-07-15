@@ -25,11 +25,13 @@ import {
   normalizeNovelListLimit,
 } from "./shared";
 
-export async function getNovelList(params?: { page?: number; limit?: number }) {
+export async function getNovelList(params?: { page?: number; limit?: number; q?: string }) {
+  const q = params?.q?.trim() || undefined;
   const { data } = await apiClient.get<ApiResponse<NovelListResponse>>("/novels", {
     params: {
       page: params?.page ?? 1,
       limit: normalizeNovelListLimit(params?.limit),
+      ...(q ? { q } : {}),
     },
   });
   return data;

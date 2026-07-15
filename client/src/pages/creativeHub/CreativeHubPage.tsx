@@ -20,6 +20,7 @@ import { Badge } from "@/components/ui/badge";
 import { useLLMStore } from "@/store/llmStore";
 import { hasCreativeHubBindings } from "@/lib/creativeHubLinks";
 import CreativeHubConversation from "./components/CreativeHubConversation";
+import CreativeHubErrorBoundary from "./components/CreativeHubErrorBoundary";
 import CreativeHubSidebar from "./components/CreativeHubSidebar";
 import CreativeHubThreadList from "./components/CreativeHubThreadList";
 import { useCreativeHubRuntime } from "./hooks/useCreativeHubRuntime";
@@ -106,6 +107,15 @@ function buildAutoCreateThreadKey(bindings: CreativeHubResourceBinding, shouldCr
 }
 
 export default function CreativeHubPage() {
+  // Boundary 必须包住含 useCreativeHubRuntime 的子树，否则 hook/converter 异常仍会整页白屏
+  return (
+    <CreativeHubErrorBoundary title="创作中枢暂时无法打开">
+      <CreativeHubPageContent />
+    </CreativeHubErrorBoundary>
+  );
+}
+
+function CreativeHubPageContent() {
   const llm = useLLMStore();
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();

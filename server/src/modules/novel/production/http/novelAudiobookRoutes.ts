@@ -4,6 +4,9 @@ import type { Router } from "express";
 import type { ApiResponse } from "@ai-novel/shared/types/api";
 import {
   MIMO_TTS_VOICE_CATALOG,
+  type AudiobookVoicePlanApplyResult,
+  type AudiobookVoicePlanSuggestResult,
+  type AudiobookVoicePreviewResult,
   type CreateAudiobookTaskInput,
 } from "@ai-novel/shared/types/audiobook";
 import { z } from "zod";
@@ -15,6 +18,7 @@ import {
   verifyAudiobookMediaAccess,
 } from "../../../../services/audiobook/audiobookMediaAccess";
 import { audiobookTaskService } from "../../../../services/audiobook/AudiobookTaskService";
+import { audiobookVoiceAssetService } from "../../../../services/audiobook/AudiobookVoiceAssetService";
 import {
   resolveAudiobookTaskDir,
   resolveChapterAudioPath,
@@ -228,6 +232,39 @@ const createAudiobookTaskSchema = z.object({
   }
 });
 
+const voicePlanSuggestSchema = z.object({
+  onlyMissing: z.boolean().optional(),
+  characterIds: z.array(z.string().trim().min(1)).max(200).optional(),
+  strategy: z.enum(["auto", "preset_only", "prefer_design"]).optional(),
+  maxImportantPerPreset: z.number().int().min(1).max(8).optional(),
+});
+
+const voicePlanApplySchema = z.object({
+  overwrite: z.boolean().optional(),
+  items: z
+    .array(
+      z.object({
+        characterId: z.string().trim().min(1),
+        ttsMode: z.enum(["preset", "design", "clone"]),
+        ttsVoice: z.string().trim().max(64).nullable().optional(),
+        ttsStyle: z.string().trim().max(500).nullable().optional(),
+        ttsDesignPrompt: z.string().trim().max(2000).nullable().optional(),
+        speakerAliases: z.array(z.string().trim().min(1).max(64)).max(24).nullable().optional(),
+      }),
+    )
+    .min(1)
+    .max(200),
+});
+
+const voicePreviewSchema = z.object({
+  characterId: z.string().trim().min(1).optional(),
+  ttsMode: z.enum(["preset", "design", "clone"]).optional(),
+  ttsVoice: z.string().trim().max(64).nullable().optional(),
+  ttsStyle: z.string().trim().max(500).nullable().optional(),
+  ttsDesignPrompt: z.string().trim().max(2000).nullable().optional(),
+  text: z.string().trim().max(200).optional(),
+});
+
 export function registerNovelAudiobookRoutes(input: { router: Router }): void {
   const { router } = input;
 
@@ -242,6 +279,63 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
       next(error);
     }
   });
+
+  router.post(
+    "/:id/audiobook/voice-plan/suggest",
+    validate({ params: novelParamsSchema, body: voicePlanSuggestSchema }),
+    async (req, res, next) => {
+      try {
+        const { id } = req.params as z.infer<typeof novelParamsSchema>;
+        const body = req.body as z.infer<typeof voicePlanSuggestSchema>;
+        const data = await audiobookVoiceAssetService.suggest(id, body);
+        res.status(200).json({
+          success: true,
+          data,
+          message: `音色规划完成：${data.summary.planned} 项（preset ${data.summary.presetCount} / design ${data.summary.designCount}）。`,
+        } satisfies ApiResponse<AudiobookVoicePlanSuggestResult>);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  router.post(
+    "/:id/audiobook/voice-plan/apply",
+    validate({ params: novelParamsSchema, body: voicePlanApplySchema }),
+    async (req, res, next) => {
+      try {
+        const { id } = req.params as z.infer<typeof novelParamsSchema>;
+        const body = req.body as z.infer<typeof voicePlanApplySchema>;
+        const data = await audiobookVoiceAssetService.apply(id, body);
+        res.status(200).json({
+          success: true,
+          data,
+          message: `已写入 ${data.applied.length} 个角色音色，跳过 ${data.skipped.length}。`,
+        } satisfies ApiResponse<AudiobookVoicePlanApplyResult>);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  router.post(
+    "/:id/audiobook/voice-preview",
+    validate({ params: novelParamsSchema, body: voicePreviewSchema }),
+    async (req, res, next) => {
+      try {
+        const { id } = req.params as z.infer<typeof novelParamsSchema>;
+        const body = req.body as z.infer<typeof voicePreviewSchema>;
+        const data = await audiobookVoiceAssetService.preview(id, body);
+        res.status(200).json({
+          success: true,
+          data,
+          message: "试听音频已生成。",
+        } satisfies ApiResponse<AudiobookVoicePreviewResult>);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
 
   router.post(
     "/:id/audiobook/precheck",
