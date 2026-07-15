@@ -62,6 +62,8 @@ const moreNavGroups: MobileNavGroup[] = [
     items: [
       { key: "help", label: "新手上路", to: "/help", group: "more" },
       { key: "drama", label: "短剧工作台", to: "/drama", group: "creation" },
+      { key: "comic", label: "漫画工作台", to: "/comic", group: "creation" },
+      { key: "audiobook", label: "有声书工作台", to: "/audiobook", group: "creation" },
       { key: "book-analysis", label: "拆书", to: "/book-analysis", group: "creation" },
       { key: "auto-director-follow-ups", label: "导演跟进", to: "/auto-director/follow-ups", group: "tasks" },
       { key: "chat-legacy", label: "旧版聊天", to: "/chat-legacy", group: "creation" },
