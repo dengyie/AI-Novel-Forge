@@ -172,14 +172,15 @@ function parseChunksPrunedFromResultJson(resultJson: string | null | undefined):
 function toSummary(row: AudiobookTaskRow): AudiobookTaskSummary {
   const chapterIds = parseChapterIds(row.chapterIdsJson);
   let readyChapterIds: string[] = [];
+  // 以磁盘为准：DB fullAudioPath 可能残留而文件已 wipe
   let fullAudioReady = false;
   try {
     const taskDir = resolveAudiobookTaskDir(row.novelId, row.id);
     readyChapterIds = listReadyChapterAudioIds(taskDir, chapterIds);
-    fullAudioReady = Boolean(row.fullAudioPath) || isFullBookAudioReady(taskDir);
+    fullAudioReady = isFullBookAudioReady(taskDir);
   } catch {
     readyChapterIds = [];
-    fullAudioReady = Boolean(row.fullAudioPath);
+    fullAudioReady = false;
   }
 
   return {
@@ -871,9 +872,14 @@ export class AudiobookTaskService {
       try {
         prunedChunkFiles = pruneChunkWavArtifacts(result.outputDir, chapterIdsForPrune);
         chunksPruned = true;
-      } catch {
+      } catch (pruneError) {
         chunksPruned = false;
         prunedChunkFiles = 0;
+        console.warn(
+          "[audiobook] pruneChunkWavArtifacts failed",
+          taskId,
+          pruneError instanceof Error ? pruneError.message : pruneError,
+        );
       }
 
       await prisma.audiobookTask.updateMany({
