@@ -1,7 +1,7 @@
 ﻿# AI 小说创作工作台 / AI Novel Production Engine
 
 
-> 本 fork 合并上游 v0.4.2，并保留 humanizer 去 AI 味、GenerationJob lease、promptRunner 墙钟超时、Reference fail-loud、SPA 根路径托管等本地生产差异。
+> 本仓库为 dengyie fork（桌面版本 `0.4.3`，对齐 GitHub Releases `v0.4.3*` 线），保留 humanizer 去 AI 味、GenerationJob lease、promptRunner 墙钟超时、Reference fail-loud、SPA 根路径托管、小说有声书等本地生产差异。
 一个面向长篇小说创作的 AI Native 开源项目。
 
 当前开发主线：
@@ -35,10 +35,10 @@
 
 如果你只是想直接下载安装并开始使用，优先从桌面版入口进入：
 
-- 下载入口：[GitHub Releases](https://github.com/ExplosiveCoderflome/AI-Novel-Writing-Assistant/releases)
-- 最新版本页：[Latest Release](https://github.com/ExplosiveCoderflome/AI-Novel-Writing-Assistant/releases/latest)
+- 下载入口：[GitHub Releases](https://github.com/dengyie/AI-Novel-Writing-Assistant/releases)
+- 最新版本页：[Latest Release](https://github.com/dengyie/AI-Novel-Writing-Assistant/releases/latest)
 - 建议优先下载 `Setup.exe` 安装版；如果你不想安装，或者想放在 U 盘 / 临时目录里直接运行，再选择 `portable` 版本
-- 公开介绍站：[GitHub Pages 介绍站](https://explosivecoderflome.github.io/AI-Novel-Writing-Assistant/) 提供功能预览、模块文档和使用指南
+- 公开介绍站源码在本仓 `site/`；若启用 GitHub Pages，入口为 [dengyie.github.io 介绍站](https://dengyie.github.io/AI-Novel-Writing-Assistant/)
 
 ## 项目定位
 
