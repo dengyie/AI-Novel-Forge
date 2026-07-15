@@ -12,6 +12,7 @@ import { Input } from "@/components/ui/input";
 import {
   createObjectUrlSlot,
   decodeBase64AudioToObjectUrl,
+  inspectWavAudioBase64,
   resolveLocalAudioSrc,
   tryAutoPlayAudio,
 } from "@/lib/audiobookVoiceAudio";
@@ -45,6 +46,9 @@ interface CharacterVoiceEditorProps {
   form: CharacterVoiceEditorForm;
   saved?: CharacterVoiceFormSlice | null;
   onChange: (field: CharacterVoiceEditorField, value: string) => void;
+  /** 音色改完后就近保存；不传则仍依赖下方「保存角色资产」。 */
+  onSave?: () => void;
+  isSaving?: boolean;
 }
 
 const ZH_PRESETS = MIMO_TTS_VOICE_CATALOG.filter((item) => item.locale === "zh");
@@ -102,6 +106,8 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
     form,
     saved,
     onChange,
+    onSave,
+    isSaving = false,
   } = props;
 
   const formVoice = useMemo(
@@ -124,6 +130,7 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
   const [previewAudioUrl, setPreviewAudioUrl] = useState<string | null>(null);
   const [previewLabel, setPreviewLabel] = useState("");
   const [previewMessage, setPreviewMessage] = useState("");
+  const [previewDurationSec, setPreviewDurationSec] = useState<number | null>(null);
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
   const previewUrlSlotRef = useRef(createObjectUrlSlot());
 
@@ -139,13 +146,32 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
     setPreviewAudioUrl(null);
     setPreviewLabel("");
     setPreviewMessage("");
+    setPreviewDurationSec(null);
   }, [characterId]);
 
   useEffect(() => {
     if (!previewAudioUrl) {
       return;
     }
-    void tryAutoPlayAudio(previewAudioRef.current);
+    let cancelled = false;
+    void tryAutoPlayAudio(previewAudioRef.current).then((result) => {
+      if (cancelled) {
+        return;
+      }
+      if (result.durationSec != null) {
+        setPreviewDurationSec(result.durationSec);
+      }
+      if (result.error) {
+        setPreviewMessage(result.error);
+        return;
+      }
+      if (!result.played) {
+        setPreviewMessage("试听已生成；若未自动播放，请点播放键。");
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [previewAudioUrl]);
 
   const previewMutation = useMutation({
@@ -166,13 +192,29 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
     },
     onSuccess: (data) => {
       if (!data?.audioBase64) {
+        setPreviewAudioUrl(previewUrlSlotRef.current.set(null));
+        setPreviewDurationSec(null);
         setPreviewMessage("试听无音频返回。");
         return;
       }
-      const nextUrl = decodeBase64AudioToObjectUrl(data.audioBase64, "audio/wav");
-      setPreviewAudioUrl(previewUrlSlotRef.current.set(nextUrl));
-      setPreviewLabel(formVoice.detailLabel);
-      setPreviewMessage("试听已生成并尝试自动播放。");
+      try {
+        const inspection = inspectWavAudioBase64(data.audioBase64);
+        if (!inspection.isWav || inspection.reason) {
+          throw new Error(inspection.reason || "试听音频无效。");
+        }
+        const nextUrl = decodeBase64AudioToObjectUrl(data.audioBase64, "audio/wav");
+        setPreviewAudioUrl(previewUrlSlotRef.current.set(nextUrl));
+        setPreviewLabel(formVoice.detailLabel);
+        setPreviewDurationSec(inspection.durationSec);
+        const durationText = inspection.durationSec != null
+          ? `约 ${inspection.durationSec.toFixed(1)} 秒`
+          : "时长待解析";
+        setPreviewMessage(`试听已生成（${durationText}），正在尝试自动播放。`);
+      } catch (error) {
+        setPreviewAudioUrl(previewUrlSlotRef.current.set(null));
+        setPreviewDurationSec(null);
+        setPreviewMessage(error instanceof Error ? error.message : "试听音频解码失败。");
+      }
     },
     onError: (error) => {
       setPreviewMessage(error instanceof Error ? error.message : "试听失败。");
@@ -214,21 +256,36 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
           </div>
           <div className="text-xs leading-5 text-muted-foreground">
             预置可直接试听；设计需有描述；克隆须保存参考音后服务端试听，未保存时可本地听参考轨。
+            改完音色后请点「保存音色」写入角色卡（侧边栏/有声书面板只读已保存绑定）。
           </div>
         </div>
         <div className="flex shrink-0 flex-col items-stretch gap-1 sm:items-end">
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            disabled={previewMutation.isPending || !previewGate.ok}
-            title={previewGate.ok ? `试听 ${characterName}` : previewGate.reason}
-            onClick={() => previewMutation.mutate()}
-          >
-            {previewMutation.isPending ? "试听生成中..." : "试听音色"}
-          </Button>
+          <div className="flex flex-wrap justify-end gap-2">
+            {onSave ? (
+              <Button
+                type="button"
+                size="sm"
+                variant={dirty ? "default" : "outline"}
+                disabled={isSaving || !dirty}
+                title={dirty ? "将当前音色配置写入角色卡" : "音色无未保存改动"}
+                onClick={onSave}
+              >
+                {isSaving ? "保存中..." : dirty ? "保存音色" : "已保存"}
+              </Button>
+            ) : null}
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={previewMutation.isPending || !previewGate.ok}
+              title={previewGate.ok ? `试听 ${characterName}` : previewGate.reason}
+              onClick={() => previewMutation.mutate()}
+            >
+              {previewMutation.isPending ? "试听生成中..." : "试听音色"}
+            </Button>
+          </div>
           {!previewGate.ok ? (
-            <div className="max-w-[16rem] text-right text-[11px] leading-4 text-muted-foreground">
+            <div className="max-w-[18rem] text-right text-[11px] leading-4 text-muted-foreground">
               {previewGate.reason}
             </div>
           ) : null}
@@ -242,8 +299,9 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
         <div className="space-y-1">
           <div className="text-xs text-muted-foreground">
             试听：{previewLabel || formVoice.detailLabel}
+            {previewDurationSec != null ? ` · ${previewDurationSec.toFixed(1)}s` : ""}
           </div>
-          <audio ref={previewAudioRef} controls autoPlay src={previewAudioUrl} className="w-full" />
+          <audio ref={previewAudioRef} controls preload="auto" src={previewAudioUrl} className="w-full" />
         </div>
       ) : null}
 

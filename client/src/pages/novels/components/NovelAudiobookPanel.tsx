@@ -31,6 +31,7 @@ import SelectControl from "@/components/common/SelectControl";
 import {
   createObjectUrlSlot,
   decodeBase64AudioToObjectUrl,
+  inspectWavAudioBase64,
   tryAutoPlayAudio,
 } from "@/lib/audiobookVoiceAudio";
 import {
@@ -698,6 +699,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
   const [voicePlanOverwrite, setVoicePlanOverwrite] = useState(false);
   const [previewAudioUrl, setPreviewAudioUrl] = useState<string | null>(null);
   const [previewLabel, setPreviewLabel] = useState("");
+  const [previewDurationSec, setPreviewDurationSec] = useState<number | null>(null);
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
   const previewUrlSlotRef = useRef(createObjectUrlSlot());
 
@@ -712,7 +714,25 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
     if (!previewAudioUrl) {
       return;
     }
-    void tryAutoPlayAudio(previewAudioRef.current);
+    let cancelled = false;
+    void tryAutoPlayAudio(previewAudioRef.current).then((result) => {
+      if (cancelled) {
+        return;
+      }
+      if (result.durationSec != null) {
+        setPreviewDurationSec(result.durationSec);
+      }
+      if (result.error) {
+        setMessage(result.error);
+        return;
+      }
+      if (!result.played) {
+        setMessage((prev) => prev || "试听已生成；若未自动播放，请点播放键。");
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [previewAudioUrl]);
 
   const sortedChapters = useMemo(
@@ -913,13 +933,29 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
     },
     onSuccess: ({ label, characterName, data }) => {
       if (!data?.audioBase64) {
+        setPreviewAudioUrl(previewUrlSlotRef.current.set(null));
+        setPreviewDurationSec(null);
         setMessage("试听无音频。");
         return;
       }
-      const nextUrl = decodeBase64AudioToObjectUrl(data.audioBase64, "audio/wav");
-      setPreviewAudioUrl(previewUrlSlotRef.current.set(nextUrl));
-      setPreviewLabel(label);
-      setMessage(`试听已生成并尝试播放：${characterName}`);
+      try {
+        const inspection = inspectWavAudioBase64(data.audioBase64);
+        if (!inspection.isWav || inspection.reason) {
+          throw new Error(inspection.reason || "试听音频无效。");
+        }
+        const nextUrl = decodeBase64AudioToObjectUrl(data.audioBase64, "audio/wav");
+        setPreviewAudioUrl(previewUrlSlotRef.current.set(nextUrl));
+        setPreviewLabel(label);
+        setPreviewDurationSec(inspection.durationSec);
+        const durationText = inspection.durationSec != null
+          ? `约 ${inspection.durationSec.toFixed(1)} 秒`
+          : "时长待解析";
+        setMessage(`试听已生成（${durationText}）并尝试播放：${characterName}`);
+      } catch (error) {
+        setPreviewAudioUrl(previewUrlSlotRef.current.set(null));
+        setPreviewDurationSec(null);
+        setMessage(error instanceof Error ? error.message : "试听音频解码失败。");
+      }
     },
     onError: (error) => {
       setMessage(error instanceof Error ? error.message : "试听失败。");
@@ -1073,8 +1109,11 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
         ) : null}
         {previewAudioUrl ? (
           <div className="space-y-1">
-            <div className="text-xs text-muted-foreground">试听：{previewLabel}</div>
-            <audio ref={previewAudioRef} controls autoPlay src={previewAudioUrl} className="w-full" />
+            <div className="text-xs text-muted-foreground">
+              试听：{previewLabel}
+              {previewDurationSec != null ? ` · ${previewDurationSec.toFixed(1)}s` : ""}
+            </div>
+            <audio ref={previewAudioRef} controls preload="auto" src={previewAudioUrl} className="w-full" />
           </div>
         ) : null}
       </div>
