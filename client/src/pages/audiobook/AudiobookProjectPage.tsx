@@ -50,7 +50,10 @@ export default function AudiobookProjectPage() {
       });
     },
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: queryKeys.novels.audiobookWorkspace(id) });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.novels.audiobookWorkspace(id) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.novels.audiobookVoiceReadiness(id) }),
+      ]);
     },
   });
 
@@ -139,7 +142,8 @@ export default function AudiobookProjectPage() {
         <CardHeader className="pb-2">
           <CardTitle className="text-base">开发说明</CardTitle>
           <CardDescription>
-            先规划/写入角色音色，再设旁白并生成任务。角色卡细节仍可在小说编辑 → 角色 Tab 调整（含 clone 参考音）。
+            本台可一键补齐角色音色与固定试听，再设旁白并生成任务。
+            clone 参考音与单卡精修仍可在小说编辑 → 角色 Tab。
             本页只拉目录与音色字段，不会加载全文章节正文。
           </CardDescription>
         </CardHeader>
