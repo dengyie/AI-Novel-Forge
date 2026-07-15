@@ -350,10 +350,10 @@ export function isPass(score: QualityScore): boolean {
 
 **仍属 backlog（不阻塞本闭环）**：Job/poll 长任务投影、债板 discard 率面板、UnifiedVerdict 类型仪式。
 
-**词表写入示例**（novel.storyWorldSliceOverridesJson）：
+**词表写入示例**（novel.storyWorldSliceOverridesJson；词条用当前 SoT 废弃术语，勿写已废口径）：
 
 ```json
-{ "sotBannedTerms": ["称重"] }
+{ "sotBannedTerms": ["旧废弃术语示例"] }
 ```
 
 ---

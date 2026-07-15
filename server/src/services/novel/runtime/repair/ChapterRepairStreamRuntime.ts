@@ -370,21 +370,14 @@ export class ChapterRepairStreamRuntime {
         },
       );
     } catch (error) {
-      logPipelineError("Artifact sync failed after repair adopt; content kept, marking needs_repair.", {
+      await this.markPostAdoptNeedsRepair({
         novelId: input.novelId,
         chapterId: input.chapterId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      await prisma.chapter.update({
-        where: { id: input.chapterId },
-        data: chapterStatePairAfterLiteraryQualityGate(false),
-      });
-      input.helpers.writeFrame({
-        type: "run_status",
         runId,
-        status: "succeeded",
-        phase: "completed",
-        message: "修复候选已采纳，但 artifacts 同步失败，已标 needs_repair。",
+        helpers: input.helpers,
+        logMessage: "Artifact sync failed after repair adopt; content kept, marking needs_repair.",
+        userMessage: "修复候选已采纳，但 artifacts 同步失败，已标 needs_repair。",
+        error,
       });
       return;
     }
@@ -399,21 +392,14 @@ export class ChapterRepairStreamRuntime {
         content: repairedContent,
       });
     } catch (error) {
-      logPipelineError("Post-adopt recheck failed; content kept, marking needs_repair.", {
+      await this.markPostAdoptNeedsRepair({
         novelId: input.novelId,
         chapterId: input.chapterId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      await prisma.chapter.update({
-        where: { id: input.chapterId },
-        data: chapterStatePairAfterLiteraryQualityGate(false),
-      });
-      input.helpers.writeFrame({
-        type: "run_status",
         runId,
-        status: "succeeded",
-        phase: "completed",
-        message: "修复候选已采纳，但正式 recheck 失败，已标 needs_repair。",
+        helpers: input.helpers,
+        logMessage: "Post-adopt recheck failed; content kept, marking needs_repair.",
+        userMessage: "修复候选已采纳，但正式 recheck 失败，已标 needs_repair。",
+        error,
       });
       return;
     }
@@ -438,6 +424,34 @@ export class ChapterRepairStreamRuntime {
       message: literaryPass
         ? "修复候选已采纳，本章已达到可继续推进状态。"
         : "修复候选已采纳并保存，但仍有问题待继续处理。",
+    });
+  }
+
+  /** adopt 后副作用失败：正文已写，强制 needs_repair，禁止假 completed。 */
+  private async markPostAdoptNeedsRepair(input: {
+    novelId: string;
+    chapterId: string;
+    runId: string;
+    helpers: StreamDoneHelpers;
+    logMessage: string;
+    userMessage: string;
+    error: unknown;
+  }): Promise<void> {
+    logPipelineError(input.logMessage, {
+      novelId: input.novelId,
+      chapterId: input.chapterId,
+      error: input.error instanceof Error ? input.error.message : String(input.error),
+    });
+    await prisma.chapter.update({
+      where: { id: input.chapterId },
+      data: chapterStatePairAfterLiteraryQualityGate(false),
+    });
+    input.helpers.writeFrame({
+      type: "run_status",
+      runId: input.runId,
+      status: "succeeded",
+      phase: "completed",
+      message: input.userMessage,
     });
   }
 

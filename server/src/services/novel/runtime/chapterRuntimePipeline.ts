@@ -248,8 +248,8 @@ export async function runPipelineChapterWithRuntime(
 
     if (!autoReview) {
       await syncFinalRetainedChapterArtifacts(deps, novelId, chapterId, content, artifactSyncMode, "confirmed");
-      // 跳过审校 ≠ 质量过审：只 bump generation，不写 completed（A6）
-      await deps.markChapterGenerationState(chapterId, "approved", { literaryPass: false });
+      // 跳过审校 ≠ 质量过审：不传 literaryPass → 只 bump generationState，不写 completed，也不误标 needs_repair（A6）
+      await deps.markChapterGenerationState(chapterId, "approved");
       return {
         reviewExecuted: false,
         pass: true,
