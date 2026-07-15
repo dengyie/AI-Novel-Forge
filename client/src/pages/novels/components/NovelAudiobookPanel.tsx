@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   DEFAULT_AUDIOBOOK_NARRATOR_STYLE,
@@ -75,15 +75,81 @@ function statusVariant(status: AudiobookTaskSummary["status"]): "default" | "sec
   return "outline";
 }
 
-/** 与小说 export 一致：触发浏览器本地下载，不走远程拷贝旁路。 */
-function triggerBrowserDownload(url: string, fileName: string): void {
+/** 与小说 export 一致：blob 触发本地下载，不走远程拷贝旁路。 */
+function triggerBlobDownload(blob: Blob, fileName: string): void {
+  const objectUrl = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
-  anchor.href = url;
+  anchor.href = objectUrl;
   anchor.download = fileName;
   anchor.rel = "noreferrer";
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();
+  // 延迟 revoke，避免部分浏览器下载未启动就失效
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 30_000);
+}
+
+function withDownloadParam(url: string): string {
+  try {
+    const parsed = new URL(url, window.location.origin);
+    parsed.searchParams.set("download", "1");
+    return parsed.toString();
+  } catch {
+    return url.includes("?") ? `${url}&download=1` : `${url}?download=1`;
+  }
+}
+
+/**
+ * 通过 fetch 拉取媒体并带进度回调（大文件）。
+ * access 在 query 中，无需额外 header。
+ */
+async function fetchMediaBlob(
+  url: string,
+  onProgress?: (loaded: number, total: number | null) => void,
+  signal?: AbortSignal,
+): Promise<Blob> {
+  const response = await fetch(withDownloadParam(url), {
+    method: "GET",
+    credentials: "same-origin",
+    signal,
+  });
+  if (!response.ok) {
+    throw new Error(`下载失败（HTTP ${response.status}）`);
+  }
+  const totalHeader = response.headers.get("Content-Length");
+  const total = totalHeader ? Number(totalHeader) : NaN;
+  const knownTotal = Number.isFinite(total) && total > 0 ? total : null;
+
+  if (!response.body || !onProgress) {
+    return response.blob();
+  }
+
+  const reader = response.body.getReader();
+  const chunks: BlobPart[] = [];
+  let loaded = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    if (value) {
+      chunks.push(value);
+      loaded += value.byteLength;
+      onProgress(loaded, knownTotal);
+    }
+  }
+  const contentType = response.headers.get("Content-Type") || "application/octet-stream";
+  return new Blob(chunks, { type: contentType });
+}
+
+function formatDownloadBytes(bytes: number): string {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function TaskAudioControls(props: {
@@ -97,10 +163,25 @@ function TaskAudioControls(props: {
   const [chapterUrls, setChapterUrls] = useState<Record<string, string>>({});
   const [selectedChapterId, setSelectedChapterId] = useState<string>("");
   const [busyDownload, setBusyDownload] = useState<string | null>(null);
+  const [downloadProgress, setDownloadProgress] = useState<{
+    key: string;
+    loaded: number;
+    total: number | null;
+  } | null>(null);
   const [error, setError] = useState("");
+  const [issuing, setIssuing] = useState(false);
+  /** 稳定 media-access 缓存：不因 task.updatedAt / 4s 轮询重签打断播放 */
+  const mediaCacheRef = useRef<{
+    taskId: string;
+    fullUrl: string | null;
+    m4bUrl: string | null;
+    chapterUrls: Record<string, string>;
+  }>({ taskId: "", fullUrl: null, m4bUrl: null, chapterUrls: {} });
 
+  // 以服务端盘面探测为准，不把 status=succeeded 当作文件存在
   const readyChapterIds = task.readyChapterIds ?? [];
-  const fullAudioReady = Boolean(task.fullAudioReady || task.fullAudioPath || task.status === "succeeded");
+  const readyChapterKey = readyChapterIds.join(",");
+  const fullAudioReady = Boolean(task.fullAudioReady);
   const m4bReady = task.m4bStatus === "ready";
   const hasProgressiveChapters = readyChapterIds.length > 0;
   const showDelivery = fullAudioReady || m4bReady || hasProgressiveChapters;
@@ -128,34 +209,72 @@ function TaskAudioControls(props: {
     }
   }, [orderedReadyChapters, selectedChapterId]);
 
+  // 稳定签发：不依赖 task.updatedAt，避免 4s 轮询打断 <audio>
+  // 仅在 taskId / 就绪集合 / 选中章 变化时补签缺失 URL
   useEffect(() => {
     let cancelled = false;
+    if (mediaCacheRef.current.taskId !== task.id) {
+      mediaCacheRef.current = {
+        taskId: task.id,
+        fullUrl: null,
+        m4bUrl: null,
+        chapterUrls: {},
+      };
+    }
+
     if (!showDelivery) {
+      mediaCacheRef.current.fullUrl = null;
+      mediaCacheRef.current.m4bUrl = null;
+      mediaCacheRef.current.chapterUrls = {};
       setFullUrl(null);
       setM4bUrl(null);
       setChapterUrls({});
+      setIssuing(false);
       return;
     }
 
     void (async () => {
+      setIssuing(true);
       try {
-        const nextChapterUrls: Record<string, string> = {};
-        // 只签发当前选中章，避免全书级任务对每章都打 media-access
-        if (selectedChapterId && orderedReadyChapters.includes(selectedChapterId)) {
+        const cache = mediaCacheRef.current;
+        const nextChapterUrls: Record<string, string> = { ...cache.chapterUrls };
+        for (const key of Object.keys(nextChapterUrls)) {
+          if (!orderedReadyChapters.includes(key)) {
+            delete nextChapterUrls[key];
+          }
+        }
+
+        if (
+          selectedChapterId
+          && orderedReadyChapters.includes(selectedChapterId)
+          && !nextChapterUrls[selectedChapterId]
+        ) {
           nextChapterUrls[selectedChapterId] = await issueAudiobookMediaUrl(novelId, task.id, {
             resource: "chapter",
             chapterId: selectedChapterId,
           });
         }
 
-        let nextFull: string | null = null;
-        let nextM4b: string | null = null;
-        if (fullAudioReady) {
+        let nextFull = cache.fullUrl;
+        let nextM4b = cache.m4bUrl;
+        if (fullAudioReady && !nextFull) {
           nextFull = await issueAudiobookMediaUrl(novelId, task.id, { resource: "full" });
         }
-        if (m4bReady) {
-          nextM4b = await issueAudiobookMediaUrl(novelId, task.id, { resource: "full_m4b" }).catch(() => null);
+        if (!fullAudioReady) {
+          nextFull = null;
         }
+        if (m4bReady && !nextM4b) {
+          nextM4b = await issueAudiobookMediaUrl(novelId, task.id, { resource: "full_m4b" }).catch(
+            () => null,
+          );
+        }
+        if (!m4bReady) {
+          nextM4b = null;
+        }
+
+        cache.fullUrl = nextFull;
+        cache.m4bUrl = nextM4b;
+        cache.chapterUrls = nextChapterUrls;
 
         if (!cancelled) {
           setChapterUrls(nextChapterUrls);
@@ -166,9 +285,10 @@ function TaskAudioControls(props: {
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : "无法签发音频地址。");
-          setFullUrl(null);
-          setM4bUrl(null);
-          setChapterUrls({});
+        }
+      } finally {
+        if (!cancelled) {
+          setIssuing(false);
         }
       }
     })();
@@ -181,10 +301,10 @@ function TaskAudioControls(props: {
     m4bReady,
     novelId,
     orderedReadyChapters,
+    readyChapterKey,
     selectedChapterId,
     showDelivery,
     task.id,
-    task.updatedAt,
   ]);
 
   if (!showDelivery) {
@@ -202,58 +322,82 @@ function TaskAudioControls(props: {
           : "章节音频已就绪，可先按章试听/下载；全书完成后提供汇总交付。";
 
   const selectedChapterUrl = selectedChapterId ? chapterUrls[selectedChapterId] ?? null : null;
-  const playerUrl = fullUrl ?? selectedChapterUrl;
+  // 全书就绪时：顶部播全书；章节区始终可单独播选中章
+  const fullPlayerUrl = fullUrl;
+  const chapterPlayerUrl = selectedChapterUrl;
   const primaryDownloadLabel = m4bReady ? "下载 m4b（推荐）" : fullAudioReady ? "下载全书 WAV" : null;
 
-  async function handlePrimaryDownload() {
-    setBusyDownload("primary");
+  async function downloadMedia(
+    key: string,
+    resolveUrl: () => Promise<string>,
+    fileName: string,
+  ): Promise<void> {
+    setBusyDownload(key);
     setError("");
+    setDownloadProgress({ key, loaded: 0, total: null });
+    const controller = new AbortController();
     try {
-      if (m4bReady) {
-        const url = m4bUrl
-          ?? await issueAudiobookMediaUrl(novelId, task.id, { resource: "full_m4b" });
-        triggerBrowserDownload(url, `audiobook-${task.id}-full.m4b`);
+      const url = await resolveUrl();
+      const blob = await fetchMediaBlob(
+        url,
+        (loaded, total) => {
+          setDownloadProgress({ key, loaded, total });
+        },
+        controller.signal,
+      );
+      triggerBlobDownload(blob, fileName);
+    } catch (err) {
+      if ((err as { name?: string })?.name === "AbortError") {
         return;
       }
-      if (fullAudioReady) {
-        const url = fullUrl
-          ?? await issueAudiobookMediaUrl(novelId, task.id, { resource: "full" });
-        triggerBrowserDownload(url, `audiobook-${task.id}-full.wav`);
-      }
-    } catch (err) {
       setError(err instanceof Error ? err.message : "下载失败。");
     } finally {
       setBusyDownload(null);
+      setDownloadProgress(null);
+    }
+  }
+
+  async function handlePrimaryDownload() {
+    if (m4bReady) {
+      await downloadMedia(
+        "primary",
+        async () => m4bUrl ?? issueAudiobookMediaUrl(novelId, task.id, { resource: "full_m4b" }),
+        `audiobook-${task.id}-full.m4b`,
+      );
+      return;
+    }
+    if (fullAudioReady) {
+      await downloadMedia(
+        "primary",
+        async () => fullUrl ?? issueAudiobookMediaUrl(novelId, task.id, { resource: "full" }),
+        `audiobook-${task.id}-full.wav`,
+      );
     }
   }
 
   async function handleWavDownload() {
-    setBusyDownload("wav");
-    setError("");
-    try {
-      const url = fullUrl
-        ?? await issueAudiobookMediaUrl(novelId, task.id, { resource: "full" });
-      triggerBrowserDownload(url, `audiobook-${task.id}-full.wav`);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "下载 WAV 失败。");
-    } finally {
-      setBusyDownload(null);
-    }
+    await downloadMedia(
+      "wav",
+      async () => fullUrl ?? issueAudiobookMediaUrl(novelId, task.id, { resource: "full" }),
+      `audiobook-${task.id}-full.wav`,
+    );
   }
 
   async function handleChapterDownload(chapterId: string) {
-    setBusyDownload(`chapter:${chapterId}`);
-    setError("");
-    try {
-      const url = chapterUrls[chapterId]
-        ?? await issueAudiobookMediaUrl(novelId, task.id, { resource: "chapter", chapterId });
-      triggerBrowserDownload(url, `audiobook-${task.id}-${chapterId}.wav`);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "下载章节音频失败。");
-    } finally {
-      setBusyDownload(null);
-    }
+    await downloadMedia(
+      `chapter:${chapterId}`,
+      async () => chapterUrls[chapterId]
+        ?? issueAudiobookMediaUrl(novelId, task.id, { resource: "chapter", chapterId }),
+      `audiobook-${task.id}-${chapterId}.wav`,
+    );
   }
+
+  const activeProgress = downloadProgress && busyDownload === downloadProgress.key
+    ? downloadProgress
+    : null;
+  const progressPercent = activeProgress && activeProgress.total
+    ? Math.min(100, Math.round((activeProgress.loaded / activeProgress.total) * 100))
+    : null;
 
   return (
     <div className="mt-3 space-y-3 rounded-xl border border-border/70 bg-muted/15 p-3">
@@ -273,7 +417,7 @@ function TaskAudioControls(props: {
               disabled={busyDownload === "primary"}
               onClick={() => void handlePrimaryDownload()}
             >
-              {busyDownload === "primary" ? "准备下载…" : primaryDownloadLabel}
+              {busyDownload === "primary" ? "下载中…" : primaryDownloadLabel}
             </Button>
           ) : null}
           {m4bReady && fullAudioReady ? (
@@ -283,12 +427,12 @@ function TaskAudioControls(props: {
               disabled={busyDownload === "wav"}
               onClick={() => void handleWavDownload()}
             >
-              {busyDownload === "wav" ? "准备下载…" : "下载全书 WAV"}
+              {busyDownload === "wav" ? "下载中…" : "下载全书 WAV"}
             </Button>
           ) : null}
-          {fullUrl ? (
+          {fullPlayerUrl ? (
             <Button asChild size="sm" variant="outline">
-              <a href={fullUrl} target="_blank" rel="noreferrer">
+              <a href={fullPlayerUrl} target="_blank" rel="noreferrer">
                 新窗口播放全书
               </a>
             </Button>
@@ -296,9 +440,39 @@ function TaskAudioControls(props: {
         </div>
       ) : null}
 
-      {playerUrl ? (
-        <audio className="w-full" controls preload="none" src={playerUrl} />
-      ) : showDelivery ? (
+      {activeProgress ? (
+        <div className="space-y-1.5">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+            <span>正在下载到本地…</span>
+            <span>
+              {formatDownloadBytes(activeProgress.loaded)}
+              {activeProgress.total
+                ? ` / ${formatDownloadBytes(activeProgress.total)}`
+                : ""}
+              {progressPercent != null ? ` · ${progressPercent}%` : ""}
+            </span>
+          </div>
+          <div className="h-2 overflow-hidden rounded-full bg-muted">
+            <div
+              className="h-full rounded-full bg-primary transition-[width] duration-150"
+              style={{
+                width: progressPercent != null
+                  ? `${progressPercent}%`
+                  : activeProgress.loaded > 0
+                    ? "35%"
+                    : "8%",
+              }}
+            />
+          </div>
+        </div>
+      ) : null}
+
+      {fullPlayerUrl ? (
+        <div className="space-y-1">
+          <div className="text-xs text-muted-foreground">全书试听</div>
+          <audio className="w-full" controls preload="none" src={fullPlayerUrl} />
+        </div>
+      ) : showDelivery && issuing && !hasProgressiveChapters ? (
         <div className="text-sm text-muted-foreground">正在准备音频地址…</div>
       ) : null}
 
@@ -332,11 +506,16 @@ function TaskAudioControls(props: {
                 }
               }}
             >
-              {busyDownload === `chapter:${selectedChapterId}` ? "准备下载…" : "下载本章 WAV"}
+              {busyDownload === `chapter:${selectedChapterId}` ? "下载中…" : "下载本章 WAV"}
             </Button>
           </div>
-          {!fullUrl && selectedChapterUrl ? (
-            <audio className="w-full" controls preload="none" src={selectedChapterUrl} />
+          {chapterPlayerUrl ? (
+            <div className="space-y-1">
+              <div className="text-xs text-muted-foreground">本章试听</div>
+              <audio className="w-full" controls preload="none" src={chapterPlayerUrl} />
+            </div>
+          ) : issuing ? (
+            <div className="text-sm text-muted-foreground">正在准备章节音频地址…</div>
           ) : null}
         </div>
       ) : null}
