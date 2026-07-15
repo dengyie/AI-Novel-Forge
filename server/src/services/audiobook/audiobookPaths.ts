@@ -166,3 +166,60 @@ export function wipeChapterAnnotationArtifact(taskDir: string, chapterId: string
   safeUnlink(ann);
   safeUnlink(`${ann}.part`);
 }
+
+/** 章音频已落盘（存在且大于最小 WAV 头），用于任务摘要/渐进播放。 */
+export function isChapterAudioReady(taskDir: string, chapterId: string): boolean {
+  try {
+    const filePath = resolveChapterAudioPath(taskDir, chapterId);
+    if (!fs.existsSync(filePath)) {
+      return false;
+    }
+    return fs.statSync(filePath).size > 44;
+  } catch {
+    return false;
+  }
+}
+
+/** 按任务章节顺序返回已有 chapter.wav 的 id。 */
+export function listReadyChapterAudioIds(taskDir: string, chapterIds: string[]): string[] {
+  return chapterIds.filter((chapterId) => isChapterAudioReady(taskDir, chapterId));
+}
+
+export function isFullBookAudioReady(taskDir: string): boolean {
+  try {
+    const filePath = resolveFullBookAudioPath(taskDir);
+    if (!fs.existsSync(filePath)) {
+      return false;
+    }
+    return fs.statSync(filePath).size > 44;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 全书合成成功后删除 chunk-*.wav，保留 chapter.wav / full-book.* / annotations。
+ * 重合成走 wipeChapterAudioArtifacts，不依赖 chunk 续跑。
+ * @returns 删除的文件数
+ */
+export function pruneChunkWavArtifacts(taskDir: string, chapterIds: string[]): number {
+  let removed = 0;
+  for (const chapterId of chapterIds) {
+    let chapterDir: string;
+    try {
+      chapterDir = resolveChapterAudioDir(taskDir, chapterId);
+    } catch {
+      continue;
+    }
+    if (!fs.existsSync(chapterDir)) {
+      continue;
+    }
+    for (const name of fs.readdirSync(chapterDir)) {
+      if (name.startsWith("chunk-") || (name.startsWith("chunk") && name.endsWith(".part"))) {
+        safeUnlink(path.join(chapterDir, name));
+        removed += 1;
+      }
+    }
+  }
+  return removed;
+}
