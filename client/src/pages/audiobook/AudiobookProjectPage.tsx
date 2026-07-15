@@ -128,6 +128,7 @@ export default function AudiobookProjectPage() {
             narratorVoice={narratorVoice}
             narratorStyle={narratorStyle}
             onNarratorChange={(patch) => {
+              saveNarratorMutation.reset();
               if (patch.audiobookNarratorVoice !== undefined) {
                 setNarratorVoice(patch.audiobookNarratorVoice);
               }

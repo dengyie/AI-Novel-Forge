@@ -138,7 +138,6 @@ export interface BasicTabProps {
   isSaving: boolean;
   projectQuickStart?: ReactNode;
   directorTakeoverEntry?: ReactNode;
-  audiobookPanel?: ReactNode;
 }
 
 export interface StoryMacroTabProps {

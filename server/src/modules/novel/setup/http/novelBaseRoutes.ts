@@ -11,6 +11,7 @@ import type { NovelApplicationServices } from "../../../../services/novel/applic
 const paginationSchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(NOVEL_LIST_PAGE_LIMIT_MAX).default(NOVEL_LIST_PAGE_LIMIT_DEFAULT),
+  q: z.string().trim().max(100).optional(),
 });
 
 const bookAnalysisSectionKeySchema = z.enum([
@@ -156,7 +157,11 @@ export function registerNovelBaseRoutes(input: RegisterNovelBaseRoutesInput): vo
   router.get("/", validate({ query: paginationSchema }), async (req, res, next) => {
     try {
       const query = paginationSchema.parse(req.query);
-      const data = await novelService.listNovels({ page: query.page, limit: query.limit });
+      const data = await novelService.listNovels({
+        page: query.page,
+        limit: query.limit,
+        q: query.q,
+      });
       const response: ApiResponse<typeof data> = {
         success: true,
         data,

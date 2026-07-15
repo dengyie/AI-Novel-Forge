@@ -1,3 +1,5 @@
+import { Link } from "react-router-dom";
+import { Headphones } from "lucide-react";
 import type { BasicTabProps } from "./NovelEditView.types";
 import NovelBasicInfoForm from "./NovelBasicInfoForm";
 import NovelStyleRecommendationCard from "./NovelStyleRecommendationCard";
@@ -7,6 +9,7 @@ import NovelCreateTitleQuickFill from "./titleWorkshop/NovelCreateTitleQuickFill
 import DirectorTakeoverEntryPanel from "./DirectorTakeoverEntryPanel";
 import { NovelCoverCard } from "./cover/NovelCoverCard";
 import { DetailDisclosure, SectionBlock } from "./workspaceShell";
+import { Button } from "@/components/ui/button";
 
 export default function BasicInfoTab(props: BasicTabProps) {
   return (
@@ -85,14 +88,23 @@ export default function BasicInfoTab(props: BasicTabProps) {
         />
       </SectionBlock>
 
-      {props.audiobookPanel ? (
-        <SectionBlock
-          title="有声书"
-          description="完整入口在侧栏「有声书工作台」。此处为快捷面板：配置音色与旁白后预检生成。"
-        >
-          {props.audiobookPanel}
-        </SectionBlock>
-      ) : null}
+      <SectionBlock
+        title="有声书"
+        description="音色规划、旁白与生成任务已聚拢到有声书工作台，避免与小说编辑页双重入口分叉。"
+      >
+        <div className="flex flex-col gap-3 rounded-xl border border-border/70 bg-muted/20 p-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="space-y-1 text-sm text-muted-foreground">
+            <div className="flex items-center gap-2 font-medium text-foreground">
+              <Headphones className="h-4 w-4 text-primary" />
+              在有声书工作台继续开发
+            </div>
+            <p>角色音色、旁白默认与章节合成请统一在工作台操作；角色卡细节仍可在本页角色 Tab 调整。</p>
+          </div>
+          <Button type="button" size="sm" asChild className="shrink-0">
+            <Link to={`/audiobook/novels/${props.novelId}`}>打开有声书工作台</Link>
+          </Button>
+        </div>
+      </SectionBlock>
 
       <DetailDisclosure
         title="写法建议"
