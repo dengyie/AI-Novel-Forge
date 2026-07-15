@@ -1,19 +1,49 @@
+import fs from "node:fs";
 import {
   DEFAULT_AUDIOBOOK_NARRATOR_STYLE,
   DEFAULT_AUDIOBOOK_NARRATOR_VOICE,
+  isAudiobookTtsMode,
   isMimoTtsPresetVoice,
   type AudiobookPrecheckResult,
   type AudiobookScopeMode,
+  type AudiobookTtsMode,
   type CreateAudiobookTaskInput,
 } from "@ai-novel/shared/types/audiobook";
 import { prisma } from "../../db/prisma";
 import { AppError } from "../../middleware/errorHandler";
+import { parseSpeakerAliases } from "./audiobookSpeakerAliases";
 
 function parseScopeMode(value: string | undefined): AudiobookScopeMode {
   if (value === "chapter" || value === "range" || value === "full") {
     return value;
   }
   throw new AppError("scopeMode 必须是 chapter | range | full。", 400);
+}
+
+function normalizeMode(raw: string | null | undefined): AudiobookTtsMode {
+  const trimmed = raw?.trim();
+  if (!trimmed) {
+    return "preset";
+  }
+  if (!isAudiobookTtsMode(trimmed)) {
+    return "preset";
+  }
+  return trimmed;
+}
+
+function characterIsConfigured(item: {
+  ttsMode: AudiobookTtsMode;
+  ttsVoice: string;
+  ttsDesignPrompt: string;
+  ttsRefAudioPath: string;
+}): boolean {
+  if (item.ttsMode === "preset") {
+    return Boolean(item.ttsVoice);
+  }
+  if (item.ttsMode === "design") {
+    return Boolean(item.ttsDesignPrompt);
+  }
+  return Boolean(item.ttsRefAudioPath);
 }
 
 export class AudiobookPrecheckService {
@@ -36,8 +66,12 @@ export class AudiobookPrecheckService {
           select: {
             id: true,
             name: true,
+            ttsMode: true,
             ttsVoice: true,
             ttsStyle: true,
+            ttsDesignPrompt: true,
+            ttsRefAudioPath: true,
+            ttsSpeakerAliases: true,
           },
           orderBy: { createdAt: "asc" },
         },
@@ -69,27 +103,67 @@ export class AudiobookPrecheckService {
     const blockingErrors: string[] = [];
 
     if (!isMimoTtsPresetVoice(narratorVoiceRaw)) {
-      blockingErrors.push(`旁白音色「${narratorVoiceRaw}」不在 MiMo 预置表中。`);
+      blockingErrors.push(`旁白音色「${narratorVoiceRaw}」不在 MiMo 预置表中（旁白仅支持 preset）。`);
     }
 
-    const characterVoices = novel.characters.map((character) => ({
-      characterId: character.id,
-      characterName: character.name,
-      ttsVoice: character.ttsVoice?.trim() || "",
-      ttsStyle: character.ttsStyle ?? null,
-    }));
+    const characterVoices = novel.characters.map((character) => {
+      const ttsMode = normalizeMode(character.ttsMode);
+      return {
+        characterId: character.id,
+        characterName: character.name,
+        ttsMode,
+        ttsVoice: character.ttsVoice?.trim() || "",
+        ttsStyle: character.ttsStyle ?? null,
+        ttsDesignPrompt: character.ttsDesignPrompt?.trim() || "",
+        ttsRefAudioPath: character.ttsRefAudioPath?.trim() || "",
+        speakerAliases: parseSpeakerAliases(character.ttsSpeakerAliases),
+      };
+    });
 
     const missingVoices = characterVoices
-      .filter((item) => !item.ttsVoice)
-      .map((item) => ({
-        characterId: item.characterId,
-        characterName: item.characterName,
-        reason: "角色卡未配置 ttsVoice（MiMo 预置音色）。",
-      }));
+      .filter((item) => !characterIsConfigured(item))
+      .map((item) => {
+        let reason = "角色卡未完成 TTS 绑定。";
+        if (item.ttsMode === "preset") {
+          reason = "角色卡未配置 ttsVoice（MiMo 预置音色）。";
+        } else if (item.ttsMode === "design") {
+          reason = "角色卡未配置 ttsDesignPrompt（音色设计描述）。";
+        } else {
+          reason = "角色卡未配置 clone 参考音频（ttsRefAudioPath）。";
+        }
+        return {
+          characterId: item.characterId,
+          characterName: item.characterName,
+          reason,
+        };
+      });
 
     for (const item of characterVoices) {
-      if (item.ttsVoice && !isMimoTtsPresetVoice(item.ttsVoice)) {
+      const rawMode = novel.characters.find((c) => c.id === item.characterId)?.ttsMode?.trim();
+      if (rawMode && !isAudiobookTtsMode(rawMode)) {
+        blockingErrors.push(`角色「${item.characterName}」ttsMode「${rawMode}」非法（须 preset|design|clone）。`);
+        continue;
+      }
+
+      if (item.ttsMode === "preset" && item.ttsVoice && !isMimoTtsPresetVoice(item.ttsVoice)) {
         blockingErrors.push(`角色「${item.characterName}」音色「${item.ttsVoice}」不在 MiMo 预置表中。`);
+      }
+
+      if (item.ttsMode === "clone" && item.ttsRefAudioPath) {
+        if (item.ttsRefAudioPath.includes("..") || item.ttsRefAudioPath.includes("\0")) {
+          blockingErrors.push(`角色「${item.characterName}」参考音频路径非法。`);
+        } else if (!fs.existsSync(item.ttsRefAudioPath)) {
+          blockingErrors.push(`角色「${item.characterName}」参考音频文件不存在。`);
+        } else {
+          try {
+            const stat = fs.statSync(item.ttsRefAudioPath);
+            if (!stat.isFile() || stat.size <= 0) {
+              blockingErrors.push(`角色「${item.characterName}」参考音频不可用。`);
+            }
+          } catch {
+            blockingErrors.push(`角色「${item.characterName}」参考音频无法读取。`);
+          }
+        }
       }
     }
 
@@ -109,7 +183,18 @@ export class AudiobookPrecheckService {
         voice: narratorVoiceRaw || DEFAULT_AUDIOBOOK_NARRATOR_VOICE,
         style: narratorStyle,
       },
-      characterVoices: characterVoices.filter((item) => item.ttsVoice),
+      characterVoices: characterVoices
+        .filter((item) => characterIsConfigured(item))
+        .map((item) => ({
+          characterId: item.characterId,
+          characterName: item.characterName,
+          ttsMode: item.ttsMode,
+          ttsVoice: item.ttsVoice || null,
+          ttsStyle: item.ttsStyle,
+          ttsDesignPrompt: item.ttsDesignPrompt || null,
+          ttsRefAudioPath: item.ttsRefAudioPath || null,
+          speakerAliases: item.speakerAliases,
+        })),
       missingVoices,
       blockingErrors,
       warnings,

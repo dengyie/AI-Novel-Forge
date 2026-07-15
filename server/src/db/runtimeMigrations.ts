@@ -145,6 +145,26 @@ const REQUIRED_COLUMN_BACKFILLS = [
     columnDefinition: `"ttsStyle" TEXT`,
   },
   {
+    tableName: "Character",
+    columnName: "ttsMode",
+    columnDefinition: `"ttsMode" TEXT`,
+  },
+  {
+    tableName: "Character",
+    columnName: "ttsDesignPrompt",
+    columnDefinition: `"ttsDesignPrompt" TEXT`,
+  },
+  {
+    tableName: "Character",
+    columnName: "ttsRefAudioPath",
+    columnDefinition: `"ttsRefAudioPath" TEXT`,
+  },
+  {
+    tableName: "Character",
+    columnName: "ttsSpeakerAliases",
+    columnDefinition: `"ttsSpeakerAliases" TEXT`,
+  },
+  {
     tableName: "Novel",
     columnName: "audiobookNarratorVoice",
     columnDefinition: `"audiobookNarratorVoice" TEXT`,

@@ -59,37 +59,54 @@ function statusVariant(status: AudiobookTaskSummary["status"]): "default" | "sec
 function TaskAudioControls(props: { novelId: string; task: AudiobookTaskSummary }) {
   const { novelId, task } = props;
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [m4bUrl, setM4bUrl] = useState<string | null>(null);
   const [error, setError] = useState("");
   const canPlay = task.status === "succeeded" || Boolean(task.fullAudioPath);
+  const m4bReady = task.m4bStatus === "ready";
 
   useEffect(() => {
     let cancelled = false;
     if (!canPlay) {
       setAudioUrl(null);
+      setM4bUrl(null);
       return;
     }
     void (async () => {
       try {
         const url = await issueAudiobookMediaUrl(novelId, task.id, { resource: "full" });
+        let m4b: string | null = null;
+        if (m4bReady) {
+          m4b = await issueAudiobookMediaUrl(novelId, task.id, { resource: "full_m4b" }).catch(() => null);
+        }
         if (!cancelled) {
           setAudioUrl(url);
+          setM4bUrl(m4b);
           setError("");
         }
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : "无法签发音频地址。");
           setAudioUrl(null);
+          setM4bUrl(null);
         }
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [canPlay, novelId, task.id, task.updatedAt]);
+  }, [canPlay, m4bReady, novelId, task.id, task.updatedAt]);
 
   if (!canPlay) {
     return null;
   }
+
+  const m4bHint = m4bReady
+    ? "可选下载 m4b（含章节目录，需播放器支持）。"
+    : task.m4bStatus === "skipped"
+      ? "本任务未封装 m4b（环境可能缺少 ffmpeg），WAV 仍可用。"
+      : task.m4bStatus === "failed"
+        ? "m4b 封装失败，WAV 仍可用。"
+        : "m4b 仅在任务成功封装后提供下载。";
 
   return (
     <div className="mt-3 space-y-2">
@@ -99,11 +116,19 @@ function TaskAudioControls(props: { novelId: string; task: AudiobookTaskSummary 
           <div className="flex flex-wrap gap-2">
             <Button asChild size="sm" variant="outline">
               <a href={audioUrl} target="_blank" rel="noreferrer">
-                播放/下载全书
+                播放/下载全书 WAV
               </a>
             </Button>
+            {m4bReady && m4bUrl ? (
+              <Button asChild size="sm" variant="outline">
+                <a href={m4bUrl} download>
+                  下载 m4b
+                </a>
+              </Button>
+            ) : null}
           </div>
           <audio className="w-full" controls preload="none" src={audioUrl} />
+          <p className="text-xs text-muted-foreground">{m4bHint}</p>
         </>
       ) : (
         <div className="text-sm text-muted-foreground">正在准备音频地址…</div>
@@ -275,7 +300,16 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
   );
 
   const missingVoiceCharacters = useMemo(
-    () => characters.filter((character) => !character.ttsVoice?.trim()),
+    () => characters.filter((character) => {
+      const mode = character.ttsMode?.trim() || "preset";
+      if (mode === "design") {
+        return !character.ttsDesignPrompt?.trim();
+      }
+      if (mode === "clone") {
+        return !character.ttsRefAudioPath?.trim();
+      }
+      return !character.ttsVoice?.trim();
+    }),
     [characters],
   );
 

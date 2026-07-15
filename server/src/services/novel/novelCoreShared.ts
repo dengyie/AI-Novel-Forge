@@ -139,8 +139,15 @@ export interface CharacterInput {
   attireStyle?: string;
   signatureDetail?: string;
   voiceTexture?: string;
+  ttsMode?: "preset" | "design" | "clone" | null;
   ttsVoice?: string | null;
   ttsStyle?: string | null;
+  ttsDesignPrompt?: string | null;
+  ttsRefAudioPath?: string | null;
+  /** 仅更新时消费：写入磁盘后落 ttsRefAudioPath，不进库。 */
+  ttsRefAudioBase64?: string | null;
+  /** 说话人别名：数组或分隔字符串，服务端序列化为 JSON 文本。 */
+  ttsSpeakerAliases?: string | string[] | null;
   presenceImpression?: string;
   arcStart?: string;
   arcMidpoint?: string;

@@ -53,11 +53,35 @@ export type AudiobookScopeMode = "chapter" | "range" | "full";
 
 export type AudiobookSpeakerKind = "narrator" | "character";
 
+/** 角色 TTS 模态：预置 / 文案设计 / 参考音频克隆。旁白仅 preset。 */
+export type AudiobookTtsMode = "preset" | "design" | "clone";
+
+export const AUDIOBOOK_TTS_MODES = ["preset", "design", "clone"] as const;
+
+export const MIMO_TTS_MODELS = {
+  preset: "mimo-v2.5-tts",
+  design: "mimo-v2.5-tts-voicedesign",
+  clone: "mimo-v2.5-tts-voiceclone",
+} as const;
+
+export function isAudiobookTtsMode(value: string): value is AudiobookTtsMode {
+  return (AUDIOBOOK_TTS_MODES as readonly string[]).includes(value);
+}
+
 export interface AudiobookCharacterVoiceConfig {
   characterId: string;
   characterName: string;
-  ttsVoice: string;
+  /** 缺省视为 preset（兼容旧数据）。 */
+  ttsMode?: AudiobookTtsMode | null;
+  /** preset：预置音色名；design/clone 可空。 */
+  ttsVoice?: string | null;
   ttsStyle?: string | null;
+  /** design：音色设计文案（user content）。 */
+  ttsDesignPrompt?: string | null;
+  /** clone：参考音频相对/绝对路径（服务端可读）。 */
+  ttsRefAudioPath?: string | null;
+  /** 说话人别名（称呼/外号），用于标注 speakerName 归一。 */
+  speakerAliases?: string[] | null;
 }
 
 export interface AudiobookNarratorConfig {
@@ -73,8 +97,15 @@ export interface AudiobookDialogueSegment {
   /** 展示名：旁白 / 角色名 */
   speakerLabel: string;
   text: string;
+  /** 合成模态；缺省 preset。 */
+  ttsMode?: AudiobookTtsMode | null;
+  /** preset 的预置名；design 可空；clone 不用作预置名。 */
   voice: string;
   style?: string | null;
+  /** design 模式音色描述。 */
+  designPrompt?: string | null;
+  /** clone 模式参考音频路径。 */
+  refAudioPath?: string | null;
 }
 
 export interface AudiobookChapterAnnotation {
@@ -141,6 +172,8 @@ export interface AudiobookTaskSummary {
   completedChapterCount: number;
   outputDir?: string | null;
   fullAudioPath?: string | null;
+  /** 全书 m4b 状态：ready 才展示下载；skipped/failed 仅提示。 */
+  m4bStatus?: "ready" | "skipped" | "failed" | null;
   createdAt: string;
   updatedAt: string;
   startedAt?: string | null;
