@@ -524,7 +524,8 @@ test("mode=off qualityLoop assessment has no setting_alignment signal", () => {
     issues: [],
     // 不传 settingAlignment
   });
-  assert.equal(assessment.signals.length, 4);
+  // retention + literary_score + continuity + prose + rolling_window（无 setting_alignment）
+  assert.equal(assessment.signals.length, 5);
   assert.ok(assessment.signals.every((s) => s.artifactType !== "setting_alignment"));
   assert.equal(assessment.recommendedAction, "continue");
 });

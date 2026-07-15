@@ -35,7 +35,10 @@ test("buildChapterQualityLoopAssessment continues when quality signals are valid
   assert.equal(assessment.recommendedAction, "continue");
   assert.equal(assessment.patchFirstRequired, false);
   assert.equal(assessment.recheckRequired, false);
-  assert.equal(assessment.signals.length, 4);
+  // retention + literary_score + continuity + prose + rolling_window
+  assert.equal(assessment.signals.length, 5);
+  const literary = assessment.signals.find((signal) => signal.artifactType === "literary_score");
+  assert.equal(literary?.status, "valid");
 });
 
 test("buildChapterQualityLoopAssessment copies length riskTags into observabilityTags without changing action", () => {
@@ -78,6 +81,10 @@ test("buildChapterQualityLoopAssessment requires patch-first repair for local qu
   assert.equal(assessment.recommendedAction, "patch_repair");
   assert.equal(assessment.patchFirstRequired, true);
   assert.equal(assessment.recheckRequired, true);
+  const literary = assessment.signals.find((signal) => signal.artifactType === "literary_score");
+  // engagement 68 vs floor 75 → gap 7 < 10 → risk（非 far-miss invalid）
+  assert.equal(literary?.status, "risk");
+  assert.ok(literary?.issueCodes.includes("literary:engagement"));
 });
 
 test("buildChapterQualityLoopAssessment routes rolling window failures to replan", () => {
@@ -182,6 +189,10 @@ test("buildChapterQualityLoopAssessment treats low repetition control as a repai
   assert.equal(assessment.overallStatus, "invalid");
   assert.equal(assessment.recommendedAction, "patch_repair");
   assert.equal(assessment.budget.nextAction, "patch_repair");
+  const literary = assessment.signals.find((signal) => signal.artifactType === "literary_score");
+  // repetition 60 vs floor 75 → gap 15 ≥ 10 → invalid
+  assert.equal(literary?.status, "invalid");
+  assert.ok(literary?.issueCodes.includes("literary:repetition"));
 });
 
 test("buildChapterQualityLoopAssessment includes prose quality risk as local patch repair input", () => {
@@ -465,4 +476,41 @@ test("quality loop projection treats valid continue as none despite residual blo
 
   assert.equal(classifyChapterQualityLoopRiskFlags(riskFlags), "none");
   assert.equal(hasContinuableChapterQualityLoopRiskFlags(riskFlags), true);
+});
+
+test("buildChapterQualityLoopAssessment treats high sot_* openIssues as prose risk", () => {
+  const assessment = buildChapterQualityLoopAssessment({
+    chapterId: "chapter-sot-leak",
+    chapterOrder: 8,
+    score: score(),
+    issues: [],
+    runtimePackage: {
+      context: {
+        chapter: { order: 8 },
+      },
+      audit: {
+        reports: [],
+        openIssues: [{
+          auditType: "mode_fit",
+          severity: "high",
+          code: "sot_must_avoid_leak",
+          evidence: "正文出现 mustAvoid 词：源核熔断。",
+          fixSuggestion: "删除或改写泄漏词。",
+        }],
+      },
+      failureClassification: {
+        code: "none",
+        summary: "未触发全局重规划。",
+        decisionReason: null,
+        blockingObligations: [],
+      },
+    },
+    evaluatedAt: "2026-07-15T00:00:00.000Z",
+  });
+
+  const proseSignal = assessment.signals.find((signal) => signal.artifactType === "prose_quality");
+  assert.equal(proseSignal?.status, "risk");
+  assert.deepEqual(proseSignal?.issueCodes, ["sot_must_avoid_leak"]);
+  assert.equal(assessment.overallStatus, "risk");
+  assert.equal(assessment.recommendedAction, "patch_repair");
 });

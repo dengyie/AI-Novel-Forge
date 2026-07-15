@@ -27,7 +27,10 @@ import {
 } from "../../novelCoreShared";
 import type { ChapterArtifactSyncService } from "../ChapterArtifactSyncService";
 import type { GenerationContextAssembler } from "../GenerationContextAssembler";
-import { detectProseQuality } from "../proseQuality/ProseQualityDetector";
+import {
+  detectProseQuality,
+  normalizeProseQualityTermList,
+} from "../proseQuality/ProseQualityDetector";
 import {
   ChapterContextAssemblyError,
   assembleChapterAuditContextPackage,
@@ -57,8 +60,14 @@ function contentFingerprint(content: string): string {
   return createHash("sha256").update(content).digest("hex");
 }
 
-function blockingProseCodes(content: string): string[] {
-  const report = detectProseQuality(content);
+function blockingProseCodes(
+  content: string,
+  options: { mustAvoid?: string | null; bannedTerms?: string[] | null } = {},
+): string[] {
+  const report = detectProseQuality(content, {
+    mustAvoidTerms: normalizeProseQualityTermList(options.mustAvoid ?? null),
+    bannedTerms: normalizeProseQualityTermList(options.bannedTerms ?? null),
+  });
   return report.findings
     .filter((finding) => finding.severity === "high" || finding.severity === "critical")
     .map((finding) => finding.code);
@@ -247,6 +256,7 @@ export class ChapterRepairStreamRuntime {
         continuityScore: true,
         characterScore: true,
         pacingScore: true,
+        mustAvoid: true,
       },
     });
     if (!baselineChapter) {
@@ -258,8 +268,9 @@ export class ChapterRepairStreamRuntime {
     const candidateHash = contentFingerprint(repairedContent);
     const consecutiveNoImprove = countTrailingRepairNoImprove(baselineChapter.repairHistory);
 
-    const baselineBlockingCodes = blockingProseCodes(baselineContent);
-    const candidateBlockingCodes = blockingProseCodes(repairedContent);
+    const proseDetectOpts = { mustAvoid: baselineChapter.mustAvoid ?? null };
+    const baselineBlockingCodes = blockingProseCodes(baselineContent, proseDetectOpts);
+    const candidateBlockingCodes = blockingProseCodes(repairedContent, proseDetectOpts);
 
     const baselineScore = await this.resolveBaselineScore({
       novelId: input.novelId,

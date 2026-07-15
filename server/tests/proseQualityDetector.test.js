@@ -132,3 +132,30 @@ test("buildProseQualityAuditReport maps findings into mode_fit runtime audit iss
   assert.match(auditReport.issues[0].code, /^prose_/);
   assert.equal(auditReport.createdAt, "2026-07-06T00:00:00.000Z");
 });
+
+test("detectProseQuality flags sot_banned_term and sot_must_avoid_leak as high blockers", () => {
+  const report = detectProseQuality(
+    [
+      "他推开门，看见了禁忌语：源核熔断。",
+      "房间里还有一个叫作内部代号X的装置。",
+    ].join("\n"),
+    {
+      bannedTerms: ["源核熔断"],
+      mustAvoidTerms: ["内部代号X"],
+    },
+  );
+  assert.ok(codes(report).includes("sot_banned_term"));
+  assert.ok(codes(report).includes("sot_must_avoid_leak"));
+  assert.equal(report.hasBlockingFindings, true);
+  assert.ok(severitiesByCode(report, "sot_banned_term").includes("high"));
+  assert.ok(severitiesByCode(report, "sot_must_avoid_leak").includes("high"));
+});
+
+test("detectProseQuality with empty SoT options keeps legacy prose-only behavior", () => {
+  const clean = detectProseQuality("潮声压在城墙外，守夜人握紧刀柄。", {
+    bannedTerms: [],
+    mustAvoidTerms: [],
+  });
+  assert.equal(codes(clean).some((code) => code.startsWith("sot_")), false);
+  assert.equal(clean.hasBlockingFindings, false);
+});

@@ -243,7 +243,8 @@ function contentIncludesAllGroups(content: string, groups: string[][]): {
   };
 }
 
-function parseMustAvoidTerms(mustAvoid: string | null | undefined): string[] {
+/** 将 mustAvoid 原文切成 ≥2 字词表（与 prose L0 / 设定对齐共用）。 */
+export function parseMustAvoidTerms(mustAvoid: string | null | undefined): string[] {
   if (!mustAvoid?.trim()) {
     return [];
   }

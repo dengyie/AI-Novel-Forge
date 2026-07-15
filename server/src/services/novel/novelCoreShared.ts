@@ -1,6 +1,10 @@
 import type { BookAnalysisSectionKey } from "@ai-novel/shared/types/bookAnalysis";
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
 import type { QualityScore, ReviewIssue } from "@ai-novel/shared/types/novel";
+import {
+  DEFAULT_QUALITY_IS_PASS_THRESHOLD,
+  isLiteraryQualityPass,
+} from "@ai-novel/shared/types/literaryQualityPass";
 import { parseCommercialTagsJson } from "@ai-novel/shared/types/novelFraming";
 import { normalizeStoryModeOutput } from "../storyMode/storyModeProfile";
 
@@ -298,8 +302,8 @@ export interface CharacterTimelineSyncOptions {
   endOrder?: number;
 }
 
-/** @deprecated Prefer DEFAULT_QUALITY_IS_PASS_THRESHOLD from @ai-novel/shared；数字契约不可改。 */
-const QUALITY_THRESHOLD = { coherence: 80, repetition: 75, engagement: 75 };
+/** 与 shared DEFAULT_QUALITY_IS_PASS_THRESHOLD 同一 SoT（80/75/75）。 */
+const QUALITY_THRESHOLD = DEFAULT_QUALITY_IS_PASS_THRESHOLD;
 type BeatStatus = "planned" | "completed" | "skipped";
 
 const CONTINUATION_ANALYSIS_SECTION_KEYS: BookAnalysisSectionKey[] = [
@@ -509,13 +513,11 @@ export function ruleScore(content: string): QualityScore {
 }
 
 /**
- * 文学可读门（与 shared isLiteraryQualityPass 同阈值 80/75/75）。
- * 实现保持本地数字以避免循环依赖；阶段 2 可 re-export shared。
+ * 文学可读门（coherence∧repetition∧engagement，阈值 80/75/75）。
+ * 委托 shared isLiteraryQualityPass，禁止本地再开第二套门槛。
  */
 export function isPass(score: QualityScore): boolean {
-  return score.coherence >= QUALITY_THRESHOLD.coherence
-    && score.repetition >= QUALITY_THRESHOLD.repetition
-    && score.engagement >= QUALITY_THRESHOLD.engagement;
+  return isLiteraryQualityPass(score, QUALITY_THRESHOLD);
 }
 
 export function briefSummary(

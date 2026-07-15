@@ -12,7 +12,9 @@ export type ProseQualityIssueCode =
   | "prose_truncation"
   | "prose_ai_self_reference"
   | "prose_placeholder_leak"
-  | "prose_engineering_term_leak";
+  | "prose_engineering_term_leak"
+  | "sot_banned_term"
+  | "sot_must_avoid_leak";
 
 export interface ProseQualityFinding {
   code: ProseQualityIssueCode;
@@ -27,6 +29,12 @@ export interface ProseQualityFinding {
 export interface ProseQualityReport {
   findings: ProseQualityFinding[];
   hasBlockingFindings: boolean;
+}
+
+/** 可选 SoT/mustAvoid 词表；默认空，不改变既有 prose_* 行为。 */
+export interface ProseQualityDetectOptions {
+  bannedTerms?: string[] | null;
+  mustAvoidTerms?: string[] | null;
 }
 
 export interface ProseQualityAuditReportInput {
@@ -57,7 +65,14 @@ const PLACEHOLDER_PATTERN = /TODO|TBD|待补充|此处省略|省略若干|略写
 const ENGINEERING_TERM_STRONG_PATTERN = /细纲|情节点|卷纲|功能标签|目标情绪|字数目标|章首钩子|章尾钩子|任务描述|任务单|scene\s*card|prompt|schema|runtime\s*package|上下文包|系统提示词|修复指令/iu;
 const ENGINEERING_TERM_SOFT_PATTERN = /本章|下一章|读者|伏笔|前文|后文|剧情推进|人物弧光|爽点|节奏点|钩子/u;
 
-export function detectProseQuality(content: string): ProseQualityReport {
+/**
+ * 正文机械 L0：既有 prose_* + 可选 SoT/mustAvoid（sot_*）。
+ * options 缺省或词表空时行为与历史 detectProseQuality(content) 一致。
+ */
+export function detectProseQuality(
+  content: string,
+  options: ProseQualityDetectOptions = {},
+): ProseQualityReport {
   const segments = buildTextSegments(content);
   const findings: ProseQualityFinding[] = [];
   const counts = new Map<ProseQualityIssueCode, number>();
@@ -97,12 +112,79 @@ export function detectProseQuality(content: string): ProseQualityReport {
   scanVerbatimRepeat(segments, addFinding);
   scanTruncation(content, segments, addFinding);
 
+  // SoT / mustAvoid：high，默认词表空不触发。
+  scanTermListLeak(segments, normalizeTermList(options.bannedTerms), "sot_banned_term", addFinding);
+  scanTermListLeak(segments, normalizeTermList(options.mustAvoidTerms), "sot_must_avoid_leak", addFinding);
+
   return {
     findings,
     hasBlockingFindings: findings.some((finding) => (
       finding.severity === "high" || finding.severity === "critical"
     )),
   };
+}
+
+/** 将 mustAvoid 原文或词表规范为 ≥2 字去重词。 */
+export function normalizeProseQualityTermList(
+  terms: string | string[] | null | undefined,
+): string[] {
+  if (terms == null) {
+    return [];
+  }
+  if (typeof terms === "string") {
+    return uniqueTerms(terms.split(/[\n；;，,、|/]+/g));
+  }
+  return uniqueTerms(terms.flatMap((term) => String(term).split(/[\n；;，,、|/]+/g)));
+}
+
+function normalizeTermList(terms: string[] | null | undefined): string[] {
+  return normalizeProseQualityTermList(terms ?? []);
+}
+
+function uniqueTerms(values: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of values) {
+    const term = raw.trim();
+    if (term.length < 2 || seen.has(term)) {
+      continue;
+    }
+    seen.add(term);
+    out.push(term);
+  }
+  return out;
+}
+
+function scanTermListLeak(
+  segments: TextSegment[],
+  terms: string[],
+  code: "sot_banned_term" | "sot_must_avoid_leak",
+  addFinding: (finding: ProseQualityFinding) => void,
+): void {
+  if (terms.length === 0) {
+    return;
+  }
+  for (const segment of segments) {
+    for (const term of terms) {
+      const index = segment.text.indexOf(term);
+      if (index < 0 || isInsideQuote(segment.text, index)) {
+        continue;
+      }
+      addFinding({
+        code,
+        severity: "high",
+        line: segment.line,
+        column: index + 1,
+        message: code === "sot_banned_term"
+          ? `正文命中 SoT 禁词「${term}」。`
+          : `正文泄漏 mustAvoid 项「${term}」。`,
+        excerpt: formatExcerpt(segment.text),
+        fixSuggestion: code === "sot_banned_term"
+          ? "删除或改写禁词，保持与世界观/SoT 一致。"
+          : "删除或改写 mustAvoid 泄漏，避免合同禁止项进入正文。",
+      });
+    }
+  }
 }
 
 export function buildProseQualityAuditReport(
