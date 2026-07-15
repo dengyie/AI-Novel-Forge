@@ -233,3 +233,101 @@ export const MIMO_TTS_VOICE_CATALOG: AudiobookVoiceCatalogItem[] = [
 export function isMimoTtsPresetVoice(value: string): value is MimoTtsPresetVoice {
   return (MIMO_TTS_PRESET_VOICES as readonly string[]).includes(value);
 }
+
+/** 人物卡 → 音色资产规划：策略 */
+export type AudiobookVoicePlanStrategy = "auto" | "preset_only" | "prefer_design";
+
+/** 单角色建议（不落库，apply 时写 Character 字段） */
+export interface AudiobookVoicePlanItem {
+  characterId: string;
+  characterName: string;
+  ttsMode: AudiobookTtsMode;
+  /** preset 时必有 */
+  ttsVoice?: string | null;
+  ttsStyle?: string | null;
+  /** design 时必有 */
+  ttsDesignPrompt?: string | null;
+  /** 建议说话人别名（可空） */
+  speakerAliases?: string[] | null;
+  /** 是否覆盖已有绑定 */
+  wouldOverwrite: boolean;
+  /** 规划理由（中文短句） */
+  reason: string;
+  /** 推断性别桶 */
+  genderBucket: "male" | "female" | "unknown";
+  /** 推断声线年龄桶 */
+  ageBucket: "youth" | "adult" | "elder" | "unknown";
+  /** 重要性 0–100，越高越优先差异化 */
+  importance: number;
+  /** 当前已绑定摘要 */
+  currentBinding?: {
+    ttsMode?: string | null;
+    ttsVoice?: string | null;
+    ttsDesignPrompt?: string | null;
+  } | null;
+}
+
+export interface AudiobookVoicePlanSuggestInput {
+  /** 仅规划未绑定角色；默认 true */
+  onlyMissing?: boolean;
+  /** 限定角色 id；空=全书角色 */
+  characterIds?: string[];
+  strategy?: AudiobookVoicePlanStrategy;
+  /** 同 preset 重要角色数超过该值后改 design；默认 1 */
+  maxImportantPerPreset?: number;
+}
+
+export interface AudiobookVoicePlanSuggestResult {
+  novelId: string;
+  strategy: AudiobookVoicePlanStrategy;
+  items: AudiobookVoicePlanItem[];
+  skipped: Array<{ characterId: string; characterName: string; reason: string }>;
+  summary: {
+    total: number;
+    planned: number;
+    presetCount: number;
+    designCount: number;
+    overwriteCount: number;
+  };
+}
+
+export interface AudiobookVoicePlanApplyItem {
+  characterId: string;
+  ttsMode: AudiobookTtsMode;
+  ttsVoice?: string | null;
+  ttsStyle?: string | null;
+  ttsDesignPrompt?: string | null;
+  speakerAliases?: string[] | null;
+}
+
+export interface AudiobookVoicePlanApplyInput {
+  items: AudiobookVoicePlanApplyItem[];
+  /** 已绑定是否覆盖；默认 false 跳过已配置 */
+  overwrite?: boolean;
+}
+
+export interface AudiobookVoicePlanApplyResult {
+  novelId: string;
+  applied: Array<{ characterId: string; characterName: string; ttsMode: string }>;
+  skipped: Array<{ characterId: string; characterName: string; reason: string }>;
+}
+
+export interface AudiobookVoicePreviewInput {
+  characterId?: string;
+  ttsMode?: AudiobookTtsMode;
+  ttsVoice?: string | null;
+  ttsStyle?: string | null;
+  ttsDesignPrompt?: string | null;
+  /** 试听文本，默认短句 */
+  text?: string;
+}
+
+export interface AudiobookVoicePreviewResult {
+  characterId?: string | null;
+  characterName?: string | null;
+  ttsMode: AudiobookTtsMode;
+  voice?: string | null;
+  audioBase64: string;
+  format: "wav";
+  sampleText: string;
+}

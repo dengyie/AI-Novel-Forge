@@ -8,19 +8,23 @@ import {
   type AudiobookScopeMode,
   type AudiobookTaskAnnotationsView,
   type AudiobookTaskSummary,
+  type AudiobookVoicePlanItem,
 } from "@ai-novel/shared/types/audiobook";
 import type { Character } from "@ai-novel/shared/types/novel";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import {
+  applyAudiobookVoicePlan,
   cancelAudiobookTask,
   createAudiobookTask,
   getAudiobookAnnotations,
   issueAudiobookMediaUrl,
   listAudiobookTasks,
   precheckAudiobookTask,
+  previewAudiobookVoice,
   reprocessAudiobookChapter,
+  suggestAudiobookVoicePlan,
 } from "@/api/novel/audiobook";
 import SelectControl from "@/components/common/SelectControl";
 
@@ -293,6 +297,9 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
   const [endOrder, setEndOrder] = useState(String(chapters[chapters.length - 1]?.order ?? 1));
   const [overrideVoice, setOverrideVoice] = useState("");
   const [message, setMessage] = useState("");
+  const [voicePlanItems, setVoicePlanItems] = useState<AudiobookVoicePlanItem[]>([]);
+  const [previewAudioUrl, setPreviewAudioUrl] = useState<string | null>(null);
+  const [previewLabel, setPreviewLabel] = useState("");
 
   const sortedChapters = useMemo(
     () => [...chapters].sort((a, b) => a.order - b.order),
@@ -381,6 +388,101 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
     },
   });
 
+  const suggestVoiceMutation = useMutation({
+    mutationFn: async () => {
+      const response = await suggestAudiobookVoicePlan(novelId, {
+        onlyMissing: true,
+        strategy: "auto",
+      });
+      return response.data;
+    },
+    onSuccess: (data) => {
+      const items = data?.items ?? [];
+      setVoicePlanItems(items);
+      if (!data || items.length === 0) {
+        setMessage(
+          data?.skipped?.length
+            ? `无需规划：${data.skipped.length} 个角色已绑定或已跳过。`
+            : "未生成音色规划（可能没有角色）。",
+        );
+        return;
+      }
+      setMessage(
+        `音色规划 ${items.length} 项：preset ${data.summary.presetCount} / design ${data.summary.designCount}。确认后可一键写入。`,
+      );
+    },
+    onError: (error) => {
+      setMessage(error instanceof Error ? error.message : "音色规划失败。");
+    },
+  });
+
+  const applyVoiceMutation = useMutation({
+    mutationFn: async () => {
+      if (voicePlanItems.length === 0) {
+        throw new Error("请先生成音色规划。");
+      }
+      const response = await applyAudiobookVoicePlan(novelId, {
+        overwrite: false,
+        items: voicePlanItems.map((item) => ({
+          characterId: item.characterId,
+          ttsMode: item.ttsMode,
+          ttsVoice: item.ttsVoice,
+          ttsStyle: item.ttsStyle,
+          ttsDesignPrompt: item.ttsDesignPrompt,
+          speakerAliases: item.speakerAliases,
+        })),
+      });
+      return response.data;
+    },
+    onSuccess: async (data) => {
+      setMessage(
+        data
+          ? `已写入 ${data.applied.length} 个角色音色，跳过 ${data.skipped.length}。请刷新角色卡或重新进入页面查看。`
+          : "音色已写入。",
+      );
+      setVoicePlanItems([]);
+      await queryClient.invalidateQueries({ queryKey: ["novel", novelId] });
+      await queryClient.invalidateQueries({ queryKey: ["novel-characters", novelId] });
+    },
+    onError: (error) => {
+      setMessage(error instanceof Error ? error.message : "写入音色失败。");
+    },
+  });
+
+  const previewVoiceMutation = useMutation({
+    mutationFn: async (item: AudiobookVoicePlanItem) => {
+      const response = await previewAudiobookVoice(novelId, {
+        characterId: item.characterId,
+        ttsMode: item.ttsMode,
+        ttsVoice: item.ttsVoice,
+        ttsStyle: item.ttsStyle,
+        ttsDesignPrompt: item.ttsDesignPrompt,
+      });
+      return { item, data: response.data };
+    },
+    onSuccess: ({ item, data }) => {
+      if (!data?.audioBase64) {
+        setMessage("试听无音频。");
+        return;
+      }
+      if (previewAudioUrl) {
+        URL.revokeObjectURL(previewAudioUrl);
+      }
+      const binary = atob(data.audioBase64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i += 1) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+      const url = URL.createObjectURL(new Blob([bytes], { type: "audio/wav" }));
+      setPreviewAudioUrl(url);
+      setPreviewLabel(`${item.characterName} · ${item.ttsMode}${item.ttsVoice ? `/${item.ttsVoice}` : ""}`);
+      setMessage(`试听已生成：${item.characterName}`);
+    },
+    onError: (error) => {
+      setMessage(error instanceof Error ? error.message : "试听失败。");
+    },
+  });
+
   function buildCreatePayload() {
     const narrator = overrideVoice.trim() || undefined;
     return {
@@ -398,7 +500,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
         <div className="min-w-0 space-y-1">
           <div className="text-sm font-semibold text-foreground">生成有声书</div>
           <div className="text-sm leading-6 text-muted-foreground">
-            多角色 TTS（CPA → MiMo）。请先在「角色准备」配置预置音色，并设置旁白默认音色。
+            多角色 TTS（CPA → MiMo）。可先「自动规划音色」写入角色卡，再设旁白并生成。
           </div>
         </div>
         <Badge
@@ -409,6 +511,78 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
             ? `${missingVoiceCharacters.length} 个角色缺音色`
             : "角色音色齐全"}
         </Badge>
+      </div>
+
+      <div className="space-y-3 rounded-xl border border-border/70 bg-muted/20 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <div className="text-sm font-medium text-foreground">人物卡 → 音色资产</div>
+            <div className="text-xs leading-5 text-muted-foreground">
+              按性别/身份/声线差异化分配 preset，重要角色撞声时升 design。不改已绑定角色。
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={suggestVoiceMutation.isPending || characters.length === 0}
+              onClick={() => suggestVoiceMutation.mutate()}
+            >
+              {suggestVoiceMutation.isPending ? "规划中..." : "自动规划音色"}
+            </Button>
+            <Button
+              size="sm"
+              disabled={
+                applyVoiceMutation.isPending
+                || voicePlanItems.length === 0
+              }
+              onClick={() => applyVoiceMutation.mutate()}
+            >
+              {applyVoiceMutation.isPending ? "写入中..." : `写入规划（${voicePlanItems.length}）`}
+            </Button>
+          </div>
+        </div>
+        {voicePlanItems.length > 0 ? (
+          <div className="max-h-56 space-y-2 overflow-y-auto rounded-lg border border-border/60 bg-background p-2">
+            {voicePlanItems.map((item) => (
+              <div
+                key={item.characterId}
+                className="flex flex-wrap items-start justify-between gap-2 rounded-md px-2 py-1.5 text-sm"
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="font-medium text-foreground">
+                    {item.characterName}
+                    <span className="ml-2 text-xs font-normal text-muted-foreground">
+                      {item.ttsMode}
+                      {item.ttsVoice ? ` · ${item.ttsVoice}` : ""}
+                      {` · 重要度 ${item.importance}`}
+                    </span>
+                  </div>
+                  <div className="text-xs leading-5 text-muted-foreground">
+                    {item.reason}
+                    {item.ttsMode === "design" && item.ttsDesignPrompt
+                      ? ` · ${item.ttsDesignPrompt.slice(0, 80)}${item.ttsDesignPrompt.length > 80 ? "…" : ""}`
+                      : ""}
+                  </div>
+                </div>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={previewVoiceMutation.isPending}
+                  onClick={() => previewVoiceMutation.mutate(item)}
+                >
+                  试听
+                </Button>
+              </div>
+            ))}
+          </div>
+        ) : null}
+        {previewAudioUrl ? (
+          <div className="space-y-1">
+            <div className="text-xs text-muted-foreground">试听：{previewLabel}</div>
+            <audio controls src={previewAudioUrl} className="w-full" />
+          </div>
+        ) : null}
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
