@@ -62,6 +62,38 @@ function presetChipClass(active: boolean): string {
     : "border-border/70 bg-background hover:border-primary/40 hover:bg-muted/25";
 }
 
+function PresetVoiceGrid(props: {
+  items: typeof MIMO_TTS_VOICE_CATALOG;
+  selectedVoice: string;
+  onSelect: (voiceId: string) => void;
+  showDescription: boolean;
+}) {
+  const { items, selectedVoice, onSelect, showDescription } = props;
+  return (
+    <div className="grid gap-2 sm:grid-cols-2">
+      {items.map((item) => {
+        const active = selectedVoice === item.id;
+        return (
+          <button
+            key={item.id}
+            type="button"
+            className={`rounded-lg border px-3 py-2 text-left transition ${presetChipClass(active)}`}
+            onClick={() => onSelect(item.id)}
+          >
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium">{item.label}</span>
+              {active ? <Badge variant="secondary">已选</Badge> : null}
+            </div>
+            {showDescription && item.description ? (
+              <div className="mt-0.5 text-[11px] text-muted-foreground">{item.description}</div>
+            ) : null}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
   const {
     novelId,
@@ -237,46 +269,19 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
         {mode === "preset" ? (
           <div className="space-y-2">
             <div className="text-xs font-medium text-muted-foreground">中文预置</div>
-            <div className="grid gap-2 sm:grid-cols-2">
-              {ZH_PRESETS.map((item) => {
-                const active = form.ttsVoice === item.id;
-                return (
-                  <button
-                    key={item.id}
-                    type="button"
-                    className={`rounded-lg border px-3 py-2 text-left transition ${presetChipClass(active)}`}
-                    onClick={() => onChange("ttsVoice", item.id)}
-                  >
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-medium">{item.label}</span>
-                      {active ? <Badge variant="secondary">已选</Badge> : null}
-                    </div>
-                    {item.description ? (
-                      <div className="mt-0.5 text-[11px] text-muted-foreground">{item.description}</div>
-                    ) : null}
-                  </button>
-                );
-              })}
-            </div>
+            <PresetVoiceGrid
+              items={ZH_PRESETS}
+              selectedVoice={form.ttsVoice}
+              onSelect={(voiceId) => onChange("ttsVoice", voiceId)}
+              showDescription
+            />
             <div className="text-xs font-medium text-muted-foreground">英文预置</div>
-            <div className="grid gap-2 sm:grid-cols-2">
-              {EN_PRESETS.map((item) => {
-                const active = form.ttsVoice === item.id;
-                return (
-                  <button
-                    key={item.id}
-                    type="button"
-                    className={`rounded-lg border px-3 py-2 text-left transition ${presetChipClass(active)}`}
-                    onClick={() => onChange("ttsVoice", item.id)}
-                  >
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-medium">{item.label}</span>
-                      {active ? <Badge variant="secondary">已选</Badge> : null}
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
+            <PresetVoiceGrid
+              items={EN_PRESETS}
+              selectedVoice={form.ttsVoice}
+              onSelect={(voiceId) => onChange("ttsVoice", voiceId)}
+              showDescription={false}
+            />
             {selectedPreset ? (
               <div className="text-xs text-muted-foreground">
                 当前预置：{selectedPreset.label}

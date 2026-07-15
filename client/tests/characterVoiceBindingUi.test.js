@@ -53,6 +53,7 @@ test("CharacterVoiceEditor is the single configuration surface", () => {
   assert.match(editor, /配置方式/);
   assert.match(editor, /中文预置/);
   assert.match(editor, /英文预置/);
+  assert.match(editor, /function PresetVoiceGrid/);
   // no speculative compact mode / dual revoke path
   assert.doesNotMatch(editor, /compact\?:/);
   assert.doesNotMatch(editor, /replaceObjectUrl/);
