@@ -201,11 +201,28 @@ function pickLeastUsedPreset(
   return best;
 }
 
+function seedPresetUsage(
+  usage: Map<string, number>,
+  importantUsage: Map<string, number>,
+  character: VoicePlannerCharacterInput,
+): void {
+  const mode = character.ttsMode?.trim() || "preset";
+  const voice = character.ttsVoice?.trim() || "";
+  if (mode !== "preset" || !voice) {
+    return;
+  }
+  usage.set(voice, (usage.get(voice) ?? 0) + 1);
+  if (scoreImportance(character) >= 55) {
+    importantUsage.set(voice, (importantUsage.get(voice) ?? 0) + 1);
+  }
+}
+
 /**
  * 纯函数：根据人物卡批量规划差异化音色。
  * - 重要角色优先拿差异化 preset；同 preset 重要角色过多则升 design
  * - 次要角色尽量填满 preset 池
- * - clone 已配置且非 overwrite 时跳过（由调用方 onlyMissing/skip 控制）
+ * - onlyMissing 跳过已绑定时，usage 会 seed 已绑定 preset，避免撞声
+ * - 已配置 clone 参考音频的角色永不进入规划（需用户在角色卡改）
  */
 export function planCharacterVoices(input: {
   characters: VoicePlannerCharacterInput[];
@@ -234,27 +251,33 @@ export function planCharacterVoices(input: {
       configured: boolean;
     }
   > = [];
+  const usage = new Map<string, number>();
+  const importantUsage = new Map<string, number>();
 
   for (const character of input.characters) {
     if (allowIds && !allowIds.has(character.characterId)) {
       continue;
     }
-    const configured = isCharacterVoiceConfigured(character);
-    if (onlyMissing && configured) {
-      skipped.push({
-        characterId: character.characterId,
-        characterName: character.characterName,
-        reason: "已绑定音色（onlyMissing=true）。",
-      });
-      continue;
-    }
-    // clone 已配参考音频：规划器不改写（除非调用方显式 include 且后续 apply overwrite）
+
     const mode = character.ttsMode?.trim() || "preset";
-    if (mode === "clone" && character.ttsRefAudioPath?.trim() && onlyMissing) {
+    const cloneBound = mode === "clone" && Boolean(character.ttsRefAudioPath?.trim());
+    // clone 参考音是用户资产：规划器永不改写（含 onlyMissing=false 的重新差异化）
+    if (cloneBound) {
       skipped.push({
         characterId: character.characterId,
         characterName: character.characterName,
         reason: "已配置 clone 参考音频。",
+      });
+      continue;
+    }
+
+    const configured = isCharacterVoiceConfigured(character);
+    if (onlyMissing && configured) {
+      seedPresetUsage(usage, importantUsage, character);
+      skipped.push({
+        characterId: character.characterId,
+        characterName: character.characterName,
+        reason: "已绑定音色（onlyMissing=true）。",
       });
       continue;
     }
@@ -273,8 +296,6 @@ export function planCharacterVoices(input: {
     return a.characterName.localeCompare(b.characterName, "zh");
   });
 
-  const usage = new Map<string, number>();
-  const importantUsage = new Map<string, number>();
   const items: AudiobookVoicePlanItem[] = [];
 
   for (const character of candidates) {

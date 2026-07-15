@@ -164,3 +164,61 @@ test("prefer_design strategy forces design prompts", () => {
   assert.equal(items.every((item) => item.ttsMode === "design"), true);
   assert.equal(items.every((item) => Boolean(item.ttsDesignPrompt)), true);
 });
+
+test("onlyMissing seeds usage from already-bound presets to avoid collisions", () => {
+  const { items, skipped } = planCharacterVoices({
+    onlyMissing: true,
+    strategy: "preset_only",
+    characters: [
+      {
+        characterId: "bound-male",
+        characterName: "已绑定男",
+        gender: "male",
+        castRole: "protagonist",
+        ttsMode: "preset",
+        ttsVoice: "白桦",
+      },
+      {
+        characterId: "new-male",
+        characterName: "新男角",
+        gender: "male",
+        castRole: "ally",
+      },
+    ],
+  });
+
+  assert.equal(skipped.some((item) => item.characterId === "bound-male"), true);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].characterId, "new-male");
+  assert.equal(items[0].ttsMode, "preset");
+  // 已占用「白桦」时，新男角应落到另一预置
+  assert.equal(items[0].ttsVoice, "苏打");
+});
+
+test("planCharacterVoices never rewrites configured clone bindings even when onlyMissing=false", () => {
+  const { items, skipped } = planCharacterVoices({
+    onlyMissing: false,
+    strategy: "prefer_design",
+    characters: [
+      {
+        characterId: "clone-1",
+        characterName: "克隆角",
+        gender: "female",
+        castRole: "protagonist",
+        ttsMode: "clone",
+        ttsRefAudioPath: "/data/voices/clone-1.wav",
+      },
+      {
+        characterId: "open-1",
+        characterName: "开放角",
+        gender: "male",
+        castRole: "ally",
+      },
+    ],
+  });
+
+  assert.equal(skipped.some((item) => item.characterId === "clone-1"), true);
+  assert.equal(items.some((item) => item.characterId === "clone-1"), false);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].characterId, "open-1");
+});
