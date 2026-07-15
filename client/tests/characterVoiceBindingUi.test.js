@@ -32,6 +32,8 @@ test("shared audiobook voice audio helpers exist", () => {
   assert.match(audio, /export function createObjectUrlSlot/);
   assert.match(audio, /export async function tryAutoPlayAudio/);
   assert.match(audio, /export function resolveLocalAudioSrc/);
+  assert.match(audio, /export function inspectWavAudioBase64/);
+  assert.match(audio, /waitForAudioReady/);
   // internal strip helper; not a public dual-revoke path
   assert.doesNotMatch(audio, /export function stripDataUrlBase64/);
   assert.doesNotMatch(audio, /export function replaceObjectUrl/);
@@ -46,7 +48,12 @@ test("CharacterVoiceEditor is the single configuration surface", () => {
   assert.match(editor, /isCharacterVoiceFormDirty/);
   assert.match(editor, /未保存/);
   assert.match(editor, /试听音色/);
+  assert.match(editor, /保存音色/);
+  assert.match(editor, /onSave/);
   assert.match(editor, /tryAutoPlayAudio/);
+  assert.match(editor, /inspectWavAudioBase64/);
+  assert.match(editor, /preload="auto"/);
+  assert.doesNotMatch(editor, /autoPlay/);
   assert.match(editor, /resolveLocalAudioSrc/);
   assert.match(editor, /createObjectUrlSlot/);
   assert.match(editor, /本地试听/);
@@ -72,6 +79,7 @@ test("character workspace mounts CharacterVoiceEditor once as source of truth", 
   const workspace = read("src/pages/novels/components/CharacterAssetWorkspace.tsx");
   assert.match(workspace, /novelId: string/);
   assert.match(workspace, /CharacterVoiceEditor/);
+  assert.match(workspace, /onSave=\{onSaveCharacter\}/);
   assert.match(workspace, /有声书音色在上方专用卡片配置/);
   // 旧的内联重复配置 / 本地 decode 不应再残留
   assert.doesNotMatch(workspace, /previewAudiobookVoice/);
@@ -90,11 +98,14 @@ test("audiobook panel lists bound voices and autoplays preview via shared audio 
   assert.match(panel, /当前绑定/);
   assert.match(panel, /kind: "character"/);
   assert.match(panel, /kind: "plan"/);
-  assert.match(panel, /autoPlay/);
   assert.match(panel, /previewAudioRef/);
   assert.match(panel, /decodeBase64AudioToObjectUrl/);
   assert.match(panel, /tryAutoPlayAudio/);
+  assert.match(panel, /inspectWavAudioBase64/);
   assert.match(panel, /createObjectUrlSlot/);
+  assert.match(panel, /preload="auto"/);
+  // voice preview uses tryAutoPlayAudio, not the HTML autoPlay attribute
+  assert.doesNotMatch(panel, /controls autoPlay src=\{previewAudioUrl\}/);
   assert.match(panel, /@\/lib\/audiobookVoiceAudio/);
   assert.doesNotMatch(panel, /function decodeBase64AudioToObjectUrl/);
   assert.doesNotMatch(panel, /replaceObjectUrl/);

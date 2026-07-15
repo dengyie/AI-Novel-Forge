@@ -478,6 +478,8 @@ export default function CharacterAssetWorkspace(props: CharacterAssetWorkspacePr
               }}
               saved={selectedCharacter}
               onChange={(field, value) => onCharacterFormChange(field, value)}
+              onSave={onSaveCharacter}
+              isSaving={isSavingCharacter}
             />
 
             <div className="rounded-xl border p-3">

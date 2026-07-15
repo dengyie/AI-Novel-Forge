@@ -9,6 +9,7 @@ import {
 import {
   createObjectUrlSlot,
   decodeBase64AudioToObjectUrl,
+  inspectWavAudioBase64,
   resolveLocalAudioSrc,
 } from "../src/lib/audiobookVoiceAudio.ts";
 
@@ -117,12 +118,38 @@ test("isCharacterVoiceFormDirty detects mode/fields/base64 draft", () => {
   );
 });
 
+function makePcmWavBase64({ dataBytes, sampleRate = 24000 }) {
+  const channels = 1;
+  const bits = 16;
+  const byteRate = sampleRate * channels * (bits / 8);
+  const blockAlign = channels * (bits / 8);
+  const fmtSize = 16;
+  const riffSize = 4 + (8 + fmtSize) + (8 + dataBytes);
+  const buf = Buffer.alloc(12 + 8 + fmtSize + 8 + dataBytes);
+  buf.write("RIFF", 0);
+  buf.writeUInt32LE(riffSize, 4);
+  buf.write("WAVE", 8);
+  buf.write("fmt ", 12);
+  buf.writeUInt32LE(fmtSize, 16);
+  buf.writeUInt16LE(1, 20);
+  buf.writeUInt16LE(channels, 22);
+  buf.writeUInt32LE(sampleRate, 24);
+  buf.writeUInt32LE(byteRate, 28);
+  buf.writeUInt16LE(blockAlign, 32);
+  buf.writeUInt16LE(bits, 34);
+  buf.write("data", 36);
+  buf.writeUInt32LE(dataBytes, 40);
+  return buf.toString("base64");
+}
+
 test("audiobookVoiceAudio local src and object url slot", () => {
   assert.equal(resolveLocalAudioSrc(""), "");
   assert.equal(resolveLocalAudioSrc("data:audio/wav;base64,abc"), "data:audio/wav;base64,abc");
   assert.equal(resolveLocalAudioSrc("abc"), "data:audio/wav;base64,abc");
 
-  const b64 = Buffer.from("hello-audio").toString("base64");
+  assert.throws(() => decodeBase64AudioToObjectUrl(Buffer.from("hello-audio").toString("base64")), /WAV|短|解码|无效/);
+
+  const b64 = makePcmWavBase64({ dataBytes: 48000 });
   const url1 = decodeBase64AudioToObjectUrl(b64, "audio/wav");
   const url2 = decodeBase64AudioToObjectUrl(`data:audio/wav;base64,${b64}`, "audio/wav");
   assert.match(url1, /^blob:/);
@@ -139,4 +166,21 @@ test("audiobookVoiceAudio local src and object url slot", () => {
   assert.equal(slot.get(), null);
   // double clear is safe
   slot.clear();
+});
+
+
+test("inspectWavAudioBase64 rejects empty/non-wav and accepts minimal pcm wav", () => {
+  assert.equal(inspectWavAudioBase64("").isWav, false);
+  assert.match(inspectWavAudioBase64("").reason || "", /空|解码|短/);
+
+  const short = inspectWavAudioBase64(makePcmWavBase64({ dataBytes: 480 })); // 0.01s
+  assert.equal(short.isWav, true);
+  assert.ok(short.reason);
+
+  const ok = inspectWavAudioBase64(makePcmWavBase64({ dataBytes: 48000 })); // 1.0s
+  assert.equal(ok.isWav, true);
+  assert.equal(ok.reason, undefined);
+  assert.ok(Math.abs((ok.durationSec ?? 0) - 1) < 0.001);
+  const url = decodeBase64AudioToObjectUrl(makePcmWavBase64({ dataBytes: 48000 }));
+  assert.match(url, /^blob:/);
 });
