@@ -11,6 +11,8 @@ import { prisma } from "../../db/prisma";
 import { AppError } from "../../middleware/errorHandler";
 import { toTaskTokenUsageSummary } from "../task/taskTokenUsageSummary";
 import { isMissingAudiobookTaskTableError } from "./audiobookErrors";
+import { parseSpeakerAliases } from "./audiobookSpeakerAliases";
+export { parseSpeakerAliases } from "./audiobookSpeakerAliases";
 import { audiobookPrecheckService } from "./AudiobookPrecheckService";
 import {
   audiobookPipelineService,
@@ -43,30 +45,6 @@ function parseChapterIds(json: string | null | undefined): string[] {
   } catch {
     return [];
   }
-}
-
-/** 角色 ttsSpeakerAliases：JSON 数组或逗号/顿号分隔。 */
-export function parseSpeakerAliases(raw: string | string[] | null | undefined): string[] {
-  if (Array.isArray(raw)) {
-    return raw.map((item) => String(item).trim()).filter(Boolean).slice(0, 24);
-  }
-  const text = raw?.trim();
-  if (!text) {
-    return [];
-  }
-  try {
-    const parsed = JSON.parse(text) as unknown;
-    if (Array.isArray(parsed)) {
-      return parsed.map((item) => String(item).trim()).filter(Boolean).slice(0, 24);
-    }
-  } catch {
-    // fall through to delimiter split
-  }
-  return text
-    .split(/[,，、;；|/\n]+/)
-    .map((item) => item.trim())
-    .filter(Boolean)
-    .slice(0, 24);
 }
 
 function buildTaskTitle(novelTitle: string, scopeMode: string, chapterCount: number): string {
@@ -160,6 +138,22 @@ type AudiobookTaskRow = {
   novel?: { id: string; title: string } | null;
 };
 
+function parseM4bStatusFromResultJson(resultJson: string | null | undefined): AudiobookTaskSummary["m4bStatus"] {
+  if (!resultJson?.trim()) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(resultJson) as { m4b?: { status?: string } };
+    const status = parsed?.m4b?.status;
+    if (status === "ready" || status === "skipped" || status === "failed") {
+      return status;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function toSummary(row: AudiobookTaskRow): AudiobookTaskSummary {
   return {
     id: row.id,
@@ -179,6 +173,7 @@ function toSummary(row: AudiobookTaskRow): AudiobookTaskSummary {
     completedChapterCount: row.completedChapterCount,
     outputDir: row.outputDir,
     fullAudioPath: row.fullAudioPath,
+    m4bStatus: parseM4bStatusFromResultJson(row.resultJson),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
     startedAt: row.startedAt?.toISOString() ?? null,
@@ -822,9 +817,22 @@ export class AudiobookTaskService {
         return;
       }
 
-      const warningSuffix = result.qualityWarnings.length > 0
-        ? `；标注回退 ${result.qualityWarnings.length} 章`
+      const annotationFallbackCount = result.qualityWarnings.length;
+      const annotationSuffix = annotationFallbackCount > 0
+        ? `；标注回退 ${annotationFallbackCount} 章`
         : "";
+      const m4bSuffix = result.m4b.status === "ready"
+        ? "，含 m4b"
+        : result.m4b.status === "skipped"
+          ? `；m4b 未生成（${result.m4b.reason ?? "skipped"}）`
+          : result.m4b.status === "failed"
+            ? `；m4b 失败（${result.m4b.reason ?? "failed"}）`
+            : "";
+      const currentItemLabel = annotationFallbackCount > 0
+        ? `完成（${annotationFallbackCount} 章旁白回退${result.m4b.status === "ready" ? "，含 m4b" : ""}）`
+        : result.m4b.status === "ready"
+          ? "有声书生成完成（含 m4b）"
+          : "有声书生成完成";
       await prisma.audiobookTask.updateMany({
         where: {
           id: taskId,
@@ -836,9 +844,7 @@ export class AudiobookTaskService {
           progress: 100,
           finishedAt: new Date(),
           currentStage: "finalizing",
-          currentItemLabel: result.qualityWarnings.length > 0
-            ? `完成（${result.qualityWarnings.length} 章旁白回退）`
-            : "有声书生成完成",
+          currentItemLabel,
           heartbeatAt: new Date(),
           completedChapterCount: result.completedChapterCount,
           outputDir: result.outputDir,
@@ -857,7 +863,7 @@ export class AudiobookTaskService {
               chapterCount: result.m4b.chapterCount ?? null,
             },
           }),
-          summary: `有声书完成：${result.completedChapterCount} 章，${result.completedChunks} 个音频块${warningSuffix}${result.m4b.status === "ready" ? "，含 m4b" : ""}。`,
+          summary: `有声书完成：${result.completedChapterCount} 章，${result.completedChunks} 个音频块${annotationSuffix}${m4bSuffix}。`,
           error: null,
         },
       });

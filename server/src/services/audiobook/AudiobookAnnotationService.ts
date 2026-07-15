@@ -52,18 +52,40 @@ function resolveCharacter(
   if (!raw || raw === "旁白" || raw === "narrator") {
     return null;
   }
-  return index.byExact.get(raw)
-    ?? index.byNormalized.get(normalizeName(raw))
-    ?? [...new Set(index.byExact.values())].find((item) => {
-      const candidates = [
-        item.characterName,
-        ...(item.speakerAliases ?? []),
-      ]
-        .map((name) => name?.trim())
-        .filter((name): name is string => Boolean(name) && name.length >= 2);
-      return candidates.some((name) => raw.includes(name) || name.includes(raw));
-    })
-    ?? null;
+  const exact = index.byExact.get(raw) ?? index.byNormalized.get(normalizeName(raw));
+  if (exact) {
+    return exact;
+  }
+
+  // 子串回退：优先最长候选，降低短别名误命中
+  let best: AudiobookCharacterVoiceConfig | null = null;
+  let bestLen = 0;
+  for (const item of new Set(index.byExact.values())) {
+    const candidates = [
+      item.characterName,
+      ...(item.speakerAliases ?? []),
+    ]
+      .map((name) => name?.trim())
+      .filter((name): name is string => Boolean(name) && name.length >= 2);
+    for (const name of candidates) {
+      if (!(raw.includes(name) || name.includes(raw))) {
+        continue;
+      }
+      if (name.length > bestLen) {
+        best = item;
+        bestLen = name.length;
+      }
+    }
+  }
+  return best;
+}
+
+/** 导出供单测验证 speaker 归一。 */
+export function matchCharacterBySpeakerNameForTest(
+  speakerName: string | null | undefined,
+  characterVoices: AudiobookCharacterVoiceConfig[],
+): AudiobookCharacterVoiceConfig | null {
+  return resolveCharacter(speakerName, buildCharacterIndex(characterVoices));
 }
 
 /**
