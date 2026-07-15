@@ -68,31 +68,57 @@ function toLangGraphInterrupt(interrupt?: CreativeHubInterrupt | null): LangGrap
 }
 
 function getMessageContent(msg: any): string | Array<Record<string, unknown>> {
-  const parts = [
-    ...msg.content,
-    ...(msg.attachments?.flatMap((item: any) => item.content) ?? []),
-  ];
-  const normalized = parts.map((part) => {
-    if (part.type === "text") {
-      return { type: "text", text: part.text };
+  const rawContent = msg?.content;
+  const contentParts = Array.isArray(rawContent)
+    ? rawContent
+    : typeof rawContent === "string"
+      ? [{ type: "text", text: rawContent }]
+      : [];
+  const attachmentParts = Array.isArray(msg?.attachments)
+    ? msg.attachments.flatMap((item: any) => (
+      Array.isArray(item?.content) ? item.content : []
+    ))
+    : [];
+  const parts = [...contentParts, ...attachmentParts];
+  const normalized = parts.map((part: any) => {
+    if (part?.type === "text") {
+      return { type: "text", text: part.text ?? "" };
     }
-    if (part.type === "image") {
+    if (part?.type === "image") {
       return { type: "image_url", image_url: { url: part.image } };
     }
     return {
       type: "file",
-      data: part.data,
-      mime_type: part.mimeType,
+      data: part?.data,
+      mime_type: part?.mimeType,
       metadata: {
-        filename: part.filename ?? "file",
+        filename: part?.filename ?? "file",
       },
       source_type: "base64",
     };
   });
+  if (normalized.length === 0) {
+    return "";
+  }
   if (normalized.length === 1 && normalized[0]?.type === "text") {
     return normalized[0].text as string;
   }
   return normalized;
+}
+
+/** convertLangChainMessages 对 null/undefined content 会 throw；入口统一兜底。 */
+function safeConvertLangChainMessages(
+  message: LangChainMessage,
+  ...rest: Parameters<typeof convertLangChainMessages> extends [any, ...infer R] ? R : never
+) {
+  const content = (message as { content?: unknown }).content;
+  if (content == null) {
+    return convertLangChainMessages(
+      { ...message, content: "" } as LangChainMessage,
+      ...rest,
+    );
+  }
+  return convertLangChainMessages(message, ...rest);
 }
 
 function truncateLangChainMessages(threadMessages: any[], parentId: string | null) {
@@ -296,12 +322,12 @@ export function useCreativeHubRuntime({
   );
 
   const threadMessages = useExternalMessageConverter({
-    callback: convertLangChainMessages,
+    callback: safeConvertLangChainMessages,
     messages: displayMessages,
     isRunning,
   });
   const baseThreadMessages = useExternalMessageConverter({
-    callback: convertLangChainMessages,
+    callback: safeConvertLangChainMessages,
     messages,
     isRunning,
   });
