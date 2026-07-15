@@ -298,6 +298,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
   const [overrideVoice, setOverrideVoice] = useState("");
   const [message, setMessage] = useState("");
   const [voicePlanItems, setVoicePlanItems] = useState<AudiobookVoicePlanItem[]>([]);
+  const [voicePlanOverwrite, setVoicePlanOverwrite] = useState(false);
   const [previewAudioUrl, setPreviewAudioUrl] = useState<string | null>(null);
   const [previewLabel, setPreviewLabel] = useState("");
 
@@ -389,14 +390,16 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
   });
 
   const suggestVoiceMutation = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (mode: "missing" | "rebalance") => {
+      const overwriteMode = mode === "rebalance";
+      setVoicePlanOverwrite(overwriteMode);
       const response = await suggestAudiobookVoicePlan(novelId, {
-        onlyMissing: true,
+        onlyMissing: !overwriteMode,
         strategy: "auto",
       });
-      return response.data;
+      return { data: response.data, overwriteMode };
     },
-    onSuccess: (data) => {
+    onSuccess: ({ data, overwriteMode }) => {
       const items = data?.items ?? [];
       setVoicePlanItems(items);
       if (!data || items.length === 0) {
@@ -408,7 +411,9 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
         return;
       }
       setMessage(
-        `音色规划 ${items.length} 项：preset ${data.summary.presetCount} / design ${data.summary.designCount}。确认后可一键写入。`,
+        `${overwriteMode ? "重新差异化" : "补齐缺失"}规划 ${items.length} 项：preset ${data.summary.presetCount} / design ${data.summary.designCount}${
+          overwriteMode ? "（写入时将覆盖已绑定）" : ""
+        }。`,
       );
     },
     onError: (error) => {
@@ -422,7 +427,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
         throw new Error("请先生成音色规划。");
       }
       const response = await applyAudiobookVoicePlan(novelId, {
-        overwrite: false,
+        overwrite: voicePlanOverwrite,
         items: voicePlanItems.map((item) => ({
           characterId: item.characterId,
           ttsMode: item.ttsMode,
@@ -437,10 +442,11 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
     onSuccess: async (data) => {
       setMessage(
         data
-          ? `已写入 ${data.applied.length} 个角色音色，跳过 ${data.skipped.length}。请刷新角色卡或重新进入页面查看。`
+          ? `已写入 ${data.applied.length} 个角色音色，跳过 ${data.skipped.length}。请刷新页面查看角色卡。`
           : "音色已写入。",
       );
       setVoicePlanItems([]);
+      setVoicePlanOverwrite(false);
       await queryClient.invalidateQueries({ queryKey: ["novel", novelId] });
       await queryClient.invalidateQueries({ queryKey: ["novel-characters", novelId] });
     },
@@ -526,9 +532,17 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
               size="sm"
               variant="outline"
               disabled={suggestVoiceMutation.isPending || characters.length === 0}
-              onClick={() => suggestVoiceMutation.mutate()}
+              onClick={() => suggestVoiceMutation.mutate("missing")}
             >
-              {suggestVoiceMutation.isPending ? "规划中..." : "自动规划音色"}
+              {suggestVoiceMutation.isPending ? "规划中..." : "补齐缺失音色"}
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={suggestVoiceMutation.isPending || characters.length === 0}
+              onClick={() => suggestVoiceMutation.mutate("rebalance")}
+            >
+              重新差异化
             </Button>
             <Button
               size="sm"
@@ -538,7 +552,9 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
               }
               onClick={() => applyVoiceMutation.mutate()}
             >
-              {applyVoiceMutation.isPending ? "写入中..." : `写入规划（${voicePlanItems.length}）`}
+              {applyVoiceMutation.isPending
+                ? "写入中..."
+                : `写入规划（${voicePlanItems.length}${voicePlanOverwrite ? "·覆盖" : ""}）`}
             </Button>
           </div>
         </div>
