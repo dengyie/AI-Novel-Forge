@@ -164,6 +164,7 @@ interface RunPipelineChapterDeps {
   markChapterGenerationState: (
     chapterId: string,
     generationState: "reviewed" | "approved",
+    options?: { literaryPass?: boolean },
   ) => Promise<void>;
   markChapterNeedsRepair: (chapterId: string) => Promise<void>;
 }
@@ -247,7 +248,8 @@ export async function runPipelineChapterWithRuntime(
 
     if (!autoReview) {
       await syncFinalRetainedChapterArtifacts(deps, novelId, chapterId, content, artifactSyncMode, "confirmed");
-      await deps.markChapterGenerationState(chapterId, "approved");
+      // 跳过审校 ≠ 质量过审：只 bump generation，不写 completed（A6）
+      await deps.markChapterGenerationState(chapterId, "approved", { literaryPass: false });
       return {
         reviewExecuted: false,
         pass: true,
@@ -300,7 +302,7 @@ export async function runPipelineChapterWithRuntime(
       // 改写实际发生时把改写后正文落库到 Chapter.content，否则一次过审章节会保留有 AI 味的原始草稿而
       // 只有 artifacts 用的是改写后文本。syncArtifacts:false 不重复触发已由循环后 syncFinalRetainedChapterArtifacts
       // 承担的 artifact 同步。在 markChapterGenerationState("approved") 之前调用，因 saveDraftAndArtifacts 会把
-      // chapterStatus 置 "generating"，由随后的 approved 覆盖回 "completed"。
+      // chapterStatus 置 "generating"，由随后的 literaryPass 门写回 completed。
       if (latestResult.runtimePackage.styleReview?.autoRewritten) {
         await deps.saveDraftAndArtifacts(novelId, chapterId, content, "drafted", {
           scheduleBackgroundSync: false,
@@ -308,7 +310,8 @@ export async function runPipelineChapterWithRuntime(
           syncArtifacts: false,
         });
       }
-      await deps.markChapterGenerationState(chapterId, "approved");
+      // A6：仅 isQualityPass（文学 isPass ∧ overall 门）才允许 completed
+      await deps.markChapterGenerationState(chapterId, "approved", { literaryPass: true });
       break;
     }
 

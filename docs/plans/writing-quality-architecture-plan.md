@@ -1,14 +1,14 @@
 # 写文质量架构：开发文档（质量优先 · 审阅稿 v2）
 
 > **文档类型**：可执行开发计划  
-> **状态**：**P0 三阶段完成 · 可交付** · v2 质量优先（否决 mode 矩阵）· 2026-07-16  
+> **状态**：**文档闭环完成 · 可交付** · P0 三阶段 + 质量加固（baseline 同源 / A6 旁路 / SoT 词表 / L1 adopt）· 2026-07-16  
 > **仓库**：`AI-Novel-Writing-Assistant`  
 > **范围**：写文质量（book-agnostic）——修文不退化、硬伤真拦、isPass 与过审一致  
 > **正交计划（不替代）**：  
 > - `director-self-cycle-pipeline-plan.md` — 能跑完  
 > - `setting-alignment-quality-architecture-plan.md` — 设定对  
 > - `chapter-output-pipeline-optimization-plan.md` + wiki `chapter-production-chain.md` — 链路形态  
-> **更新日期**：2026-07-15  
+> **更新日期**：2026-07-16  
 > **产品硬原则**：  
 > - 不做机械字数 / 松紧硬闸  
 > - **禁止**策略化 `skip_quality_repair` / 盲批 / 无根因 `forceResume`  
@@ -335,4 +335,27 @@ export function isPass(score: QualityScore): boolean {
 
 ---
 
-**文档结束 · v2 质量优先 · 待审阅 · 未开工**
+## 16. 文档闭环加固（2026-07-16）
+
+相对 P0 三阶段后 code review 的 P1 缺口，本轮已落地：
+
+| 缺口 | 落地 |
+|---|---|
+| baseline 信旧 QualityReport | `resolveBaselineReview`：优先 evaluateOnly 与 candidate 同协议 |
+| A6 completed 旁路 | `mergeChapterPatchForGenerationStateBump` 无 `literaryPass:true` 不写 completed；pipeline 过审路径显式传 true |
+| 书级 bannedTerms 空接线 | `sotBannedTerms` 从 `storyWorldSlice(Overrides)Json` 读取；finalization + repair 共用 |
+| L1 义务恶化可 adopt | `baseline/candidateBlockingL1Codes` + `fingerprintReviewIssuesAsL1BlockingCodes` |
+| mustAvoid「」包装漏扫 | `normalizeTextForTermLeakScan` 归一化扫描 |
+| adopt 后 recheck/artifact 失败半写 | catch 后强制 `needs_repair`，正文保留 |
+
+**仍属 backlog（不阻塞本闭环）**：Job/poll 长任务投影、债板 discard 率面板、UnifiedVerdict 类型仪式。
+
+**词表写入示例**（novel.storyWorldSliceOverridesJson）：
+
+```json
+{ "sotBannedTerms": ["称重"] }
+```
+
+---
+
+**文档结束 · v2 质量优先 · 文档闭环完成 · 可交付**

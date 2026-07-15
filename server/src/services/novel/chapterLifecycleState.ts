@@ -77,19 +77,39 @@ export function chapterStatePairAfterPlannedReset(): ChapterStatePairPatch {
 
 /**
  * 将 `generationState` 升为 `approved` 时，顺带保证 `chapterStatus` 与用户可见「已完成」一致。
- * 对已处于 `generationState === "approved"` 的更新可安全重复调用。
+ *
+ * **A6**：仅当调用方证明文学门已过（`literaryPass === true`）时才允许 `completed`。
+ * - `literaryPass === true` → approved + completed
+ * - `literaryPass === false` → reviewed + needs_repair（拒绝假完成）
+ * - `literaryPass` 省略 → **不**自动 completed（只 bump generationState），
+ *   避免 pipeline/adapter 旁路把未 isPass 章标完成。需要 completed 请走
+ *   `chapterStatePairAfterLiteraryQualityGate(true)` / 传入 literaryPass:true。
  */
 export function mergeChapterPatchForGenerationStateBump(
   current: ChapterStatePairPatch | undefined,
   nextGenerationState: PipelineGenerationState,
+  options?: { literaryPass?: boolean },
 ): ChapterStatePairPatch {
   const base: ChapterStatePairPatch = { ...(current ?? {}) };
 
-  base.generationState = nextGenerationState;
-
   if (nextGenerationState === "approved") {
-    base.chapterStatus = "completed";
+    if (options?.literaryPass === true) {
+      return {
+        ...base,
+        ...chapterStatePairAfterPipelineApproval(),
+      };
+    }
+    if (options?.literaryPass === false) {
+      return {
+        ...base,
+        ...chapterStatePairAfterLiteraryQualityGate(false),
+      };
+    }
+    // 未证明 literaryPass：只记 generation，不写 completed（防 A6 旁路）
+    base.generationState = "approved";
+    return base;
   }
 
+  base.generationState = nextGenerationState;
   return base;
 }
