@@ -29,6 +29,11 @@ import {
 import { queryKeys } from "@/api/queryKeys";
 import SelectControl from "@/components/common/SelectControl";
 import {
+  decodeBase64AudioToObjectUrl,
+  replaceObjectUrl,
+  tryAutoPlayAudio,
+} from "@/lib/audiobookVoiceAudio";
+import {
   resolveCharacterVoiceBinding,
   resolveCharacterVoiceMode,
 } from "./characterAssetWorkspace.helpers";
@@ -78,18 +83,6 @@ function statusVariant(status: AudiobookTaskSummary["status"]): "default" | "sec
   if (status === "failed") return "destructive";
   if (status === "queued") return "secondary";
   return "outline";
-}
-
-function decodeBase64AudioToObjectUrl(audioBase64: string, mimeType = "audio/wav"): string {
-  const bare = audioBase64.includes(",")
-    ? (audioBase64.split(",").pop() ?? audioBase64)
-    : audioBase64;
-  const binary = atob(bare);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return URL.createObjectURL(new Blob([bytes], { type: mimeType }));
 }
 
 /** 与小说 export 一致：blob 触发本地下载，不走远程拷贝旁路。 */
@@ -716,14 +709,10 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
   }, [previewAudioUrl]);
 
   useEffect(() => {
-    if (!previewAudioUrl || !previewAudioRef.current) {
+    if (!previewAudioUrl) {
       return;
     }
-    const el = previewAudioRef.current;
-    el.load();
-    void el.play().catch(() => {
-      // autoplay 可能被浏览器拦截；controls 仍可手播。
-    });
+    void tryAutoPlayAudio(previewAudioRef.current);
   }, [previewAudioUrl]);
 
   const sortedChapters = useMemo(
@@ -927,12 +916,9 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
         setMessage("试听无音频。");
         return;
       }
-      setPreviewAudioUrl((prev) => {
-        if (prev) {
-          URL.revokeObjectURL(prev);
-        }
-        return decodeBase64AudioToObjectUrl(data.audioBase64, "audio/wav");
-      });
+      setPreviewAudioUrl((prev) =>
+        replaceObjectUrl(prev, decodeBase64AudioToObjectUrl(data.audioBase64, "audio/wav")),
+      );
       setPreviewLabel(label);
       setMessage(`试听已生成并尝试播放：${characterName}`);
     },

@@ -1,4 +1,8 @@
 import type { Character, CharacterCastRole, CharacterGender } from "@ai-novel/shared/types/novel";
+import {
+  MIMO_TTS_VOICE_CATALOG,
+  type AudiobookVoiceCatalogItem,
+} from "@ai-novel/shared/types/audiobook";
 
 const CAST_ROLE_LABELS: Record<CharacterCastRole, string> = {
   protagonist: "主角",
@@ -61,12 +65,34 @@ const TTS_MODE_LABELS: Record<CharacterVoiceMode, string> = {
   clone: "参考克隆",
 };
 
+export const CHARACTER_VOICE_MODE_OPTIONS: Array<{
+  value: CharacterVoiceMode;
+  label: string;
+  helper: string;
+}> = [
+  { value: "preset", label: "预置", helper: "点名 MiMo 现成音色，最快可生成" },
+  { value: "design", label: "文案设计", helper: "用描述造声线，适合定制人设" },
+  { value: "clone", label: "克隆", helper: "上传参考音，保存后可试听/合成" },
+];
+
 export function resolveCharacterVoiceMode(value?: string | null): CharacterVoiceMode {
   const mode = value?.trim();
   if (mode === "design" || mode === "clone" || mode === "preset") {
     return mode;
   }
   return "preset";
+}
+
+export function getCharacterVoiceModeLabel(mode: CharacterVoiceMode): string {
+  return TTS_MODE_LABELS[mode];
+}
+
+export function findMimoVoiceCatalogItem(voiceId?: string | null): AudiobookVoiceCatalogItem | undefined {
+  const id = voiceId?.trim();
+  if (!id) {
+    return undefined;
+  }
+  return MIMO_TTS_VOICE_CATALOG.find((item) => item.id === id);
 }
 
 /** 有声书音色绑定摘要：列表徽章 / 焦点摘要 / 配置区共用。 */
@@ -110,11 +136,97 @@ export function resolveCharacterVoiceBinding(character?: {
 
   const voice = character?.ttsVoice?.trim() ?? "";
   const ready = voice.length > 0;
+  const catalog = findMimoVoiceCatalogItem(voice);
+  const displayVoice = catalog
+    ? (catalog.description ? `${catalog.label}（${catalog.description}）` : catalog.label)
+    : voice;
   return {
     mode,
     ready,
     modeLabel,
-    shortLabel: ready ? voice : "未配音色",
-    detailLabel: ready ? `${modeLabel} · ${voice}` : `${modeLabel} · 未选择`,
+    shortLabel: ready ? (catalog?.label ?? voice) : "未配音色",
+    detailLabel: ready ? `${modeLabel} · ${displayVoice}` : `${modeLabel} · 未选择`,
   };
+}
+
+export type CharacterVoiceFormSlice = {
+  ttsMode?: string | null;
+  ttsVoice?: string | null;
+  ttsStyle?: string | null;
+  ttsDesignPrompt?: string | null;
+  ttsRefAudioPath?: string | null;
+  ttsRefAudioBase64?: string | null;
+  /** 表单为逗号串；已保存角色可能是 string[]。 */
+  ttsSpeakerAliases?: string | string[] | null;
+};
+
+function normalizeSpeakerAliases(value?: string | string[] | null): string {
+  if (Array.isArray(value)) {
+    return value.map((item) => item.trim()).filter(Boolean).join("、");
+  }
+  return (value ?? "").trim();
+}
+
+/** 表单相对已保存角色是否改了音色相关字段。 */
+export function isCharacterVoiceFormDirty(
+  form: CharacterVoiceFormSlice,
+  saved?: CharacterVoiceFormSlice | null,
+): boolean {
+  const formMode = resolveCharacterVoiceMode(form.ttsMode);
+  const savedMode = resolveCharacterVoiceMode(saved?.ttsMode);
+  if (formMode !== savedMode) {
+    return true;
+  }
+  if ((form.ttsVoice ?? "").trim() !== (saved?.ttsVoice ?? "").trim()) {
+    return true;
+  }
+  if ((form.ttsStyle ?? "").trim() !== (saved?.ttsStyle ?? "").trim()) {
+    return true;
+  }
+  if ((form.ttsDesignPrompt ?? "").trim() !== (saved?.ttsDesignPrompt ?? "").trim()) {
+    return true;
+  }
+  if ((form.ttsRefAudioPath ?? "").trim() !== (saved?.ttsRefAudioPath ?? "").trim()) {
+    return true;
+  }
+  if (normalizeSpeakerAliases(form.ttsSpeakerAliases) !== normalizeSpeakerAliases(saved?.ttsSpeakerAliases)) {
+    return true;
+  }
+  if ((form.ttsRefAudioBase64 ?? "").trim().length > 0) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * 能否调用服务端 voice-preview。
+ * clone 只接受已落盘路径；草稿 base64 只能本地试听。
+ */
+export function canPreviewCharacterVoice(form: CharacterVoiceFormSlice): {
+  ok: boolean;
+  reason: string;
+} {
+  const mode = resolveCharacterVoiceMode(form.ttsMode);
+  if (mode === "preset") {
+    const voice = form.ttsVoice?.trim() ?? "";
+    if (!voice) {
+      return { ok: false, reason: "请先选择一个预置音色。" };
+    }
+    return { ok: true, reason: "" };
+  }
+  if (mode === "design") {
+    const prompt = form.ttsDesignPrompt?.trim() ?? "";
+    if (!prompt) {
+      return { ok: false, reason: "请先填写音色设计描述。" };
+    }
+    return { ok: true, reason: "" };
+  }
+  const path = form.ttsRefAudioPath?.trim() ?? "";
+  if (!path) {
+    if (form.ttsRefAudioBase64?.trim()) {
+      return { ok: false, reason: "新参考音需先保存角色，再服务端试听；可先本地试听。" };
+    }
+    return { ok: false, reason: "请先上传并保存参考音频。" };
+  }
+  return { ok: true, reason: "" };
 }
