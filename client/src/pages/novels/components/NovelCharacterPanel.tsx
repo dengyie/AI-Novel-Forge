@@ -723,6 +723,7 @@ export default function NovelCharacterPanel(props: NovelCharacterPanelProps) {
       />
 
       <CharacterAssetWorkspace
+        novelId={novelId}
         characters={characters}
         selectedCharacterId={selectedCharacterId}
         onSelectedCharacterChange={onSelectedCharacterChange}

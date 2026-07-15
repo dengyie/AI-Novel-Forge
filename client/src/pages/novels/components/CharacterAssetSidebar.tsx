@@ -1,7 +1,7 @@
 import type { Character } from "@ai-novel/shared/types/novel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { isProtagonistCharacter } from "./characterAssetWorkspace.helpers";
+import { isProtagonistCharacter, resolveCharacterVoiceBinding } from "./characterAssetWorkspace.helpers";
 
 interface CharacterAssetSidebarProps {
   characters: Character[];
@@ -56,6 +56,7 @@ function CharacterCard(props: {
     ? character.currentGoal || character.storyFunction || character.role || "待补全主角目标"
     : character.relationToProtagonist || character.role || "待补全角色定位";
   const supportingLabel = character.relationToProtagonist ? "与主角关系" : "定位";
+  const voice = resolveCharacterVoiceBinding(character);
 
   return (
     <div className={getCharacterCardClass(isSelected, isProtagonist)}>
@@ -67,6 +68,13 @@ function CharacterCard(props: {
         <div className="flex flex-wrap items-center gap-2">
           <div className="truncate font-medium">{character.name}</div>
           {isProtagonist ? <Badge variant="secondary">主角</Badge> : null}
+          <Badge
+            variant={voice.ready ? "outline" : "destructive"}
+            title={voice.detailLabel}
+            className="max-w-[7.5rem] truncate"
+          >
+            {voice.ready ? voice.shortLabel : "缺音色"}
+          </Badge>
         </div>
         <div className="mt-1 text-xs text-muted-foreground">
           {isProtagonist ? `身份：${character.role || "待补全"}` : `${supportingLabel}：${supportingLine}`}
