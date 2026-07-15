@@ -4,6 +4,8 @@ import {
   DEFAULT_AUDIOBOOK_NARRATOR_VOICE,
   isAudiobookTtsMode,
   isMimoTtsPresetVoice,
+  type AudiobookPrecheckPreview,
+  type AudiobookPrecheckPreviewItem,
   type AudiobookPrecheckResult,
   type AudiobookScopeMode,
   type AudiobookTtsMode,
@@ -12,6 +14,11 @@ import {
 import { prisma } from "../../db/prisma";
 import { AppError } from "../../middleware/errorHandler";
 import { parseSpeakerAliases } from "./audiobookSpeakerAliases";
+import {
+  buildCharacterVoicePreviewFingerprint,
+  DEFAULT_CHARACTER_VOICE_PREVIEW_TEXT,
+  resolveCharacterVoicePreviewStatus,
+} from "./characterVoicePreview";
 
 function parseScopeMode(value: string | undefined): AudiobookScopeMode {
   if (value === "chapter" || value === "range" || value === "full") {
@@ -72,6 +79,9 @@ export class AudiobookPrecheckService {
             ttsDesignPrompt: true,
             ttsRefAudioPath: true,
             ttsSpeakerAliases: true,
+            ttsPreviewAudioPath: true,
+            ttsPreviewSampleText: true,
+            ttsPreviewFingerprint: true,
           },
           orderBy: { createdAt: "asc" },
         },
@@ -172,6 +182,7 @@ export class AudiobookPrecheckService {
     }
 
     const ok = missingVoices.length === 0 && blockingErrors.length === 0;
+    const preview = this.buildPreviewReport(novel.characters, characterVoices);
 
     return {
       ok,
@@ -198,6 +209,91 @@ export class AudiobookPrecheckService {
       missingVoices,
       blockingErrors,
       warnings,
+      preview,
+    };
+  }
+
+  /**
+   * 仅统计 voice 已 configured 的角色试听；不进入 precheck.ok。
+   * createTask 可通过 requireReadyPreview 硬拦 preview.ok。
+   */
+  private buildPreviewReport(
+    rows: Array<{
+      id: string;
+      name: string;
+      ttsMode: string | null;
+      ttsVoice: string | null;
+      ttsStyle: string | null;
+      ttsDesignPrompt: string | null;
+      ttsRefAudioPath: string | null;
+      ttsPreviewAudioPath: string | null;
+      ttsPreviewSampleText: string | null;
+      ttsPreviewFingerprint: string | null;
+    }>,
+    characterVoices: Array<{
+      characterId: string;
+      characterName: string;
+      ttsMode: AudiobookTtsMode;
+      ttsVoice: string;
+      ttsDesignPrompt: string;
+      ttsRefAudioPath: string;
+    }>,
+  ): AudiobookPrecheckPreview {
+    const configuredIds = new Set(
+      characterVoices.filter((item) => characterIsConfigured(item)).map((item) => item.characterId),
+    );
+    let ready = 0;
+    let stale = 0;
+    let missing = 0;
+    const items: AudiobookPrecheckPreviewItem[] = [];
+
+    for (const row of rows) {
+      if (!configuredIds.has(row.id)) {
+        continue;
+      }
+      const sampleForFingerprint =
+        row.ttsPreviewSampleText?.trim() || DEFAULT_CHARACTER_VOICE_PREVIEW_TEXT;
+      const currentFingerprint = buildCharacterVoicePreviewFingerprint(
+        {
+          ttsMode: row.ttsMode,
+          ttsVoice: row.ttsVoice,
+          ttsStyle: row.ttsStyle,
+          ttsDesignPrompt: row.ttsDesignPrompt,
+          ttsRefAudioPath: row.ttsRefAudioPath,
+        },
+        sampleForFingerprint,
+      );
+      const previewStatus = resolveCharacterVoicePreviewStatus({
+        audioPath: row.ttsPreviewAudioPath,
+        fingerprint: row.ttsPreviewFingerprint,
+        currentFingerprint,
+      });
+      if (previewStatus === "ready") {
+        ready += 1;
+        continue;
+      }
+      if (previewStatus === "stale") {
+        stale += 1;
+      } else {
+        missing += 1;
+      }
+      items.push({
+        characterId: row.id,
+        characterName: row.name,
+        previewStatus,
+        reason: previewStatus === "stale"
+          ? "试听音频与当前音色指纹不一致（stale）"
+          : "尚未生成固定试听音频",
+      });
+    }
+
+    const configuredTotal = ready + stale + missing;
+    return {
+      ready,
+      stale,
+      missing,
+      ok: configuredTotal === 0 ? true : stale === 0 && missing === 0,
+      items,
     };
   }
 
