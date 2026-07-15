@@ -132,13 +132,22 @@ function streamAudioFile(
   fs.createReadStream(filePath).pipe(res);
 }
 
+function wantsAttachmentDownload(req: import("express").Request): boolean {
+  const raw = req.query?.download;
+  if (Array.isArray(raw)) {
+    return raw.some((item) => item === "1" || item === "true");
+  }
+  return raw === "1" || raw === "true";
+}
+
 function streamWavFile(
   req: import("express").Request,
   res: import("express").Response,
   filePath: string,
   downloadName: string,
 ): void {
-  streamAudioFile(req, res, filePath, downloadName, "audio/wav", "inline");
+  const disposition = wantsAttachmentDownload(req) ? "attachment" : "inline";
+  streamAudioFile(req, res, filePath, downloadName, "audio/wav", disposition);
 }
 
 function resolvePlayableFullPath(taskDir: string, stored: string | null | undefined): string {
@@ -754,6 +763,7 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
           filePath,
           `audiobook-${taskId}-full.m4b`,
           "audio/mp4",
+          // m4b 默认 attachment；显式 download=1 时同样 attachment
           "attachment",
         );
       } catch (error) {
