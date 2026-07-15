@@ -3,7 +3,7 @@
  * 人物卡与有声书面板共用，避免两套 atob / revoke 逻辑分叉。
  */
 
-export function stripDataUrlBase64(audioBase64: string): string {
+function stripDataUrlBase64(audioBase64: string): string {
   if (!audioBase64.includes(",")) {
     return audioBase64;
   }
@@ -35,14 +35,31 @@ export function resolveLocalAudioSrc(audioBase64OrDataUrl: string): string {
   return `data:audio/wav;base64,${value}`;
 }
 
-export function replaceObjectUrl(
-  previous: string | null | undefined,
-  next: string | null,
-): string | null {
-  if (previous) {
-    URL.revokeObjectURL(previous);
-  }
-  return next;
+/**
+ * 用 ref 持有当前 object URL，保证 revoke 只发生一次。
+ * 避免「setState 时 revoke + useEffect cleanup 再 revoke」的双路径。
+ */
+export function createObjectUrlSlot() {
+  let current: string | null = null;
+
+  return {
+    get(): string | null {
+      return current;
+    },
+    set(next: string | null): string | null {
+      if (current && current !== next) {
+        URL.revokeObjectURL(current);
+      }
+      current = next;
+      return current;
+    },
+    clear(): void {
+      if (current) {
+        URL.revokeObjectURL(current);
+        current = null;
+      }
+    },
+  };
 }
 
 export async function tryAutoPlayAudio(el: HTMLAudioElement | null): Promise<void> {

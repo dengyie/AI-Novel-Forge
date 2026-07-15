@@ -29,8 +29,8 @@ import {
 import { queryKeys } from "@/api/queryKeys";
 import SelectControl from "@/components/common/SelectControl";
 import {
+  createObjectUrlSlot,
   decodeBase64AudioToObjectUrl,
-  replaceObjectUrl,
   tryAutoPlayAudio,
 } from "@/lib/audiobookVoiceAudio";
 import {
@@ -699,14 +699,14 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
   const [previewAudioUrl, setPreviewAudioUrl] = useState<string | null>(null);
   const [previewLabel, setPreviewLabel] = useState("");
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
+  const previewUrlSlotRef = useRef(createObjectUrlSlot());
 
   useEffect(() => {
+    const slot = previewUrlSlotRef.current;
     return () => {
-      if (previewAudioUrl) {
-        URL.revokeObjectURL(previewAudioUrl);
-      }
+      slot.clear();
     };
-  }, [previewAudioUrl]);
+  }, []);
 
   useEffect(() => {
     if (!previewAudioUrl) {
@@ -916,9 +916,8 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
         setMessage("试听无音频。");
         return;
       }
-      setPreviewAudioUrl((prev) =>
-        replaceObjectUrl(prev, decodeBase64AudioToObjectUrl(data.audioBase64, "audio/wav")),
-      );
+      const nextUrl = decodeBase64AudioToObjectUrl(data.audioBase64, "audio/wav");
+      setPreviewAudioUrl(previewUrlSlotRef.current.set(nextUrl));
       setPreviewLabel(label);
       setMessage(`试听已生成并尝试播放：${characterName}`);
     },

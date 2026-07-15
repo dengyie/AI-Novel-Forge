@@ -562,15 +562,11 @@ export default function CharacterAssetWorkspace(props: CharacterAssetWorkspacePr
                     <option value="other">性别：其他</option>
                   </SelectControl>
                   <div className="rounded-md border border-dashed px-2 py-1.5 text-xs leading-5 text-muted-foreground">
-                    有声书音色状态：
+                    有声书音色在上方专用卡片配置（保存后侧边栏/有声书面板同步）。当前：
                     <span className={formVoice.ready ? "text-foreground" : "text-destructive"}>
                       {formVoice.detailLabel}
                     </span>
                   </div>
-                </div>
-
-                <div className="rounded-lg border border-dashed border-border/70 bg-muted/10 p-3 text-xs leading-5 text-muted-foreground">
-                  有声书音色已在上方专用卡片配置（含模态、预置点选、试听与未保存提示）。保存角色后侧边栏与有声书面板会同步绑定状态。
                 </div>
 
                 <div className="grid gap-2 md:grid-cols-2">

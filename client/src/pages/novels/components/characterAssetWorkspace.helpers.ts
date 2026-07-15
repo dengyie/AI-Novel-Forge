@@ -1,6 +1,7 @@
 import type { Character, CharacterCastRole, CharacterGender } from "@ai-novel/shared/types/novel";
 import {
   MIMO_TTS_VOICE_CATALOG,
+  isMimoTtsPresetVoice,
   type AudiobookVoiceCatalogItem,
 } from "@ai-novel/shared/types/audiobook";
 
@@ -81,10 +82,6 @@ export function resolveCharacterVoiceMode(value?: string | null): CharacterVoice
     return mode;
   }
   return "preset";
-}
-
-export function getCharacterVoiceModeLabel(mode: CharacterVoiceMode): string {
-  return TTS_MODE_LABELS[mode];
 }
 
 export function findMimoVoiceCatalogItem(voiceId?: string | null): AudiobookVoiceCatalogItem | undefined {
@@ -211,6 +208,9 @@ export function canPreviewCharacterVoice(form: CharacterVoiceFormSlice): {
     const voice = form.ttsVoice?.trim() ?? "";
     if (!voice) {
       return { ok: false, reason: "请先选择一个预置音色。" };
+    }
+    if (!isMimoTtsPresetVoice(voice)) {
+      return { ok: false, reason: `「${voice}」不在 MiMo 预置表，请重新点选。` };
     }
     return { ok: true, reason: "" };
   }
