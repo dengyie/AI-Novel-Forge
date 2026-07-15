@@ -4,7 +4,7 @@ import ReactMarkdown from "react-markdown";
 import { getDocContent } from "./docsContent";
 import { docsManifest, flattenedDocs } from "./docsManifest";
 
-const repoUrl = "https://github.com/ExplosiveCoderflome/AI-Novel-Writing-Assistant";
+const repoUrl = "https://github.com/dengyie/AI-Novel-Writing-Assistant";
 
 type DocsPageProps = {
   docId?: string;
