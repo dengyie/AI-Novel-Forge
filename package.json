@@ -65,7 +65,7 @@
       "electron-winstaller"
     ],
     "overrides": {
-      "@assistant-ui/store": "0.2.20"
+      "@assistant-ui/store": "0.2.13"
     }
   },
   "devDependencies": {
