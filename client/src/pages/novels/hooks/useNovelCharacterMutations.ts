@@ -46,8 +46,13 @@ interface CharacterFormState {
   attireStyle: string;
   signatureDetail: string;
   voiceTexture: string;
+  ttsMode: "preset" | "design" | "clone" | "";
   ttsVoice: string;
   ttsStyle: string;
+  ttsDesignPrompt: string;
+  ttsRefAudioPath: string;
+  ttsRefAudioBase64: string;
+  ttsSpeakerAliases: string;
   presenceImpression: string;
   currentState: string;
   currentGoal: string;
@@ -260,8 +265,13 @@ export function useNovelCharacterMutations(input: UseNovelCharacterMutationsInpu
         attireStyle: characterForm.attireStyle,
         signatureDetail: characterForm.signatureDetail,
         voiceTexture: characterForm.voiceTexture,
+        ttsMode: (characterForm.ttsMode || "preset") as "preset" | "design" | "clone",
         ttsVoice: characterForm.ttsVoice.trim() || null,
         ttsStyle: characterForm.ttsStyle.trim() || null,
+        ttsDesignPrompt: characterForm.ttsDesignPrompt.trim() || null,
+        ttsRefAudioPath: characterForm.ttsRefAudioPath.trim() || null,
+        ttsRefAudioBase64: characterForm.ttsRefAudioBase64.trim() || null,
+        ttsSpeakerAliases: characterForm.ttsSpeakerAliases.trim() || null,
         presenceImpression: characterForm.presenceImpression,
         currentState: characterForm.currentState,
         currentGoal: characterForm.currentGoal,

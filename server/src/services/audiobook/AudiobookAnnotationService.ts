@@ -30,8 +30,16 @@ function buildCharacterIndex(characterVoices: AudiobookCharacterVoiceConfig[]) {
   const byExact = new Map<string, AudiobookCharacterVoiceConfig>();
   const byNormalized = new Map<string, AudiobookCharacterVoiceConfig>();
   for (const item of characterVoices) {
-    byExact.set(item.characterName.trim(), item);
-    byNormalized.set(normalizeName(item.characterName), item);
+    const names = [
+      item.characterName,
+      ...(item.speakerAliases ?? []),
+    ]
+      .map((name) => name?.trim())
+      .filter((name): name is string => Boolean(name));
+    for (const name of names) {
+      byExact.set(name, item);
+      byNormalized.set(normalizeName(name), item);
+    }
   }
   return { byExact, byNormalized };
 }
@@ -44,13 +52,40 @@ function resolveCharacter(
   if (!raw || raw === "旁白" || raw === "narrator") {
     return null;
   }
-  return index.byExact.get(raw)
-    ?? index.byNormalized.get(normalizeName(raw))
-    ?? [...index.byExact.values()].find((item) => {
-      const name = item.characterName.trim();
-      return name.length >= 2 && (raw.includes(name) || name.includes(raw));
-    })
-    ?? null;
+  const exact = index.byExact.get(raw) ?? index.byNormalized.get(normalizeName(raw));
+  if (exact) {
+    return exact;
+  }
+
+  // 子串回退：优先最长候选，降低短别名误命中
+  let best: AudiobookCharacterVoiceConfig | null = null;
+  let bestLen = 0;
+  for (const item of new Set(index.byExact.values())) {
+    const candidates = [
+      item.characterName,
+      ...(item.speakerAliases ?? []),
+    ]
+      .map((name) => name?.trim())
+      .filter((name): name is string => Boolean(name) && name.length >= 2);
+    for (const name of candidates) {
+      if (!(raw.includes(name) || name.includes(raw))) {
+        continue;
+      }
+      if (name.length > bestLen) {
+        best = item;
+        bestLen = name.length;
+      }
+    }
+  }
+  return best;
+}
+
+/** 导出供单测验证 speaker 归一。 */
+export function matchCharacterBySpeakerNameForTest(
+  speakerName: string | null | undefined,
+  characterVoices: AudiobookCharacterVoiceConfig[],
+): AudiobookCharacterVoiceConfig | null {
+  return resolveCharacter(speakerName, buildCharacterIndex(characterVoices));
 }
 
 /**
@@ -72,6 +107,7 @@ export function buildNarratorOnlyAnnotation(input: {
         characterId: null,
         speakerLabel: "旁白",
         text,
+        ttsMode: "preset",
         voice: input.narrator.voice,
         style: input.narrator.style,
       }]
@@ -114,7 +150,20 @@ export class AudiobookAnnotationService {
     }
 
     const roster = input.characterVoices
-      .map((item) => `- ${item.characterName}（音色 ${item.ttsVoice}）`)
+      .map((item) => {
+        const mode = item.ttsMode?.trim() || "preset";
+        const aliases = (item.speakerAliases ?? [])
+          .map((alias) => alias.trim())
+          .filter(Boolean);
+        const aliasSuffix = aliases.length > 0 ? `；别名：${aliases.join("、")}` : "";
+        if (mode === "design") {
+          return `- ${item.characterName}（design${aliasSuffix}）`;
+        }
+        if (mode === "clone") {
+          return `- ${item.characterName}（clone${aliasSuffix}）`;
+        }
+        return `- ${item.characterName}（音色 ${item.ttsVoice || "未设"}${aliasSuffix}）`;
+      })
       .join("\n");
 
     try {
@@ -152,14 +201,18 @@ export class AudiobookAnnotationService {
         if (raw.speakerKind === "character") {
           const matched = resolveCharacter(raw.speakerName, index);
           if (matched) {
+            const mode = matched.ttsMode?.trim() || "preset";
             segments.push({
               index: segIndex++,
               speakerKind: "character",
               characterId: matched.characterId,
               speakerLabel: matched.characterName,
               text,
-              voice: matched.ttsVoice,
+              ttsMode: mode === "design" || mode === "clone" ? mode : "preset",
+              voice: matched.ttsVoice?.trim() || "",
               style: matched.ttsStyle ?? input.narrator.style,
+              designPrompt: matched.ttsDesignPrompt ?? null,
+              refAudioPath: matched.ttsRefAudioPath ?? null,
             });
             continue;
           }
@@ -171,6 +224,7 @@ export class AudiobookAnnotationService {
           characterId: null,
           speakerLabel: "旁白",
           text,
+          ttsMode: "preset",
           voice: input.narrator.voice,
           style: input.narrator.style,
         });

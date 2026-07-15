@@ -11,6 +11,8 @@ import { prisma } from "../../db/prisma";
 import { AppError } from "../../middleware/errorHandler";
 import { toTaskTokenUsageSummary } from "../task/taskTokenUsageSummary";
 import { isMissingAudiobookTaskTableError } from "./audiobookErrors";
+import { parseSpeakerAliases } from "./audiobookSpeakerAliases";
+export { parseSpeakerAliases } from "./audiobookSpeakerAliases";
 import { audiobookPrecheckService } from "./AudiobookPrecheckService";
 import {
   audiobookPipelineService,
@@ -58,12 +60,12 @@ function buildPrecheckRejectMessage(precheck: Awaited<ReturnType<typeof audioboo
   const parts: string[] = [];
   if (precheck.missingVoices.length > 0) {
     const names = precheck.missingVoices.map((item) => item.characterName).join("、");
-    parts.push(`以下角色未配置 ttsVoice：${names}`);
+    parts.push(`以下角色未完成 TTS 绑定：${names}`);
   }
   if (precheck.blockingErrors.length > 0) {
     parts.push(...precheck.blockingErrors);
   }
-  return `有声书启动被拒绝：${parts.join("；") || "预检未通过"}。请绑定 MiMo 预置音色后重试。`;
+  return `有声书启动被拒绝：${parts.join("；") || "预检未通过"}。请按角色 ttsMode 补齐 preset/design/clone 绑定后重试。`;
 }
 
 function parseAnnotationsJson(json: string | null | undefined): AudiobookChapterAnnotation[] {
@@ -136,6 +138,22 @@ type AudiobookTaskRow = {
   novel?: { id: string; title: string } | null;
 };
 
+function parseM4bStatusFromResultJson(resultJson: string | null | undefined): AudiobookTaskSummary["m4bStatus"] {
+  if (!resultJson?.trim()) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(resultJson) as { m4b?: { status?: string } };
+    const status = parsed?.m4b?.status;
+    if (status === "ready" || status === "skipped" || status === "failed") {
+      return status;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function toSummary(row: AudiobookTaskRow): AudiobookTaskSummary {
   return {
     id: row.id,
@@ -155,6 +173,7 @@ function toSummary(row: AudiobookTaskRow): AudiobookTaskSummary {
     completedChapterCount: row.completedChapterCount,
     outputDir: row.outputDir,
     fullAudioPath: row.fullAudioPath,
+    m4bStatus: parseM4bStatusFromResultJson(row.resultJson),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
     startedAt: row.startedAt?.toISOString() ?? null,
@@ -679,12 +698,17 @@ export class AudiobookTaskService {
       const novel = await prisma.novel.findUnique({
         where: { id: task.novelId },
         select: {
+          title: true,
           characters: {
             select: {
               id: true,
               name: true,
+              ttsMode: true,
               ttsVoice: true,
               ttsStyle: true,
+              ttsDesignPrompt: true,
+              ttsRefAudioPath: true,
+              ttsSpeakerAliases: true,
             },
           },
         },
@@ -694,17 +718,35 @@ export class AudiobookTaskService {
         return;
       }
       const characterVoices = novel.characters
-        .filter((character) => Boolean(character.ttsVoice?.trim()))
-        .map((character) => ({
-          characterId: character.id,
-          characterName: character.name,
-          ttsVoice: character.ttsVoice!.trim(),
-          ttsStyle: character.ttsStyle ?? null,
-        }));
+        .map((character) => {
+          const modeRaw = character.ttsMode?.trim();
+          const ttsMode: "preset" | "design" | "clone" =
+            modeRaw === "design" || modeRaw === "clone" ? modeRaw : "preset";
+          return {
+            characterId: character.id,
+            characterName: character.name,
+            ttsMode,
+            ttsVoice: character.ttsVoice?.trim() || null,
+            ttsStyle: character.ttsStyle ?? null,
+            ttsDesignPrompt: character.ttsDesignPrompt?.trim() || null,
+            ttsRefAudioPath: character.ttsRefAudioPath?.trim() || null,
+            speakerAliases: parseSpeakerAliases(character.ttsSpeakerAliases),
+          };
+        })
+        .filter((character) => {
+          if (character.ttsMode === "design") {
+            return Boolean(character.ttsDesignPrompt);
+          }
+          if (character.ttsMode === "clone") {
+            return Boolean(character.ttsRefAudioPath);
+          }
+          return Boolean(character.ttsVoice);
+        });
 
       const result = await audiobookPipelineService.run({
         taskId,
         novelId: task.novelId,
+        novelTitle: novel.title,
         chapterIds,
         narrator: {
           voice: task.narratorVoice,
@@ -775,9 +817,22 @@ export class AudiobookTaskService {
         return;
       }
 
-      const warningSuffix = result.qualityWarnings.length > 0
-        ? `；标注回退 ${result.qualityWarnings.length} 章`
+      const annotationFallbackCount = result.qualityWarnings.length;
+      const annotationSuffix = annotationFallbackCount > 0
+        ? `；标注回退 ${annotationFallbackCount} 章`
         : "";
+      const m4bSuffix = result.m4b.status === "ready"
+        ? "，含 m4b"
+        : result.m4b.status === "skipped"
+          ? `；m4b 未生成（${result.m4b.reason ?? "skipped"}）`
+          : result.m4b.status === "failed"
+            ? `；m4b 失败（${result.m4b.reason ?? "failed"}）`
+            : "";
+      const currentItemLabel = annotationFallbackCount > 0
+        ? `完成（${annotationFallbackCount} 章旁白回退${result.m4b.status === "ready" ? "，含 m4b" : ""}）`
+        : result.m4b.status === "ready"
+          ? "有声书生成完成（含 m4b）"
+          : "有声书生成完成";
       await prisma.audiobookTask.updateMany({
         where: {
           id: taskId,
@@ -789,9 +844,7 @@ export class AudiobookTaskService {
           progress: 100,
           finishedAt: new Date(),
           currentStage: "finalizing",
-          currentItemLabel: result.qualityWarnings.length > 0
-            ? `完成（${result.qualityWarnings.length} 章旁白回退）`
-            : "有声书生成完成",
+          currentItemLabel,
           heartbeatAt: new Date(),
           completedChapterCount: result.completedChapterCount,
           outputDir: result.outputDir,
@@ -802,8 +855,15 @@ export class AudiobookTaskService {
             chapterIds: result.chapterAudioPaths.map((item) => item.chapterId),
             completedChunks: result.completedChunks,
             qualityWarnings: result.qualityWarnings,
+            m4b: {
+              status: result.m4b.status,
+              path: result.m4b.relativePath,
+              reason: result.m4b.reason ?? null,
+              bytes: result.m4b.bytes ?? null,
+              chapterCount: result.m4b.chapterCount ?? null,
+            },
           }),
-          summary: `有声书完成：${result.completedChapterCount} 章，${result.completedChunks} 个音频块${warningSuffix}。`,
+          summary: `有声书完成：${result.completedChapterCount} 章，${result.completedChunks} 个音频块${annotationSuffix}${m4bSuffix}。`,
           error: null,
         },
       });
