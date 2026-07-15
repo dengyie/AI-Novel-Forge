@@ -1,14 +1,18 @@
 import type { Character } from "@ai-novel/shared/types/novel";
+import type { CharacterVoicePreviewStatus } from "@ai-novel/shared/types/audiobook";
 import { Badge } from "@/components/ui/badge";
 import {
   getCastRoleLabel,
   getCharacterGenderLabel,
   isProtagonistCharacter,
   resolveCharacterVoiceBinding,
+  resolveCharacterVoicePreviewBadge,
 } from "./characterAssetWorkspace.helpers";
 
 interface CharacterFocusSummaryProps {
-  selectedCharacter: Character;
+  selectedCharacter: Character & {
+    voicePreviewStatus?: CharacterVoicePreviewStatus | null;
+  };
   lastAppearanceChapter?: number | null;
 }
 
@@ -22,6 +26,10 @@ export default function CharacterFocusSummary(props: CharacterFocusSummaryProps)
     ? selectedCharacter.currentGoal || selectedCharacter.storyFunction || "待补全主角目标"
     : selectedCharacter.relationToProtagonist || selectedCharacter.role || "待补全与主角关系";
   const voice = resolveCharacterVoiceBinding(selectedCharacter);
+  const previewBadge = resolveCharacterVoicePreviewBadge(
+    selectedCharacter.voicePreviewStatus
+      ?? (selectedCharacter.ttsPreviewAudioPath ? "ready" : "missing"),
+  );
 
   return (
     <div className={`rounded-xl border p-4 ${isProtagonist ? "border-primary/30 bg-primary/5" : "bg-muted/10"}`}>
@@ -38,6 +46,18 @@ export default function CharacterFocusSummary(props: CharacterFocusSummaryProps)
             <Badge variant={voice.ready ? "outline" : "destructive"} title={voice.detailLabel}>
               {voice.ready ? `有声书 · ${voice.shortLabel}` : "有声书 · 缺音色"}
             </Badge>
+            <Badge
+              variant={
+                previewBadge.tone === "ready"
+                  ? "outline"
+                  : previewBadge.tone === "stale"
+                    ? "secondary"
+                    : "destructive"
+              }
+              title="角色卡固定试听状态"
+            >
+              {previewBadge.label}
+            </Badge>
           </div>
           <div className="text-sm leading-6 text-muted-foreground">
             {isProtagonist ? `当前目标：${primaryLine}` : `与主角关系：${primaryLine}`}
@@ -49,6 +69,7 @@ export default function CharacterFocusSummary(props: CharacterFocusSummaryProps)
           <div>故事作用：{selectedCharacter.storyFunction || "待补全"}</div>
           <div>当前状态：{selectedCharacter.currentState || "待补全"}</div>
           <div className="sm:col-span-2">音色：{voice.detailLabel}</div>
+          <div className="sm:col-span-2">试听：{previewBadge.label}</div>
         </div>
       </div>
     </div>

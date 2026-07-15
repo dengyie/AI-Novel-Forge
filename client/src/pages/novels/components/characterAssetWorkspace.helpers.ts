@@ -196,7 +196,7 @@ export function isCharacterVoiceFormDirty(
 }
 
 /**
- * 能否调用服务端 voice-preview。
+ * 能否基于当前表单配置调用服务端生成试听（不含 dirty 门禁）。
  * clone 只接受已落盘路径；草稿 base64 只能本地试听。
  */
 export function canPreviewCharacterVoice(form: CharacterVoiceFormSlice): {
@@ -224,9 +224,40 @@ export function canPreviewCharacterVoice(form: CharacterVoiceFormSlice): {
   const path = form.ttsRefAudioPath?.trim() ?? "";
   if (!path) {
     if (form.ttsRefAudioBase64?.trim()) {
-      return { ok: false, reason: "新参考音需先保存角色，再服务端试听；可先本地试听。" };
+      return { ok: false, reason: "新参考音需先保存角色，再生成试听；可先本地听参考轨。" };
     }
     return { ok: false, reason: "请先上传并保存参考音频。" };
   }
   return { ok: true, reason: "" };
+}
+
+/**
+ * 生成试听门禁：必须基于已保存配置；dirty 时禁止生成。
+ */
+export function canGenerateCharacterVoicePreview(input: {
+  form: CharacterVoiceFormSlice;
+  saved?: CharacterVoiceFormSlice | null;
+}): {
+  ok: boolean;
+  reason: string;
+} {
+  if (isCharacterVoiceFormDirty(input.form, input.saved)) {
+    return { ok: false, reason: "请先保存音色，再生成试听（基于已保存配置）。" };
+  }
+  return canPreviewCharacterVoice(input.saved ?? input.form);
+}
+
+export type CharacterVoicePreviewStatusLabel = "missing" | "ready" | "stale";
+
+export function resolveCharacterVoicePreviewBadge(status?: CharacterVoicePreviewStatusLabel | null): {
+  label: string;
+  tone: "ready" | "stale" | "missing";
+} {
+  if (status === "ready") {
+    return { label: "试听✓", tone: "ready" };
+  }
+  if (status === "stale") {
+    return { label: "试听过期", tone: "stale" };
+  }
+  return { label: "无试听", tone: "missing" };
 }

@@ -1,11 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   DEFAULT_AUDIOBOOK_NARRATOR_STYLE,
   MIMO_TTS_VOICE_CATALOG,
-  type AudiobookTtsMode,
+  type CharacterVoicePreviewAsset,
+  type CharacterVoicePreviewStatus,
 } from "@ai-novel/shared/types/audiobook";
-import { previewAudiobookVoice } from "@/api/novel/audiobook";
+import {
+  generateCharacterVoicePreview,
+  getCharacterVoicePreview,
+  issueCharacterVoicePreviewMediaUrl,
+} from "@/api/novel/audiobook";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -16,13 +21,15 @@ import {
   resolveLocalAudioSrc,
   tryAutoPlayAudio,
 } from "@/lib/audiobookVoiceAudio";
+import { queryKeys } from "@/api/queryKeys";
 import {
   CHARACTER_VOICE_MODE_OPTIONS,
-  canPreviewCharacterVoice,
+  canGenerateCharacterVoicePreview,
   findMimoVoiceCatalogItem,
   isCharacterVoiceFormDirty,
   resolveCharacterVoiceBinding,
   resolveCharacterVoiceMode,
+  resolveCharacterVoicePreviewBadge,
   type CharacterVoiceFormSlice,
   type CharacterVoiceMode,
 } from "./characterAssetWorkspace.helpers";
@@ -98,6 +105,16 @@ function PresetVoiceGrid(props: {
   );
 }
 
+function statusBadgeVariant(status: CharacterVoicePreviewStatus | null | undefined): "outline" | "secondary" | "destructive" {
+  if (status === "ready") {
+    return "outline";
+  }
+  if (status === "stale") {
+    return "secondary";
+  }
+  return "destructive";
+}
+
 export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
   const {
     novelId,
@@ -110,15 +127,16 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
     isSaving = false,
   } = props;
 
+  const queryClient = useQueryClient();
   const formVoice = useMemo(
     () => resolveCharacterVoiceBinding(form),
     [form.ttsMode, form.ttsVoice, form.ttsDesignPrompt, form.ttsRefAudioPath],
   );
   const savedVoice = useMemo(() => resolveCharacterVoiceBinding(saved), [saved]);
   const dirty = useMemo(() => isCharacterVoiceFormDirty(form, saved), [form, saved]);
-  const previewGate = useMemo(
-    () => canPreviewCharacterVoice(form),
-    [form.ttsMode, form.ttsVoice, form.ttsDesignPrompt, form.ttsRefAudioPath, form.ttsRefAudioBase64],
+  const generateGate = useMemo(
+    () => canGenerateCharacterVoicePreview({ form, saved }),
+    [form, saved],
   );
   const mode = resolveCharacterVoiceMode(form.ttsMode);
   const selectedPreset = findMimoVoiceCatalogItem(form.ttsVoice);
@@ -133,6 +151,20 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
   const [previewDurationSec, setPreviewDurationSec] = useState<number | null>(null);
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
   const previewUrlSlotRef = useRef(createObjectUrlSlot());
+
+  const previewQuery = useQuery({
+    queryKey: queryKeys.novels.characterVoicePreview(novelId, characterId),
+    queryFn: async () => {
+      const response = await getCharacterVoicePreview(novelId, characterId);
+      return response.data as CharacterVoicePreviewAsset;
+    },
+    enabled: Boolean(novelId && characterId),
+    staleTime: 15_000,
+  });
+
+  const assetStatus = previewQuery.data?.status ?? null;
+  const previewBadge = resolveCharacterVoicePreviewBadge(assetStatus);
+  const canPlay = assetStatus === "ready" || assetStatus === "stale";
 
   useEffect(() => {
     const slot = previewUrlSlotRef.current;
@@ -166,7 +198,7 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
         return;
       }
       if (!result.played) {
-        setPreviewMessage("试听已生成；若未自动播放，请点播放键。");
+        setPreviewMessage("试听已就绪；若未自动播放，请点播放键。");
       }
     });
     return () => {
@@ -174,50 +206,87 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
     };
   }, [previewAudioUrl]);
 
-  const previewMutation = useMutation({
+  async function playFromAsset(asset?: CharacterVoicePreviewAsset | null) {
+    if (asset?.audioBase64) {
+      const inspection = inspectWavAudioBase64(asset.audioBase64);
+      if (!inspection.isWav || inspection.reason) {
+        throw new Error(inspection.reason || "试听音频无效。");
+      }
+      const nextUrl = decodeBase64AudioToObjectUrl(asset.audioBase64, "audio/wav");
+      setPreviewAudioUrl(previewUrlSlotRef.current.set(nextUrl));
+      setPreviewDurationSec(inspection.durationSec);
+      setPreviewLabel(savedVoice.detailLabel || formVoice.detailLabel);
+      return;
+    }
+    const mediaUrl = await issueCharacterVoicePreviewMediaUrl(novelId, characterId);
+    setPreviewAudioUrl(previewUrlSlotRef.current.set(mediaUrl));
+    setPreviewDurationSec(null);
+    setPreviewLabel(savedVoice.detailLabel || formVoice.detailLabel);
+  }
+
+  const generateMutation = useMutation({
     mutationFn: async () => {
-      const gate = canPreviewCharacterVoice(form);
+      const gate = canGenerateCharacterVoicePreview({ form, saved });
       if (!gate.ok) {
         throw new Error(gate.reason);
       }
-      const nextMode = resolveCharacterVoiceMode(form.ttsMode);
-      const response = await previewAudiobookVoice(novelId, {
-        characterId,
-        ttsMode: nextMode as AudiobookTtsMode,
-        ttsVoice: form.ttsVoice.trim() || null,
-        ttsStyle: form.ttsStyle.trim() || null,
-        ttsDesignPrompt: form.ttsDesignPrompt.trim() || null,
-      });
-      return response.data;
+      const response = await generateCharacterVoicePreview(novelId, characterId, {});
+      return response.data as CharacterVoicePreviewAsset;
     },
-    onSuccess: (data) => {
-      if (!data?.audioBase64) {
-        setPreviewAudioUrl(previewUrlSlotRef.current.set(null));
-        setPreviewDurationSec(null);
-        setPreviewMessage("试听无音频返回。");
-        return;
-      }
+    onSuccess: async (data) => {
+      queryClient.setQueryData(
+        queryKeys.novels.characterVoicePreview(novelId, characterId),
+        data,
+      );
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.novels.detail(novelId) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.novels.characters(novelId) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.novels.audiobookWorkspace(novelId) }),
+      ]);
       try {
-        const inspection = inspectWavAudioBase64(data.audioBase64);
-        if (!inspection.isWav || inspection.reason) {
-          throw new Error(inspection.reason || "试听音频无效。");
-        }
-        const nextUrl = decodeBase64AudioToObjectUrl(data.audioBase64, "audio/wav");
-        setPreviewAudioUrl(previewUrlSlotRef.current.set(nextUrl));
-        setPreviewLabel(formVoice.detailLabel);
-        setPreviewDurationSec(inspection.durationSec);
-        const durationText = inspection.durationSec != null
-          ? `约 ${inspection.durationSec.toFixed(1)} 秒`
+        await playFromAsset(data);
+        const durationText = previewDurationSec != null
+          ? `约 ${previewDurationSec.toFixed(1)} 秒`
           : "时长待解析";
-        setPreviewMessage(`试听已生成（${durationText}），正在尝试自动播放。`);
+        setPreviewMessage(
+          data.status === "ready"
+            ? `试听已写入角色卡（${durationText}），正在播放。`
+            : `试听已生成（${durationText}）。`,
+        );
       } catch (error) {
-        setPreviewAudioUrl(previewUrlSlotRef.current.set(null));
-        setPreviewDurationSec(null);
-        setPreviewMessage(error instanceof Error ? error.message : "试听音频解码失败。");
+        setPreviewMessage(error instanceof Error ? error.message : "试听已生成，但播放失败。");
       }
     },
     onError: (error) => {
-      setPreviewMessage(error instanceof Error ? error.message : "试听失败。");
+      setPreviewMessage(error instanceof Error ? error.message : "生成试听失败。");
+    },
+  });
+
+  const playMutation = useMutation({
+    mutationFn: async () => {
+      if (!canPlay) {
+        throw new Error("尚无试听资产，请先生成试听。");
+      }
+      let asset = previewQuery.data;
+      if (!asset || asset.status === "missing") {
+        const response = await getCharacterVoicePreview(novelId, characterId);
+        asset = response.data as CharacterVoicePreviewAsset;
+      }
+      if (!asset || asset.status === "missing") {
+        throw new Error("尚无试听资产，请先生成试听。");
+      }
+      await playFromAsset(asset);
+      return asset;
+    },
+    onSuccess: (asset) => {
+      if (asset.status === "stale") {
+        setPreviewMessage("正在播放旧版试听（配置已变更，建议重新生成）。");
+        return;
+      }
+      setPreviewMessage("正在播放已保存的试听资产。");
+    },
+    onError: (error) => {
+      setPreviewMessage(error instanceof Error ? error.message : "播放试听失败。");
     },
   });
 
@@ -246,6 +315,9 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
               {formVoice.ready ? "可生成" : "缺配置"}
             </Badge>
             <Badge variant="secondary">{formVoice.modeLabel}</Badge>
+            <Badge variant={statusBadgeVariant(assetStatus)} title={previewBadge.label}>
+              {previewBadge.label}
+            </Badge>
             {dirty ? <Badge variant="secondary">未保存</Badge> : null}
           </div>
           <div className="text-xs leading-5 text-muted-foreground">
@@ -255,8 +327,8 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
               : ""}
           </div>
           <div className="text-xs leading-5 text-muted-foreground">
-            预置可直接试听；设计需有描述；克隆须保存参考音后服务端试听，未保存时可本地听参考轨。
-            改完音色后请点「保存音色」写入角色卡（侧边栏/有声书面板只读已保存绑定）。
+            试听是角色卡固定资产：先「保存音色」，再「生成试听」；之后「播放试听」只读磁盘，不再打上游。
+            配置变更后旧试听仍可播，但会标记为过期。
           </div>
         </div>
         <div className="flex shrink-0 flex-col items-stretch gap-1 sm:items-end">
@@ -276,17 +348,36 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
             <Button
               type="button"
               size="sm"
-              variant="outline"
-              disabled={previewMutation.isPending || !previewGate.ok}
-              title={previewGate.ok ? `试听 ${characterName}` : previewGate.reason}
-              onClick={() => previewMutation.mutate()}
+              variant="default"
+              disabled={generateMutation.isPending || !generateGate.ok}
+              title={generateGate.ok ? `为 ${characterName} 生成固定试听` : generateGate.reason}
+              onClick={() => generateMutation.mutate()}
             >
-              {previewMutation.isPending ? "试听生成中..." : "试听音色"}
+              {generateMutation.isPending
+                ? "生成中..."
+                : assetStatus === "ready" || assetStatus === "stale"
+                  ? "重新生成"
+                  : "生成试听"}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={playMutation.isPending || !canPlay}
+              title={canPlay ? `播放 ${characterName} 已保存试听` : "请先生成试听"}
+              onClick={() => playMutation.mutate()}
+            >
+              {playMutation.isPending ? "加载中..." : "播放试听"}
             </Button>
           </div>
-          {!previewGate.ok ? (
+          {!generateGate.ok ? (
             <div className="max-w-[18rem] text-right text-[11px] leading-4 text-muted-foreground">
-              {previewGate.reason}
+              {generateGate.reason}
+            </div>
+          ) : null}
+          {assetStatus === "stale" ? (
+            <div className="max-w-[18rem] text-right text-[11px] leading-4 text-amber-700 dark:text-amber-400">
+              配置已变，可播旧版；建议重新生成。
             </div>
           ) : null}
         </div>
@@ -300,6 +391,9 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
           <div className="text-xs text-muted-foreground">
             试听：{previewLabel || formVoice.detailLabel}
             {previewDurationSec != null ? ` · ${previewDurationSec.toFixed(1)}s` : ""}
+            {previewQuery.data?.generatedAt
+              ? ` · 生成于 ${new Date(previewQuery.data.generatedAt).toLocaleString()}`
+              : ""}
           </div>
           <audio ref={previewAudioRef} controls preload="auto" src={previewAudioUrl} className="w-full" />
         </div>
@@ -381,7 +475,7 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
             {hasLocalCloneDraft ? (
               <div className="space-y-1">
                 <p className="text-xs text-muted-foreground">
-                  已选择新参考音频（未保存）。可先本地试听，保存角色后才能服务端克隆试听。
+                  已选择新参考音频（未保存）。可先本地听参考轨；保存后再生成固定试听。
                 </p>
                 {localCloneSrc ? (
                   <audio controls src={localCloneSrc} className="w-full" />
