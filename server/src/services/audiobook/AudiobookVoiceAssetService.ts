@@ -182,6 +182,16 @@ export class AudiobookVoiceAssetService {
         continue;
       }
 
+      const currentMode = character.ttsMode?.trim() || "preset";
+      if (currentMode === "clone" && character.ttsRefAudioPath?.trim()) {
+        skipped.push({
+          characterId: character.id,
+          characterName: character.name,
+          reason: "已配置 clone 参考音频，apply 不覆盖。",
+        });
+        continue;
+      }
+
       if (item.ttsMode === "preset") {
         const voice = item.ttsVoice?.trim() || "";
         if (!voice || !isMimoTtsPresetVoice(voice)) {
@@ -223,6 +233,8 @@ export class AudiobookVoiceAssetService {
       const data: Record<string, unknown> = {
         ttsMode: item.ttsMode,
         ttsStyle: item.ttsStyle?.trim() || null,
+        // 切到 preset/design 时清掉 clone 参考路径，避免预检/合成仍走旧 clone
+        ttsRefAudioPath: null,
       };
 
       if (item.ttsMode === "preset") {
