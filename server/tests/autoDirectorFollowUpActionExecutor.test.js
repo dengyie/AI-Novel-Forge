@@ -162,7 +162,7 @@ test("auto director follow-up action executor continues auto execution and dedup
   prisma.autoDirectorFollowUpActionLog.create = originals.actionLogCreate;
 });
 
-test("auto director follow-up action executor sends skip_quality_repair for quality-repair checkpoints", async () => {
+test("auto director follow-up action executor does not strategy-map quality-repair checkpoints to skip_quality_repair", async () => {
   const executor = new AutoDirectorFollowUpActionExecutor();
   const calls = [];
   const originals = {
@@ -185,7 +185,7 @@ test("auto director follow-up action executor sends skip_quality_repair for qual
     currentStage: "质量修复",
     currentItemKey: "quality_repair",
     checkpointType: "chapter_batch_ready",
-    currentItemLabel: "等待跳过本次建议后继续自动执行",
+    currentItemLabel: "等待质量修复后继续自动执行",
   });
   executor.novelDirectorService.continueTask = async (taskId, input) => {
     calls.push({ taskId, input });
@@ -200,15 +200,16 @@ test("auto director follow-up action executor sends skip_quality_repair for qual
     taskId: "task_quality_repair_continue",
     actionCode: "continue_auto_execution",
     source: "web",
-    operatorId: "user_skip",
+    operatorId: "user_continue",
     idempotencyKey: "continue-quality-repair-k1",
   });
 
   assert.equal(result.code, "executed");
+  // A7：follow-up 默认 auto_execute_range，禁止把质量检查点策略映射为 skip_quality_repair
   assert.deepEqual(calls, [{
     taskId: "task_quality_repair_continue",
     input: {
-      continuationMode: "skip_quality_repair",
+      continuationMode: "auto_execute_range",
     },
   }]);
 

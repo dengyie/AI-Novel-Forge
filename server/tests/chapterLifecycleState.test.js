@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const {
   chapterStatePairAfterManualQualityReview,
   chapterStatePairAfterPipelineApproval,
+  chapterStatePairAfterLiteraryQualityGate,
   chapterStatePairAfterDraftSave,
   chapterStatePairAfterPlannedReset,
   mergeChapterPatchForGenerationStateBump,
@@ -24,6 +25,17 @@ test("chapterStatePairAfterPipelineApproval aligns approved with completed", () 
   assert.deepEqual(chapterStatePairAfterPipelineApproval(), {
     generationState: "approved",
     chapterStatus: "completed",
+  });
+});
+
+test("chapterStatePairAfterLiteraryQualityGate blocks completed when !literaryPass (A6)", () => {
+  assert.deepEqual(chapterStatePairAfterLiteraryQualityGate(true), {
+    generationState: "approved",
+    chapterStatus: "completed",
+  });
+  assert.deepEqual(chapterStatePairAfterLiteraryQualityGate(false), {
+    generationState: "reviewed",
+    chapterStatus: "needs_repair",
   });
 });
 

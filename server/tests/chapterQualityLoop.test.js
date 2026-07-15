@@ -401,6 +401,27 @@ test("buildChapterQualityLoopChapterUpdate marks exhausted auto repair as deferr
   assert.match(update.repairHistory, /terminal=defer_and_continue/);
 });
 
+test("buildChapterQualityLoopChapterUpdate never completes on defer even if generation already approved (A6)", () => {
+  const assessment = buildChapterQualityLoopAssessment({
+    chapterId: "chapter-defer-no-complete",
+    chapterOrder: 6,
+    score: score({ coherence: 70, repetition: 70, engagement: 70, overall: 70 }),
+    issues: [],
+    evaluatedAt: "2026-07-15T00:00:00.000Z",
+  });
+
+  const update = buildChapterQualityLoopChapterUpdate({
+    riskFlags: null,
+    repairHistory: null,
+    chapterStatus: "needs_repair",
+    generationState: "approved",
+  }, assessment, "pipeline_review", "defer_and_continue");
+
+  // defer 记债可读，但 !literaryPass 不得质量过审 completed
+  assert.equal(update.chapterStatus, "pending_review");
+  assert.notEqual(update.chapterStatus, "completed");
+});
+
 test("quality loop projection classifies deferred patch repair as non-blocking debt", () => {
   const riskFlags = JSON.stringify({
     qualityLoop: {

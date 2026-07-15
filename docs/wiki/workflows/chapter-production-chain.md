@@ -34,6 +34,8 @@
 - 生成后用一次结构化接收闸门判断是否可继续、是否需要局部修文、是否需要人工确认。
 - 接收闸门通过后、构建运行包前，会对最终正文执行一次确定性正文自然度/退化检测。该检测只做本地文本规则检查，覆盖 AI 自述、占位符、工程词泄漏、截断、复读、破折号/省略号、否定翻转句、碎句和长段落等风险；它不调用 LLM，也不改变正文。
 - 正文自然度/退化检测输出统一进入 `mode_fit` 审计报告，issue code 使用 `prose_*` 前缀。`high/critical` 视为本章阻塞审计问题并复用现有 patch repair / heavy repair 链路；`medium/low` 只作为提示和后续局部优化依据，不触发全章重写。
+- **修文 adopt / discard（写文质量 P0）**：自动修文路径（`ChapterRepairStreamRuntime.finalizeRepairResult`）必须 `baseline → candidate → evaluate → adopt|discard`，**禁止**未评估先写 `chapter.content`。降 overall、新增 L0 hard、或文学门恶化 → discard（正文保持 baseline，repairHistory 记 decision）；改进且无 L0 恶化 → adopt。连续无改进达 plateau → 停自动修、记债，**禁止**策略化 `skip_quality_repair`。
+- **文学 isPass 与质量过审**：`isPass` / `isLiteraryQualityPass` 固定 `coherence≥80 ∧ repetition≥75 ∧ engagement≥75`。qualityLoop `literary_score` / retention 与 isPass 同阈值。`!literaryPass` 不得写成 `chapterStatus=completed` 的质量过审（manual review / repair recheck / pipeline auto-review）；导演 `defer_and_continue` 可读可续，但不是质量过审。L0 另含 `sot_banned_term` / `sot_must_avoid_leak`（高严重度，默认空词表）。
 - `prose_*` 问题默认属于本章局部质量问题。自动修复耗尽后，如果正文仍可读，应登记 `defer_and_continue` 质量债并继续剩余章节；不得仅因为单章正文自然度问题写入 `replanAlertDetails`、`PIPELINE_REPLAN_REQUIRED` 或全局自动导演重规划。
 - 接收闸门热路径只等待 `acceptance`。timeline extractor 不再阻塞正文接收；章节接收后由 `ChapterTimelineFinalizationService` 执行 stable/degraded 时间线定稿。
 - `acceptance` 门禁必须按同章、同正文 content hash、同模型请求写入持久化幂等缓存；timeline 定稿必须按同章、同正文 content hash 写入 `timeline_finalization` checkpoint。任务取消、失败或 worker 重启后，如果正文未变化，应优先复用成功结果，不能重新触发相同的接收评估或 timeline extractor。

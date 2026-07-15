@@ -109,21 +109,21 @@ function inferPhaseFromTaskState(input: {
   return null;
 }
 
+/**
+ * 是否跳过当前质量修复检查点。
+ * 写文质量 P0：仅显式 continuationMode === "skip_quality_repair" 才跳过；
+ * auto_execute_range 在 quality_repair / 「质量」阶段不再隐式 skip（禁止策略化盲跳）。
+ */
 function shouldSkipCurrentQualityRepair(input: {
   continuationMode: DirectorContinuationMode | null;
   checkpointType?: string | null;
   currentItemKey?: string | null;
   currentStage?: string | null;
 }): boolean {
-  if (input.continuationMode === "skip_quality_repair") {
-    return true;
-  }
-  if (input.continuationMode !== "auto_execute_range") {
-    return false;
-  }
-  return input.checkpointType === "replan_required"
-    || input.currentItemKey === "quality_repair"
-    || Boolean(input.currentStage?.includes("质量"));
+  void input.checkpointType;
+  void input.currentItemKey;
+  void input.currentStage;
+  return input.continuationMode === "skip_quality_repair";
 }
 
 export class NovelDirectorContinueRuntime {
