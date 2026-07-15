@@ -161,12 +161,16 @@ test("A5: L0 blocking (prose / SoT / mustAvoid) blocks recommendedAction=continu
   assert.ok(sot.findings.some((f) => f.code === "sot_banned_term"));
   assert.equal(sot.hasBlockingFindings, true);
 
-  // 词表匹配为字面包含；正文夹「」书名号时 plain term 不命中（见 ProseQualityDetector scanTermListLeak）
+  // 字面 + 归一化：plain 与「」包装均应命中
   const mustAvoid = detectProseQuality("他使用了禁忌术裂空斩。", {
     mustAvoidTerms: ["裂空斩"],
   });
   assert.ok(mustAvoid.findings.some((f) => f.code === "sot_must_avoid_leak"));
   assert.equal(mustAvoid.hasBlockingFindings, true);
+  const mustAvoidWrapped = detectProseQuality("他使用了禁忌术「裂空斩」。", {
+    mustAvoidTerms: ["裂空斩"],
+  });
+  assert.ok(mustAvoidWrapped.findings.some((f) => f.code === "sot_must_avoid_leak"));
 
   const blockingCodes = [
     ...prose.findings.filter((f) => f.severity === "high" || f.severity === "critical").map((f) => f.code),
@@ -216,6 +220,18 @@ test("A6: !literaryPass cannot quality-over-approve / completed", () => {
     generationState: "approved",
     chapterStatus: "completed",
   });
+
+  // pipeline generation bump 不得在无 literaryPass 证明时写 completed
+  assert.deepEqual(
+    require("../dist/services/novel/chapterLifecycleState.js")
+      .mergeChapterPatchForGenerationStateBump({}, "approved"),
+    { generationState: "approved" },
+  );
+  assert.deepEqual(
+    require("../dist/services/novel/chapterLifecycleState.js")
+      .mergeChapterPatchForGenerationStateBump({}, "approved", { literaryPass: true }),
+    { generationState: "approved", chapterStatus: "completed" },
+  );
 
   const failScore = score({ coherence: 70, repetition: 70, engagement: 70, overall: 70 });
   assert.equal(isLiteraryQualityPass(failScore), false);

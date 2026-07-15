@@ -14,6 +14,12 @@ export interface RepairContentAdoptInput {
   baselineBlockingCodes: string[];
   /** candidate 的 L0 blocking codes */
   candidateBlockingCodes: string[];
+  /**
+   * L1 义务/审校硬伤指纹（high/critical issue 稳定键）。
+   * 候选相对 baseline **新增** → discard（防止高分补丁抹掉合同硬义务）。
+   */
+  baselineBlockingL1Codes?: string[];
+  candidateBlockingL1Codes?: string[];
   /** 本决策前已连续无改进次数（discard / plateau） */
   consecutiveNoImprove?: number;
   /** 连续无改进上限，默认 2 */
@@ -33,6 +39,7 @@ export interface RepairContentAdoptResult {
     engagement: number;
   };
   introducedBlockingCodes: string[];
+  introducedBlockingL1Codes: string[];
   baselineLiteraryPass: boolean;
   candidateLiteraryPass: boolean;
 }
@@ -70,6 +77,10 @@ export function decideRepairContentAdoption(
     input.baselineBlockingCodes,
     input.candidateBlockingCodes,
   );
+  const introducedBlockingL1Codes = introducedCodes(
+    input.baselineBlockingL1Codes ?? [],
+    input.candidateBlockingL1Codes ?? [],
+  );
 
   const fail = (reason: string): RepairContentAdoptResult => {
     const nextNoImprove = consecutiveNoImprove + 1;
@@ -83,6 +94,7 @@ export function decideRepairContentAdoption(
         : reason,
       scoreDelta,
       introducedBlockingCodes,
+      introducedBlockingL1Codes,
       baselineLiteraryPass,
       candidateLiteraryPass,
     };
@@ -91,6 +103,12 @@ export function decideRepairContentAdoption(
   if (introducedBlockingCodes.length > 0) {
     return fail(
       `候选引入新的 L0 硬伤：${introducedBlockingCodes.slice(0, 6).join(",")}`,
+    );
+  }
+
+  if (introducedBlockingL1Codes.length > 0) {
+    return fail(
+      `候选引入新的 L1 义务/审校硬伤：${introducedBlockingL1Codes.slice(0, 6).join(",")}`,
     );
   }
 
@@ -121,13 +139,56 @@ export function decideRepairContentAdoption(
   return {
     decision: "adopt",
     reason: candidateLiteraryPass
-      ? "候选通过文学门且无 L0 回归，采纳"
-      : "候选相对基线有改进且无 L0 回归，采纳",
+      ? "候选通过文学门且无 L0/L1 回归，采纳"
+      : "候选相对基线有改进且无 L0/L1 回归，采纳",
     scoreDelta,
     introducedBlockingCodes,
+    introducedBlockingL1Codes,
     baselineLiteraryPass,
     candidateLiteraryPass,
   };
+}
+
+/**
+ * 将 ReviewIssue 中 high/critical 压成 L1 稳定指纹（无独立 code 字段时用 category+证据摘要）。
+ * 供修文 adopt 判定「义务/审校硬伤是否恶化」。
+ */
+export function fingerprintReviewIssuesAsL1BlockingCodes(
+  issues: Array<{
+    severity?: string | null;
+    category?: string | null;
+    evidence?: string | null;
+    code?: string | null;
+  }> | null | undefined,
+): string[] {
+  if (!Array.isArray(issues) || issues.length === 0) {
+    return [];
+  }
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const issue of issues) {
+    const severity = String(issue?.severity ?? "").toLowerCase();
+    if (severity !== "high" && severity !== "critical") {
+      continue;
+    }
+    const code = typeof issue.code === "string" && issue.code.trim()
+      ? issue.code.trim()
+      : null;
+    const category = String(issue.category ?? "unknown").trim() || "unknown";
+    const evidence = String(issue.evidence ?? "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 64);
+    const key = code
+      ? `l1:${code}`
+      : `l1:${category}:${evidence || "no-evidence"}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    out.push(key);
+  }
+  return out;
 }
 
 /** 从 repairHistory 文本统计尾部连续 discard/plateau 次数。 */

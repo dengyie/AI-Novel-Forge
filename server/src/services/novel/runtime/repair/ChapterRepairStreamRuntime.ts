@@ -5,8 +5,10 @@ import {
   appendRepairAdoptHistoryLine,
   countTrailingRepairNoImprove,
   decideRepairContentAdoption,
+  fingerprintReviewIssuesAsL1BlockingCodes,
   formatRepairAdoptHistoryLine,
 } from "@ai-novel/shared/types/repairAdoptDecision";
+import { extractSotBannedTermsFromNovel } from "@ai-novel/shared/types/sotBannedTerms";
 import type { StreamDoneHelpers } from "../../../../llm/streaming";
 import { prisma } from "../../../../db/prisma";
 import { streamTextPrompt } from "../../../../prompting/core/promptRunner";
@@ -257,6 +259,12 @@ export class ChapterRepairStreamRuntime {
         characterScore: true,
         pacingScore: true,
         mustAvoid: true,
+        novel: {
+          select: {
+            storyWorldSliceJson: true,
+            storyWorldSliceOverridesJson: true,
+          },
+        },
       },
     });
     if (!baselineChapter) {
@@ -268,17 +276,25 @@ export class ChapterRepairStreamRuntime {
     const candidateHash = contentFingerprint(repairedContent);
     const consecutiveNoImprove = countTrailingRepairNoImprove(baselineChapter.repairHistory);
 
-    const proseDetectOpts = { mustAvoid: baselineChapter.mustAvoid ?? null };
+    const bannedTerms = extractSotBannedTermsFromNovel(baselineChapter.novel);
+    const proseDetectOpts = {
+      mustAvoid: baselineChapter.mustAvoid ?? null,
+      bannedTerms,
+    };
     const baselineBlockingCodes = blockingProseCodes(baselineContent, proseDetectOpts);
     const candidateBlockingCodes = blockingProseCodes(repairedContent, proseDetectOpts);
 
-    const baselineScore = await this.resolveBaselineScore({
+    // baseline 与 candidate 同协议：优先 evaluateOnly 现算，避免陈旧 QualityReport 误导 adopt
+    const baselineReview = await this.resolveBaselineReview({
       novelId: input.novelId,
       chapterId: input.chapterId,
       baselineContent,
       chapter: baselineChapter,
       options: input.options,
     });
+    const baselineScore = baselineReview.score;
+    const baselineBlockingL1Codes = fingerprintReviewIssuesAsL1BlockingCodes(baselineReview.issues);
+
     const candidateReview = await this.deps.reviewChapterAfterRepair(input.novelId, input.chapterId, {
       provider: input.options.provider,
       model: input.options.model,
@@ -287,12 +303,15 @@ export class ChapterRepairStreamRuntime {
       evaluateOnly: true,
     });
     const candidateScore = candidateReview.score;
+    const candidateBlockingL1Codes = fingerprintReviewIssuesAsL1BlockingCodes(candidateReview.issues);
 
     const adoptDecision = decideRepairContentAdoption({
       baselineScore,
       candidateScore,
       baselineBlockingCodes,
       candidateBlockingCodes,
+      baselineBlockingL1Codes,
+      candidateBlockingL1Codes,
       consecutiveNoImprove,
     });
 
@@ -337,26 +356,67 @@ export class ChapterRepairStreamRuntime {
         ...contentRevisionBumpData(),
       },
     });
-    await this.deps.artifactSyncService.syncChapterArtifacts(
-      input.novelId,
-      input.chapterId,
-      repairedContent,
-      {
-        scheduleBackgroundSync: true,
-        awaitArtifactDelta: true,
-        skipLegacySummaryAndFacts: true,
-        provider: input.options.provider,
-        model: input.options.model,
-      },
-    );
+    try {
+      await this.deps.artifactSyncService.syncChapterArtifacts(
+        input.novelId,
+        input.chapterId,
+        repairedContent,
+        {
+          scheduleBackgroundSync: true,
+          awaitArtifactDelta: true,
+          skipLegacySummaryAndFacts: true,
+          provider: input.options.provider,
+          model: input.options.model,
+        },
+      );
+    } catch (error) {
+      logPipelineError("Artifact sync failed after repair adopt; content kept, marking needs_repair.", {
+        novelId: input.novelId,
+        chapterId: input.chapterId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      await prisma.chapter.update({
+        where: { id: input.chapterId },
+        data: chapterStatePairAfterLiteraryQualityGate(false),
+      });
+      input.helpers.writeFrame({
+        type: "run_status",
+        runId,
+        status: "succeeded",
+        phase: "completed",
+        message: "修复候选已采纳，但 artifacts 同步失败，已标 needs_repair。",
+      });
+      return;
+    }
 
     // 采纳后正式 recheck（写 QualityReport / qualityLoop / 状态）
-    const review = await this.deps.reviewChapterAfterRepair(input.novelId, input.chapterId, {
-      provider: input.options.provider,
-      model: input.options.model,
-      temperature: input.options.temperature,
-      content: repairedContent,
-    });
+    let review: RepairReviewResult;
+    try {
+      review = await this.deps.reviewChapterAfterRepair(input.novelId, input.chapterId, {
+        provider: input.options.provider,
+        model: input.options.model,
+        temperature: input.options.temperature,
+        content: repairedContent,
+      });
+    } catch (error) {
+      logPipelineError("Post-adopt recheck failed; content kept, marking needs_repair.", {
+        novelId: input.novelId,
+        chapterId: input.chapterId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      await prisma.chapter.update({
+        where: { id: input.chapterId },
+        data: chapterStatePairAfterLiteraryQualityGate(false),
+      });
+      input.helpers.writeFrame({
+        type: "run_status",
+        runId,
+        status: "succeeded",
+        phase: "completed",
+        message: "修复候选已采纳，但正式 recheck 失败，已标 needs_repair。",
+      });
+      return;
+    }
 
     // A6：仅文学 isPass 可质量过审/completed；!pass 写成 needs_repair，不得假 completed
     const literaryPass = isPass(review.score);
@@ -381,7 +441,11 @@ export class ChapterRepairStreamRuntime {
     });
   }
 
-  private async resolveBaselineScore(input: {
+  /**
+   * baseline 评估与 candidate 同协议（evaluateOnly）。
+   * 仅在 evaluateOnly 失败时回退列代理 / ruleScore，**不再优先信旧 QualityReport**。
+   */
+  private async resolveBaselineReview(input: {
     novelId: string;
     chapterId: string;
     baselineContent: string;
@@ -392,49 +456,13 @@ export class ChapterRepairStreamRuntime {
       pacingScore?: number | null;
     };
     options: RepairOptions;
-  }): Promise<QualityScore> {
-    try {
-      const latestReport = await prisma.qualityReport.findFirst({
-        where: { chapterId: input.chapterId, novelId: input.novelId },
-        orderBy: { createdAt: "desc" },
-        select: {
-          coherence: true,
-          repetition: true,
-          pacing: true,
-          voice: true,
-          engagement: true,
-          overall: true,
-        },
-      });
-      if (latestReport) {
-        return {
-          coherence: latestReport.coherence,
-          repetition: latestReport.repetition,
-          pacing: latestReport.pacing,
-          voice: latestReport.voice,
-          engagement: latestReport.engagement,
-          overall: latestReport.overall,
-        };
-      }
-    } catch (error) {
-      logPipelineError("Failed to load latest QualityReport for repair baseline score.", {
-        novelId: input.novelId,
-        chapterId: input.chapterId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-
-    const fromColumns = scoreFromChapterColumns(input.chapter);
-    if (fromColumns) {
-      return fromColumns;
-    }
-
+  }): Promise<RepairReviewResult> {
     if (!input.baselineContent.trim()) {
-      return ruleScore("");
+      return { score: ruleScore(""), issues: [] };
     }
 
     try {
-      const baselineReview = await this.deps.reviewChapterAfterRepair(
+      return await this.deps.reviewChapterAfterRepair(
         input.novelId,
         input.chapterId,
         {
@@ -445,15 +473,19 @@ export class ChapterRepairStreamRuntime {
           evaluateOnly: true,
         },
       );
-      return baselineReview.score;
     } catch (error) {
-      logPipelineError("Baseline evaluateOnly failed; falling back to ruleScore.", {
+      logPipelineError("Baseline evaluateOnly failed; falling back to columns/ruleScore.", {
         novelId: input.novelId,
         chapterId: input.chapterId,
         error: error instanceof Error ? error.message : String(error),
       });
-      return ruleScore(input.baselineContent);
     }
+
+    const fromColumns = scoreFromChapterColumns(input.chapter);
+    if (fromColumns) {
+      return { score: fromColumns, issues: [] };
+    }
+    return { score: ruleScore(input.baselineContent), issues: [] };
   }
 }
 

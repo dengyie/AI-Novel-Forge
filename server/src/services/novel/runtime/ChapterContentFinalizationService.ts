@@ -14,6 +14,7 @@ import {
   buildRuntimePackage,
   type ChapterRuntimePlannerPort,
 } from "./chapterRuntimePackageBuilders";
+import { extractSotBannedTermsFromNovel } from "@ai-novel/shared/types/sotBannedTerms";
 import {
   buildProseQualityAuditReport,
   detectProseQuality,
@@ -125,10 +126,11 @@ export class ChapterContentFinalizationService {
     const mustAvoidTerms = normalizeProseQualityTermList(
       input.contextPackage?.chapter?.mustAvoid ?? null,
     );
+    // D2：书级 SoT 禁词从 storyWorldSlice(Overrides)Json.sotBannedTerms 读取；默认空
+    const bannedTerms = await this.loadNovelSotBannedTerms(input.novelId);
     const proseQualityReport = detectProseQuality(finalContent, {
       mustAvoidTerms,
-      // 书级 bannedTerms 无独立列时保持空；后续可由 call site 注入
-      bannedTerms: [],
+      bannedTerms,
     });
     const proseQualityAuditReport = buildProseQualityAuditReport({
       novelId: input.novelId,
@@ -353,6 +355,26 @@ export class ChapterContentFinalizationService {
       sourceStage: "chapter_content_finalization",
       reason: input.qualityDebt ? "post_finalize_with_quality_debt" : "post_finalize_async",
     });
+  }
+
+  /** D2：从 novel.storyWorldSlice(Overrides)Json 读 sotBannedTerms，失败/空 → []。 */
+  private async loadNovelSotBannedTerms(novelId: string): Promise<string[]> {
+    try {
+      const novel = await prisma.novel.findUnique({
+        where: { id: novelId },
+        select: {
+          storyWorldSliceJson: true,
+          storyWorldSliceOverridesJson: true,
+        },
+      });
+      return extractSotBannedTermsFromNovel(novel);
+    } catch (error) {
+      console.warn("[chapter-runtime] load sotBannedTerms failed; treating as empty", {
+        novelId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return [];
+    }
   }
 
   /**

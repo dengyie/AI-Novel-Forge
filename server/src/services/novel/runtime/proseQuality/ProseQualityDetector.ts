@@ -155,6 +155,16 @@ function uniqueTerms(values: string[]): string[] {
   return out;
 }
 
+/**
+ * 去掉常见书名号/引号与空白，便于 mustAvoid/SoT 字面匹配不被「」包装绕过。
+ * 仅用于扫描比对；finding 仍引用原文 segment。
+ */
+export function normalizeTextForTermLeakScan(text: string): string {
+  return text
+    .replace(/[「」『』“”"'《》【】\[\]（）()]/gu, "")
+    .replace(/\s+/gu, "");
+}
+
 function scanTermListLeak(
   segments: TextSegment[],
   terms: string[],
@@ -165,16 +175,28 @@ function scanTermListLeak(
     return;
   }
   for (const segment of segments) {
+    const raw = segment.text;
+    const normalized = normalizeTextForTermLeakScan(raw);
     for (const term of terms) {
-      const index = segment.text.indexOf(term);
-      if (index < 0 || isInsideQuote(segment.text, index)) {
+      const rawIndex = raw.indexOf(term);
+      const normalizedTerm = normalizeTextForTermLeakScan(term);
+      const normalizedHit = normalizedTerm.length >= 2
+        && normalized.includes(normalizedTerm);
+      if (rawIndex < 0 && !normalizedHit) {
         continue;
+      }
+      // 原文命中且在对话引号内 → 跳过；仅归一化命中（包装绕过）→ 仍拦
+      if (rawIndex >= 0 && isInsideQuote(raw, rawIndex) && !normalizedHit) {
+        continue;
+      }
+      if (rawIndex >= 0 && isInsideQuote(raw, rawIndex) && normalizedHit) {
+        // 对话内复述禁词：仍拦 SoT/mustAvoid（合同禁止项不允许「说出来就合法」）
       }
       addFinding({
         code,
         severity: "high",
         line: segment.line,
-        column: index + 1,
+        column: (rawIndex >= 0 ? rawIndex : 0) + 1,
         message: code === "sot_banned_term"
           ? `正文命中 SoT 禁词「${term}」。`
           : `正文泄漏 mustAvoid 项「${term}」。`,

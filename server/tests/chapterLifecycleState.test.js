@@ -57,19 +57,33 @@ test("chapterStatePairAfterPlannedReset pairs planned with unplanned", () => {
   });
 });
 
-test("mergeChapterPatchForGenerationStateBump only adds completed when approved", () => {
+test("mergeChapterPatchForGenerationStateBump only completes when literaryPass proven (A6)", () => {
   assert.deepEqual(mergeChapterPatchForGenerationStateBump({}, "reviewed"), {
     generationState: "reviewed",
   });
+  // 未证明 literaryPass：不得假 completed
   assert.deepEqual(mergeChapterPatchForGenerationStateBump({}, "approved"), {
     generationState: "approved",
-    chapterStatus: "completed",
   });
   assert.deepEqual(
     mergeChapterPatchForGenerationStateBump({ chapterStatus: "pending_review" }, "approved"),
     {
       generationState: "approved",
+      chapterStatus: "pending_review",
+    },
+  );
+  assert.deepEqual(
+    mergeChapterPatchForGenerationStateBump({}, "approved", { literaryPass: true }),
+    {
+      generationState: "approved",
       chapterStatus: "completed",
+    },
+  );
+  assert.deepEqual(
+    mergeChapterPatchForGenerationStateBump({}, "approved", { literaryPass: false }),
+    {
+      generationState: "reviewed",
+      chapterStatus: "needs_repair",
     },
   );
 });

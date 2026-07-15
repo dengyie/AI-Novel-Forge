@@ -40,4 +40,5 @@ export * from "./types/volumePlanning";
 export * from "./types/canonicalState";
 export * from "./types/literaryQualityPass";
 export * from "./types/repairAdoptDecision";
+export * from "./types/sotBannedTerms";
 export * from "./utils/bookAnalysisTimeline";

@@ -67,6 +67,30 @@ test("decideRepairContentAdoption discards newly introduced L0 codes", () => {
   assert.deepEqual(result.introducedBlockingCodes, ["prose_ai_self_reference"]);
 });
 
+test("decideRepairContentAdoption discards newly introduced L1 blocking codes", () => {
+  const {
+    fingerprintReviewIssuesAsL1BlockingCodes,
+  } = require("@ai-novel/shared/types/repairAdoptDecision");
+  const baselineL1 = fingerprintReviewIssuesAsL1BlockingCodes([
+    { severity: "high", category: "coherence", evidence: "义务A未兑现" },
+  ]);
+  const candidateL1 = fingerprintReviewIssuesAsL1BlockingCodes([
+    { severity: "high", category: "coherence", evidence: "义务A未兑现" },
+    { severity: "critical", category: "logic", evidence: "义务B新增缺口" },
+  ]);
+  const result = decideRepairContentAdoption({
+    baselineScore: score({ overall: 70, coherence: 70, repetition: 70, engagement: 70 }),
+    candidateScore: score({ overall: 92, coherence: 92, repetition: 92, engagement: 92 }),
+    baselineBlockingCodes: [],
+    candidateBlockingCodes: [],
+    baselineBlockingL1Codes: baselineL1,
+    candidateBlockingL1Codes: candidateL1,
+  });
+  assert.equal(result.decision, "discard");
+  assert.match(result.reason, /L1/);
+  assert.ok(result.introducedBlockingL1Codes.length >= 1);
+});
+
 test("decideRepairContentAdoption plateau_stop after consecutive no-improve", () => {
   const result = decideRepairContentAdoption({
     baselineScore: score({ overall: 88 }),

@@ -159,3 +159,11 @@ test("detectProseQuality with empty SoT options keeps legacy prose-only behavior
   assert.equal(codes(clean).some((code) => code.startsWith("sot_")), false);
   assert.equal(clean.hasBlockingFindings, false);
 });
+
+test("detectProseQuality catches mustAvoid wrapped in book-title marks via normalize", () => {
+  const report = detectProseQuality("他使用了禁忌术「裂空斩」。", {
+    mustAvoidTerms: ["裂空斩"],
+  });
+  assert.ok(codes(report).includes("sot_must_avoid_leak"));
+  assert.equal(report.hasBlockingFindings, true);
+});
