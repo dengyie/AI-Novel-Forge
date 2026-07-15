@@ -18,7 +18,7 @@ import projectPreviewImage from "./assets/project-social-preview.png";
 
 const DocsPage = lazy(() => import("./DocsPage"));
 
-const repoUrl = "https://github.com/ExplosiveCoderflome/AI-Novel-Writing-Assistant";
+const repoUrl = "https://github.com/dengyie/AI-Novel-Writing-Assistant";
 const releaseUrl = `${repoUrl}/releases/latest`;
 
 const proofItems = [
