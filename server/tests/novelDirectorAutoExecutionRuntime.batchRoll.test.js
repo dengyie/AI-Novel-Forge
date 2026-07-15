@@ -259,3 +259,248 @@ test("runFromReady without resolveBatchRoll keeps legacy workflow_completed on e
   assert.equal(calls.some((c) => c[0] === "startPipelineJob"), false);
   assert.ok(calls.some((c) => c[0] === "recordCheckpoint" && c[1] === "workflow_completed"));
 });
+
+function buildMinimalRequest(overrides = {}) {
+  return {
+    idea: "x",
+    candidate: {
+      id: "c1",
+      workingTitle: "t",
+      titleOptions: [],
+      logline: "l",
+      positioning: "p",
+      sellingPoint: "s",
+      coreConflict: "c",
+      protagonistPath: "p",
+      endingDirection: "e",
+      hookStrategy: "h",
+      progressionLoop: "p",
+      whyItFits: "w",
+      toneKeywords: [],
+      targetChapterCount: 10,
+    },
+    runMode: "auto_to_execution",
+    ...overrides,
+  };
+}
+
+test("runFromReady reenter prepares next window then continues loop", async () => {
+  const calls = [];
+  const completed = new Set([1]);
+  const runtime = new NovelDirectorAutoExecutionRuntime({
+    novelContextService: {
+      async listChapters() {
+        return [1, 2].map((order) => (
+          completed.has(order)
+            ? withExecutionDetail({
+              id: `chapter-${order}`,
+              order,
+              generationState: "approved",
+              chapterStatus: "completed",
+              content: `正文${order}`,
+            })
+            : withExecutionDetail({
+              id: `chapter-${order}`,
+              order,
+              generationState: "planned",
+              chapterStatus: "unplanned",
+              content: "",
+            })
+        ));
+      },
+    },
+    novelService: {
+      async startPipelineJob(_novelId, options) {
+        calls.push(["startPipelineJob", options.startOrder, options.endOrder]);
+        return { id: `job-${options.startOrder}`, status: "queued" };
+      },
+      async findActivePipelineJobForRange() {
+        return null;
+      },
+      async getPipelineJobById(jobId) {
+        const order = Number(String(jobId).replace("job-", ""));
+        completed.add(order);
+        return {
+          id: jobId,
+          status: "succeeded",
+          progress: 1,
+          startOrder: order,
+          endOrder: order,
+          noticeSummary: null,
+          error: null,
+        };
+      },
+      async cancelPipelineJob() {},
+      async resumePipelineJob() {},
+    },
+    workflowService: {
+      async bootstrapTask() {},
+      async getTaskById() {
+        return { status: "running" };
+      },
+      async markTaskRunning() {
+        calls.push(["markTaskRunning"]);
+      },
+      async recordCheckpoint(_taskId, input) {
+        calls.push([
+          "recordCheckpoint",
+          input.checkpointType,
+          input.seedPayload?.autoExecution?.startOrder,
+          input.seedPayload?.autoExecution?.endOrder,
+        ]);
+      },
+      async markTaskFailed(_taskId, message) {
+        calls.push(["markTaskFailed", message]);
+      },
+    },
+    buildDirectorSeedPayload(_request, _novelId, extra) {
+      return extra ?? {};
+    },
+    enableBatchRoll: true,
+    canPrepareNextBatch: true,
+    resolveBatchRoll: async ({ range, consecutiveBatchRolls }) => {
+      calls.push(["resolveBatchRoll", range.startOrder, range.endOrder, consecutiveBatchRolls]);
+      if (range.endOrder < 2) {
+        return {
+          kind: "reenter_structured_outline",
+          reason: "next window needs prepare",
+          nextRange: { startOrder: 2, endOrder: 2 },
+        };
+      }
+      return { kind: "completed_scope", reason: "done" };
+    },
+    prepareNextAutoExecutionBatch: async (input) => {
+      calls.push([
+        "prepareNextAutoExecutionBatch",
+        input.decision.kind,
+        input.decision.nextRange?.startOrder,
+        input.decision.nextRange?.endOrder,
+        input.request?.runMode ?? null,
+        input.previousState?.startOrder ?? null,
+      ]);
+      assert.equal(input.decision.kind, "reenter_structured_outline");
+      assert.equal(input.request?.runMode, "auto_to_execution");
+      return {
+        range: {
+          startOrder: 2,
+          endOrder: 2,
+          totalChapterCount: 1,
+          firstChapterId: "chapter-2",
+        },
+        autoExecution: {
+          enabled: true,
+          mode: "chapter_range",
+          firstChapterId: "chapter-2",
+          startOrder: 2,
+          endOrder: 2,
+          totalChapterCount: 1,
+          pipelineJobId: null,
+          pipelineStatus: "queued",
+          autoReview: true,
+          autoRepair: true,
+          skippedChapterIds: input.previousState?.skippedChapterIds ?? [],
+          skippedChapterOrders: input.previousState?.skippedChapterOrders ?? [],
+        },
+      };
+    },
+  });
+
+  await runtime.runFromReady({
+    taskId: "task-reenter-prepare",
+    novelId: "novel-1",
+    request: buildMinimalRequest(),
+    existingState: {
+      enabled: true,
+      mode: "chapter_range",
+      firstChapterId: "chapter-1",
+      startOrder: 1,
+      endOrder: 1,
+      totalChapterCount: 1,
+      pipelineJobId: null,
+      pipelineStatus: null,
+      autoReview: true,
+      autoRepair: true,
+      skippedChapterIds: ["chapter-skip"],
+      skippedChapterOrders: [99],
+    },
+  });
+
+  assert.ok(calls.some((c) => (
+    c[0] === "prepareNextAutoExecutionBatch"
+    && c[1] === "reenter_structured_outline"
+    && c[2] === 2
+    && c[3] === 2
+    && c[4] === "auto_to_execution"
+  )));
+  const starts = calls.filter((c) => c[0] === "startPipelineJob").map((c) => c.slice(1));
+  assert.deepEqual(starts, [[2, 2]]);
+  assert.ok(calls.some((c) => c[0] === "recordCheckpoint" && c[1] === "workflow_completed"));
+  assert.equal(calls.some((c) => c[0] === "markTaskFailed"), false);
+});
+
+test("runFromReady reenter without prepare port fails and does not expand", async () => {
+  const calls = [];
+  const runtime = new NovelDirectorAutoExecutionRuntime({
+    novelContextService: {
+      async listChapters() {
+        return [withExecutionDetail({
+          id: "chapter-1",
+          order: 1,
+          generationState: "approved",
+          chapterStatus: "completed",
+          content: "done",
+        })];
+      },
+    },
+    novelService: {
+      async startPipelineJob() {
+        calls.push(["startPipelineJob"]);
+        return { id: "job", status: "queued" };
+      },
+      async findActivePipelineJobForRange() { return null; },
+      async getPipelineJobById() { return null; },
+      async cancelPipelineJob() {},
+      async resumePipelineJob() {},
+    },
+    workflowService: {
+      async bootstrapTask() {},
+      async getTaskById() { return { status: "running" }; },
+      async markTaskRunning() {},
+      async recordCheckpoint(_id, input) {
+        calls.push(["recordCheckpoint", input.checkpointType]);
+      },
+      async markTaskFailed(_taskId, message) {
+        calls.push(["markTaskFailed", String(message)]);
+      },
+    },
+    buildDirectorSeedPayload(_r, _n, extra) { return extra ?? {}; },
+    enableBatchRoll: true,
+    canPrepareNextBatch: true,
+    resolveBatchRoll: async () => ({
+      kind: "reenter_structured_outline",
+      reason: "need prepare but port missing",
+      nextRange: { startOrder: 2, endOrder: 2 },
+    }),
+    // intentionally omit prepareNextAutoExecutionBatch
+  });
+
+  await runtime.runFromReady({
+    taskId: "task-reenter-no-prepare",
+    novelId: "novel-1",
+    request: buildMinimalRequest(),
+    existingState: {
+      enabled: true,
+      mode: "chapter_range",
+      startOrder: 1,
+      endOrder: 1,
+      totalChapterCount: 1,
+      firstChapterId: "chapter-1",
+      autoReview: true,
+      autoRepair: true,
+    },
+  });
+
+  assert.equal(calls.some((c) => c[0] === "startPipelineJob"), false);
+  assert.ok(calls.some((c) => c[0] === "markTaskFailed" && /prepareNextAutoExecutionBatch/.test(c[1])));
+  assert.equal(calls.some((c) => c[0] === "recordCheckpoint" && c[1] === "workflow_completed"), false);
+});

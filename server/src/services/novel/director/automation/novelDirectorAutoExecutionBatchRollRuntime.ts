@@ -1,4 +1,7 @@
-import type { DirectorAutoExecutionState } from "@ai-novel/shared/types/novelDirector";
+import type {
+  DirectorAutoExecutionState,
+  DirectorConfirmRequest,
+} from "@ai-novel/shared/types/novelDirector";
 import { assessChapterExecutionContractShape } from "@ai-novel/shared/types/chapterTaskSheetQuality";
 import type { DirectorAutoExecutionChapterRef, DirectorAutoExecutionRange } from "./novelDirectorAutoExecution";
 import {
@@ -267,8 +270,26 @@ export function buildExpandedAutoExecutionRange(input: {
   };
 }
 
+function uniqueNonEmptyStrings(values: Array<string | null | undefined>): string[] {
+  return Array.from(new Set(
+    values
+      .map((value) => value?.trim())
+      .filter((value): value is string => Boolean(value)),
+  ));
+}
+
+function uniqueFiniteNumbers(values: Array<number | null | undefined>): number[] {
+  return Array.from(new Set(
+    values.filter((value): value is number => typeof value === "number" && Number.isFinite(value)),
+  )).sort((left, right) => left - right);
+}
+
 /**
  * Apply expand_range: rebuild state for the next prepared window, preserving skip/quality debt.
+ *
+ * `buildDirectorAutoExecutionState` only keeps in-window skips that still pass
+ * canPreserve. Cross-window historical debt must be unioned back so batch-roll
+ * does not silently drop deferred quality / skip markers from earlier batches.
  */
 export function applyExpandRangeBatchRoll(input: {
   previousState: DirectorAutoExecutionState;
@@ -303,6 +324,26 @@ export function applyExpandRangeBatchRoll(input: {
       ...autoExecution,
       pipelineJobId: null,
       pipelineStatus: "queued",
+      skippedChapterIds: uniqueNonEmptyStrings([
+        ...(input.previousState.skippedChapterIds ?? []),
+        ...(autoExecution.skippedChapterIds ?? []),
+      ]),
+      skippedChapterOrders: uniqueFiniteNumbers([
+        ...(input.previousState.skippedChapterOrders ?? []),
+        ...(autoExecution.skippedChapterOrders ?? []),
+      ]),
+      qualityDebtChapterIds: uniqueNonEmptyStrings([
+        ...(input.previousState.qualityDebtChapterIds ?? []),
+        ...(autoExecution.qualityDebtChapterIds ?? []),
+      ]),
+      qualityDebtChapterOrders: uniqueFiniteNumbers([
+        ...(input.previousState.qualityDebtChapterOrders ?? []),
+        ...(autoExecution.qualityDebtChapterOrders ?? []),
+      ]),
+      qualityDebtSummaries: [
+        ...(input.previousState.qualityDebtSummaries ?? []),
+        ...(autoExecution.qualityDebtSummaries ?? []),
+      ].slice(-40),
     },
   };
 }
@@ -313,6 +354,8 @@ export type PrepareNextAutoExecutionBatchInput = {
   decision: BatchRollDecision;
   previousState: DirectorAutoExecutionState;
   previousRange: DirectorAutoExecutionRange;
+  /** 批续窗 prepare 需要 provider/model/runMode；runtime 必传 */
+  request: DirectorConfirmRequest;
 };
 
 export type PrepareNextAutoExecutionBatchResult = {

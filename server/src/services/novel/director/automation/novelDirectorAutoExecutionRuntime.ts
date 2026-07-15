@@ -192,6 +192,7 @@ export class NovelDirectorAutoExecutionRuntime {
         decision,
         previousState: input.autoExecution,
         previousRange: input.range,
+        request: input.request,
       });
       await syncAutoExecutionTaskState(this.deps, {
         taskId: input.taskId,
