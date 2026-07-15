@@ -8,8 +8,8 @@ import {
   type AudiobookScopeMode,
   type AudiobookTaskAnnotationsView,
   type AudiobookTaskSummary,
-  type AudiobookTtsMode,
   type AudiobookVoicePlanItem,
+  type CharacterVoicePreviewStatus,
 } from "@ai-novel/shared/types/audiobook";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -20,6 +20,7 @@ import {
   createAudiobookTask,
   getAudiobookAnnotations,
   issueAudiobookMediaUrl,
+  issueCharacterVoicePreviewMediaUrl,
   listAudiobookTasks,
   precheckAudiobookTask,
   previewAudiobookVoice,
@@ -36,7 +37,7 @@ import {
 } from "@/lib/audiobookVoiceAudio";
 import {
   resolveCharacterVoiceBinding,
-  resolveCharacterVoiceMode,
+  resolveCharacterVoicePreviewBadge,
 } from "./characterAssetWorkspace.helpers";
 
 interface ChapterOption {
@@ -58,6 +59,7 @@ type AudiobookPanelCharacter = {
   ttsDesignPrompt?: string | null;
   ttsRefAudioPath?: string | null;
   ttsSpeakerAliases?: string | null;
+  voicePreviewStatus?: CharacterVoicePreviewStatus | null;
 };
 
 interface NovelAudiobookPanelProps {
@@ -896,46 +898,60 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
 
   const previewVoiceMutation = useMutation({
     mutationFn: async (target: VoicePreviewTarget) => {
+      // 规划草稿：未写入角色卡，ephemeral 预览（禁止带 characterId，否则会固化）
       if (target.kind === "plan") {
         const item = target.item;
         const response = await previewAudiobookVoice(novelId, {
-          characterId: item.characterId,
           ttsMode: item.ttsMode,
           ttsVoice: item.ttsVoice,
           ttsStyle: item.ttsStyle,
           ttsDesignPrompt: item.ttsDesignPrompt,
         });
         return {
-          label: `${item.characterName} · ${item.ttsMode}${item.ttsVoice ? `/${item.ttsVoice}` : ""}`,
+          mode: "ephemeral" as const,
+          label: `${item.characterName} · 规划草稿 · ${item.ttsMode}${item.ttsVoice ? `/${item.ttsVoice}` : ""}`,
           characterName: item.characterName,
           data: response.data,
         };
       }
 
+      // 已绑定角色：只读角色卡固定试听，禁止在此页在线生成
       const character = target.character;
-      const mode = resolveCharacterVoiceMode(character.ttsMode);
       const binding = resolveCharacterVoiceBinding(character);
       if (!binding.ready) {
-        throw new Error(`${character.name} 尚未配置完整音色，无法试听。`);
+        throw new Error(`${character.name} 尚未配置完整音色。请到角色资产工作台配置并生成试听。`);
       }
-      const response = await previewAudiobookVoice(novelId, {
-        characterId: character.id,
-        ttsMode: mode as AudiobookTtsMode,
-        ttsVoice: character.ttsVoice ?? null,
-        ttsStyle: character.ttsStyle ?? null,
-        ttsDesignPrompt: character.ttsDesignPrompt ?? null,
-      });
+      const status = character.voicePreviewStatus;
+      if (status !== "ready" && status !== "stale") {
+        throw new Error(`${character.name} 尚无固定试听资产。请到「角色资产工作台」生成试听后再播放。`);
+      }
+      const mediaUrl = await issueCharacterVoicePreviewMediaUrl(novelId, character.id);
       return {
-        label: `${character.name} · ${binding.detailLabel}`,
+        mode: "asset" as const,
+        label: `${character.name} · ${binding.detailLabel}${status === "stale" ? " · 过期" : ""}`,
         characterName: character.name,
-        data: response.data,
+        mediaUrl,
+        status,
       };
     },
-    onSuccess: ({ label, characterName, data }) => {
+    onSuccess: (result) => {
+      if (result.mode === "asset") {
+        setPreviewAudioUrl(previewUrlSlotRef.current.set(result.mediaUrl));
+        setPreviewDurationSec(null);
+        setPreviewLabel(result.label);
+        setMessage(
+          result.status === "stale"
+            ? `正在播放 ${result.characterName} 的旧版试听（配置已变，请在角色台重新生成）。`
+            : `正在播放 ${result.characterName} 的固定试听。`,
+        );
+        return;
+      }
+
+      const { label, characterName, data } = result;
       if (!data?.audioBase64) {
         setPreviewAudioUrl(previewUrlSlotRef.current.set(null));
         setPreviewDurationSec(null);
-        setMessage("试听无音频。");
+        setMessage("规划草稿试听无音频。");
         return;
       }
       try {
@@ -950,7 +966,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
         const durationText = inspection.durationSec != null
           ? `约 ${inspection.durationSec.toFixed(1)} 秒`
           : "时长待解析";
-        setMessage(`试听已生成（${durationText}）并尝试播放：${characterName}`);
+        setMessage(`规划草稿试听已生成（${durationText}，未写入角色卡）：${characterName}`);
       } catch (error) {
         setPreviewAudioUrl(previewUrlSlotRef.current.set(null));
         setPreviewDurationSec(null);
@@ -958,7 +974,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
       }
     },
     onError: (error) => {
-      setMessage(error instanceof Error ? error.message : "试听失败。");
+      setMessage(error instanceof Error ? error.message : "播放试听失败。");
     },
   });
 
@@ -997,7 +1013,8 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
           <div>
             <div className="text-sm font-medium text-foreground">人物卡 → 音色资产</div>
             <div className="text-xs leading-5 text-muted-foreground">
-              一眼看清谁已配/谁缺配；可先「自动规划」再写入角色卡，或对已绑定角色直接试听。
+              一眼看清谁已配/谁缺配。固定试听只在「角色资产工作台」生成；本台仅播放已落盘资产。
+              规划草稿可临时听效果（不写入角色卡）。
             </div>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -1037,7 +1054,11 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
             <div className="px-2 py-1 text-xs font-medium text-muted-foreground">
               当前绑定（{characterVoiceRows.length - missingVoiceCharacters.length}/{characterVoiceRows.length} 已就绪）
             </div>
-            {characterVoiceRows.map(({ character, binding }) => (
+            {characterVoiceRows.map(({ character, binding }) => {
+              const previewBadge = resolveCharacterVoicePreviewBadge(character.voicePreviewStatus);
+              const canPlayAsset = character.voicePreviewStatus === "ready"
+                || character.voicePreviewStatus === "stale";
+              return (
               <div
                 key={character.id}
                 className="flex flex-wrap items-center justify-between gap-2 rounded-md px-2 py-1.5 text-sm"
@@ -1048,24 +1069,42 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
                     <Badge variant={binding.ready ? "outline" : "destructive"}>
                       {binding.ready ? binding.shortLabel : "缺音色"}
                     </Badge>
+                    <Badge
+                      variant={
+                        previewBadge.tone === "ready"
+                          ? "outline"
+                          : previewBadge.tone === "stale"
+                            ? "secondary"
+                            : "destructive"
+                      }
+                    >
+                      {previewBadge.label}
+                    </Badge>
                     <span className="text-xs text-muted-foreground">{binding.modeLabel}</span>
                   </div>
                   <div className="text-xs leading-5 text-muted-foreground">{binding.detailLabel}</div>
+                  {!canPlayAsset ? (
+                    <div className="text-[11px] leading-4 text-muted-foreground">
+                      无固定试听：请到角色资产工作台生成。
+                    </div>
+                  ) : null}
                 </div>
                 <Button
                   size="sm"
                   variant="ghost"
-                  disabled={previewVoiceMutation.isPending || !binding.ready}
+                  disabled={previewVoiceMutation.isPending || !canPlayAsset}
+                  title={canPlayAsset ? "播放角色卡固定试听" : "请到角色资产工作台生成试听"}
                   onClick={() => previewVoiceMutation.mutate({ kind: "character", character })}
                 >
-                  试听
+                  播放试听
                 </Button>
               </div>
-            ))}
+              );
+            })}
           </div>
         ) : (
           <div className="rounded-lg border border-dashed px-3 py-4 text-xs text-muted-foreground">
-            暂无角色。请先在人物卡建角，再回到这里规划/试听。
+            暂无角色。请先在人物卡建角，再到角色台生成固定试听。
           </div>
         )}
 
@@ -1101,7 +1140,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
                   disabled={previewVoiceMutation.isPending}
                   onClick={() => previewVoiceMutation.mutate({ kind: "plan", item })}
                 >
-                  试听
+                  试听规划草稿
                 </Button>
               </div>
             ))}
