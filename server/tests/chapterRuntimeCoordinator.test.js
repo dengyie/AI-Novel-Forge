@@ -723,6 +723,7 @@ test("createRepairStream escalates patch schema failures to a single heavy repai
   const originalChapterFindFirst = prisma.chapter.findFirst;
   const originalBibleFindUnique = prisma.novelBible.findUnique;
   const originalChapterUpdate = prisma.chapter.update;
+  const originalQualityReportFindFirst = prisma.qualityReport.findFirst;
   const originalRunStructuredPrompt = promptRunner.runStructuredPrompt;
   const originalStreamTextPrompt = promptRunner.streamTextPrompt;
 
@@ -737,8 +738,21 @@ test("createRepairStream escalates patch schema failures to a single heavy repai
     id: "chapter-1",
     title: "第1章",
     content: "旧正文里有一段需要修复的内容。",
+    repairHistory: null,
+    qualityScore: 70,
+    continuityScore: 70,
+    characterScore: 70,
+    pacingScore: 70,
   });
   prisma.novelBible.findUnique = async () => ({ rawContent: "作品圣经" });
+  prisma.qualityReport.findFirst = async () => ({
+    coherence: 70,
+    repetition: 70,
+    pacing: 70,
+    voice: 70,
+    engagement: 70,
+    overall: 70,
+  });
   prisma.chapter.update = async ({ data }) => {
     chapterUpdates.push(data);
     return { id: "chapter-1", ...data };
@@ -766,7 +780,7 @@ test("createRepairStream escalates patch schema failures to a single heavy repai
         },
       },
       reviewChapterAfterRepair: async (_novelId, _chapterId, options) => {
-        reviewCalls.push(options.content);
+        reviewCalls.push({ content: options.content, evaluateOnly: Boolean(options.evaluateOnly) });
         return {
           score: {
             coherence: 92,
@@ -810,13 +824,18 @@ test("createRepairStream escalates patch schema failures to a single heavy repai
     });
 
     assert.equal(streamedContent, "全文修复片段");
-    assert.deepEqual(reviewCalls, ["全文修复后的正文"]);
+    // evaluateOnly candidate 评估 + 采纳后正式 recheck
+    assert.deepEqual(reviewCalls, [
+      { content: "全文修复后的正文", evaluateOnly: true },
+      { content: "全文修复后的正文", evaluateOnly: false },
+    ]);
     assert.equal(syncCalls.length, 1);
     assert.equal(syncCalls[0][2], "全文修复后的正文");
     assert.equal(syncCalls[0][3].awaitArtifactDelta, true);
     assert.equal(syncCalls[0][3].skipLegacySummaryAndFacts, true);
     assert.deepEqual(resolvedIssues, [["issue-1"]]);
     assert.deepEqual(chapterUpdates.map((item) => item.generationState), ["repaired", "approved"]);
+    assert.ok(chapterUpdates[0].repairHistory?.includes("decision=adopt"));
     assert.equal(frames.at(-1)?.status, "succeeded");
     assert.equal(frames.at(-1)?.phase, "completed");
   } finally {
@@ -824,6 +843,229 @@ test("createRepairStream escalates patch schema failures to a single heavy repai
     prisma.chapter.findFirst = originalChapterFindFirst;
     prisma.novelBible.findUnique = originalBibleFindUnique;
     prisma.chapter.update = originalChapterUpdate;
+    prisma.qualityReport.findFirst = originalQualityReportFindFirst;
+    promptRunner.runStructuredPrompt = originalRunStructuredPrompt;
+    promptRunner.streamTextPrompt = originalStreamTextPrompt;
+  }
+});
+
+test("createRepairStream discards candidate on overall regression without overwriting content", async () => {
+  const originalNovelFindUnique = prisma.novel.findUnique;
+  const originalChapterFindFirst = prisma.chapter.findFirst;
+  const originalBibleFindUnique = prisma.novelBible.findUnique;
+  const originalChapterUpdate = prisma.chapter.update;
+  const originalQualityReportFindFirst = prisma.qualityReport.findFirst;
+  const originalRunStructuredPrompt = promptRunner.runStructuredPrompt;
+  const originalStreamTextPrompt = promptRunner.streamTextPrompt;
+
+  const chapterUpdates = [];
+  const syncCalls = [];
+  const frames = [];
+
+  prisma.novel.findUnique = async () => ({ id: "novel-1", title: "测试小说" });
+  prisma.chapter.findFirst = async () => ({
+    id: "chapter-1",
+    title: "第1章",
+    content: "基线正文保持不变。",
+    repairHistory: null,
+    qualityScore: 88,
+    continuityScore: 88,
+    characterScore: 88,
+    pacingScore: 88,
+  });
+  prisma.novelBible.findUnique = async () => ({ rawContent: "作品圣经" });
+  prisma.qualityReport.findFirst = async () => ({
+    coherence: 88,
+    repetition: 88,
+    pacing: 88,
+    voice: 88,
+    engagement: 88,
+    overall: 88,
+  });
+  prisma.chapter.update = async ({ data }) => {
+    chapterUpdates.push(data);
+    return { id: "chapter-1", ...data };
+  };
+  promptRunner.runStructuredPrompt = async () => {
+    throw new Error("force heavy");
+  };
+  promptRunner.streamTextPrompt = async () => ({
+    stream: {
+      async *[Symbol.asyncIterator]() {
+        yield { content: "更差候选" };
+      },
+    },
+    complete: Promise.resolve({ output: "更差的修复候选正文" }),
+  });
+
+  try {
+    const coordinator = new ChapterRuntimeCoordinator({
+      assembler: {
+        assemble: async () => createRepairAssembledChapter(),
+      },
+      artifactSyncService: {
+        async syncChapterArtifacts(...args) {
+          syncCalls.push(args);
+        },
+      },
+      reviewChapterAfterRepair: async () => ({
+        score: {
+          coherence: 70,
+          repetition: 70,
+          pacing: 70,
+          voice: 70,
+          engagement: 70,
+          overall: 70,
+        },
+        issues: [],
+      }),
+      resolveAuditIssues: async () => undefined,
+      timelineFinalizer: {
+        finalizeCurrentContent: async () => undefined,
+        ensurePreviousChapterFinalized: async () => null,
+      },
+    });
+
+    const streamResult = await coordinator.createRepairStream("novel-1", "chapter-1", {
+      repairMode: "light_repair",
+      reviewIssues: [{
+        severity: "high",
+        category: "pacing",
+        evidence: "需要修复",
+        fixSuggestion: "补结果",
+      }],
+    });
+
+    for await (const _chunk of streamResult.stream) {
+      // drain
+    }
+    await streamResult.onDone("更差的修复候选正文", {
+      writeFrame(frame) {
+        frames.push(frame);
+      },
+    });
+
+    assert.equal(syncCalls.length, 0, "discard must not sync artifacts");
+    assert.equal(chapterUpdates.length, 1);
+    assert.equal(chapterUpdates[0].content, undefined, "discard must not overwrite content");
+    assert.ok(chapterUpdates[0].repairHistory?.includes("decision=discard"));
+    assert.match(frames.at(-1)?.message ?? "", /未采纳/);
+  } finally {
+    prisma.novel.findUnique = originalNovelFindUnique;
+    prisma.chapter.findFirst = originalChapterFindFirst;
+    prisma.novelBible.findUnique = originalBibleFindUnique;
+    prisma.chapter.update = originalChapterUpdate;
+    prisma.qualityReport.findFirst = originalQualityReportFindFirst;
+    promptRunner.runStructuredPrompt = originalRunStructuredPrompt;
+    promptRunner.streamTextPrompt = originalStreamTextPrompt;
+  }
+});
+
+test("createRepairStream discards candidate that introduces L0 AI self-reference", async () => {
+  const originalNovelFindUnique = prisma.novel.findUnique;
+  const originalChapterFindFirst = prisma.chapter.findFirst;
+  const originalBibleFindUnique = prisma.novelBible.findUnique;
+  const originalChapterUpdate = prisma.chapter.update;
+  const originalQualityReportFindFirst = prisma.qualityReport.findFirst;
+  const originalRunStructuredPrompt = promptRunner.runStructuredPrompt;
+  const originalStreamTextPrompt = promptRunner.streamTextPrompt;
+
+  const chapterUpdates = [];
+  const syncCalls = [];
+
+  prisma.novel.findUnique = async () => ({ id: "novel-1", title: "测试小说" });
+  prisma.chapter.findFirst = async () => ({
+    id: "chapter-1",
+    title: "第1章",
+    content: "正常基线正文没有任何工程泄漏。",
+    repairHistory: null,
+    qualityScore: 70,
+    continuityScore: 70,
+    characterScore: 70,
+    pacingScore: 70,
+  });
+  prisma.novelBible.findUnique = async () => ({ rawContent: "作品圣经" });
+  prisma.qualityReport.findFirst = async () => ({
+    coherence: 70,
+    repetition: 70,
+    pacing: 70,
+    voice: 70,
+    engagement: 70,
+    overall: 70,
+  });
+  prisma.chapter.update = async ({ data }) => {
+    chapterUpdates.push(data);
+    return { id: "chapter-1", ...data };
+  };
+  promptRunner.runStructuredPrompt = async () => {
+    throw new Error("force heavy");
+  };
+  const badCandidate = "作为AI语言模型，我无法继续生成这一章。";
+  promptRunner.streamTextPrompt = async () => ({
+    stream: {
+      async *[Symbol.asyncIterator]() {
+        yield { content: badCandidate };
+      },
+    },
+    complete: Promise.resolve({ output: badCandidate }),
+  });
+
+  try {
+    const coordinator = new ChapterRuntimeCoordinator({
+      assembler: {
+        assemble: async () => createRepairAssembledChapter(),
+      },
+      artifactSyncService: {
+        async syncChapterArtifacts(...args) {
+          syncCalls.push(args);
+        },
+      },
+      reviewChapterAfterRepair: async () => ({
+        score: {
+          coherence: 95,
+          repetition: 95,
+          pacing: 95,
+          voice: 95,
+          engagement: 95,
+          overall: 95,
+        },
+        issues: [],
+      }),
+      resolveAuditIssues: async () => undefined,
+      timelineFinalizer: {
+        finalizeCurrentContent: async () => undefined,
+        ensurePreviousChapterFinalized: async () => null,
+      },
+    });
+
+    const streamResult = await coordinator.createRepairStream("novel-1", "chapter-1", {
+      repairMode: "heavy_repair",
+      reviewIssues: [{
+        severity: "high",
+        category: "coherence",
+        evidence: "需要修复",
+        fixSuggestion: "改写",
+      }],
+    });
+
+    for await (const _chunk of streamResult.stream) {
+      // drain
+    }
+    await streamResult.onDone(badCandidate, {
+      writeFrame() {},
+    });
+
+    assert.equal(syncCalls.length, 0);
+    assert.equal(chapterUpdates[0].content, undefined);
+    assert.ok(chapterUpdates[0].repairHistory?.includes("decision=discard"));
+    assert.ok(chapterUpdates[0].repairHistory?.includes("prose_ai_self_reference")
+      || chapterUpdates[0].repairHistory?.includes("L0"));
+  } finally {
+    prisma.novel.findUnique = originalNovelFindUnique;
+    prisma.chapter.findFirst = originalChapterFindFirst;
+    prisma.novelBible.findUnique = originalBibleFindUnique;
+    prisma.chapter.update = originalChapterUpdate;
+    prisma.qualityReport.findFirst = originalQualityReportFindFirst;
     promptRunner.runStructuredPrompt = originalRunStructuredPrompt;
     promptRunner.streamTextPrompt = originalStreamTextPrompt;
   }

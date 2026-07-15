@@ -75,6 +75,11 @@ export class NovelCoreReviewService {
       chapterId,
     );
 
+    // evaluateOnly：修文候选可用性评估，禁止副作用写库（避免 discard 污染 baseline）。
+    if (options.evaluateOnly) {
+      return review;
+    }
+
     const chapterStatePatch = chapterStatePairAfterManualQualityReview(isPass(review.score));
     await prisma.chapter.update({
       where: { id: chapterId },

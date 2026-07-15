@@ -38,4 +38,6 @@ export * from "./types/autoDirectorValidation";
 export * from "./types/novelWorkflow";
 export * from "./types/volumePlanning";
 export * from "./types/canonicalState";
+export * from "./types/literaryQualityPass";
+export * from "./types/repairAdoptDecision";
 export * from "./utils/bookAnalysisTimeline";

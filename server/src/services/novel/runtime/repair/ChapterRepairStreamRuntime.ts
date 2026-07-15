@@ -1,5 +1,12 @@
+import { createHash } from "node:crypto";
 import type { BaseMessageChunk } from "@langchain/core/messages";
 import type { QualityScore, ReviewIssue } from "@ai-novel/shared/types/novel";
+import {
+  appendRepairAdoptHistoryLine,
+  countTrailingRepairNoImprove,
+  decideRepairContentAdoption,
+  formatRepairAdoptHistoryLine,
+} from "@ai-novel/shared/types/repairAdoptDecision";
 import type { StreamDoneHelpers } from "../../../../llm/streaming";
 import { prisma } from "../../../../db/prisma";
 import { streamTextPrompt } from "../../../../prompting/core/promptRunner";
@@ -14,11 +21,13 @@ import { ChapterPatchRepairFailedError } from "../../chapterPatchRepairService";
 import {
   isPass,
   logPipelineError,
+  ruleScore,
   type RepairOptions,
   type ReviewOptions,
 } from "../../novelCoreShared";
 import type { ChapterArtifactSyncService } from "../ChapterArtifactSyncService";
 import type { GenerationContextAssembler } from "../GenerationContextAssembler";
+import { detectProseQuality } from "../proseQuality/ProseQualityDetector";
 import {
   ChapterContextAssemblyError,
   assembleChapterAuditContextPackage,
@@ -42,6 +51,43 @@ export interface ChapterRepairStreamRuntimeDeps {
     options: ReviewOptions,
   ) => Promise<RepairReviewResult>;
   resolveAuditIssues?: (novelId: string, issueIds: string[]) => Promise<unknown>;
+}
+
+function contentFingerprint(content: string): string {
+  return createHash("sha256").update(content).digest("hex");
+}
+
+function blockingProseCodes(content: string): string[] {
+  const report = detectProseQuality(content);
+  return report.findings
+    .filter((finding) => finding.severity === "high" || finding.severity === "critical")
+    .map((finding) => finding.code);
+}
+
+function scoreFromChapterColumns(chapter: {
+  qualityScore?: number | null;
+  continuityScore?: number | null;
+  characterScore?: number | null;
+  pacingScore?: number | null;
+} | null | undefined): QualityScore | null {
+  if (
+    chapter?.qualityScore == null
+    || chapter.continuityScore == null
+    || chapter.characterScore == null
+    || chapter.pacingScore == null
+  ) {
+    return null;
+  }
+  // 列上仅 overall/coherence/voice/pacing；repetition/engagement 用 overall 保守回填。
+  const overall = chapter.qualityScore;
+  return {
+    coherence: chapter.continuityScore,
+    repetition: overall,
+    pacing: chapter.pacingScore,
+    voice: chapter.characterScore,
+    engagement: overall,
+    overall,
+  };
 }
 
 export class ChapterRepairStreamRuntime {
@@ -166,6 +212,10 @@ export class ChapterRepairStreamRuntime {
     return fallbackReview.issues;
   }
 
+  /**
+   * 修文落库：candidate → L0+score 评估 → adopt|discard|plateau_stop。
+   * discard / plateau 不覆盖 chapter.content；仅写 repairHistory 决策行。
+   */
   private async finalizeRepairResult(input: {
     novelId: string;
     chapterId: string;
@@ -179,7 +229,7 @@ export class ChapterRepairStreamRuntime {
       runId,
       status: "running",
       phase: "finalizing",
-      message: "修复稿已生成，正在保存正文并重新审校。",
+      message: "修复稿已生成，正在评估是否采纳（evaluate → adopt|discard）。",
     });
 
     const repairedContent = input.content.trim();
@@ -187,12 +237,92 @@ export class ChapterRepairStreamRuntime {
       throw new ChapterPatchRepairFailedError("修复结果为空，未保存章节正文。");
     }
 
+    const baselineChapter = await prisma.chapter.findFirst({
+      where: { id: input.chapterId, novelId: input.novelId },
+      select: {
+        id: true,
+        content: true,
+        repairHistory: true,
+        qualityScore: true,
+        continuityScore: true,
+        characterScore: true,
+        pacingScore: true,
+      },
+    });
+    if (!baselineChapter) {
+      throw new Error("章节不存在，无法完成修复采纳评估。");
+    }
+
+    const baselineContent = baselineChapter.content ?? "";
+    const baselineHash = contentFingerprint(baselineContent);
+    const candidateHash = contentFingerprint(repairedContent);
+    const consecutiveNoImprove = countTrailingRepairNoImprove(baselineChapter.repairHistory);
+
+    const baselineBlockingCodes = blockingProseCodes(baselineContent);
+    const candidateBlockingCodes = blockingProseCodes(repairedContent);
+
+    const baselineScore = await this.resolveBaselineScore({
+      novelId: input.novelId,
+      chapterId: input.chapterId,
+      baselineContent,
+      chapter: baselineChapter,
+      options: input.options,
+    });
+    const candidateReview = await this.deps.reviewChapterAfterRepair(input.novelId, input.chapterId, {
+      provider: input.options.provider,
+      model: input.options.model,
+      temperature: input.options.temperature,
+      content: repairedContent,
+      evaluateOnly: true,
+    });
+    const candidateScore = candidateReview.score;
+
+    const adoptDecision = decideRepairContentAdoption({
+      baselineScore,
+      candidateScore,
+      baselineBlockingCodes,
+      candidateBlockingCodes,
+      consecutiveNoImprove,
+    });
+
+    const historyLine = formatRepairAdoptHistoryLine({
+      decision: adoptDecision.decision,
+      reason: adoptDecision.reason,
+      baselineOverall: baselineScore.overall,
+      candidateOverall: candidateScore.overall,
+      baselineHash,
+      candidateHash,
+    });
+    const nextRepairHistory = appendRepairAdoptHistoryLine(
+      baselineChapter.repairHistory,
+      historyLine,
+    );
+
+    if (adoptDecision.decision !== "adopt") {
+      await prisma.chapter.update({
+        where: { id: input.chapterId },
+        data: { repairHistory: nextRepairHistory },
+      });
+
+      input.helpers.writeFrame({
+        type: "run_status",
+        runId,
+        status: "succeeded",
+        phase: "completed",
+        message: adoptDecision.decision === "plateau_stop"
+          ? `修复候选未采纳（plateau）：${adoptDecision.reason} 正文保持 baseline。`
+          : `修复候选未采纳（discard）：${adoptDecision.reason} 正文保持 baseline。`,
+      });
+      return;
+    }
+
+    // adopt：写 content + revision + artifacts + recheck（带副作用）+ 可选 approval
     await prisma.chapter.update({
       where: { id: input.chapterId },
       data: {
         content: repairedContent,
+        repairHistory: nextRepairHistory,
         ...chapterStatePairAfterDraftSave("repaired"),
-        // 修复旁路写正文：系统权威写，不走 expected CAS，但仍 bump revision
         ...contentRevisionBumpData(),
       },
     });
@@ -209,12 +339,14 @@ export class ChapterRepairStreamRuntime {
       },
     );
 
+    // 采纳后正式 recheck（写 QualityReport / qualityLoop / 状态）
     const review = await this.deps.reviewChapterAfterRepair(input.novelId, input.chapterId, {
       provider: input.options.provider,
       model: input.options.model,
       temperature: input.options.temperature,
       content: repairedContent,
     });
+
     if (isPass(review.score)) {
       await prisma.chapter.update({
         where: { id: input.chapterId },
@@ -233,9 +365,84 @@ export class ChapterRepairStreamRuntime {
       status: "succeeded",
       phase: "completed",
       message: isPass(review.score)
-        ? "章节修复已完成，本章已达到可继续推进状态。"
-        : "修复稿已保存，但仍有问题待继续处理。",
+        ? "修复候选已采纳，本章已达到可继续推进状态。"
+        : "修复候选已采纳并保存，但仍有问题待继续处理。",
     });
+  }
+
+  private async resolveBaselineScore(input: {
+    novelId: string;
+    chapterId: string;
+    baselineContent: string;
+    chapter: {
+      qualityScore?: number | null;
+      continuityScore?: number | null;
+      characterScore?: number | null;
+      pacingScore?: number | null;
+    };
+    options: RepairOptions;
+  }): Promise<QualityScore> {
+    try {
+      const latestReport = await prisma.qualityReport.findFirst({
+        where: { chapterId: input.chapterId, novelId: input.novelId },
+        orderBy: { createdAt: "desc" },
+        select: {
+          coherence: true,
+          repetition: true,
+          pacing: true,
+          voice: true,
+          engagement: true,
+          overall: true,
+        },
+      });
+      if (latestReport) {
+        return {
+          coherence: latestReport.coherence,
+          repetition: latestReport.repetition,
+          pacing: latestReport.pacing,
+          voice: latestReport.voice,
+          engagement: latestReport.engagement,
+          overall: latestReport.overall,
+        };
+      }
+    } catch (error) {
+      logPipelineError("Failed to load latest QualityReport for repair baseline score.", {
+        novelId: input.novelId,
+        chapterId: input.chapterId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    const fromColumns = scoreFromChapterColumns(input.chapter);
+    if (fromColumns) {
+      return fromColumns;
+    }
+
+    if (!input.baselineContent.trim()) {
+      return ruleScore("");
+    }
+
+    try {
+      const baselineReview = await this.deps.reviewChapterAfterRepair(
+        input.novelId,
+        input.chapterId,
+        {
+          provider: input.options.provider,
+          model: input.options.model,
+          temperature: input.options.temperature,
+          content: input.baselineContent,
+          evaluateOnly: true,
+        },
+      );
+      return baselineReview.score;
+    } catch (error) {
+      logPipelineError("Baseline evaluateOnly failed; falling back to ruleScore.", {
+        novelId: input.novelId,
+        chapterId: input.chapterId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return ruleScore(input.baselineContent);
+    }
   }
 }
 

@@ -276,6 +276,11 @@ export interface StorylineImpactInput {
 
 export interface ReviewOptions extends LLMGenerateOptions {
   content?: string;
+  /**
+   * true：仅返回 score/issues，不写 chapter 状态 / QualityReport / qualityLoop。
+   * 用于修文 candidate 采纳前评估（evaluate → adopt|discard）。
+   */
+  evaluateOnly?: boolean;
 }
 
 export interface RepairOptions extends LLMGenerateOptions {
@@ -293,6 +298,7 @@ export interface CharacterTimelineSyncOptions {
   endOrder?: number;
 }
 
+/** @deprecated Prefer DEFAULT_QUALITY_IS_PASS_THRESHOLD from @ai-novel/shared；数字契约不可改。 */
 const QUALITY_THRESHOLD = { coherence: 80, repetition: 75, engagement: 75 };
 type BeatStatus = "planned" | "completed" | "skipped";
 
@@ -502,6 +508,10 @@ export function ruleScore(content: string): QualityScore {
   return { coherence, repetition, pacing, voice, engagement, overall };
 }
 
+/**
+ * 文学可读门（与 shared isLiteraryQualityPass 同阈值 80/75/75）。
+ * 实现保持本地数字以避免循环依赖；阶段 2 可 re-export shared。
+ */
 export function isPass(score: QualityScore): boolean {
   return score.coherence >= QUALITY_THRESHOLD.coherence
     && score.repetition >= QUALITY_THRESHOLD.repetition
