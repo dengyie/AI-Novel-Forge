@@ -15,6 +15,8 @@ import type {
   AudiobookVoicePreviewInput,
   AudiobookVoicePreviewResult,
   AudiobookWorkspaceBootstrap,
+  CharacterVoicePreviewAsset,
+  CharacterVoicePreviewGenerateInput,
   CreateAudiobookTaskInput,
 } from "@ai-novel/shared/types/audiobook";
 import { API_AUTH_TOKEN, API_BASE_URL } from "@/lib/constants";
@@ -55,6 +57,7 @@ export async function applyAudiobookVoicePlan(
   return data;
 }
 
+/** @deprecated 产品路径请用 generateCharacterVoicePreview / issueCharacterVoicePreviewMediaUrl。 */
 export async function previewAudiobookVoice(
   novelId: string,
   payload: AudiobookVoicePreviewInput,
@@ -64,6 +67,51 @@ export async function previewAudiobookVoice(
     payload,
   );
   return data;
+}
+
+/** 基于已保存音色生成角色卡固定试听资产。 */
+export async function generateCharacterVoicePreview(
+  novelId: string,
+  characterId: string,
+  payload: CharacterVoicePreviewGenerateInput = {},
+) {
+  const { data } = await apiClient.post<ApiResponse<CharacterVoicePreviewAsset>>(
+    `/novels/${novelId}/characters/${characterId}/voice-preview/generate`,
+    payload,
+  );
+  return data;
+}
+
+/** 查询角色卡固定试听状态（不触发 TTS）。 */
+export async function getCharacterVoicePreview(novelId: string, characterId: string) {
+  const { data } = await apiClient.get<ApiResponse<CharacterVoicePreviewAsset>>(
+    `/novels/${novelId}/characters/${characterId}/voice-preview`,
+  );
+  return data;
+}
+
+/** 签发角色固定试听的短时播放 URL（供 <audio>）。 */
+export async function issueCharacterVoicePreviewMediaUrl(
+  novelId: string,
+  characterId: string,
+): Promise<string> {
+  const { data } = await apiClient.post<ApiResponse<AudiobookMediaAccessResult>>(
+    `/novels/${novelId}/characters/${characterId}/voice-preview/media-access`,
+  );
+  const path = data.data?.urlPath;
+  if (!path) {
+    return buildCharacterVoicePreviewAudioUrl(novelId, characterId);
+  }
+  const base = API_BASE_URL.replace(/\/$/, "");
+  if (path.startsWith("http://") || path.startsWith("https://")) {
+    return path;
+  }
+  return `${base}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
+export function buildCharacterVoicePreviewAudioUrl(novelId: string, characterId: string): string {
+  const base = API_BASE_URL.replace(/\/$/, "");
+  return `${base}/novels/${encodeURIComponent(novelId)}/characters/${encodeURIComponent(characterId)}/voice-preview/audio`;
 }
 
 export async function precheckAudiobookTask(

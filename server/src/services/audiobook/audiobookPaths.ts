@@ -38,6 +38,51 @@ export function resolveCharacterVoiceRefPath(novelId: string, characterId: strin
   return path.join(resolveCharacterVoiceRefDir(novelId, characterId), `ref.${safeExt}`);
 }
 
+/** 角色卡固定试听 WAV（与 clone ref 同目录）。 */
+export function resolveCharacterVoicePreviewPath(novelId: string, characterId: string): string {
+  return path.join(resolveCharacterVoiceRefDir(novelId, characterId), "preview.wav");
+}
+
+/**
+ * 将 base64（可带 data: 前缀）落盘为角色固定试听 WAV，返回绝对路径。
+ */
+export function writeCharacterVoicePreviewFromBase64(input: {
+  novelId: string;
+  characterId: string;
+  base64: string;
+  maxBytes?: number;
+}): string {
+  const maxBytes = input.maxBytes ?? 3 * 1024 * 1024;
+  const raw = input.base64.trim();
+  if (!raw) {
+    throw new Error("试听音频 base64 不能为空。");
+  }
+  const match = /^data:audio\/([a-z0-9.+-]+);base64,(.+)$/i.exec(raw);
+  const bare = (match ? match[2] : raw).replace(/\s+/g, "");
+  if (!bare) {
+    throw new Error("试听音频 base64 无效。");
+  }
+  const buf = Buffer.from(bare, "base64");
+  if (buf.length <= 0) {
+    throw new Error("试听音频解码后为空。");
+  }
+  if (buf.length > maxBytes) {
+    throw new Error(`试听音频过大（>${maxBytes} bytes）。`);
+  }
+  const isRiff = buf.length >= 12 && buf.subarray(0, 4).toString("ascii") === "RIFF";
+  if (!isRiff) {
+    throw new Error("试听资产仅接受 WAV（RIFF）。");
+  }
+
+  const dir = resolveCharacterVoiceRefDir(input.novelId, input.characterId);
+  fs.mkdirSync(dir, { recursive: true });
+  const target = resolveCharacterVoicePreviewPath(input.novelId, input.characterId);
+  const tmp = `${target}.part`;
+  fs.writeFileSync(tmp, buf);
+  fs.renameSync(tmp, target);
+  return target;
+}
+
 /**
  * 将 base64（可带 data: 前缀）落盘为角色 clone 参考音频，返回绝对路径。
  */

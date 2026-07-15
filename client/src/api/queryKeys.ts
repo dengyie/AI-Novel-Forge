@@ -40,6 +40,8 @@ export const queryKeys = {
     /** 有声书工作台轻量 bootstrap（无章节正文） */
     audiobookWorkspace: (id: string) => ["novels", "audiobook-workspace", id] as const,
     audiobookTasks: (id: string) => ["novels", "audiobook-tasks", id] as const,
+    characterVoicePreview: (novelId: string, characterId: string) =>
+      ["novels", "character-voice-preview", novelId, characterId] as const,
   },
   worlds: {
     all: ["worlds"] as const,

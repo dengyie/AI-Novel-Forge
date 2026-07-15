@@ -75,6 +75,11 @@ export interface Character {
    * 用于 LLM 标注 speakerName 归一（外号/称呼）。
    */
   ttsSpeakerAliases?: string | string[] | null;
+  /** 角色卡固定试听 WAV 路径（非任务产物）。 */
+  ttsPreviewAudioPath?: string | null;
+  ttsPreviewSampleText?: string | null;
+  ttsPreviewFingerprint?: string | null;
+  ttsPreviewGeneratedAt?: string | null;
   presenceImpression?: string | null;
   arcStart?: string | null;
   arcMidpoint?: string | null;

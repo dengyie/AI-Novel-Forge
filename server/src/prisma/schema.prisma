@@ -633,6 +633,11 @@ model Character {
   ttsRefAudioPath String?
   /** JSON string array of speaker aliases for audiobook annotation. */
   ttsSpeakerAliases String?
+  /** Fixed character-card voice preview wav path (not task output). */
+  ttsPreviewAudioPath String?
+  ttsPreviewSampleText String?
+  ttsPreviewFingerprint String?
+  ttsPreviewGeneratedAt DateTime?
   presenceImpression String?
   arcStart        String?
   arcMidpoint     String?

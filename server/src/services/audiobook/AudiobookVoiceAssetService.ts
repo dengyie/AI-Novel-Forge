@@ -6,6 +6,8 @@ import {
   type AudiobookVoicePreviewInput,
   type AudiobookVoicePreviewResult,
   type AudiobookWorkspaceBootstrap,
+  type CharacterVoicePreviewAsset,
+  type CharacterVoicePreviewGenerateInput,
   isAudiobookTtsMode,
   isMimoTtsPresetVoice,
 } from "@ai-novel/shared/types/audiobook";
@@ -13,13 +15,25 @@ import { prisma } from "../../db/prisma";
 import { AppError } from "../../middleware/errorHandler";
 import { parseSpeakerAliases } from "./audiobookSpeakerAliases";
 import {
+  resolveCharacterVoicePreviewPath,
+  writeCharacterVoicePreviewFromBase64,
+} from "./audiobookPaths";
+import {
   isCharacterVoiceConfigured,
   planCharacterVoices,
   type VoicePlannerCharacterInput,
 } from "./audiobookVoicePlanner";
+import {
+  assertCharacterVoiceReadyForPreview,
+  buildCharacterVoicePreviewAudioUrl,
+  buildCharacterVoicePreviewFingerprint,
+  DEFAULT_CHARACTER_VOICE_PREVIEW_TEXT,
+  resolveCharacterVoicePreviewStatus,
+  resolvePreviewTtsMode,
+} from "./characterVoicePreview";
 import { mimoChatAudioTTSProvider } from "./MimoChatAudioTTSProvider";
 
-const DEFAULT_PREVIEW_TEXT = "我是这段故事里的角色，请听听我的声音是否合适。";
+const DEFAULT_PREVIEW_TEXT = DEFAULT_CHARACTER_VOICE_PREVIEW_TEXT;
 
 function summarizePlan(items: AudiobookVoicePlanSuggestResult["items"]): AudiobookVoicePlanSuggestResult["summary"] {
   return {
@@ -106,6 +120,10 @@ export class AudiobookVoiceAssetService {
             ttsDesignPrompt: true,
             ttsRefAudioPath: true,
             ttsSpeakerAliases: true,
+            ttsPreviewAudioPath: true,
+            ttsPreviewSampleText: true,
+            ttsPreviewFingerprint: true,
+            ttsPreviewGeneratedAt: true,
           },
         },
       },
@@ -121,7 +139,19 @@ export class AudiobookVoiceAssetService {
       audiobookNarratorVoice: novel.audiobookNarratorVoice ?? null,
       audiobookNarratorStyle: novel.audiobookNarratorStyle ?? null,
       chapters: novel.chapters,
-      characters: novel.characters,
+      characters: novel.characters.map((character) => {
+        const sampleText = character.ttsPreviewSampleText?.trim() || DEFAULT_PREVIEW_TEXT;
+        const currentFingerprint = buildCharacterVoicePreviewFingerprint(character, sampleText);
+        return {
+          ...character,
+          ttsPreviewGeneratedAt: character.ttsPreviewGeneratedAt?.toISOString() ?? null,
+          voicePreviewStatus: resolveCharacterVoicePreviewStatus({
+            audioPath: character.ttsPreviewAudioPath,
+            fingerprint: character.ttsPreviewFingerprint,
+            currentFingerprint,
+          }),
+        };
+      }),
       chapterCount: novel.chapters.length,
       characterCount: novel.characters.length,
     };
@@ -322,58 +352,42 @@ export class AudiobookVoiceAssetService {
     return { novelId, applied, skipped };
   }
 
+  /**
+   * @deprecated 产品路径请用 generateCharacterPreview / getCharacterPreview。
+   * 带 characterId 时改为固化试听资产；无 characterId 仍 ephemeral（调试）。
+   */
   async preview(novelId: string, input: AudiobookVoicePreviewInput): Promise<AudiobookVoicePreviewResult> {
-    let characterName: string | null = null;
+    if (input.characterId?.trim()) {
+      const asset = await this.generateCharacterPreview(novelId, input.characterId.trim(), {
+        text: input.text,
+      });
+      return {
+        characterId: asset.characterId,
+        characterName: asset.characterName,
+        ttsMode: asset.ttsMode,
+        voice: asset.voice ?? null,
+        audioBase64: asset.audioBase64 ?? "",
+        format: "wav",
+        sampleText: asset.sampleText ?? DEFAULT_PREVIEW_TEXT,
+      };
+    }
+
     let mode = input.ttsMode?.trim() || "preset";
     let voice = input.ttsVoice?.trim() || "";
     let style = input.ttsStyle?.trim() || null;
     let designPrompt = input.ttsDesignPrompt?.trim() || null;
-    let refAudioPath: string | null = null;
-
-    if (input.characterId?.trim()) {
-      const character = await prisma.character.findFirst({
-        where: { id: input.characterId, novelId },
-        select: {
-          id: true,
-          name: true,
-          ttsMode: true,
-          ttsVoice: true,
-          ttsStyle: true,
-          ttsDesignPrompt: true,
-          ttsRefAudioPath: true,
-        },
-      });
-      if (!character) {
-        throw new AppError("角色不存在。", 404);
-      }
-      characterName = character.name;
-      if (!input.ttsMode) {
-        mode = character.ttsMode?.trim() || "preset";
-      }
-      if (!input.ttsVoice) {
-        voice = character.ttsVoice?.trim() || "";
-      }
-      if (input.ttsStyle == null) {
-        style = character.ttsStyle;
-      }
-      if (input.ttsDesignPrompt == null) {
-        designPrompt = character.ttsDesignPrompt;
-      }
-      refAudioPath = character.ttsRefAudioPath;
-    }
 
     if (!isAudiobookTtsMode(mode)) {
       throw new AppError(`不支持的 TTS 模态「${mode}」。`, 400);
     }
-
     if (mode === "preset" && (!voice || !isMimoTtsPresetVoice(voice))) {
       throw new AppError("试听 preset 需要合法 MiMo 预置音色。", 400);
     }
     if (mode === "design" && !designPrompt?.trim()) {
       throw new AppError("试听 design 需要 ttsDesignPrompt。", 400);
     }
-    if (mode === "clone" && !refAudioPath?.trim()) {
-      throw new AppError("试听 clone 需要角色已配置参考音频。", 400);
+    if (mode === "clone") {
+      throw new AppError("ephemeral 试听不支持 clone；请走角色卡生成试听。", 400);
     }
 
     const sampleText = (input.text?.trim() || DEFAULT_PREVIEW_TEXT).slice(0, 120);
@@ -383,19 +397,153 @@ export class AudiobookVoiceAssetService {
       voice: mode === "preset" ? voice : null,
       style,
       designPrompt: mode === "design" ? designPrompt : null,
-      refAudioPath: mode === "clone" ? refAudioPath : null,
+      refAudioPath: null,
       format: "wav",
     });
 
     return {
-      characterId: input.characterId ?? null,
-      characterName,
+      characterId: null,
+      characterName: null,
       ttsMode: mode,
       voice: mode === "preset" ? voice : null,
       audioBase64: result.audioBase64,
       format: "wav",
       sampleText,
     };
+  }
+
+  async getCharacterPreview(novelId: string, characterId: string): Promise<CharacterVoicePreviewAsset> {
+    const character = await prisma.character.findFirst({
+      where: { id: characterId, novelId },
+      select: {
+        id: true,
+        name: true,
+        ttsMode: true,
+        ttsVoice: true,
+        ttsStyle: true,
+        ttsDesignPrompt: true,
+        ttsRefAudioPath: true,
+        ttsPreviewAudioPath: true,
+        ttsPreviewSampleText: true,
+        ttsPreviewFingerprint: true,
+        ttsPreviewGeneratedAt: true,
+      },
+    });
+    if (!character) {
+      throw new AppError("角色不存在。", 404);
+    }
+
+    const mode = resolvePreviewTtsMode(character.ttsMode);
+    const sampleForFingerprint = character.ttsPreviewSampleText?.trim() || DEFAULT_PREVIEW_TEXT;
+    const currentFingerprint = buildCharacterVoicePreviewFingerprint(character, sampleForFingerprint);
+    const status = resolveCharacterVoicePreviewStatus({
+      audioPath: character.ttsPreviewAudioPath,
+      fingerprint: character.ttsPreviewFingerprint,
+      currentFingerprint,
+    });
+
+    return {
+      characterId: character.id,
+      characterName: character.name,
+      status,
+      ttsMode: mode,
+      voice: mode === "preset" ? character.ttsVoice?.trim() || null : null,
+      sampleText: character.ttsPreviewSampleText ?? null,
+      fingerprint: character.ttsPreviewFingerprint ?? null,
+      currentFingerprint,
+      generatedAt: character.ttsPreviewGeneratedAt?.toISOString() ?? null,
+      audioUrl: status === "missing" ? null : buildCharacterVoicePreviewAudioUrl(novelId, characterId),
+      audioBase64: null,
+      format: "wav",
+    };
+  }
+
+  async generateCharacterPreview(
+    novelId: string,
+    characterId: string,
+    input: CharacterVoicePreviewGenerateInput = {},
+  ): Promise<CharacterVoicePreviewAsset> {
+    const character = await prisma.character.findFirst({
+      where: { id: characterId, novelId },
+      select: {
+        id: true,
+        name: true,
+        ttsMode: true,
+        ttsVoice: true,
+        ttsStyle: true,
+        ttsDesignPrompt: true,
+        ttsRefAudioPath: true,
+      },
+    });
+    if (!character) {
+      throw new AppError("角色不存在。", 404);
+    }
+
+    let ready: ReturnType<typeof assertCharacterVoiceReadyForPreview>;
+    try {
+      ready = assertCharacterVoiceReadyForPreview(character);
+    } catch (error) {
+      throw new AppError(error instanceof Error ? error.message : "音色配置不完整，无法生成试听。", 400);
+    }
+
+    const sampleText = (input.text?.trim() || DEFAULT_PREVIEW_TEXT).slice(0, 120);
+    const fingerprint = buildCharacterVoicePreviewFingerprint(character, sampleText);
+
+    const result = await mimoChatAudioTTSProvider.synthesize({
+      text: sampleText,
+      mode: ready.mode,
+      voice: ready.mode === "preset" ? ready.voice : null,
+      style: ready.style,
+      designPrompt: ready.mode === "design" ? ready.designPrompt : null,
+      refAudioPath: ready.mode === "clone" ? ready.refAudioPath : null,
+      format: "wav",
+    });
+
+    let previewPath: string;
+    try {
+      previewPath = writeCharacterVoicePreviewFromBase64({
+        novelId,
+        characterId,
+        base64: result.audioBase64,
+      });
+    } catch (error) {
+      throw new AppError(error instanceof Error ? error.message : "试听音频落盘失败。", 500);
+    }
+
+    const generatedAt = new Date();
+    await prisma.character.update({
+      where: { id: characterId },
+      data: {
+        ttsPreviewAudioPath: previewPath,
+        ttsPreviewSampleText: sampleText,
+        ttsPreviewFingerprint: fingerprint,
+        ttsPreviewGeneratedAt: generatedAt,
+      },
+    });
+
+    return {
+      characterId: character.id,
+      characterName: character.name,
+      status: "ready",
+      ttsMode: ready.mode,
+      voice: ready.mode === "preset" ? ready.voice : null,
+      sampleText,
+      fingerprint,
+      currentFingerprint: fingerprint,
+      generatedAt: generatedAt.toISOString(),
+      audioUrl: buildCharacterVoicePreviewAudioUrl(novelId, characterId),
+      audioBase64: result.audioBase64,
+      format: "wav",
+    };
+  }
+
+  resolvePreviewFilePath(novelId: string, characterId: string, storedPath?: string | null): string | null {
+    const preferred = storedPath?.trim();
+    const fallback = resolveCharacterVoicePreviewPath(novelId, characterId);
+    if (preferred) {
+      return preferred;
+    }
+    return fallback;
   }
 }
 

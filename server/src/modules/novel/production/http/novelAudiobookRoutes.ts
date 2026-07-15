@@ -8,21 +8,27 @@ import {
   type AudiobookVoicePlanSuggestResult,
   type AudiobookVoicePreviewResult,
   type AudiobookWorkspaceBootstrap,
+  type CharacterVoicePreviewAsset,
   type CreateAudiobookTaskInput,
 } from "@ai-novel/shared/types/audiobook";
 import { z } from "zod";
 import { llmProviderSchema } from "../../../../llm/providerSchema";
 import { resolveAuthMode, type RequestWithApiAuth } from "../../../../middleware/auth";
 import { validate } from "../../../../middleware/validate";
+import { prisma } from "../../../../db/prisma";
 import {
   issueAudiobookMediaAccess,
+  issueCharacterVoicePreviewAccess,
   verifyAudiobookMediaAccess,
+  verifyCharacterVoicePreviewAccess,
 } from "../../../../services/audiobook/audiobookMediaAccess";
 import { audiobookTaskService } from "../../../../services/audiobook/AudiobookTaskService";
 import { audiobookVoiceAssetService } from "../../../../services/audiobook/AudiobookVoiceAssetService";
 import {
   resolveAudiobookTaskDir,
   resolveChapterAudioPath,
+  resolveCharacterVoicePreviewPath,
+  resolveCharacterVoiceRefDir,
   resolveFullBookAudioPath,
   resolveFullBookM4bPath,
 } from "../../../../services/audiobook/audiobookPaths";
@@ -40,6 +46,15 @@ const chapterAudioParamsSchema = z.object({
   id: z.string().trim().min(1),
   taskId: z.string().trim().min(1),
   chapterId: z.string().trim().min(1),
+});
+
+const characterParamsSchema = z.object({
+  id: z.string().trim().min(1),
+  charId: z.string().trim().min(1),
+});
+
+const characterVoicePreviewGenerateSchema = z.object({
+  text: z.string().trim().max(200).optional(),
 });
 
 function isPathInside(parent: string, target: string): boolean {
@@ -358,8 +373,136 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
         res.status(200).json({
           success: true,
           data,
-          message: "试听音频已生成。",
+          message: body.characterId?.trim()
+            ? "试听资产已生成并写入角色卡。"
+            : "临时试听音频已生成（未写入角色卡）。",
         } satisfies ApiResponse<AudiobookVoicePreviewResult>);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  router.post(
+    "/:id/characters/:charId/voice-preview/generate",
+    validate({ params: characterParamsSchema, body: characterVoicePreviewGenerateSchema }),
+    async (req, res, next) => {
+      try {
+        const { id, charId } = req.params as z.infer<typeof characterParamsSchema>;
+        const body = req.body as z.infer<typeof characterVoicePreviewGenerateSchema>;
+        const data = await audiobookVoiceAssetService.generateCharacterPreview(id, charId, body);
+        res.status(200).json({
+          success: true,
+          data,
+          message: "试听资产已生成并写入角色卡。",
+        } satisfies ApiResponse<CharacterVoicePreviewAsset>);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  router.get(
+    "/:id/characters/:charId/voice-preview",
+    validate({ params: characterParamsSchema }),
+    async (req, res, next) => {
+      try {
+        const { id, charId } = req.params as z.infer<typeof characterParamsSchema>;
+        const data = await audiobookVoiceAssetService.getCharacterPreview(id, charId);
+        res.status(200).json({
+          success: true,
+          data,
+          message: "角色试听资产状态。",
+        } satisfies ApiResponse<CharacterVoicePreviewAsset>);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  /** 签发角色固定试听的短时播放 URL。 */
+  router.post(
+    "/:id/characters/:charId/voice-preview/media-access",
+    validate({ params: characterParamsSchema }),
+    async (req, res, next) => {
+      try {
+        const { id, charId } = req.params as z.infer<typeof characterParamsSchema>;
+        const asset = await audiobookVoiceAssetService.getCharacterPreview(id, charId);
+        if (asset.status === "missing" || !asset.audioUrl) {
+          res.status(404).json({
+            success: false,
+            error: "试听资产不存在，请先在角色卡生成试听。",
+          } satisfies ApiResponse<null>);
+          return;
+        }
+        const issued = issueCharacterVoicePreviewAccess({ novelId: id, characterId: charId });
+        const pathSuffix = asset.audioUrl;
+        const data = issued
+          ? {
+              urlPath: `${pathSuffix}?access=${encodeURIComponent(issued.access)}`,
+              access: issued.access,
+              expiresAt: issued.expiresAt,
+            }
+          : {
+              urlPath: pathSuffix,
+              access: null as string | null,
+              expiresAt: null as number | null,
+            };
+        res.status(200).json({
+          success: true,
+          data,
+          message: "试听媒体访问令牌已签发。",
+        } satisfies ApiResponse<typeof data>);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  router.get(
+    "/:id/characters/:charId/voice-preview/audio",
+    validate({ params: characterParamsSchema }),
+    async (req, res, next) => {
+      try {
+        const { id, charId } = req.params as z.infer<typeof characterParamsSchema>;
+        const headerAuthorized = Boolean((req as RequestWithApiAuth).apiAuthViaHeader);
+        if (!headerAuthorized) {
+          const access = typeof req.query?.access === "string" ? req.query.access : null;
+          const mode = resolveAuthMode();
+          if (mode === "token") {
+            if (!verifyCharacterVoicePreviewAccess({ access, novelId: id, characterId: charId })) {
+              res.status(401).json({
+                success: false,
+                error: "未授权：试听媒体令牌无效或已过期。",
+              } satisfies ApiResponse<null>);
+              return;
+            }
+          }
+        }
+
+        const character = await prisma.character.findFirst({
+          where: { id: charId, novelId: id },
+          select: { ttsPreviewAudioPath: true },
+        });
+        if (!character) {
+          res.status(404).json({
+            success: false,
+            error: "角色不存在。",
+          } satisfies ApiResponse<null>);
+          return;
+        }
+
+        const refDir = resolveCharacterVoiceRefDir(id, charId);
+        const preferred = character.ttsPreviewAudioPath?.trim()
+          || resolveCharacterVoicePreviewPath(id, charId);
+        if (!isPathInside(refDir, preferred)) {
+          res.status(400).json({
+            success: false,
+            error: "试听路径非法。",
+          } satisfies ApiResponse<null>);
+          return;
+        }
+        streamWavFile(req, res, preferred, `character-${charId}-preview.wav`);
       } catch (error) {
         next(error);
       }

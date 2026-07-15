@@ -341,6 +341,31 @@ export interface AudiobookVoicePreviewResult {
   sampleText: string;
 }
 
+/** 角色卡固定试听资产状态。 */
+export type CharacterVoicePreviewStatus = "missing" | "ready" | "stale";
+
+export interface CharacterVoicePreviewGenerateInput {
+  /** 可选样例句；默认系统短句。 */
+  text?: string;
+}
+
+export interface CharacterVoicePreviewAsset {
+  characterId: string;
+  characterName: string;
+  status: CharacterVoicePreviewStatus;
+  ttsMode: AudiobookTtsMode;
+  voice?: string | null;
+  sampleText: string | null;
+  fingerprint: string | null;
+  currentFingerprint: string;
+  generatedAt: string | null;
+  /** SPA 可直接用于 <audio src> 的相对路径（需带鉴权时由客户端再签 media-access）。 */
+  audioUrl: string | null;
+  /** 生成接口可选带回，便于首播；status 查询默认 null。 */
+  audioBase64?: string | null;
+  format: "wav";
+}
+
 /** 有声书工作台首屏：不含章节正文 / bible / plotBeats。 */
 export interface AudiobookWorkspaceChapterOption {
   id: string;
@@ -360,6 +385,11 @@ export interface AudiobookWorkspaceCharacter {
   ttsDesignPrompt?: string | null;
   ttsRefAudioPath?: string | null;
   ttsSpeakerAliases?: string | null;
+  ttsPreviewAudioPath?: string | null;
+  ttsPreviewSampleText?: string | null;
+  ttsPreviewFingerprint?: string | null;
+  ttsPreviewGeneratedAt?: string | null;
+  voicePreviewStatus?: CharacterVoicePreviewStatus | null;
 }
 
 export interface AudiobookWorkspaceBootstrap {
