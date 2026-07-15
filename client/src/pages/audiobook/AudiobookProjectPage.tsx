@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Headphones } from "lucide-react";
-import { getNovelDetail, updateNovel } from "@/api/novel";
+import { updateNovel } from "@/api/novel";
+import { getAudiobookWorkspace } from "@/api/novel/audiobook";
 import { queryKeys } from "@/api/queryKeys";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -15,34 +16,31 @@ export default function AudiobookProjectPage() {
   const [narratorVoice, setNarratorVoice] = useState("");
   const [narratorStyle, setNarratorStyle] = useState("");
 
-  const detailQuery = useQuery({
-    queryKey: queryKeys.novels.detail(id),
-    queryFn: () => getNovelDetail(id),
+  // 轻量 bootstrap：不含章节正文（getNovelDetail 对源世界 ~2MB）
+  const workspaceQuery = useQuery({
+    queryKey: queryKeys.novels.audiobookWorkspace(id),
+    queryFn: async () => {
+      const response = await getAudiobookWorkspace(id);
+      if (!response.data) {
+        throw new Error(response.message || "有声书工作台数据为空。");
+      }
+      return response.data;
+    },
     enabled: Boolean(id),
+    staleTime: 30_000,
   });
 
-  const detail = detailQuery.data?.data;
+  const workspace = workspaceQuery.data;
 
   useEffect(() => {
-    if (!detail) return;
-    setNarratorVoice(detail.audiobookNarratorVoice ?? "");
-    setNarratorStyle(detail.audiobookNarratorStyle ?? "");
-  }, [detail?.id, detail?.audiobookNarratorVoice, detail?.audiobookNarratorStyle]);
-
-  const chapters = useMemo(
-    () =>
-      (detail?.chapters ?? [])
-        .slice()
-        .sort((a, b) => a.order - b.order)
-        .map((chapter) => ({
-          id: chapter.id,
-          order: chapter.order,
-          title: chapter.title,
-        })),
-    [detail?.chapters],
-  );
-
-  const characters = detail?.characters ?? [];
+    if (!workspace) return;
+    setNarratorVoice(workspace.audiobookNarratorVoice ?? "");
+    setNarratorStyle(workspace.audiobookNarratorStyle ?? "");
+  }, [
+    workspace?.novelId,
+    workspace?.audiobookNarratorVoice,
+    workspace?.audiobookNarratorStyle,
+  ]);
 
   const saveNarratorMutation = useMutation({
     mutationFn: async () => {
@@ -52,7 +50,7 @@ export default function AudiobookProjectPage() {
       });
     },
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: queryKeys.novels.detail(id) });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.novels.audiobookWorkspace(id) });
     },
   });
 
@@ -67,23 +65,47 @@ export default function AudiobookProjectPage() {
     );
   }
 
-  if (detailQuery.isLoading) {
-    return <div className="mx-auto max-w-4xl px-4 py-10 text-sm text-muted-foreground">加载小说…</div>;
+  if (workspaceQuery.isLoading) {
+    return (
+      <div className="mx-auto max-w-4xl space-y-4 px-4 py-10">
+        <Button asChild size="sm" variant="ghost" className="-ml-2 w-fit">
+          <Link to="/audiobook">
+            <ArrowLeft className="h-4 w-4" />
+            有声书工作台
+          </Link>
+        </Button>
+        <div className="rounded-xl border border-border/70 bg-muted/20 px-4 py-8 text-sm text-muted-foreground">
+          正在加载有声书工作台（章节目录与角色音色，不含正文）…
+        </div>
+      </div>
+    );
   }
 
-  if (detailQuery.isError || !detail) {
+  if (workspaceQuery.isError || !workspace) {
     return (
       <div className="mx-auto max-w-4xl space-y-4 px-4 py-10">
         <div className="text-sm text-destructive">
           小说加载失败：
-          {detailQuery.error instanceof Error ? detailQuery.error.message : "不存在或无权访问"}
+          {workspaceQuery.error instanceof Error ? workspaceQuery.error.message : "不存在或无权访问"}
         </div>
-        <Button asChild size="sm" variant="outline">
-          <Link to="/audiobook">
-            <ArrowLeft className="h-4 w-4" />
-            返回有声书工作台
-          </Link>
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={() => {
+              void workspaceQuery.refetch();
+            }}
+          >
+            重试
+          </Button>
+          <Button asChild size="sm" variant="outline">
+            <Link to="/audiobook">
+              <ArrowLeft className="h-4 w-4" />
+              返回有声书工作台
+            </Link>
+          </Button>
+        </div>
       </div>
     );
   }
@@ -100,12 +122,12 @@ export default function AudiobookProjectPage() {
           </Button>
           <h1 className="flex flex-wrap items-center gap-2 text-2xl font-semibold">
             <Headphones className="h-6 w-6 text-primary" />
-            {detail.title}
+            {workspace.title}
           </h1>
           <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
             <span>有声书开发</span>
-            <Badge variant="outline">{chapters.length} 章</Badge>
-            <Badge variant="outline">{characters.length} 角色</Badge>
+            <Badge variant="outline">{workspace.chapterCount} 章</Badge>
+            <Badge variant="outline">{workspace.characterCount} 角色</Badge>
           </div>
         </div>
         <Button asChild size="sm" variant="outline">
@@ -118,13 +140,14 @@ export default function AudiobookProjectPage() {
           <CardTitle className="text-base">开发说明</CardTitle>
           <CardDescription>
             先规划/写入角色音色，再设旁白并生成任务。角色卡细节仍可在小说编辑 → 角色 Tab 调整（含 clone 参考音）。
+            本页只拉目录与音色字段，不会加载全文章节正文。
           </CardDescription>
         </CardHeader>
         <CardContent>
           <NovelAudiobookPanel
             novelId={id}
-            chapters={chapters}
-            characters={characters}
+            chapters={workspace.chapters}
+            characters={workspace.characters}
             narratorVoice={narratorVoice}
             narratorStyle={narratorStyle}
             onNarratorChange={(patch) => {
