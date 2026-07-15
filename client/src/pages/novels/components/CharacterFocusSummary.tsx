@@ -1,6 +1,11 @@
 import type { Character } from "@ai-novel/shared/types/novel";
 import { Badge } from "@/components/ui/badge";
-import { getCastRoleLabel, getCharacterGenderLabel, isProtagonistCharacter } from "./characterAssetWorkspace.helpers";
+import {
+  getCastRoleLabel,
+  getCharacterGenderLabel,
+  isProtagonistCharacter,
+  resolveCharacterVoiceBinding,
+} from "./characterAssetWorkspace.helpers";
 
 interface CharacterFocusSummaryProps {
   selectedCharacter: Character;
@@ -16,6 +21,7 @@ export default function CharacterFocusSummary(props: CharacterFocusSummaryProps)
   const primaryLine = isProtagonist
     ? selectedCharacter.currentGoal || selectedCharacter.storyFunction || "待补全主角目标"
     : selectedCharacter.relationToProtagonist || selectedCharacter.role || "待补全与主角关系";
+  const voice = resolveCharacterVoiceBinding(selectedCharacter);
 
   return (
     <div className={`rounded-xl border p-4 ${isProtagonist ? "border-primary/30 bg-primary/5" : "bg-muted/10"}`}>
@@ -29,6 +35,9 @@ export default function CharacterFocusSummary(props: CharacterFocusSummaryProps)
               <Badge variant="outline">{getCastRoleLabel(selectedCharacter.castRole)}</Badge>
             )}
             <Badge variant="secondary">{getCharacterGenderLabel(selectedCharacter.gender)}</Badge>
+            <Badge variant={voice.ready ? "outline" : "destructive"} title={voice.detailLabel}>
+              {voice.ready ? `有声书 · ${voice.shortLabel}` : "有声书 · 缺音色"}
+            </Badge>
           </div>
           <div className="text-sm leading-6 text-muted-foreground">
             {isProtagonist ? `当前目标：${primaryLine}` : `与主角关系：${primaryLine}`}
@@ -39,6 +48,7 @@ export default function CharacterFocusSummary(props: CharacterFocusSummaryProps)
           <div>最近出场：{lastAppearanceChapter ? `第${lastAppearanceChapter}章` : "暂无"}</div>
           <div>故事作用：{selectedCharacter.storyFunction || "待补全"}</div>
           <div>当前状态：{selectedCharacter.currentState || "待补全"}</div>
+          <div className="sm:col-span-2">音色：{voice.detailLabel}</div>
         </div>
       </div>
     </div>

@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useMutation } from "@tanstack/react-query";
 import type {
   Character,
   CharacterGender,
@@ -8,14 +9,20 @@ import type {
   CharacterVisibleProfileSuggestion,
 } from "@ai-novel/shared/types/novel";
 import type { CharacterResourceLedgerItem } from "@ai-novel/shared/types/characterResource";
+import type { AudiobookTtsMode } from "@ai-novel/shared/types/audiobook";
 import AiButton from "@/components/common/AiButton";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { previewAudiobookVoice } from "@/api/novel/audiobook";
 import CharacterAssetSidebar from "./CharacterAssetSidebar";
 import CharacterFocusSummary from "./CharacterFocusSummary";
-import { isProtagonistCharacter } from "./characterAssetWorkspace.helpers";
+import {
+  isProtagonistCharacter,
+  resolveCharacterVoiceBinding,
+  resolveCharacterVoiceMode,
+} from "./characterAssetWorkspace.helpers";
 import { getLastAppearanceChapter } from "./characterPanel.utils";
 import SelectControl from "@/components/common/SelectControl";
 import {
@@ -48,6 +55,7 @@ interface CharacterFormState {
 }
 
 interface CharacterAssetWorkspaceProps {
+  novelId: string;
   characters: Character[];
   selectedCharacterId: string;
   onSelectedCharacterChange: (id: string) => void;
@@ -179,8 +187,21 @@ function getResourceFunctionLabel(value: CharacterResourceLedgerItem["narrativeF
   return labels[value] ?? value;
 }
 
+function decodeBase64AudioToObjectUrl(audioBase64: string, mimeType = "audio/wav"): string {
+  const bare = audioBase64.includes(",")
+    ? (audioBase64.split(",").pop() ?? audioBase64)
+    : audioBase64;
+  const binary = atob(bare);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return URL.createObjectURL(new Blob([bytes], { type: mimeType }));
+}
+
 export default function CharacterAssetWorkspace(props: CharacterAssetWorkspaceProps) {
   const {
+    novelId,
     characters,
     selectedCharacterId,
     onSelectedCharacterChange,
@@ -215,6 +236,113 @@ export default function CharacterAssetWorkspace(props: CharacterAssetWorkspacePr
     isBackfillingCharacterResources = false,
   } = props;
   const [visibleProfileGuidance, setVisibleProfileGuidance] = useState("");
+  const [previewAudioUrl, setPreviewAudioUrl] = useState<string | null>(null);
+  const [previewLabel, setPreviewLabel] = useState("");
+  const [previewMessage, setPreviewMessage] = useState("");
+  const previewAudioRef = useRef<HTMLAudioElement | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (previewAudioUrl) {
+        URL.revokeObjectURL(previewAudioUrl);
+      }
+    };
+  }, [previewAudioUrl]);
+
+  useEffect(() => {
+    // 切换角色时清掉上一角色试听，避免误听。
+    setPreviewAudioUrl((prev) => {
+      if (prev) {
+        URL.revokeObjectURL(prev);
+      }
+      return null;
+    });
+    setPreviewLabel("");
+    setPreviewMessage("");
+  }, [selectedCharacterId]);
+
+  useEffect(() => {
+    if (!previewAudioUrl || !previewAudioRef.current) {
+      return;
+    }
+    const el = previewAudioRef.current;
+    el.load();
+    void el.play().catch(() => {
+      // 部分浏览器拦截 autoplay；仍保留 controls 供手动点播。
+    });
+  }, [previewAudioUrl]);
+
+  const formVoice = useMemo(
+    () => resolveCharacterVoiceBinding({
+      ttsMode: characterForm.ttsMode || "preset",
+      ttsVoice: characterForm.ttsVoice,
+      ttsDesignPrompt: characterForm.ttsDesignPrompt,
+      ttsRefAudioPath: characterForm.ttsRefAudioPath,
+    }),
+    [
+      characterForm.ttsMode,
+      characterForm.ttsVoice,
+      characterForm.ttsDesignPrompt,
+      characterForm.ttsRefAudioPath,
+    ],
+  );
+
+  const savedVoice = useMemo(
+    () => resolveCharacterVoiceBinding(selectedCharacter),
+    [selectedCharacter],
+  );
+
+  const previewVoiceMutation = useMutation({
+    mutationFn: async () => {
+      if (!selectedCharacter) {
+        throw new Error("请先选择角色。");
+      }
+      const mode = resolveCharacterVoiceMode(characterForm.ttsMode || selectedCharacter.ttsMode);
+      if (mode === "preset") {
+        const voice = (characterForm.ttsVoice || selectedCharacter.ttsVoice || "").trim();
+        if (!voice) {
+          throw new Error("预置音色未选择，请先选一个 MiMo 音色再试听。");
+        }
+      }
+      if (mode === "design") {
+        const prompt = (characterForm.ttsDesignPrompt || selectedCharacter.ttsDesignPrompt || "").trim();
+        if (!prompt) {
+          throw new Error("文案设计音色需要先填写设计描述。");
+        }
+      }
+      if (mode === "clone") {
+        const path = (characterForm.ttsRefAudioPath || selectedCharacter.ttsRefAudioPath || "").trim();
+        if (!path) {
+          throw new Error("克隆音色需先保存参考音频，再试听已落盘的绑定。");
+        }
+      }
+      const response = await previewAudiobookVoice(novelId, {
+        characterId: selectedCharacter.id,
+        ttsMode: mode as AudiobookTtsMode,
+        ttsVoice: (characterForm.ttsVoice || selectedCharacter.ttsVoice || "").trim() || null,
+        ttsStyle: (characterForm.ttsStyle || selectedCharacter.ttsStyle || "").trim() || null,
+        ttsDesignPrompt: (characterForm.ttsDesignPrompt || selectedCharacter.ttsDesignPrompt || "").trim() || null,
+      });
+      return response.data;
+    },
+    onSuccess: (data) => {
+      if (!data?.audioBase64) {
+        setPreviewMessage("试听无音频返回。");
+        return;
+      }
+      setPreviewAudioUrl((prev) => {
+        if (prev) {
+          URL.revokeObjectURL(prev);
+        }
+        return decodeBase64AudioToObjectUrl(data.audioBase64, "audio/wav");
+      });
+      setPreviewLabel(formVoice.detailLabel);
+      setPreviewMessage("试听已生成并尝试自动播放。");
+    },
+    onError: (error) => {
+      setPreviewMessage(error instanceof Error ? error.message : "试听失败。");
+    },
+  });
 
   const lastAppearanceChapter = useMemo(
     () => getLastAppearanceChapter(timelineEvents),
@@ -446,6 +574,47 @@ export default function CharacterAssetWorkspace(props: CharacterAssetWorkspacePr
               </div>
             </div>
 
+            <div className="rounded-xl border border-border/70 bg-muted/15 p-3">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                <div className="min-w-0 space-y-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="text-sm font-medium">有声书音色</div>
+                    <Badge variant={formVoice.ready ? "outline" : "destructive"}>
+                      {formVoice.ready ? "可生成" : "缺配置"}
+                    </Badge>
+                    <Badge variant="secondary">{formVoice.modeLabel}</Badge>
+                  </div>
+                  <div className="text-xs leading-5 text-muted-foreground">
+                    当前表单：{formVoice.detailLabel}
+                    {savedVoice.detailLabel !== formVoice.detailLabel
+                      ? ` · 已保存：${savedVoice.detailLabel}`
+                      : ""}
+                  </div>
+                  <div className="text-xs leading-5 text-muted-foreground">
+                    预置可直接试听；设计需有描述文案；克隆须先保存参考音频到角色卡。
+                  </div>
+                </div>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={previewVoiceMutation.isPending || !selectedCharacter}
+                  onClick={() => previewVoiceMutation.mutate()}
+                >
+                  {previewVoiceMutation.isPending ? "试听生成中..." : "试听音色"}
+                </Button>
+              </div>
+              {previewMessage ? (
+                <div className="mt-2 text-xs text-muted-foreground">{previewMessage}</div>
+              ) : null}
+              {previewAudioUrl ? (
+                <div className="mt-2 space-y-1">
+                  <div className="text-xs text-muted-foreground">试听：{previewLabel || formVoice.detailLabel}</div>
+                  <audio ref={previewAudioRef} controls autoPlay src={previewAudioUrl} className="w-full" />
+                </div>
+              ) : null}
+            </div>
+
             <div className="rounded-xl border p-3">
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                 <div>
@@ -527,80 +696,94 @@ export default function CharacterAssetWorkspace(props: CharacterAssetWorkspacePr
                     <option value="female">性别：女</option>
                     <option value="other">性别：其他</option>
                   </SelectControl>
+                  <div className="rounded-md border border-dashed px-2 py-1.5 text-xs leading-5 text-muted-foreground">
+                    有声书音色状态：
+                    <span className={formVoice.ready ? "text-foreground" : "text-destructive"}>
+                      {formVoice.detailLabel}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="space-y-2 rounded-lg border border-border/70 bg-background p-3">
+                  <div className="text-sm font-medium text-foreground">有声书音色配置</div>
+                  <div className="text-xs leading-5 text-muted-foreground">
+                    先选模态，再填对应字段。预置 = 点名现成音色；设计 = 文案造声；克隆 = 上传参考音。
+                  </div>
                   <SelectControl
                     className="w-full rounded-md border bg-background p-2 text-sm"
                     value={characterForm.ttsMode || "preset"}
                     onChange={(event) => onCharacterFormChange("ttsMode", event.target.value)}
                   >
-                    <option value="preset">有声书模态：预置音色</option>
-                    <option value="design">有声书模态：文案设计音色</option>
-                    <option value="clone">有声书模态：参考音频克隆</option>
+                    <option value="preset">模态：预置音色（推荐）</option>
+                    <option value="design">模态：文案设计音色</option>
+                    <option value="clone">模态：参考音频克隆</option>
                   </SelectControl>
-                </div>
-                {(characterForm.ttsMode || "preset") === "preset" ? (
-                  <SelectControl
-                    className="w-full rounded-md border bg-background p-2 text-sm"
-                    value={characterForm.ttsVoice}
-                    onChange={(event) => onCharacterFormChange("ttsVoice", event.target.value)}
-                  >
-                    <option value="">预置音色：未配置（阻断生成）</option>
-                    {MIMO_TTS_VOICE_CATALOG.map((item) => (
-                      <option key={item.id} value={item.id}>
-                        {item.label}{item.description ? ` · ${item.description}` : ""}
-                      </option>
-                    ))}
-                  </SelectControl>
-                ) : null}
-                {characterForm.ttsMode === "design" ? (
+                  {(characterForm.ttsMode || "preset") === "preset" ? (
+                    <SelectControl
+                      className="w-full rounded-md border bg-background p-2 text-sm"
+                      value={characterForm.ttsVoice}
+                      onChange={(event) => onCharacterFormChange("ttsVoice", event.target.value)}
+                    >
+                      <option value="">预置音色：未配置（阻断生成）</option>
+                      {MIMO_TTS_VOICE_CATALOG.map((item) => (
+                        <option key={item.id} value={item.id}>
+                          {item.label}{item.description ? ` · ${item.description}` : ""}
+                        </option>
+                      ))}
+                    </SelectControl>
+                  ) : null}
+                  {characterForm.ttsMode === "design" ? (
+                    <textarea
+                      className="min-h-[72px] w-full rounded-md border bg-background p-2 text-sm"
+                      placeholder="音色设计描述（如：青年男性，声线沉稳略沙哑，语速中等，适合冷硬独白）"
+                      value={characterForm.ttsDesignPrompt}
+                      onChange={(event) => onCharacterFormChange("ttsDesignPrompt", event.target.value)}
+                    />
+                  ) : null}
+                  {characterForm.ttsMode === "clone" ? (
+                    <div className="space-y-2 rounded-md border border-dashed p-2">
+                      <p className="text-xs text-muted-foreground">
+                        上传参考 WAV/音频（将 base64 提交服务端落盘）。已绑定路径：
+                        {characterForm.ttsRefAudioPath ? ` ${characterForm.ttsRefAudioPath}` : " 无"}
+                      </p>
+                      <input
+                        type="file"
+                        accept="audio/*,.wav,.mp3,.ogg"
+                        className="block w-full text-sm"
+                        onChange={(event) => {
+                          const file = event.target.files?.[0];
+                          if (!file) {
+                            return;
+                          }
+                          const reader = new FileReader();
+                          reader.onload = () => {
+                            const result = typeof reader.result === "string" ? reader.result : "";
+                            onCharacterFormChange("ttsRefAudioBase64", result);
+                            if (!characterForm.ttsMode) {
+                              onCharacterFormChange("ttsMode", "clone");
+                            }
+                          };
+                          reader.readAsDataURL(file);
+                        }}
+                      />
+                      {characterForm.ttsRefAudioBase64 ? (
+                        <p className="text-xs text-muted-foreground">已选择新参考音频，保存角色后写入。</p>
+                      ) : null}
+                    </div>
+                  ) : null}
                   <textarea
                     className="min-h-[72px] w-full rounded-md border bg-background p-2 text-sm"
-                    placeholder="音色设计描述（如：青年男性，声线沉稳略沙哑，语速中等，适合冷硬独白）"
-                    value={characterForm.ttsDesignPrompt}
-                    onChange={(event) => onCharacterFormChange("ttsDesignPrompt", event.target.value)}
+                    placeholder={`有声书说话 style（默认可参考：${DEFAULT_AUDIOBOOK_NARRATOR_STYLE.slice(0, 24)}…）`}
+                    value={characterForm.ttsStyle}
+                    onChange={(event) => onCharacterFormChange("ttsStyle", event.target.value)}
                   />
-                ) : null}
-                {characterForm.ttsMode === "clone" ? (
-                  <div className="space-y-2 rounded-md border border-dashed p-2">
-                    <p className="text-xs text-muted-foreground">
-                      上传参考 WAV/音频（将 base64 提交服务端落盘）。已绑定路径：
-                      {characterForm.ttsRefAudioPath ? ` ${characterForm.ttsRefAudioPath}` : " 无"}
-                    </p>
-                    <input
-                      type="file"
-                      accept="audio/*,.wav,.mp3,.ogg"
-                      className="block w-full text-sm"
-                      onChange={(event) => {
-                        const file = event.target.files?.[0];
-                        if (!file) {
-                          return;
-                        }
-                        const reader = new FileReader();
-                        reader.onload = () => {
-                          const result = typeof reader.result === "string" ? reader.result : "";
-                          onCharacterFormChange("ttsRefAudioBase64", result);
-                          if (!characterForm.ttsMode) {
-                            onCharacterFormChange("ttsMode", "clone");
-                          }
-                        };
-                        reader.readAsDataURL(file);
-                      }}
-                    />
-                    {characterForm.ttsRefAudioBase64 ? (
-                      <p className="text-xs text-muted-foreground">已选择新参考音频，保存角色后写入。</p>
-                    ) : null}
-                  </div>
-                ) : null}
-                <textarea
-                  className="min-h-[72px] w-full rounded-md border bg-background p-2 text-sm"
-                  placeholder={`有声书说话 style（默认可参考：${DEFAULT_AUDIOBOOK_NARRATOR_STYLE.slice(0, 24)}…）`}
-                  value={characterForm.ttsStyle}
-                  onChange={(event) => onCharacterFormChange("ttsStyle", event.target.value)}
-                />
-                <Input
-                  placeholder="说话人别名（外号/称呼，顿号或逗号分隔，如：远哥、小远）"
-                  value={characterForm.ttsSpeakerAliases}
-                  onChange={(event) => onCharacterFormChange("ttsSpeakerAliases", event.target.value)}
-                />
+                  <Input
+                    placeholder="说话人别名（外号/称呼，顿号或逗号分隔，如：远哥、小远）"
+                    value={characterForm.ttsSpeakerAliases}
+                    onChange={(event) => onCharacterFormChange("ttsSpeakerAliases", event.target.value)}
+                  />
+                </div>
+
                 <div className="grid gap-2 md:grid-cols-2">
                   <Input
                     placeholder="当前状态（例如：重伤闭关）"

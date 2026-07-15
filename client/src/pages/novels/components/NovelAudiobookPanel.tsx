@@ -8,6 +8,7 @@ import {
   type AudiobookScopeMode,
   type AudiobookTaskAnnotationsView,
   type AudiobookTaskSummary,
+  type AudiobookTtsMode,
   type AudiobookVoicePlanItem,
 } from "@ai-novel/shared/types/audiobook";
 import { Button } from "@/components/ui/button";
@@ -27,6 +28,10 @@ import {
 } from "@/api/novel/audiobook";
 import { queryKeys } from "@/api/queryKeys";
 import SelectControl from "@/components/common/SelectControl";
+import {
+  resolveCharacterVoiceBinding,
+  resolveCharacterVoiceMode,
+} from "./characterAssetWorkspace.helpers";
 
 interface ChapterOption {
   id: string;
@@ -73,6 +78,18 @@ function statusVariant(status: AudiobookTaskSummary["status"]): "default" | "sec
   if (status === "failed") return "destructive";
   if (status === "queued") return "secondary";
   return "outline";
+}
+
+function decodeBase64AudioToObjectUrl(audioBase64: string, mimeType = "audio/wav"): string {
+  const bare = audioBase64.includes(",")
+    ? (audioBase64.split(",").pop() ?? audioBase64)
+    : audioBase64;
+  const binary = atob(bare);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return URL.createObjectURL(new Blob([bytes], { type: mimeType }));
 }
 
 /** 与小说 export 一致：blob 触发本地下载，不走远程拷贝旁路。 */
@@ -688,24 +705,43 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
   const [voicePlanOverwrite, setVoicePlanOverwrite] = useState(false);
   const [previewAudioUrl, setPreviewAudioUrl] = useState<string | null>(null);
   const [previewLabel, setPreviewLabel] = useState("");
+  const previewAudioRef = useRef<HTMLAudioElement | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (previewAudioUrl) {
+        URL.revokeObjectURL(previewAudioUrl);
+      }
+    };
+  }, [previewAudioUrl]);
+
+  useEffect(() => {
+    if (!previewAudioUrl || !previewAudioRef.current) {
+      return;
+    }
+    const el = previewAudioRef.current;
+    el.load();
+    void el.play().catch(() => {
+      // autoplay 可能被浏览器拦截；controls 仍可手播。
+    });
+  }, [previewAudioUrl]);
 
   const sortedChapters = useMemo(
     () => [...chapters].sort((a, b) => a.order - b.order),
     [chapters],
   );
 
-  const missingVoiceCharacters = useMemo(
-    () => characters.filter((character) => {
-      const mode = character.ttsMode?.trim() || "preset";
-      if (mode === "design") {
-        return !character.ttsDesignPrompt?.trim();
-      }
-      if (mode === "clone") {
-        return !character.ttsRefAudioPath?.trim();
-      }
-      return !character.ttsVoice?.trim();
+  const characterVoiceRows = useMemo(
+    () => characters.map((character) => {
+      const binding = resolveCharacterVoiceBinding(character);
+      return { character, binding };
     }),
     [characters],
+  );
+
+  const missingVoiceCharacters = useMemo(
+    () => characterVoiceRows.filter((row) => !row.binding.ready).map((row) => row.character),
+    [characterVoiceRows],
   );
 
   const tasksQuery = useQuery({
@@ -845,34 +881,60 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
     },
   });
 
+  type VoicePreviewTarget =
+    | { kind: "plan"; item: AudiobookVoicePlanItem }
+    | { kind: "character"; character: AudiobookPanelCharacter };
+
   const previewVoiceMutation = useMutation({
-    mutationFn: async (item: AudiobookVoicePlanItem) => {
+    mutationFn: async (target: VoicePreviewTarget) => {
+      if (target.kind === "plan") {
+        const item = target.item;
+        const response = await previewAudiobookVoice(novelId, {
+          characterId: item.characterId,
+          ttsMode: item.ttsMode,
+          ttsVoice: item.ttsVoice,
+          ttsStyle: item.ttsStyle,
+          ttsDesignPrompt: item.ttsDesignPrompt,
+        });
+        return {
+          label: `${item.characterName} · ${item.ttsMode}${item.ttsVoice ? `/${item.ttsVoice}` : ""}`,
+          characterName: item.characterName,
+          data: response.data,
+        };
+      }
+
+      const character = target.character;
+      const mode = resolveCharacterVoiceMode(character.ttsMode);
+      const binding = resolveCharacterVoiceBinding(character);
+      if (!binding.ready) {
+        throw new Error(`${character.name} 尚未配置完整音色，无法试听。`);
+      }
       const response = await previewAudiobookVoice(novelId, {
-        characterId: item.characterId,
-        ttsMode: item.ttsMode,
-        ttsVoice: item.ttsVoice,
-        ttsStyle: item.ttsStyle,
-        ttsDesignPrompt: item.ttsDesignPrompt,
+        characterId: character.id,
+        ttsMode: mode as AudiobookTtsMode,
+        ttsVoice: character.ttsVoice ?? null,
+        ttsStyle: character.ttsStyle ?? null,
+        ttsDesignPrompt: character.ttsDesignPrompt ?? null,
       });
-      return { item, data: response.data };
+      return {
+        label: `${character.name} · ${binding.detailLabel}`,
+        characterName: character.name,
+        data: response.data,
+      };
     },
-    onSuccess: ({ item, data }) => {
+    onSuccess: ({ label, characterName, data }) => {
       if (!data?.audioBase64) {
         setMessage("试听无音频。");
         return;
       }
-      if (previewAudioUrl) {
-        URL.revokeObjectURL(previewAudioUrl);
-      }
-      const binary = atob(data.audioBase64);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i += 1) {
-        bytes[i] = binary.charCodeAt(i);
-      }
-      const url = URL.createObjectURL(new Blob([bytes], { type: "audio/wav" }));
-      setPreviewAudioUrl(url);
-      setPreviewLabel(`${item.characterName} · ${item.ttsMode}${item.ttsVoice ? `/${item.ttsVoice}` : ""}`);
-      setMessage(`试听已生成：${item.characterName}`);
+      setPreviewAudioUrl((prev) => {
+        if (prev) {
+          URL.revokeObjectURL(prev);
+        }
+        return decodeBase64AudioToObjectUrl(data.audioBase64, "audio/wav");
+      });
+      setPreviewLabel(label);
+      setMessage(`试听已生成并尝试播放：${characterName}`);
     },
     onError: (error) => {
       setMessage(error instanceof Error ? error.message : "试听失败。");
@@ -914,7 +976,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
           <div>
             <div className="text-sm font-medium text-foreground">人物卡 → 音色资产</div>
             <div className="text-xs leading-5 text-muted-foreground">
-              按性别/身份/声线差异化分配 preset，重要角色撞声时升 design。不改已绑定角色。
+              一眼看清谁已配/谁缺配；可先「自动规划」再写入角色卡，或对已绑定角色直接试听。
             </div>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -948,8 +1010,49 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
             </Button>
           </div>
         </div>
+
+        {characterVoiceRows.length > 0 ? (
+          <div className="max-h-52 space-y-1 overflow-y-auto rounded-lg border border-border/60 bg-background p-2">
+            <div className="px-2 py-1 text-xs font-medium text-muted-foreground">
+              当前绑定（{characterVoiceRows.length - missingVoiceCharacters.length}/{characterVoiceRows.length} 已就绪）
+            </div>
+            {characterVoiceRows.map(({ character, binding }) => (
+              <div
+                key={character.id}
+                className="flex flex-wrap items-center justify-between gap-2 rounded-md px-2 py-1.5 text-sm"
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-medium text-foreground">{character.name}</span>
+                    <Badge variant={binding.ready ? "outline" : "destructive"}>
+                      {binding.ready ? binding.shortLabel : "缺音色"}
+                    </Badge>
+                    <span className="text-xs text-muted-foreground">{binding.modeLabel}</span>
+                  </div>
+                  <div className="text-xs leading-5 text-muted-foreground">{binding.detailLabel}</div>
+                </div>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={previewVoiceMutation.isPending || !binding.ready}
+                  onClick={() => previewVoiceMutation.mutate({ kind: "character", character })}
+                >
+                  试听
+                </Button>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="rounded-lg border border-dashed px-3 py-4 text-xs text-muted-foreground">
+            暂无角色。请先在人物卡建角，再回到这里规划/试听。
+          </div>
+        )}
+
         {voicePlanItems.length > 0 ? (
           <div className="max-h-56 space-y-2 overflow-y-auto rounded-lg border border-border/60 bg-background p-2">
+            <div className="px-2 py-1 text-xs font-medium text-muted-foreground">
+              待写入规划（{voicePlanItems.length}）{voicePlanOverwrite ? " · 将覆盖已绑定" : " · 仅补齐缺失"}
+            </div>
             {voicePlanItems.map((item) => (
               <div
                 key={item.characterId}
@@ -975,7 +1078,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
                   size="sm"
                   variant="ghost"
                   disabled={previewVoiceMutation.isPending}
-                  onClick={() => previewVoiceMutation.mutate(item)}
+                  onClick={() => previewVoiceMutation.mutate({ kind: "plan", item })}
                 >
                   试听
                 </Button>
@@ -986,7 +1089,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
         {previewAudioUrl ? (
           <div className="space-y-1">
             <div className="text-xs text-muted-foreground">试听：{previewLabel}</div>
-            <audio controls src={previewAudioUrl} className="w-full" />
+            <audio ref={previewAudioRef} controls autoPlay src={previewAudioUrl} className="w-full" />
           </div>
         ) : null}
       </div>
