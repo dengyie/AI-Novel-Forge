@@ -10,8 +10,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
+  createObjectUrlSlot,
   decodeBase64AudioToObjectUrl,
-  replaceObjectUrl,
   resolveLocalAudioSrc,
   tryAutoPlayAudio,
 } from "@/lib/audiobookVoiceAudio";
@@ -26,7 +26,7 @@ import {
   type CharacterVoiceMode,
 } from "./characterAssetWorkspace.helpers";
 
-export type CharacterVoiceEditorForm = CharacterVoiceFormSlice & {
+export type CharacterVoiceEditorForm = {
   ttsMode: "preset" | "design" | "clone" | "";
   ttsVoice: string;
   ttsStyle: string;
@@ -45,8 +45,6 @@ interface CharacterVoiceEditorProps {
   form: CharacterVoiceEditorForm;
   saved?: CharacterVoiceFormSlice | null;
   onChange: (field: CharacterVoiceEditorField, value: string) => void;
-  /** 紧凑模式：仅配置区，无外层大卡片标题。默认完整。 */
-  compact?: boolean;
 }
 
 const ZH_PRESETS = MIMO_TTS_VOICE_CATALOG.filter((item) => item.locale === "zh");
@@ -72,24 +70,18 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
     form,
     saved,
     onChange,
-    compact = false,
   } = props;
 
-  const formVoice = useMemo(() => resolveCharacterVoiceBinding(form), [
-    form.ttsMode,
-    form.ttsVoice,
-    form.ttsDesignPrompt,
-    form.ttsRefAudioPath,
-  ]);
+  const formVoice = useMemo(
+    () => resolveCharacterVoiceBinding(form),
+    [form.ttsMode, form.ttsVoice, form.ttsDesignPrompt, form.ttsRefAudioPath],
+  );
   const savedVoice = useMemo(() => resolveCharacterVoiceBinding(saved), [saved]);
   const dirty = useMemo(() => isCharacterVoiceFormDirty(form, saved), [form, saved]);
-  const previewGate = useMemo(() => canPreviewCharacterVoice(form), [
-    form.ttsMode,
-    form.ttsVoice,
-    form.ttsDesignPrompt,
-    form.ttsRefAudioPath,
-    form.ttsRefAudioBase64,
-  ]);
+  const previewGate = useMemo(
+    () => canPreviewCharacterVoice(form),
+    [form.ttsMode, form.ttsVoice, form.ttsDesignPrompt, form.ttsRefAudioPath, form.ttsRefAudioBase64],
+  );
   const mode = resolveCharacterVoiceMode(form.ttsMode);
   const selectedPreset = findMimoVoiceCatalogItem(form.ttsVoice);
   const hasLocalCloneDraft = Boolean(form.ttsRefAudioBase64?.trim());
@@ -101,17 +93,18 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
   const [previewLabel, setPreviewLabel] = useState("");
   const [previewMessage, setPreviewMessage] = useState("");
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
+  const previewUrlSlotRef = useRef(createObjectUrlSlot());
 
   useEffect(() => {
+    const slot = previewUrlSlotRef.current;
     return () => {
-      if (previewAudioUrl) {
-        URL.revokeObjectURL(previewAudioUrl);
-      }
+      slot.clear();
     };
-  }, [previewAudioUrl]);
+  }, []);
 
   useEffect(() => {
-    setPreviewAudioUrl((prev) => replaceObjectUrl(prev, null));
+    previewUrlSlotRef.current.clear();
+    setPreviewAudioUrl(null);
     setPreviewLabel("");
     setPreviewMessage("");
   }, [characterId]);
@@ -144,9 +137,8 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
         setPreviewMessage("试听无音频返回。");
         return;
       }
-      setPreviewAudioUrl((prev) =>
-        replaceObjectUrl(prev, decodeBase64AudioToObjectUrl(data.audioBase64, "audio/wav")),
-      );
+      const nextUrl = decodeBase64AudioToObjectUrl(data.audioBase64, "audio/wav");
+      setPreviewAudioUrl(previewUrlSlotRef.current.set(nextUrl));
       setPreviewLabel(formVoice.detailLabel);
       setPreviewMessage("试听已生成并尝试自动播放。");
     },
@@ -154,11 +146,6 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
       setPreviewMessage(error instanceof Error ? error.message : "试听失败。");
     },
   });
-
-  function setMode(next: CharacterVoiceMode) {
-    onChange("ttsMode", next);
-    // 切模态时不硬清字段，保留用户草稿，但克隆未保存提示会走 gate。
-  }
 
   function handleCloneFile(file: File | undefined) {
     if (!file) {
@@ -175,12 +162,8 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
     reader.readAsDataURL(file);
   }
 
-  const shellClass = compact
-    ? "space-y-3"
-    : "space-y-3 rounded-xl border border-border/70 bg-muted/15 p-3";
-
   return (
-    <div className={shellClass}>
+    <div className="space-y-3 rounded-xl border border-border/70 bg-muted/15 p-3">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0 space-y-1">
           <div className="flex flex-wrap items-center gap-2">
@@ -242,7 +225,7 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
                 key={option.value}
                 type="button"
                 className={`rounded-lg border px-3 py-2 text-left transition ${modeButtonClass(active)}`}
-                onClick={() => setMode(option.value)}
+                onClick={() => onChange("ttsMode", option.value as CharacterVoiceMode)}
               >
                 <div className="text-sm font-medium text-foreground">{option.label}</div>
                 <div className="mt-0.5 text-[11px] leading-4 text-muted-foreground">{option.helper}</div>
