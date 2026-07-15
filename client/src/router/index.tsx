@@ -16,6 +16,8 @@ const DramaWorkspacePage = lazy(() => import("@/pages/drama/DramaWorkspacePage")
 const DramaProjectPage = lazy(() => import("@/pages/drama/DramaProjectPage"));
 const ComicWorkspacePage = lazy(() => import("@/pages/comic/ComicWorkspacePage"));
 const ComicProjectPage = lazy(() => import("@/pages/comic/ComicProjectPage"));
+const AudiobookWorkspacePage = lazy(() => import("@/pages/audiobook/AudiobookWorkspacePage"));
+const AudiobookProjectPage = lazy(() => import("@/pages/audiobook/AudiobookProjectPage"));
 const CreativeHubPage = lazy(() => import("@/pages/creativeHub/CreativeHubPage"));
 const ChatPage = lazy(() => import("@/pages/chat/ChatPage"));
 const BookAnalysisPage = lazy(() => import("@/pages/bookAnalysis/BookAnalysisPage"));
@@ -52,6 +54,8 @@ const routes: RouteObject[] = [
       { path: "drama/projects/:id", element: <DramaProjectPage /> },
       { path: "comic", element: <ComicWorkspacePage /> },
       { path: "comic/projects/:id", element: <ComicProjectPage /> },
+      { path: "audiobook", element: <AudiobookWorkspacePage /> },
+      { path: "audiobook/novels/:id", element: <AudiobookProjectPage /> },
       { path: "creative-hub", element: <CreativeHubPage /> },
       { path: "chat-legacy", element: <ChatPage /> },
       { path: "chat", element: <Navigate to="/creative-hub" replace /> },

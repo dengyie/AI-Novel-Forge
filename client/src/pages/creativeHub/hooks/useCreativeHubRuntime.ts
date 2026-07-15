@@ -6,7 +6,6 @@ import {
 } from "@assistant-ui/react";
 import {
   appendLangChainChunk,
-  convertLangChainMessages,
   useLangGraphMessages,
   type LangChainMessage,
   type LangGraphInterruptState,
@@ -22,6 +21,10 @@ import type {
 import type { CreativeHubStreamFrame } from "@ai-novel/shared/types/api";
 import { toast } from "@/components/ui/toast";
 import { streamCreativeHubRun } from "@/api/creativeHub";
+import {
+  getMessageContent,
+  safeConvertLangChainMessages,
+} from "../lib/creativeHubMessageContent";
 import {
   buildInlineStateMessages,
   buildRunArtifactMessages,
@@ -65,34 +68,6 @@ function toLangGraphInterrupt(interrupt?: CreativeHubInterrupt | null): LangGrap
     when: "during",
     ns: interrupt.id ? [interrupt.id] : undefined,
   };
-}
-
-function getMessageContent(msg: any): string | Array<Record<string, unknown>> {
-  const parts = [
-    ...msg.content,
-    ...(msg.attachments?.flatMap((item: any) => item.content) ?? []),
-  ];
-  const normalized = parts.map((part) => {
-    if (part.type === "text") {
-      return { type: "text", text: part.text };
-    }
-    if (part.type === "image") {
-      return { type: "image_url", image_url: { url: part.image } };
-    }
-    return {
-      type: "file",
-      data: part.data,
-      mime_type: part.mimeType,
-      metadata: {
-        filename: part.filename ?? "file",
-      },
-      source_type: "base64",
-    };
-  });
-  if (normalized.length === 1 && normalized[0]?.type === "text") {
-    return normalized[0].text as string;
-  }
-  return normalized;
 }
 
 function truncateLangChainMessages(threadMessages: any[], parentId: string | null) {
@@ -296,12 +271,12 @@ export function useCreativeHubRuntime({
   );
 
   const threadMessages = useExternalMessageConverter({
-    callback: convertLangChainMessages,
+    callback: safeConvertLangChainMessages,
     messages: displayMessages,
     isRunning,
   });
   const baseThreadMessages = useExternalMessageConverter({
-    callback: convertLangChainMessages,
+    callback: safeConvertLangChainMessages,
     messages,
     isRunning,
   });

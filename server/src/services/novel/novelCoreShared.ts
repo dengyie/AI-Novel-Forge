@@ -7,6 +7,8 @@ import { normalizeStoryModeOutput } from "../storyMode/storyModeProfile";
 export interface PaginationInput {
   page: number;
   limit: number;
+  /** Optional title search (contains; matches agent list_novels). */
+  q?: string;
 }
 
 export interface CreateNovelInput {
