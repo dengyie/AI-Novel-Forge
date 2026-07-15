@@ -331,3 +331,35 @@ export interface AudiobookVoicePreviewResult {
   format: "wav";
   sampleText: string;
 }
+
+/** 有声书工作台首屏：不含章节正文 / bible / plotBeats。 */
+export interface AudiobookWorkspaceChapterOption {
+  id: string;
+  order: number;
+  title: string;
+}
+
+export interface AudiobookWorkspaceCharacter {
+  id: string;
+  name: string;
+  gender?: string | null;
+  castRole?: string | null;
+  role?: string | null;
+  ttsMode?: string | null;
+  ttsVoice?: string | null;
+  ttsStyle?: string | null;
+  ttsDesignPrompt?: string | null;
+  ttsRefAudioPath?: string | null;
+  ttsSpeakerAliases?: string | null;
+}
+
+export interface AudiobookWorkspaceBootstrap {
+  novelId: string;
+  title: string;
+  audiobookNarratorVoice: string | null;
+  audiobookNarratorStyle: string | null;
+  chapters: AudiobookWorkspaceChapterOption[];
+  characters: AudiobookWorkspaceCharacter[];
+  chapterCount: number;
+  characterCount: number;
+}

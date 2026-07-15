@@ -5,6 +5,7 @@ import {
   type AudiobookVoicePlanSuggestResult,
   type AudiobookVoicePreviewInput,
   type AudiobookVoicePreviewResult,
+  type AudiobookWorkspaceBootstrap,
   isAudiobookTtsMode,
   isMimoTtsPresetVoice,
 } from "@ai-novel/shared/types/audiobook";
@@ -71,6 +72,61 @@ function toPlannerInput(row: {
 }
 
 export class AudiobookVoiceAssetService {
+  /**
+   * 有声书页首屏数据：章节仅 id/order/title，角色仅音色相关字段。
+   * 禁止 include 章节 content（源世界整本 getNovelDetail ~2MB）。
+   */
+  async getWorkspaceBootstrap(novelId: string): Promise<AudiobookWorkspaceBootstrap> {
+    const novel = await prisma.novel.findUnique({
+      where: { id: novelId },
+      select: {
+        id: true,
+        title: true,
+        audiobookNarratorVoice: true,
+        audiobookNarratorStyle: true,
+        chapters: {
+          orderBy: { order: "asc" },
+          select: {
+            id: true,
+            order: true,
+            title: true,
+          },
+        },
+        characters: {
+          orderBy: { createdAt: "asc" },
+          select: {
+            id: true,
+            name: true,
+            gender: true,
+            castRole: true,
+            role: true,
+            ttsMode: true,
+            ttsVoice: true,
+            ttsStyle: true,
+            ttsDesignPrompt: true,
+            ttsRefAudioPath: true,
+            ttsSpeakerAliases: true,
+          },
+        },
+      },
+    });
+
+    if (!novel) {
+      throw new AppError("小说不存在。", 404);
+    }
+
+    return {
+      novelId: novel.id,
+      title: novel.title,
+      audiobookNarratorVoice: novel.audiobookNarratorVoice ?? null,
+      audiobookNarratorStyle: novel.audiobookNarratorStyle ?? null,
+      chapters: novel.chapters,
+      characters: novel.characters,
+      chapterCount: novel.chapters.length,
+      characterCount: novel.characters.length,
+    };
+  }
+
   async suggest(novelId: string, input: AudiobookVoicePlanSuggestInput = {}): Promise<AudiobookVoicePlanSuggestResult> {
     const novel = await prisma.novel.findUnique({
       where: { id: novelId },
