@@ -2,6 +2,10 @@ import type { ChapterRuntimePackage, GenerationContextPackage } from "@ai-novel/
 import type { ContentProvenance } from "@ai-novel/shared/types/canonicalState";
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
 import type { QualityScore, ReviewIssue } from "@ai-novel/shared/types/novel";
+import {
+  DEFAULT_QUALITY_IS_PASS_THRESHOLD,
+  isLiteraryQualityPass,
+} from "@ai-novel/shared/types/literaryQualityPass";
 import type { ChapterRuntimeRequestInput } from "./chapterRuntimeSchema";
 import { detectForbiddenStyleEntities } from "../../styleEngine/styleGenerationSanitizer";
 import {
@@ -164,8 +168,8 @@ interface RunPipelineChapterDeps {
   markChapterNeedsRepair: (chapterId: string) => Promise<void>;
 }
 
-/** 分维固定阈；与 options.qualityThreshold（overall）合取，见 isQualityPass / P2-3 双轨说明。 */
-const QUALITY_THRESHOLD = { coherence: 80, repetition: 75, engagement: 75 };
+/** 分维固定阈；与 options.qualityThreshold（overall）合取，见 isQualityPass。与 shared isPass 同源。 */
+const QUALITY_THRESHOLD = DEFAULT_QUALITY_IS_PASS_THRESHOLD;
 const EMPTY_CONTENT_GENERATION_RETRY_LIMIT = 1;
 /** mid-stream / writer transport 瞬时失败整章重试上限（不含首次）。与 empty 重试独立计数。 */
 const WRITER_TRANSPORT_GENERATION_RETRY_LIMIT = Math.max(
@@ -498,13 +502,11 @@ async function syncFinalRetainedChapterArtifacts(
 }
 
 /**
- * 分数门：overall ≥ qualityThreshold 且分维 ≥ 固定阈 → 本轮可 pass。
+ * 分数门：文学 isPass（shared 80/75/75）且 overall ≥ qualityThreshold → 本轮可 pass。
  * 与 qualityLoop（义务/replan/manual_gate）独立；pass=false 仍可 defer_and_continue 写债。
  */
 function isQualityPass(score: QualityScore, qualityThreshold: number): boolean {
-  return score.coherence >= QUALITY_THRESHOLD.coherence
-    && score.repetition >= QUALITY_THRESHOLD.repetition
-    && score.engagement >= QUALITY_THRESHOLD.engagement
+  return isLiteraryQualityPass(score, QUALITY_THRESHOLD)
     && score.overall >= qualityThreshold;
 }
 

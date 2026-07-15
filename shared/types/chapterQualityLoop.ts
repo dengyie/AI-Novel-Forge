@@ -6,12 +6,18 @@ import type {
 } from "./chapterRuntime.js";
 import type { SettingAlignmentAssessment } from "./settingAlignment.js";
 import { settingAlignmentToQualityLoopSignal } from "./settingAlignment.js";
+import {
+  DEFAULT_QUALITY_IS_PASS_THRESHOLD,
+  isLiteraryQualityPass,
+  type QualityIsPassThreshold,
+} from "./literaryQualityPass.js";
 
 export const CHAPTER_QUALITY_LOOP_ARTIFACT_TYPES = [
   "chapter_retention_contract",
   "continuity_state",
   "rolling_window_review",
   "prose_quality",
+  "literary_score",
   "setting_alignment",
 ] as const;
 
@@ -365,7 +371,23 @@ function worseStatus(
   return rank[right] > rank[left] ? right : left;
 }
 
-function buildRetentionSignal(input: ChapterQualityLoopAssessmentInput): ChapterQualityLoopSignal {
+/**
+ * 留存信号的文学三维门槛与 isPass 对齐（80/75/75），去掉历史 65/68 双轨。
+ * overall 不再单独做 soft/hard 双门（避免 qualityScore 代理与 literaryPass 混用）。
+ * softFloor 取阈值本身：未达 isPass 维即 risk；远低于 hard 带宽记 invalid。
+ */
+function literaryDimensionStatus(
+  value: number,
+  passFloor: number,
+): ChapterQualityLoopSignalStatus {
+  // hard = passFloor - 10：明显不达标 → invalid；passFloor 以下 → risk；≥pass → valid
+  return scoreStatus(value, Math.max(0, passFloor - 10), passFloor);
+}
+
+function buildRetentionSignal(
+  input: ChapterQualityLoopAssessmentInput,
+  threshold: QualityIsPassThreshold = DEFAULT_QUALITY_IS_PASS_THRESHOLD,
+): ChapterQualityLoopSignal {
   const retentionIssues = input.issues.filter((issue) => (
     issue.category === "pacing"
     || issue.category === "coherence"
@@ -373,10 +395,10 @@ function buildRetentionSignal(input: ChapterQualityLoopAssessmentInput): Chapter
   ));
   const scoreDrivenStatus = worseStatus(
     worseStatus(
-      scoreStatus(input.score.engagement, 65, 75),
-      scoreStatus(input.score.repetition, 65, 75),
+      literaryDimensionStatus(input.score.engagement, threshold.engagement),
+      literaryDimensionStatus(input.score.repetition, threshold.repetition),
     ),
-    scoreStatus(input.score.overall, 68, 78),
+    literaryDimensionStatus(input.score.coherence, threshold.coherence),
   );
   const severityDrivenStatus = maxSeverity(retentionIssues) >= SEVERITY_RANK.critical
     ? "invalid"
@@ -391,6 +413,40 @@ function buildRetentionSignal(input: ChapterQualityLoopAssessmentInput): Chapter
       ? "章节留存信号满足继续推进要求。"
       : "章节留存信号不足，需要优先用局部补丁修复推进目标、读者期待或结尾拉力。",
     issueCodes: retentionIssues.map(issueCode).slice(0, 6),
+  };
+}
+
+/**
+ * 文学门专用 signal：与 isPass 同阈值。
+ * pass → valid；单维差 <10 → risk；任一维差 ≥10 → invalid。
+ */
+function buildLiteraryScoreSignal(
+  input: ChapterQualityLoopAssessmentInput,
+  threshold: QualityIsPassThreshold = DEFAULT_QUALITY_IS_PASS_THRESHOLD,
+): ChapterQualityLoopSignal {
+  const { coherence, repetition, engagement } = input.score;
+  if (isLiteraryQualityPass(input.score, threshold)) {
+    return {
+      artifactType: "literary_score",
+      status: "valid",
+      reason: "文学可读门通过（coherence/repetition/engagement 均达 isPass 阈值）。",
+      issueCodes: [],
+    };
+  }
+  const gaps = [
+    { code: "literary:coherence", gap: threshold.coherence - coherence },
+    { code: "literary:repetition", gap: threshold.repetition - repetition },
+    { code: "literary:engagement", gap: threshold.engagement - engagement },
+  ].filter((item) => item.gap > 0);
+  const farMiss = gaps.some((item) => item.gap >= 10);
+  const status: ChapterQualityLoopSignalStatus = farMiss ? "invalid" : "risk";
+  return {
+    artifactType: "literary_score",
+    status,
+    reason: status === "invalid"
+      ? "文学可读门明显未达 isPass 阈值，需修复后才可质量过审。"
+      : "文学可读门接近但未达 isPass，记质量债/局部修复。",
+    issueCodes: gaps.map((item) => item.code).slice(0, 6),
   };
 }
 
@@ -465,9 +521,17 @@ export function isTimelineExtractionDeferred(input: ChapterQualityLoopAssessment
   return false;
 }
 
+/** L0 正文机械码：既有 prose_* + SoT/mustAvoid 的 sot_*。 */
+export function isProseOrSotIssueCode(code: string | null | undefined): boolean {
+  if (typeof code !== "string" || !code) {
+    return false;
+  }
+  return code.startsWith("prose_") || code.startsWith("sot_");
+}
+
 function buildProseQualitySignal(input: ChapterQualityLoopAssessmentInput): ChapterQualityLoopSignal {
   const proseIssues = input.runtimePackage?.audit.openIssues.filter((issue) => (
-    typeof issue.code === "string" && issue.code.startsWith("prose_")
+    isProseOrSotIssueCode(issue.code)
   )) ?? [];
   if (proseIssues.length === 0) {
     return {
@@ -485,13 +549,16 @@ function buildProseQualitySignal(input: ChapterQualityLoopAssessmentInput): Chap
   const status: ChapterQualityLoopSignalStatus = worstSeverity >= SEVERITY_RANK.high
     ? "risk"
     : "valid";
+  const hasSot = proseIssues.some((issue) => typeof issue.code === "string" && issue.code.startsWith("sot_"));
 
   return {
     artifactType: "prose_quality",
     status,
     reason: status === "valid"
       ? "正文存在自然度或节奏提示，可作为后续局部优化参考。"
-      : "正文存在明显 AI 句式、退化或工程词泄漏，需要优先做本章局部修复。",
+      : hasSot
+        ? "正文命中 SoT 禁词或 mustAvoid 泄漏，需优先局部修复，不得因高 overall 放行。"
+        : "正文存在明显 AI 句式、退化或工程词泄漏，需要优先做本章局部修复。",
     issueCodes: proseIssues.map((issue) => issue.code).slice(0, 8),
   };
 }
@@ -618,6 +685,7 @@ export function buildChapterQualityLoopAssessment(
 ): ChapterQualityLoopAssessment {
   const baseSignals = [
     buildRetentionSignal(input),
+    buildLiteraryScoreSignal(input),
     buildContinuitySignal(input),
     buildProseQualitySignal(input),
     buildRollingWindowSignal(input),

@@ -217,10 +217,19 @@ export interface Chapter {
   sceneCards?: string | null;
   styleContract?: string | null;
   repairHistory?: string | null;
+  /**
+   * 列表列代理 overall；**不等于**文学 isPass。
+   * 可读门请看 literaryPass（coherence∧repetition∧engagement）。
+   */
   qualityScore?: number | null;
   continuityScore?: number | null;
   characterScore?: number | null;
   pacingScore?: number | null;
+  /**
+   * 文学可读门投影（isPass 同阈值 80/75/75）。
+   * 列表由 qualityLoop.literary_score 或完整三维分推导；不可用时为 null/undefined。
+   */
+  literaryPass?: boolean | null;
   riskFlags?: string | null;
   hook?: string | null;
   expectation?: string | null;

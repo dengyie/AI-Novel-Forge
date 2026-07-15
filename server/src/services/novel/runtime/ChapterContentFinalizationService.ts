@@ -17,6 +17,7 @@ import {
 import {
   buildProseQualityAuditReport,
   detectProseQuality,
+  normalizeProseQualityTermList,
 } from "./proseQuality/ProseQualityDetector";
 import {
   chapterTimelineFinalizationService,
@@ -121,7 +122,14 @@ export class ChapterContentFinalizationService {
       request: input.request,
     });
     const timelineCheck = timelineGate.result;
-    const proseQualityReport = detectProseQuality(finalContent);
+    const mustAvoidTerms = normalizeProseQualityTermList(
+      input.contextPackage?.chapter?.mustAvoid ?? null,
+    );
+    const proseQualityReport = detectProseQuality(finalContent, {
+      mustAvoidTerms,
+      // 书级 bannedTerms 无独立列时保持空；后续可由 call site 注入
+      bannedTerms: [],
+    });
     const proseQualityAuditReport = buildProseQualityAuditReport({
       novelId: input.novelId,
       chapterId: input.chapterId,
