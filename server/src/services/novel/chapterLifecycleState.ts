@@ -20,6 +20,7 @@ export interface ChapterStatePairPatch {
 
 /**
  * 审校结束时与 `novelCoreReviewService` 对齐：已通过则收尾为完成，否则待修复。
+ * `pass` 必须来自文学 isPass（shared 80/75/75）；!pass 不得 completed（A6）。
  */
 export function chapterStatePairAfterManualQualityReview(pass: boolean): ChapterStatePairPatch {
   return {
@@ -29,13 +30,27 @@ export function chapterStatePairAfterManualQualityReview(pass: boolean): Chapter
 }
 
 /**
- * 流水线在某次循环内将章节标为已通过（自动审校跳过或达标）时的推荐成对取值。
+ * 流水线在文学 isPass 达标后将章节标为已通过时的推荐成对取值。
+ * 调用方必须先用 isPass / isLiteraryQualityPass 门禁；本 helper 本身不二次验分。
  */
 export function chapterStatePairAfterPipelineApproval(): ChapterStatePairPatch {
   return {
     generationState: "approved",
     chapterStatus: "completed",
   };
+}
+
+/**
+ * 质量过审门：仅 literaryPass=true 时允许 completed 成对状态；否则 needs_repair。
+ * 供 review / repair 写路径与验收测共用，避免 !literaryPass 被标 completed。
+ */
+export function chapterStatePairAfterLiteraryQualityGate(literaryPass: boolean): ChapterStatePairPatch {
+  return literaryPass
+    ? chapterStatePairAfterPipelineApproval()
+    : {
+      generationState: "reviewed",
+      chapterStatus: "needs_repair",
+    };
 }
 
 /**

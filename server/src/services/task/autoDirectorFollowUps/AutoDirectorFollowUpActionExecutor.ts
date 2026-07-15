@@ -74,14 +74,15 @@ function toCheckpointType(value: string | null | undefined): NovelWorkflowCheckp
   return typeof value === "string" && value.trim() ? value as NovelWorkflowCheckpoint : null;
 }
 
+/**
+ * 自动跟进 continue 默认 continuationMode。
+ * 写文质量 P0：禁止把质量修复检查点策略映射为 skip_quality_repair；
+ * skip 仅允许调用方显式传入 API 枚举，不得作为 follow-up 默认策略。
+ */
 function resolveContinueContinuationMode(
-  row: Pick<WorkflowTaskRow, "checkpointType" | "currentItemKey" | "currentStage">,
+  _row: Pick<WorkflowTaskRow, "checkpointType" | "currentItemKey" | "currentStage">,
 ): "auto_execute_range" | "skip_quality_repair" {
-  return row.checkpointType === "replan_required"
-    || row.currentItemKey === "quality_repair"
-    || Boolean(row.currentStage?.includes("质量"))
-    ? "skip_quality_repair"
-    : "auto_execute_range";
+  return "auto_execute_range";
 }
 
 function buildExecutedCacheKey(input: {

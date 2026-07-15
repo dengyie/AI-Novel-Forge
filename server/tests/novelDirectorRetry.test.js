@@ -997,7 +997,7 @@ test("continueTask does not skip the current chapter when approving a waiting au
   }
 });
 
-test("continueTask normalizes auto_execute_range into skip_quality_repair at a quality-repair checkpoint", async () => {
+test("continueTask keeps auto_execute_range from strategy-skipping quality-repair checkpoints", async () => {
   const service = new NovelDirectorService();
   const originalContinueCandidateStageTask = service.continueCandidateStageTask;
   const originalGetTaskById = service.workflowService.getTaskById;
@@ -1016,11 +1016,11 @@ test("continueTask normalizes auto_execute_range into skip_quality_repair at a q
     resumeCheckpointType: "replan_required",
   });
   service.workflowService.getTaskById = async () => ({
-    id: "task_quality_repair_skip_normalized",
+    id: "task_quality_repair_no_auto_skip",
     lane: "auto_director",
     status: "waiting_approval",
     pendingManualRecovery: false,
-    novelId: "novel_quality_repair_skip_normalized",
+    novelId: "novel_quality_repair_no_auto_skip",
     checkpointType: "replan_required",
     currentStage: "质量修复",
     currentItemKey: "quality_repair",
@@ -1031,7 +1031,7 @@ test("continueTask normalizes auto_execute_range into skip_quality_repair at a q
     lastError: "当前章需要先处理质量修复建议。",
     seedPayloadJson: JSON.stringify({
       directorInput: buildDirectorInput({
-        workflowTaskId: "task_quality_repair_skip_normalized",
+        workflowTaskId: "task_quality_repair_no_auto_skip",
         runMode: "auto_to_execution",
       }),
       directorSession: {
@@ -1070,7 +1070,7 @@ test("continueTask normalizes auto_execute_range into skip_quality_repair at a q
   };
 
   try {
-    await service.continueTask("task_quality_repair_skip_normalized", {
+    await service.continueTask("task_quality_repair_no_auto_skip", {
       continuationMode: "auto_execute_range",
     });
     assert.equal(runningCalls.length, 1);
@@ -1081,7 +1081,8 @@ test("continueTask normalizes auto_execute_range into skip_quality_repair at a q
 
     assert.equal(runtimeCalls.length, 1);
     assert.equal(runtimeCalls[0].resumeCheckpointType, "replan_required");
-    assert.equal(runtimeCalls[0].skipCurrentQualityRepair, true);
+    // A7：auto_execute_range 不再把 quality_repair 检查点隐式 skip
+    assert.equal(runtimeCalls[0].skipCurrentQualityRepair, false);
     assert.equal(runtimeCalls[0].approveAutoExecutionScope, true);
   } finally {
     service.continueCandidateStageTask = originalContinueCandidateStageTask;

@@ -101,9 +101,27 @@ function appendRepairHistory(
   return lines.join("\n");
 }
 
-function resolveContinuableChapterStatus(chapter: Pick<ChapterQualityLoopChapter, "chapterStatus" | "generationState">): ChapterStatus | undefined {
+/**
+ * continue / defer 后运营态。
+ * A6：defer_and_continue 记非阻塞债，**不得**写成 completed（!literaryPass 不可质量过审）。
+ * 仅 recommendedAction=continue（文学门已过）且 generation 已 approved/published 时收尾 completed。
+ */
+function resolveContinuableChapterStatus(
+  chapter: Pick<ChapterQualityLoopChapter, "chapterStatus" | "generationState">,
+  options: {
+    recommendedAction: ChapterQualityLoopAssessment["recommendedAction"];
+    terminalAction?: RecordChapterQualityLoopInput["terminalAction"];
+  },
+): ChapterStatus | undefined {
   if (chapter.chapterStatus !== "needs_repair") {
     return undefined;
+  }
+  // 耗尽后 defer：可读可继续，但不是质量过审
+  if (options.terminalAction === "defer_and_continue") {
+    return "pending_review";
+  }
+  if (options.recommendedAction !== "continue") {
+    return "pending_review";
   }
   if (chapter.generationState === "approved" || chapter.generationState === "published") {
     return "completed";
@@ -122,7 +140,10 @@ export function buildChapterQualityLoopChapterUpdate(
   const nextRepairHistory = appendRepairHistory(chapter.repairHistory, assessment, terminalAction);
   const shouldContinueChapter = assessment.recommendedAction === "continue" || terminalAction === "defer_and_continue";
   const nextChapterStatus: ChapterStatus | undefined = shouldContinueChapter
-    ? resolveContinuableChapterStatus(chapter)
+    ? resolveContinuableChapterStatus(chapter, {
+      recommendedAction: assessment.recommendedAction,
+      terminalAction,
+    })
     : "needs_repair";
   return {
     riskFlags: serializeRiskFlags(

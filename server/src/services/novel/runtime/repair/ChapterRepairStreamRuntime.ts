@@ -15,7 +15,7 @@ import { auditService } from "../../../audit/AuditService";
 import { contentRevisionBumpData } from "../../chapterContentCas";
 import {
   chapterStatePairAfterDraftSave,
-  chapterStatePairAfterPipelineApproval,
+  chapterStatePairAfterLiteraryQualityGate,
 } from "../../chapterLifecycleState";
 import { ChapterPatchRepairFailedError } from "../../chapterPatchRepairService";
 import {
@@ -358,16 +358,16 @@ export class ChapterRepairStreamRuntime {
       content: repairedContent,
     });
 
-    if (isPass(review.score)) {
-      await prisma.chapter.update({
-        where: { id: input.chapterId },
-        data: chapterStatePairAfterPipelineApproval(),
-      });
-      if (input.options.auditIssueIds?.length) {
-        const resolveAuditIssues = this.deps.resolveAuditIssues
-          ?? ((novelId: string, issueIds: string[]) => auditService.resolveIssues(novelId, issueIds));
-        await resolveAuditIssues(input.novelId, input.options.auditIssueIds).catch(() => null);
-      }
+    // A6：仅文学 isPass 可质量过审/completed；!pass 写成 needs_repair，不得假 completed
+    const literaryPass = isPass(review.score);
+    await prisma.chapter.update({
+      where: { id: input.chapterId },
+      data: chapterStatePairAfterLiteraryQualityGate(literaryPass),
+    });
+    if (literaryPass && input.options.auditIssueIds?.length) {
+      const resolveAuditIssues = this.deps.resolveAuditIssues
+        ?? ((novelId: string, issueIds: string[]) => auditService.resolveIssues(novelId, issueIds));
+      await resolveAuditIssues(input.novelId, input.options.auditIssueIds).catch(() => null);
     }
 
     input.helpers.writeFrame({
@@ -375,7 +375,7 @@ export class ChapterRepairStreamRuntime {
       runId,
       status: "succeeded",
       phase: "completed",
-      message: isPass(review.score)
+      message: literaryPass
         ? "修复候选已采纳，本章已达到可继续推进状态。"
         : "修复候选已采纳并保存，但仍有问题待继续处理。",
     });

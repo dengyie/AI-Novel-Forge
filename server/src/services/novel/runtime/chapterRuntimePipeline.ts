@@ -504,6 +504,8 @@ async function syncFinalRetainedChapterArtifacts(
 /**
  * 分数门：文学 isPass（shared 80/75/75）且 overall ≥ qualityThreshold → 本轮可 pass。
  * 与 qualityLoop（义务/replan/manual_gate）独立；pass=false 仍可 defer_and_continue 写债。
+ * A6：仅 isQualityPass=true 时下游 markChapterGenerationState("approved")→completed；
+ * autoReview=false 的「跳过审校」控制路径不走本函数，不属于质量过审。
  */
 function isQualityPass(score: QualityScore, qualityThreshold: number): boolean {
   return isLiteraryQualityPass(score, QUALITY_THRESHOLD)
