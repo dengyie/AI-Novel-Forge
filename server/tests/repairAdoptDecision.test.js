@@ -125,6 +125,16 @@ test("countTrailingRepairNoImprove counts discard/plateau lines", () => {
   assert.equal(countTrailingRepairNoImprove(""), 0);
 });
 
+test("countTrailingRepairNoImprove ignores non-repair_adopt noise lines", () => {
+  const history = [
+    "[repair_adopt t1] decision=discard overall=80->78 reason=drop",
+    "quality_loop: patch_repair recommended",
+    "[quality_loop] something else decision=discard",
+    "[repair_adopt t2] decision=discard overall=80->77 reason=drop2",
+  ].join("\n");
+  assert.equal(countTrailingRepairNoImprove(history), 2);
+});
+
 test("format and append repair adopt history lines", () => {
   const line = formatRepairAdoptHistoryLine({
     decision: "discard",

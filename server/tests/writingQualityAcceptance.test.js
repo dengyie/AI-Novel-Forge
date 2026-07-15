@@ -155,8 +155,8 @@ test("A5: L0 blocking (prose / SoT / mustAvoid) blocks recommendedAction=continu
   const prose = detectProseQuality("作为AI语言模型，我无法继续写小说。");
   assert.equal(prose.hasBlockingFindings, true);
 
-  const sot = detectProseQuality("主角开启了称重流程评估异能。", {
-    bannedTerms: ["称重"],
+  const sot = detectProseQuality("主角开启了废弃术语甲流程评估异能。", {
+    bannedTerms: ["废弃术语甲"],
   });
   assert.ok(sot.findings.some((f) => f.code === "sot_banned_term"));
   assert.equal(sot.hasBlockingFindings, true);

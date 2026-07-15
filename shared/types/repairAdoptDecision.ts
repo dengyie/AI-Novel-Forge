@@ -174,6 +174,10 @@ export function fingerprintReviewIssuesAsL1BlockingCodes(
     const code = typeof issue.code === "string" && issue.code.trim()
       ? issue.code.trim()
       : null;
+    // L0（prose_*/sot_*）已由 baseline/candidateBlockingCodes 处理，不进 L1 双计
+    if (code && (code.startsWith("prose_") || code.startsWith("sot_"))) {
+      continue;
+    }
     const category = String(issue.category ?? "unknown").trim() || "unknown";
     const evidence = String(issue.evidence ?? "")
       .replace(/\s+/g, " ")
@@ -191,7 +195,7 @@ export function fingerprintReviewIssuesAsL1BlockingCodes(
   return out;
 }
 
-/** 从 repairHistory 文本统计尾部连续 discard/plateau 次数。 */
+/** 从 repairHistory 文本统计尾部连续 discard/plateau 次数（只认 [repair_adopt] 决策行）。 */
 export function countTrailingRepairNoImprove(repairHistory: string | null | undefined): number {
   if (!repairHistory?.trim()) {
     return 0;
@@ -203,19 +207,17 @@ export function countTrailingRepairNoImprove(repairHistory: string | null | unde
   let count = 0;
   for (let index = lines.length - 1; index >= 0; index -= 1) {
     const line = lines[index] ?? "";
-    if (
-      /decision=discard\b/.test(line)
-      || /decision=plateau_stop\b/.test(line)
-      || /\[repair_adopt[^\]]*decision=discard/.test(line)
-      || /\[repair_adopt[^\]]*decision=plateau_stop/.test(line)
-    ) {
+    // 旧 quality_loop / 杂行不参与 plateau，避免误提前停自动修
+    if (!/\[repair_adopt\b/.test(line)) {
+      continue;
+    }
+    if (/decision=discard\b/.test(line) || /decision=plateau_stop\b/.test(line)) {
       count += 1;
       continue;
     }
-    if (/decision=adopt\b/.test(line) || /\[repair_adopt[^\]]*decision=adopt/.test(line)) {
+    if (/decision=adopt\b/.test(line)) {
       break;
     }
-    // 非 adopt 决策行不打断连续 discard 计数（兼容旧 quality_loop 行）
   }
   return count;
 }

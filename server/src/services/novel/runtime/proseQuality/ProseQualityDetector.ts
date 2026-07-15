@@ -178,20 +178,16 @@ function scanTermListLeak(
     const raw = segment.text;
     const normalized = normalizeTextForTermLeakScan(raw);
     for (const term of terms) {
-      const rawIndex = raw.indexOf(term);
       const normalizedTerm = normalizeTextForTermLeakScan(term);
-      const normalizedHit = normalizedTerm.length >= 2
-        && normalized.includes(normalizedTerm);
-      if (rawIndex < 0 && !normalizedHit) {
+      if (normalizedTerm.length < 2) {
         continue;
       }
-      // 原文命中且在对话引号内 → 跳过；仅归一化命中（包装绕过）→ 仍拦
-      if (rawIndex >= 0 && isInsideQuote(raw, rawIndex) && !normalizedHit) {
+      // 归一化扫描：剥书名号/引号/空白，避免「包装后不拦」；合同禁项在对话中复述同样拦截
+      const normalizedIndex = normalized.indexOf(normalizedTerm);
+      if (normalizedIndex < 0) {
         continue;
       }
-      if (rawIndex >= 0 && isInsideQuote(raw, rawIndex) && normalizedHit) {
-        // 对话内复述禁词：仍拦 SoT/mustAvoid（合同禁止项不允许「说出来就合法」）
-      }
+      const rawIndex = raw.indexOf(term);
       addFinding({
         code,
         severity: "high",
