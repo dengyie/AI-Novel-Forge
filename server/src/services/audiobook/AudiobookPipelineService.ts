@@ -23,7 +23,9 @@ import {
   resolveChapterAudioPath,
   resolveChunkAudioPath,
   resolveFullBookAudioPath,
+  wipeChapterAudioArtifacts,
 } from "./audiobookPaths";
+import { createHash } from "node:crypto";
 import {
   encodeFullBookM4b,
   type AudiobookM4bEncodeResult,
@@ -168,9 +170,41 @@ function listExistingChunkPaths(taskDir: string, chapterId: string, expectedCoun
   return paths;
 }
 
-/** @deprecated 使用 expandSegmentsToChunkJobs（含 group_by_speaker）。 */
-function expandSegmentsToChunks(segments: AudiobookDialogueSegment[]) {
-  return expandSegmentsToChunkJobs(segments);
+
+function chunkLayoutFingerprint(jobs: Array<{ text: string; segment: AudiobookDialogueSegment }>): string {
+  const hash = createHash("sha1");
+  for (const job of jobs) {
+    hash.update(speakerKeyFromSegment(job.segment));
+    hash.update("\0");
+    hash.update(job.segment.ttsMode ?? "preset");
+    hash.update("\0");
+    hash.update(job.segment.voice ?? "");
+    hash.update("\0");
+    hash.update(String(job.text.length));
+    hash.update("\0");
+    hash.update(job.text.slice(0, 64));
+    hash.update("\n");
+  }
+  return hash.digest("hex").slice(0, 16);
+}
+
+function resolveChunkLayoutPath(taskDir: string, chapterId: string): string {
+  return path.join(ensureChapterAudioDir(taskDir, chapterId), "chunk-layout.sha1");
+}
+
+function readChunkLayoutFingerprint(taskDir: string, chapterId: string): string | null {
+  const filePath = resolveChunkLayoutPath(taskDir, chapterId);
+  try {
+    if (!fs.existsSync(filePath)) return null;
+    return fs.readFileSync(filePath, "utf8").trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function writeChunkLayoutFingerprint(taskDir: string, chapterId: string, fingerprint: string): void {
+  const filePath = resolveChunkLayoutPath(taskDir, chapterId);
+  fs.writeFileSync(filePath, `${fingerprint}\n`, "utf8");
 }
 
 function collectQualityWarnings(annotations: AudiobookChapterAnnotation[]): string[] {
@@ -308,7 +342,7 @@ export class AudiobookPipelineService {
       }
 
       annotations.push(annotation);
-      totalChunksEstimate += expandSegmentsToChunks(annotation.segments).length;
+      totalChunksEstimate += expandSegmentsToChunkJobs(annotation.segments).length;
 
       await input.onProgress({
         phase: "annotating",
@@ -338,7 +372,7 @@ export class AudiobookPipelineService {
 
       const chapterWavPath = resolveChapterAudioPath(taskDir, chapter.id);
       if (isValidPcmWavFile(chapterWavPath)) {
-        const chunks = expandSegmentsToChunks(annotation.segments);
+        const chunks = expandSegmentsToChunkJobs(annotation.segments);
         completedChunks += chunks.length;
         chapterAudioPaths.push({
           chapterId: chapter.id,
@@ -361,7 +395,14 @@ export class AudiobookPipelineService {
       }
 
       ensureChapterAudioDir(taskDir, chapter.id);
-      const chunkJobs = expandSegmentsToChunks(annotation.segments);
+      const chunkJobs = expandSegmentsToChunkJobs(annotation.segments);
+      const layoutFp = chunkLayoutFingerprint(chunkJobs);
+      const prevFp = readChunkLayoutFingerprint(taskDir, chapter.id);
+      if (prevFp && prevFp !== layoutFp) {
+        // 布局变更（如 group_by_speaker 升级）时丢弃旧 chunk，避免 resume 错位
+        wipeChapterAudioArtifacts(taskDir, chapter.id);
+        ensureChapterAudioDir(taskDir, chapter.id);
+      }
       if (chunkJobs.length === 0) {
         const silentPcm = createSilentPcm(50, 24_000, 1);
         const silent = buildWavBuffer(silentPcm, {
@@ -447,6 +488,7 @@ export class AudiobookPipelineService {
       });
 
       const merged = concatWavFiles(allChunkPaths, chapterWavPath, chunkGapMs);
+      writeChunkLayoutFingerprint(taskDir, chapter.id, layoutFp);
       completedChunks += chunkJobs.length;
       chapterAudioPaths.push({
         chapterId: chapter.id,
@@ -514,10 +556,12 @@ export class AudiobookPipelineService {
       qualityWarnings,
     });
 
-    const m4b = encodeFullBookM4b({
+    const m4b = await encodeFullBookM4b({
       taskDir,
       bookTitle: input.novelTitle?.trim() || "有声书",
       sourceWavPath: fullAudioPath,
+      betweenChapterGapMs: resolveBetweenChapterGapMs(),
+      signal: input.signal,
       chapters: orderedChapters.map((chapter) => {
         const found = chapterAudioPaths.find((item) => item.chapterId === chapter.id);
         return {
@@ -528,11 +572,6 @@ export class AudiobookPipelineService {
         };
       }),
     });
-    if (m4b.status === "failed" && m4b.reason) {
-      qualityWarnings.push(`m4b：${m4b.reason}`);
-    } else if (m4b.status === "skipped" && m4b.reason) {
-      qualityWarnings.push(`m4b：${m4b.reason}`);
-    }
 
     await input.onProgress({
       phase: "finalizing",

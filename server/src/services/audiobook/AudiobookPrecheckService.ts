@@ -11,7 +11,7 @@ import {
 } from "@ai-novel/shared/types/audiobook";
 import { prisma } from "../../db/prisma";
 import { AppError } from "../../middleware/errorHandler";
-import { parseSpeakerAliases } from "./AudiobookTaskService";
+import { parseSpeakerAliases } from "./audiobookSpeakerAliases";
 
 function parseScopeMode(value: string | undefined): AudiobookScopeMode {
   if (value === "chapter" || value === "range" || value === "full") {

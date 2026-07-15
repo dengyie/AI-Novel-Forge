@@ -172,6 +172,8 @@ export interface AudiobookTaskSummary {
   completedChapterCount: number;
   outputDir?: string | null;
   fullAudioPath?: string | null;
+  /** 全书 m4b 状态：ready 才展示下载；skipped/failed 仅提示。 */
+  m4bStatus?: "ready" | "skipped" | "failed" | null;
   createdAt: string;
   updatedAt: string;
   startedAt?: string | null;

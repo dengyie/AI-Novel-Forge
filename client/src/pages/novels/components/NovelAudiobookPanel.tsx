@@ -62,6 +62,7 @@ function TaskAudioControls(props: { novelId: string; task: AudiobookTaskSummary 
   const [m4bUrl, setM4bUrl] = useState<string | null>(null);
   const [error, setError] = useState("");
   const canPlay = task.status === "succeeded" || Boolean(task.fullAudioPath);
+  const m4bReady = task.m4bStatus === "ready";
 
   useEffect(() => {
     let cancelled = false;
@@ -72,10 +73,11 @@ function TaskAudioControls(props: { novelId: string; task: AudiobookTaskSummary 
     }
     void (async () => {
       try {
-        const [url, m4b] = await Promise.all([
-          issueAudiobookMediaUrl(novelId, task.id, { resource: "full" }),
-          issueAudiobookMediaUrl(novelId, task.id, { resource: "full_m4b" }).catch(() => null),
-        ]);
+        const url = await issueAudiobookMediaUrl(novelId, task.id, { resource: "full" });
+        let m4b: string | null = null;
+        if (m4bReady) {
+          m4b = await issueAudiobookMediaUrl(novelId, task.id, { resource: "full_m4b" }).catch(() => null);
+        }
         if (!cancelled) {
           setAudioUrl(url);
           setM4bUrl(m4b);
@@ -92,11 +94,19 @@ function TaskAudioControls(props: { novelId: string; task: AudiobookTaskSummary 
     return () => {
       cancelled = true;
     };
-  }, [canPlay, novelId, task.id, task.updatedAt]);
+  }, [canPlay, m4bReady, novelId, task.id, task.updatedAt]);
 
   if (!canPlay) {
     return null;
   }
+
+  const m4bHint = m4bReady
+    ? "可选下载 m4b（含章节目录，需播放器支持）。"
+    : task.m4bStatus === "skipped"
+      ? "本任务未封装 m4b（环境可能缺少 ffmpeg），WAV 仍可用。"
+      : task.m4bStatus === "failed"
+        ? "m4b 封装失败，WAV 仍可用。"
+        : "m4b 仅在任务成功封装后提供下载。";
 
   return (
     <div className="mt-3 space-y-2">
@@ -109,7 +119,7 @@ function TaskAudioControls(props: { novelId: string; task: AudiobookTaskSummary 
                 播放/下载全书 WAV
               </a>
             </Button>
-            {m4bUrl ? (
+            {m4bReady && m4bUrl ? (
               <Button asChild size="sm" variant="outline">
                 <a href={m4bUrl} download>
                   下载 m4b
@@ -118,9 +128,7 @@ function TaskAudioControls(props: { novelId: string; task: AudiobookTaskSummary 
             ) : null}
           </div>
           <audio className="w-full" controls preload="none" src={audioUrl} />
-          <p className="text-xs text-muted-foreground">
-            m4b 依赖运行环境 ffmpeg；若点击下载 404，说明本任务未成功封装 m4b，WAV 仍可用。
-          </p>
+          <p className="text-xs text-muted-foreground">{m4bHint}</p>
         </>
       ) : (
         <div className="text-sm text-muted-foreground">正在准备音频地址…</div>

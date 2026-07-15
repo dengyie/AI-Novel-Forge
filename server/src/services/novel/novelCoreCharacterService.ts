@@ -5,7 +5,7 @@ import {
   characterWorldCheckPrompt,
 } from "../../prompting/prompts/novel/coreCharacter.prompts";
 import { writeCharacterVoiceRefFromBase64 } from "../audiobook/audiobookPaths";
-import { parseSpeakerAliases } from "../audiobook/AudiobookTaskService";
+import { parseSpeakerAliases } from "../audiobook/audiobookSpeakerAliases";
 import { ragServices } from "../rag";
 import { queueRagDelete, queueRagUpsert } from "./novelCoreSupport";
 import { WorldContextGateway } from "./worldContext/WorldContextGateway";

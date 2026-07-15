@@ -533,12 +533,16 @@ test("buildMimoTtsRequestBody rejects preset unknown voice", () => {
 });
 
 
-const { parseSpeakerAliases } = require("../dist/services/audiobook/AudiobookTaskService.js");
+const { parseSpeakerAliases } = require("../dist/services/audiobook/audiobookSpeakerAliases.js");
 const {
+  buildM4bChapterTimeline,
   buildM4bFfmetadata,
   encodeFullBookM4b,
   resolveFfmpegBinary,
 } = require("../dist/services/audiobook/audiobookM4b.js");
+const {
+  matchCharacterBySpeakerNameForTest,
+} = require("../dist/services/audiobook/AudiobookAnnotationService.js");
 
 test("parseSpeakerAliases accepts JSON array and delimiter strings", () => {
   assert.deepEqual(parseSpeakerAliases(null), []);
@@ -546,6 +550,28 @@ test("parseSpeakerAliases accepts JSON array and delimiter strings", () => {
   assert.deepEqual(parseSpeakerAliases(["远哥", " 小远 ", ""]), ["远哥", "小远"]);
   assert.deepEqual(parseSpeakerAliases('["远哥","小远"]'), ["远哥", "小远"]);
   assert.deepEqual(parseSpeakerAliases("远哥、小远,阿远"), ["远哥", "小远", "阿远"]);
+});
+
+test("matchCharacterBySpeakerName prefers exact then longest alias", () => {
+  const voices = [
+    {
+      characterId: "c1",
+      characterName: "李远",
+      speakerAliases: ["远", "远哥"],
+      ttsVoice: "白桦",
+    },
+    {
+      characterId: "c2",
+      characterName: "远哥弟弟",
+      speakerAliases: ["远哥弟弟"],
+      ttsVoice: "Dean",
+    },
+  ];
+  assert.equal(matchCharacterBySpeakerNameForTest("李远", voices)?.characterId, "c1");
+  assert.equal(matchCharacterBySpeakerNameForTest("远哥", voices)?.characterId, "c1");
+  // 子串：优先更长候选「远哥弟弟」
+  assert.equal(matchCharacterBySpeakerNameForTest("远哥弟弟说", voices)?.characterId, "c2");
+  assert.equal(matchCharacterBySpeakerNameForTest("旁白", voices), null);
 });
 
 test("buildM4bFfmetadata writes chapter blocks with ms timebase", () => {
@@ -557,16 +583,43 @@ test("buildM4bFfmetadata writes chapter blocks with ms timebase", () => {
     ],
   });
   assert.equal(meta.includes(";FFMETADATA1"), true);
-  assert.equal(meta.includes("title=测试书\\=标题") || meta.includes("title=测试书\=标题"), true);
+  assert.equal(meta.includes("title=测试书\\=标题"), true);
   assert.equal(meta.includes("TIMEBASE=1/1000"), true);
   assert.equal(meta.includes("START=0"), true);
   assert.equal(meta.includes("END=1000"), true);
   assert.equal(meta.includes("START=1000"), true);
   assert.equal(meta.includes("END=2500"), true);
-  assert.equal(meta.includes("title=第二章\\;夜") || meta.includes("title=第二章\;夜"), true);
+  assert.equal(meta.includes("title=第二章\\;夜"), true);
 });
 
-test("encodeFullBookM4b skips when ffmpeg is unavailable", () => {
+test("buildM4bChapterTimeline includes between-chapter gaps", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ab-timeline-"));
+  try {
+    // 100ms @ 24k mono 16-bit = 4800 bytes PCM
+    const pcmBytes = 4800;
+    const wav = buildWavBuffer(Buffer.alloc(pcmBytes), { numChannels: 1, sampleRate: 24_000, bitsPerSample: 16 });
+    const c1 = path.join(dir, "c1.wav");
+    const c2 = path.join(dir, "c2.wav");
+    fs.writeFileSync(c1, wav);
+    fs.writeFileSync(c2, wav);
+    const timeline = buildM4bChapterTimeline({
+      chapters: [
+        { chapterId: "1", chapterTitle: "一", chapterOrder: 1, wavPath: c1 },
+        { chapterId: "2", chapterTitle: "二", chapterOrder: 2, wavPath: c2 },
+      ],
+      betweenChapterGapMs: 700,
+    });
+    assert.equal(timeline.length, 2);
+    assert.equal(timeline[0].startMs, 0);
+    assert.equal(timeline[0].endMs, 100);
+    assert.equal(timeline[1].startMs, 800); // 100 + 700
+    assert.equal(timeline[1].endMs, 900);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("encodeFullBookM4b skips when ffmpeg is unavailable", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ab-m4b-"));
   const prevFfmpeg = process.env.AUDIOBOOK_FFMPEG_PATH;
   const prevFfmpeg2 = process.env.FFMPEG_PATH;
@@ -578,7 +631,7 @@ test("encodeFullBookM4b skips when ffmpeg is unavailable", () => {
     process.env.AUDIOBOOK_FFMPEG_PATH = path.join(dir, "missing-ffmpeg-binary");
     process.env.FFMPEG_PATH = path.join(dir, "missing-ffmpeg-binary");
     process.env.PATH = "";
-    const result = encodeFullBookM4b({
+    const result = await encodeFullBookM4b({
       taskDir: dir,
       bookTitle: "无 ffmpeg 书",
       chapters: [],
@@ -587,7 +640,7 @@ test("encodeFullBookM4b skips when ffmpeg is unavailable", () => {
     assert.equal(result.path, null);
     assert.match(result.reason || "", /ffmpeg/);
 
-    const missing = encodeFullBookM4b({
+    const missing = await encodeFullBookM4b({
       taskDir: path.join(dir, "no-wav"),
       bookTitle: "x",
       chapters: [],
