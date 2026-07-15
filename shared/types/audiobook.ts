@@ -170,10 +170,19 @@ export interface AudiobookTaskSummary {
   lastError?: string | null;
   chapterCount: number;
   completedChapterCount: number;
+  /**
+   * 已落盘 chapter.wav、可立即播放/下载的章节 id（生成中即可用，不必等全书）。
+   * 顺序与任务 chapterIds 一致子集。
+   */
+  readyChapterIds?: string[];
   outputDir?: string | null;
   fullAudioPath?: string | null;
+  /** 全书 WAV 是否可交付（磁盘 full-book.wav 存在）。 */
+  fullAudioReady?: boolean;
   /** 全书 m4b 状态：ready 才展示下载；skipped/failed 仅提示。 */
   m4bStatus?: "ready" | "skipped" | "failed" | null;
+  /** 成功后是否已清理 chunk-*.wav（章 wav / 全书仍保留）。 */
+  chunksPruned?: boolean;
   createdAt: string;
   updatedAt: string;
   startedAt?: string | null;
