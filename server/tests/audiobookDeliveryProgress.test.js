@@ -69,6 +69,19 @@ test("listReadyChapterAudioIds / pruneChunkWavArtifacts keep chapter+full wav", 
   }
 });
 
+test("full-book ready is disk-only (missing file => false even if DB would claim path)", () => {
+  const taskDir = fs.mkdtempSync(path.join(os.tmpdir(), "audiobook-full-ready-"));
+  try {
+    assert.equal(isFullBookAudioReady(taskDir), false);
+    writeTinyWav(resolveFullBookAudioPath(taskDir));
+    assert.equal(isFullBookAudioReady(taskDir), true);
+    fs.unlinkSync(resolveFullBookAudioPath(taskDir));
+    assert.equal(isFullBookAudioReady(taskDir), false);
+  } finally {
+    fs.rmSync(taskDir, { recursive: true, force: true });
+  }
+});
+
 test("AudiobookTaskSummary progressive delivery fields exist on type surface", () => {
   /** @type {import('../../shared/dist/types/audiobook.js').AudiobookTaskSummary} */
   const sample = {
@@ -93,4 +106,14 @@ test("AudiobookTaskSummary progressive delivery fields exist on type surface", (
   assert.equal(sample.readyChapterIds.length, 1);
   assert.equal(sample.fullAudioReady, false);
   assert.equal(sample.chunksPruned, false);
+});
+
+test("WAV stream supports download=1 attachment (source contract)", () => {
+  const routes = fs.readFileSync(
+    path.join(__dirname, "../src/modules/novel/production/http/novelAudiobookRoutes.ts"),
+    "utf8",
+  );
+  assert.match(routes, /wantsAttachmentDownload/);
+  assert.match(routes, /download.*1|raw === "1"/);
+  assert.match(routes, /disposition.*attachment.*inline|attachment" : "inline"/);
 });
