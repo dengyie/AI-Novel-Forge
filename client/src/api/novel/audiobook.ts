@@ -14,6 +14,7 @@ import type {
   AudiobookVoicePlanSuggestResult,
   AudiobookVoicePreviewInput,
   AudiobookVoicePreviewResult,
+  AudiobookWorkspaceBootstrap,
   CreateAudiobookTaskInput,
 } from "@ai-novel/shared/types/audiobook";
 import { API_AUTH_TOKEN, API_BASE_URL } from "@/lib/constants";
@@ -21,6 +22,14 @@ import { apiClient } from "../client";
 
 export async function listAudiobookVoices() {
   const { data } = await apiClient.get<ApiResponse<AudiobookVoiceCatalogItem[]>>("/novels/audiobook/voices");
+  return data;
+}
+
+/** 有声书页首屏：不含章节正文的轻量 bootstrap。 */
+export async function getAudiobookWorkspace(novelId: string) {
+  const { data } = await apiClient.get<ApiResponse<AudiobookWorkspaceBootstrap>>(
+    `/novels/${novelId}/audiobook/workspace`,
+  );
   return data;
 }
 
