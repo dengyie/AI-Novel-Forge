@@ -7,6 +7,7 @@ import {
   type AudiobookVoicePlanApplyResult,
   type AudiobookVoicePlanSuggestResult,
   type AudiobookVoicePreviewResult,
+  type AudiobookWorkspaceBootstrap,
   type CreateAudiobookTaskInput,
 } from "@ai-novel/shared/types/audiobook";
 import { z } from "zod";
@@ -279,6 +280,25 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
       next(error);
     }
   });
+
+  /** 有声书工作台首屏：轻量章节选项 + 角色音色字段（不含正文）。 */
+  router.get(
+    "/:id/audiobook/workspace",
+    validate({ params: novelParamsSchema }),
+    async (req, res, next) => {
+      try {
+        const { id } = req.params as z.infer<typeof novelParamsSchema>;
+        const data = await audiobookVoiceAssetService.getWorkspaceBootstrap(id);
+        res.status(200).json({
+          success: true,
+          data,
+          message: "有声书工作台数据。",
+        } satisfies ApiResponse<AudiobookWorkspaceBootstrap>);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
 
   router.post(
     "/:id/audiobook/voice-plan/suggest",

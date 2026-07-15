@@ -10,7 +10,6 @@ import {
   type AudiobookTaskSummary,
   type AudiobookVoicePlanItem,
 } from "@ai-novel/shared/types/audiobook";
-import type { Character } from "@ai-novel/shared/types/novel";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -35,10 +34,25 @@ interface ChapterOption {
   title: string;
 }
 
+/** 面板只需音色相关字段；workspace 投影与完整角色均可（null 兼容）。 */
+type AudiobookPanelCharacter = {
+  id: string;
+  name: string;
+  gender?: string | null;
+  castRole?: string | null;
+  role?: string | null;
+  ttsMode?: string | null;
+  ttsVoice?: string | null;
+  ttsStyle?: string | null;
+  ttsDesignPrompt?: string | null;
+  ttsRefAudioPath?: string | null;
+  ttsSpeakerAliases?: string | null;
+};
+
 interface NovelAudiobookPanelProps {
   novelId: string;
   chapters: ChapterOption[];
-  characters: Character[];
+  characters: AudiobookPanelCharacter[];
   narratorVoice?: string | null;
   narratorStyle?: string | null;
   onNarratorChange?: (patch: { audiobookNarratorVoice?: string; audiobookNarratorStyle?: string }) => void;
@@ -451,6 +465,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: queryKeys.novels.detail(novelId) }),
         queryClient.invalidateQueries({ queryKey: queryKeys.novels.characters(novelId) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.novels.audiobookWorkspace(novelId) }),
       ]);
     },
     onError: (error) => {

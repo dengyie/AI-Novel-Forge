@@ -37,6 +37,9 @@ export const queryKeys = {
     novelWorldSyncDiff: (id: string) => ["novels", "novel-world", id, "sync-diff"] as const,
     worldSlice: (id: string) => ["novels", "world-slice", id] as const,
     snapshots: (id: string) => ["novels", "snapshots", id] as const,
+    /** 有声书工作台轻量 bootstrap（无章节正文） */
+    audiobookWorkspace: (id: string) => ["novels", "audiobook-workspace", id] as const,
+    audiobookTasks: (id: string) => ["novels", "audiobook-tasks", id] as const,
   },
   worlds: {
     all: ["worlds"] as const,
