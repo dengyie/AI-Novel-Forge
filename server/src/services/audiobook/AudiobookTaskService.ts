@@ -20,6 +20,9 @@ import {
 } from "./AudiobookPipelineService";
 import {
   ensureAudiobookTaskDir,
+  isFullBookAudioReady,
+  listReadyChapterAudioIds,
+  pruneChunkWavArtifacts,
   resolveAudiobookTaskDir,
   wipeChapterAnnotationArtifact,
   wipeChapterAudioArtifacts,
@@ -154,7 +157,31 @@ function parseM4bStatusFromResultJson(resultJson: string | null | undefined): Au
   }
 }
 
+function parseChunksPrunedFromResultJson(resultJson: string | null | undefined): boolean {
+  if (!resultJson?.trim()) {
+    return false;
+  }
+  try {
+    const parsed = JSON.parse(resultJson) as { chunksPruned?: unknown };
+    return parsed?.chunksPruned === true;
+  } catch {
+    return false;
+  }
+}
+
 function toSummary(row: AudiobookTaskRow): AudiobookTaskSummary {
+  const chapterIds = parseChapterIds(row.chapterIdsJson);
+  let readyChapterIds: string[] = [];
+  let fullAudioReady = false;
+  try {
+    const taskDir = resolveAudiobookTaskDir(row.novelId, row.id);
+    readyChapterIds = listReadyChapterAudioIds(taskDir, chapterIds);
+    fullAudioReady = Boolean(row.fullAudioPath) || isFullBookAudioReady(taskDir);
+  } catch {
+    readyChapterIds = [];
+    fullAudioReady = Boolean(row.fullAudioPath);
+  }
+
   return {
     id: row.id,
     novelId: row.novelId,
@@ -171,9 +198,12 @@ function toSummary(row: AudiobookTaskRow): AudiobookTaskSummary {
     lastError: row.error,
     chapterCount: row.chapterCount,
     completedChapterCount: row.completedChapterCount,
+    readyChapterIds,
     outputDir: row.outputDir,
     fullAudioPath: row.fullAudioPath,
+    fullAudioReady,
     m4bStatus: parseM4bStatusFromResultJson(row.resultJson),
+    chunksPruned: parseChunksPrunedFromResultJson(row.resultJson),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
     startedAt: row.startedAt?.toISOString() ?? null,
@@ -833,6 +863,19 @@ export class AudiobookTaskService {
         : result.m4b.status === "ready"
           ? "有声书生成完成（含 m4b）"
           : "有声书生成完成";
+
+      // 成功后删 chunk，保留 chapter.wav / full-book.*；重合成会 wipe 整章再生成
+      const chapterIdsForPrune = result.chapterAudioPaths.map((item) => item.chapterId);
+      let chunksPruned = false;
+      let prunedChunkFiles = 0;
+      try {
+        prunedChunkFiles = pruneChunkWavArtifacts(result.outputDir, chapterIdsForPrune);
+        chunksPruned = true;
+      } catch {
+        chunksPruned = false;
+        prunedChunkFiles = 0;
+      }
+
       await prisma.audiobookTask.updateMany({
         where: {
           id: taskId,
@@ -852,9 +895,11 @@ export class AudiobookTaskService {
           fullAudioPath: "full-book.wav",
           annotationsJson: JSON.stringify(result.annotations),
           resultJson: JSON.stringify({
-            chapterIds: result.chapterAudioPaths.map((item) => item.chapterId),
+            chapterIds: chapterIdsForPrune,
             completedChunks: result.completedChunks,
             qualityWarnings: result.qualityWarnings,
+            chunksPruned,
+            prunedChunkFiles,
             m4b: {
               status: result.m4b.status,
               path: result.m4b.relativePath,
