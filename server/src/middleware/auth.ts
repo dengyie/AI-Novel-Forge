@@ -82,12 +82,13 @@ function isHealthLivenessPath(req: Request): boolean {
 }
 
 /**
- * 有声书 WAV 播放/下载：原生 <audio>/<a> 无法带 Authorization。
+ * 有声书 WAV / 角色固定试听：原生 <audio>/<a> 无法带 Authorization。
  * token 模式下允许携带 ?access= 短时签名令牌进入路由，由路由校验绑定关系。
  */
 function isAudiobookMediaPath(req: Request): boolean {
   const url = (req.originalUrl ?? req.url ?? "").split("?")[0];
-  return /\/audiobook\/tasks\/[^/]+\/audio\//.test(url);
+  return /\/audiobook\/tasks\/[^/]+\/audio\//.test(url)
+    || /\/characters\/[^/]+\/voice-preview\/audio$/.test(url);
 }
 
 export type RequestWithApiAuth = Request & {

@@ -10,7 +10,8 @@ const DEFAULT_TTL_SEC = Math.max(
 export type AudiobookMediaResource =
   | { kind: "full" }
   | { kind: "full_m4b" }
-  | { kind: "chapter"; chapterId: string };
+  | { kind: "chapter"; chapterId: string }
+  | { kind: "character_preview"; characterId: string };
 
 function resolveSigningSecret(): string | null {
   const dedicated = process.env.AUDIOBOOK_MEDIA_SIGNING_SECRET?.trim();
@@ -45,12 +46,16 @@ function resourceKey(resource: AudiobookMediaResource): string {
   if (resource.kind === "full_m4b") {
     return "full_m4b";
   }
+  if (resource.kind === "character_preview") {
+    return `character_preview:${resource.characterId}`;
+  }
   return `chapter:${resource.chapterId}`;
 }
 
 /**
  * 签发绑定 novelId/taskId/resource 的短时 access token。
  * open 模式（无签名密钥）返回 null，调用方直接给裸 URL。
+ * character_preview 时 taskId 传 characterId（与 verify 一致）。
  */
 export function issueAudiobookMediaAccess(input: {
   novelId: string;
@@ -76,6 +81,33 @@ export function issueAudiobookMediaAccess(input: {
     access: `${base64Url(payload)}.${sig}`,
     expiresAt: exp,
   };
+}
+
+/** 角色卡固定试听：taskId 槽位复用 characterId。 */
+export function issueCharacterVoicePreviewAccess(input: {
+  novelId: string;
+  characterId: string;
+  ttlSec?: number;
+}): { access: string; expiresAt: number } | null {
+  return issueAudiobookMediaAccess({
+    novelId: input.novelId,
+    taskId: input.characterId,
+    resource: { kind: "character_preview", characterId: input.characterId },
+    ttlSec: input.ttlSec,
+  });
+}
+
+export function verifyCharacterVoicePreviewAccess(input: {
+  access: string | null | undefined;
+  novelId: string;
+  characterId: string;
+}): boolean {
+  return verifyAudiobookMediaAccess({
+    access: input.access,
+    novelId: input.novelId,
+    taskId: input.characterId,
+    resource: { kind: "character_preview", characterId: input.characterId },
+  });
 }
 
 export function verifyAudiobookMediaAccess(input: {

@@ -165,6 +165,26 @@ const REQUIRED_COLUMN_BACKFILLS = [
     columnDefinition: `"ttsSpeakerAliases" TEXT`,
   },
   {
+    tableName: "Character",
+    columnName: "ttsPreviewAudioPath",
+    columnDefinition: `"ttsPreviewAudioPath" TEXT`,
+  },
+  {
+    tableName: "Character",
+    columnName: "ttsPreviewSampleText",
+    columnDefinition: `"ttsPreviewSampleText" TEXT`,
+  },
+  {
+    tableName: "Character",
+    columnName: "ttsPreviewFingerprint",
+    columnDefinition: `"ttsPreviewFingerprint" TEXT`,
+  },
+  {
+    tableName: "Character",
+    columnName: "ttsPreviewGeneratedAt",
+    columnDefinition: `"ttsPreviewGeneratedAt" DATETIME`,
+  },
+  {
     tableName: "Novel",
     columnName: "audiobookNarratorVoice",
     columnDefinition: `"audiobookNarratorVoice" TEXT`,
