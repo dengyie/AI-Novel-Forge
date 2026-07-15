@@ -37,8 +37,8 @@ import {
 } from "@/lib/audiobookVoiceAudio";
 import {
   resolveCharacterVoiceBinding,
-  resolveCharacterVoicePreviewBadge,
 } from "./characterAssetWorkspace.helpers";
+import AudiobookVoiceReadinessSection from "./AudiobookVoiceReadinessSection";
 
 interface ChapterOption {
   id: string;
@@ -699,6 +699,8 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
   const [message, setMessage] = useState("");
   const [voicePlanItems, setVoicePlanItems] = useState<AudiobookVoicePlanItem[]>([]);
   const [voicePlanOverwrite, setVoicePlanOverwrite] = useState(false);
+  /** D8：可选全量试听硬门禁（默认关，仅 voice 硬拦） */
+  const [requireReadyPreview, setRequireReadyPreview] = useState(false);
   const [previewAudioUrl, setPreviewAudioUrl] = useState<string | null>(null);
   const [previewLabel, setPreviewLabel] = useState("");
   const [previewDurationSec, setPreviewDurationSec] = useState<number | null>(null);
@@ -778,14 +780,26 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
         setMessage("预检无结果。");
         return;
       }
+      const preview = data.preview;
+      const previewSoft = preview
+        ? `试听 ready ${preview.ready}/缺 ${preview.missing}/过期 ${preview.stale}${
+            preview.ok ? "" : "（软提示，默认不拦生成）"
+          }`
+        : "";
       if (data.ok) {
-        setMessage(`预检通过：${data.chapterCount} 章，角色音色 ${data.characterVoices.length} 个。`);
+        setMessage(
+          [
+            `预检通过：${data.chapterCount} 章，角色音色 ${data.characterVoices.length} 个。`,
+            previewSoft,
+          ].filter(Boolean).join(" "),
+        );
       } else {
         const missing = data.missingVoices.map((item) => item.characterName).join("、");
         const blocking = data.blockingErrors.join("；");
         setMessage([
           missing ? `缺音色：${missing}` : "",
           blocking || "",
+          previewSoft,
         ].filter(Boolean).join(" | ") || "预检未通过。");
       }
     },
@@ -885,6 +899,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
         queryClient.invalidateQueries({ queryKey: queryKeys.novels.detail(novelId) }),
         queryClient.invalidateQueries({ queryKey: queryKeys.novels.characters(novelId) }),
         queryClient.invalidateQueries({ queryKey: queryKeys.novels.audiobookWorkspace(novelId) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.novels.audiobookVoiceReadiness(novelId) }),
       ]);
     },
     onError: (error) => {
@@ -915,15 +930,15 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
         };
       }
 
-      // 已绑定角色：只读角色卡固定试听，禁止在此页在线生成
+      // 已绑定角色：只读角色卡固定试听（生成在就绪看板 / 角色台）
       const character = target.character;
       const binding = resolveCharacterVoiceBinding(character);
       if (!binding.ready) {
-        throw new Error(`${character.name} 尚未配置完整音色。请到角色资产工作台配置并生成试听。`);
+        throw new Error(`${character.name} 尚未配置完整音色。请在本台「一键就绪」补齐，或到角色台精修。`);
       }
       const status = character.voicePreviewStatus;
       if (status !== "ready" && status !== "stale") {
-        throw new Error(`${character.name} 尚无固定试听资产。请到「角色资产工作台」生成试听后再播放。`);
+        throw new Error(`${character.name} 尚无固定试听。请在本台「生成试听 / 一键就绪」后再播放。`);
       }
       const mediaUrl = await issueCharacterVoicePreviewMediaUrl(novelId, character.id);
       return {
@@ -941,7 +956,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
         setPreviewLabel(result.label);
         setMessage(
           result.status === "stale"
-            ? `正在播放 ${result.characterName} 的旧版试听（配置已变，请在角色台重新生成）。`
+            ? `正在播放 ${result.characterName} 的旧版试听（配置已变，可在本台重新生成）。`
             : `正在播放 ${result.characterName} 的固定试听。`,
         );
         return;
@@ -986,6 +1001,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
       startChapterOrder: scopeMode === "range" ? Number(startOrder) : undefined,
       endChapterOrder: scopeMode === "range" ? Number(endOrder) : undefined,
       narratorVoice: narrator,
+      requireReadyPreview: requireReadyPreview || undefined,
     };
   }
 
@@ -995,7 +1011,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
         <div className="min-w-0 space-y-1">
           <div className="text-sm font-semibold text-foreground">生成有声书</div>
           <div className="text-sm leading-6 text-muted-foreground">
-            多角色 TTS（CPA → MiMo）。可先「自动规划音色」写入角色卡，再设旁白并生成。
+            多角色 TTS（CPA → MiMo）。本台可一键补齐音色与固定试听，再设旁白并生成。
           </div>
         </div>
         <Badge
@@ -1008,13 +1024,34 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
         </Badge>
       </div>
 
+      {/* D18 SoT：就绪看板；一键就绪/单角色生成/播放 */}
+      <AudiobookVoiceReadinessSection
+        novelId={novelId}
+        playPending={previewVoiceMutation.isPending}
+        onMessage={setMessage}
+        onPlayCharacter={({ characterId, characterName, previewStatus }) => {
+          const character = characters.find((item) => item.id === characterId);
+          if (!character) {
+            setMessage(`找不到角色：${characterName}`);
+            return;
+          }
+          // 以 readiness 状态覆盖 props 中可能滞后的 voicePreviewStatus
+          previewVoiceMutation.mutate({
+            kind: "character",
+            character: {
+              ...character,
+              voicePreviewStatus: previewStatus,
+            },
+          });
+        }}
+      />
+
       <div className="space-y-3 rounded-xl border border-border/70 bg-muted/20 p-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
-            <div className="text-sm font-medium text-foreground">人物卡 → 音色资产</div>
+            <div className="text-sm font-medium text-foreground">音色规划（可选）</div>
             <div className="text-xs leading-5 text-muted-foreground">
-              一眼看清谁已配/谁缺配。固定试听只在「角色资产工作台」生成；本台仅播放已落盘资产。
-              规划草稿可临时听效果（不写入角色卡）。
+              一键就绪会自动规划并写入缺失音色。此处保留「重新差异化 / 手动审阅写入」与规划草稿临时试听（不固化角色卡）。
             </div>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -1048,65 +1085,6 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
             </Button>
           </div>
         </div>
-
-        {characterVoiceRows.length > 0 ? (
-          <div className="max-h-52 space-y-1 overflow-y-auto rounded-lg border border-border/60 bg-background p-2">
-            <div className="px-2 py-1 text-xs font-medium text-muted-foreground">
-              当前绑定（{characterVoiceRows.length - missingVoiceCharacters.length}/{characterVoiceRows.length} 已就绪）
-            </div>
-            {characterVoiceRows.map(({ character, binding }) => {
-              const previewBadge = resolveCharacterVoicePreviewBadge(character.voicePreviewStatus);
-              const canPlayAsset = character.voicePreviewStatus === "ready"
-                || character.voicePreviewStatus === "stale";
-              return (
-              <div
-                key={character.id}
-                className="flex flex-wrap items-center justify-between gap-2 rounded-md px-2 py-1.5 text-sm"
-              >
-                <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-medium text-foreground">{character.name}</span>
-                    <Badge variant={binding.ready ? "outline" : "destructive"}>
-                      {binding.ready ? binding.shortLabel : "缺音色"}
-                    </Badge>
-                    <Badge
-                      variant={
-                        previewBadge.tone === "ready"
-                          ? "outline"
-                          : previewBadge.tone === "stale"
-                            ? "secondary"
-                            : "destructive"
-                      }
-                    >
-                      {previewBadge.label}
-                    </Badge>
-                    <span className="text-xs text-muted-foreground">{binding.modeLabel}</span>
-                  </div>
-                  <div className="text-xs leading-5 text-muted-foreground">{binding.detailLabel}</div>
-                  {!canPlayAsset ? (
-                    <div className="text-[11px] leading-4 text-muted-foreground">
-                      无固定试听：请到角色资产工作台生成。
-                    </div>
-                  ) : null}
-                </div>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  disabled={previewVoiceMutation.isPending || !canPlayAsset}
-                  title={canPlayAsset ? "播放角色卡固定试听" : "请到角色资产工作台生成试听"}
-                  onClick={() => previewVoiceMutation.mutate({ kind: "character", character })}
-                >
-                  播放试听
-                </Button>
-              </div>
-              );
-            })}
-          </div>
-        ) : (
-          <div className="rounded-lg border border-dashed px-3 py-4 text-xs text-muted-foreground">
-            暂无角色。请先在人物卡建角，再到角色台生成固定试听。
-          </div>
-        )}
 
         {voicePlanItems.length > 0 ? (
           <div className="max-h-56 space-y-2 overflow-y-auto rounded-lg border border-border/60 bg-background p-2">
@@ -1145,7 +1123,11 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
               </div>
             ))}
           </div>
-        ) : null}
+        ) : (
+          <div className="rounded-lg border border-dashed px-3 py-3 text-xs text-muted-foreground">
+            暂无待写入规划。常用路径：上方「一键就绪」；需要人工挑音色时再用本区规划。
+          </div>
+        )}
         {previewAudioUrl ? (
           <div className="space-y-1">
             <div className="text-xs text-muted-foreground">
@@ -1246,11 +1228,25 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
 
       {missingVoiceCharacters.length > 0 ? (
         <div className="rounded-xl border border-amber-200/80 bg-amber-50/70 p-3 text-sm leading-6 text-amber-900">
-          请先到「角色准备」为以下角色选择 MiMo 预置音色：
+          以下角色缺音色，可用上方「一键就绪」或「音色规划」补齐：
           {" "}
           {missingVoiceCharacters.map((character) => character.name).join("、")}
         </div>
       ) : null}
+
+      <label className="flex cursor-pointer items-start gap-2 rounded-xl border border-border/70 bg-muted/10 px-3 py-2 text-xs leading-5 text-muted-foreground">
+        <input
+          type="checkbox"
+          className="mt-0.5"
+          checked={requireReadyPreview}
+          onChange={(event) => setRequireReadyPreview(event.target.checked)}
+        />
+        <span>
+          <span className="font-medium text-foreground">要求全员固定试听 ready</span>
+          （可选硬门禁：create 时若试听有缺/过期则拒绝；默认只硬拦缺音色。
+          过期可播旧版，合成任务不强制 ready。）
+        </span>
+      </label>
 
       <div className="flex flex-wrap gap-2">
         <Button

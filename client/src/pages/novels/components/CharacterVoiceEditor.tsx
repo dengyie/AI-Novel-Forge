@@ -327,8 +327,8 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
               : ""}
           </div>
           <div className="text-xs leading-5 text-muted-foreground">
-            试听是角色卡固定资产：先「保存音色」，再「生成试听」；之后「播放试听」只读磁盘，不再打上游。
-            配置变更后旧试听仍可播，但会标记为过期。
+            试听是角色卡固定资产：本卡可精修后保存并生成；全书批量请到有声书工作台「一键就绪」。
+            播放只读磁盘不打上游。配置变更后旧试听可播但会过期。
           </div>
         </div>
         <div className="flex shrink-0 flex-col items-stretch gap-1 sm:items-end">

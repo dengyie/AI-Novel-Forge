@@ -40,6 +40,10 @@ export const queryKeys = {
     /** 有声书工作台轻量 bootstrap（无章节正文） */
     audiobookWorkspace: (id: string) => ["novels", "audiobook-workspace", id] as const,
     audiobookTasks: (id: string) => ["novels", "audiobook-tasks", id] as const,
+    /** 音色/试听就绪评估（工作台徽章 SoT） */
+    audiobookVoiceReadiness: (id: string) => ["novels", "audiobook-voice-readiness", id] as const,
+    audiobookVoiceReadinessJob: (id: string, jobId: string) =>
+      ["novels", "audiobook-voice-readiness-job", id, jobId] as const,
     characterVoicePreview: (novelId: string, characterId: string) =>
       ["novels", "character-voice-preview", novelId, characterId] as const,
   },
