@@ -160,4 +160,7 @@ test("applyExpandRangeBatchRoll rebuilds state for next window and clears pipeli
   assert.equal(autoExecution.startOrder, 21);
   assert.equal(autoExecution.endOrder, 23);
   assert.ok((autoExecution.remainingChapterCount ?? 0) >= 1);
+  // Cross-window historical skips must survive expand (not only in-window canPreserve).
+  assert.deepEqual(autoExecution.skippedChapterIds, ["chapter-15"]);
+  assert.deepEqual(autoExecution.skippedChapterOrders, [15]);
 });

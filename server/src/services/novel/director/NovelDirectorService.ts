@@ -59,6 +59,7 @@ import {
   resolveNextPreparedExecutableWindow,
   resolveNextUnpreparedWindow,
 } from "./automation/novelDirectorAutoExecutionBatchRollRuntime";
+import { prepareNextAutoExecutionBatch } from "./automation/novelDirectorAutoExecutionBatchPrepare";
 import {
   loadDirectorTakeoverState,
 } from "./runtime/novelDirectorTakeoverRuntime";
@@ -226,15 +227,28 @@ export class NovelDirectorService {
         consecutiveBatchRolls,
         nextPreparedExecutableWindow: resolveNextPreparedExecutableWindow({ afterOrder, readiness }),
         nextUnpreparedWindow: resolveNextUnpreparedWindow({ afterOrder, readiness }),
-        // Phase 1: expand_range only. reenter_structured_outline → halt_for_review until
-        // a real outline+sync prepareNextAutoExecutionBatch is injected (phase later).
-        canPrepareNextBatch: false,
+        // Prepare injected below — reenter_structured_outline runs surgical detail+sync.
+        canPrepareNextBatch: true,
         volumeCompletionKind,
         supervisoryCloseable,
       });
     },
-    // Do not inject prepareNext until it can run structured outline + sync.
-    // Fake expand-only prepare would silently skip outline on reenter.
+    prepareNextAutoExecutionBatch: (input) => prepareNextAutoExecutionBatch(
+      {
+        volumeService: this.volumeService,
+        novelContextService: this.novelContextService,
+        characterDynamicsService: this.characterDynamicsService,
+        onProgress: async (label, progress) => {
+          await this.workflowService.markTaskRunning(input.taskId, {
+            stage: "chapter_execution",
+            itemKey: "batch_roll_prepare",
+            itemLabel: label,
+            progress,
+          }).catch(() => undefined);
+        },
+      },
+      input,
+    ),
   });
   private readonly directorRuntimeOrchestrator = new NovelDirectorRuntimeOrchestrator({
     directorRuntime: this.directorRuntime,
