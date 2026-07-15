@@ -14,6 +14,12 @@ import type {
   AudiobookVoicePlanSuggestResult,
   AudiobookVoicePreviewInput,
   AudiobookVoicePreviewResult,
+  AudiobookVoiceReadinessAssessInput,
+  AudiobookVoiceReadinessJob,
+  AudiobookVoiceReadinessJobActiveErrorData,
+  AudiobookVoiceReadinessPrepareInput,
+  AudiobookVoiceReadinessPrepareResult,
+  AudiobookVoiceReadinessSummary,
   AudiobookWorkspaceBootstrap,
   CharacterVoicePreviewAsset,
   CharacterVoicePreviewGenerateInput,
@@ -33,6 +39,63 @@ export async function getAudiobookWorkspace(novelId: string) {
     `/novels/${novelId}/audiobook/workspace`,
   );
   return data;
+}
+
+export async function getAudiobookVoiceReadiness(
+  novelId: string,
+  params: AudiobookVoiceReadinessAssessInput = {},
+) {
+  const { data } = await apiClient.get<ApiResponse<AudiobookVoiceReadinessSummary>>(
+    `/novels/${novelId}/audiobook/voice-readiness`,
+    {
+      params: params.characterIds?.length
+        ? { characterIds: params.characterIds.join(",") }
+        : undefined,
+    },
+  );
+  return data;
+}
+
+export async function prepareAudiobookVoiceReadiness(
+  novelId: string,
+  payload: AudiobookVoiceReadinessPrepareInput = {},
+) {
+  const { data } = await apiClient.post<ApiResponse<AudiobookVoiceReadinessPrepareResult>>(
+    `/novels/${novelId}/audiobook/voice-readiness/prepare`,
+    payload,
+  );
+  return data;
+}
+
+export async function getAudiobookVoiceReadinessJob(novelId: string, jobId: string) {
+  const { data } = await apiClient.get<ApiResponse<AudiobookVoiceReadinessJob>>(
+    `/novels/${novelId}/audiobook/voice-readiness/jobs/${jobId}`,
+  );
+  return data;
+}
+
+export async function cancelAudiobookVoiceReadinessJob(novelId: string, jobId: string) {
+  const { data } = await apiClient.post<ApiResponse<AudiobookVoiceReadinessJob>>(
+    `/novels/${novelId}/audiobook/voice-readiness/jobs/${jobId}/cancel`,
+  );
+  return data;
+}
+
+/** 解析 prepare 409（READINESS_JOB_ACTIVE） */
+export function parseReadinessJobActiveError(
+  error: unknown,
+): AudiobookVoiceReadinessJobActiveErrorData | null {
+  const response = (error as {
+    response?: { status?: number; data?: ApiResponse<AudiobookVoiceReadinessJobActiveErrorData> };
+  })?.response;
+  if (response?.status !== 409) {
+    return null;
+  }
+  const payload = response.data?.data;
+  if (payload?.code === "READINESS_JOB_ACTIVE" && typeof payload.activeJobId === "string") {
+    return payload;
+  }
+  return null;
 }
 
 export async function suggestAudiobookVoicePlan(
@@ -262,4 +325,8 @@ export type {
   AudiobookPrecheckResult,
   AudiobookTaskAnnotationsView,
   AudiobookChapterReprocessMode,
+  AudiobookVoiceReadinessSummary,
+  AudiobookVoiceReadinessJob,
+  AudiobookVoiceReadinessPrepareInput,
+  AudiobookVoiceReadinessJobActiveErrorData,
 };

@@ -7,6 +7,10 @@ import {
   type AudiobookVoicePlanApplyResult,
   type AudiobookVoicePlanSuggestResult,
   type AudiobookVoicePreviewResult,
+  type AudiobookVoiceReadinessJob,
+  type AudiobookVoiceReadinessJobActiveErrorData,
+  type AudiobookVoiceReadinessPrepareResult,
+  type AudiobookVoiceReadinessSummary,
   type AudiobookWorkspaceBootstrap,
   type CharacterVoicePreviewAsset,
   type CreateAudiobookTaskInput,
@@ -14,6 +18,7 @@ import {
 import { z } from "zod";
 import { llmProviderSchema } from "../../../../llm/providerSchema";
 import { resolveAuthMode, type RequestWithApiAuth } from "../../../../middleware/auth";
+import { AppError } from "../../../../middleware/errorHandler";
 import { validate } from "../../../../middleware/validate";
 import { prisma } from "../../../../db/prisma";
 import {
@@ -24,6 +29,7 @@ import {
 } from "../../../../services/audiobook/audiobookMediaAccess";
 import { audiobookTaskService } from "../../../../services/audiobook/AudiobookTaskService";
 import { audiobookVoiceAssetService } from "../../../../services/audiobook/AudiobookVoiceAssetService";
+import { audiobookVoiceReadinessService } from "../../../../services/audiobook/AudiobookVoiceReadinessService";
 import {
   resolveAudiobookTaskDir,
   resolveChapterAudioPath,
@@ -232,6 +238,7 @@ const createAudiobookTaskSchema = z.object({
   provider: llmProviderSchema.optional(),
   model: z.string().trim().min(1).optional(),
   temperature: z.number().min(0).max(2).optional(),
+  requireReadyPreview: z.boolean().optional(),
 }).superRefine((value, ctx) => {
   if (value.scopeMode === "chapter" && !value.chapterId) {
     ctx.addIssue({
@@ -290,6 +297,51 @@ const voicePreviewSchema = z.object({
   text: z.string().trim().max(200).optional(),
 });
 
+const voiceReadinessAssessQuerySchema = z.object({
+  characterIds: z.union([z.string(), z.array(z.string())]).optional(),
+});
+
+function parseCharacterIdsQuery(raw: unknown): string[] | undefined {
+  if (raw == null) {
+    return undefined;
+  }
+  const parts = Array.isArray(raw) ? raw : [raw];
+  const ids = parts
+    .flatMap((item) => String(item).split(","))
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (!ids.length) {
+    return undefined;
+  }
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const id of ids) {
+    if (seen.has(id)) {
+      continue;
+    }
+    seen.add(id);
+    out.push(id);
+    if (out.length >= 200) {
+      break;
+    }
+  }
+  return out;
+}
+
+const voiceReadinessPrepareSchema = z.object({
+  characterIds: z.array(z.string().trim().min(1)).max(200).optional(),
+  fillMissingVoice: z.boolean().optional(),
+  generatePreview: z.boolean().optional(),
+  regenerateStale: z.boolean().optional(),
+  planStrategy: z.enum(["auto", "preset_only", "prefer_design"]).optional(),
+  previewText: z.string().trim().max(200).optional(),
+});
+
+const voiceReadinessJobParamsSchema = z.object({
+  id: z.string().trim().min(1),
+  jobId: z.string().trim().min(1),
+});
+
 export function registerNovelAudiobookRoutes(input: { router: Router }): void {
   const { router } = input;
 
@@ -313,11 +365,136 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
       try {
         const { id } = req.params as z.infer<typeof novelParamsSchema>;
         const data = await audiobookVoiceAssetService.getWorkspaceBootstrap(id);
+        // 路由层组装 readiness，避免 VoiceAssetService ↔ ReadinessService 循环依赖（D 架构）
+        const summary = audiobookVoiceReadinessService.buildSummaryFromRows({
+          novelId: data.novelId,
+          narratorVoice: data.audiobookNarratorVoice,
+          narratorStyle: data.audiobookNarratorStyle,
+          characters: data.characters,
+        });
+        const readiness = audiobookVoiceReadinessService.toBootstrapReadiness(
+          summary,
+          audiobookVoiceReadinessService.getActiveJobId(id),
+        );
+        const payload: AudiobookWorkspaceBootstrap = {
+          ...data,
+          readiness,
+        };
+        res.status(200).json({
+          success: true,
+          data: payload,
+          message: "有声书工作台数据。",
+        } satisfies ApiResponse<AudiobookWorkspaceBootstrap>);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  router.get(
+    "/:id/audiobook/voice-readiness",
+    validate({ params: novelParamsSchema, query: voiceReadinessAssessQuerySchema }),
+    async (req, res, next) => {
+      try {
+        const { id } = req.params as z.infer<typeof novelParamsSchema>;
+        const characterIds = parseCharacterIdsQuery(req.query.characterIds);
+        const data = await audiobookVoiceReadinessService.assess(id, {
+          characterIds,
+        });
         res.status(200).json({
           success: true,
           data,
-          message: "有声书工作台数据。",
-        } satisfies ApiResponse<AudiobookWorkspaceBootstrap>);
+          message: data.readyForWorkbench
+            ? "音色与试听均已就绪。"
+            : data.voiceOk
+              ? "音色已就绪，试听尚有缺口。"
+              : "音色尚未就绪。",
+        } satisfies ApiResponse<AudiobookVoiceReadinessSummary>);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  router.post(
+    "/:id/audiobook/voice-readiness/prepare",
+    validate({ params: novelParamsSchema, body: voiceReadinessPrepareSchema }),
+    async (req, res, next) => {
+      try {
+        const { id } = req.params as z.infer<typeof novelParamsSchema>;
+        const body = req.body as z.infer<typeof voiceReadinessPrepareSchema>;
+        const data = await audiobookVoiceReadinessService.prepare(id, body);
+        res.status(202).json({
+          success: true,
+          data,
+          message: data.job.status === "succeeded"
+            ? "无需操作，已返回完成任务。"
+            : "音色就绪任务已创建。",
+        } satisfies ApiResponse<AudiobookVoiceReadinessPrepareResult>);
+      } catch (error) {
+        // D17：409 使用 data 承载 code/activeJobId，不改全局 ApiResponse
+        if (
+          error instanceof AppError
+          && error.statusCode === 409
+          && error.details
+          && typeof error.details === "object"
+          && (error.details as AudiobookVoiceReadinessJobActiveErrorData).code === "READINESS_JOB_ACTIVE"
+        ) {
+          const details = error.details as AudiobookVoiceReadinessJobActiveErrorData;
+          res.status(409).json({
+            success: false,
+            error: error.message,
+            data: {
+              code: details.code,
+              activeJobId: details.activeJobId,
+            },
+          } satisfies ApiResponse<AudiobookVoiceReadinessJobActiveErrorData>);
+          return;
+        }
+        next(error);
+      }
+    },
+  );
+
+  router.get(
+    "/:id/audiobook/voice-readiness/jobs/:jobId",
+    validate({ params: voiceReadinessJobParamsSchema }),
+    async (req, res, next) => {
+      try {
+        const { id, jobId } = req.params as z.infer<typeof voiceReadinessJobParamsSchema>;
+        const job = audiobookVoiceReadinessService.getJob(jobId);
+        if (!job || job.novelId !== id) {
+          res.status(404).json({
+            success: false,
+            error: "就绪任务不存在。",
+          } satisfies ApiResponse<null>);
+          return;
+        }
+        res.status(200).json({
+          success: true,
+          data: job,
+          message: "音色就绪任务状态。",
+        } satisfies ApiResponse<AudiobookVoiceReadinessJob>);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  router.post(
+    "/:id/audiobook/voice-readiness/jobs/:jobId/cancel",
+    validate({ params: voiceReadinessJobParamsSchema }),
+    async (req, res, next) => {
+      try {
+        const { id, jobId } = req.params as z.infer<typeof voiceReadinessJobParamsSchema>;
+        const data = audiobookVoiceReadinessService.cancelJob(id, jobId);
+        res.status(200).json({
+          success: true,
+          data,
+          message: data.status === "cancelled" || data.cancelRequested
+            ? "已请求取消就绪任务。"
+            : "就绪任务状态已返回。",
+        } satisfies ApiResponse<AudiobookVoiceReadinessJob>);
       } catch (error) {
         next(error);
       }

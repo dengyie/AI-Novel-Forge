@@ -71,6 +71,22 @@ function buildPrecheckRejectMessage(precheck: Awaited<ReturnType<typeof audioboo
   return `有声书启动被拒绝：${parts.join("；") || "预检未通过"}。请按角色 ttsMode 补齐 preset/design/clone 绑定后重试。`;
 }
 
+function buildRequirePreviewRejectMessage(
+  precheck: Awaited<ReturnType<typeof audiobookPrecheckService.precheck>>,
+): string {
+  const names = precheck.preview.items
+    .map((item) => {
+      const tag = item.previewStatus === "stale" ? "过期" : "缺失";
+      return `${item.characterName}（${tag}）`;
+    })
+    .slice(0, 12)
+    .join("、");
+  const more = precheck.preview.items.length > 12
+    ? ` 等 ${precheck.preview.items.length} 人`
+    : "";
+  return `有声书启动被拒绝：已开启「要求试听就绪」，以下角色固定试听未 ready：${names || "若干角色"}${more}。请在有声书工作台一键就绪或单独生成试听后重试。`;
+}
+
 function parseAnnotationsJson(json: string | null | undefined): AudiobookChapterAnnotation[] {
   if (!json?.trim()) {
     return [];
@@ -265,6 +281,9 @@ export class AudiobookTaskService {
     const precheck = await audiobookPrecheckService.precheck(input);
     if (!precheck.ok) {
       throw new AppError(buildPrecheckRejectMessage(precheck), 400);
+    }
+    if (input.requireReadyPreview === true && !precheck.preview.ok) {
+      throw new AppError(buildRequirePreviewRejectMessage(precheck), 400);
     }
 
     const novel = await prisma.novel.findUnique({

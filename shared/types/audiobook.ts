@@ -132,12 +132,35 @@ export interface CreateAudiobookTaskInput {
   provider?: LLMProvider;
   model?: string;
   temperature?: number;
+  /**
+   * 为 true 时：createTask 在 voice 通过后额外要求全书角色卡试听均为 ready。
+   * 默认 false；扫描范围与音色门禁一致（全书角色，不按章节收窄）。
+   */
+  requireReadyPreview?: boolean;
 }
 
 export interface AudiobookPrecheckMissingVoice {
   characterId: string;
   characterName: string;
   reason: string;
+}
+
+export interface AudiobookPrecheckPreviewItem {
+  characterId: string;
+  characterName: string;
+  previewStatus: CharacterVoicePreviewStatus;
+  reason?: string | null;
+}
+
+/** 仅针对 voice 已 configured 的角色统计试听就绪；不进入 precheck.ok。 */
+export interface AudiobookPrecheckPreview {
+  ready: number;
+  stale: number;
+  missing: number;
+  /** 无 configured 角色时 true；否则全部 ready */
+  ok: boolean;
+  /** 非 ready 的 configured 角色（控制 payload） */
+  items: AudiobookPrecheckPreviewItem[];
 }
 
 export interface AudiobookPrecheckResult {
@@ -152,6 +175,8 @@ export interface AudiobookPrecheckResult {
   /** 非预置音色等硬失败原因（与 missingVoices 一并决定 ok） */
   blockingErrors: string[];
   warnings: string[];
+  /** 固定试听就绪报告（软）；create 可选 requireReadyPreview 硬拦 preview.ok */
+  preview: AudiobookPrecheckPreview;
 }
 
 export interface AudiobookTaskSummary {
@@ -392,6 +417,154 @@ export interface AudiobookWorkspaceCharacter {
   voicePreviewStatus?: CharacterVoicePreviewStatus | null;
 }
 
+/** 与 precheck 对齐的音色绑定状态 */
+export type CharacterVoiceBindingStatus = "configured" | "missing" | "invalid";
+
+/**
+ * 建议动作 — 纯函数可由 binding+mode+preview 推出，无 IO。
+ * prepare 失败不回写为另一 action；失败在 job item.error。
+ */
+export type CharacterVoiceReadinessAction =
+  | "none"
+  | "apply_plan"
+  | "generate_preview"
+  | "manual_clone"
+  | "fix_invalid";
+
+export interface CharacterVoiceReadinessItem {
+  characterId: string;
+  characterName: string;
+  castRole?: string | null;
+  gender?: string | null;
+  voiceBindingStatus: CharacterVoiceBindingStatus;
+  ttsMode: AudiobookTtsMode;
+  ttsVoice?: string | null;
+  voiceDetailLabel: string;
+  previewStatus: CharacterVoicePreviewStatus;
+  previewGeneratedAt?: string | null;
+  action: CharacterVoiceReadinessAction;
+  blocksTask: boolean;
+  blocksReadyPreview: boolean;
+  reason?: string | null;
+}
+
+export interface AudiobookVoiceReadinessSummary {
+  novelId: string;
+  characterTotal: number;
+  voiceConfigured: number;
+  voiceMissing: number;
+  voiceInvalid: number;
+  previewReady: number;
+  previewStale: number;
+  previewMissing: number;
+  voiceOk: boolean;
+  previewOk: boolean;
+  readyForWorkbench: boolean;
+  narrator: AudiobookNarratorConfig & { valid: boolean };
+  items: CharacterVoiceReadinessItem[];
+  warnings: string[];
+  blockingErrors: string[];
+}
+
+export interface AudiobookVoiceReadinessAssessInput {
+  characterIds?: string[];
+}
+
+export interface AudiobookVoiceReadinessPrepareInput {
+  characterIds?: string[];
+  fillMissingVoice?: boolean;
+  generatePreview?: boolean;
+  regenerateStale?: boolean;
+  planStrategy?: AudiobookVoicePlanStrategy;
+  previewText?: string;
+}
+
+export type AudiobookVoiceReadinessJobStatus =
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "cancelled";
+
+export type AudiobookVoiceReadinessJobItemStatus =
+  | "pending"
+  | "running"
+  | "skipped"
+  | "succeeded"
+  | "failed";
+
+export interface AudiobookVoiceReadinessJobItem {
+  characterId: string;
+  characterName: string;
+  status: AudiobookVoiceReadinessJobItemStatus;
+  phase: "voice" | "preview" | "idle";
+  error?: string | null;
+  previewStatusAfter?: CharacterVoicePreviewStatus | null;
+}
+
+export interface AudiobookVoiceReadinessJob {
+  id: string;
+  novelId: string;
+  status: AudiobookVoiceReadinessJobStatus;
+  progress: number;
+  currentCharacterId?: string | null;
+  currentCharacterName?: string | null;
+  currentLabel?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  cancelRequested: boolean;
+  options: {
+    fillMissingVoice: boolean;
+    generatePreview: boolean;
+    regenerateStale: boolean;
+    planStrategy: AudiobookVoicePlanStrategy;
+    characterIds?: string[];
+    previewText?: string;
+  };
+  items: AudiobookVoiceReadinessJobItem[];
+  summary?: {
+    appliedVoice: number;
+    generatedPreview: number;
+    skipped: number;
+    failed: number;
+  } | null;
+  lastError?: string | null;
+}
+
+export interface AudiobookVoiceReadinessPrepareResult {
+  job: AudiobookVoiceReadinessJob;
+}
+
+/** POST prepare 409 的 data 形状（不改全局 ApiResponse） */
+export interface AudiobookVoiceReadinessJobActiveErrorData {
+  code: "READINESS_JOB_ACTIVE";
+  activeJobId: string;
+}
+
+export interface AudiobookWorkspaceBootstrapReadiness {
+  voiceOk: boolean;
+  previewOk: boolean;
+  readyForWorkbench: boolean;
+  voiceConfigured: number;
+  voiceMissing: number;
+  voiceInvalid: number;
+  previewReady: number;
+  previewStale: number;
+  previewMissing: number;
+  characterTotal: number;
+  narratorValid: boolean;
+  attentionItems: Array<{
+    characterId: string;
+    characterName: string;
+    action: CharacterVoiceReadinessAction;
+    previewStatus: CharacterVoicePreviewStatus;
+    voiceBindingStatus: CharacterVoiceBindingStatus;
+  }>;
+  activeReadinessJobId?: string | null;
+}
+
 export interface AudiobookWorkspaceBootstrap {
   novelId: string;
   title: string;
@@ -401,4 +574,6 @@ export interface AudiobookWorkspaceBootstrap {
   characters: AudiobookWorkspaceCharacter[];
   chapterCount: number;
   characterCount: number;
+  /** 路由组装的就绪摘要；工作台徽章 SoT */
+  readiness?: AudiobookWorkspaceBootstrapReadiness;
 }
