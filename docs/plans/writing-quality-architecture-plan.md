@@ -7,8 +7,9 @@
 > **正交计划（不替代）**：  
 > - `director-self-cycle-pipeline-plan.md` — 能跑完  
 > - `setting-alignment-quality-architecture-plan.md` — 设定对  
+> - `writing-quality-hardgate-architecture-plan.md` — **硬门 follow-on**（L0 不可 defer 降级 · HUD · 词表可观测；本 P0 交付后抽查缺口）  
 > - `chapter-output-pipeline-optimization-plan.md` + wiki `chapter-production-chain.md` — 链路形态  
-> **更新日期**：2026-07-16  
+> **更新日期**：2026-07-16（交叉链 2026-07-17）  
 > **产品硬原则**：  
 > - 不做机械字数 / 松紧硬闸  
 > - **禁止**策略化 `skip_quality_repair` / 盲批 / 无根因 `forceResume`  
@@ -355,6 +356,13 @@ export function isPass(score: QualityScore): boolean {
 ```json
 { "sotBannedTerms": ["旧废弃术语示例"] }
 ```
+
+### 16.1 硬门 follow-on（2026-07-17）
+
+本闭环交付后，生产抽查仍见：空 `sotBannedTerms` 不拦政策词、无 HUD 结构码、`defer_and_continue` 可将 sot/prose high 降为 non_blocking。  
+**不在本文重开阶段**；执行计划见：
+
+→ [`writing-quality-hardgate-architecture-plan.md`](./writing-quality-hardgate-architecture-plan.md)
 
 ---
 

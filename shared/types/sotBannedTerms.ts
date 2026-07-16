@@ -92,3 +92,13 @@ export function extractSotBannedTermsFromNovel(
   const fromSlice = extractSotBannedTermsFromJsonBlob(novel.storyWorldSliceJson);
   return uniqueTerms([...fromOverrides, ...fromSlice]);
 }
+
+/**
+ * 空表可观测：词条数量。不 fail 建书；调用方可用于 readiness / 限流 warn。
+ * 空表 = 0 = 不产生 sot_* 码（book-agnostic）。
+ */
+export function countSotBannedTerms(
+  novel: NovelSotBannedTermsSource | null | undefined,
+): number {
+  return extractSotBannedTermsFromNovel(novel).length;
+}

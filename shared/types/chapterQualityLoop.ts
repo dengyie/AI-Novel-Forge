@@ -111,6 +111,69 @@ function hasEnforceSettingAlignmentDebt(qualityLoop: Record<string, unknown>): b
   });
 }
 
+/**
+ * 政策 / 确定性 L0 码：sot_*、critical prose、结构 HUD。
+ * 与 detector severity 对齐；high 非 critical（如 prose_negative_flip）不在此集合。
+ * 双通道判定见 {@link hasNonDeferrableProseOrSotDebt}，不依赖 issueCodes 截断。
+ */
+export const NON_DEFERRABLE_PROSE_OR_SOT_ISSUE_CODES = [
+  "sot_banned_term",
+  "sot_must_avoid_leak",
+  "prose_ai_self_reference",
+  "prose_placeholder_leak",
+  "prose_verbatim_repeat",
+  "prose_truncation",
+  "prose_system_hud",
+] as const;
+
+const NON_DEFERRABLE_PROSE_OR_SOT_CODE_SET = new Set<string>(
+  NON_DEFERRABLE_PROSE_OR_SOT_ISSUE_CODES,
+);
+
+export function isNonDeferrableProseOrSotIssueCode(
+  code: string | null | undefined,
+): boolean {
+  if (typeof code !== "string" || !code) {
+    return false;
+  }
+  if (NON_DEFERRABLE_PROSE_OR_SOT_CODE_SET.has(code)) {
+    return true;
+  }
+  // 防御：未来 sot_* 新码仍不可 defer
+  return code.startsWith("sot_");
+}
+
+/**
+ * 政策 L0 不可被 terminalAction=defer_and_continue 降为 non_blocking。
+ * 双通道（D1）：
+ * 1. prose_quality signal status === "invalid"（主路径，不依赖 issueCodes 截断）
+ * 2. 任一 signal.issueCodes 命中 non-deferrable 集合（signal 漏写 invalid 时仍拦）
+ */
+export function hasNonDeferrableProseOrSotDebt(qualityLoop: unknown): boolean {
+  if (!isRecord(qualityLoop)) {
+    return false;
+  }
+  const signals = Array.isArray(qualityLoop.signals) ? qualityLoop.signals : [];
+  for (const signal of signals) {
+    if (!isRecord(signal)) {
+      continue;
+    }
+    if (
+      signal.artifactType === "prose_quality"
+      && signal.status === "invalid"
+    ) {
+      return true;
+    }
+    const codes = Array.isArray(signal.issueCodes) ? signal.issueCodes : [];
+    if (codes.some((code) => isNonDeferrableProseOrSotIssueCode(
+      typeof code === "string" ? code : null,
+    ))) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function classifyChapterQualityLoopRisk(
   qualityLoop: unknown,
 ): ChapterQualityLoopRiskClassification {
@@ -125,17 +188,22 @@ export function classifyChapterQualityLoopRisk(
   ) {
     return "blocking";
   }
-  // 设定硬失败 / manual_gate 不可被 defer_and_continue 降级为 non-blocking。
+  // 设定硬失败 / manual_gate / 政策 L0 invalid 不可被 defer 降级为 non-blocking。
   // pipeline 常在 prose 未达标时写 terminalAction=defer_and_continue；若同时存在
-  // setting_alignment 债务，导演仍必须视为未 processed，禁止无脑放行。
+  // setting_alignment 或 sot/critical prose/HUD 债务，导演仍必须视为未 processed。
   if (
     recommendedAction === "manual_gate"
     || hasSettingAlignmentHardInvalidSignal(qualityLoop)
+    || hasNonDeferrableProseOrSotDebt(qualityLoop)
   ) {
     return "blocking";
   }
   if (qualityLoop.terminalAction === "defer_and_continue") {
     if (hasEnforceSettingAlignmentDebt(qualityLoop)) {
+      return "blocking";
+    }
+    // 防御：上分支已拦 invalid；此处再读一次，避免未来 early-return 漂移
+    if (hasNonDeferrableProseOrSotDebt(qualityLoop)) {
       return "blocking";
     }
     return "non_blocking_quality_debt";
@@ -529,6 +597,15 @@ export function isProseOrSotIssueCode(code: string | null | undefined): boolean 
   return code.startsWith("prose_") || code.startsWith("sot_");
 }
 
+/**
+ * prose_quality signal：
+ * - sot_* / critical prose / prose_system_hud → **invalid**（不可 defer 降级）
+ * - 其它 severity≥high → risk
+ * - medium/low → valid（issueCodes 仍保留可观测）
+ *
+ * issueCodes 投影仍截断到 8（签名/展示）；门禁以 status=invalid 与
+ * {@link hasNonDeferrableProseOrSotDebt} 全量码集合为准，不依赖截断列表。
+ */
 function buildProseQualitySignal(input: ChapterQualityLoopAssessmentInput): ChapterQualityLoopSignal {
   const proseIssues = input.runtimePackage?.audit.openIssues.filter((issue) => (
     isProseOrSotIssueCode(issue.code)
@@ -542,23 +619,46 @@ function buildProseQualitySignal(input: ChapterQualityLoopAssessmentInput): Chap
     };
   }
 
+  const hasNonDeferrable = proseIssues.some((issue) => (
+    isNonDeferrableProseOrSotIssueCode(issue.code)
+  ));
   const worstSeverity = proseIssues.reduce((max, issue) => {
     const rank = SEVERITY_RANK[issue.severity] ?? 0;
     return Math.max(max, rank);
   }, 0);
-  const status: ChapterQualityLoopSignalStatus = worstSeverity >= SEVERITY_RANK.high
-    ? "risk"
-    : "valid";
-  const hasSot = proseIssues.some((issue) => typeof issue.code === "string" && issue.code.startsWith("sot_"));
+
+  let status: ChapterQualityLoopSignalStatus;
+  if (hasNonDeferrable) {
+    status = "invalid";
+  } else if (worstSeverity >= SEVERITY_RANK.high) {
+    status = "risk";
+  } else {
+    status = "valid";
+  }
+
+  const hasSot = proseIssues.some((issue) => (
+    typeof issue.code === "string" && issue.code.startsWith("sot_")
+  ));
+  const hasHud = proseIssues.some((issue) => issue.code === "prose_system_hud");
+
+  let reason: string;
+  if (status === "valid") {
+    reason = "正文存在自然度或节奏提示，可作为后续局部优化参考。";
+  } else if (hasSot) {
+    reason = "正文命中 SoT 禁词或 mustAvoid 泄漏，需优先局部修复，不得因高 overall 放行。";
+  } else if (hasHud) {
+    reason = "正文出现系统 HUD / 伪状态面板结构，需优先局部修复，不得因高 overall 放行。";
+  } else if (status === "invalid") {
+    reason = "正文存在 critical 级机械硬伤（身份泄漏/占位/截断/复读等），需优先局部修复。";
+  } else {
+    reason = "正文存在明显 AI 句式、退化或工程词泄漏，需要优先做本章局部修复。";
+  }
 
   return {
     artifactType: "prose_quality",
     status,
-    reason: status === "valid"
-      ? "正文存在自然度或节奏提示，可作为后续局部优化参考。"
-      : hasSot
-        ? "正文命中 SoT 禁词或 mustAvoid 泄漏，需优先局部修复，不得因高 overall 放行。"
-        : "正文存在明显 AI 句式、退化或工程词泄漏，需要优先做本章局部修复。",
+    reason,
+    // 展示/签名截断；门禁不依赖此列表完整性
     issueCodes: proseIssues.map((issue) => issue.code).slice(0, 8),
   };
 }

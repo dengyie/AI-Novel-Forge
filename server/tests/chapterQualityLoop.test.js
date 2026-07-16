@@ -5,6 +5,8 @@ const {
   buildChapterQualityLoopAssessment,
   classifyChapterQualityLoopRiskFlags,
   hasContinuableChapterQualityLoopRiskFlags,
+  hasNonDeferrableProseOrSotDebt,
+  isNonDeferrableProseOrSotIssueCode,
 } = require("../../shared/dist/types/chapterQualityLoop.js");
 const {
   buildChapterQualityLoopChapterUpdate,
@@ -423,12 +425,18 @@ test("buildChapterQualityLoopChapterUpdate never completes on defer even if gene
 });
 
 test("quality loop projection classifies deferred patch repair as non-blocking debt", () => {
+  // 仅 L2 / 预算耗尽、无 sot/critical prose：defer 仍可读债
   const riskFlags = JSON.stringify({
     qualityLoop: {
       overallStatus: "invalid",
       recommendedAction: "patch_repair",
       rootCauseCode: "draft_repair_exhausted",
       terminalAction: "defer_and_continue",
+      signals: [{
+        artifactType: "literary_score",
+        status: "invalid",
+        issueCodes: ["literary:repetition"],
+      }],
     },
   });
 
@@ -436,7 +444,28 @@ test("quality loop projection classifies deferred patch repair as non-blocking d
   assert.equal(hasContinuableChapterQualityLoopRiskFlags(riskFlags), true);
 });
 
-test("quality loop projection classifies deferred prose risk as non-blocking debt", () => {
+test("quality loop projection classifies deferred critical prose as blocking (non-deferrable L0)", () => {
+  const riskFlags = JSON.stringify({
+    qualityLoop: {
+      overallStatus: "invalid",
+      recommendedAction: "patch_repair",
+      rootCauseCode: "draft_repair_exhausted",
+      terminalAction: "defer_and_continue",
+      signals: [{
+        artifactType: "prose_quality",
+        status: "invalid",
+        issueCodes: ["prose_ai_self_reference"],
+      }],
+    },
+  });
+
+  assert.equal(classifyChapterQualityLoopRiskFlags(riskFlags), "blocking");
+  assert.equal(hasContinuableChapterQualityLoopRiskFlags(riskFlags), false);
+  assert.equal(hasNonDeferrableProseOrSotDebt(JSON.parse(riskFlags).qualityLoop), true);
+});
+
+test("quality loop projection classifies deferred sot debt as blocking even if signal still risk", () => {
+  // 双通道：issueCodes 含 sot_* 即使 status 误写 risk 仍 blocking
   const riskFlags = JSON.stringify({
     qualityLoop: {
       overallStatus: "risk",
@@ -446,7 +475,27 @@ test("quality loop projection classifies deferred prose risk as non-blocking deb
       signals: [{
         artifactType: "prose_quality",
         status: "risk",
-        issueCodes: ["prose_ai_self_reference"],
+        issueCodes: ["sot_banned_term"],
+      }],
+    },
+  });
+
+  assert.equal(classifyChapterQualityLoopRiskFlags(riskFlags), "blocking");
+  assert.equal(hasContinuableChapterQualityLoopRiskFlags(riskFlags), false);
+});
+
+test("quality loop projection keeps deferred high non-critical prose as non-blocking", () => {
+  // prose_negative_flip = high 但非 critical / 非 sot → 仍可 defer 记债
+  const riskFlags = JSON.stringify({
+    qualityLoop: {
+      overallStatus: "risk",
+      recommendedAction: "patch_repair",
+      rootCauseCode: "draft_repair_exhausted",
+      terminalAction: "defer_and_continue",
+      signals: [{
+        artifactType: "prose_quality",
+        status: "risk",
+        issueCodes: ["prose_negative_flip"],
       }],
     },
   });
@@ -499,7 +548,7 @@ test("quality loop projection treats valid continue as none despite residual blo
   assert.equal(hasContinuableChapterQualityLoopRiskFlags(riskFlags), true);
 });
 
-test("buildChapterQualityLoopAssessment treats high sot_* openIssues as prose risk", () => {
+test("buildChapterQualityLoopAssessment treats high sot_* openIssues as prose invalid", () => {
   const assessment = buildChapterQualityLoopAssessment({
     chapterId: "chapter-sot-leak",
     chapterOrder: 8,
@@ -530,8 +579,90 @@ test("buildChapterQualityLoopAssessment treats high sot_* openIssues as prose ri
   });
 
   const proseSignal = assessment.signals.find((signal) => signal.artifactType === "prose_quality");
-  assert.equal(proseSignal?.status, "risk");
+  assert.equal(proseSignal?.status, "invalid");
   assert.deepEqual(proseSignal?.issueCodes, ["sot_must_avoid_leak"]);
-  assert.equal(assessment.overallStatus, "risk");
+  assert.equal(assessment.overallStatus, "invalid");
+  assert.equal(assessment.recommendedAction, "patch_repair");
+  assert.notEqual(assessment.recommendedAction, "continue");
+});
+
+test("sot openIssues with high literary triad still patch_repair and defer stays blocking", () => {
+  const assessment = buildChapterQualityLoopAssessment({
+    chapterId: "chapter-sot-high-score",
+    chapterOrder: 9,
+    score: score({ coherence: 95, repetition: 95, engagement: 95, overall: 95 }),
+    issues: [],
+    runtimePackage: {
+      context: { chapter: { order: 9 } },
+      audit: {
+        reports: [],
+        openIssues: [{
+          auditType: "mode_fit",
+          severity: "high",
+          code: "sot_banned_term",
+          evidence: "fixture-banned-term",
+          fixSuggestion: "删除禁词。",
+        }],
+      },
+      failureClassification: {
+        code: "none",
+        summary: "未触发全局重规划。",
+        decisionReason: null,
+        blockingObligations: [],
+      },
+    },
+    evaluatedAt: "2026-07-17T00:00:00.000Z",
+  });
+
+  assert.equal(assessment.overallStatus, "invalid");
+  assert.equal(assessment.recommendedAction, "patch_repair");
+  const deferred = JSON.stringify({
+    qualityLoop: {
+      ...assessment,
+      terminalAction: "defer_and_continue",
+    },
+  });
+  assert.equal(classifyChapterQualityLoopRiskFlags(deferred), "blocking");
+});
+
+test("isNonDeferrableProseOrSotIssueCode covers sot and critical prose only", () => {
+  assert.equal(isNonDeferrableProseOrSotIssueCode("sot_banned_term"), true);
+  assert.equal(isNonDeferrableProseOrSotIssueCode("sot_must_avoid_leak"), true);
+  assert.equal(isNonDeferrableProseOrSotIssueCode("prose_ai_self_reference"), true);
+  assert.equal(isNonDeferrableProseOrSotIssueCode("prose_system_hud"), true);
+  assert.equal(isNonDeferrableProseOrSotIssueCode("prose_negative_flip"), false);
+  assert.equal(isNonDeferrableProseOrSotIssueCode("prose_long_paragraph"), false);
+  assert.equal(isNonDeferrableProseOrSotIssueCode("literary:engagement"), false);
+});
+
+test("critical prose openIssues map to prose_quality invalid", () => {
+  const assessment = buildChapterQualityLoopAssessment({
+    chapterId: "chapter-critical-prose",
+    chapterOrder: 10,
+    score: score(),
+    issues: [],
+    runtimePackage: {
+      context: { chapter: { order: 10 } },
+      audit: {
+        reports: [],
+        openIssues: [{
+          auditType: "mode_fit",
+          severity: "critical",
+          code: "prose_placeholder_leak",
+          evidence: "TODO: 补写",
+          fixSuggestion: "补全文。",
+        }],
+      },
+      failureClassification: {
+        code: "none",
+        summary: "未触发全局重规划。",
+        decisionReason: null,
+        blockingObligations: [],
+      },
+    },
+    evaluatedAt: "2026-07-17T00:00:00.000Z",
+  });
+  const proseSignal = assessment.signals.find((s) => s.artifactType === "prose_quality");
+  assert.equal(proseSignal?.status, "invalid");
   assert.equal(assessment.recommendedAction, "patch_repair");
 });
