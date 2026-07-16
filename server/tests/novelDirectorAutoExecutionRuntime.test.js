@@ -1063,7 +1063,7 @@ test("runFromReady pauses replan notices in AI-driver execution", async () => {
   assert.equal(calls.some((call) => call[0] === "recordCheckpoint" && call[2] === "workflow_completed"), false);
 });
 
-test("runFromReady can skip a replan notice and continue the remaining auto-execution range", async () => {
+test("runFromReady cannot skip a replan hard-pause notice via skipCurrentQualityRepair", async () => {
   const calls = [];
   const completedOrders = new Set();
   const runtime = new NovelDirectorAutoExecutionRuntime({
@@ -1170,16 +1170,12 @@ test("runFromReady can skip a replan notice and continue the remaining auto-exec
     skipCurrentQualityRepair: true,
   });
 
-  assert.equal(calls.some((call) => call[0] === "recordAutoApproval" && call[1] === "replan_required"), false);
+  // replan is a hard pause: skipCurrentQualityRepair must not auto-continue past it.
   assert.deepEqual(calls.filter((call) => call[0] === "startPipelineJob").map((call) => call.slice(1)), [
     [1, 1],
-    [2, 2],
-    [3, 3],
   ]);
-  assert.ok(calls.some((call) => call[0] === "bootstrapTask" && Array.isArray(call[1]) && call[1].includes(1)));
-  assert.equal(calls.some((call) => call[0] === "bootstrapTask" && Array.isArray(call[1]) && call[1].includes(2)), false);
-  assert.equal(calls.some((call) => call[0] === "recordCheckpoint" && call[2] === "replan_required"), false);
-  assert.ok(calls.some((call) => call[0] === "recordCheckpoint" && call[2] === "workflow_completed"));
+  assert.ok(calls.some((call) => call[0] === "recordCheckpoint" && call[2] === "replan_required"));
+  assert.equal(calls.some((call) => call[0] === "recordCheckpoint" && call[2] === "workflow_completed"), false);
 });
 
 test("auto-execution state drops blank chapters from skipped quality debt", () => {
@@ -2688,4 +2684,259 @@ test("runFromReady resolves pending state proposals before retrying full-book au
     [1, 1],
   ]);
   assert.ok(calls.some((call) => call[0] === "recordCheckpoint" && call[2] === "workflow_completed"));
+});
+
+test("runFromReady defers contentful pipeline-skip-eligible next chapter on no-generatable and advances", async () => {
+  const calls = [];
+  const deferFlags = JSON.stringify({
+    qualityLoop: {
+      overallStatus: "invalid",
+      recommendedAction: "patch_repair",
+      rootCauseCode: "draft_obligation_unmet",
+      terminalAction: "defer_and_continue",
+      signals: [{
+        artifactType: "prose_quality",
+        status: "invalid",
+        issueCodes: ["prose_system_hud"],
+      }],
+    },
+  });
+  let listPhase = "stuck";
+  const runtime = new NovelDirectorAutoExecutionRuntime({
+    novelContextService: {
+      async listChapters() {
+        if (listPhase === "after_gen") {
+          return [
+            withExecutionDetail({
+              id: "chapter-57",
+              order: 57,
+              content: "正文 57 有 L0 债",
+              generationState: "reviewed",
+              chapterStatus: "pending_review",
+              riskFlags: deferFlags,
+            }),
+            withExecutionDetail({
+              id: "chapter-58",
+              order: 58,
+              content: "正文 58",
+              generationState: "approved",
+              chapterStatus: "completed",
+              riskFlags: null,
+            }),
+          ];
+        }
+        return [
+          withExecutionDetail({
+            id: "chapter-57",
+            order: 57,
+            content: "正文 57 有 L0 债",
+            generationState: "reviewed",
+            chapterStatus: "pending_review",
+            riskFlags: deferFlags,
+          }),
+          withExecutionDetail({
+            id: "chapter-58",
+            order: 58,
+            content: "",
+            generationState: "planned",
+            chapterStatus: "unplanned",
+            riskFlags: null,
+          }),
+        ];
+      },
+    },
+    novelService: {
+      async startPipelineJob(_novelId, options) {
+        calls.push(["startPipelineJob", options.startOrder, options.endOrder]);
+        if (options.startOrder === 57) {
+          throw new Error("指定区间内没有可生成的章节。当前可用章节范围为第 57 章到第 58 章。");
+        }
+        return { id: "job-58", status: "queued" };
+      },
+      async findActivePipelineJobForRange() {
+        return null;
+      },
+      async getPipelineJobById(jobId) {
+        calls.push(["getPipelineJobById", jobId]);
+        listPhase = "after_gen";
+        return {
+          id: jobId,
+          status: "succeeded",
+          progress: 1,
+          currentStage: null,
+          currentItemLabel: null,
+          noticeSummary: null,
+          error: null,
+        };
+      },
+      async cancelPipelineJob() {
+        calls.push(["cancelPipelineJob"]);
+      },
+    },
+    workflowService: {
+      async bootstrapTask(input) {
+        calls.push([
+          "bootstrapTask",
+          input.seedPayload.autoExecution?.nextChapterOrder ?? null,
+          input.seedPayload.autoExecution?.skippedChapterOrders ?? [],
+          input.seedPayload.autoExecution?.remainingChapterCount ?? null,
+        ]);
+      },
+      async getTaskById() {
+        return { status: "running" };
+      },
+      async markTaskRunning() {
+        calls.push(["markTaskRunning"]);
+      },
+      async recordCheckpoint(taskId, input) {
+        calls.push([
+          "recordCheckpoint",
+          taskId,
+          input.checkpointType,
+          input.seedPayload.autoExecution?.skippedChapterOrders ?? [],
+          input.seedPayload.autoExecution?.nextChapterOrder ?? null,
+        ]);
+      },
+      async markTaskFailed(_taskId, message) {
+        calls.push(["markTaskFailed", message]);
+      },
+    },
+    buildDirectorSeedPayload(_request, _novelId, extra) {
+      return extra ?? {};
+    },
+  });
+
+  await runtime.runFromReady({
+    taskId: "task-auto-exec",
+    novelId: "novel-1",
+    request: buildRequest({ runMode: "full_book_autopilot" }),
+    existingState: {
+      enabled: true,
+      mode: "chapter_range",
+      autoReview: true,
+      autoRepair: true,
+      firstChapterId: "chapter-57",
+      startOrder: 57,
+      endOrder: 58,
+      totalChapterCount: 2,
+      nextChapterId: "chapter-57",
+      nextChapterOrder: 57,
+      remainingChapterCount: 2,
+      pipelineJobId: null,
+      pipelineStatus: null,
+    },
+  });
+
+  assert.equal(calls.some((call) => call[0] === "markTaskFailed"), false);
+  const startCalls = calls.filter((call) => call[0] === "startPipelineJob").map((call) => call.slice(1));
+  assert.deepEqual(startCalls, [
+    [57, 57],
+    [58, 58],
+  ]);
+  assert.ok(
+    calls.some((call) => (
+      call[0] === "bootstrapTask"
+      && Array.isArray(call[2])
+      && call[2].includes(57)
+    )),
+    "chapter 57 should be registered as skipped debt",
+  );
+  assert.ok(calls.some((call) => call[0] === "recordCheckpoint" && call[2] === "workflow_completed"));
+});
+
+test("runFromReady still fails no-generatable when stuck next chapter is replan-required", async () => {
+  const calls = [];
+  const replanFlags = JSON.stringify({
+    qualityLoop: {
+      overallStatus: "invalid",
+      recommendedAction: "replan",
+      rootCauseCode: "replan_required",
+      terminalAction: "defer_and_continue",
+    },
+  });
+  const runtime = new NovelDirectorAutoExecutionRuntime({
+    novelContextService: {
+      async listChapters() {
+        return [
+          withExecutionDetail({
+            id: "chapter-57",
+            order: 57,
+            content: "正文 57 replan",
+            generationState: "reviewed",
+            chapterStatus: "pending_review",
+            riskFlags: replanFlags,
+          }),
+          withExecutionDetail({
+            id: "chapter-58",
+            order: 58,
+            content: "",
+            generationState: "planned",
+            chapterStatus: "unplanned",
+            riskFlags: null,
+          }),
+        ];
+      },
+    },
+    novelService: {
+      async startPipelineJob(_novelId, options) {
+        calls.push(["startPipelineJob", options.startOrder, options.endOrder]);
+        throw new Error("指定区间内没有可生成的章节。当前可用章节范围为第 57 章到第 58 章。");
+      },
+      async findActivePipelineJobForRange() {
+        return null;
+      },
+      async getPipelineJobById() {
+        throw new Error("should not inspect pipeline job");
+      },
+      async cancelPipelineJob() {
+        calls.push(["cancelPipelineJob"]);
+      },
+    },
+    workflowService: {
+      async bootstrapTask(input) {
+        calls.push(["bootstrapTask", input.seedPayload.autoExecution?.nextChapterOrder ?? null]);
+      },
+      async getTaskById() {
+        return { status: "running" };
+      },
+      async markTaskRunning() {
+        calls.push(["markTaskRunning"]);
+      },
+      async recordCheckpoint(taskId, input) {
+        calls.push(["recordCheckpoint", taskId, input.checkpointType]);
+      },
+      async markTaskFailed(_taskId, message) {
+        calls.push(["markTaskFailed", message]);
+      },
+    },
+    buildDirectorSeedPayload(_request, _novelId, extra) {
+      return extra ?? {};
+    },
+  });
+
+  await assert.rejects(
+    () => runtime.runFromReady({
+      taskId: "task-auto-exec",
+      novelId: "novel-1",
+      request: buildRequest({ runMode: "full_book_autopilot" }),
+      existingState: {
+        enabled: true,
+        mode: "chapter_range",
+        firstChapterId: "chapter-57",
+        startOrder: 57,
+        endOrder: 58,
+        totalChapterCount: 2,
+        nextChapterId: "chapter-57",
+        nextChapterOrder: 57,
+        remainingChapterCount: 2,
+        pipelineJobId: null,
+        pipelineStatus: null,
+      },
+    }),
+    /指定区间内没有可生成的章节/,
+  );
+  assert.deepEqual(calls.filter((call) => call[0] === "startPipelineJob").map((call) => call.slice(1)), [
+    [57, 57],
+  ]);
+  assert.equal(calls.some((call) => call[0] === "recordCheckpoint" && call[2] === "workflow_completed"), false);
 });

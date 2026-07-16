@@ -250,6 +250,37 @@ function isDirectorAutoExecutionChapterCompleted(chapter: DirectorAutoExecutionC
 }
 
 /**
+ * 与 pipelineExecutionHelpers.buildSkipCompletedChapterWhere 的 defer 片段对齐：
+ * 有正文 + terminalAction=defer_and_continue，且无 replan 标记时，管线不会再生成该章。
+ * AE 仍可因 non-deferrable L0 将其视为未 processed；两者不一致时必须能登记 skipped，否则死锁。
+ */
+const PIPELINE_SKIP_TERMINAL_CONTINUE_FRAGMENT = '"terminalAction":"defer_and_continue"';
+const PIPELINE_SKIP_REPLAN_REQUIRED_FRAGMENT = '"rootCauseCode":"replan_required"';
+const PIPELINE_SKIP_REPLAN_ACTION_FRAGMENT = '"recommendedAction":"replan"';
+
+export function isDirectorAutoExecutionPipelineSkipEligibleChapter(
+  chapter: DirectorAutoExecutionChapterRef,
+): boolean {
+  if (!hasDirectorAutoExecutionChapterContent(chapter)) {
+    return false;
+  }
+  if (isDirectorAutoExecutionChapterCompleted(chapter)) {
+    return true;
+  }
+  const riskFlags = typeof chapter.riskFlags === "string" ? chapter.riskFlags : "";
+  if (!riskFlags.includes(PIPELINE_SKIP_TERMINAL_CONTINUE_FRAGMENT)) {
+    return false;
+  }
+  if (
+    riskFlags.includes(PIPELINE_SKIP_REPLAN_REQUIRED_FRAGMENT)
+    || riskFlags.includes(PIPELINE_SKIP_REPLAN_ACTION_FRAGMENT)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/**
  * blocking replan / manual_gate 质量债不得视为 auto-execution 已处理，否则导演会跳过并继续堆章。
  * 始终根据 riskFlags 内容分类：缺字段 / null / 空串 / 无 qualityLoop → 不阻断。
  * 不再用 hasOwnProperty 旁路——调用方须显式加载 riskFlags（listChapters 全行已含该列）。
@@ -286,8 +317,15 @@ export function canPreserveDirectorAutoExecutionSkippedChapter(chapter: Director
   if (!hasDirectorAutoExecutionChapterContent(chapter)) {
     return false;
   }
-  return chapter.chapterStatus === "needs_repair"
-    && (chapter.generationState === "reviewed" || chapter.generationState === "repaired");
+  if (
+    chapter.chapterStatus === "needs_repair"
+    && (chapter.generationState === "reviewed" || chapter.generationState === "repaired")
+  ) {
+    return true;
+  }
+  // 有正文且管线 skipCompleted 会跳过（defer_and_continue / 无 replan）时允许登记 skipped：
+  // 即使 AE 因 non-deferrable L0 仍视为未 processed，也不得挡后续空章生成。
+  return isDirectorAutoExecutionPipelineSkipEligibleChapter(chapter);
 }
 
 function uniqueStrings(values: Array<string | null | undefined>): string[] {
