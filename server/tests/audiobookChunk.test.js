@@ -280,18 +280,20 @@ const {
   verifyAudiobookMediaAccess,
 } = require("../dist/services/audiobook/audiobookMediaAccess.js");
 
-test("wipeChapterAudioArtifacts removes chapter audio and full-book only", () => {
+test("wipeChapterAudioArtifacts removes chapter audio, layout fingerprint and full-book only", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ab-wipe-"));
   try {
     const chapterId = "ch01";
     ensureChapterAudioDir(root, chapterId);
     const chunk = resolveChunkAudioPath(root, chapterId, 0);
     const chapterWav = resolveChapterAudioPath(root, chapterId);
+    const layoutFp = path.join(path.dirname(chapterWav), "chunk-layout.sha1");
     const full = resolveFullBookAudioPath(root);
     const fullM4b = path.join(root, "full-book.m4b");
     const ann = resolveChapterAnnotationPath(root, chapterId);
     fs.writeFileSync(chunk, Buffer.alloc(48));
     fs.writeFileSync(chapterWav, Buffer.alloc(48));
+    fs.writeFileSync(layoutFp, "deadbeef\n");
     fs.writeFileSync(full, Buffer.alloc(48));
     fs.writeFileSync(fullM4b, Buffer.alloc(48));
     fs.mkdirSync(path.dirname(ann), { recursive: true });
@@ -300,6 +302,7 @@ test("wipeChapterAudioArtifacts removes chapter audio and full-book only", () =>
     wipeChapterAudioArtifacts(root, chapterId);
     assert.equal(fs.existsSync(chunk), false);
     assert.equal(fs.existsSync(chapterWav), false);
+    assert.equal(fs.existsSync(layoutFp), false);
     assert.equal(fs.existsSync(full), false);
     assert.equal(fs.existsSync(fullM4b), false);
     assert.equal(fs.existsSync(ann), true);

@@ -11,6 +11,7 @@ import {
   type AudiobookVoicePlanItem,
   type AudiobookVoiceReadinessSummary,
   type CharacterVoicePreviewStatus,
+  type DeliveryStyleMode,
 } from "@ai-novel/shared/types/audiobook";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -649,22 +650,52 @@ function TaskAnnotationsPanel(props: {
                   <div className="mt-2 text-xs leading-5 text-amber-800">回退：{annotation.error}</div>
                 ) : null}
                 <div className="mt-2 space-y-1">
-                  {annotation.segments.slice(0, 6).map((segment) => (
-                    <div
-                      key={`${annotation.chapterId}-${segment.index}`}
-                      className="text-xs leading-5 text-muted-foreground"
-                    >
-                      <span className="font-medium text-foreground">
-                        [{segment.speakerLabel}/{segment.voice}]
-                      </span>
-                      {" "}
-                      {segment.text.length > 80 ? `${segment.text.slice(0, 80)}…` : segment.text}
-                    </div>
-                  ))}
+                  {annotation.segments.slice(0, 6).map((segment) => {
+                    const emotion = segment.delivery?.primaryEmotion;
+                    const intensity = segment.delivery?.intensity;
+                    const styleHint = segment.style?.includes("本句表演")
+                      || segment.style?.includes("本句叙述")
+                      || segment.designPrompt?.includes("表演指令")
+                      ? "已注入表演"
+                      : null;
+                    return (
+                      <div
+                        key={`${annotation.chapterId}-${segment.index}`}
+                        className="text-xs leading-5 text-muted-foreground"
+                      >
+                        <span className="font-medium text-foreground">
+                          [{segment.speakerLabel}/{segment.voice}]
+                        </span>
+                        {emotion ? (
+                          <span className="ml-1 text-violet-700">
+                            {emotion}
+                            {intensity ? `/${intensity}` : ""}
+                          </span>
+                        ) : null}
+                        {styleHint ? (
+                          <span className="ml-1 text-emerald-700">{styleHint}</span>
+                        ) : null}
+                        {" "}
+                        {segment.text.length > 80 ? `${segment.text.slice(0, 80)}…` : segment.text}
+                      </div>
+                    );
+                  })}
                   {annotation.segments.length > 6 ? (
                     <div className="text-xs text-muted-foreground">
                       …另有 {annotation.segments.length - 6} 段
                     </div>
+                  ) : null}
+                  {annotation.deliveryStats ? (
+                    <div className="pt-1 text-[11px] leading-5 text-muted-foreground">
+                      表演：采用 {annotation.deliveryStats.deliveryApplied}
+                      /角色段 {annotation.deliveryStats.characterSegmentCount}
+                      {annotation.deliveryStats.deliveryPeeled > 0
+                        ? ` · 剥除 ${annotation.deliveryStats.deliveryPeeled}`
+                        : ""}
+                      {annotation.contentTruncated ? " · 正文截断 28k" : ""}
+                    </div>
+                  ) : annotation.contentTruncated ? (
+                    <div className="pt-1 text-[11px] leading-5 text-amber-800">正文截断 28k</div>
                   ) : null}
                 </div>
               </div>
@@ -705,6 +736,8 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
   const [voicePlanOverwrite, setVoicePlanOverwrite] = useState(false);
   /** D8：可选全量试听硬门禁（默认关，仅 voice 硬拦） */
   const [requireReadyPreview, setRequireReadyPreview] = useState(false);
+  /** 段级语境表演；默认 off，不污染固定试听/readiness */
+  const [deliveryStyleMode, setDeliveryStyleMode] = useState<DeliveryStyleMode>("off");
   /** D18 SoT：就绪看板回传；create 门禁 / 缺音色 banner 优先用它 */
   const [readinessSummary, setReadinessSummary] = useState<AudiobookVoiceReadinessSummary | null>(null);
   const [previewAudioUrl, setPreviewAudioUrl] = useState<string | null>(null);
@@ -1031,6 +1064,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
       endChapterOrder: scopeMode === "range" ? Number(endOrder) : undefined,
       narratorVoice: narrator,
       requireReadyPreview: requireReadyPreview || undefined,
+      deliveryStyleMode: deliveryStyleMode === "off" ? undefined : deliveryStyleMode,
     };
   }
 
@@ -1278,6 +1312,23 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
           过期可播旧版，合成任务不强制 ready。）
         </span>
       </label>
+
+      <div className="space-y-2 rounded-xl border border-border/70 bg-muted/10 px-3 py-2">
+        <div className="text-xs font-medium text-foreground">段级语境表演（实验）</div>
+        <div className="text-xs leading-5 text-muted-foreground">
+          默认关闭。开启后标注会为角色对白注入语境表演到 MiMo user；固定试听/就绪看板仍只用角色基线。
+          off→characters 后需「重标+合成」才生效。
+        </div>
+        <SelectControl
+          className="w-full rounded-md border bg-background p-2 text-sm"
+          value={deliveryStyleMode}
+          onChange={(event) => setDeliveryStyleMode(event.target.value as DeliveryStyleMode)}
+        >
+          <option value="off">关闭（默认，与旧听感一致）</option>
+          <option value="characters">角色对白表演</option>
+          <option value="all">角色 + 旁白轻量叙述</option>
+        </SelectControl>
+      </div>
 
       <div className="flex flex-wrap gap-2">
         <Button

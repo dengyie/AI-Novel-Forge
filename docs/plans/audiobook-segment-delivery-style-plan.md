@@ -1,9 +1,9 @@
 # 有声书 · 段级语境表演（Delivery Style）开发计划
 
-> 状态：设计稿 · 2026-07-16 · **R2 修订（深度 review 后）**  
+> 状态：Phase 0–2 已实现 · 2026-07-16 · **R2 修订（深度 review 后）**  
 > 范围：角色对白（及可选旁白）在 **合成前** 根据上下文分析情绪与表演因素，生成 **可注入 MiMo `user`/style 通道** 的提示词。  
 > 产品 SoT：`[[ainovel 小说转有声书 产品形态]]` · 协议 SoT：`[[ainovel 小说转有声书 TTS 经验]]` · 生产 tip 以运维手册为准。  
-> 本计划 **只定义实现边界**；未获准前不改生产合成默认路径。  
+> **默认 `deliveryStyleMode=off`**；听测通过前勿改生产默认。  
 > Review 结论已吸收：指纹 / 失败隔离 / Core 字段 / design 契约 / 合并桶 / deliveryLine 校验 / roster 声线 / 存储 / 听感门禁。
 
 ---
@@ -454,10 +454,10 @@ readiness / 固定试听：**永不**展示或使用段级 delivery。
 
 ### Phase 0 — 纯函数 + 契约（默认路径无行为变更）
 
-- [ ] types：`AudiobookSegmentDelivery` Core/Extended、`DeliveryStyleMode`、segment 扩展字段  
-- [ ] `deliveryStyle.ts`：normalize / validateDeliveryLine / compileDeliveryLine / deliveryMergeKey / resolveSynthesizeInput  
-- [ ] **指纹函数升级设计**（可先单测纯函数 `fingerprintParts`，Phase1 挂 Pipeline）  
-- [ ] 单测：  
+- [x] types：`AudiobookSegmentDelivery` Core/Extended、`DeliveryStyleMode`、segment 扩展字段  
+- [x] `deliveryStyle.ts`：normalize / validateDeliveryLine / compileDeliveryLine / deliveryMergeKey / resolveSynthesizeInput  
+- [x] **指纹函数升级设计**（可先单测纯函数 `fingerprintParts`，Phase1 挂 Pipeline）  
+- [x] 单测：  
   - 基线-only（off）  
   - Core 全字段 compile  
   - 坏 deliveryLine → 重算  
@@ -466,22 +466,22 @@ readiness / 固定试听：**永不**展示或使用段级 delivery。
   - mergeKey 同桶/异桶  
   - 超长 280 截断、base 优先  
   - 过戏词 strip  
-- [ ] 金标准样例 ≥10：**好例 + 坏例→重算**（源世界风格）
+- [x] 金标准样例 ≥10：**好例 + 坏例→重算**（源世界风格）
 
 **验收**：单测绿；生产默认 off 路径未接线则行为不变。
 
 ### Phase 1 — 标注 v2 + 管线接线
 
-- [ ] annotate schema：delivery **optional**；normalize 剥坏表演  
-- [ ] roster 声线摘要进 prompt  
-- [ ] AnnotationService：mode 分支；baseStyle/baseDesignPrompt；resolve；mergeKey  
-- [ ] `canMergeSegments` 改用 mergeKey（+ 音色字段）  
-- [ ] **Pipeline fingerprint 纳入 style+designPrompt**  
-- [ ] synthesize 只吃 `resolveSynthesizeInput` 结果  
-- [ ] createTask + env 开关，**默认 off**  
-- [ ] reannotate / resynthesize 语义按 D15  
-- [ ] 集成测：假 LLM 坏 delivery 不整章旁白；异桶不合并；指纹变则重合成  
-- [ ] **听感门禁**：同章 off vs characters 各抽样 ≥2 角色 chunk 人工听
+- [x] annotate schema：delivery **optional**；normalize 剥坏表演  
+- [x] roster 声线摘要进 prompt  
+- [x] AnnotationService：mode 分支；baseStyle/baseDesignPrompt；resolve；mergeKey  
+- [x] `canMergeSegments` 改用 mergeKey（+ 音色字段）  
+- [x] **Pipeline fingerprint 纳入 style+designPrompt**  
+- [x] synthesize 只吃 `resolveSynthesizeInput` 结果  
+- [x] createTask + env 开关，**默认 off**  
+- [x] reannotate / resynthesize 语义按 D15  
+- [x] 集成测：假 LLM 坏 delivery 不整章旁白；异桶不合并；指纹变则重合成  
+- [ ] **听感门禁**：同章 off vs characters 各抽样 ≥2 角色 chunk 人工听（Manual-required）
 
 **验收**：
 
@@ -494,11 +494,11 @@ readiness / 固定试听：**永不**展示或使用段级 delivery。
 
 ### Phase 2 — 质量与连续
 
-- [ ] continuityFrom 服务端补全  
-- [ ] mode=all 旁白轻量  
-- [ ] 标注 UI  
-- [ ] 指标：fallbackRate、段均 user 长、merge 后 chunk 倍率、28k 截断章标记  
-- [ ] 可选 bracket 实验（默认关）
+- [x] continuityFrom 服务端补全  
+- [x] mode=all 旁白轻量  
+- [x] 标注 UI（创建任务 mode 选择 + 标注列表 emotion/intensity/stats）  
+- [x] 指标：fallbackRate、段均 user 长、merge 后 chunk 倍率、28k 截断章标记  
+- [ ] 可选 bracket 实验（默认关 · backlog）
 
 ### 明确不做
 

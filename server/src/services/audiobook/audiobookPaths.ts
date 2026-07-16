@@ -188,14 +188,19 @@ export function safeUnlink(filePath: string): void {
 }
 
 /**
- * 清除单章音频产物（chunk + chapter.wav + .part），保留 annotations 由调用方决定。
+ * 清除单章音频产物（chunk + chapter.wav + layout 指纹 + .part），保留 annotations 由调用方决定。
  * 同时删除全书 full-book.wav（章变则全书必须重拼）。
  */
 export function wipeChapterAudioArtifacts(taskDir: string, chapterId: string): void {
   const chapterDir = resolveChapterAudioDir(taskDir, chapterId);
   if (fs.existsSync(chapterDir)) {
     for (const name of fs.readdirSync(chapterDir)) {
-      if (name.startsWith("chunk-") || name === "chapter.wav" || name.endsWith(".part")) {
+      if (
+        name.startsWith("chunk-")
+        || name === "chapter.wav"
+        || name === "chunk-layout.sha1"
+        || name.endsWith(".part")
+      ) {
         safeUnlink(path.join(chapterDir, name));
       }
     }

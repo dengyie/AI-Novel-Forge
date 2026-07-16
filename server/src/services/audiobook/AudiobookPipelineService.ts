@@ -265,6 +265,20 @@ function collectQualityWarnings(annotations: AudiobookChapterAnnotation[]): stri
     if (annotation.error?.trim()) {
       warnings.push(`第 ${annotation.chapterOrder} 章：${annotation.error.trim()}`);
     }
+    if (annotation.contentTruncated) {
+      warnings.push(`第 ${annotation.chapterOrder} 章：正文超 28k，标注仅见前部`);
+    }
+    const stats = annotation.deliveryStats;
+    if (stats && stats.deliveryPeeled > 0) {
+      warnings.push(
+        `第 ${annotation.chapterOrder} 章：剥除 ${stats.deliveryPeeled} 段坏表演（已回退静态 style）`,
+      );
+    }
+    if (stats && stats.mergeChunkMultiplier != null && stats.mergeChunkMultiplier > 1.8) {
+      warnings.push(
+        `第 ${annotation.chapterOrder} 章：chunk 倍率 ${stats.mergeChunkMultiplier}（表演分桶偏碎）`,
+      );
+    }
   }
   return warnings;
 }
