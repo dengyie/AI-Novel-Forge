@@ -442,6 +442,10 @@ export interface AudiobookVoicePlanSuggestResult {
     slotOverrideCount: number;
     /** onlyMissing 时已绑定 design 无结构化标签、用卡字段推断占槽 */
     seedInferredCount: number;
+    /** design 文案平均长度（可选观测） */
+    designPromptAvgLen?: number;
+    /** reason 含 archetype: 的 design 项 */
+    archetypeHitCount?: number;
   };
 }
 

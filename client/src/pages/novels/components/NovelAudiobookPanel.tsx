@@ -910,6 +910,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
   const [overrideVoice, setOverrideVoice] = useState("");
   const [message, setMessage] = useState("");
   const [voicePlanItems, setVoicePlanItems] = useState<AudiobookVoicePlanItem[]>([]);
+  const [expandedPlanDesignIds, setExpandedPlanDesignIds] = useState<Record<string, boolean>>({});
   const [voicePlanOverwrite, setVoicePlanOverwrite] = useState(false);
   /** D8：可选全量试听硬门禁（默认关，仅 voice 硬拦） */
   const [requireReadyPreview, setRequireReadyPreview] = useState(false);
@@ -1365,9 +1366,28 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
                   </div>
                   <div className="text-xs leading-5 text-muted-foreground">
                     {item.reason}
-                    {item.ttsMode === "design" && item.ttsDesignPrompt
-                      ? ` · ${item.ttsDesignPrompt.slice(0, 80)}${item.ttsDesignPrompt.length > 80 ? "…" : ""}`
-                      : ""}
+                    {item.ttsMode === "design" && item.ttsDesignPrompt ? (
+                      <>
+                        {" · "}
+                        {expandedPlanDesignIds[item.characterId] || item.ttsDesignPrompt.length <= 80
+                          ? item.ttsDesignPrompt
+                          : `${item.ttsDesignPrompt.slice(0, 80)}…`}
+                        {item.ttsDesignPrompt.length > 80 ? (
+                          <button
+                            type="button"
+                            className="ml-1 text-[11px] text-primary underline-offset-2 hover:underline"
+                            onClick={() =>
+                              setExpandedPlanDesignIds((prev) => ({
+                                ...prev,
+                                [item.characterId]: !prev[item.characterId],
+                              }))
+                            }
+                          >
+                            {expandedPlanDesignIds[item.characterId] ? "收起" : "展开全文"}
+                          </button>
+                        ) : null}
+                      </>
+                    ) : null}
                   </div>
                 </div>
                 <Button

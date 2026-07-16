@@ -4,6 +4,7 @@ import {
   type AudiobookVoicePlanStrategy,
   type MimoTtsPresetVoice,
 } from "@ai-novel/shared/types/audiobook";
+import { pickDesignPromptArchetype } from "./designPromptArchetypes";
 
 export type VoiceGenderBucket = "male" | "female" | "unknown";
 export type VoiceAgeBucket = "youth" | "adult" | "elder" | "unknown";
@@ -911,6 +912,12 @@ export function planCharacterVoices(input: {
       const neighbor = neighborSlot ? neighborLabel(neighborSlot) : null;
       const slotDiverged = !slotsEqual(character.preferredSlot, allocated.slot);
 
+      const archetype = pickDesignPromptArchetype({
+        character,
+        gender: character.genderBucket,
+        age: character.ageBucket,
+        cluster: character.cluster,
+      });
       ttsDesignPrompt = buildDesignPrompt({
         character,
         gender: character.genderBucket,
@@ -920,7 +927,12 @@ export function planCharacterVoices(input: {
         softCollision,
         neighborSlotLabel: softCollision ? neighbor : null,
         cluster: character.cluster,
+        archetypeTexturePhrase: archetype?.texturePhrase ?? null,
+        archetypeUseCase: archetype?.useCase ?? null,
       });
+      if (archetype) {
+        reason = `${reason} archetype:${archetype.id}`.trim();
+      }
 
       markSlotOccupied(occupiedSlots, occupiedSlotByKey, allocated.key, allocated.slot);
 
