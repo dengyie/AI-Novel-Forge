@@ -1,7 +1,7 @@
 # 有声书听感与可用性 P0
 
 **分支**：`feat/audiobook-design-prompt-quality`（基 tip cea1f2a design-prompt v1.2）  
-**状态**：实施中  
+**状态**：已完成（分支 tip，未 merge/deploy）  
 **不做**：multi-backend 合并、merge/deploy、readiness 落库、响度 loudnorm 大改
 
 ## 目标
@@ -25,3 +25,12 @@
 
 - ≥3 主角真机试听（成书路径，characters 模式）
 - 生产 cutover / merge 另令
+
+
+## 交付提交
+
+- `cb69031` feat(phase-1): surface unresolved speakers
+- `e56085e` feat(phase-2): synth SoT + default characters
+- `b033e90` feat(phase-3): hard punctuation split preference
+
+验证：shared/server build 绿；audiobook 相关 node:test 109 pass。

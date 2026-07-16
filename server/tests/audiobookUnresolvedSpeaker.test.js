@@ -3,7 +3,6 @@ const assert = require("node:assert/strict");
 
 const {
   computeDeliveryChapterStats,
-  applyDeliveryToSegment,
 } = require("../dist/services/audiobook/deliveryStyle.js");
 const {
   resolveChunkSynthesizeFields,
