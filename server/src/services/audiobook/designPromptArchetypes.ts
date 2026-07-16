@@ -108,6 +108,42 @@ export const DESIGN_PROMPT_ARCHETYPES: DesignPromptArchetype[] = [
     useCase: "主角团对白",
   },
   {
+    id: "cast-ally-male-adult",
+    gender: "male",
+    age: "adult",
+    cluster: "cast",
+    roleHints: ["伙伴", "兄弟", "ally", "好友", "配角"],
+    texturePhrase: "中性干净略稳",
+    useCase: "主角团对白",
+  },
+  {
+    id: "cast-ally-female-adult",
+    gender: "female",
+    age: "adult",
+    cluster: "cast",
+    roleHints: ["闺蜜", "伙伴", "ally", "好友", "配角"],
+    texturePhrase: "清亮稳、不甜腻",
+    useCase: "主角团对白",
+  },
+  {
+    id: "cast-generic-male-adult",
+    gender: "male",
+    age: "adult",
+    cluster: "cast",
+    roleHints: [],
+    texturePhrase: "中性干净",
+    useCase: "主角团对白",
+  },
+  {
+    id: "cast-generic-female-adult",
+    gender: "female",
+    age: "adult",
+    cluster: "cast",
+    roleHints: [],
+    texturePhrase: "中性干净",
+    useCase: "主角团对白",
+  },
+  {
     id: "cast-love-female",
     gender: "female",
     age: "adult",
@@ -235,22 +271,42 @@ export const DESIGN_PROMPT_ARCHETYPES: DesignPromptArchetype[] = [
   },
 ];
 
+/** 角色/功能信号；不含 characterName，避免专名误抬分 */
 function roleBlob(character: VoicePlannerCharacterInput): string {
   return [
     character.role,
     character.castRole,
     character.storyFunction,
-    character.characterName,
   ]
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
 }
 
+/** 强立场种子：无 roleHints 命中时降权，避免 ally 落到反派 */
+const STRONG_STANCE_ARCHETYPE_IDS = new Set([
+  "cast-antagonist-male",
+  "cast-antagonist-female",
+  "cast-pressure-male",
+  "cast-foil-female",
+  "cast-catalyst-any",
+  "cast-strategist-male",
+  "cast-strategist-female",
+  "cast-mentor-elder-male",
+  "cast-mentor-elder-female",
+  "cast-love-female",
+  "cast-love-male",
+]);
+
+/**
+ * 弱卡：无 voiceTexture，且气质描述不足。
+ * 有 texture 或 personality/firstImpression 字数 ≥4 视为已有卡面声线/气质，不补 archetype。
+ */
 function isWeakCard(character: VoicePlannerCharacterInput): boolean {
   const texture = character.voiceTexture?.trim() || "";
+  if (texture) return false;
   const personality = (character.personality || character.firstImpression || "").trim();
-  return !texture && personality.length < 8;
+  return personality.length < 4;
 }
 
 export function scoreDesignPromptArchetype(
@@ -280,12 +336,25 @@ export function scoreDesignPromptArchetype(
   }
 
   const blob = roleBlob(input.character);
+  let hintHit = false;
   for (const hint of arch.roleHints) {
     if (hint && blob.includes(hint.toLowerCase())) {
-      score += 3;
+      score += 5;
+      hintHit = true;
       break;
     }
   }
+
+  // 无任何 roleHints 的通用种子：弱补分，避免被强立场表序抢先
+  if (arch.roleHints.length === 0 && arch.cluster === input.cluster) {
+    score += 2;
+  }
+
+  // 强立场种子必须有 roleHints 命中；否则大幅降权
+  if (STRONG_STANCE_ARCHETYPE_IDS.has(arch.id) && !hintHit) {
+    score -= 8;
+  }
+
   return score;
 }
 
