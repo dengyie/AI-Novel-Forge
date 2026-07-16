@@ -171,6 +171,13 @@ export interface AudiobookDialogueSegment {
    * canMerge 用此字段（及音色字段），不用全文 style 字符串。
    */
   deliveryMergeKey?: string | null;
+  /**
+   * 标注时 speaker 未匹配角色卡，已强制旁白音色出声。
+   * 仅审计/UI/质量警告；合成仍走旁白 voice。
+   */
+  speakerUnresolved?: boolean;
+  /** 模型原始 speaker 名（未匹配时保留，便于补 alias） */
+  unresolvedSpeakerName?: string | null;
 }
 
 /** 章级表演质量指标（annotate 后写入，供 UI / 听测门禁） */
@@ -196,6 +203,10 @@ export interface AudiobookDeliveryChapterStats {
   avgResolvedUserLen: number;
   /** expand 后 chunk 数 / 段数；>1 表示被切碎 */
   mergeChunkMultiplier?: number | null;
+  /** 标注时未匹配角色卡、强制旁白出声的段数 */
+  unresolvedSpeakerCount?: number;
+  /** 未匹配原始名（去重，最多约 8 个，供警告/UI） */
+  unresolvedSpeakerNames?: string[];
 }
 
 export interface AudiobookChapterAnnotation {

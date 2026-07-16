@@ -824,7 +824,7 @@ function TaskAnnotationsPanel(props: {
                               className="text-xs leading-5 text-muted-foreground"
                             >
                               <span className="font-medium text-foreground">
-                                [{segment.speakerLabel}/{segment.voice}]
+                                [{segment.speakerLabel}{segment.speakerUnresolved ? " · 未匹配旁白" : ""}/{segment.voice}]
                               </span>
                               {emotion ? (
                                 <span className="ml-1 text-violet-700">
@@ -868,6 +868,8 @@ function TaskAnnotationsPanel(props: {
                         : ""}
                       {annotation.deliveryStats.deliveryPeeled > 0
                         ? ` · 剥除 ${annotation.deliveryStats.deliveryPeeled}`
+                        : ""}{(annotation.deliveryStats.unresolvedSpeakerCount ?? 0) > 0
+                        ? ` · 未匹配 ${annotation.deliveryStats.unresolvedSpeakerCount}`
                         : ""}
                       {annotation.contentTruncated ? " · 正文截断 28k" : ""}
                     </div>

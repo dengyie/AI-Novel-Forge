@@ -319,12 +319,17 @@ export class AudiobookAnnotationService {
 
         // 未匹配角色名：已从 character 分支 fallthrough，按旁白落段并强制剥 delivery
         const unmatchedCharacterForcedNarrator = raw.speakerKind === "character";
+        const rawSpeakerName = typeof raw.speakerName === "string"
+          ? raw.speakerName.trim()
+          : "";
 
         const narratorBase = buildBaseSegment({
           index: segIndex++,
           speakerKind: "narrator",
           characterId: null,
-          speakerLabel: "旁白",
+          speakerLabel: unmatchedCharacterForcedNarrator && rawSpeakerName
+            ? rawSpeakerName
+            : "旁白",
           text,
           ttsMode: "preset",
           voice: input.narrator.voice,
@@ -332,7 +337,7 @@ export class AudiobookAnnotationService {
           baseDesignPrompt: null,
           refAudioPath: null,
         });
-        const narratorSeg = unmatchedCharacterForcedNarrator
+        let narratorSeg = unmatchedCharacterForcedNarrator
           ? applyDeliveryToSegment(narratorBase, null, {
               deliveryStyleMode: "off",
               baseStyle: input.narrator.style,
@@ -349,6 +354,13 @@ export class AudiobookAnnotationService {
                 baseStyle: input.narrator.style,
                 baseDesignPrompt: null,
               });
+        if (unmatchedCharacterForcedNarrator) {
+          narratorSeg = {
+            ...narratorSeg,
+            speakerUnresolved: true,
+            unresolvedSpeakerName: rawSpeakerName || null,
+          };
+        }
         if (unmatchedCharacterForcedNarrator && hadRawDelivery) {
           peeledCount += 1;
         } else if (
