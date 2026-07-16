@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type {
   AudiobookChapterAnnotation,
   AudiobookCharacterVoiceConfig,
@@ -17,6 +18,12 @@ import {
   shouldApplyDelivery,
 } from "./deliveryStyle";
 import { expandSegmentsToChunkJobs } from "./audiobookChunk";
+
+/** 标注缓存用正文指纹：trim + CRLF→LF 后 sha1 前 16 hex。 */
+export function hashAudiobookChapterContent(content: string | null | undefined): string {
+  const normalized = (content ?? "").replace(/\r\n/g, "\n").trim();
+  return createHash("sha1").update(normalized, "utf8").digest("hex").slice(0, 16);
+}
 
 export interface AnnotateChapterInput {
   chapterId: string;
@@ -164,6 +171,7 @@ export function buildNarratorOnlyAnnotation(input: {
     annotatedAt: new Date().toISOString(),
     error: input.error ?? (text ? null : "章节正文为空。"),
     deliveryStyleMode: "off",
+    contentSha1: hashAudiobookChapterContent(input.chapterContent),
   };
 }
 
@@ -381,6 +389,7 @@ export class AudiobookAnnotationService {
         contentTruncated: contentTruncated || undefined,
         deliveryStats,
         deliveryStyleMode,
+        contentSha1: hashAudiobookChapterContent(content),
       };
     } catch (error) {
       if (input.signal?.aborted) {

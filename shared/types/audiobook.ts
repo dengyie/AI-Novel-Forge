@@ -214,6 +214,11 @@ export interface AudiobookChapterAnnotation {
    * resume 时若与任务 progressJson 不一致，应 reannotate 而非盲用旧段。
    */
   deliveryStyleMode?: DeliveryStyleMode | null;
+  /**
+   * 标注时章节正文 sha1 前 16 hex（trim + \n 归一后）。
+   * resume 时与当前 chapter.content 不一致则 reannotate，避免改稿后盲用旧音。
+   */
+  contentSha1?: string | null;
 }
 
 export interface CreateAudiobookTaskInput {
