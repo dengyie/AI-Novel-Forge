@@ -11,6 +11,8 @@ const {
   allocateVoiceSlot,
   buildDesignPrompt,
   slotKey,
+  parseSlotFromDesignPrompt,
+  slotsEqual,
 } = require("../dist/services/audiobook/audiobookVoicePlanner.js");
 
 test("inferGenderBucket uses explicit gender and text hints", () => {
@@ -118,7 +120,7 @@ test("planCharacterVoices differentiates male/female presets and balances load",
   assert.equal(maleVoices.size >= 2, true);
 });
 
-test("auto promotes design for important characters with voiceTexture (no 70/80 dead zone)", () => {
+test("auto promotes design for all important characters with voiceTexture (no 70/80 dead zone)", () => {
   const { items } = planCharacterVoices({
     onlyMissing: true,
     strategy: "auto",
@@ -144,10 +146,9 @@ test("auto promotes design for important characters with voiceTexture (no 70/80 
   });
 
   assert.equal(items.length, 2);
-  // protagonist 80 + texture → design；antagonist 70+texture+8=至少 70+ → design
-  const designItems = items.filter((i) => i.ttsMode === "design");
-  assert.equal(designItems.length >= 1, true);
-  for (const item of designItems) {
+  // protagonist ≥70+texture；antagonist 70+texture → 两者均 design
+  assert.equal(items.every((i) => i.ttsMode === "design"), true);
+  for (const item of items) {
     assert.equal(Boolean(item.ttsDesignPrompt && item.ttsDesignPrompt.length > 8), true);
     assert.match(item.ttsDesignPrompt, /【声线】/);
     assert.match(item.ttsDesignPrompt, /【互斥】/);
@@ -241,8 +242,46 @@ test("prefer_design allocates distinct slots for same-gender cast when possible"
     const energy = item.ttsDesignPrompt.match(/气息([^，\n]+)/)?.[1];
     return `${pitch}|${texture}|${energy}`;
   });
-  // 同质输入应通过槽位扰动拉开，至少 2 种组合
-  assert.equal(new Set(keys).size >= 2, true);
+  // 同质输入应通过槽位扰动拉开；4 人池未尽时应 4 种组合
+  assert.equal(new Set(keys).size, 4);
+});
+
+test("slot override does not put contradictory texture into 声线", () => {
+  const { items } = planCharacterVoices({
+    onlyMissing: false,
+    strategy: "prefer_design",
+    characters: [
+      {
+        characterId: "m1",
+        characterName: "一",
+        gender: "male",
+        voiceTexture: "沉稳沙哑低沉威严",
+      },
+      {
+        characterId: "m2",
+        characterName: "二",
+        gender: "male",
+        voiceTexture: "沉稳沙哑低沉威严",
+      },
+      {
+        characterId: "m3",
+        characterName: "三",
+        gender: "male",
+        voiceTexture: "沉稳沙哑低沉威严",
+      },
+    ],
+  });
+
+  const overridden = items.filter((item) => item.reason.includes("slot:override"));
+  assert.equal(overridden.length >= 1, true);
+
+  for (const item of items) {
+    const voiceLine = item.ttsDesignPrompt.split("\n").find((line) => line.startsWith("【声线】")) || "";
+    // 质感明亮/中性 时，【声线】不得再拼沙哑/低沉整句
+    if (/质感明亮清脆|质感中性干净/.test(voiceLine)) {
+      assert.equal(/沙哑|低沉威严/.test(voiceLine), false);
+    }
+  }
 });
 
 test("buildDesignPrompt keeps texture core and mutex; never bare-returns texture only", () => {
@@ -258,12 +297,32 @@ test("buildDesignPrompt keeps texture core and mutex; never bare-returns texture
     gender: "male",
     age: "adult",
     slot: { pitchBand: "low", textureBand: "dark_raspy", energyBand: "heavy" },
+    preferredSlot: { pitchBand: "low", textureBand: "dark_raspy", energyBand: "heavy" },
   });
   assert.ok(prompt.length <= 480);
   assert.match(prompt, /【声线】/);
   assert.match(prompt, /【互斥】/);
   assert.match(prompt, /沉稳略沙哑/);
   assert.notEqual(prompt.trim(), longTexture.slice(0, 480));
+});
+
+test("buildDesignPrompt drops conflicting texture when slot diverged", () => {
+  const prompt = buildDesignPrompt({
+    character: {
+      characterId: "x",
+      characterName: "测试角",
+      voiceTexture: "沉稳沙哑低沉威严",
+      role: "配角",
+    },
+    gender: "male",
+    age: "adult",
+    slot: { pitchBand: "low", textureBand: "bright", energyBand: "heavy" },
+    preferredSlot: { pitchBand: "low", textureBand: "dark_raspy", energyBand: "heavy" },
+  });
+  const voiceLine = prompt.split("\n").find((line) => line.startsWith("【声线】")) || "";
+  assert.match(voiceLine, /质感明亮清脆/);
+  assert.equal(/沙哑|低沉威严/.test(voiceLine), false);
+  assert.match(prompt, /【气质】/);
 });
 
 test("allocateVoiceSlot perturbs on collision then soft-collides when exhausted", () => {
@@ -323,6 +382,94 @@ test("onlyMissing seeds usage from already-bound presets to avoid collisions", (
   assert.equal(items[0].ttsVoice, "苏打");
 });
 
+test("onlyMissing seeds occupied design slots so new design avoids bound key", () => {
+  const boundPrompt = [
+    "【身份】青壮年男性，叙事身份：主角「旧」",
+    "【声线】音高偏低，质感偏低略沙哑，气息沉稳有分量",
+    "【互斥】与同书其他角色在音高/质感上可辨",
+  ].join("\n");
+
+  const parsed = parseSlotFromDesignPrompt(boundPrompt);
+  assert.ok(parsed);
+  assert.equal(parsed.pitchBand, "low");
+  assert.equal(parsed.textureBand, "dark_raspy");
+  assert.equal(parsed.energyBand, "heavy");
+
+  const { items, skipped } = planCharacterVoices({
+    onlyMissing: true,
+    strategy: "prefer_design",
+    characters: [
+      {
+        characterId: "old",
+        characterName: "旧",
+        gender: "male",
+        castRole: "protagonist",
+        ttsMode: "design",
+        ttsDesignPrompt: boundPrompt,
+        voiceTexture: "沉稳沙哑低沉",
+      },
+      {
+        characterId: "new",
+        characterName: "新",
+        gender: "male",
+        castRole: "ally",
+        voiceTexture: "沉稳沙哑低沉",
+      },
+    ],
+  });
+
+  assert.equal(skipped.some((item) => item.characterId === "old"), true);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].characterId, "new");
+  assert.equal(items[0].ttsMode, "design");
+  // 新角不得再占与 bound 相同的音高/质感/气息组合
+  const pitch = items[0].ttsDesignPrompt.match(/音高([^，\n]+)/)?.[1];
+  const texture = items[0].ttsDesignPrompt.match(/质感([^，\n]+)/)?.[1];
+  const energy = items[0].ttsDesignPrompt.match(/气息([^，\n]+)/)?.[1];
+  const newKey = `${pitch}|${texture}|${energy}`;
+  assert.notEqual(newKey, "偏低|偏低略沙哑|沉稳有分量");
+  assert.equal(items[0].reason.includes("slot:override") || newKey !== "偏低|偏低略沙哑|沉稳有分量", true);
+});
+
+test("soft collision mutex cites occupied neighbor slot not last writer", () => {
+  // 填满 female 全部槽，再规划一个 female → soft；邻居应来自占用表中 preferred key
+  const characters = [];
+  let i = 0;
+  for (const pitch of ["high", "mid", "low"]) {
+    for (const texture of ["bright", "neutral", "dark_raspy", "airy"]) {
+      for (const energy of ["lively", "even", "heavy"]) {
+        characters.push({
+          characterId: `f${i}`,
+          characterName: `女${i}`,
+          gender: "female",
+          // 无 texture，preferred 落 mid|neutral|even；先用不同 personality 避免 sort 干扰
+          personality: `p${i}`,
+        });
+        i += 1;
+      }
+    }
+  }
+  // 第 37 个：同 preferred mid|neutral|even → soft
+  characters.push({
+    characterId: "soft-one",
+    characterName: "软撞",
+    gender: "female",
+    personality: "最终",
+  });
+
+  const { items } = planCharacterVoices({
+    onlyMissing: false,
+    strategy: "prefer_design",
+    characters,
+  });
+
+  const softItem = items.find((item) => item.characterId === "soft-one");
+  assert.ok(softItem);
+  assert.match(softItem.reason, /collision:soft/);
+  // 邻居标签应是某档音高+质感「声线」
+  assert.match(softItem.ttsDesignPrompt, /明显区别于.+声线/);
+});
+
 test("planCharacterVoices never rewrites configured clone bindings even when onlyMissing=false", () => {
   const { items, skipped } = planCharacterVoices({
     onlyMissing: false,
@@ -360,4 +507,13 @@ test("inferVoiceSlot reads rough/low cues from texture", () => {
   });
   assert.equal(slot.pitchBand, "low");
   assert.equal(slot.textureBand, "dark_raspy");
+});
+
+test("slotsEqual and parseSlotFromDesignPrompt round-trip labels", () => {
+  const slot = { pitchBand: "high", textureBand: "airy", energyBand: "lively" };
+  assert.equal(slotsEqual(slot, { ...slot }), true);
+  assert.equal(slotsEqual(slot, { ...slot, pitchBand: "low" }), false);
+  const prompt = "【声线】音高偏高，质感偏气声轻柔，气息活泼有弹性";
+  const parsed = parseSlotFromDesignPrompt(prompt);
+  assert.deepEqual(parsed, slot);
 });

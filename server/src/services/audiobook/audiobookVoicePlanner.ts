@@ -83,6 +83,14 @@ const ENERGY_ZH: Record<VoiceEnergyBand, string> = {
   heavy: "沉稳有分量",
 };
 
+/** 与 TEXTURE_ZH 对立的原句线索：槽位扰动后禁止再拼进【声线】 */
+const TEXTURE_CONFLICT_HINTS: Record<VoiceTextureBand, RegExp> = {
+  bright: /沙哑|低沉|沉稳|沧桑|粗|哑|暗|厚|冷硬|气声|虚|飘|薄|柔弱/,
+  neutral: /沙哑|清亮|甜|脆|气声|虚|飘|明快|软糯/,
+  dark_raspy: /清亮|甜|脆|明快|灵动|俏|软糯|气声|虚|飘|明亮/,
+  airy: /沙哑|低沉|沉稳|沧桑|粗|哑|厚|威严|冷硬|浑/,
+};
+
 export function isCharacterVoiceConfigured(input: {
   ttsMode?: string | null;
   ttsVoice?: string | null;
@@ -195,6 +203,51 @@ export function slotKey(gender: VoiceGenderBucket, slot: VoiceSlot): string {
   return `${gender}|${slot.pitchBand}|${slot.textureBand}|${slot.energyBand}`;
 }
 
+export function slotsEqual(a: VoiceSlot, b: VoiceSlot): boolean {
+  return (
+    a.pitchBand === b.pitchBand
+    && a.textureBand === b.textureBand
+    && a.energyBand === b.energyBand
+  );
+}
+
+/**
+ * 从已写入的 design prompt 反解析槽位标签（onlyMissing seed 用）。
+ * 匹配失败返回 null，调用方回退 inferVoiceSlot。
+ */
+export function parseSlotFromDesignPrompt(prompt: string): VoiceSlot | null {
+  const text = prompt.trim();
+  if (!text) return null;
+
+  let pitchBand: VoicePitchBand | null = null;
+  let textureBand: VoiceTextureBand | null = null;
+  let energyBand: VoiceEnergyBand | null = null;
+
+  for (const band of PITCH_ORDER) {
+    if (text.includes(`音高${PITCH_ZH[band]}`)) {
+      pitchBand = band;
+      break;
+    }
+  }
+  for (const band of TEXTURE_ORDER) {
+    if (text.includes(`质感${TEXTURE_ZH[band]}`)) {
+      textureBand = band;
+      break;
+    }
+  }
+  for (const band of ENERGY_ORDER) {
+    if (text.includes(`气息${ENERGY_ZH[band]}`)) {
+      energyBand = band;
+      break;
+    }
+  }
+
+  if (!pitchBand || !textureBand || !energyBand) {
+    return null;
+  }
+  return { pitchBand, textureBand, energyBand };
+}
+
 /**
  * 在已占用集合中找空闲槽；池尽则 soft 占用原槽。
  * 扰动优先级：texture → pitch → energy（与开发计划一致）。
@@ -257,16 +310,22 @@ function genderLabel(gender: VoiceGenderBucket): string {
   return "中性偏柔";
 }
 
+function textureConflictsWithSlot(textureCore: string, textureBand: VoiceTextureBand): boolean {
+  return TEXTURE_CONFLICT_HINTS[textureBand].test(textureCore);
+}
+
 /**
  * 结构化 design prompt。
- * voiceTexture 长文进【声线】核心，仍强制拼槽位维与互斥（禁止裸 return）。
- * 截断优先级：声线 > 互斥 > 身份 > 表达 > 禁止 > 气质。
+ * - 槽位自然语言为【声线】主信号
+ * - voiceTexture 仅在与槽位一致且无对立词时并入；槽位扰动后禁止裸拼原句（避免「明亮+沙哑」）
+ * - 截断优先级：声线 > 互斥 > 身份 > 表达 > 禁止 > 气质
  */
 export function buildDesignPrompt(input: {
   character: VoicePlannerCharacterInput;
   gender: VoiceGenderBucket;
   age: VoiceAgeBucket;
   slot: VoiceSlot;
+  preferredSlot?: VoiceSlot;
   softCollision?: boolean;
   neighborSlotLabel?: string | null;
 }): string {
@@ -275,14 +334,27 @@ export function buildDesignPrompt(input: {
   const roleBit = (character.role || character.castRole || "配角").toString().slice(0, 32);
   const personality = (character.personality || character.firstImpression || "").trim().slice(0, 72);
   const textureCore = character.voiceTexture?.trim() || "";
+  const preferred = input.preferredSlot ?? inferVoiceSlot(character);
+  const slotDiverged = !slotsEqual(preferred, slot);
 
   const voiceParts = [
     `音高${PITCH_ZH[slot.pitchBand]}`,
     `质感${TEXTURE_ZH[slot.textureBand]}`,
     `气息${ENERGY_ZH[slot.energyBand]}`,
   ];
-  if (textureCore) {
+  // 槽位与卡一致且原句不与槽位对立时，才并入 texture 原句
+  if (
+    textureCore
+    && !slotDiverged
+    && !textureConflictsWithSlot(textureCore, slot.textureBand)
+  ) {
     voiceParts.push(textureCore.slice(0, 200));
+  } else if (textureCore && slotDiverged) {
+    // 扰动后：只保留极短非对立片段作审计，绝不整段粘贴
+    const clipped = textureCore.slice(0, 24);
+    if (!textureConflictsWithSlot(clipped, slot.textureBand)) {
+      voiceParts.push(`（卡面线索：${clipped}）`);
+    }
   }
 
   const mutexParts = [
@@ -295,12 +367,18 @@ export function buildDesignPrompt(input: {
 
   const identity = `【身份】${ageLabel(age)}${genderLabel(gender)}，叙事身份：${roleBit}「${name}」`;
   const voice = `【声线】${voiceParts.join("，")}`;
-  const vibe = personality ? `【气质】${personality}` : "";
+  // 槽位扰动时把完整 texture 挪到气质侧，避免【声线】自相矛盾
+  const vibeBits = [personality];
+  if (slotDiverged && textureCore) {
+    vibeBits.push(`卡面声线原文：${textureCore.slice(0, 48)}`);
+  }
+  const vibeJoined = vibeBits.filter(Boolean).join("；").slice(0, 96);
+  const vibe = vibeJoined ? `【气质】${vibeJoined}` : "";
   const express = "【表达】语速中等，吐字清楚，适合小说对白；中文普通话";
   const mutex = `【互斥】${mutexParts.join("；")}`;
   const forbid = "【禁止】不要模仿旁白；不要空壳「标准男/女声」";
 
-  // 阅读顺序组装；超长时按优先级丢弃气质→禁止→表达，尽量保留声线与互斥
+  // 阅读顺序组装；超长时按优先级丢弃气质→禁止→表达→身份，尽量保留声线与互斥
   const ordered = [identity, voice, vibe, express, mutex, forbid].filter(Boolean);
   let prompt = ordered.join("\n");
   if (prompt.length <= DESIGN_PROMPT_MAX) {
@@ -321,7 +399,7 @@ export function buildDesignPrompt(input: {
     return prompt;
   }
 
-  // 仍超长：保声线+互斥，截断声线中的 texture 尾部
+  // 仍超长：保声线+互斥
   const hard = [voice, mutex].join("\n");
   if (hard.length <= DESIGN_PROMPT_MAX) {
     return hard;
@@ -331,7 +409,14 @@ export function buildDesignPrompt(input: {
   return `${voice.slice(0, room)}${mutexBlock}`.slice(0, DESIGN_PROMPT_MAX);
 }
 
-function buildStyle(input: VoicePlannerCharacterInput, slot?: VoiceSlot): string {
+function buildStyle(
+  input: VoicePlannerCharacterInput,
+  slot?: VoiceSlot,
+  options?: { preferSlot?: boolean },
+): string {
+  if (options?.preferSlot && slot) {
+    return `音高${PITCH_ZH[slot.pitchBand]}，质感${TEXTURE_ZH[slot.textureBand]}，吐字清楚，语速中等。`.slice(0, 200);
+  }
   const texture = input.voiceTexture?.trim();
   if (texture) {
     return texture.slice(0, 200);
@@ -388,6 +473,40 @@ function seedPresetUsage(
   }
 }
 
+/** onlyMissing：已绑定 design 占用槽位，避免新角撞上旧 design prompt 维 */
+function seedBoundDesignSlot(
+  occupiedSlots: Set<string>,
+  occupiedSlotByKey: Map<string, VoiceSlot>,
+  character: VoicePlannerCharacterInput,
+): void {
+  const mode = character.ttsMode?.trim() || "preset";
+  if (mode !== "design" || !character.ttsDesignPrompt?.trim()) {
+    return;
+  }
+  const gender = inferGenderBucket(character);
+  const slot =
+    parseSlotFromDesignPrompt(character.ttsDesignPrompt)
+    ?? inferVoiceSlot(character);
+  const key = slotKey(gender, slot);
+  occupiedSlots.add(key);
+  if (!occupiedSlotByKey.has(key)) {
+    occupiedSlotByKey.set(key, slot);
+  }
+}
+
+function markSlotOccupied(
+  occupiedSlots: Set<string>,
+  occupiedSlotByKey: Map<string, VoiceSlot>,
+  key: string,
+  slot: VoiceSlot,
+): void {
+  occupiedSlots.add(key);
+  // soft 碰撞时 key 已存在：保留先占者，邻居标签才能指向真实占用槽
+  if (!occupiedSlotByKey.has(key)) {
+    occupiedSlotByKey.set(key, slot);
+  }
+}
+
 function neighborLabel(slot: VoiceSlot): string {
   return `${PITCH_ZH[slot.pitchBand]}${TEXTURE_ZH[slot.textureBand]}声线`;
 }
@@ -398,6 +517,7 @@ function neighborLabel(slot: VoiceSlot): string {
  * - auto（保守）：importance≥70 且有 voiceTexture → design；重要 preset 位满 → design；其余 preset
  * - preset_only：仅 preset 负载均衡
  * - clone 永不改写
+ * - 覆盖语义由调用方 onlyMissing + apply.overwrite 处理（本函数不接收 overwrite）
  */
 export function planCharacterVoices(input: {
   characters: VoicePlannerCharacterInput[];
@@ -405,7 +525,6 @@ export function planCharacterVoices(input: {
   onlyMissing?: boolean;
   characterIds?: string[];
   maxImportantPerPreset?: number;
-  overwrite?: boolean;
 }): {
   items: AudiobookVoicePlanItem[];
   skipped: Array<{ characterId: string; characterName: string; reason: string }>;
@@ -430,7 +549,7 @@ export function planCharacterVoices(input: {
   const usage = new Map<string, number>();
   const importantUsage = new Map<string, number>();
   const occupiedSlots = new Set<string>();
-  let lastAllocatedSlot: VoiceSlot | null = null;
+  const occupiedSlotByKey = new Map<string, VoiceSlot>();
 
   for (const character of input.characters) {
     if (allowIds && !allowIds.has(character.characterId)) {
@@ -451,6 +570,7 @@ export function planCharacterVoices(input: {
     const configured = isCharacterVoiceConfigured(character);
     if (onlyMissing && configured) {
       seedPresetUsage(usage, importantUsage, character);
+      seedBoundDesignSlot(occupiedSlots, occupiedSlotByKey, character);
       skipped.push({
         characterId: character.characterId,
         characterName: character.characterName,
@@ -527,23 +647,29 @@ export function planCharacterVoices(input: {
       });
       designSlot = allocated.slot;
       softCollision = allocated.softCollision;
-      occupiedSlots.add(allocated.key);
 
-      const neighbor = lastAllocatedSlot
-        ? neighborLabel(lastAllocatedSlot)
+      const neighborSlot = softCollision
+        ? occupiedSlotByKey.get(allocated.key) ?? null
         : null;
+      const neighbor = neighborSlot ? neighborLabel(neighborSlot) : null;
+      const slotDiverged = !slotsEqual(character.preferredSlot, allocated.slot);
+
       ttsDesignPrompt = buildDesignPrompt({
         character,
         gender: character.genderBucket,
         age: character.ageBucket,
         slot: allocated.slot,
+        preferredSlot: character.preferredSlot,
         softCollision,
         neighborSlotLabel: softCollision ? neighbor : null,
       });
-      lastAllocatedSlot = allocated.slot;
+
+      markSlotOccupied(occupiedSlots, occupiedSlotByKey, allocated.key, allocated.slot);
 
       if (softCollision) {
         reason = `${reason} collision:soft`.trim();
+      } else if (slotDiverged) {
+        reason = `${reason} slot:override ${allocated.key}。`.trim();
       } else if (!reason.includes("槽") && strategy === "prefer_design") {
         reason = `${reason} 槽位 ${allocated.key}。`.trim();
       }
@@ -554,7 +680,11 @@ export function planCharacterVoices(input: {
       characterName: character.characterName,
       ttsMode,
       ttsVoice,
-      ttsStyle: buildStyle(character, designSlot ?? character.preferredSlot),
+      ttsStyle: buildStyle(
+        character,
+        designSlot ?? character.preferredSlot,
+        { preferSlot: ttsMode === "design" },
+      ),
       ttsDesignPrompt,
       speakerAliases: null,
       wouldOverwrite: character.configured,
