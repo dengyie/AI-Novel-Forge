@@ -10,6 +10,8 @@ export type VoiceAgeBucket = "youth" | "adult" | "elder" | "unknown";
 export type VoicePitchBand = "high" | "mid" | "low";
 export type VoiceTextureBand = "bright" | "neutral" | "dark_raspy" | "airy";
 export type VoiceEnergyBand = "lively" | "even" | "heavy";
+/** 音色分簇：主角 / 主角团 / 路人 / 旁白（分配维，非听感证明） */
+export type VoiceCluster = "lead" | "cast" | "extra" | "narrator";
 
 export interface VoicePlannerCharacterInput {
   characterId: string;
@@ -167,6 +169,48 @@ export function scoreImportance(input: VoicePlannerCharacterInput): number {
   return Math.max(0, Math.min(100, score));
 }
 
+const CAST_ROLES = new Set([
+  "antagonist",
+  "love_interest",
+  "mentor",
+  "ally",
+  "foil",
+  "catalyst",
+  "pressure_source",
+]);
+
+/**
+ * 分簇（分配维）：
+ * - lead：主角
+ * - cast：主角团 / 高戏份
+ * - extra：路人
+ * - narrator：旁白（角色卡若标旁白则走旁白 preset 簇；系统旁白仍在 pipeline 外）
+ */
+export function resolveVoiceCluster(input: VoicePlannerCharacterInput): VoiceCluster {
+  const cast = (input.castRole ?? "").trim().toLowerCase();
+  const role = (input.role ?? "").trim();
+  const name = (input.characterName ?? "").trim();
+  if (
+    cast === "narrator"
+    || /旁白|narrator/i.test(role)
+    || /旁白|narrator/i.test(name)
+  ) {
+    return "narrator";
+  }
+  if (cast === "protagonist" || /主角|主人公/.test(role)) {
+    return "lead";
+  }
+  const importance = scoreImportance(input);
+  if (CAST_ROLES.has(cast) || importance >= 50) {
+    // 显式路人 role 且分数不高：仍归 extra，避免「路人甲」误进主角团
+    if (importance < 55 && /路人|群众|店小二|侍卫|士兵|npc|路人甲|路人乙/i.test(role)) {
+      return "extra";
+    }
+    return "cast";
+  }
+  return "extra";
+}
+
 function characterBlob(input: VoicePlannerCharacterInput): string {
   return [
     input.voiceTexture,
@@ -195,6 +239,12 @@ export function inferVoiceSlot(input: VoicePlannerCharacterInput): VoiceSlot {
   let energyBand: VoiceEnergyBand = "even";
   if (HEAVY_HINT.test(blob) && !LIVELY_HINT.test(blob)) energyBand = "heavy";
   else if (LIVELY_HINT.test(blob)) energyBand = "lively";
+
+  // 主角忌默认「平稳克制」死气：无活泼线索时抬到 heavy（坚定主心骨，非听感证明）
+  const cluster = resolveVoiceCluster(input);
+  if (cluster === "lead" && energyBand === "even" && !LIVELY_HINT.test(blob)) {
+    energyBand = "heavy";
+  }
 
   return { pitchBand, textureBand, energyBand };
 }
@@ -249,8 +299,38 @@ export function parseSlotFromDesignPrompt(prompt: string): VoiceSlot | null {
 }
 
 /**
+ * 槽距：pitch 差 + texture 差 + energy 差（0–3）。
+ * lead/cast 分配时优先与已占 design 槽拉开 ≥2 维（分配维，非听感证明）。
+ */
+export function slotDistance(a: VoiceSlot, b: VoiceSlot): number {
+  let d = 0;
+  if (a.pitchBand !== b.pitchBand) d += 1;
+  if (a.textureBand !== b.textureBand) d += 1;
+  if (a.energyBand !== b.energyBand) d += 1;
+  return d;
+}
+
+function minDistanceToOccupied(
+  gender: VoiceGenderBucket,
+  slot: VoiceSlot,
+  occupiedSlotByKey: Map<string, VoiceSlot> | undefined,
+): number {
+  if (!occupiedSlotByKey || occupiedSlotByKey.size === 0) {
+    return 3;
+  }
+  let min = 3;
+  for (const [key, other] of occupiedSlotByKey) {
+    if (!key.startsWith(`${gender}|`)) continue;
+    min = Math.min(min, slotDistance(slot, other));
+    if (min === 0) return 0;
+  }
+  return min;
+}
+
+/**
  * 在已占用集合中找空闲槽；池尽则 soft 占用原槽。
  * 扰动优先级：texture → pitch → energy（与开发计划一致）。
+ * lead/cast 可要求 minSeparation（默认 0；分簇 v2 用 2）相对已占同性别 design 槽。
  *
  * soft 语义锁：池尽时必须仍返回 preferred.key（已被占的键），
  * 以便调用方用 occupiedSlotByKey.get(preferred.key) 解析真实先占邻居。
@@ -260,39 +340,55 @@ export function allocateVoiceSlot(input: {
   gender: VoiceGenderBucket;
   preferred: VoiceSlot;
   occupied: Set<string>;
+  /** 已占槽位 map；提供时才做 minSeparation 约束 */
+  occupiedSlotByKey?: Map<string, VoiceSlot>;
+  /** 与同性别已占 design 的最小维差；0=仅 key 不撞 */
+  minSeparation?: number;
 }): { slot: VoiceSlot; key: string; softCollision: boolean } {
+  const minSep = Math.max(0, Math.min(3, input.minSeparation ?? 0));
   const trySlot = (slot: VoiceSlot) => {
     const key = slotKey(input.gender, slot);
-    return { slot, key, free: !input.occupied.has(key) };
+    const free = !input.occupied.has(key);
+    const sep = free
+      ? minDistanceToOccupied(input.gender, slot, input.occupiedSlotByKey)
+      : -1;
+    return { slot, key, free, sep };
   };
 
   const preferred = trySlot(input.preferred);
-  if (preferred.free) {
+  if (preferred.free && preferred.sep >= minSep) {
     return { slot: preferred.slot, key: preferred.key, softCollision: false };
   }
 
-  for (const textureBand of TEXTURE_ORDER) {
-    const candidate = trySlot({ ...input.preferred, textureBand });
-    if (candidate.free) {
-      return { slot: candidate.slot, key: candidate.key, softCollision: false };
+  // 两轮：先满足 minSep，再降级为仅 key 不撞（避免池尽 soft 过早）
+  for (const requireSep of minSep > 0 ? [minSep, 0] : [0]) {
+    if (preferred.free && preferred.sep >= requireSep) {
+      return { slot: preferred.slot, key: preferred.key, softCollision: false };
     }
-  }
 
-  for (const pitchBand of PITCH_ORDER) {
     for (const textureBand of TEXTURE_ORDER) {
-      const candidate = trySlot({ ...input.preferred, pitchBand, textureBand });
-      if (candidate.free) {
+      const candidate = trySlot({ ...input.preferred, textureBand });
+      if (candidate.free && candidate.sep >= requireSep) {
         return { slot: candidate.slot, key: candidate.key, softCollision: false };
       }
     }
-  }
 
-  for (const energyBand of ENERGY_ORDER) {
     for (const pitchBand of PITCH_ORDER) {
       for (const textureBand of TEXTURE_ORDER) {
-        const candidate = trySlot({ pitchBand, textureBand, energyBand });
-        if (candidate.free) {
+        const candidate = trySlot({ ...input.preferred, pitchBand, textureBand });
+        if (candidate.free && candidate.sep >= requireSep) {
           return { slot: candidate.slot, key: candidate.key, softCollision: false };
+        }
+      }
+    }
+
+    for (const energyBand of ENERGY_ORDER) {
+      for (const pitchBand of PITCH_ORDER) {
+        for (const textureBand of TEXTURE_ORDER) {
+          const candidate = trySlot({ pitchBand, textureBand, energyBand });
+          if (candidate.free && candidate.sep >= requireSep) {
+            return { slot: candidate.slot, key: candidate.key, softCollision: false };
+          }
         }
       }
     }
@@ -332,8 +428,10 @@ export function buildDesignPrompt(input: {
   preferredSlot?: VoiceSlot;
   softCollision?: boolean;
   neighborSlotLabel?: string | null;
+  cluster?: VoiceCluster;
 }): string {
   const { character, gender, age, slot } = input;
+  const cluster = input.cluster ?? resolveVoiceCluster(character);
   const name = character.characterName.slice(0, 24);
   const roleBit = (character.role || character.castRole || "配角").toString().slice(0, 32);
   const personality = (character.personality || character.firstImpression || "").trim().slice(0, 72);
@@ -365,6 +463,9 @@ export function buildDesignPrompt(input: {
     "与同书其他角色在音高/质感上可辨",
     "避免播音腔与无特征标准青年声",
   ];
+  if (cluster === "lead" || cluster === "cast") {
+    mutexParts.push("与路人预置声和旁白声明显可分");
+  }
   if (input.softCollision && input.neighborSlotLabel) {
     mutexParts.unshift(`明显区别于${input.neighborSlotLabel}`);
   }
@@ -373,14 +474,21 @@ export function buildDesignPrompt(input: {
   const voice = `【声线】${voiceParts.join("，")}`;
   // 槽位扰动时把完整 texture 挪到气质侧，避免【声线】自相矛盾
   const vibeBits = [personality];
+  if (cluster === "lead") {
+    vibeBits.unshift("意志坚定有主心骨，可受挫但不空心死气");
+  }
   if (slotDiverged && textureCore) {
     vibeBits.push(`卡面声线原文：${textureCore.slice(0, 48)}`);
   }
   const vibeJoined = vibeBits.filter(Boolean).join("；").slice(0, 96);
   const vibe = vibeJoined ? `【气质】${vibeJoined}` : "";
-  const express = "【表达】语速中等，吐字清楚，适合小说对白；中文普通话";
+  const express = cluster === "lead"
+    ? "【表达】语速中等偏稳，吐字清楚有力，适合小说对白；中文普通话"
+    : "【表达】语速中等，吐字清楚，适合小说对白；中文普通话";
   const mutex = `【互斥】${mutexParts.join("；")}`;
-  const forbid = "【禁止】不要模仿旁白；不要空壳「标准男/女声」";
+  const forbid = cluster === "lead"
+    ? "【禁止】不要模仿旁白；不要空壳「标准男/女声」；避免死气沉沉的平板播读"
+    : "【禁止】不要模仿旁白；不要空壳「标准男/女声」";
 
   // 阅读顺序组装；超长时按优先级丢弃气质→禁止→表达→身份，尽量保留声线与互斥
   const ordered = [identity, voice, vibe, express, mutex, forbid].filter(Boolean);
@@ -435,7 +543,28 @@ function buildStyle(
   return "符合角色身份，吐字清楚，语速中等，情绪自然。";
 }
 
-function presetPool(gender: VoiceGenderBucket, age: VoiceAgeBucket): MimoTtsPresetVoice[] {
+/**
+ * 路人 preset 簇：按性别固定「泛用」声，与主角团 design 分离（分配维）。
+ * 旁白：女→茉莉、男→白桦、未知→茉莉（与常见默认旁白一致）。
+ */
+function extraPresetPool(gender: VoiceGenderBucket): MimoTtsPresetVoice[] {
+  if (gender === "female") return ["冰糖", "茉莉"];
+  if (gender === "male") return ["苏打", "白桦"];
+  return ["苏打", "冰糖"];
+}
+
+function narratorPresetPool(gender: VoiceGenderBucket): MimoTtsPresetVoice[] {
+  if (gender === "male") return ["白桦", "苏打"];
+  return ["茉莉", "冰糖"];
+}
+
+function presetPool(
+  gender: VoiceGenderBucket,
+  age: VoiceAgeBucket,
+  cluster?: VoiceCluster,
+): MimoTtsPresetVoice[] {
+  if (cluster === "narrator") return narratorPresetPool(gender);
+  if (cluster === "extra") return extraPresetPool(gender);
   if (gender === "female") {
     return age === "youth" ? [...FEMALE_YOUTH] : [...FEMALE_ADULT];
   }
@@ -521,9 +650,9 @@ function neighborLabel(slot: VoiceSlot): string {
 
 /**
  * 纯函数：根据人物卡批量规划差异化音色。
- * - prefer_design：非「clone+ref」全 design + 槽位 prompt 防撞
+ * - prefer_design：lead/cast → design + 槽位拉开；extra/narrator → 路人/旁白 preset 簇
  * - auto（保守）：importance≥70 且有 voiceTexture → design；重要 preset 位满 → design；其余 preset
- * - preset_only：仅 preset 负载均衡
+ * - preset_only：仅 preset 负载均衡（旁白/路人用分簇池）
  * - clone+非空 ref 永不改写；无 ref 的 half-clone 可规划为 preset/design
  * - 覆盖语义由调用方 onlyMissing + apply.overwrite 处理（本函数不接收 overwrite）
  */
@@ -552,6 +681,7 @@ export function planCharacterVoices(input: {
       importance: number;
       configured: boolean;
       preferredSlot: VoiceSlot;
+      cluster: VoiceCluster;
     }
   > = [];
   const usage = new Map<string, number>();
@@ -589,6 +719,7 @@ export function planCharacterVoices(input: {
       continue;
     }
 
+    const cluster = resolveVoiceCluster(character);
     candidates.push({
       ...character,
       genderBucket: inferGenderBucket(character),
@@ -596,6 +727,7 @@ export function planCharacterVoices(input: {
       importance: scoreImportance(character),
       configured,
       preferredSlot: inferVoiceSlot(character),
+      cluster,
     });
   }
 
@@ -607,7 +739,7 @@ export function planCharacterVoices(input: {
   const items: AudiobookVoicePlanItem[] = [];
 
   for (const character of candidates) {
-    const pool = presetPool(character.genderBucket, character.ageBucket);
+    const pool = presetPool(character.genderBucket, character.ageBucket, character.cluster);
     let ttsMode: AudiobookTtsMode = "preset";
     let ttsVoice: string | null = null;
     let ttsDesignPrompt: string | null = null;
@@ -616,14 +748,27 @@ export function planCharacterVoices(input: {
     let softCollision = false;
 
     const hasTexture = Boolean(character.voiceTexture?.trim());
+    const isLeadOrCast = character.cluster === "lead" || character.cluster === "cast";
     // auto 保守：importance≥70 且有 texture → design（删除内层 ≥80 死区）
     const autoDesignByTexture = strategy === "auto" && character.importance >= 70 && hasTexture;
+    // prefer_design：仅主角/主角团 design；路人/旁白强制 preset 簇（分配维，非听感证明）
+    const preferDesignCore =
+      strategy === "prefer_design" && isLeadOrCast;
 
-    if (strategy === "prefer_design" || autoDesignByTexture) {
+    if (preferDesignCore || autoDesignByTexture) {
       ttsMode = "design";
-      reason = strategy === "prefer_design"
-        ? "策略 prefer_design：按人物卡生成 design 描述。"
-        : "auto：高重要性且有 voiceTexture，用 design 拉开 prompt 维（非听感证明）。";
+      if (preferDesignCore) {
+        reason = character.cluster === "lead"
+          ? "策略 prefer_design：主角簇 design，忌死气槽位。"
+          : "策略 prefer_design：主角团 design，槽位拉开。";
+      } else {
+        reason = "auto：高重要性且有 voiceTexture，用 design 拉开 prompt 维（非听感证明）。";
+      }
+    } else if (strategy === "prefer_design" && !isLeadOrCast) {
+      ttsMode = "preset";
+      reason = character.cluster === "narrator"
+        ? "策略 prefer_design：旁白簇走预置，与角色 design 隔离。"
+        : "策略 prefer_design：路人簇走预置，与主角/主角团 design 隔离。";
     }
 
     if (ttsMode === "preset") {
@@ -633,6 +778,7 @@ export function planCharacterVoices(input: {
 
       if (
         strategy !== "preset_only"
+        && strategy !== "prefer_design"
         && isImportant
         && importantCount >= maxImportantPerPreset
       ) {
@@ -645,15 +791,22 @@ export function planCharacterVoices(input: {
         if (isImportant) {
           importantUsage.set(voice, importantCount + 1);
         }
-        reason = `按${character.genderBucket}/${character.ageBucket}分配预置「${voice}」，负载均衡。`;
+        if (!reason) {
+          reason = `按${character.cluster}/${character.genderBucket}/${character.ageBucket}分配预置「${voice}」，负载均衡。`;
+        } else {
+          reason = `${reason} 预置「${voice}」。`.trim();
+        }
       }
     }
 
     if (ttsMode === "design") {
+      const minSeparation = isLeadOrCast ? 2 : 0;
       const allocated = allocateVoiceSlot({
         gender: character.genderBucket,
         preferred: character.preferredSlot,
         occupied: occupiedSlots,
+        occupiedSlotByKey,
+        minSeparation,
       });
       designSlot = allocated.slot;
       softCollision = allocated.softCollision;
@@ -672,6 +825,7 @@ export function planCharacterVoices(input: {
         preferredSlot: character.preferredSlot,
         softCollision,
         neighborSlotLabel: softCollision ? neighbor : null,
+        cluster: character.cluster,
       });
 
       markSlotOccupied(occupiedSlots, occupiedSlotByKey, allocated.key, allocated.slot);
@@ -680,7 +834,7 @@ export function planCharacterVoices(input: {
         reason = `${reason} collision:soft`.trim();
       } else if (slotDiverged) {
         reason = `${reason} slot:override ${allocated.key}。`.trim();
-      } else if (!reason.includes("槽") && strategy === "prefer_design") {
+      } else if (!reason.includes("槽") && (strategy === "prefer_design" || minSeparation > 0)) {
         reason = `${reason} 槽位 ${allocated.key}。`.trim();
       }
     }
