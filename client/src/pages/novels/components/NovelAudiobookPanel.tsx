@@ -417,43 +417,103 @@ function TaskAudioControls(props: {
     : null;
 
   return (
-    <div className="mt-3 space-y-3 rounded-xl border border-border/70 bg-muted/15 p-3">
+    <div className="mt-3 space-y-3 rounded-xl border border-primary/25 bg-primary/5 p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="text-sm font-medium text-foreground">交付</div>
+        <div className="text-sm font-medium text-foreground">在线试听</div>
         <div className="text-xs text-muted-foreground">
-          浏览器下载 / 试听 · 与小说导出一致 · 不经 SSH
+          网页内直接播放 · 无需下载 · 不经 SSH
         </div>
       </div>
       {error ? <div className="text-sm text-destructive">{error}</div> : null}
 
-      {primaryDownloadLabel || fullAudioReady || m4bReady ? (
-        <div className="flex flex-wrap gap-2">
-          {primaryDownloadLabel ? (
-            <Button
-              size="sm"
-              disabled={busyDownload === "primary"}
-              onClick={() => void handlePrimaryDownload()}
-            >
-              {busyDownload === "primary" ? "下载中…" : primaryDownloadLabel}
+      {fullPlayerUrl ? (
+        <div className="space-y-2 rounded-lg border border-border/70 bg-background p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="text-sm font-medium text-foreground">全书在线听</div>
+            <Button asChild size="sm" variant="outline">
+              <a href={fullPlayerUrl} target="_blank" rel="noreferrer">
+                新窗口打开
+              </a>
             </Button>
-          ) : null}
-          {m4bReady && fullAudioReady ? (
+          </div>
+          <audio className="w-full" controls preload="metadata" src={fullPlayerUrl} />
+          <p className="text-xs text-muted-foreground">
+            点播放键即可听；大文件首次缓冲可能需几秒。
+          </p>
+        </div>
+      ) : showDelivery && issuing && !hasProgressiveChapters ? (
+        <div className="text-sm text-muted-foreground">正在准备在线播放地址…</div>
+      ) : null}
+
+      {hasProgressiveChapters ? (
+        <div className="space-y-2 rounded-lg border border-border/70 bg-background p-3">
+          <div className="text-sm font-medium text-foreground">按章在线听</div>
+          <div className="text-xs leading-5 text-muted-foreground">
+            已可播 {readyChapterIds.length}/{task.chapterCount} 章
+            {task.status === "running" || task.status === "queued"
+              ? "（生成中即可听，无需等全书）"
+              : ""}
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <SelectControl
+              className="min-w-[12rem] flex-1 rounded-md border bg-background p-2 text-sm"
+              value={selectedChapterId}
+              onChange={(event) => setSelectedChapterId(event.target.value)}
+            >
+              {orderedReadyChapters.map((chapterId) => (
+                <option key={chapterId} value={chapterId}>
+                  {chapterTitleById.get(chapterId) ?? chapterId}
+                </option>
+              ))}
+            </SelectControl>
             <Button
               size="sm"
               variant="outline"
-              disabled={busyDownload === "wav"}
-              onClick={() => void handleWavDownload()}
+              disabled={!selectedChapterId || busyDownload === `chapter:${selectedChapterId}`}
+              onClick={() => {
+                if (selectedChapterId) {
+                  void handleChapterDownload(selectedChapterId);
+                }
+              }}
             >
-              {busyDownload === "wav" ? "下载中…" : "下载全书 WAV"}
+              {busyDownload === `chapter:${selectedChapterId}` ? "下载中…" : "下载本章 WAV"}
             </Button>
+          </div>
+          {chapterPlayerUrl ? (
+            <div className="space-y-1">
+              <audio className="w-full" controls preload="metadata" src={chapterPlayerUrl} />
+            </div>
+          ) : issuing ? (
+            <div className="text-sm text-muted-foreground">正在准备章节播放地址…</div>
           ) : null}
-          {fullPlayerUrl ? (
-            <Button asChild size="sm" variant="outline">
-              <a href={fullPlayerUrl} target="_blank" rel="noreferrer">
-                新窗口播放全书
-              </a>
-            </Button>
-          ) : null}
+        </div>
+      ) : null}
+
+      {(primaryDownloadLabel || fullAudioReady || m4bReady) ? (
+        <div className="space-y-2 border-t border-border/60 pt-3">
+          <div className="text-xs font-medium text-muted-foreground">下载到本地（可选）</div>
+          <div className="flex flex-wrap gap-2">
+            {primaryDownloadLabel ? (
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={busyDownload === "primary"}
+                onClick={() => void handlePrimaryDownload()}
+              >
+                {busyDownload === "primary" ? "下载中…" : primaryDownloadLabel}
+              </Button>
+            ) : null}
+            {m4bReady && fullAudioReady ? (
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={busyDownload === "wav"}
+                onClick={() => void handleWavDownload()}
+              >
+                {busyDownload === "wav" ? "下载中…" : "下载全书 WAV"}
+              </Button>
+            ) : null}
+          </div>
         </div>
       ) : null}
 
@@ -484,62 +544,9 @@ function TaskAudioControls(props: {
         </div>
       ) : null}
 
-      {fullPlayerUrl ? (
-        <div className="space-y-1">
-          <div className="text-xs text-muted-foreground">全书试听</div>
-          <audio className="w-full" controls preload="none" src={fullPlayerUrl} />
-        </div>
-      ) : showDelivery && issuing && !hasProgressiveChapters ? (
-        <div className="text-sm text-muted-foreground">正在准备音频地址…</div>
-      ) : null}
-
-      {hasProgressiveChapters ? (
-        <div className="space-y-2">
-          <div className="text-xs leading-5 text-muted-foreground">
-            已可播章节 {readyChapterIds.length}/{task.chapterCount}
-            {task.status === "running" || task.status === "queued"
-              ? "（生成中即可按章试听/下载，无需等全书）"
-              : ""}
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <SelectControl
-              className="min-w-[12rem] flex-1 rounded-md border bg-background p-2 text-sm"
-              value={selectedChapterId}
-              onChange={(event) => setSelectedChapterId(event.target.value)}
-            >
-              {orderedReadyChapters.map((chapterId) => (
-                <option key={chapterId} value={chapterId}>
-                  {chapterTitleById.get(chapterId) ?? chapterId}
-                </option>
-              ))}
-            </SelectControl>
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={!selectedChapterId || busyDownload === `chapter:${selectedChapterId}`}
-              onClick={() => {
-                if (selectedChapterId) {
-                  void handleChapterDownload(selectedChapterId);
-                }
-              }}
-            >
-              {busyDownload === `chapter:${selectedChapterId}` ? "下载中…" : "下载本章 WAV"}
-            </Button>
-          </div>
-          {chapterPlayerUrl ? (
-            <div className="space-y-1">
-              <div className="text-xs text-muted-foreground">本章试听</div>
-              <audio className="w-full" controls preload="none" src={chapterPlayerUrl} />
-            </div>
-          ) : issuing ? (
-            <div className="text-sm text-muted-foreground">正在准备章节音频地址…</div>
-          ) : null}
-        </div>
-      ) : null}
-
       <p className="text-xs text-muted-foreground">{m4bHint}</p>
       {task.chunksPruned ? (
-        <p className="text-xs text-muted-foreground">中间 chunk 已清理，章 WAV / 全书文件仍可下载。</p>
+        <p className="text-xs text-muted-foreground">中间 chunk 已清理，章 WAV / 全书文件仍可在线听与下载。</p>
       ) : null}
     </div>
   );
