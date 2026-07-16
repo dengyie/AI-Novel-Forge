@@ -556,6 +556,7 @@ function TaskAnnotationsPanel(props: {
   const [loading, setLoading] = useState(false);
   const [busyChapterId, setBusyChapterId] = useState<string | null>(null);
   const [view, setView] = useState<AudiobookTaskAnnotationsView | null>(null);
+  const [expandedChapterIds, setExpandedChapterIds] = useState<Record<string, boolean>>({});
 
   const terminal = task.status === "succeeded" || task.status === "failed" || task.status === "cancelled";
 
@@ -564,6 +565,7 @@ function TaskAnnotationsPanel(props: {
     try {
       const response = await getAudiobookAnnotations(novelId, task.id);
       setView(response.data ?? null);
+      setExpandedChapterIds({});
       if (!response.data) {
         onMessage("暂无标注结果。");
       }
@@ -650,45 +652,69 @@ function TaskAnnotationsPanel(props: {
                   <div className="mt-2 text-xs leading-5 text-amber-800">回退：{annotation.error}</div>
                 ) : null}
                 <div className="mt-2 space-y-1">
-                  {annotation.segments.slice(0, 6).map((segment) => {
-                    const emotion = segment.delivery?.primaryEmotion;
-                    const intensity = segment.delivery?.intensity;
-                    const styleHint = segment.style?.includes("本句表演")
-                      || segment.style?.includes("本句叙述")
-                      || segment.designPrompt?.includes("表演指令")
-                      ? "已注入表演"
-                      : null;
+                  {(() => {
+                    const expanded = Boolean(expandedChapterIds[annotation.chapterId]);
+                    const visible = expanded
+                      ? annotation.segments
+                      : annotation.segments.slice(0, 6);
                     return (
-                      <div
-                        key={`${annotation.chapterId}-${segment.index}`}
-                        className="text-xs leading-5 text-muted-foreground"
-                      >
-                        <span className="font-medium text-foreground">
-                          [{segment.speakerLabel}/{segment.voice}]
-                        </span>
-                        {emotion ? (
-                          <span className="ml-1 text-violet-700">
-                            {emotion}
-                            {intensity ? `/${intensity}` : ""}
-                          </span>
+                      <>
+                        {visible.map((segment) => {
+                          const emotion = segment.delivery?.primaryEmotion;
+                          const intensity = segment.delivery?.intensity;
+                          const styleHint = segment.style?.includes("本句表演")
+                            || segment.style?.includes("本句叙述")
+                            || segment.designPrompt?.includes("表演指令")
+                            ? "已注入表演"
+                            : null;
+                          return (
+                            <div
+                              key={`${annotation.chapterId}-${segment.index}`}
+                              className="text-xs leading-5 text-muted-foreground"
+                            >
+                              <span className="font-medium text-foreground">
+                                [{segment.speakerLabel}/{segment.voice}]
+                              </span>
+                              {emotion ? (
+                                <span className="ml-1 text-violet-700">
+                                  {emotion}
+                                  {intensity ? `/${intensity}` : ""}
+                                </span>
+                              ) : null}
+                              {styleHint ? (
+                                <span className="ml-1 text-emerald-700">{styleHint}</span>
+                              ) : null}
+                              {" "}
+                              {segment.text.length > 80 ? `${segment.text.slice(0, 80)}…` : segment.text}
+                            </div>
+                          );
+                        })}
+                        {annotation.segments.length > 6 ? (
+                          <button
+                            type="button"
+                            className="text-xs text-primary underline-offset-2 hover:underline"
+                            onClick={() =>
+                              setExpandedChapterIds((prev) => ({
+                                ...prev,
+                                [annotation.chapterId]: !prev[annotation.chapterId],
+                              }))
+                            }
+                          >
+                            {expanded
+                              ? "收起段列表"
+                              : `展开全部 ${annotation.segments.length} 段`}
+                          </button>
                         ) : null}
-                        {styleHint ? (
-                          <span className="ml-1 text-emerald-700">{styleHint}</span>
-                        ) : null}
-                        {" "}
-                        {segment.text.length > 80 ? `${segment.text.slice(0, 80)}…` : segment.text}
-                      </div>
+                      </>
                     );
-                  })}
-                  {annotation.segments.length > 6 ? (
-                    <div className="text-xs text-muted-foreground">
-                      …另有 {annotation.segments.length - 6} 段
-                    </div>
-                  ) : null}
+                  })()}
                   {annotation.deliveryStats ? (
                     <div className="pt-1 text-[11px] leading-5 text-muted-foreground">
-                      表演：采用 {annotation.deliveryStats.deliveryApplied}
-                      /角色段 {annotation.deliveryStats.characterSegmentCount}
+                      表演：角色 {annotation.deliveryStats.characterDeliveryApplied ?? annotation.deliveryStats.deliveryApplied}
+                      /{annotation.deliveryStats.characterSegmentCount}
+                      {(annotation.deliveryStats.narratorDeliveryApplied ?? 0) > 0
+                        ? ` · 旁白 ${annotation.deliveryStats.narratorDeliveryApplied}/${annotation.deliveryStats.narratorSegmentCount ?? 0}`
+                        : ""}
                       {annotation.deliveryStats.deliveryPeeled > 0
                         ? ` · 剥除 ${annotation.deliveryStats.deliveryPeeled}`
                         : ""}

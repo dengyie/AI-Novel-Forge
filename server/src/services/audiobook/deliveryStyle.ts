@@ -686,6 +686,7 @@ export interface DeliveryChapterStatsInput {
 
 /**
  * 章级 delivery 指标。
+ * 采用率：有角色段时只算角色（旁白 all 不抬高/扭曲角色率）；全旁白章才用旁白分母。
  */
 export function computeDeliveryChapterStats(
   segments: AudiobookDialogueSegment[],
@@ -693,7 +694,10 @@ export function computeDeliveryChapterStats(
 ): {
   segmentCount: number;
   characterSegmentCount: number;
+  narratorSegmentCount: number;
   deliveryApplied: number;
+  characterDeliveryApplied: number;
+  narratorDeliveryApplied: number;
   deliveryPeeled: number;
   deliveryApplyRate: number;
   avgResolvedUserLen: number;
@@ -701,20 +705,30 @@ export function computeDeliveryChapterStats(
 } {
   const segmentCount = segments.length;
   let characterSegmentCount = 0;
-  let deliveryApplied = 0;
+  let narratorSegmentCount = 0;
+  let characterDeliveryApplied = 0;
+  let narratorDeliveryApplied = 0;
   let userLenSum = 0;
   for (const seg of segments) {
-    if (seg.speakerKind === "character") characterSegmentCount += 1;
-    if (seg.delivery) deliveryApplied += 1;
+    if (seg.speakerKind === "character") {
+      characterSegmentCount += 1;
+      if (seg.delivery) characterDeliveryApplied += 1;
+    } else {
+      narratorSegmentCount += 1;
+      if (seg.delivery) narratorDeliveryApplied += 1;
+    }
     const user =
       (seg.ttsMode === "design" ? seg.designPrompt : seg.style) || "";
     userLenSum += user.length;
   }
+  const deliveryApplied = characterDeliveryApplied + narratorDeliveryApplied;
   const deliveryPeeled = Math.max(0, options?.peeledCount ?? 0);
-  const deliveryApplyRate =
-    characterSegmentCount > 0
-      ? deliveryApplied / Math.max(characterSegmentCount, 1)
-      : deliveryApplied / Math.max(segmentCount, 1);
+  let deliveryApplyRate = 0;
+  if (characterSegmentCount > 0) {
+    deliveryApplyRate = characterDeliveryApplied / characterSegmentCount;
+  } else if (narratorSegmentCount > 0) {
+    deliveryApplyRate = narratorDeliveryApplied / narratorSegmentCount;
+  }
   const avgResolvedUserLen = segmentCount > 0 ? userLenSum / segmentCount : 0;
   const mergeChunkMultiplier =
     typeof options?.chunkJobCount === "number" && segmentCount > 0
@@ -723,7 +737,10 @@ export function computeDeliveryChapterStats(
   return {
     segmentCount,
     characterSegmentCount,
+    narratorSegmentCount,
     deliveryApplied,
+    characterDeliveryApplied,
+    narratorDeliveryApplied,
     deliveryPeeled,
     deliveryApplyRate: Number(deliveryApplyRate.toFixed(4)),
     avgResolvedUserLen: Number(avgResolvedUserLen.toFixed(1)),

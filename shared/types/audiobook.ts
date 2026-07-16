@@ -177,11 +177,20 @@ export interface AudiobookDialogueSegment {
 export interface AudiobookDeliveryChapterStats {
   segmentCount: number;
   characterSegmentCount: number;
-  /** 最终保留 delivery 的段数 */
+  narratorSegmentCount: number;
+  /** 最终保留 delivery 的段数（角色 + 旁白） */
   deliveryApplied: number;
+  /** 角色段中最终保留 delivery 的段数 */
+  characterDeliveryApplied: number;
+  /** 旁白段中最终保留 delivery 的段数（mode=all） */
+  narratorDeliveryApplied: number;
   /** 模型给了 delivery 但 normalize/适用失败被剥掉的段数 */
   deliveryPeeled: number;
-  /** 角色段中最终有 delivery 的占比 0–1 */
+  /**
+   * 采用率 0–1。
+   * 有角色段时：characterDeliveryApplied / characterSegmentCount（不把旁白计入分子/分母）。
+   * 全旁白章时：narratorDeliveryApplied / narratorSegmentCount。
+   */
   deliveryApplyRate: number;
   /** resolve 后 style/designPrompt 平均长度 */
   avgResolvedUserLen: number;
