@@ -3,7 +3,8 @@
 > 状态：**v1.1 实现中**（分支 `feat/audiobook-voice-diff` · 阶段 1–2 + P1 深入修复已落地）· 2026-07-16  
 > 相对 v1.0：删除写文线耦合；收紧默认 `auto`；槽位降为 prompt 约束；补隔离契约与 provider 契约测；阶段重切避免面子工程。  
 > P1 修复（2026-07-16）：onlyMissing seed 已绑定 design 槽；槽位扰动后禁止【声线】对立 texture；soft 邻居改占用 map；收紧单测；去掉 planner 死参 `overwrite`。
-> P2 收口：clone 无 ref 亦 skip；seed:inferred；reason 去「保证」；summary soft/override/seedInferred；Mimo 契约独立测。  
+> P2 收口：seed:inferred；reason 去「保证」；summary soft/override/seedInferred；Mimo 契约独立测。  
+> P2 再收口：仅 clone+ref 永久 skip（half-clone 可重规划）；auto 位满升 design reason 非听感口径；UI 展示 seedInferred。  
 > 范围：在 **不换 TTS 供应商、不新建 Voice 表、不通读全书正文、不碰写文管线** 的前提下，把「多角色身份音色可区分」做成 **可用、可维护、可回归** 的有声书能力。  
 > 生产：pxed + `ainovel.mangoq.ccwu.cc`；TTS：**CPA → MiMo chat-audio** 三模态。  
 > 产品 SoT：Obsidian `ainovel 小说转有声书 产品形态` · 协议：`ainovel 小说转有声书 TTS 经验` · 控制面：`docs/plans/audiobook-workbench-voice-readiness-plan.md` · 固定试听：`docs/plans/character-voice-preview-asset-plan.md` · 段级表演：`docs/plans/audiobook-segment-delivery-style-plan.md`（**正交**）。  
