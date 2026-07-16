@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import type {
   AudiobookChapterAnnotation,
   AudiobookChapterReprocessMode,
@@ -131,9 +132,32 @@ function parseAnnotationsJson(json: string | null | undefined): AudiobookChapter
 }
 
 function collectAnnotationWarnings(annotations: AudiobookChapterAnnotation[]): string[] {
-  return annotations
-    .filter((item) => Boolean(item.error?.trim()))
-    .map((item) => `第 ${item.chapterOrder} 章：${item.error!.trim()}`);
+  const warnings: string[] = [];
+  for (const annotation of annotations) {
+    if (annotation.error?.trim()) {
+      warnings.push(`第 ${annotation.chapterOrder} 章：${annotation.error.trim()}`);
+    }
+    if (annotation.contentTruncated) {
+      warnings.push(`第 ${annotation.chapterOrder} 章：正文超 28k，标注仅见前部`);
+    }
+    const stats = annotation.deliveryStats;
+    if (stats && stats.deliveryPeeled > 0) {
+      warnings.push(
+        `第 ${annotation.chapterOrder} 章：剥除 ${stats.deliveryPeeled} 段坏表演（已回退静态 style）`,
+      );
+    }
+    if (stats && stats.mergeChunkMultiplier != null && stats.mergeChunkMultiplier > 1.8) {
+      warnings.push(
+        `第 ${annotation.chapterOrder} 章：chunk 倍率 ${stats.mergeChunkMultiplier}（表演分桶偏碎）`,
+      );
+    }
+  }
+  return warnings;
+}
+
+/** 仅统计「整章旁白回退」类 error，不含截断/剥表演等软警告 */
+function countNarratorFallbackChapters(annotations: AudiobookChapterAnnotation[]): number {
+  return annotations.filter((item) => Boolean(item.error?.trim())).length;
 }
 
 type AudiobookTaskRow = {
@@ -811,16 +835,75 @@ export class AudiobookTaskService {
             personality: character.personality ?? null,
             voiceTexture: character.voiceTexture ?? null,
           };
-        })
-        .filter((character) => {
-          if (character.ttsMode === "design") {
-            return Boolean(character.ttsDesignPrompt);
-          }
-          if (character.ttsMode === "clone") {
-            return Boolean(character.ttsRefAudioPath);
-          }
-          return Boolean(character.ttsVoice);
         });
+
+      // 执行前硬门禁：配置了却不可读/无效的绑定直接 fail，禁止静默滤成「全旁白」
+      const executeBindingErrors: string[] = [];
+      for (const character of characterVoices) {
+        if (character.ttsMode === "design") {
+          if (!character.ttsDesignPrompt) {
+            executeBindingErrors.push(
+              `角色「${character.characterName}」design 模式缺少 ttsDesignPrompt。`,
+            );
+          }
+          continue;
+        }
+        if (character.ttsMode === "clone") {
+          const refPath = character.ttsRefAudioPath?.trim() || "";
+          if (!refPath) {
+            executeBindingErrors.push(
+              `角色「${character.characterName}」clone 模式缺少 ttsRefAudioPath。`,
+            );
+            continue;
+          }
+          if (refPath.includes("..") || refPath.includes("\0")) {
+            executeBindingErrors.push(
+              `角色「${character.characterName}」clone 参考音频路径非法。`,
+            );
+            continue;
+          }
+          try {
+            if (!fs.existsSync(refPath) || !fs.statSync(refPath).isFile()) {
+              executeBindingErrors.push(
+                `角色「${character.characterName}」clone 参考音频不存在或不可读。`,
+              );
+            } else if (fs.statSync(refPath).size <= 0) {
+              executeBindingErrors.push(
+                `角色「${character.characterName}」clone 参考音频为空文件。`,
+              );
+            }
+          } catch {
+            executeBindingErrors.push(
+              `角色「${character.characterName}」clone 参考音频无法访问。`,
+            );
+          }
+          continue;
+        }
+        if (!character.ttsVoice) {
+          executeBindingErrors.push(
+            `角色「${character.characterName}」preset 模式未配置 ttsVoice。`,
+          );
+        }
+      }
+      if (executeBindingErrors.length > 0) {
+        await this.markFailedIfRunning(
+          taskId,
+          `执行前音色门禁失败：${executeBindingErrors.slice(0, 5).join("；")}${
+            executeBindingErrors.length > 5 ? ` 等 ${executeBindingErrors.length} 项` : ""
+          }`,
+        );
+        return;
+      }
+
+      const usableCharacterVoices = characterVoices.filter((character) => {
+        if (character.ttsMode === "design") {
+          return Boolean(character.ttsDesignPrompt);
+        }
+        if (character.ttsMode === "clone") {
+          return Boolean(character.ttsRefAudioPath);
+        }
+        return Boolean(character.ttsVoice);
+      });
 
       const deliveryStyleMode = readDeliveryStyleModeFromTask(task);
       const result = await audiobookPipelineService.run({
@@ -832,7 +915,7 @@ export class AudiobookTaskService {
           voice: task.narratorVoice,
           style: task.narratorStyle,
         },
-        characterVoices,
+        characterVoices: usableCharacterVoices,
         provider: (task.provider as LLMProvider | null) ?? null,
         model: task.model,
         temperature: task.temperature,
@@ -899,7 +982,7 @@ export class AudiobookTaskService {
         return;
       }
 
-      const annotationFallbackCount = result.qualityWarnings.length;
+      const annotationFallbackCount = countNarratorFallbackChapters(result.annotations);
       const annotationSuffix = annotationFallbackCount > 0
         ? `；标注回退 ${annotationFallbackCount} 章`
         : "";

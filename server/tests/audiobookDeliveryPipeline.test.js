@@ -288,3 +288,78 @@ test("mode=off path style has no 本句表演", () => {
   assert.equal(seg.style, "角色基线 style");
   assert.equal((seg.style || "").includes("本句表演"), false);
 });
+
+
+const { resolveChunkSynthesizeFields } = require("../dist/services/audiobook/AudiobookPipelineService.js");
+
+test("resolveChunkSynthesizeFields keeps narrator 本句叙述 SoT", () => {
+  const narratorSeg = applyDeliveryToSegment(
+    {
+      index: 0,
+      speakerKind: "narrator",
+      characterId: null,
+      speakerLabel: "旁白",
+      text: "夜色渐深，长街只剩脚步声。",
+      ttsMode: "preset",
+      voice: "茉莉",
+      style: "知性旁白",
+    },
+    GOOD,
+    { deliveryStyleMode: "all", baseStyle: "知性旁白" },
+  );
+  assert.match(narratorSeg.style || "", /本句叙述：/);
+  assert.equal((narratorSeg.style || "").includes("本句表演"), false);
+
+  const synth = resolveChunkSynthesizeFields(narratorSeg);
+  assert.equal(synth.style, narratorSeg.style);
+  assert.match(synth.style || "", /本句叙述：/);
+  assert.equal((synth.style || "").includes("本句表演"), false);
+});
+
+test("resolveChunkSynthesizeFields rebuilds narrator without resolved style", () => {
+  const delivery = normalizeDelivery(GOOD);
+  const bare = {
+    index: 0,
+    speakerKind: "narrator",
+    characterId: null,
+    speakerLabel: "旁白",
+    text: "夜色渐深。",
+    ttsMode: "preset",
+    voice: "茉莉",
+    style: "知性旁白",
+    baseStyle: "知性旁白",
+    delivery,
+    deliveryMergeKey: deliveryMergeKey(delivery),
+  };
+  const synth = resolveChunkSynthesizeFields(bare);
+  assert.match(synth.style || "", /本句叙述：/);
+  assert.equal((synth.style || "").includes("本句表演"), false);
+});
+
+test("asymmetric mergeKey falls back to style equality (no false merge)", () => {
+  const key = deliveryMergeKey(normalizeDelivery(GOOD));
+  const a = {
+    index: 0,
+    speakerKind: "character",
+    characterId: "c1",
+    speakerLabel: "何屿",
+    text: "第一句。",
+    ttsMode: "preset",
+    voice: "白桦",
+    style: "风格A",
+    deliveryMergeKey: key,
+  };
+  const b = {
+    index: 1,
+    speakerKind: "character",
+    characterId: "c1",
+    speakerLabel: "何屿",
+    text: "第二句。",
+    ttsMode: "preset",
+    voice: "白桦",
+    style: "风格B",
+    // 缺 mergeKey：不得用 none 与 a 误合并
+  };
+  const coalesced = coalesceSegmentsBySpeaker([a, b]);
+  assert.equal(coalesced.length, 2);
+});

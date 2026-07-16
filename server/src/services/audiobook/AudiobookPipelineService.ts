@@ -41,6 +41,7 @@ import {
 } from "./audiobookWav";
 import { mimoChatAudioTTSProvider } from "./MimoChatAudioTTSProvider";
 import {
+  applyDeliveryToSegment,
   fingerprintStyleParts,
   resolveDeliveryStyleMode,
   resolveSynthesizeInput,
@@ -207,32 +208,69 @@ export function chunkLayoutFingerprint(
 }
 
 /**
- * 合成前唯一解析 style/designPrompt：优先 segment 已 resolve 字段，
- * 若仅有 base+delivery 则再 resolve 一次（兼容旧 annotations / 手工修字段）。
+ * 合成前唯一解析 style/designPrompt。
+ * 原则：annotate 已写入的 style/designPrompt 为 SoT；
+ * 仅当有 delivery 且终态尚未写出时才重 resolve。
+ * 旁白绝不走角色「本句表演」模板（认 本句叙述 / speakerKind）。
  */
-function resolveChunkSynthesizeFields(segment: AudiobookDialogueSegment): {
+export function resolveChunkSynthesizeFields(segment: AudiobookDialogueSegment): {
   style?: string | null;
   designPrompt?: string | null;
 } {
   const hasDelivery = Boolean(segment.delivery);
-  const hasResolvedStyle =
-    typeof segment.style === "string" &&
-    (segment.style.includes("本句表演：") || segment.style.includes("表演指令："));
-  const hasResolvedDesign =
-    typeof segment.designPrompt === "string" &&
-    segment.designPrompt.includes("表演指令：");
-
-  if (!hasDelivery || hasResolvedStyle || hasResolvedDesign) {
+  if (!hasDelivery) {
     return {
       style: segment.style,
       designPrompt: segment.designPrompt,
     };
   }
 
+  const style = typeof segment.style === "string" ? segment.style : "";
+  const design = typeof segment.designPrompt === "string" ? segment.designPrompt : "";
+  const baseStyle = segment.baseStyle ?? null;
+  const baseDesign = segment.baseDesignPrompt ?? null;
+
+  const hasResolvedStyle =
+    style.includes("本句表演：")
+    || style.includes("本句叙述：")
+    || style.includes("表演指令：")
+    || (baseStyle != null && style.length > 0 && style !== baseStyle);
+  const hasResolvedDesign =
+    design.includes("表演指令：")
+    || (baseDesign != null && design.length > 0 && design !== baseDesign);
+
+  if (hasResolvedStyle || hasResolvedDesign) {
+    return {
+      style: segment.style,
+      designPrompt: segment.designPrompt,
+    };
+  }
+
+  // 旁白：禁止 resolveSynthesizeInput 角色通道；无终态时用 apply 的叙述路径重算
+  if (segment.speakerKind === "narrator") {
+    const rebuilt = applyDeliveryToSegment(
+      {
+        ...segment,
+        style: baseStyle ?? segment.style,
+        designPrompt: baseDesign ?? segment.designPrompt,
+      },
+      segment.delivery,
+      {
+        deliveryStyleMode: "all",
+        baseStyle: baseStyle ?? segment.style ?? null,
+        baseDesignPrompt: baseDesign ?? null,
+      },
+    );
+    return {
+      style: rebuilt.style,
+      designPrompt: rebuilt.designPrompt,
+    };
+  }
+
   return resolveSynthesizeInput({
     ttsMode: segment.ttsMode,
-    baseStyle: segment.baseStyle ?? segment.style,
-    baseDesignPrompt: segment.baseDesignPrompt ?? segment.designPrompt,
+    baseStyle: baseStyle ?? segment.style,
+    baseDesignPrompt: baseDesign ?? segment.designPrompt,
     style: segment.style,
     designPrompt: segment.designPrompt,
     delivery: segment.delivery,
@@ -438,9 +476,12 @@ export class AudiobookPipelineService {
       }
 
       const chapterWavPath = resolveChapterAudioPath(taskDir, chapter.id);
-      if (isValidPcmWavFile(chapterWavPath)) {
-        const chunks = expandSegmentsToChunkJobs(annotation.segments);
-        completedChunks += chunks.length;
+      const chunkJobsPreview = expandSegmentsToChunkJobs(annotation.segments);
+      const layoutFp = chunkLayoutFingerprint(chunkJobsPreview);
+      const prevFp = readChunkLayoutFingerprint(taskDir, chapter.id);
+      // 章 wav 存在也必须对照指纹；不一致则 wipe 后重合成（防改 annotation 后 resume 复用旧音）
+      if (isValidPcmWavFile(chapterWavPath) && prevFp && prevFp === layoutFp) {
+        completedChunks += chunkJobsPreview.length;
         chapterAudioPaths.push({
           chapterId: chapter.id,
           path: chapterWavPath,
@@ -460,13 +501,14 @@ export class AudiobookPipelineService {
         });
         continue;
       }
+      if (isValidPcmWavFile(chapterWavPath) && (!prevFp || prevFp !== layoutFp)) {
+        wipeChapterAudioArtifacts(taskDir, chapter.id);
+      }
 
       ensureChapterAudioDir(taskDir, chapter.id);
-      const chunkJobs = expandSegmentsToChunkJobs(annotation.segments);
-      const layoutFp = chunkLayoutFingerprint(chunkJobs);
-      const prevFp = readChunkLayoutFingerprint(taskDir, chapter.id);
+      const chunkJobs = chunkJobsPreview;
       if (prevFp && prevFp !== layoutFp) {
-        // 布局变更（如 group_by_speaker 升级）时丢弃旧 chunk，避免 resume 错位
+        // 布局变更时丢弃旧 chunk，避免 resume 错位
         wipeChapterAudioArtifacts(taskDir, chapter.id);
         ensureChapterAudioDir(taskDir, chapter.id);
       }
