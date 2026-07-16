@@ -1,6 +1,6 @@
 # 有声书 · Design Prompt 质量（Voice Design 文案升级）开发计划
 
-> 状态：**已冻结 v1.1（用户拍板 2026-07-17 · 深度 review 修订后）** · 待开工  
+> 状态：**实现完成（2026-07-17）** · 分支 `feat/audiobook-design-prompt-quality` @ 待交付 tip · **未 merge / 未部署**  
 > 前置已上线：音色区分度 + 分簇 v2（`8acd1a6`）+ 工作台 UI（`dcfc946`）+ multi-backend fallback 分支 `8b31fcb`（**并行、不叠合**）  
 > 调研依据：MiMo-V2.5-TTS 官方样例、阿里 CosyVoice/Qwen Voice Design 七维原则、ASLP VoiceSculptor 中文规范、TTS-Story/RoleBank 形态对照  
 > 产品 SoT：Obsidian `ainovel 小说转有声书 产品形态` · 协议：`ainovel 小说转有声书 TTS 经验`  
@@ -371,4 +371,16 @@ git checkout main && pull → 拉 feat/audiobook-design-prompt-quality
 → 你令后再 merge / 部署 / Manual 听感
 ```
 
-**未开工（仅 plan 修订已写入）。** 说「开始做」即按 v1.1 契约执行。
+**阶段 1–3 已实现并提交。** merge / 部署 / Manual 听感另令。
+
+---
+
+## 11. 实现记录（2026-07-17）
+
+| 阶段 | Commit | 内容 |
+|------|--------|------|
+| 1 | `6f02a89` | `buildDesignPrompt` 自然语言 + `DESIGN_PROMPT_MAX=200` + 单测迁移 |
+| 2 | `c47c69f` | `designPromptArchetypes` ~24 + summary 可选字段 + UI 展开全文 |
+| 3 | （本收口） | plan 状态完成 + Obsidian TTS 经验「Design 身份文案原则」+ 整体审查 |
+
+验证：`pnpm -C shared/server build`；`node --test` planner+quality **36/36**；client `tsc --noEmit` 通过。
