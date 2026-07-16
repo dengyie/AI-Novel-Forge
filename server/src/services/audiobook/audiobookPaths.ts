@@ -232,13 +232,10 @@ export function listReadyChapterAudioIds(taskDir: string, chapterIds: string[]):
   return chapterIds.filter((chapterId) => isChapterAudioReady(taskDir, chapterId));
 }
 
+/** 全书 WAV 已落盘且为合法 PCM（与 chapter ready / preview 同一套校验）。 */
 export function isFullBookAudioReady(taskDir: string): boolean {
   try {
-    const filePath = resolveFullBookAudioPath(taskDir);
-    if (!fs.existsSync(filePath)) {
-      return false;
-    }
-    return fs.statSync(filePath).size > 44;
+    return isValidPcmWavFile(resolveFullBookAudioPath(taskDir));
   } catch {
     return false;
   }

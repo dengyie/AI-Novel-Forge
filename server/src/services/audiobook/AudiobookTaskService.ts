@@ -7,6 +7,7 @@ import type {
   CreateAudiobookTaskInput,
   DeliveryStyleMode,
 } from "@ai-novel/shared/types/audiobook";
+import { isMimoTtsPresetVoice } from "@ai-novel/shared/types/audiobook";
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
 import { prisma } from "../../db/prisma";
 import { AppError } from "../../middleware/errorHandler";
@@ -838,7 +839,16 @@ export class AudiobookTaskService {
         });
 
       // 执行前硬门禁：配置了却不可读/无效的绑定直接 fail，禁止静默滤成「全旁白」
+      // 与 precheck 对齐：preset 必须在 MiMo 预置表内
       const executeBindingErrors: string[] = [];
+      const narratorVoice = task.narratorVoice?.trim() || "";
+      if (!narratorVoice) {
+        executeBindingErrors.push("旁白未配置 narratorVoice。");
+      } else if (!isMimoTtsPresetVoice(narratorVoice)) {
+        executeBindingErrors.push(
+          `旁白音色「${narratorVoice}」不在 MiMo 预置表中（旁白仅支持 preset）。`,
+        );
+      }
       for (const character of characterVoices) {
         if (character.ttsMode === "design") {
           if (!character.ttsDesignPrompt) {
@@ -864,9 +874,14 @@ export class AudiobookTaskService {
           }
           continue;
         }
-        if (!character.ttsVoice) {
+        const voice = character.ttsVoice?.trim() || "";
+        if (!voice) {
           executeBindingErrors.push(
             `角色「${character.characterName}」preset 模式未配置 ttsVoice。`,
+          );
+        } else if (!isMimoTtsPresetVoice(voice)) {
+          executeBindingErrors.push(
+            `角色「${character.characterName}」音色「${voice}」不在 MiMo 预置表中。`,
           );
         }
       }
@@ -887,7 +902,8 @@ export class AudiobookTaskService {
         if (character.ttsMode === "clone") {
           return Boolean(character.ttsRefAudioPath);
         }
-        return Boolean(character.ttsVoice);
+        const voice = character.ttsVoice?.trim() || "";
+        return Boolean(voice) && isMimoTtsPresetVoice(voice);
       });
 
       const deliveryStyleMode = readDeliveryStyleModeFromTask(task);

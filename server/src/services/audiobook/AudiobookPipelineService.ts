@@ -602,7 +602,13 @@ export class AudiobookPipelineService {
       }
 
       annotations.push(annotation);
-      totalChunksEstimate += expandSegmentsToChunkJobs(annotation.segments).length;
+      // 与合成侧同一套 reconcile→expand，避免改卡后进度分母偏离实际 chunk 数
+      const estimateSegments = reconcileAnnotationSegmentsWithVoices(annotation.segments, {
+        characterVoices: input.characterVoices,
+        narrator: input.narrator,
+        deliveryStyleMode,
+      });
+      totalChunksEstimate += expandSegmentsToChunkJobs(estimateSegments).length;
 
       await input.onProgress({
         phase: "annotating",
