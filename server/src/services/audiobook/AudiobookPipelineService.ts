@@ -91,10 +91,51 @@ export function shouldInvalidateCachedAnnotation(input: {
   return false;
 }
 
+export type ReconcileAnnotationSegmentsResult = {
+  segments: AudiobookDialogueSegment[];
+  /** 标注仍挂 characterId 但当前角色表已无该卡 → 已强制旁白回退 */
+  orphanCharacterIds: string[];
+  orphanSpeakerLabels: string[];
+};
+
+/**
+ * 剥除已编译的表演/叙述/指令行，避免缺 baseStyle 时把「本句表演」再当 base 二次编译。
+ */
+export function peelCompiledDeliveryMarks(value: string | null | undefined): string | null {
+  if (value == null) return null;
+  const raw = String(value);
+  if (
+    !raw.includes("本句表演：")
+    && !raw.includes("本句叙述：")
+    && !raw.includes("表演指令：")
+    && !raw.includes("保持该角色声线与身份一致")
+  ) {
+    const trimmed = raw.trim();
+    return trimmed || null;
+  }
+  const cleaned = raw
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter((line) => {
+      if (!line) return false;
+      if (line.startsWith("本句表演：") || line.startsWith("本句叙述：") || line.startsWith("表演指令：")) {
+        return false;
+      }
+      if (line.includes("保持该角色声线与身份一致")) {
+        return false;
+      }
+      return true;
+    })
+    .join("\n")
+    .trim();
+  return cleaned || null;
+}
+
 /**
  * 合成前用任务当前 characterVoices / narrator 覆盖段绑定。
  * 标注冻结 speaker/text/delivery；音色/mode/ref/base 以卡为准，有 delivery 则按 base 重 apply。
  * 改卡后 resume 不必 reannotate 也能换声线（layout fingerprint 会变）。
+ * 角色卡已删除：强制旁白 + 登记 orphan（禁止 silent 继续用旧 clone/脏 voice）。
  */
 export function reconcileAnnotationSegmentsWithVoices(
   segments: AudiobookDialogueSegment[],
@@ -103,13 +144,16 @@ export function reconcileAnnotationSegmentsWithVoices(
     narrator: AudiobookNarratorConfig;
     deliveryStyleMode: DeliveryStyleMode;
   },
-): AudiobookDialogueSegment[] {
+): ReconcileAnnotationSegmentsResult {
   const byId = new Map(
     input.characterVoices.map((item) => [item.characterId, item] as const),
   );
   const mode = resolveDeliveryStyleMode(input.deliveryStyleMode);
+  const orphanCharacterIds: string[] = [];
+  const orphanSpeakerLabels: string[] = [];
+  const orphanSeen = new Set<string>();
 
-  return segments.map((seg) => {
+  const nextSegments = segments.map((seg) => {
     if (seg.speakerKind === "narrator" || !seg.characterId) {
       const baseStyle = input.narrator.style || null;
       const base: AudiobookDialogueSegment = {
@@ -140,8 +184,34 @@ export function reconcileAnnotationSegmentsWithVoices(
 
     const matched = byId.get(seg.characterId);
     if (!matched) {
-      // 角色已从配置移除：保留标注身份，音色字段不动（避免 silent 错配）
-      return seg;
+      // 角色卡已移除：禁止沿用旧 voice/ref；强制旁白并记录 orphan
+      if (!orphanSeen.has(seg.characterId)) {
+        orphanSeen.add(seg.characterId);
+        orphanCharacterIds.push(seg.characterId);
+        orphanSpeakerLabels.push(seg.speakerLabel || seg.characterId);
+      }
+      const baseStyle = input.narrator.style || null;
+      const base: AudiobookDialogueSegment = {
+        ...seg,
+        speakerKind: "narrator",
+        characterId: null,
+        speakerLabel: "旁白",
+        ttsMode: "preset",
+        voice: input.narrator.voice,
+        refAudioPath: null,
+        baseStyle,
+        baseDesignPrompt: null,
+        style: baseStyle,
+        designPrompt: null,
+        // 身份丢失时不保留角色表演，避免旁白串戏
+        delivery: null,
+        deliveryMergeKey: "none",
+      };
+      return applyDeliveryToSegment(base, null, {
+        deliveryStyleMode: "off",
+        baseStyle,
+        baseDesignPrompt: null,
+      });
     }
 
     const rawMode = matched.ttsMode?.trim() || "preset";
@@ -175,6 +245,12 @@ export function reconcileAnnotationSegmentsWithVoices(
       baseDesignPrompt,
     });
   });
+
+  return {
+    segments: nextSegments,
+    orphanCharacterIds,
+    orphanSpeakerLabels,
+  };
 }
 
 export type AudiobookCancelChecker = () => Promise<boolean>;
@@ -343,24 +419,34 @@ export function chunkLayoutFingerprint(
 
 /**
  * 合成前唯一解析 style/designPrompt。
- * - 无 delivery：旁白脏「本句表演」剥回 base；否则透传
- * - 有 delivery：旁白/角色均以 base + delivery 重 compile（不盲信旧 style 字符串）
+ * - 无 delivery：旁白/角色脏「本句表演」剥回 base 或剥标记
+ * - 有 delivery：旁白/角色均以干净 base + delivery 重 compile（不盲信旧 style 字符串）
  */
 export function resolveChunkSynthesizeFields(segment: AudiobookDialogueSegment): {
   style?: string | null;
   designPrompt?: string | null;
 } {
   const hasDelivery = Boolean(segment.delivery);
+  const styleRaw = typeof segment.style === "string" ? segment.style : "";
+  const designRaw = typeof segment.designPrompt === "string" ? segment.designPrompt : "";
+  const dirtyStyle = styleRaw.includes("本句表演：")
+    || styleRaw.includes("本句叙述：")
+    || styleRaw.includes("表演指令：");
+  const dirtyDesign = designRaw.includes("表演指令：");
+
   if (!hasDelivery) {
-    // 无 delivery 的旁白若残留角色表演标记，剥回 baseStyle，避免脏缓存出声
-    if (segment.speakerKind === "narrator") {
-      const style = typeof segment.style === "string" ? segment.style : "";
-      if (style.includes("本句表演：") || style.includes("表演指令：")) {
-        return {
-          style: segment.baseStyle ?? null,
-          designPrompt: segment.baseDesignPrompt ?? null,
-        };
-      }
+    // 无 delivery：残留编译标记 → 剥回 base 或剥标记，避免脏缓存出声
+    if (segment.speakerKind === "narrator" && (dirtyStyle || dirtyDesign)) {
+      return {
+        style: segment.baseStyle ?? peelCompiledDeliveryMarks(segment.style),
+        designPrompt: segment.baseDesignPrompt ?? peelCompiledDeliveryMarks(segment.designPrompt),
+      };
+    }
+    if (segment.speakerKind === "character" && (dirtyStyle || dirtyDesign)) {
+      return {
+        style: segment.baseStyle ?? peelCompiledDeliveryMarks(segment.style),
+        designPrompt: segment.baseDesignPrompt ?? peelCompiledDeliveryMarks(segment.designPrompt),
+      };
     }
     return {
       style: segment.style,
@@ -368,18 +454,18 @@ export function resolveChunkSynthesizeFields(segment: AudiobookDialogueSegment):
     };
   }
 
-  const style = typeof segment.style === "string" ? segment.style : "";
-  const design = typeof segment.designPrompt === "string" ? segment.designPrompt : "";
-  const baseStyle = segment.baseStyle ?? null;
-  const baseDesign = segment.baseDesignPrompt ?? null;
+  const baseStyleClean = peelCompiledDeliveryMarks(segment.baseStyle)
+    ?? (dirtyStyle ? peelCompiledDeliveryMarks(segment.style) : (segment.baseStyle ?? segment.style ?? null));
+  const baseDesignClean = peelCompiledDeliveryMarks(segment.baseDesignPrompt)
+    ?? (dirtyDesign ? peelCompiledDeliveryMarks(segment.designPrompt) : (segment.baseDesignPrompt ?? segment.designPrompt ?? null));
 
   // 旁白：干净「本句叙述」可透传；脏「本句表演」强制重算
   if (segment.speakerKind === "narrator") {
     const narratorClean =
-      style.includes("本句叙述：")
-      && !style.includes("本句表演：")
-      && !style.includes("表演指令：")
-      && !design.includes("表演指令：");
+      styleRaw.includes("本句叙述：")
+      && !styleRaw.includes("本句表演：")
+      && !styleRaw.includes("表演指令：")
+      && !designRaw.includes("表演指令：");
     if (narratorClean) {
       return {
         style: segment.style,
@@ -389,14 +475,14 @@ export function resolveChunkSynthesizeFields(segment: AudiobookDialogueSegment):
     const rebuilt = applyDeliveryToSegment(
       {
         ...segment,
-        style: baseStyle ?? (style.includes("本句表演：") || style.includes("表演指令：") ? null : segment.style),
-        designPrompt: baseDesign ?? segment.designPrompt,
+        style: baseStyleClean,
+        designPrompt: baseDesignClean,
       },
       segment.delivery,
       {
         deliveryStyleMode: "all",
-        baseStyle: baseStyle ?? null,
-        baseDesignPrompt: baseDesign ?? null,
+        baseStyle: baseStyleClean,
+        baseDesignPrompt: baseDesignClean,
       },
     );
     return {
@@ -405,13 +491,13 @@ export function resolveChunkSynthesizeFields(segment: AudiobookDialogueSegment):
     };
   }
 
-  // 角色：始终 base + delivery 重 compile，避免改卡后旧 base 嵌在 style 里
+  // 角色：始终干净 base + delivery 重 compile，避免改卡后旧 base 嵌在 style 里二次叠表演
   return resolveSynthesizeInput({
     ttsMode: segment.ttsMode,
-    baseStyle: baseStyle ?? segment.style,
-    baseDesignPrompt: baseDesign ?? segment.designPrompt,
-    style: baseStyle ?? segment.style,
-    designPrompt: baseDesign ?? segment.designPrompt,
+    baseStyle: baseStyleClean,
+    baseDesignPrompt: baseDesignClean,
+    style: baseStyleClean,
+    designPrompt: baseDesignClean,
     delivery: segment.delivery,
     text: segment.text,
   });
@@ -603,12 +689,12 @@ export class AudiobookPipelineService {
 
       annotations.push(annotation);
       // 与合成侧同一套 reconcile→expand，避免改卡后进度分母偏离实际 chunk 数
-      const estimateSegments = reconcileAnnotationSegmentsWithVoices(annotation.segments, {
+      const estimateReconcile = reconcileAnnotationSegmentsWithVoices(annotation.segments, {
         characterVoices: input.characterVoices,
         narrator: input.narrator,
         deliveryStyleMode,
       });
-      totalChunksEstimate += expandSegmentsToChunkJobs(estimateSegments).length;
+      totalChunksEstimate += expandSegmentsToChunkJobs(estimateReconcile.segments).length;
 
       await input.onProgress({
         phase: "annotating",
@@ -638,7 +724,7 @@ export class AudiobookPipelineService {
 
       const chapterWavPath = resolveChapterAudioPath(taskDir, chapter.id);
       // 合成侧对账：标注保留 speaker/text/delivery；绑定以当前角色卡为准
-      const reconciledSegments = reconcileAnnotationSegmentsWithVoices(
+      const reconcileResult = reconcileAnnotationSegmentsWithVoices(
         annotation.segments,
         {
           characterVoices: input.characterVoices,
@@ -646,6 +732,28 @@ export class AudiobookPipelineService {
           deliveryStyleMode,
         },
       );
+      const reconciledSegments = reconcileResult.segments;
+      // 写回对账后的绑定视图（UI/annotationsJson 与真实合成一致）；orphan 记入 qualityWarnings
+      const orphanNote = reconcileResult.orphanSpeakerLabels.length > 0
+        ? `角色卡缺失已回退旁白：${reconcileResult.orphanSpeakerLabels.slice(0, 6).join("、")}${
+          reconcileResult.orphanSpeakerLabels.length > 6
+            ? ` 等 ${reconcileResult.orphanSpeakerLabels.length} 人`
+            : ""
+        }`
+        : null;
+      const annotationForPersist: AudiobookChapterAnnotation = {
+        ...annotation,
+        segments: reconciledSegments,
+        error: orphanNote
+          ? [annotation.error?.trim(), orphanNote].filter(Boolean).join("；")
+          : annotation.error,
+      };
+      const annotationIndex = annotations.findIndex((item) => item.chapterId === chapter.id);
+      if (annotationIndex >= 0) {
+        annotations[annotationIndex] = annotationForPersist;
+      }
+      writeAnnotationFileSafe(taskDir, annotationForPersist);
+
       const chunkJobsPreview = expandSegmentsToChunkJobs(reconciledSegments);
       const layoutFp = chunkLayoutFingerprint(chunkJobsPreview);
       const prevFp = readChunkLayoutFingerprint(taskDir, chapter.id);
@@ -668,6 +776,7 @@ export class AudiobookPipelineService {
           totalChunksEstimate,
           message: `跳过已完成第 ${chapter.order} 章音频`,
           chapterAudioPaths: chapterAudioPaths.map((item) => ({ chapterId: item.chapterId, path: item.path })),
+          qualityWarnings: collectQualityWarnings(annotations),
         });
         continue;
       }
@@ -687,6 +796,8 @@ export class AudiobookPipelineService {
           bitsPerSample: 16,
         });
         writeWavFileAtomic(chapterWavPath, silent);
+        // 空作业也写布局指纹，避免 resume 反复 wipe 静音章
+        writeChunkLayoutFingerprint(taskDir, chapter.id, layoutFp);
         chapterAudioPaths.push({ chapterId: chapter.id, path: chapterWavPath, bytes: silent.length });
         continue;
       }
