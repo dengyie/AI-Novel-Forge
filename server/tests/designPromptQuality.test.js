@@ -9,8 +9,14 @@ const {
 const {
   planCharacterVoices,
   buildDesignPrompt,
+  buildDesignPromptDetailed,
   parseSlotFromDesignPrompt,
+  inferVoiceSlot,
+  allocateVoiceSlot,
+  extractCompatibleTextureSnippet,
   DESIGN_PROMPT_MAX,
+  DESIGN_PROMPT_TARGET_MIN,
+  DESIGN_PROMPT_TARGET_MAX,
 } = require("../dist/services/audiobook/audiobookVoicePlanner.js");
 
 test("archetype table has at least 24 seeds and no celebrity names", () => {
@@ -271,4 +277,195 @@ test("scoreDesignPromptArchetype prefers matching gender/role", () => {
     character: { characterId: "3", characterName: "丙", castRole: "ally" },
   });
   assert.ok(allyScore > antScore);
+});
+
+
+test("personality 冷静 does not force dark_raspy when texture is 清亮", () => {
+  const slot = inferVoiceSlot({
+    characterId: "st",
+    characterName: "沈棠",
+    gender: "female",
+    castRole: "protagonist",
+    role: "女主",
+    personality: "冷静锋利",
+    voiceTexture: "清亮稳、不甜腻",
+  });
+  assert.equal(slot.textureBand, "bright");
+  assert.notEqual(slot.textureBand, "dark_raspy");
+});
+
+test("plan keeps card bright texture for cold-personality female lead", () => {
+  const { items } = planCharacterVoices({
+    onlyMissing: false,
+    strategy: "prefer_design",
+    characters: [
+      {
+        characterId: "2",
+        characterName: "沈棠",
+        gender: "female",
+        castRole: "protagonist",
+        role: "女主",
+        personality: "冷静锋利",
+        voiceTexture: "清亮稳、不甜腻",
+      },
+    ],
+  });
+  assert.equal(items.length, 1);
+  const p = items[0].ttsDesignPrompt;
+  assert.match(p, /质感明亮清脆/);
+  assert.match(p, /清亮|不甜腻/);
+  assert.doesNotMatch(p, /质感偏低略沙哑/);
+  assert.match(items[0].reason, /texture:card-kept|texture:locked/);
+  assert.ok(p.length >= DESIGN_PROMPT_TARGET_MIN - 20, `len ${p.length}`);
+  assert.ok(p.length <= DESIGN_PROMPT_MAX);
+  assert.ok(parseSlotFromDesignPrompt(p));
+});
+
+test("preserveTexture prefers pitch/energy override over texture", () => {
+  const preferred = { pitchBand: "mid", textureBand: "bright", energyBand: "heavy" };
+  const occupied = new Set(["female|mid|bright|heavy"]);
+  const map = new Map([["female|mid|bright|heavy", preferred]]);
+  const a = allocateVoiceSlot({
+    gender: "female",
+    preferred,
+    occupied,
+    occupiedSlotByKey: map,
+    minSeparation: 2,
+    preserveTexture: true,
+  });
+  assert.equal(a.slot.textureBand, "bright");
+  assert.notEqual(
+    `${a.slot.pitchBand}|${a.slot.textureBand}|${a.slot.energyBand}`,
+    "mid|bright|heavy",
+  );
+});
+
+test("extractCompatibleTextureSnippet keeps non-conflicting tokens", () => {
+  const s = extractCompatibleTextureSnippet("清亮稳、不甜腻", "dark_raspy", 28);
+  // 清亮/甜 conflict with dark; residual should not reintroduce 清亮
+  if (s) {
+    assert.doesNotMatch(s, /清亮|甜腻|明亮/);
+  }
+  const bright = extractCompatibleTextureSnippet("清亮稳、不甜腻", "bright", 28);
+  assert.ok(bright);
+  assert.match(bright, /清亮|不甜腻|稳/);
+});
+
+test("slot override still keeps partial card texture when possible", () => {
+  // Force many males with same preferred so override happens; one has distinct sweet texture
+  const characters = [];
+  for (let i = 0; i < 4; i++) {
+    characters.push({
+      characterId: `m${i}`,
+      characterName: `男${i}`,
+      gender: "male",
+      castRole: "ally",
+      personality: "普通",
+      voiceTexture: "中性干净",
+    });
+  }
+  characters.push({
+    characterId: "sf",
+    characterName: "师父",
+    gender: "male",
+    castRole: "mentor",
+    role: "师父",
+    personality: "沉稳",
+    voiceTexture: "清亮甜脆",
+  });
+  const { items } = planCharacterVoices({
+    onlyMissing: false,
+    strategy: "prefer_design",
+    characters,
+  });
+  const sf = items.find((i) => i.characterId === "sf");
+  assert.ok(sf);
+  // either texture locked bright with some card flavor, or partial/drop flagged in reason
+  assert.ok(sf.ttsDesignPrompt);
+  assert.ok(parseSlotFromDesignPrompt(sf.ttsDesignPrompt));
+  if (sf.reason.includes("slot:override") && sf.ttsDesignPrompt.includes("质感明亮清脆")) {
+    // best: preserveTexture kept bright
+    assert.match(sf.reason, /texture:locked/);
+  } else if (sf.reason.includes("texture:card-partial") || sf.reason.includes("texture:card-kept")) {
+    assert.ok(true);
+  } else {
+    // last resort: must not be silent about drop
+    assert.match(sf.reason, /texture:card-dropped|texture:locked|slot:override/);
+  }
+});
+
+test("lead same-gender energy spreads across two leads", () => {
+  const { items } = planCharacterVoices({
+    onlyMissing: false,
+    strategy: "prefer_design",
+    characters: [
+      {
+        characterId: "l1",
+        characterName: "甲",
+        gender: "male",
+        castRole: "protagonist",
+        role: "男主",
+        personality: "沉稳",
+        voiceTexture: "中性干净",
+      },
+      {
+        characterId: "l2",
+        characterName: "乙",
+        gender: "male",
+        castRole: "protagonist",
+        role: "男主",
+        personality: "沉稳",
+        voiceTexture: "中性干净略厚",
+      },
+    ],
+  });
+  assert.equal(items.length, 2);
+  const e1 = parseSlotFromDesignPrompt(items[0].ttsDesignPrompt).energyBand;
+  const e2 = parseSlotFromDesignPrompt(items[1].ttsDesignPrompt).energyBand;
+  // prefer different energy when possible
+  assert.notEqual(e1, e2);
+});
+
+test("soft target: design prompt typically reaches near TARGET_MIN", () => {
+  const prompt = buildDesignPrompt({
+    character: {
+      characterId: "1",
+      characterName: "林澈",
+      gender: "male",
+      castRole: "protagonist",
+      role: "男主",
+      personality: "沉稳内敛",
+      voiceTexture: "清亮偏薄略干",
+    },
+    gender: "male",
+    age: "youth",
+    slot: { pitchBand: "mid", textureBand: "airy", energyBand: "heavy" },
+    cluster: "lead",
+  });
+  assert.ok(prompt.length <= DESIGN_PROMPT_MAX);
+  assert.ok(
+    prompt.length >= DESIGN_PROMPT_TARGET_MIN - 15,
+    `expected soft fill, got ${prompt.length}`,
+  );
+  assert.match(prompt, /音高中等/);
+  assert.match(prompt, /质感偏气声轻柔/);
+  assert.match(prompt, /气息沉稳有分量/);
+});
+
+test("buildDesignPromptDetailed reports card-full for aligned texture", () => {
+  const { prompt, textureFlavor } = buildDesignPromptDetailed({
+    character: {
+      characterId: "1",
+      characterName: "A",
+      voiceTexture: "清亮稳、不甜腻",
+      personality: "冷静锋利",
+    },
+    gender: "female",
+    age: "adult",
+    slot: { pitchBand: "high", textureBand: "bright", energyBand: "heavy" },
+    preferredSlot: { pitchBand: "high", textureBand: "bright", energyBand: "heavy" },
+    cluster: "lead",
+  });
+  assert.equal(textureFlavor, "card-full");
+  assert.match(prompt, /清亮|不甜腻/);
 });
