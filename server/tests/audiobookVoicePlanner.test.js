@@ -13,6 +13,9 @@ const {
   slotKey,
   parseSlotFromDesignPrompt,
   slotsEqual,
+  resolveVoiceCluster,
+  slotDistance,
+  isLeadRoleText,
 } = require("../dist/services/audiobook/audiobookVoicePlanner.js");
 
 test("inferGenderBucket uses explicit gender and text hints", () => {
@@ -177,18 +180,25 @@ test("auto still uses preset for low-importance without texture", () => {
   assert.equal(items.every((item) => item.ttsMode === "preset"), true);
 });
 
-test("prefer_design strategy forces design prompts with structure and mutex", () => {
+test("prefer_design uses design for lead/cast and preset for extras", () => {
   const { items } = planCharacterVoices({
     onlyMissing: false,
     strategy: "prefer_design",
     characters: [
-      { characterId: "1", characterName: "甲", gender: "female", role: "路人" },
-      { characterId: "2", characterName: "乙", gender: "male", role: "路人" },
+      { characterId: "1", characterName: "甲", gender: "female", castRole: "protagonist" },
+      { characterId: "2", characterName: "乙", gender: "male", castRole: "ally" },
+      { characterId: "3", characterName: "丙", gender: "male", role: "路人" },
     ],
   });
-  assert.equal(items.every((item) => item.ttsMode === "design"), true);
-  assert.equal(items.every((item) => Boolean(item.ttsDesignPrompt)), true);
-  for (const item of items) {
+  const lead = items.find((i) => i.characterId === "1");
+  const cast = items.find((i) => i.characterId === "2");
+  const extra = items.find((i) => i.characterId === "3");
+  assert.ok(lead && cast && extra);
+  assert.equal(lead.ttsMode, "design");
+  assert.equal(cast.ttsMode, "design");
+  assert.equal(extra.ttsMode, "preset");
+  assert.ok(["苏打", "白桦"].includes(extra.ttsVoice));
+  for (const item of [lead, cast]) {
     assert.ok(item.ttsDesignPrompt.length <= 480);
     assert.match(item.ttsDesignPrompt, /【声线】/);
     assert.match(item.ttsDesignPrompt, /【互斥】/);
@@ -228,7 +238,7 @@ test("prefer_design allocates distinct slots for same-gender cast when possible"
         characterId: "m4",
         characterName: "男四",
         gender: "male",
-        role: "路人",
+        castRole: "mentor",
         voiceTexture: "沉稳沙哑低沉",
       },
     ],
@@ -255,18 +265,21 @@ test("slot override does not put contradictory texture into 声线", () => {
         characterId: "m1",
         characterName: "一",
         gender: "male",
+        castRole: "ally",
         voiceTexture: "沉稳沙哑低沉威严",
       },
       {
         characterId: "m2",
         characterName: "二",
         gender: "male",
+        castRole: "ally",
         voiceTexture: "沉稳沙哑低沉威严",
       },
       {
         characterId: "m3",
         characterName: "三",
         gender: "male",
+        castRole: "ally",
         voiceTexture: "沉稳沙哑低沉威严",
       },
     ],
@@ -442,6 +455,7 @@ test("soft collision mutex cites occupied neighbor slot not last writer", () => 
           characterId: `f${i}`,
           characterName: `女${i}`,
           gender: "female",
+          castRole: "ally",
           // 无 texture，preferred 落 mid|neutral|even；先用不同 personality 避免 sort 干扰
           personality: `p${i}`,
         });
@@ -454,6 +468,7 @@ test("soft collision mutex cites occupied neighbor slot not last writer", () => 
     characterId: "soft-one",
     characterName: "软撞",
     gender: "female",
+    castRole: "ally",
     personality: "最终",
   });
 
@@ -508,6 +523,7 @@ test("half-clone without ref is re-planned (only clone+ref is permanent skip)", 
         characterId: "half-clone",
         characterName: "半克隆",
         gender: "male",
+        castRole: "ally",
         ttsMode: "clone",
         ttsRefAudioPath: "",
       },
@@ -537,6 +553,7 @@ test("legacy design prompt without labels seeds as seed:inferred", () => {
         characterId: "new",
         characterName: "新角",
         gender: "male",
+        castRole: "ally",
         voiceTexture: "沉稳沙哑低沉",
       },
     ],
@@ -612,6 +629,129 @@ test("inferVoiceSlot reads rough/low cues from texture", () => {
   });
   assert.equal(slot.pitchBand, "low");
   assert.equal(slot.textureBand, "dark_raspy");
+});
+
+test("lead default energy is heavy not flat even", () => {
+  const slot = inferVoiceSlot({
+    characterId: "1",
+    characterName: "主角",
+    castRole: "protagonist",
+    gender: "male",
+  });
+  assert.equal(slot.energyBand, "heavy");
+  assert.notEqual(slot.energyBand, "even");
+});
+
+test("lead keeps lively when lively cues present", () => {
+  const slot = inferVoiceSlot({
+    characterId: "1",
+    characterName: "主角",
+    castRole: "protagonist",
+    personality: "活泼灵动",
+  });
+  assert.equal(slot.energyBand, "lively");
+});
+
+test("resolveVoiceCluster maps lead/cast/extra/narrator", () => {
+  assert.equal(
+    resolveVoiceCluster({ characterId: "1", characterName: "A", castRole: "protagonist" }),
+    "lead",
+  );
+  assert.equal(
+    resolveVoiceCluster({ characterId: "2", characterName: "B", castRole: "ally" }),
+    "cast",
+  );
+  assert.equal(
+    resolveVoiceCluster({ characterId: "3", characterName: "C", role: "路人甲" }),
+    "extra",
+  );
+  assert.equal(
+    resolveVoiceCluster({ characterId: "4", characterName: "旁白", role: "旁白" }),
+    "narrator",
+  );
+});
+
+test("isLeadRoleText rejects dependents and maps female lead to non-lead text", () => {
+  assert.equal(isLeadRoleText("主角"), true);
+  assert.equal(isLeadRoleText("男主角"), true);
+  assert.equal(isLeadRoleText("主人公"), true);
+  assert.equal(isLeadRoleText("废柴主角"), true);
+  assert.equal(isLeadRoleText("主角的父亲"), false);
+  assert.equal(isLeadRoleText("主人公的师父"), false);
+  assert.equal(isLeadRoleText("女主"), false);
+  assert.equal(isLeadRoleText("女主角"), false);
+});
+
+test("resolveVoiceCluster does not promote 主角的父亲 to lead", () => {
+  assert.equal(
+    resolveVoiceCluster({ characterId: "1", characterName: "父", role: "主角的父亲" }),
+    "extra",
+  );
+  // 女主走 cast（importance/love 文案），非 lead
+  assert.equal(
+    resolveVoiceCluster({ characterId: "2", characterName: "她", role: "女主" }),
+    "cast",
+  );
+  assert.equal(
+    resolveVoiceCluster({ characterId: "3", characterName: "她", role: "女主角" }),
+    "cast",
+  );
+});
+
+test("prefer_design keeps narrator on isolated preset cluster", () => {
+  const { items } = planCharacterVoices({
+    onlyMissing: false,
+    strategy: "prefer_design",
+    characters: [
+      {
+        characterId: "n1",
+        characterName: "旁白",
+        gender: "female",
+        role: "旁白",
+      },
+      {
+        characterId: "p1",
+        characterName: "主角",
+        gender: "male",
+        castRole: "protagonist",
+      },
+    ],
+  });
+  const narrator = items.find((i) => i.characterId === "n1");
+  const lead = items.find((i) => i.characterId === "p1");
+  assert.ok(narrator && lead);
+  assert.equal(narrator.ttsMode, "preset");
+  assert.equal(narrator.cluster, "narrator");
+  assert.ok(["茉莉", "冰糖"].includes(narrator.ttsVoice));
+  assert.equal(lead.ttsMode, "design");
+  assert.equal(lead.cluster, "lead");
+  assert.match(lead.ttsDesignPrompt, /意志坚定|主心骨|死气/);
+});
+
+test("allocateVoiceSlot minSeparation prefers multi-axis distance", () => {
+  const occupied = new Set();
+  const occupiedSlotByKey = new Map();
+  const preferred = { pitchBand: "mid", textureBand: "neutral", energyBand: "heavy" };
+  const first = allocateVoiceSlot({
+    gender: "male",
+    preferred,
+    occupied,
+    occupiedSlotByKey,
+    minSeparation: 2,
+  });
+  occupied.add(first.key);
+  occupiedSlotByKey.set(first.key, first.slot);
+
+  const second = allocateVoiceSlot({
+    gender: "male",
+    preferred,
+    occupied,
+    occupiedSlotByKey,
+    minSeparation: 2,
+  });
+  assert.equal(second.softCollision, false);
+  assert.notEqual(second.key, first.key);
+  assert.equal(slotDistance(first.slot, second.slot) >= 2, true);
 });
 
 test("slotsEqual and parseSlotFromDesignPrompt round-trip labels", () => {
