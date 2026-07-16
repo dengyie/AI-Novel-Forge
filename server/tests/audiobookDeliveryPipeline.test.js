@@ -607,13 +607,14 @@ test("reconcileAnnotationSegmentsWithVoices overlays current character binding",
     narrator: { voice: "茉莉", style: "旁白" },
     deliveryStyleMode: "characters",
   });
-  assert.equal(reconciled.length, 1);
-  assert.equal(reconciled[0].voice, "苏打");
-  assert.equal(reconciled[0].baseStyle, "新基线");
-  assert.match(reconciled[0].style || "", /本句表演：/);
-  assert.equal((reconciled[0].style || "").includes("旧基线"), false);
-  assert.equal(reconciled[0].text, "你把责任说清楚。");
-  assert.ok(reconciled[0].delivery);
+  assert.equal(reconciled.segments.length, 1);
+  assert.equal(reconciled.orphanCharacterIds.length, 0);
+  assert.equal(reconciled.segments[0].voice, "苏打");
+  assert.equal(reconciled.segments[0].baseStyle, "新基线");
+  assert.match(reconciled.segments[0].style || "", /本句表演：/);
+  assert.equal((reconciled.segments[0].style || "").includes("旧基线"), false);
+  assert.equal(reconciled.segments[0].text, "你把责任说清楚。");
+  assert.ok(reconciled.segments[0].delivery);
 });
 
 test("resolveChunkSynthesizeFields rebuilds character delivery from baseStyle", () => {
@@ -680,13 +681,99 @@ test("reconcile then expand is the estimate source of truth for chunk count", ()
     deliveryStyleMode: "characters",
   });
   const rawJobs = expandSegmentsToChunkJobs(segments);
-  const reconciledJobs = expandSegmentsToChunkJobs(reconciled);
+  const reconciledJobs = expandSegmentsToChunkJobs(reconciled.segments);
   // 合成侧用 reconciled；标注侧 estimate 必须对齐
-  assert.equal(reconciledJobs.length, expandSegmentsToChunkJobs(reconciled).length);
+  assert.equal(reconciledJobs.length, expandSegmentsToChunkJobs(reconciled.segments).length);
   assert.ok(reconciledJobs.length >= 1);
   // 指纹依赖 voice/style，reconcile 后应与 raw 不同（换声线）
   assert.notEqual(
     chunkLayoutFingerprint(rawJobs),
     chunkLayoutFingerprint(reconciledJobs),
   );
+});
+
+const {
+  peelCompiledDeliveryMarks,
+} = require("../dist/services/audiobook/AudiobookPipelineService.js");
+
+test("peelCompiledDeliveryMarks strips performance lines", () => {
+  assert.equal(peelCompiledDeliveryMarks("新基线"), "新基线");
+  assert.equal(
+    peelCompiledDeliveryMarks("新基线\n本句表演：平静公事地压着怒。\n保持该角色声线与身份一致，吐字清楚。"),
+    "新基线",
+  );
+  assert.equal(peelCompiledDeliveryMarks("本句表演：只有表演"), null);
+});
+
+test("reconcile orphan character forces narrator fallback", () => {
+  const delivery = normalizeDelivery(GOOD);
+  const segments = [{
+    index: 0,
+    speakerKind: "character",
+    characterId: "deleted-c9",
+    speakerLabel: "已删角色",
+    text: "你还在吗。",
+    ttsMode: "clone",
+    voice: "",
+    style: "旧\n本句表演：x",
+    baseStyle: "旧",
+    refAudioPath: "/data/storage/voice-refs/n1/deleted/ref.wav",
+    delivery,
+    deliveryMergeKey: deliveryMergeKey(delivery),
+  }];
+  const reconciled = reconcileAnnotationSegmentsWithVoices(segments, {
+    characterVoices: [], // 当前卡无此角色
+    narrator: { voice: "茉莉", style: "知性旁白" },
+    deliveryStyleMode: "characters",
+  });
+  assert.equal(reconciled.orphanCharacterIds.includes("deleted-c9"), true);
+  assert.equal(reconciled.segments.length, 1);
+  assert.equal(reconciled.segments[0].speakerKind, "narrator");
+  assert.equal(reconciled.segments[0].characterId, null);
+  assert.equal(reconciled.segments[0].voice, "茉莉");
+  assert.equal(reconciled.segments[0].refAudioPath, null);
+  assert.equal(reconciled.segments[0].delivery, null);
+  assert.equal((reconciled.segments[0].style || "").includes("本句表演"), false);
+});
+
+test("resolveChunkSynthesizeFields peels dirty character style without baseStyle", () => {
+  const delivery = normalizeDelivery(GOOD);
+  const dirty = {
+    index: 0,
+    speakerKind: "character",
+    characterId: "c1",
+    speakerLabel: "何屿",
+    text: "你把责任说清楚。",
+    ttsMode: "preset",
+    voice: "苏打",
+    // 历史脏缓存：style 已含表演，且缺 baseStyle
+    style: "角色基线\n本句表演：过时旧句。\n保持该角色声线与身份一致，吐字清楚。",
+    baseStyle: null,
+    delivery,
+  };
+  const synth = resolveChunkSynthesizeFields(dirty);
+  assert.match(synth.style || "", /本句表演：/);
+  assert.match(synth.style || "", /角色基线/);
+  // 不得叠两层「本句表演」
+  const matches = (synth.style || "").match(/本句表演：/g) || [];
+  assert.equal(matches.length, 1);
+  assert.equal((synth.style || "").includes("过时旧句"), false);
+});
+
+test("resolveChunkSynthesizeFields peels dirty character without delivery", () => {
+  const dirty = {
+    index: 0,
+    speakerKind: "character",
+    characterId: "c1",
+    speakerLabel: "何屿",
+    text: "先歇。",
+    ttsMode: "preset",
+    voice: "苏打",
+    style: "基线\n本句表演：嘶吼崩溃。",
+    baseStyle: "基线",
+    delivery: null,
+  };
+  const synth = resolveChunkSynthesizeFields(dirty);
+  assert.equal(synth.style, "基线");
+  assert.equal((synth.style || "").includes("本句表演"), false);
 });

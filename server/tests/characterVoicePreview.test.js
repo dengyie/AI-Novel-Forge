@@ -155,24 +155,50 @@ test("buildCharacterVoicePreviewAudioUrl encodes ids", () => {
   );
 });
 
-test("writeCharacterVoicePreviewFromBase64 accepts RIFF and rejects non-wav", () => {
+test("writeCharacterVoicePreviewFromBase64 accepts PCM WAV and rejects fake/non-wav", () => {
   const novelId = `tnovel_${Date.now()}`;
   const characterId = `tchar_${Date.now()}`;
   const writtenDir = path.dirname(resolveCharacterVoicePreviewPath(novelId, characterId));
   try {
-    const riff = Buffer.alloc(64, 0);
-    riff.write("RIFF", 0);
-    riff.writeUInt32LE(56, 4);
-    riff.write("WAVE", 8);
-    const b64 = riff.toString("base64");
+    // 伪 RIFF（仅头）不得写入
+    const fake = Buffer.alloc(64, 0);
+    fake.write("RIFF", 0);
+    fake.writeUInt32LE(56, 4);
+    fake.write("WAVE", 8);
+    assert.throws(
+      () =>
+        writeCharacterVoicePreviewFromBase64({
+          novelId,
+          characterId,
+          base64: fake.toString("base64"),
+        }),
+      /PCM WAV|WAV/,
+    );
+
+    // 合法 PCM WAV
+    const dataSize = 48;
+    const pcm = Buffer.alloc(44 + dataSize, 0);
+    pcm.write("RIFF", 0);
+    pcm.writeUInt32LE(36 + dataSize, 4);
+    pcm.write("WAVE", 8);
+    pcm.write("fmt ", 12);
+    pcm.writeUInt32LE(16, 16);
+    pcm.writeUInt16LE(1, 20);
+    pcm.writeUInt16LE(1, 22);
+    pcm.writeUInt32LE(24000, 24);
+    pcm.writeUInt32LE(48000, 28);
+    pcm.writeUInt16LE(2, 32);
+    pcm.writeUInt16LE(16, 34);
+    pcm.write("data", 36);
+    pcm.writeUInt32LE(dataSize, 40);
     const written = writeCharacterVoicePreviewFromBase64({
       novelId,
       characterId,
-      base64: b64,
+      base64: pcm.toString("base64"),
     });
     assert.equal(written, resolveCharacterVoicePreviewPath(novelId, characterId));
     assert.equal(fs.existsSync(written), true);
-    assert.equal(fs.statSync(written).size, 64);
+    assert.equal(fs.statSync(written).size, 44 + dataSize);
 
     assert.throws(
       () =>

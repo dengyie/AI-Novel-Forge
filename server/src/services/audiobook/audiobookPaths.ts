@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { resolveDataRoot } from "../../runtime/appPaths";
-import { isValidPcmWavFile } from "./audiobookWav";
+import { isValidPcmWavFile, parseWavInfo } from "./audiobookWav";
 
 function assertSafePathSegment(value: string, label: string): string {
   const trimmed = value?.trim();
@@ -46,6 +46,7 @@ export function resolveCharacterVoicePreviewPath(novelId: string, characterId: s
 
 /**
  * 将 base64（可带 data: 前缀）落盘为角色固定试听 WAV，返回绝对路径。
+ * 与 preview ready / chapter ready 同一套：必须为合法 PCM WAV。
  */
 export function writeCharacterVoicePreviewFromBase64(input: {
   novelId: string;
@@ -70,9 +71,16 @@ export function writeCharacterVoicePreviewFromBase64(input: {
   if (buf.length > maxBytes) {
     throw new Error(`试听音频过大（>${maxBytes} bytes）。`);
   }
-  const isRiff = buf.length >= 12 && buf.subarray(0, 4).toString("ascii") === "RIFF";
-  if (!isRiff) {
-    throw new Error("试听资产仅接受 WAV（RIFF）。");
+  try {
+    const info = parseWavInfo(buf);
+    if (info.dataSize < 2 || buf.length < info.dataOffset + Math.min(info.dataSize, 2)) {
+      throw new Error("试听资产不是合法 PCM WAV。");
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("试听资产")) {
+      throw error;
+    }
+    throw new Error("试听资产仅接受合法 PCM WAV。");
   }
 
   const dir = resolveCharacterVoiceRefDir(input.novelId, input.characterId);
