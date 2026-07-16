@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
-import fs from "node:fs";
 import type { AudiobookTtsMode, CharacterVoicePreviewStatus } from "@ai-novel/shared/types/audiobook";
 import { isAudiobookTtsMode, isMimoTtsPresetVoice } from "@ai-novel/shared/types/audiobook";
+import { isValidPcmWavFile } from "./audiobookWav";
 
 export const DEFAULT_CHARACTER_VOICE_PREVIEW_TEXT = "我是这段故事里的角色，请听听我的声音是否合适。";
 
@@ -79,11 +79,8 @@ export function resolveCharacterVoicePreviewStatus(input: {
   if (!audioPath) {
     return "missing";
   }
-  try {
-    if (!fs.existsSync(audioPath) || fs.statSync(audioPath).size <= 44) {
-      return "missing";
-    }
-  } catch {
+  // 与合成 resume 同一套 PCM WAV 校验，拒绝伪 RIFF / 截断文件
+  if (!isValidPcmWavFile(audioPath)) {
     return "missing";
   }
   const stored = normalizePart(input.fingerprint);

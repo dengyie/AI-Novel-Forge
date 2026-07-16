@@ -38,6 +38,7 @@ import {
   resolveFullBookAudioPath,
   resolveFullBookM4bPath,
 } from "../../../../services/audiobook/audiobookPaths";
+import { isPathInside } from "../../../../services/audiobook/voiceRefPath";
 
 const novelParamsSchema = z.object({
   id: z.string().trim().min(1),
@@ -62,12 +63,6 @@ const characterParamsSchema = z.object({
 const characterVoicePreviewGenerateSchema = z.object({
   text: z.string().trim().max(200).optional(),
 });
-
-function isPathInside(parent: string, target: string): boolean {
-  const resolvedParent = path.resolve(parent);
-  const resolvedTarget = path.resolve(target);
-  return resolvedTarget === resolvedParent || resolvedTarget.startsWith(`${resolvedParent}${path.sep}`);
-}
 
 function parseRangeHeader(
   rangeHeader: string | undefined,
