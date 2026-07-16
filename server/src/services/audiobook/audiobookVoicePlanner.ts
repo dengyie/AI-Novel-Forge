@@ -251,6 +251,10 @@ export function parseSlotFromDesignPrompt(prompt: string): VoiceSlot | null {
 /**
  * 在已占用集合中找空闲槽；池尽则 soft 占用原槽。
  * 扰动优先级：texture → pitch → energy（与开发计划一致）。
+ *
+ * soft 语义锁：池尽时必须仍返回 preferred.key（已被占的键），
+ * 以便调用方用 occupiedSlotByKey.get(preferred.key) 解析真实先占邻居。
+ * 禁止 soft 时改写为「随机空键」或新造 key。
  */
 export function allocateVoiceSlot(input: {
   gender: VoiceGenderBucket;
@@ -294,7 +298,7 @@ export function allocateVoiceSlot(input: {
     }
   }
 
-  // 池尽：soft 冲突，仍写原 preferred，reason 由调用方标记
+  // 池尽 soft：固定 preferred.key，供邻居 map 解析
   return { slot: preferred.slot, key: preferred.key, softCollision: true };
 }
 
@@ -473,25 +477,29 @@ function seedPresetUsage(
   }
 }
 
-/** onlyMissing：已绑定 design 占用槽位，避免新角撞上旧 design prompt 维 */
+/**
+ * onlyMissing：已绑定 design 占用槽位，避免新角撞上旧 design prompt 维。
+ * 结构化标签可精确 seed；无标签时回退卡字段推断并标 seed:inferred。
+ */
 function seedBoundDesignSlot(
   occupiedSlots: Set<string>,
   occupiedSlotByKey: Map<string, VoiceSlot>,
   character: VoicePlannerCharacterInput,
-): void {
+): { seeded: boolean; inferred: boolean } {
   const mode = character.ttsMode?.trim() || "preset";
   if (mode !== "design" || !character.ttsDesignPrompt?.trim()) {
-    return;
+    return { seeded: false, inferred: false };
   }
   const gender = inferGenderBucket(character);
-  const slot =
-    parseSlotFromDesignPrompt(character.ttsDesignPrompt)
-    ?? inferVoiceSlot(character);
+  const parsed = parseSlotFromDesignPrompt(character.ttsDesignPrompt);
+  const inferred = !parsed;
+  const slot = parsed ?? inferVoiceSlot(character);
   const key = slotKey(gender, slot);
   occupiedSlots.add(key);
   if (!occupiedSlotByKey.has(key)) {
     occupiedSlotByKey.set(key, slot);
   }
+  return { seeded: true, inferred };
 }
 
 function markSlotOccupied(
@@ -557,12 +565,14 @@ export function planCharacterVoices(input: {
     }
 
     const mode = character.ttsMode?.trim() || "preset";
-    const cloneBound = mode === "clone" && Boolean(character.ttsRefAudioPath?.trim());
-    if (cloneBound) {
+    // clone 一律不由规划器改写（含无 ref 的半配置）；仅人工上传参考音频
+    if (mode === "clone") {
       skipped.push({
         characterId: character.characterId,
         characterName: character.characterName,
-        reason: "已配置 clone 参考音频。",
+        reason: character.ttsRefAudioPath?.trim()
+          ? "已配置 clone 参考音频。"
+          : "ttsMode=clone（规划不改写；请上传参考音频或在角色卡改 mode）。",
       });
       continue;
     }
@@ -570,11 +580,13 @@ export function planCharacterVoices(input: {
     const configured = isCharacterVoiceConfigured(character);
     if (onlyMissing && configured) {
       seedPresetUsage(usage, importantUsage, character);
-      seedBoundDesignSlot(occupiedSlots, occupiedSlotByKey, character);
+      const seed = seedBoundDesignSlot(occupiedSlots, occupiedSlotByKey, character);
       skipped.push({
         characterId: character.characterId,
         characterName: character.characterName,
-        reason: "已绑定音色（onlyMissing=true）。",
+        reason: seed.inferred
+          ? "已绑定音色（onlyMissing=true） seed:inferred。"
+          : "已绑定音色（onlyMissing=true）。",
       });
       continue;
     }
@@ -613,7 +625,7 @@ export function planCharacterVoices(input: {
       ttsMode = "design";
       reason = strategy === "prefer_design"
         ? "策略 prefer_design：按人物卡生成 design 描述。"
-        : "auto：高重要性且有 voiceTexture，用 design 保证声线辨识度。";
+        : "auto：高重要性且有 voiceTexture，用 design 拉开 prompt 维（非听感证明）。";
     }
 
     if (ttsMode === "preset") {

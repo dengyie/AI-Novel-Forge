@@ -757,43 +757,4 @@ test("encodeFullBookM4b skips when ffmpeg is unavailable", async () => {
   }
 });
 
-const { planCharacterVoices } = require("../dist/services/audiobook/audiobookVoicePlanner.js");
-
-test("prefer_design plan items build valid Mimo design request bodies", () => {
-  const { items } = planCharacterVoices({
-    onlyMissing: false,
-    strategy: "prefer_design",
-    characters: [
-      {
-        characterId: "a",
-        characterName: "何屿",
-        gender: "male",
-        castRole: "protagonist",
-        voiceTexture: "青年男性，声线沉稳略沙哑",
-      },
-      {
-        characterId: "b",
-        characterName: "林婉",
-        gender: "female",
-        castRole: "love_interest",
-        personality: "清亮克制",
-      },
-    ],
-  });
-
-  assert.equal(items.length, 2);
-  for (const item of items) {
-    assert.equal(item.ttsMode, "design");
-    assert.ok(item.ttsDesignPrompt && item.ttsDesignPrompt.length >= 24);
-    assert.ok(item.ttsDesignPrompt.length <= 480);
-    const body = buildMimoTtsRequestBody({
-      text: "固定试听校准句。",
-      mode: "design",
-      designPrompt: item.ttsDesignPrompt,
-    });
-    assert.equal(body.model, MIMO_TTS_MODELS.design);
-    assert.equal(body.messages[0].role, "user");
-    assert.equal(body.messages[0].content, item.ttsDesignPrompt);
-    assert.equal(Object.prototype.hasOwnProperty.call(body.audio, "voice"), false);
-  }
-});
+// prefer_design → Mimo design 契约见 tests/mimoChatAudioRequestContract.test.js
