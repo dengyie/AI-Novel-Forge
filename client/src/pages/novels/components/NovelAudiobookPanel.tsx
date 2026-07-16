@@ -1165,7 +1165,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
           <div>
             <div className="text-sm font-medium text-foreground">音色规划（可选）</div>
             <div className="text-xs leading-5 text-muted-foreground">
-              一键就绪会按 auto 保守策略补缺失音色。「重新差异化」走 VoiceDesign（prefer_design），特征只读角色卡、不读正文；写入后请一键就绪/生成试听。规划草稿临时试听不固化角色卡。
+              一键就绪会按 auto 保守策略补缺失音色。「重新差异化」按分簇规划：主角/主角团 VoiceDesign（拉开槽位），路人/旁白走预置簇；特征只读角色卡、不读正文；写入后请一键就绪/生成试听。规划草稿临时试听不固化角色卡。
             </div>
           </div>
           <div className="flex flex-wrap gap-2">

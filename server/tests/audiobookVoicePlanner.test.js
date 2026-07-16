@@ -15,6 +15,7 @@ const {
   slotsEqual,
   resolveVoiceCluster,
   slotDistance,
+  isLeadRoleText,
 } = require("../dist/services/audiobook/audiobookVoicePlanner.js");
 
 test("inferGenderBucket uses explicit gender and text hints", () => {
@@ -670,6 +671,33 @@ test("resolveVoiceCluster maps lead/cast/extra/narrator", () => {
   );
 });
 
+test("isLeadRoleText rejects dependents and maps female lead to non-lead text", () => {
+  assert.equal(isLeadRoleText("主角"), true);
+  assert.equal(isLeadRoleText("男主角"), true);
+  assert.equal(isLeadRoleText("主人公"), true);
+  assert.equal(isLeadRoleText("废柴主角"), true);
+  assert.equal(isLeadRoleText("主角的父亲"), false);
+  assert.equal(isLeadRoleText("主人公的师父"), false);
+  assert.equal(isLeadRoleText("女主"), false);
+  assert.equal(isLeadRoleText("女主角"), false);
+});
+
+test("resolveVoiceCluster does not promote 主角的父亲 to lead", () => {
+  assert.equal(
+    resolveVoiceCluster({ characterId: "1", characterName: "父", role: "主角的父亲" }),
+    "extra",
+  );
+  // 女主走 cast（importance/love 文案），非 lead
+  assert.equal(
+    resolveVoiceCluster({ characterId: "2", characterName: "她", role: "女主" }),
+    "cast",
+  );
+  assert.equal(
+    resolveVoiceCluster({ characterId: "3", characterName: "她", role: "女主角" }),
+    "cast",
+  );
+});
+
 test("prefer_design keeps narrator on isolated preset cluster", () => {
   const { items } = planCharacterVoices({
     onlyMissing: false,
@@ -693,8 +721,10 @@ test("prefer_design keeps narrator on isolated preset cluster", () => {
   const lead = items.find((i) => i.characterId === "p1");
   assert.ok(narrator && lead);
   assert.equal(narrator.ttsMode, "preset");
+  assert.equal(narrator.cluster, "narrator");
   assert.ok(["茉莉", "冰糖"].includes(narrator.ttsVoice));
   assert.equal(lead.ttsMode, "design");
+  assert.equal(lead.cluster, "lead");
   assert.match(lead.ttsDesignPrompt, /意志坚定|主心骨|死气/);
 });
 
