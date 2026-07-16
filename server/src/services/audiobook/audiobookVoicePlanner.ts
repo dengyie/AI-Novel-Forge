@@ -152,11 +152,32 @@ export function inferAgeBucket(input: VoicePlannerCharacterInput): VoiceAgeBucke
   return "adult";
 }
 
+/**
+ * role 是否像「本书主角」标签（分配维）。
+ * 排除：主角的父亲、女主/女主角（进 cast）、配角含「主角」从属等。
+ */
+export function isLeadRoleText(role: string): boolean {
+  const r = role.trim();
+  if (!r) return false;
+  // 从属/亲属：主角的父亲、主人公之师
+  if (/主角的|主人公的|之主角|配角/.test(r)) return false;
+  // 女主线标签：与男主并列时归 cast（design 仍可进主角团），避免双 lead 抢槽
+  if (/女主|女主人公|heroine/i.test(r) && !/男主/.test(r)) return false;
+  // 精确/常见标签
+  if (/^(本书)?主角$|^主人公$|^男主$|^男主角$|^male\s*lead$/i.test(r)) return true;
+  // 分隔词边界上的「主角」「主人公」（非「女主角」：女+主角无边界）
+  if (/(?:^|[,，、；\s/|])主角(?:$|[,，、；\s/|])/.test(r)) return true;
+  if (/(?:^|[,，、；\s/|])主人公(?:$|[,，、；\s/|])/.test(r)) return true;
+  // 以「主角」收尾且非女主角：如「废柴主角」
+  if (/主角$/.test(r) && !/女主角$/.test(r)) return true;
+  return false;
+}
+
 export function scoreImportance(input: VoicePlannerCharacterInput): number {
   let score = 30;
   const cast = (input.castRole ?? "").trim().toLowerCase();
   const role = (input.role ?? "").trim();
-  if (cast === "protagonist" || /主角|主人公/.test(role)) score += 50;
+  if (cast === "protagonist" || isLeadRoleText(role)) score += 50;
   else if (cast === "antagonist" || /反派|对手|BOSS|boss/.test(role)) score += 40;
   else if (cast === "love_interest" || /女主|男主|爱人|情/.test(role)) score += 35;
   else if (cast === "mentor" || /师父|导师|老师/.test(role)) score += 25;
@@ -181,7 +202,7 @@ const CAST_ROLES = new Set([
 
 /**
  * 分簇（分配维）：
- * - lead：主角
+ * - lead：主角（castRole=protagonist 或 isLeadRoleText）
  * - cast：主角团 / 高戏份
  * - extra：路人
  * - narrator：旁白（角色卡若标旁白则走旁白 preset 簇；系统旁白仍在 pipeline 外）
@@ -197,7 +218,7 @@ export function resolveVoiceCluster(input: VoicePlannerCharacterInput): VoiceClu
   ) {
     return "narrator";
   }
-  if (cast === "protagonist" || /主角|主人公/.test(role)) {
+  if (cast === "protagonist" || isLeadRoleText(role)) {
     return "lead";
   }
   const importance = scoreImportance(input);
@@ -856,6 +877,7 @@ export function planCharacterVoices(input: {
       genderBucket: character.genderBucket,
       ageBucket: character.ageBucket,
       importance: character.importance,
+      cluster: character.cluster,
       currentBinding: {
         ttsMode: character.ttsMode ?? null,
         ttsVoice: character.ttsVoice ?? null,
