@@ -225,10 +225,56 @@ test("A-H6: harmless fullwidth brackets / short names are not HUD", () => {
     "他自称【裂空】，旁人只当是绰号。",
     "地图上标着【北港】两个字。",
     "她把【旧钥】塞进他掌心，没有多说。",
+    // 软关键词短绰号：不得因「等级/冷却/面板」单独抬 HUD
+    "他外号【等级】，同伴只当玩笑。",
+    "她把那块【冷却】石塞回口袋。",
     "潮声压在城墙外，守夜人握紧刀柄。",
   ].join("\n"));
-  assert.equal(codes(report).includes("prose_system_hud"), false);
+  assert.equal(codes(report).includes("prose_system_hud"), false, `codes=${codes(report).join(",")}`);
   assert.equal(report.hasBlockingFindings, false);
+});
+
+// ─── A-H6b channel-1 契约：仅 non-deferrable → invalid ───────────
+test("A-H6b: channel-1 prose_quality invalid only for non-deferrable codes", () => {
+  // high 但可 defer 的文风债 → risk，不得 invalid（避免 dual-channel 误硬门）
+  const engineering = buildChapterQualityLoopAssessment({
+    chapterId: "ah6b-eng",
+    chapterOrder: 61,
+    score: score(),
+    issues: [],
+    runtimePackage: baseRuntimePackage([{
+      auditType: "mode_fit",
+      severity: "high",
+      code: "prose_engineering_term_leak",
+      evidence: "细纲",
+      fixSuggestion: "删工程词。",
+    }]),
+    evaluatedAt: "2026-07-17T00:00:00.000Z",
+  });
+  const engProse = engineering.signals.find((s) => s.artifactType === "prose_quality");
+  assert.equal(engProse?.status, "risk");
+  assert.equal(hasNonDeferrableProseOrSotDebt(engineering), false);
+  assert.equal(projectL0ClearFromQualityLoop(engineering), true);
+
+  // non-deferrable 即使 severity 写成 medium 也应 invalid（码集合优先）
+  const hud = buildChapterQualityLoopAssessment({
+    chapterId: "ah6b-hud",
+    chapterOrder: 62,
+    score: score(),
+    issues: [],
+    runtimePackage: baseRuntimePackage([{
+      auditType: "mode_fit",
+      severity: "medium",
+      code: "prose_system_hud",
+      evidence: "【系统：任务】",
+      fixSuggestion: "删 HUD。",
+    }]),
+    evaluatedAt: "2026-07-17T00:00:00.000Z",
+  });
+  const hudProse = hud.signals.find((s) => s.artifactType === "prose_quality");
+  assert.equal(hudProse?.status, "invalid");
+  assert.equal(hasNonDeferrableProseOrSotDebt(hud), true);
+  assert.equal(projectL0ClearFromQualityLoop(hud), false);
 });
 
 // ─── A-H7 ──────────────────────────────────────────────────────────
