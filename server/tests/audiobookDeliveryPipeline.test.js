@@ -576,3 +576,63 @@ test("shouldInvalidateCachedAnnotation null mode + off + dirty delivery", () => 
     chapterContent: body,
   }), false);
 });
+
+const {
+  reconcileAnnotationSegmentsWithVoices,
+} = require("../dist/services/audiobook/AudiobookPipelineService.js");
+
+test("reconcileAnnotationSegmentsWithVoices overlays current character binding", () => {
+  const delivery = normalizeDelivery(GOOD);
+  const segments = [{
+    index: 0,
+    speakerKind: "character",
+    characterId: "c1",
+    speakerLabel: "何屿",
+    text: "你把责任说清楚。",
+    ttsMode: "preset",
+    voice: "白桦",
+    style: "旧基线\n本句表演：旧句。",
+    baseStyle: "旧基线",
+    delivery,
+    deliveryMergeKey: deliveryMergeKey(delivery),
+  }];
+  const reconciled = reconcileAnnotationSegmentsWithVoices(segments, {
+    characterVoices: [{
+      characterId: "c1",
+      characterName: "何屿",
+      ttsMode: "preset",
+      ttsVoice: "苏打",
+      ttsStyle: "新基线",
+    }],
+    narrator: { voice: "茉莉", style: "旁白" },
+    deliveryStyleMode: "characters",
+  });
+  assert.equal(reconciled.length, 1);
+  assert.equal(reconciled[0].voice, "苏打");
+  assert.equal(reconciled[0].baseStyle, "新基线");
+  assert.match(reconciled[0].style || "", /本句表演：/);
+  assert.equal((reconciled[0].style || "").includes("旧基线"), false);
+  assert.equal(reconciled[0].text, "你把责任说清楚。");
+  assert.ok(reconciled[0].delivery);
+});
+
+test("resolveChunkSynthesizeFields rebuilds character delivery from baseStyle", () => {
+  const delivery = normalizeDelivery(GOOD);
+  const dirty = {
+    index: 0,
+    speakerKind: "character",
+    characterId: "c1",
+    speakerLabel: "何屿",
+    text: "你把责任说清楚。",
+    ttsMode: "preset",
+    voice: "苏打",
+    style: "旧基线\n本句表演：过时句。",
+    baseStyle: "新基线",
+    delivery,
+  };
+  const synth = resolveChunkSynthesizeFields(dirty);
+  assert.match(synth.style || "", /本句表演：/);
+  assert.match(synth.style || "", /新基线/);
+  assert.equal((synth.style || "").includes("旧基线"), false);
+  assert.equal((synth.style || "").includes("过时句"), false);
+});

@@ -77,12 +77,30 @@ test("assertCharacterVoiceReadyForPreview gates modes", () => {
 test("resolveCharacterVoicePreviewStatus missing/ready/stale", () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "voice-preview-"));
   const wavPath = path.join(tmpDir, "preview.wav");
-  // minimal RIFF larger than 44 bytes
-  const buf = Buffer.alloc(64, 0);
+  // 合法 PCM WAV（与 isValidPcmWavFile 对齐）
+  const dataSize = 48;
+  const buf = Buffer.alloc(44 + dataSize, 0);
   buf.write("RIFF", 0);
-  buf.writeUInt32LE(56, 4);
+  buf.writeUInt32LE(36 + dataSize, 4);
   buf.write("WAVE", 8);
+  buf.write("fmt ", 12);
+  buf.writeUInt32LE(16, 16);
+  buf.writeUInt16LE(1, 20); // PCM
+  buf.writeUInt16LE(1, 22); // mono
+  buf.writeUInt32LE(24000, 24);
+  buf.writeUInt32LE(48000, 28);
+  buf.writeUInt16LE(2, 32);
+  buf.writeUInt16LE(16, 34);
+  buf.write("data", 36);
+  buf.writeUInt32LE(dataSize, 40);
   fs.writeFileSync(wavPath, buf);
+
+  const fakePath = path.join(tmpDir, "fake.wav");
+  const fake = Buffer.alloc(64, 0);
+  fake.write("RIFF", 0);
+  fake.writeUInt32LE(56, 4);
+  fake.write("WAVE", 8);
+  fs.writeFileSync(fakePath, fake);
 
   const fingerprint = "abc";
   assert.equal(
@@ -100,6 +118,15 @@ test("resolveCharacterVoicePreviewStatus missing/ready/stale", () => {
       currentFingerprint: fingerprint,
     }),
     "missing",
+  );
+  assert.equal(
+    resolveCharacterVoicePreviewStatus({
+      audioPath: fakePath,
+      fingerprint,
+      currentFingerprint: fingerprint,
+    }),
+    "missing",
+    "伪 RIFF 不得记为 ready",
   );
   assert.equal(
     resolveCharacterVoicePreviewStatus({
