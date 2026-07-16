@@ -82,6 +82,25 @@ test("full-book ready is disk-only (missing file => false even if DB would claim
   }
 });
 
+test("full-book ready rejects truncated/fake RIFF (isValidPcmWavFile parity)", () => {
+  const taskDir = fs.mkdtempSync(path.join(os.tmpdir(), "audiobook-full-ready-fake-"));
+  try {
+    const fullPath = resolveFullBookAudioPath(taskDir);
+    fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+    // size>44 伪 RIFF，旧实现会 true；现应 false
+    const fake = Buffer.alloc(64, 0);
+    fake.write("RIFF", 0);
+    fake.writeUInt32LE(56, 4);
+    fake.write("WAVE", 8);
+    fs.writeFileSync(fullPath, fake);
+    assert.equal(isFullBookAudioReady(taskDir), false);
+    writeTinyWav(fullPath);
+    assert.equal(isFullBookAudioReady(taskDir), true);
+  } finally {
+    fs.rmSync(taskDir, { recursive: true, force: true });
+  }
+});
+
 test("AudiobookTaskSummary progressive delivery fields exist on type surface", () => {
   /** @type {import('../../shared/dist/types/audiobook.js').AudiobookTaskSummary} */
   const sample = {

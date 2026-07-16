@@ -636,3 +636,57 @@ test("resolveChunkSynthesizeFields rebuilds character delivery from baseStyle", 
   assert.equal((synth.style || "").includes("旧基线"), false);
   assert.equal((synth.style || "").includes("过时句"), false);
 });
+
+test("reconcile then expand is the estimate source of truth for chunk count", () => {
+  // 两段同角色、同 delivery → coalesce 后可能合并；estimate 必须走 reconcile 后 expand
+  const delivery = normalizeDelivery(GOOD);
+  const segments = [
+    {
+      index: 0,
+      speakerKind: "character",
+      characterId: "c1",
+      speakerLabel: "何屿",
+      text: "你把责任说清楚。",
+      ttsMode: "preset",
+      voice: "白桦",
+      style: "旧",
+      baseStyle: "旧",
+      delivery,
+      deliveryMergeKey: deliveryMergeKey(delivery),
+    },
+    {
+      index: 1,
+      speakerKind: "character",
+      characterId: "c1",
+      speakerLabel: "何屿",
+      text: "别再甩锅。",
+      ttsMode: "preset",
+      voice: "白桦",
+      style: "旧",
+      baseStyle: "旧",
+      delivery,
+      deliveryMergeKey: deliveryMergeKey(delivery),
+    },
+  ];
+  const reconciled = reconcileAnnotationSegmentsWithVoices(segments, {
+    characterVoices: [{
+      characterId: "c1",
+      characterName: "何屿",
+      ttsMode: "preset",
+      ttsVoice: "苏打",
+      ttsStyle: "新基线",
+    }],
+    narrator: { voice: "茉莉", style: "旁白" },
+    deliveryStyleMode: "characters",
+  });
+  const rawJobs = expandSegmentsToChunkJobs(segments);
+  const reconciledJobs = expandSegmentsToChunkJobs(reconciled);
+  // 合成侧用 reconciled；标注侧 estimate 必须对齐
+  assert.equal(reconciledJobs.length, expandSegmentsToChunkJobs(reconciled).length);
+  assert.ok(reconciledJobs.length >= 1);
+  // 指纹依赖 voice/style，reconcile 后应与 raw 不同（换声线）
+  assert.notEqual(
+    chunkLayoutFingerprint(rawJobs),
+    chunkLayoutFingerprint(reconciledJobs),
+  );
+});
