@@ -5,6 +5,7 @@ import type {
   AudiobookTaskDetail,
   AudiobookTaskSummary,
   CreateAudiobookTaskInput,
+  DeliveryStyleMode,
 } from "@ai-novel/shared/types/audiobook";
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
 import { prisma } from "../../db/prisma";
@@ -27,6 +28,7 @@ import {
   wipeChapterAnnotationArtifact,
   wipeChapterAudioArtifacts,
 } from "./audiobookPaths";
+import { resolveDeliveryStyleMode } from "./deliveryStyle";
 
 const AUDIOBOOK_HEARTBEAT_INTERVAL_MS = Math.max(
   5_000,
@@ -48,6 +50,25 @@ function parseChapterIds(json: string | null | undefined): string[] {
   } catch {
     return [];
   }
+}
+
+function parseProgressJson(json: string | null | undefined): Record<string, unknown> {
+  if (!json?.trim()) return {};
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return parsed as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
+function readDeliveryStyleModeFromTask(row: {
+  progressJson?: string | null;
+}): DeliveryStyleMode {
+  const progress = parseProgressJson(row.progressJson);
+  const raw = progress.deliveryStyleMode;
+  return resolveDeliveryStyleMode(typeof raw === "string" ? raw : null);
 }
 
 function buildTaskTitle(novelTitle: string, scopeMode: string, chapterCount: number): string {
@@ -257,6 +278,7 @@ function toDetail(row: AudiobookTaskRow): AudiobookTaskDetail {
       temperature: row.temperature,
       outputDir: row.outputDir,
       fullAudioPath: row.fullAudioPath,
+      deliveryStyleMode: readDeliveryStyleModeFromTask(row),
     },
   };
 }
@@ -295,6 +317,7 @@ export class AudiobookTaskService {
     }
 
     const title = buildTaskTitle(novel.title, precheck.scopeMode, precheck.chapterCount);
+    const deliveryStyleMode = resolveDeliveryStyleMode(input.deliveryStyleMode ?? null);
     const task = await prisma.audiobookTask.create({
       data: {
         novelId: novel.id,
@@ -313,6 +336,8 @@ export class AudiobookTaskService {
         currentStage: "queued",
         currentItemLabel: "排队中",
         maxRetries: DEFAULT_MAX_RETRIES,
+        // 任务级开关快照：无 schema 列，落 progressJson 供 resume/重跑读取
+        progressJson: JSON.stringify({ deliveryStyleMode }),
       },
       include: {
         novel: { select: { id: true, title: true } },
@@ -759,6 +784,8 @@ export class AudiobookTaskService {
               ttsDesignPrompt: true,
               ttsRefAudioPath: true,
               ttsSpeakerAliases: true,
+              personality: true,
+              voiceTexture: true,
             },
           },
         },
@@ -781,6 +808,8 @@ export class AudiobookTaskService {
             ttsDesignPrompt: character.ttsDesignPrompt?.trim() || null,
             ttsRefAudioPath: character.ttsRefAudioPath?.trim() || null,
             speakerAliases: parseSpeakerAliases(character.ttsSpeakerAliases),
+            personality: character.personality ?? null,
+            voiceTexture: character.voiceTexture ?? null,
           };
         })
         .filter((character) => {
@@ -793,6 +822,7 @@ export class AudiobookTaskService {
           return Boolean(character.ttsVoice);
         });
 
+      const deliveryStyleMode = readDeliveryStyleModeFromTask(task);
       const result = await audiobookPipelineService.run({
         taskId,
         novelId: task.novelId,
@@ -806,6 +836,7 @@ export class AudiobookTaskService {
         provider: (task.provider as LLMProvider | null) ?? null,
         model: task.model,
         temperature: task.temperature,
+        deliveryStyleMode,
         signal: controller.signal,
         isCancelRequested: () => this.isCancelRequested(taskId),
         onProgress: async (progress) => {
@@ -848,6 +879,7 @@ export class AudiobookTaskService {
                 ? { annotationsJson: JSON.stringify(progress.annotations) }
                 : {}),
               progressJson: JSON.stringify({
+                deliveryStyleMode,
                 phase: progress.phase,
                 chapterIndex: progress.chapterIndex,
                 chapterCount: progress.chapterCount,

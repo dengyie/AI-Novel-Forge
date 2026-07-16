@@ -3,11 +3,17 @@ import type {
   AudiobookCharacterVoiceConfig,
   AudiobookDialogueSegment,
   AudiobookNarratorConfig,
+  DeliveryStyleMode,
 } from "@ai-novel/shared/types/audiobook";
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
 import { runStructuredPrompt } from "../../prompting/core/promptRunner";
 import { audiobookChapterAnnotatePrompt } from "../../prompting/prompts/audiobook/audiobookChapterAnnotate.prompts";
 import { AppError } from "../../middleware/errorHandler";
+import {
+  applyDeliveryToSegment,
+  resolveDeliveryStyleMode,
+  shouldApplyDelivery,
+} from "./deliveryStyle";
 
 export interface AnnotateChapterInput {
   chapterId: string;
@@ -20,10 +26,30 @@ export interface AnnotateChapterInput {
   model?: string | null;
   temperature?: number | null;
   signal?: AbortSignal;
+  /** 段级表演模式；缺省 resolveDeliveryStyleMode() → off */
+  deliveryStyleMode?: DeliveryStyleMode | null;
 }
 
 function normalizeName(value: string | null | undefined): string {
   return (value ?? "").trim().toLowerCase().replace(/\s+/g, "");
+}
+
+function clipRosterField(value: string | null | undefined, max: number): string | null {
+  const t = (value ?? "").trim().replace(/\s+/g, " ");
+  if (!t) return null;
+  return t.length <= max ? t : t.slice(0, max);
+}
+
+/** roster 行：名 | 别名 | 声线 | 风格 | 性格 */
+export function buildCharacterRosterLine(item: AudiobookCharacterVoiceConfig): string {
+  const aliases = (item.speakerAliases ?? [])
+    .map((alias) => alias.trim())
+    .filter(Boolean);
+  const voice = clipRosterField(item.voiceTexture, 36) || "未设定";
+  const style = clipRosterField(item.ttsStyle, 24) || "未设定";
+  const personality = clipRosterField(item.personality, 24) || "未设定";
+  const aliasPart = aliases.length > 0 ? aliases.join("、") : "无";
+  return `- ${item.characterName} | 别名:${aliasPart} | 声线:${voice} | 风格:${style} | 性格:${personality}`;
 }
 
 function buildCharacterIndex(characterVoices: AudiobookCharacterVoiceConfig[]) {
@@ -90,6 +116,7 @@ export function matchCharacterBySpeakerNameForTest(
 
 /**
  * 标注失败时的兜底：整章作为旁白单段，保证合成可继续。
+ * 注意：仅用于标注总失败；delivery 单段失败不得走此路径。
  */
 export function buildNarratorOnlyAnnotation(input: {
   chapterId: string;
@@ -110,6 +137,9 @@ export function buildNarratorOnlyAnnotation(input: {
         ttsMode: "preset",
         voice: input.narrator.voice,
         style: input.narrator.style,
+        baseStyle: input.narrator.style,
+        delivery: null,
+        deliveryMergeKey: "none",
       }]
     : [];
 
@@ -120,6 +150,36 @@ export function buildNarratorOnlyAnnotation(input: {
     segments,
     annotatedAt: new Date().toISOString(),
     error: input.error ?? (text ? null : "章节正文为空。"),
+  };
+}
+
+function buildBaseSegment(input: {
+  index: number;
+  speakerKind: "narrator" | "character";
+  characterId: string | null;
+  speakerLabel: string;
+  text: string;
+  ttsMode: "preset" | "design" | "clone";
+  voice: string;
+  baseStyle: string | null;
+  baseDesignPrompt: string | null;
+  refAudioPath: string | null;
+}): AudiobookDialogueSegment {
+  return {
+    index: input.index,
+    speakerKind: input.speakerKind,
+    characterId: input.characterId,
+    speakerLabel: input.speakerLabel,
+    text: input.text,
+    ttsMode: input.ttsMode,
+    voice: input.voice,
+    style: input.baseStyle,
+    designPrompt: input.baseDesignPrompt,
+    refAudioPath: input.refAudioPath,
+    baseStyle: input.baseStyle,
+    baseDesignPrompt: input.baseDesignPrompt,
+    delivery: null,
+    deliveryMergeKey: "none",
   };
 }
 
@@ -149,22 +209,10 @@ export class AudiobookAnnotationService {
       });
     }
 
-    const roster = input.characterVoices
-      .map((item) => {
-        const mode = item.ttsMode?.trim() || "preset";
-        const aliases = (item.speakerAliases ?? [])
-          .map((alias) => alias.trim())
-          .filter(Boolean);
-        const aliasSuffix = aliases.length > 0 ? `；别名：${aliases.join("、")}` : "";
-        if (mode === "design") {
-          return `- ${item.characterName}（design${aliasSuffix}）`;
-        }
-        if (mode === "clone") {
-          return `- ${item.characterName}（clone${aliasSuffix}）`;
-        }
-        return `- ${item.characterName}（音色 ${item.ttsVoice || "未设"}${aliasSuffix}）`;
-      })
-      .join("\n");
+    const deliveryStyleMode = resolveDeliveryStyleMode(input.deliveryStyleMode ?? null);
+    const requestDelivery = deliveryStyleMode !== "off";
+
+    const roster = input.characterVoices.map(buildCharacterRosterLine).join("\n");
 
     try {
       const result = await runStructuredPrompt({
@@ -175,6 +223,7 @@ export class AudiobookAnnotationService {
           chapterContent: content.slice(0, 28_000),
           characterRosterText: roster,
           narratorLabel: "旁白",
+          requestDelivery,
         },
         options: {
           provider: input.provider ?? undefined,
@@ -198,27 +247,45 @@ export class AudiobookAnnotationService {
           continue;
         }
 
+        // delivery 单独 normalize；坏表演只剥 delivery，绝不整章旁白
+        const rawDelivery = (raw as { delivery?: unknown }).delivery;
+
         if (raw.speakerKind === "character") {
           const matched = resolveCharacter(raw.speakerName, index);
           if (matched) {
             const mode = matched.ttsMode?.trim() || "preset";
-            segments.push({
+            const ttsMode = mode === "design" || mode === "clone" ? mode : "preset";
+            const baseStyle = (matched.ttsStyle ?? input.narrator.style) || null;
+            const baseDesignPrompt = matched.ttsDesignPrompt ?? null;
+            const base = buildBaseSegment({
               index: segIndex++,
               speakerKind: "character",
               characterId: matched.characterId,
               speakerLabel: matched.characterName,
               text,
-              ttsMode: mode === "design" || mode === "clone" ? mode : "preset",
+              ttsMode,
               voice: matched.ttsVoice?.trim() || "",
-              style: matched.ttsStyle ?? input.narrator.style,
-              designPrompt: matched.ttsDesignPrompt ?? null,
+              baseStyle,
+              baseDesignPrompt,
               refAudioPath: matched.ttsRefAudioPath ?? null,
             });
+            const withDelivery = shouldApplyDelivery(deliveryStyleMode, "character")
+              ? applyDeliveryToSegment(base, rawDelivery, {
+                  deliveryStyleMode,
+                  baseStyle,
+                  baseDesignPrompt,
+                })
+              : applyDeliveryToSegment(base, null, {
+                  deliveryStyleMode: "off",
+                  baseStyle,
+                  baseDesignPrompt,
+                });
+            segments.push(withDelivery);
             continue;
           }
         }
 
-        segments.push({
+        const narratorBase = buildBaseSegment({
           index: segIndex++,
           speakerKind: "narrator",
           characterId: null,
@@ -226,8 +293,22 @@ export class AudiobookAnnotationService {
           text,
           ttsMode: "preset",
           voice: input.narrator.voice,
-          style: input.narrator.style,
+          baseStyle: input.narrator.style,
+          baseDesignPrompt: null,
+          refAudioPath: null,
         });
+        const narratorSeg = shouldApplyDelivery(deliveryStyleMode, "narrator")
+          ? applyDeliveryToSegment(narratorBase, rawDelivery, {
+              deliveryStyleMode,
+              baseStyle: input.narrator.style,
+              baseDesignPrompt: null,
+            })
+          : applyDeliveryToSegment(narratorBase, null, {
+              deliveryStyleMode: "off",
+              baseStyle: input.narrator.style,
+              baseDesignPrompt: null,
+            });
+        segments.push(narratorSeg);
       }
 
       if (segments.length === 0) {

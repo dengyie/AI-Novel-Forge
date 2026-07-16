@@ -146,6 +146,67 @@ test("coalesceSegmentsBySpeaker does not merge different voice config", () => {
   assert.equal(merged.length, 2);
 });
 
+test("coalesceSegmentsBySpeaker merges same deliveryMergeKey even if style strings differ", () => {
+  const segments = [
+    {
+      index: 0,
+      speakerKind: "character",
+      characterId: "c1",
+      speakerLabel: "何屿",
+      text: "你把责任说清楚。",
+      ttsMode: "preset",
+      voice: "白桦",
+      style: "基线\n本句表演：平静公事地压着怒，甲。",
+      deliveryMergeKey: "anger|mid|soft|measured",
+    },
+    {
+      index: 1,
+      speakerKind: "character",
+      characterId: "c1",
+      speakerLabel: "何屿",
+      text: "别再甩锅。",
+      ttsMode: "preset",
+      voice: "白桦",
+      style: "基线\n本句表演：平静公事地压着怒，乙。",
+      deliveryMergeKey: "anger|mid|soft|measured",
+    },
+  ];
+  const merged = coalesceSegmentsBySpeaker(segments);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].text, "你把责任说清楚。\n别再甩锅。");
+  // 段首 style 保留
+  assert.equal(merged[0].style.includes("甲。"), true);
+});
+
+test("coalesceSegmentsBySpeaker does not merge different deliveryMergeKey", () => {
+  const segments = [
+    {
+      index: 0,
+      speakerKind: "character",
+      characterId: "c1",
+      speakerLabel: "何屿",
+      text: "你把责任说清楚。",
+      ttsMode: "preset",
+      voice: "白桦",
+      style: "A",
+      deliveryMergeKey: "anger|mid|soft|measured",
+    },
+    {
+      index: 1,
+      speakerKind: "character",
+      characterId: "c1",
+      speakerLabel: "何屿",
+      text: "先歇一会儿。",
+      ttsMode: "preset",
+      voice: "白桦",
+      style: "B",
+      deliveryMergeKey: "tender|low|soft|slow",
+    },
+  ];
+  const merged = coalesceSegmentsBySpeaker(segments);
+  assert.equal(merged.length, 2);
+});
+
 test("expandSegmentsToChunkJobs groups then splits long text", () => {
   const longA = "甲。".repeat(300);
   const longB = "乙。".repeat(10);

@@ -49,8 +49,9 @@ export function splitTextForTts(
 
 /**
  * 同说话人连续段合并（group_by_speaker），再按 maxChars 切 TTS 块。
- * 合并条件：speakerKey 相同，且 ttsMode / voice / style / designPrompt / refAudioPath 一致。
- * 合并后 index 重排；文本用换行拼接，避免两句黏连。
+ * 合并条件：speakerKey 相同，且 ttsMode / voice / refAudioPath / deliveryMergeKey 一致。
+ * deliveryMergeKey 缺省时回退 style+designPrompt 字符串全等（兼容旧 annotations）。
+ * 合并后 index 重排；文本用换行拼接，避免两句黏连；style/design 取段首。
  */
 export function coalesceSegmentsBySpeaker(
   segments: AudiobookDialogueSegment[],
@@ -114,13 +115,20 @@ function canMergeSegments(
   if ((prev.voice ?? "").trim() !== (next.voice ?? "").trim()) {
     return false;
   }
+  if ((prev.refAudioPath ?? "").trim() !== (next.refAudioPath ?? "").trim()) {
+    return false;
+  }
+
+  // D7：优先 deliveryMergeKey 桶；旧数据无 mergeKey 时回退 style/design 全等
+  const prevKey = prev.deliveryMergeKey;
+  const nextKey = next.deliveryMergeKey;
+  if (prevKey != null || nextKey != null) {
+    return (prevKey ?? "none") === (nextKey ?? "none");
+  }
   if ((prev.style ?? "").trim() !== (next.style ?? "").trim()) {
     return false;
   }
   if ((prev.designPrompt ?? "").trim() !== (next.designPrompt ?? "").trim()) {
-    return false;
-  }
-  if ((prev.refAudioPath ?? "").trim() !== (next.refAudioPath ?? "").trim()) {
     return false;
   }
   return true;

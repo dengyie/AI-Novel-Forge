@@ -5,6 +5,7 @@ import type {
   AudiobookCharacterVoiceConfig,
   AudiobookDialogueSegment,
   AudiobookNarratorConfig,
+  DeliveryStyleMode,
 } from "@ai-novel/shared/types/audiobook";
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
 import { prisma } from "../../db/prisma";
@@ -39,6 +40,11 @@ import {
   writeWavFileAtomic,
 } from "./audiobookWav";
 import { mimoChatAudioTTSProvider } from "./MimoChatAudioTTSProvider";
+import {
+  fingerprintStyleParts,
+  resolveDeliveryStyleMode,
+  resolveSynthesizeInput,
+} from "./deliveryStyle";
 
 export type AudiobookCancelChecker = () => Promise<boolean>;
 
@@ -75,6 +81,8 @@ export interface RunAudiobookPipelineInput {
   temperature?: number | null;
   annotateProvider?: LLMProvider | null;
   annotateModel?: string | null;
+  /** 段级表演模式；缺省 resolve → off */
+  deliveryStyleMode?: DeliveryStyleMode | null;
   signal?: AbortSignal;
   isCancelRequested: AudiobookCancelChecker;
   onProgress: (progress: AudiobookPipelineProgress) => Promise<void> | void;
@@ -171,14 +179,24 @@ function listExistingChunkPaths(taskDir: string, chapterId: string, expectedCoun
 }
 
 
-function chunkLayoutFingerprint(jobs: Array<{ text: string; segment: AudiobookDialogueSegment }>): string {
+/**
+ * 章内 chunk 布局指纹。D11：必须含 style + designPrompt，避免只改表演时 resume 复用旧 WAV。
+ */
+export function chunkLayoutFingerprint(
+  jobs: Array<{ text: string; segment: AudiobookDialogueSegment }>,
+): string {
   const hash = createHash("sha1");
   for (const job of jobs) {
+    const styleParts = fingerprintStyleParts(job.segment);
     hash.update(speakerKeyFromSegment(job.segment));
     hash.update("\0");
     hash.update(job.segment.ttsMode ?? "preset");
     hash.update("\0");
     hash.update(job.segment.voice ?? "");
+    hash.update("\0");
+    hash.update(styleParts.style);
+    hash.update("\0");
+    hash.update(styleParts.designPrompt);
     hash.update("\0");
     hash.update(String(job.text.length));
     hash.update("\0");
@@ -186,6 +204,40 @@ function chunkLayoutFingerprint(jobs: Array<{ text: string; segment: AudiobookDi
     hash.update("\n");
   }
   return hash.digest("hex").slice(0, 16);
+}
+
+/**
+ * 合成前唯一解析 style/designPrompt：优先 segment 已 resolve 字段，
+ * 若仅有 base+delivery 则再 resolve 一次（兼容旧 annotations / 手工修字段）。
+ */
+function resolveChunkSynthesizeFields(segment: AudiobookDialogueSegment): {
+  style?: string | null;
+  designPrompt?: string | null;
+} {
+  const hasDelivery = Boolean(segment.delivery);
+  const hasResolvedStyle =
+    typeof segment.style === "string" &&
+    (segment.style.includes("本句表演：") || segment.style.includes("表演指令："));
+  const hasResolvedDesign =
+    typeof segment.designPrompt === "string" &&
+    segment.designPrompt.includes("表演指令：");
+
+  if (!hasDelivery || hasResolvedStyle || hasResolvedDesign) {
+    return {
+      style: segment.style,
+      designPrompt: segment.designPrompt,
+    };
+  }
+
+  return resolveSynthesizeInput({
+    ttsMode: segment.ttsMode,
+    baseStyle: segment.baseStyle ?? segment.style,
+    baseDesignPrompt: segment.baseDesignPrompt ?? segment.designPrompt,
+    style: segment.style,
+    designPrompt: segment.designPrompt,
+    delivery: segment.delivery,
+    text: segment.text,
+  });
 }
 
 function resolveChunkLayoutPath(taskDir: string, chapterId: string): string {
@@ -337,6 +389,7 @@ export class AudiobookPipelineService {
           model: input.annotateModel ?? input.model,
           temperature: input.temperature,
           signal: input.signal,
+          deliveryStyleMode: resolveDeliveryStyleMode(input.deliveryStyleMode ?? null),
         });
         writeAnnotationFileSafe(taskDir, annotation);
       }
@@ -434,12 +487,13 @@ export class AudiobookPipelineService {
           chapterAudioPaths: chapterAudioPaths.map((item) => ({ chapterId: item.chapterId, path: item.path })),
         });
 
+        const synth = resolveChunkSynthesizeFields(job.segment);
         const audioBuffer = await synthesizeChunkWithRetry({
           text: job.text,
           voice: job.segment.voice,
-          style: job.segment.style,
+          style: synth.style,
           ttsMode: job.segment.ttsMode,
-          designPrompt: job.segment.designPrompt,
+          designPrompt: synth.designPrompt,
           refAudioPath: job.segment.refAudioPath,
           provider: input.provider,
           signal: input.signal,
