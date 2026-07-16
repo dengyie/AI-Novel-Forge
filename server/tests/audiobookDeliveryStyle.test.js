@@ -692,9 +692,104 @@ test("computeDeliveryChapterStats tracks peel and apply rate", () => {
   });
   assert.equal(stats.segmentCount, 2);
   assert.equal(stats.characterSegmentCount, 2);
+  assert.equal(stats.narratorSegmentCount, 0);
   assert.equal(stats.deliveryApplied, 1);
+  assert.equal(stats.characterDeliveryApplied, 1);
+  assert.equal(stats.narratorDeliveryApplied, 0);
   assert.equal(stats.deliveryPeeled, 1);
   assert.equal(stats.deliveryApplyRate, 0.5);
   assert.equal(stats.mergeChunkMultiplier, 1);
   assert.ok(stats.avgResolvedUserLen > 0);
+});
+
+test("computeDeliveryChapterStats rate ignores narrator when characters exist", () => {
+  const char = applyDeliveryToSegment(
+    {
+      index: 0,
+      speakerKind: "character",
+      characterId: "c1",
+      speakerLabel: "何屿",
+      text: "你把责任说清楚。",
+      ttsMode: "preset",
+      voice: "白桦",
+      style: "基线",
+    },
+    GOOD_CORE,
+    { deliveryStyleMode: "all", baseStyle: "基线" },
+  );
+  const narrator = applyDeliveryToSegment(
+    {
+      index: 1,
+      speakerKind: "narrator",
+      characterId: null,
+      speakerLabel: "旁白",
+      text: "夜色渐深。",
+      ttsMode: "preset",
+      voice: "茉莉",
+      style: "知性",
+    },
+    {
+      primaryEmotion: "沉静",
+      intensity: "low",
+      surfaceTone: "低缓",
+      intent: "铺陈",
+      vocalEffort: "soft",
+      rate: "slow",
+    },
+    { deliveryStyleMode: "all", baseStyle: "知性" },
+  );
+  // 1 角色有 delivery + 1 旁白有 delivery；采用率仍只看角色 → 1.0
+  const stats = computeDeliveryChapterStats([char, narrator]);
+  assert.equal(stats.characterSegmentCount, 1);
+  assert.equal(stats.narratorSegmentCount, 1);
+  assert.equal(stats.deliveryApplied, 2);
+  assert.equal(stats.characterDeliveryApplied, 1);
+  assert.equal(stats.narratorDeliveryApplied, 1);
+  assert.equal(stats.deliveryApplyRate, 1);
+});
+
+test("computeDeliveryChapterStats all-narrator chapter uses narrator denominator", () => {
+  const n1 = applyDeliveryToSegment(
+    {
+      index: 0,
+      speakerKind: "narrator",
+      characterId: null,
+      speakerLabel: "旁白",
+      text: "夜色渐深。",
+      ttsMode: "preset",
+      voice: "茉莉",
+      style: "知性",
+    },
+    {
+      primaryEmotion: "沉静",
+      intensity: "low",
+      surfaceTone: "低缓",
+      intent: "铺陈",
+      vocalEffort: "soft",
+      rate: "slow",
+    },
+    { deliveryStyleMode: "all", baseStyle: "知性" },
+  );
+  const n2 = applyDeliveryToSegment(
+    {
+      index: 1,
+      speakerKind: "narrator",
+      characterId: null,
+      speakerLabel: "旁白",
+      text: "只剩脚步。",
+      ttsMode: "preset",
+      voice: "茉莉",
+      style: "知性",
+    },
+    { intensity: "high" }, // peel
+    { deliveryStyleMode: "all", baseStyle: "知性" },
+  );
+  const stats = computeDeliveryChapterStats([n1, n2], { peeledCount: 1 });
+  assert.equal(stats.characterSegmentCount, 0);
+  assert.equal(stats.narratorSegmentCount, 2);
+  assert.equal(stats.deliveryApplied, 1);
+  assert.equal(stats.characterDeliveryApplied, 0);
+  assert.equal(stats.narratorDeliveryApplied, 1);
+  assert.equal(stats.deliveryApplyRate, 0.5);
+  assert.equal(stats.deliveryPeeled, 1);
 });
