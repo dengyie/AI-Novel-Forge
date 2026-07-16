@@ -2,7 +2,8 @@
 
 > 状态：已完成（2026-07-16）  
 > 范围：AI Novel 角色音色试听从「每次在线生成」改为「角色卡固定资产 + 播放只读」  
-> 生产：pxed + `ainovel.mangoq.ccwu.cc`；blob 落 `server/storage`（生产 symlink → `/share/archive/ainovel/storage`）
+> 生产：pxed + `ainovel.mangoq.ccwu.cc`；blob 落 `server/storage`（生产 symlink → `/share/archive/ainovel/storage`）  
+> **后续编排**：批量生成 / 有声书台一键就绪 → `docs/plans/audiobook-workbench-voice-readiness-plan.md`（主操作台上收到有声书工作台；本文件的盘+指纹+单条 generate 语义不变）
 
 ## 0. 执行契约
 
