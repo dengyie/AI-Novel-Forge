@@ -10,6 +10,7 @@ const {
   inferVoiceSlot,
   allocateVoiceSlot,
   buildDesignPrompt,
+  DESIGN_PROMPT_MAX,
   slotKey,
   parseSlotFromDesignPrompt,
   slotsEqual,
@@ -153,8 +154,11 @@ test("auto promotes design for all important characters with voiceTexture (no 70
   assert.equal(items.every((i) => i.ttsMode === "design"), true);
   for (const item of items) {
     assert.equal(Boolean(item.ttsDesignPrompt && item.ttsDesignPrompt.length > 8), true);
-    assert.match(item.ttsDesignPrompt, /【声线】/);
-    assert.match(item.ttsDesignPrompt, /【互斥】/);
+    assert.ok(item.ttsDesignPrompt.length <= DESIGN_PROMPT_MAX);
+    assert.match(item.ttsDesignPrompt, /音高/);
+    assert.match(item.ttsDesignPrompt, /质感/);
+    assert.match(item.ttsDesignPrompt, /气息/);
+    assert.equal(Boolean(parseSlotFromDesignPrompt(item.ttsDesignPrompt)), true);
   }
 });
 
@@ -199,9 +203,11 @@ test("prefer_design uses design for lead/cast and preset for extras", () => {
   assert.equal(extra.ttsMode, "preset");
   assert.ok(["苏打", "白桦"].includes(extra.ttsVoice));
   for (const item of [lead, cast]) {
-    assert.ok(item.ttsDesignPrompt.length <= 480);
-    assert.match(item.ttsDesignPrompt, /【声线】/);
-    assert.match(item.ttsDesignPrompt, /【互斥】/);
+    assert.ok(item.ttsDesignPrompt.length <= DESIGN_PROMPT_MAX);
+    assert.match(item.ttsDesignPrompt, /音高/);
+    assert.match(item.ttsDesignPrompt, /质感/);
+    assert.match(item.ttsDesignPrompt, /气息/);
+    assert.equal(Boolean(parseSlotFromDesignPrompt(item.ttsDesignPrompt)), true);
   }
 });
 
@@ -289,11 +295,12 @@ test("slot override does not put contradictory texture into 声线", () => {
   assert.equal(overridden.length >= 1, true);
 
   for (const item of items) {
-    const voiceLine = item.ttsDesignPrompt.split("\n").find((line) => line.startsWith("【声线】")) || "";
-    // 质感明亮/中性 时，【声线】不得再拼沙哑/低沉整句
-    if (/质感明亮清脆|质感中性干净/.test(voiceLine)) {
-      assert.equal(/沙哑|低沉威严/.test(voiceLine), false);
+    const prompt = item.ttsDesignPrompt || "";
+    // 质感明亮/中性 时，不得再拼沙哑/低沉威严整句
+    if (/质感明亮清脆|质感中性干净/.test(prompt)) {
+      assert.equal(/沙哑|低沉威严/.test(prompt), false);
     }
+    assert.equal(Boolean(parseSlotFromDesignPrompt(prompt)), true);
   }
 });
 
@@ -311,12 +318,18 @@ test("buildDesignPrompt keeps texture core and mutex; never bare-returns texture
     age: "adult",
     slot: { pitchBand: "low", textureBand: "dark_raspy", energyBand: "heavy" },
     preferredSlot: { pitchBand: "low", textureBand: "dark_raspy", energyBand: "heavy" },
+    cluster: "lead",
   });
-  assert.ok(prompt.length <= 480);
-  assert.match(prompt, /【声线】/);
-  assert.match(prompt, /【互斥】/);
+  assert.ok(prompt.length <= DESIGN_PROMPT_MAX);
+  assert.match(prompt, /音高偏低/);
+  assert.match(prompt, /质感偏低略沙哑/);
+  assert.match(prompt, /气息沉稳有分量/);
   assert.match(prompt, /沉稳略沙哑/);
-  assert.notEqual(prompt.trim(), longTexture.slice(0, 480));
+  assert.match(prompt, /避免|区分|可辨|空壳|播音/);
+  assert.notEqual(prompt.trim(), longTexture.slice(0, DESIGN_PROMPT_MAX));
+  assert.equal(Boolean(parseSlotFromDesignPrompt(prompt)), true);
+  assert.doesNotMatch(prompt, /【声线】|【身份】/);
+  assert.doesNotMatch(prompt, /「测试角」/);
 });
 
 test("buildDesignPrompt drops conflicting texture when slot diverged", () => {
@@ -331,11 +344,11 @@ test("buildDesignPrompt drops conflicting texture when slot diverged", () => {
     age: "adult",
     slot: { pitchBand: "low", textureBand: "bright", energyBand: "heavy" },
     preferredSlot: { pitchBand: "low", textureBand: "dark_raspy", energyBand: "heavy" },
+    cluster: "cast",
   });
-  const voiceLine = prompt.split("\n").find((line) => line.startsWith("【声线】")) || "";
-  assert.match(voiceLine, /质感明亮清脆/);
-  assert.equal(/沙哑|低沉威严/.test(voiceLine), false);
-  assert.match(prompt, /【气质】/);
+  assert.match(prompt, /质感明亮清脆/);
+  assert.equal(/沙哑|低沉威严/.test(prompt), false);
+  assert.equal(Boolean(parseSlotFromDesignPrompt(prompt)), true);
 });
 
 test("allocateVoiceSlot perturbs on collision then soft-collides when exhausted", () => {
@@ -482,7 +495,8 @@ test("soft collision mutex cites occupied neighbor slot not last writer", () => 
   assert.ok(softItem);
   assert.match(softItem.reason, /collision:soft/);
   // 邻居标签应是某档音高+质感「声线」
-  assert.match(softItem.ttsDesignPrompt, /明显区别于.+声线/);
+  assert.match(softItem.ttsDesignPrompt, /明显区分|明显区别于/);
+  assert.match(softItem.ttsDesignPrompt, /声线/);
 });
 
 test("planCharacterVoices never rewrites configured clone bindings even when onlyMissing=false", () => {
@@ -758,7 +772,39 @@ test("slotsEqual and parseSlotFromDesignPrompt round-trip labels", () => {
   const slot = { pitchBand: "high", textureBand: "airy", energyBand: "lively" };
   assert.equal(slotsEqual(slot, { ...slot }), true);
   assert.equal(slotsEqual(slot, { ...slot, pitchBand: "low" }), false);
-  const prompt = "【声线】音高偏高，质感偏气声轻柔，气息活泼有弹性";
-  const parsed = parseSlotFromDesignPrompt(prompt);
-  assert.deepEqual(parsed, slot);
+  const legacy = "【声线】音高偏高，质感偏气声轻柔，气息活泼有弹性";
+  assert.deepEqual(parseSlotFromDesignPrompt(legacy), slot);
+  const natural = "青年女性，标准普通话，音高偏高，质感偏气声轻柔，气息活泼有弹性，适合女主情感对白。避免播音腔。";
+  assert.deepEqual(parseSlotFromDesignPrompt(natural), slot);
+});
+
+test("buildDesignPrompt natural language stays within hard max and parses", () => {
+  const prompt = buildDesignPrompt({
+    character: {
+      characterId: "lead-1",
+      characterName: "林某某",
+      role: "主角",
+      castRole: "protagonist",
+      personality: "克制隐忍但内心炽热不肯认输",
+      voiceTexture: "清亮略薄，咬字利落",
+    },
+    gender: "male",
+    age: "youth",
+    slot: { pitchBand: "mid", textureBand: "bright", energyBand: "heavy" },
+    preferredSlot: { pitchBand: "mid", textureBand: "bright", energyBand: "heavy" },
+    cluster: "lead",
+    softCollision: true,
+    neighborSlotLabel: "偏低偏低略沙哑声线",
+  });
+  assert.ok(prompt.length <= DESIGN_PROMPT_MAX);
+  assert.match(prompt, /音高中等/);
+  assert.match(prompt, /质感明亮清脆/);
+  assert.match(prompt, /气息沉稳有分量/);
+  assert.match(prompt, /明显区分/);
+  assert.doesNotMatch(prompt, /林某某|【声线】|【身份】/);
+  assert.deepEqual(parseSlotFromDesignPrompt(prompt), {
+    pitchBand: "mid",
+    textureBand: "bright",
+    energyBand: "heavy",
+  });
 });

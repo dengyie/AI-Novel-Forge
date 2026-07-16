@@ -66,7 +66,11 @@ const PITCH_ORDER: VoicePitchBand[] = ["mid", "low", "high"];
 const TEXTURE_ORDER: VoiceTextureBand[] = ["neutral", "dark_raspy", "bright", "airy"];
 const ENERGY_ORDER: VoiceEnergyBand[] = ["even", "heavy", "lively"];
 
-const DESIGN_PROMPT_MAX = 480;
+/** identity design 硬顶；须为 delivery 合并预留余量（MIMO_USER_MAX=280） */
+export const DESIGN_PROMPT_MAX = 200;
+/** 组装目标区间（软目标，硬顶仍为 DESIGN_PROMPT_MAX） */
+export const DESIGN_PROMPT_TARGET_MIN = 120;
+export const DESIGN_PROMPT_TARGET_MAX = 160;
 
 const PITCH_ZH: Record<VoicePitchBand, string> = {
   high: "偏高",
@@ -436,10 +440,11 @@ function textureConflictsWithSlot(textureCore: string, textureBand: VoiceTexture
 }
 
 /**
- * 结构化 design prompt。
- * - 槽位自然语言为【声线】主信号
- * - voiceTexture 仅在与槽位一致且无对立词时并入；槽位扰动后禁止裸拼原句（避免「明亮+沙哑」）
- * - 截断优先级：声线 > 互斥 > 身份 > 表达 > 禁止 > 气质
+ * Voice Design 身份文案（自然语言一段 + 可解析三元锚点）。
+ * - 强制含：音高{PITCH_ZH} / 质感{TEXTURE_ZH} / 气息{ENERGY_ZH}（onlyMissing seed）
+ * - 无【标签】主结构；默认不写角色专名
+ * - softCollision 互斥首句 hard-keep；超长按优先级截断，硬顶 DESIGN_PROMPT_MAX
+ * - lead 忌死气平板；slot 扰动后禁止对立 texture 整句粘贴
  */
 export function buildDesignPrompt(input: {
   character: VoicePlannerCharacterInput;
@@ -450,97 +455,165 @@ export function buildDesignPrompt(input: {
   softCollision?: boolean;
   neighborSlotLabel?: string | null;
   cluster?: VoiceCluster;
+  /** 弱卡 archetype 质感短语（阶段 2）；不得覆盖三元锚点 */
+  archetypeTexturePhrase?: string | null;
+  archetypeUseCase?: string | null;
 }): string {
   const { character, gender, age, slot } = input;
   const cluster = input.cluster ?? resolveVoiceCluster(character);
-  const name = character.characterName.slice(0, 24);
-  const roleBit = (character.role || character.castRole || "配角").toString().slice(0, 32);
-  const personality = (character.personality || character.firstImpression || "").trim().slice(0, 72);
-  const textureCore = character.voiceTexture?.trim() || "";
   const preferred = input.preferredSlot ?? inferVoiceSlot(character);
   const slotDiverged = !slotsEqual(preferred, slot);
+  const textureCore = character.voiceTexture?.trim() || "";
+  const personality = (character.personality || character.firstImpression || "")
+    .trim()
+    .replace(/\s+/g, "")
+    .slice(0, 36);
 
-  const voiceParts = [
-    `音高${PITCH_ZH[slot.pitchBand]}`,
-    `质感${TEXTURE_ZH[slot.textureBand]}`,
-    `气息${ENERGY_ZH[slot.energyBand]}`,
-  ];
-  // 槽位与卡一致且原句不与槽位对立时，才并入 texture 原句
+  const ageGender = `${ageLabelNatural(age)}${genderLabelNatural(gender)}`;
+  const pitch = `音高${PITCH_ZH[slot.pitchBand]}`;
+  const texture = `质感${TEXTURE_ZH[slot.textureBand]}`;
+  const energy = `气息${ENERGY_ZH[slot.energyBand]}`;
+  const core = `${ageGender}，标准普通话，${pitch}，${texture}，${energy}`;
+
+  const flavorParts: string[] = [];
   if (
     textureCore
     && !slotDiverged
     && !textureConflictsWithSlot(textureCore, slot.textureBand)
   ) {
-    voiceParts.push(textureCore.slice(0, 200));
-  } else if (textureCore && slotDiverged) {
-    // 扰动后：只保留极短非对立片段作审计，绝不整段粘贴
-    const clipped = textureCore.slice(0, 24);
-    if (!textureConflictsWithSlot(clipped, slot.textureBand)) {
-      voiceParts.push(`（卡面线索：${clipped}）`);
+    const clipped = compressTextureSnippet(textureCore, 28);
+    if (clipped && !core.includes(clipped)) {
+      flavorParts.push(clipped);
+    }
+  } else if (
+    !textureCore
+    && input.archetypeTexturePhrase?.trim()
+  ) {
+    const arch = compressTextureSnippet(input.archetypeTexturePhrase.trim(), 24);
+    if (arch && !textureConflictsWithSlot(arch, slot.textureBand)) {
+      flavorParts.push(arch);
     }
   }
 
-  const mutexParts = [
-    "与同书其他角色在音高/质感上可辨",
-    "避免播音腔与无特征标准青年声",
-  ];
-  if (cluster === "lead" || cluster === "cast") {
-    mutexParts.push("与路人预置声和旁白声明显可分");
-  }
-  if (input.softCollision && input.neighborSlotLabel) {
-    mutexParts.unshift(`明显区别于${input.neighborSlotLabel}`);
-  }
-
-  const identity = `【身份】${ageLabel(age)}${genderLabel(gender)}，叙事身份：${roleBit}「${name}」`;
-  const voice = `【声线】${voiceParts.join("，")}`;
-  // 槽位扰动时把完整 texture 挪到气质侧，避免【声线】自相矛盾
-  const vibeBits = [personality];
   if (cluster === "lead") {
-    vibeBits.unshift("意志坚定有主心骨，可受挫但不空心死气");
+    flavorParts.push("吐字清楚有主心骨");
+  } else if (slot.energyBand === "lively") {
+    flavorParts.push("吐字轻快");
+  } else if (slot.energyBand === "heavy") {
+    flavorParts.push("吐字沉稳");
+  } else {
+    flavorParts.push("吐字清楚");
   }
-  if (slotDiverged && textureCore) {
-    vibeBits.push(`卡面声线原文：${textureCore.slice(0, 48)}`);
-  }
-  const vibeJoined = vibeBits.filter(Boolean).join("；").slice(0, 96);
-  const vibe = vibeJoined ? `【气质】${vibeJoined}` : "";
-  const express = cluster === "lead"
-    ? "【表达】语速中等偏稳，吐字清楚有力，适合小说对白；中文普通话"
-    : "【表达】语速中等，吐字清楚，适合小说对白；中文普通话";
-  const mutex = `【互斥】${mutexParts.join("；")}`;
-  const forbid = cluster === "lead"
-    ? "【禁止】不要模仿旁白；不要空壳「标准男/女声」；避免死气沉沉的平板播读"
-    : "【禁止】不要模仿旁白；不要空壳「标准男/女声」";
 
-  // 阅读顺序组装；超长时按优先级丢弃气质→禁止→表达→身份，尽量保留声线与互斥
-  const ordered = [identity, voice, vibe, express, mutex, forbid].filter(Boolean);
-  let prompt = ordered.join("\n");
+  if (personality) {
+    flavorParts.push(`气质${personality}`);
+  } else if (cluster === "lead") {
+    flavorParts.push("气质克制坚定");
+  }
+
+  const useCase =
+    (input.archetypeUseCase?.trim() && input.archetypeUseCase.trim().slice(0, 24))
+    || resolveDesignUseCase(character, cluster);
+  const bodyMid = flavorParts.filter(Boolean).join("，");
+  let body = bodyMid
+    ? `${core}，${bodyMid}，适合${useCase}`
+    : `${core}，适合${useCase}`;
+
+  const mutexPrimary = input.softCollision && input.neighborSlotLabel
+    ? `与「${input.neighborSlotLabel}」明显区分`
+    : "";
+  const mutexSecondary = cluster === "lead" || cluster === "cast"
+    ? "避免播音腔、空壳标准声与死气平板播读"
+    : "避免播音腔与无特征标准声";
+
+  const tailParts: string[] = [];
+  if (mutexPrimary) tailParts.push(mutexPrimary);
+  tailParts.push(mutexSecondary);
+  let tail = tailParts.join("；");
+
+  let prompt = `${body}。${tail}。`;
   if (prompt.length <= DESIGN_PROMPT_MAX) {
     return prompt;
   }
 
-  const dropOrder = [vibe, forbid, express, identity];
-  const active = new Set(ordered);
-  for (const drop of dropOrder) {
-    if (!drop || prompt.length <= DESIGN_PROMPT_MAX) break;
-    active.delete(drop);
-    prompt = [identity, voice, vibe, express, mutex, forbid]
-      .filter((part) => part && active.has(part))
-      .join("\n");
+  // 丢弃顺序：archetype/气质细节 → 次互斥缩短 → use case 缩短 → 仍超则硬截（保三元+ soft 首句）
+  const dropSteps: Array<() => void> = [
+    () => {
+      // 去掉气质片段
+      const withoutVibe = flavorParts.filter((p) => !p.startsWith("气质"));
+      const mid = withoutVibe.join("，");
+      body = mid ? `${core}，${mid}，适合${useCase}` : `${core}，适合${useCase}`;
+    },
+    () => {
+      // 去掉额外 texture 风味，只留吐字
+      const keep = flavorParts.filter((p) => p.startsWith("吐字") || p.includes("主心骨"));
+      const mid = keep.join("，") || "吐字清楚";
+      body = `${core}，${mid}，适合${useCase}`;
+    },
+    () => {
+      body = `${core}，适合${shortenUseCase(useCase)}`;
+    },
+    () => {
+      body = core;
+    },
+    () => {
+      tail = mutexPrimary || mutexSecondary;
+    },
+  ];
+
+  for (const step of dropSteps) {
+    step();
+    prompt = body.endsWith("。") ? `${body}${tail}。` : `${body}。${tail}。`;
+    if (prompt.length <= DESIGN_PROMPT_MAX) {
+      return prompt;
+    }
   }
 
-  if (prompt.length <= DESIGN_PROMPT_MAX) {
-    return prompt;
-  }
-
-  // 仍超长：保声线+互斥
-  const hard = [voice, mutex].join("\n");
+  // 硬保：三元 core + soft 首句（若有）
+  const hardTail = mutexPrimary ? `${mutexPrimary}。` : `${mutexSecondary}。`;
+  const hard = `${core}。${hardTail}`;
   if (hard.length <= DESIGN_PROMPT_MAX) {
     return hard;
   }
-  const mutexBlock = `\n${mutex}`;
-  const room = Math.max(24, DESIGN_PROMPT_MAX - mutexBlock.length);
-  return `${voice.slice(0, room)}${mutexBlock}`.slice(0, DESIGN_PROMPT_MAX);
+  return hard.slice(0, DESIGN_PROMPT_MAX);
 }
+
+function ageLabelNatural(age: VoiceAgeBucket): string {
+  if (age === "youth") return "青年";
+  if (age === "elder") return "年长";
+  return "青壮年";
+}
+
+function genderLabelNatural(gender: VoiceGenderBucket): string {
+  if (gender === "female") return "女性";
+  if (gender === "male") return "男性";
+  return "中性";
+}
+
+function compressTextureSnippet(raw: string, max: number): string {
+  const cleaned = raw.replace(/[【】\[\]\n]/g, " ").replace(/\s+/g, "").trim();
+  if (!cleaned) return "";
+  return cleaned.slice(0, max);
+}
+
+function shortenUseCase(useCase: string): string {
+  if (useCase.length <= 8) return useCase;
+  return useCase.slice(0, 8);
+}
+
+function resolveDesignUseCase(
+  character: VoicePlannerCharacterInput,
+  cluster: VoiceCluster,
+): string {
+  const role = `${character.role || ""} ${character.castRole || ""}`;
+  if (/反派|antagonist|BOSS|boss|对手/i.test(role)) return "权谋反派对白";
+  if (/女主|heroine|love_interest/i.test(role)) return "女主情感对白";
+  if (cluster === "lead" || /主角|protagonist|男主/i.test(role)) return "男主对白";
+  if (cluster === "cast") return "主角团对白";
+  if (cluster === "narrator") return "旁白叙述";
+  return "网文角色对白";
+}
+
 
 function buildStyle(
   input: VoicePlannerCharacterInput,
