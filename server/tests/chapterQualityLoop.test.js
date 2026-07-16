@@ -484,6 +484,26 @@ test("quality loop projection classifies deferred sot debt as blocking even if s
   assert.equal(hasContinuableChapterQualityLoopRiskFlags(riskFlags), false);
 });
 
+test("quality loop projection classifies deferred prose_system_hud as blocking", () => {
+  const riskFlags = JSON.stringify({
+    qualityLoop: {
+      overallStatus: "invalid",
+      recommendedAction: "patch_repair",
+      rootCauseCode: "draft_repair_exhausted",
+      terminalAction: "defer_and_continue",
+      signals: [{
+        artifactType: "prose_quality",
+        status: "invalid",
+        issueCodes: ["prose_system_hud"],
+      }],
+    },
+  });
+
+  assert.equal(classifyChapterQualityLoopRiskFlags(riskFlags), "blocking");
+  assert.equal(hasContinuableChapterQualityLoopRiskFlags(riskFlags), false);
+  assert.equal(hasNonDeferrableProseOrSotDebt(JSON.parse(riskFlags).qualityLoop), true);
+});
+
 test("quality loop projection keeps deferred high non-critical prose as non-blocking", () => {
   // prose_negative_flip = high 但非 critical / 非 sot → 仍可 defer 记债
   const riskFlags = JSON.stringify({

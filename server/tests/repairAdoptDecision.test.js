@@ -67,6 +67,18 @@ test("decideRepairContentAdoption discards newly introduced L0 codes", () => {
   assert.deepEqual(result.introducedBlockingCodes, ["prose_ai_self_reference"]);
 });
 
+test("decideRepairContentAdoption discards candidate that introduces prose_system_hud", () => {
+  const result = decideRepairContentAdoption({
+    baselineScore: score({ overall: 70, coherence: 70, repetition: 70, engagement: 70 }),
+    candidateScore: score({ overall: 95, coherence: 95, repetition: 95, engagement: 95 }),
+    baselineBlockingCodes: [],
+    candidateBlockingCodes: ["prose_system_hud"],
+  });
+  assert.equal(result.decision, "discard");
+  assert.match(result.reason, /prose_system_hud/);
+  assert.deepEqual(result.introducedBlockingCodes, ["prose_system_hud"]);
+});
+
 test("decideRepairContentAdoption discards newly introduced L1 blocking codes", () => {
   const {
     fingerprintReviewIssuesAsL1BlockingCodes,

@@ -167,3 +167,51 @@ test("detectProseQuality catches mustAvoid wrapped in book-title marks via norma
   assert.ok(codes(report).includes("sot_must_avoid_leak"));
   assert.equal(report.hasBlockingFindings, true);
 });
+
+test("detectProseQuality flags true system HUD blocks as prose_system_hud", () => {
+  const report = detectProseQuality([
+    "门轴吱呀一声，他踏入锈蚀的舱室。",
+    "【系统提示：检测到宿主异常，状态面板已开启】",
+    "【HP：120/120　MP：40/80　冷却：3秒】",
+    "他眉头一紧，却把视线移开。",
+  ].join("\n"));
+
+  assert.ok(codes(report).includes("prose_system_hud"), `codes=${codes(report).join(",")}`);
+  assert.equal(report.hasBlockingFindings, true);
+  const hudSeverities = severitiesByCode(report, "prose_system_hud");
+  assert.ok(hudSeverities.length >= 1);
+  assert.ok(hudSeverities.every((severity) => severity === "high" || severity === "critical"));
+});
+
+test("detectProseQuality multi HUD blocks elevate severity to critical", () => {
+  const report = detectProseQuality([
+    "【系统：任务更新】",
+    "【状态：冷却中】",
+    "【等级：12　经验：3300】",
+    "他收起刀，没有再看那行字。",
+  ].join("\n"));
+  assert.ok(codes(report).includes("prose_system_hud"));
+  assert.equal(report.hasBlockingFindings, true);
+  assert.ok(severitiesByCode(report, "prose_system_hud").includes("critical"));
+});
+
+test("detectProseQuality ignores harmless fullwidth brackets as short names", () => {
+  const report = detectProseQuality([
+    "他自称【裂空】，旁人只当是绰号。",
+    "地图上标着【北港】两个字。",
+    "她把【旧钥】塞进他掌心，没有多说。",
+    "潮声压在城墙外，守夜人握紧刀柄。",
+  ].join("\n"));
+
+  assert.equal(codes(report).includes("prose_system_hud"), false, `codes=${codes(report).join(",")}`);
+  assert.equal(report.hasBlockingFindings, false);
+});
+
+test("detectProseQuality does not treat narrative without brackets as HUD", () => {
+  const report = detectProseQuality([
+    "系统里没有答案，他只能靠自己。",
+    "状态很糟，冷却也谈不上，等级更是笑话。",
+    "他推开门，走进雨里。",
+  ].join("\n"));
+  assert.equal(codes(report).includes("prose_system_hud"), false);
+});
