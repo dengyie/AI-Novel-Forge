@@ -34,6 +34,9 @@
 - [Prompt Workbench, Context and Step Runtime Plan](./plans/prompt-workbench-context-and-step-runtime-plan.md)
 - [Auto Director Execution Plane Isolation Plan](./plans/auto-director-execution-plane-isolation-plan.md)
 - [Director Self-Cycle Pipeline Plan](./plans/director-self-cycle-pipeline-plan.md)（批续窗 / 合同 strip / recovery 不回卷，监管只重启）
+- [Writing Quality Architecture Plan](./plans/writing-quality-architecture-plan.md)（修文 adopt/discard · isPass 对齐 · L0 接线）
+- [Writing Quality Hardgate Architecture Plan](./plans/writing-quality-hardgate-architecture-plan.md)（L0 真拦 · 不可 defer 降级 · HUD · 词表可观测）
+- [Setting Alignment Quality Architecture Plan](./plans/setting-alignment-quality-architecture-plan.md)（设定对齐 · settingQualityMode）
 - [Director Mode Module and State Refactor Checklist](./plans/director-mode-module-state-refactor-checklist.md)
 
 ### `docs/design`
