@@ -8,6 +8,7 @@ const {
   normalizeDelivery,
   validateDeliveryLine,
   compileDeliveryLine,
+  compileNarratorDeliveryLine,
   deliveryMergeKey,
   emotionFamily,
   resolveDeliveryLine,
@@ -16,6 +17,8 @@ const {
   shouldApplyDelivery,
   applyDeliveryToSegment,
   fingerprintStyleParts,
+  fillContinuityFrom,
+  computeDeliveryChapterStats,
 } = require("../dist/services/audiobook/deliveryStyle.js");
 
 const GOOD_CORE = {
@@ -539,3 +542,159 @@ for (const sample of GOLDEN) {
     }
   });
 }
+
+// ── Phase2: continuity / narrator all / stats ────────────────
+
+test("fillContinuityFrom fills empty continuity for same character", () => {
+  const a = applyDeliveryToSegment(
+    {
+      index: 0,
+      speakerKind: "character",
+      characterId: "c1",
+      speakerLabel: "何屿",
+      text: "你把责任说清楚。",
+      ttsMode: "preset",
+      voice: "白桦",
+      style: "基线",
+    },
+    { ...GOOD_CORE, continuityFrom: null, deliveryLine: null },
+    { deliveryStyleMode: "characters", baseStyle: "基线" },
+  );
+  const b = applyDeliveryToSegment(
+    {
+      index: 1,
+      speakerKind: "character",
+      characterId: "c1",
+      speakerLabel: "何屿",
+      text: "别再甩锅。",
+      ttsMode: "preset",
+      voice: "白桦",
+      style: "基线",
+    },
+    {
+      primaryEmotion: "压抑愤怒",
+      intensity: "mid",
+      surfaceTone: "平静公事",
+      intent: "再压一句",
+      vocalEffort: "soft",
+      rate: "measured",
+      deliveryLine: null,
+    },
+    { deliveryStyleMode: "characters", baseStyle: "基线" },
+  );
+  assert.equal(b.delivery?.continuityFrom ?? null, null);
+  const filled = fillContinuityFrom([a, b], { deliveryStyleMode: "characters" });
+  assert.equal(filled[0].delivery?.continuityFrom ?? null, null);
+  assert.match(filled[1].delivery?.continuityFrom || "", /承接上句/);
+  assert.match(filled[1].delivery?.continuityFrom || "", /压抑愤怒|怒/);
+});
+
+test("fillContinuityFrom does not overwrite model continuityFrom", () => {
+  const a = applyDeliveryToSegment(
+    {
+      index: 0,
+      speakerKind: "character",
+      characterId: "c1",
+      speakerLabel: "何屿",
+      text: "先说。",
+      ttsMode: "preset",
+      voice: "白桦",
+      style: "基线",
+    },
+    GOOD_CORE,
+    { deliveryStyleMode: "characters", baseStyle: "基线" },
+  );
+  const b = applyDeliveryToSegment(
+    {
+      index: 1,
+      speakerKind: "character",
+      characterId: "c1",
+      speakerLabel: "何屿",
+      text: "再说。",
+      ttsMode: "preset",
+      voice: "白桦",
+      style: "基线",
+    },
+    {
+      ...GOOD_CORE,
+      continuityFrom: "模型已写承接",
+      deliveryLine: null,
+    },
+    { deliveryStyleMode: "characters", baseStyle: "基线" },
+  );
+  const filled = fillContinuityFrom([a, b], { deliveryStyleMode: "characters" });
+  assert.equal(filled[1].delivery?.continuityFrom, "模型已写承接");
+});
+
+test("mode=all narrator uses 本句叙述 not 本句表演", () => {
+  const seg = applyDeliveryToSegment(
+    {
+      index: 0,
+      speakerKind: "narrator",
+      characterId: null,
+      speakerLabel: "旁白",
+      text: "夜色渐深，长街只剩脚步声。",
+      ttsMode: "preset",
+      voice: "茉莉",
+      style: "知性旁白",
+    },
+    {
+      primaryEmotion: "沉静",
+      intensity: "low",
+      surfaceTone: "低缓",
+      intent: "铺陈夜景",
+      vocalEffort: "soft",
+      rate: "slow",
+      deliveryLine: null,
+    },
+    { deliveryStyleMode: "all", baseStyle: "知性旁白" },
+  );
+  assert.ok(seg.delivery);
+  assert.match(seg.style || "", /本句叙述：/);
+  assert.equal((seg.style || "").includes("本句表演"), false);
+  assert.match(seg.style || "", /不抢角色/);
+  const line = compileNarratorDeliveryLine(seg.delivery);
+  assert.match(line, /像有声书旁白/);
+});
+
+test("computeDeliveryChapterStats tracks peel and apply rate", () => {
+  const good = applyDeliveryToSegment(
+    {
+      index: 0,
+      speakerKind: "character",
+      characterId: "c1",
+      speakerLabel: "何屿",
+      text: "你把责任说清楚。",
+      ttsMode: "preset",
+      voice: "白桦",
+      style: "基线",
+    },
+    GOOD_CORE,
+    { deliveryStyleMode: "characters", baseStyle: "基线" },
+  );
+  const peeled = applyDeliveryToSegment(
+    {
+      index: 1,
+      speakerKind: "character",
+      characterId: "c1",
+      speakerLabel: "何屿",
+      text: "别急。",
+      ttsMode: "preset",
+      voice: "白桦",
+      style: "基线",
+    },
+    { intensity: "high" },
+    { deliveryStyleMode: "characters", baseStyle: "基线" },
+  );
+  const stats = computeDeliveryChapterStats([good, peeled], {
+    peeledCount: 1,
+    chunkJobCount: 2,
+  });
+  assert.equal(stats.segmentCount, 2);
+  assert.equal(stats.characterSegmentCount, 2);
+  assert.equal(stats.deliveryApplied, 1);
+  assert.equal(stats.deliveryPeeled, 1);
+  assert.equal(stats.deliveryApplyRate, 0.5);
+  assert.equal(stats.mergeChunkMultiplier, 1);
+  assert.ok(stats.avgResolvedUserLen > 0);
+});

@@ -11,9 +11,12 @@ import { audiobookChapterAnnotatePrompt } from "../../prompting/prompts/audioboo
 import { AppError } from "../../middleware/errorHandler";
 import {
   applyDeliveryToSegment,
+  computeDeliveryChapterStats,
+  fillContinuityFrom,
   resolveDeliveryStyleMode,
   shouldApplyDelivery,
 } from "./deliveryStyle";
+import { expandSegmentsToChunkJobs } from "./audiobookChunk";
 
 export interface AnnotateChapterInput {
   chapterId: string;
@@ -211,6 +214,7 @@ export class AudiobookAnnotationService {
 
     const deliveryStyleMode = resolveDeliveryStyleMode(input.deliveryStyleMode ?? null);
     const requestDelivery = deliveryStyleMode !== "off";
+    const contentTruncated = content.length > 28_000;
 
     const roster = input.characterVoices.map(buildCharacterRosterLine).join("\n");
 
@@ -240,6 +244,7 @@ export class AudiobookAnnotationService {
       const index = buildCharacterIndex(input.characterVoices);
       const segments: AudiobookDialogueSegment[] = [];
       let segIndex = 0;
+      let peeledCount = 0;
 
       for (const raw of result.output.segments) {
         const text = raw.text.replace(/\r\n/g, "\n").trim();
@@ -249,6 +254,7 @@ export class AudiobookAnnotationService {
 
         // delivery 单独 normalize；坏表演只剥 delivery，绝不整章旁白
         const rawDelivery = (raw as { delivery?: unknown }).delivery;
+        const hadRawDelivery = Boolean(rawDelivery && typeof rawDelivery === "object");
 
         if (raw.speakerKind === "character") {
           const matched = resolveCharacter(raw.speakerName, index);
@@ -280,6 +286,13 @@ export class AudiobookAnnotationService {
                   baseStyle,
                   baseDesignPrompt,
                 });
+            if (
+              hadRawDelivery
+              && shouldApplyDelivery(deliveryStyleMode, "character")
+              && !withDelivery.delivery
+            ) {
+              peeledCount += 1;
+            }
             segments.push(withDelivery);
             continue;
           }
@@ -308,6 +321,13 @@ export class AudiobookAnnotationService {
               baseStyle: input.narrator.style,
               baseDesignPrompt: null,
             });
+        if (
+          hadRawDelivery
+          && shouldApplyDelivery(deliveryStyleMode, "narrator")
+          && !narratorSeg.delivery
+        ) {
+          peeledCount += 1;
+        }
         segments.push(narratorSeg);
       }
 
@@ -322,13 +342,22 @@ export class AudiobookAnnotationService {
         });
       }
 
+      const withContinuity = fillContinuityFrom(segments, { deliveryStyleMode });
+      const chunkJobCount = expandSegmentsToChunkJobs(withContinuity).length;
+      const deliveryStats = computeDeliveryChapterStats(withContinuity, {
+        peeledCount,
+        chunkJobCount,
+      });
+
       return {
         chapterId: input.chapterId,
         chapterOrder: input.chapterOrder,
         chapterTitle: input.chapterTitle,
-        segments,
+        segments: withContinuity,
         annotatedAt: new Date().toISOString(),
         error: null,
+        contentTruncated: contentTruncated || undefined,
+        deliveryStats,
       };
     } catch (error) {
       if (input.signal?.aborted) {

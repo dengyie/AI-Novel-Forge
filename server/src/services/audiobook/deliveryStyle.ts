@@ -558,9 +558,26 @@ export function fingerprintStyleParts(segment: {
 }
 
 /**
- * 在已有 segment 上写入 delivery 相关字段（纯函数，返回新对象）。
- * delivery 坏/不适用 → 静态 base，mergeKey=none。
+ * 旁白 mode=all 轻量叙述句（§7.3）；不抢角色、不演戏。
  */
+export function compileNarratorDeliveryLine(d: AudiobookSegmentDelivery): string {
+  const rateWord = RATE_WORDS[d.rate] || "中等";
+  const tone = d.surfaceTone || "平稳";
+  const emotion = d.primaryEmotion || "克制";
+  const intensity = d.intensity || "mid";
+  const line = `${tone}，${emotion}（${intensity}），语速${rateWord}；像有声书旁白，不抢角色，不演戏。`;
+  return clip(stripEmptyPhrases(stripOveract(line, intensity)), DELIVERY_LINE_MAX);
+}
+
+function buildNarratorUser(baseStyle: string | null, line: string): string {
+  const base = clip(baseStyle || "", BASE_STYLE_PREFER_MAX);
+  const performance = clip(`本句叙述：${line}`, DELIVERY_LINE_MAX + 6);
+  let out = [base, performance].filter(Boolean).join("\n");
+  if (out.length <= MIMO_USER_MAX) return out;
+  const budget = Math.max(24, MIMO_USER_MAX - base.length - 4);
+  return [base, clip(performance, budget)].filter(Boolean).join("\n");
+}
+
 export function applyDeliveryToSegment(
   segment: AudiobookDialogueSegment,
   rawDelivery: unknown,
@@ -577,6 +594,22 @@ export function applyDeliveryToSegment(
   const apply = shouldApplyDelivery(options.deliveryStyleMode, segment.speakerKind);
   const delivery = apply ? normalizeDelivery(rawDelivery) : null;
   const mergeKey = deliveryMergeKey(delivery);
+
+  // 旁白 all：轻量「本句叙述」通道，不用角色「本句表演」模板
+  if (delivery && segment.speakerKind === "narrator") {
+    const line = delivery.deliveryLine && validateDeliveryLine(delivery, segment.text)
+      ? stripOveract(stripEmptyPhrases(clip(delivery.deliveryLine, DELIVERY_LINE_MAX)), delivery.intensity)
+      : compileNarratorDeliveryLine(delivery);
+    return {
+      ...segment,
+      baseStyle,
+      baseDesignPrompt,
+      delivery,
+      deliveryMergeKey: mergeKey,
+      style: buildNarratorUser(baseStyle, line),
+      designPrompt: baseDesignPrompt,
+    };
+  }
 
   const resolved = resolveSynthesizeInput(
     {
@@ -599,5 +632,102 @@ export function applyDeliveryToSegment(
     deliveryMergeKey: mergeKey,
     style: resolved.style ?? baseStyle,
     designPrompt: resolved.designPrompt ?? baseDesignPrompt,
+  };
+}
+
+/**
+ * D8：按 characterId 顺序，空 continuityFrom 时补「承接上句（{emotion}）」。
+ * 补全后重新 resolve style/design，使注入句含承接。旁白跳过。
+ */
+export function fillContinuityFrom(
+  segments: AudiobookDialogueSegment[],
+  options?: { deliveryStyleMode?: DeliveryStyleMode | null },
+): AudiobookDialogueSegment[] {
+  const lastEmotionByCharacter = new Map<string, string>();
+  const mode = options?.deliveryStyleMode ?? null;
+  return segments.map((seg) => {
+    if (seg.speakerKind !== "character" || !seg.characterId || !seg.delivery) {
+      return seg;
+    }
+    const prevEmotion = lastEmotionByCharacter.get(seg.characterId);
+    lastEmotionByCharacter.set(seg.characterId, seg.delivery.primaryEmotion);
+    if (seg.delivery.continuityFrom?.trim() || !prevEmotion) {
+      return seg;
+    }
+    const continuityFrom = clip(`承接上句（${prevEmotion}）`, 40);
+    const delivery = { ...seg.delivery, continuityFrom };
+    const resolved = resolveSynthesizeInput(
+      {
+        ttsMode: seg.ttsMode,
+        baseStyle: seg.baseStyle ?? seg.style,
+        baseDesignPrompt: seg.baseDesignPrompt ?? seg.designPrompt,
+        style: seg.baseStyle ?? seg.style,
+        designPrompt: seg.baseDesignPrompt ?? seg.designPrompt,
+        delivery,
+        text: seg.text,
+      },
+      mode != null ? { deliveryStyleMode: mode } : undefined,
+    );
+    return {
+      ...seg,
+      delivery,
+      style: resolved.style ?? seg.style,
+      designPrompt: resolved.designPrompt ?? seg.designPrompt,
+    };
+  });
+}
+
+export interface DeliveryChapterStatsInput {
+  segments: AudiobookDialogueSegment[];
+  /** 模型 raw delivery 是否曾尝试（按段 index 对齐可选；无则仅统计最终 delivery） */
+  peeledCount?: number;
+  chunkJobCount?: number;
+}
+
+/**
+ * 章级 delivery 指标。
+ */
+export function computeDeliveryChapterStats(
+  segments: AudiobookDialogueSegment[],
+  options?: { peeledCount?: number; chunkJobCount?: number },
+): {
+  segmentCount: number;
+  characterSegmentCount: number;
+  deliveryApplied: number;
+  deliveryPeeled: number;
+  deliveryApplyRate: number;
+  avgResolvedUserLen: number;
+  mergeChunkMultiplier: number | null;
+} {
+  const segmentCount = segments.length;
+  let characterSegmentCount = 0;
+  let deliveryApplied = 0;
+  let userLenSum = 0;
+  for (const seg of segments) {
+    if (seg.speakerKind === "character") characterSegmentCount += 1;
+    if (seg.delivery) deliveryApplied += 1;
+    const user =
+      (seg.ttsMode === "design" ? seg.designPrompt : seg.style) || "";
+    userLenSum += user.length;
+  }
+  const deliveryPeeled = Math.max(0, options?.peeledCount ?? 0);
+  const deliveryApplyRate =
+    characterSegmentCount > 0
+      ? deliveryApplied / Math.max(characterSegmentCount, 1)
+      : deliveryApplied / Math.max(segmentCount, 1);
+  const avgResolvedUserLen = segmentCount > 0 ? userLenSum / segmentCount : 0;
+  const mergeChunkMultiplier =
+    typeof options?.chunkJobCount === "number" && segmentCount > 0
+      ? options.chunkJobCount / segmentCount
+      : null;
+  return {
+    segmentCount,
+    characterSegmentCount,
+    deliveryApplied,
+    deliveryPeeled,
+    deliveryApplyRate: Number(deliveryApplyRate.toFixed(4)),
+    avgResolvedUserLen: Number(avgResolvedUserLen.toFixed(1)),
+    mergeChunkMultiplier:
+      mergeChunkMultiplier == null ? null : Number(mergeChunkMultiplier.toFixed(3)),
   };
 }

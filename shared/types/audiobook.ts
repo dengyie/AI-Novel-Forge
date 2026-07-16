@@ -173,6 +173,22 @@ export interface AudiobookDialogueSegment {
   deliveryMergeKey?: string | null;
 }
 
+/** 章级表演质量指标（annotate 后写入，供 UI / 听测门禁） */
+export interface AudiobookDeliveryChapterStats {
+  segmentCount: number;
+  characterSegmentCount: number;
+  /** 最终保留 delivery 的段数 */
+  deliveryApplied: number;
+  /** 模型给了 delivery 但 normalize/适用失败被剥掉的段数 */
+  deliveryPeeled: number;
+  /** 角色段中最终有 delivery 的占比 0–1 */
+  deliveryApplyRate: number;
+  /** resolve 后 style/designPrompt 平均长度 */
+  avgResolvedUserLen: number;
+  /** expand 后 chunk 数 / 段数；>1 表示被切碎 */
+  mergeChunkMultiplier?: number | null;
+}
+
 export interface AudiobookChapterAnnotation {
   chapterId: string;
   chapterOrder: number;
@@ -180,6 +196,10 @@ export interface AudiobookChapterAnnotation {
   segments: AudiobookDialogueSegment[];
   annotatedAt?: string | null;
   error?: string | null;
+  /** 正文超过 annotate 截断阈值（28k）时 true */
+  contentTruncated?: boolean;
+  /** 段级表演统计；mode=off 时也可有零值 */
+  deliveryStats?: AudiobookDeliveryChapterStats | null;
 }
 
 export interface CreateAudiobookTaskInput {
