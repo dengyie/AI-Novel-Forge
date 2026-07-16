@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ChevronDown } from "lucide-react";
 import {
   DEFAULT_AUDIOBOOK_NARRATOR_STYLE,
   DEFAULT_AUDIOBOOK_NARRATOR_VOICE,
@@ -90,6 +91,21 @@ function statusVariant(status: AudiobookTaskSummary["status"]): "default" | "sec
   if (status === "failed") return "destructive";
   if (status === "queued") return "secondary";
   return "outline";
+}
+
+function isActiveAudiobookTask(status: AudiobookTaskSummary["status"]): boolean {
+  return status === "queued" || status === "running";
+}
+
+function taskSummaryMeta(task: AudiobookTaskSummary): string {
+  const parts = [`${task.progress}%`];
+  if (task.currentItemLabel) {
+    parts.push(task.currentItemLabel);
+  }
+  if ((task.readyChapterIds?.length ?? 0) > 0) {
+    parts.push(`已可播 ${task.readyChapterIds!.length}/${task.chapterCount} 章`);
+  }
+  return parts.join(" · ");
 }
 
 /** 与小说 export 一致：blob 触发本地下载，不走远程拷贝旁路。 */
@@ -549,6 +565,98 @@ function TaskAudioControls(props: {
         <p className="text-xs text-muted-foreground">中间 chunk 已清理，章 WAV / 全书文件仍可在线听与下载。</p>
       ) : null}
     </div>
+  );
+}
+
+function RecentAudiobookTaskCard(props: {
+  novelId: string;
+  task: AudiobookTaskSummary;
+  chapters: ChapterOption[];
+  defaultOpen: boolean;
+  cancelPending: boolean;
+  onCancel: (taskId: string) => void;
+  onMessage: (text: string) => void;
+  onReprocessed: () => void;
+}) {
+  const {
+    novelId,
+    task,
+    chapters,
+    defaultOpen,
+    cancelPending,
+    onCancel,
+    onMessage,
+    onReprocessed,
+  } = props;
+  const [open, setOpen] = useState(defaultOpen);
+  const active = isActiveAudiobookTask(task.status);
+
+  useEffect(() => {
+    if (defaultOpen) {
+      setOpen(true);
+    }
+  }, [defaultOpen, task.id]);
+
+  return (
+    <details
+      className="group rounded-xl border border-border/70 bg-background p-4"
+      open={open}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
+      <summary className="cursor-pointer list-none">
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div className="min-w-0 flex-1 space-y-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="text-sm font-medium text-foreground">{task.title}</div>
+              <Badge variant={statusVariant(task.status)}>{statusLabel(task.status)}</Badge>
+              {active ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7"
+                  disabled={cancelPending}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    onCancel(task.id);
+                  }}
+                >
+                  取消
+                </Button>
+              ) : null}
+            </div>
+            <div className="text-xs leading-5 text-muted-foreground">
+              {taskSummaryMeta(task)}
+            </div>
+            {task.lastError ? (
+              <div className="text-sm text-destructive">{task.lastError}</div>
+            ) : null}
+            {task.status === "succeeded" && task.currentItemLabel?.includes("旁白回退") ? (
+              <div className="text-xs leading-5 text-amber-800">
+                {task.currentItemLabel}
+              </div>
+            ) : null}
+          </div>
+          <div className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
+            <span className="group-open:hidden">展开交付/标注</span>
+            <span className="hidden group-open:inline">收起详情</span>
+            <ChevronDown className="h-4 w-4 transition-transform duration-200 group-open:rotate-180" />
+          </div>
+        </div>
+      </summary>
+
+      {open ? (
+        <>
+          <TaskAudioControls novelId={novelId} task={task} chapters={chapters} />
+          <TaskAnnotationsPanel
+            novelId={novelId}
+            task={task}
+            onMessage={onMessage}
+            onReprocessed={onReprocessed}
+          />
+        </>
+      ) : null}
+    </details>
   );
 }
 
@@ -1118,7 +1226,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
   }
 
   return (
-    <section className="space-y-4 border-t border-border/60 pt-4">
+    <section className="space-y-4 border-t border-border/60 pt-4 pb-[max(1.5rem,env(safe-area-inset-bottom))] md:pb-4">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0 space-y-1">
           <div className="text-sm font-semibold text-foreground">生成有声书</div>
@@ -1408,61 +1516,43 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
         </div>
       ) : null}
 
-      <div className="space-y-3">
-        <div className="text-sm font-medium text-foreground">最近任务</div>
+      <div className="space-y-3 pb-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="text-sm font-medium text-foreground">最近任务</div>
+          {(tasksQuery.data ?? []).length > 0 ? (
+            <div className="text-xs text-muted-foreground">
+              默认折叠详情；运行中任务会自动展开
+            </div>
+          ) : null}
+        </div>
         {(tasksQuery.data ?? []).length === 0 ? (
           <div className="rounded-xl border border-dashed border-border/70 bg-background p-4 text-sm leading-6 text-muted-foreground">
             暂无有声书任务。完成音色配置后，可先预检再生成。
           </div>
         ) : (
-          <div className="space-y-3">
-            {(tasksQuery.data ?? []).slice(0, 8).map((task) => (
-              <div
-                key={task.id}
-                className="rounded-xl border border-border/70 bg-background p-4"
-              >
-                <div className="flex flex-wrap items-center gap-2">
-                  <div className="text-sm font-medium text-foreground">{task.title}</div>
-                  <Badge variant={statusVariant(task.status)}>{statusLabel(task.status)}</Badge>
-                  <span className="text-xs text-muted-foreground">
-                    {task.progress}%
-                    {task.currentItemLabel ? ` · ${task.currentItemLabel}` : ""}
-                    {(task.readyChapterIds?.length ?? 0) > 0
-                      ? ` · 已可播 ${task.readyChapterIds!.length}/${task.chapterCount} 章`
-                      : ""}
-                  </span>
-                </div>
-                {task.lastError ? (
-                  <div className="mt-2 text-sm text-destructive">{task.lastError}</div>
-                ) : null}
-                {task.status === "succeeded" && task.currentItemLabel?.includes("旁白回退") ? (
-                  <div className="mt-2 text-xs leading-5 text-amber-800">
-                    {task.currentItemLabel}
-                  </div>
-                ) : null}
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {(task.status === "queued" || task.status === "running") ? (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={cancelMutation.isPending}
-                      onClick={() => cancelMutation.mutate(task.id)}
-                    >
-                      取消
-                    </Button>
-                  ) : null}
-                </div>
-                <TaskAudioControls novelId={novelId} task={task} chapters={sortedChapters} />
-                <TaskAnnotationsPanel
+          <div className="space-y-2">
+            {(tasksQuery.data ?? []).slice(0, 8).map((task, index) => {
+              const active = isActiveAudiobookTask(task.status);
+              // 运行中/排队默认展开；否则仅最新一条默认展开，其余折叠
+              const defaultOpen = active || index === 0;
+              return (
+                <RecentAudiobookTaskCard
+                  key={task.id}
                   novelId={novelId}
                   task={task}
+                  chapters={sortedChapters}
+                  defaultOpen={defaultOpen}
+                  cancelPending={cancelMutation.isPending}
+                  onCancel={(taskId) => cancelMutation.mutate(taskId)}
                   onMessage={setMessage}
                   onReprocessed={() => {
-                    void queryClient.invalidateQueries({ queryKey: ["novel-audiobook-tasks", novelId] });
+                    void queryClient.invalidateQueries({
+                      queryKey: ["novel-audiobook-tasks", novelId],
+                    });
                   }}
                 />
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
