@@ -35,7 +35,7 @@ export default function AudiobookWorkspacePage() {
   const totalPages = novelListQuery.data?.data?.totalPages ?? 1;
 
   return (
-    <div className="mx-auto max-w-4xl space-y-6 px-4 py-6 pb-[max(7rem,calc(5.5rem+env(safe-area-inset-bottom)))] md:pb-10">
+    <div className="mx-auto max-w-4xl space-y-6 px-4 py-6">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <h1 className="flex items-center gap-2 text-2xl font-semibold">

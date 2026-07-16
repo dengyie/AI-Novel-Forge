@@ -102,10 +102,29 @@ function taskSummaryMeta(task: AudiobookTaskSummary): string {
   if (task.currentItemLabel) {
     parts.push(task.currentItemLabel);
   }
-  if ((task.readyChapterIds?.length ?? 0) > 0) {
-    parts.push(`已可播 ${task.readyChapterIds!.length}/${task.chapterCount} 章`);
+  const readyCount = task.readyChapterIds?.length ?? 0;
+  if (readyCount > 0) {
+    parts.push(`已可播 ${readyCount}/${task.chapterCount} 章`);
   }
   return parts.join(" · ");
+}
+
+/**
+ * 默认展开策略（纯函数）：
+ * - 有运行中/排队：只自动展开列表中最新一条 active（slice 顺序假定新→旧）
+ * - 无 active：只展开最新一条（index 0），其余折叠
+ * 多 active 时避免同时挂多张重交付卡。
+ */
+function resolveTaskCardDefaultOpen(
+  tasks: AudiobookTaskSummary[],
+  taskId: string,
+  index: number,
+): boolean {
+  const firstActive = tasks.find((item) => isActiveAudiobookTask(item.status));
+  if (firstActive) {
+    return firstActive.id === taskId;
+  }
+  return index === 0;
 }
 
 /** 与小说 export 一致：blob 触发本地下载，不走远程拷贝旁路。 */
@@ -590,12 +609,25 @@ function RecentAudiobookTaskCard(props: {
   } = props;
   const [open, setOpen] = useState(defaultOpen);
   const active = isActiveAudiobookTask(task.status);
+  /**
+   * 交付控件：展开后本卡片生命周期内保留（折叠用 hidden，不 unmount），
+   * 避免收起/再展开打断 <audio> 与 media 签发缓存。
+   * 未展开过的卡片不预挂载，避免多任务同时签发。
+   */
+  const [deliveryMounted, setDeliveryMounted] = useState(defaultOpen);
 
   useEffect(() => {
     if (defaultOpen) {
       setOpen(true);
+      setDeliveryMounted(true);
     }
   }, [defaultOpen, task.id]);
+
+  useEffect(() => {
+    if (open) {
+      setDeliveryMounted(true);
+    }
+  }, [open]);
 
   return (
     <details
@@ -603,7 +635,7 @@ function RecentAudiobookTaskCard(props: {
       open={open}
       onToggle={(event) => setOpen(event.currentTarget.open)}
     >
-      <summary className="cursor-pointer list-none">
+      <summary className="cursor-pointer list-none [&::-webkit-details-marker]:hidden">
         <div className="flex flex-wrap items-start justify-between gap-2">
           <div className="min-w-0 flex-1 space-y-1">
             <div className="flex flex-wrap items-center gap-2">
@@ -629,7 +661,9 @@ function RecentAudiobookTaskCard(props: {
               {taskSummaryMeta(task)}
             </div>
             {task.lastError ? (
-              <div className="text-sm text-destructive">{task.lastError}</div>
+              <div className="line-clamp-2 text-sm text-destructive" title={task.lastError}>
+                {task.lastError}
+              </div>
             ) : null}
             {task.status === "succeeded" && task.currentItemLabel?.includes("旁白回退") ? (
               <div className="text-xs leading-5 text-amber-800">
@@ -645,16 +679,18 @@ function RecentAudiobookTaskCard(props: {
         </div>
       </summary>
 
-      {open ? (
-        <>
+      {deliveryMounted ? (
+        <div className={open ? undefined : "hidden"} aria-hidden={!open}>
           <TaskAudioControls novelId={novelId} task={task} chapters={chapters} />
-          <TaskAnnotationsPanel
-            novelId={novelId}
-            task={task}
-            onMessage={onMessage}
-            onReprocessed={onReprocessed}
-          />
-        </>
+        </div>
+      ) : null}
+      {open ? (
+        <TaskAnnotationsPanel
+          novelId={novelId}
+          task={task}
+          onMessage={onMessage}
+          onReprocessed={onReprocessed}
+        />
       ) : null}
     </details>
   );
@@ -1226,7 +1262,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
   }
 
   return (
-    <section className="space-y-4 border-t border-border/60 pt-4 pb-[max(1.5rem,env(safe-area-inset-bottom))] md:pb-4">
+    <section className="space-y-4 border-t border-border/60 pt-4">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0 space-y-1">
           <div className="text-sm font-semibold text-foreground">生成有声书</div>
@@ -1516,12 +1552,12 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
         </div>
       ) : null}
 
-      <div className="space-y-3 pb-2">
+      <div className="space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="text-sm font-medium text-foreground">最近任务</div>
           {(tasksQuery.data ?? []).length > 0 ? (
             <div className="text-xs text-muted-foreground">
-              默认折叠详情；运行中任务会自动展开
+              仅最新运行中一条默认展开；无运行中时展开最新一条
             </div>
           ) : null}
         </div>
@@ -1531,28 +1567,23 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
           </div>
         ) : (
           <div className="space-y-2">
-            {(tasksQuery.data ?? []).slice(0, 8).map((task, index) => {
-              const active = isActiveAudiobookTask(task.status);
-              // 运行中/排队默认展开；否则仅最新一条默认展开，其余折叠
-              const defaultOpen = active || index === 0;
-              return (
-                <RecentAudiobookTaskCard
-                  key={task.id}
-                  novelId={novelId}
-                  task={task}
-                  chapters={sortedChapters}
-                  defaultOpen={defaultOpen}
-                  cancelPending={cancelMutation.isPending}
-                  onCancel={(taskId) => cancelMutation.mutate(taskId)}
-                  onMessage={setMessage}
-                  onReprocessed={() => {
-                    void queryClient.invalidateQueries({
-                      queryKey: ["novel-audiobook-tasks", novelId],
-                    });
-                  }}
-                />
-              );
-            })}
+            {(tasksQuery.data ?? []).slice(0, 8).map((task, index, tasks) => (
+              <RecentAudiobookTaskCard
+                key={task.id}
+                novelId={novelId}
+                task={task}
+                chapters={sortedChapters}
+                defaultOpen={resolveTaskCardDefaultOpen(tasks, task.id, index)}
+                cancelPending={cancelMutation.isPending}
+                onCancel={(taskId) => cancelMutation.mutate(taskId)}
+                onMessage={setMessage}
+                onReprocessed={() => {
+                  void queryClient.invalidateQueries({
+                    queryKey: ["novel-audiobook-tasks", novelId],
+                  });
+                }}
+              />
+            ))}
           </div>
         )}
       </div>
