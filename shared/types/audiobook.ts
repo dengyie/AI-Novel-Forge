@@ -53,6 +53,52 @@ export type AudiobookScopeMode = "chapter" | "range" | "full";
 
 export type AudiobookSpeakerKind = "narrator" | "character";
 
+/**
+ * 段级语境表演开关。
+ * - off：完全沿用角色卡静态 style/design（默认）
+ * - characters：仅角色对白注入 delivery
+ * - all：角色 + 旁白轻量 delivery
+ */
+export type DeliveryStyleMode = "off" | "characters" | "all";
+
+export const DELIVERY_STYLE_MODES = ["off", "characters", "all"] as const;
+
+export function isDeliveryStyleMode(value: string): value is DeliveryStyleMode {
+  return (DELIVERY_STYLE_MODES as readonly string[]).includes(value);
+}
+
+export type DeliveryIntensity = "low" | "mid" | "high";
+export type DeliveryVocalEffort = "whisper" | "soft" | "normal" | "raised" | "strained";
+export type DeliveryRate = "slow" | "measured" | "normal" | "fast" | "rushed";
+export type DeliveryPitchMove = "lowered" | "stable" | "lifted" | "cracked";
+
+/**
+ * 段级表演结构化字段（Core 必填倾向 + Extended 可空）。
+ * 不写回 Character；仅存于 annotations 段。
+ */
+export interface AudiobookSegmentDelivery {
+  primaryEmotion: string;
+  intensity: DeliveryIntensity;
+  surfaceTone: string;
+  intent: string;
+  vocalEffort: DeliveryVocalEffort;
+  rate: DeliveryRate;
+  maskOrLeak?: string | null;
+  secondaryTraits?: string[];
+  addresseeRelation?: string | null;
+  subtext?: string | null;
+  sceneSpace?: string | null;
+  scenePressure?: string | null;
+  pitchMove?: DeliveryPitchMove | null;
+  pauseBreath?: string | null;
+  articulation?: string | null;
+  nonverbalCue?: string | null;
+  continuityFrom?: string | null;
+  rawFactors?: string[];
+  /** 模型成稿句；须过 validateDeliveryLine 才采用，否则服务端 compile */
+  deliveryLine?: string | null;
+}
+
 /** 角色 TTS 模态：预置 / 文案设计 / 参考音频克隆。旁白仅 preset。 */
 export type AudiobookTtsMode = "preset" | "design" | "clone";
 
@@ -82,6 +128,10 @@ export interface AudiobookCharacterVoiceConfig {
   ttsRefAudioPath?: string | null;
   /** 说话人别名（称呼/外号），用于标注 speakerName 归一。 */
   speakerAliases?: string[] | null;
+  /** 角色卡声线描述（roster 摘要；不进合成）。 */
+  voiceTexture?: string | null;
+  /** 角色卡性格一句（roster 摘要；不进合成）。 */
+  personality?: string | null;
 }
 
 export interface AudiobookNarratorConfig {
@@ -101,11 +151,26 @@ export interface AudiobookDialogueSegment {
   ttsMode?: AudiobookTtsMode | null;
   /** preset 的预置名；design 可空；clone 不用作预置名。 */
   voice: string;
+  /**
+   * preset/clone：最终注入 MiMo user 的 style；
+   * design：可保留 base 供审计，合成以 designPrompt 为准。
+   */
   style?: string | null;
-  /** design 模式音色描述。 */
+  /** design：最终 user（音色 + 表演）；preset/clone 透传角色卡原值。 */
   designPrompt?: string | null;
   /** clone 模式参考音频路径。 */
   refAudioPath?: string | null;
+  /** 角色卡/旁白基线 style（审计；preset 合成前参与 compile）。 */
+  baseStyle?: string | null;
+  /** design 模式：角色卡原始 design（审计；合成时与表演合并）。 */
+  baseDesignPrompt?: string | null;
+  /** 结构化表演；null = 无表演或已剥除。 */
+  delivery?: AudiobookSegmentDelivery | null;
+  /**
+   * 合并桶：emotion族|intensity|vocalEffort|rate。
+   * canMerge 用此字段（及音色字段），不用全文 style 字符串。
+   */
+  deliveryMergeKey?: string | null;
 }
 
 export interface AudiobookChapterAnnotation {
@@ -137,6 +202,11 @@ export interface CreateAudiobookTaskInput {
    * 默认 false；扫描范围与音色门禁一致（全书角色，不按章节收窄）。
    */
   requireReadyPreview?: boolean;
+  /**
+   * 段级语境表演模式。缺省由服务端解析（代码默认 off，env AUDIOBOOK_DELIVERY_STYLE_MODE 可覆盖）。
+   * 听测前请保持 off，勿污染固定试听/readiness 基线。
+   */
+  deliveryStyleMode?: DeliveryStyleMode;
 }
 
 export interface AudiobookPrecheckMissingVoice {
