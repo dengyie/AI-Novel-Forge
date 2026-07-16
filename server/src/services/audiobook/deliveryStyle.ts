@@ -505,12 +505,25 @@ function buildDesignUser(baseDesign: string | null, line: string): string {
   if (out.length <= MIMO_USER_MAX) {
     return out;
   }
-  // design 也限制 280：优先保 base 前段 + 表演 + guard
+  // design 也限制 280：优先保 identity 句首三元锚点，再表演，再 guard
   const budgetForBase = Math.max(
     40,
     MIMO_USER_MAX - performance.length - guard.length - 8,
   );
-  return [clip(base, budgetForBase), performance, guard].filter(Boolean).join("\n\n");
+  let clippedBase = clip(base, budgetForBase);
+  // 若尾部互斥句被切掉但预算仍够一句短互斥，补回（串戏防护）
+  if (
+    base.includes("避免播音腔")
+    && !clippedBase.includes("避免播音腔")
+    && clippedBase.length + 12 <= budgetForBase
+  ) {
+    const shortMutex = "避免播音腔与串戏。";
+    const room = budgetForBase - shortMutex.length;
+    if (room >= 40) {
+      clippedBase = `${clip(base, room)}${shortMutex}`;
+    }
+  }
+  return [clippedBase, performance, guard].filter(Boolean).join("\n\n");
 }
 
 /**

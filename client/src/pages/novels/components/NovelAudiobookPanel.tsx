@@ -1371,10 +1371,10 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
                     {item.ttsMode === "design" && item.ttsDesignPrompt ? (
                       <>
                         {" · "}
-                        {expandedPlanDesignIds[item.characterId] || item.ttsDesignPrompt.length <= 80
+                        {expandedPlanDesignIds[item.characterId] || item.ttsDesignPrompt.length <= 100
                           ? item.ttsDesignPrompt
-                          : `${item.ttsDesignPrompt.slice(0, 80)}…`}
-                        {item.ttsDesignPrompt.length > 80 ? (
+                          : `${item.ttsDesignPrompt.slice(0, 100)}…`}
+                        {item.ttsDesignPrompt.length > 100 ? (
                           <button
                             type="button"
                             className="ml-1 text-[11px] text-primary underline-offset-2 hover:underline"
@@ -1391,6 +1391,18 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
                       </>
                     ) : null}
                   </div>
+                  {item.ttsMode === "design"
+                    && (item.reason.includes("texture:card-dropped")
+                      || item.reason.includes("texture:card-partial")
+                      || item.reason.includes("slot:override")) ? (
+                    <div className="mt-0.5 text-[11px] leading-4 text-amber-800 dark:text-amber-200">
+                      {item.reason.includes("texture:card-dropped")
+                        ? "卡面声线与分配槽冲突，未能写入 design；试听后可手改角色卡。"
+                        : item.reason.includes("texture:card-partial")
+                          ? "卡面声线仅部分并入 design（已去掉与槽位对立的词）。"
+                          : "槽位已为防撞改写；有卡面声线时会尽量锁定质感维。"}
+                    </div>
+                  ) : null}
                 </div>
                 <Button
                   size="sm"
