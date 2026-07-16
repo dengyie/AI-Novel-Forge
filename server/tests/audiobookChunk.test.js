@@ -582,6 +582,37 @@ test("buildMimoTtsRequestBody clone uses DataURL voice", () => {
   assert.equal(body.audio.voice.endsWith(bare), true);
 });
 
+const { resolveCloneRefMimeSubtype } = require("../dist/services/audiobook/MimoChatAudioTTSProvider.js");
+
+test("resolveCloneRefMimeSubtype prefers magic over extension", () => {
+  assert.equal(resolveCloneRefMimeSubtype({
+    filePath: "/x/ref.mp3",
+    bytes: Buffer.from("RIFF....WAVEfmt "),
+  }), "wav");
+  assert.equal(resolveCloneRefMimeSubtype({
+    filePath: "/x/ref.ogg",
+    bytes: Buffer.from("OggS............"),
+  }), "ogg");
+  assert.equal(resolveCloneRefMimeSubtype({
+    filePath: "/x/ref.mp3",
+    bytes: Buffer.from("ID3............."),
+  }), "mpeg");
+  assert.equal(resolveCloneRefMimeSubtype({ filePath: "/x/ref.mp3" }), "mpeg");
+  assert.equal(resolveCloneRefMimeSubtype({ filePath: "/x/ref.unknown" }), "wav");
+});
+
+test("buildMimoTtsRequestBody clone keeps DataURL mime from payload", () => {
+  const bare = Buffer.from("not-a-real-mp3-but-ok").toString("base64");
+  const body = buildMimoTtsRequestBody({
+    text: "克隆 mp3。",
+    mode: "clone",
+    style: "语速稍慢",
+    refAudioBase64: `data:audio/mpeg;base64,${bare}`,
+  });
+  assert.equal(body.audio.voice.startsWith("data:audio/mpeg;base64,"), true);
+  assert.equal(body.audio.voice.endsWith(bare), true);
+});
+
 test("buildMimoTtsRequestBody rejects design without prompt", () => {
   assert.throws(
     () => buildMimoTtsRequestBody({ text: "x", mode: "design" }),

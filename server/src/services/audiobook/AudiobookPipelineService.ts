@@ -10,7 +10,10 @@ import type {
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
 import { prisma } from "../../db/prisma";
 import { AppError } from "../../middleware/errorHandler";
-import { audiobookAnnotationService } from "./AudiobookAnnotationService";
+import {
+  audiobookAnnotationService,
+  hashAudiobookChapterContent,
+} from "./AudiobookAnnotationService";
 import { expandSegmentsToChunkJobs } from "./audiobookChunk";
 import {
   resolveBetweenChapterGapMs,
@@ -46,6 +49,46 @@ import {
   resolveDeliveryStyleMode,
   resolveSynthesizeInput,
 } from "./deliveryStyle";
+
+/**
+ * resume 是否应丢弃缓存标注并 reannotate。
+ * - mode 戳与任务不一致
+ * - 正文 contentSha1 缺失或与当前章不一致（防改稿后盲用旧音）
+ * - 任务 off 且旧标注无 mode 戳却仍带 delivery（防脏 SoT 透传）
+ */
+export function shouldInvalidateCachedAnnotation(input: {
+  annotation: AudiobookChapterAnnotation | null | undefined;
+  deliveryStyleMode: DeliveryStyleMode;
+  chapterContent: string | null | undefined;
+}): boolean {
+  const annotation = input.annotation;
+  if (!annotation || annotation.segments.length === 0) {
+    return true;
+  }
+
+  const cachedMode = annotation.deliveryStyleMode;
+  if (cachedMode != null && cachedMode !== input.deliveryStyleMode) {
+    return true;
+  }
+
+  // 旧标注无 mode 戳 + 任务 off + 段上仍有 delivery → 强制重标，避免合成透传表演
+  if (
+    cachedMode == null
+    && input.deliveryStyleMode === "off"
+    && annotation.segments.some((seg) => Boolean(seg.delivery))
+  ) {
+    return true;
+  }
+
+  const currentSha = hashAudiobookChapterContent(input.chapterContent);
+  const cachedSha = annotation.contentSha1?.trim() || "";
+  // 缺指纹或与当前正文不一致 → 失效（新写出必带 sha；缺戳旧任务 resume 重标一次）
+  if (!cachedSha || cachedSha !== currentSha) {
+    return true;
+  }
+
+  return false;
+}
 
 export type AudiobookCancelChecker = () => Promise<boolean>;
 
@@ -442,16 +485,14 @@ export class AudiobookPipelineService {
       const chapter = orderedChapters[chapterIndex];
       let annotation = annotationsByChapter.get(chapter.id) ?? readAnnotationFile(taskDir, chapter.id);
 
-      // 无段 / 空段 / 缓存 mode 与任务不一致 → 重标（防运维改 progressJson 后盲用旧 delivery）
-      const cachedMode = annotation?.deliveryStyleMode;
-      const modeMismatch = Boolean(
-        annotation
-        && annotation.segments.length > 0
-        && cachedMode != null
-        && cachedMode !== deliveryStyleMode,
-      );
-      if (!annotation || annotation.segments.length === 0 || modeMismatch) {
-        if (modeMismatch && annotation) {
+      // 无段 / 空段 / mode 不一致 / 正文漂移 / 旧脏 delivery → 重标（防 resume 盲用旧音）
+      const shouldReannotate = shouldInvalidateCachedAnnotation({
+        annotation,
+        deliveryStyleMode,
+        chapterContent: chapter.content ?? "",
+      });
+      if (shouldReannotate) {
+        if (annotation && annotation.segments.length > 0) {
           wipeChapterAudioArtifacts(taskDir, chapter.id);
         }
         await input.onProgress({
@@ -463,8 +504,8 @@ export class AudiobookPipelineService {
           completedChapters: chapterIndex,
           completedChunks,
           totalChunksEstimate,
-          message: modeMismatch
-            ? `表演模式变更，重标第 ${chapter.order} 章：${chapter.title}`
+          message: annotation && annotation.segments.length > 0
+            ? `标注缓存失效，重标第 ${chapter.order} 章：${chapter.title}`
             : `标注第 ${chapter.order} 章：${chapter.title}`,
           chapterAudioPaths: chapterAudioPaths.map((item) => ({ chapterId: item.chapterId, path: item.path })),
         });
@@ -483,6 +524,10 @@ export class AudiobookPipelineService {
           deliveryStyleMode,
         });
         writeAnnotationFileSafe(taskDir, annotation);
+      }
+
+      if (!annotation || annotation.segments.length === 0) {
+        throw new AppError(`章节标注失败：${chapter.id}`, 500);
       }
 
       annotations.push(annotation);

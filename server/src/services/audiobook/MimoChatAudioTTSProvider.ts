@@ -26,7 +26,7 @@ export interface MimoTtsSynthesizeInput {
    * 合成模态。缺省 preset。
    * - preset: audio.voice = 预置名
    * - design: user = designPrompt，禁止 audio.voice
-   * - clone: audio.voice = data:audio/wav;base64,...
+   * - clone: audio.voice = data:audio/<mime>;base64,...（mime 随参考文件）
    */
   mode?: AudiobookTtsMode | null;
   /** preset 预置 voice id；design/clone 可空 */
@@ -154,9 +154,57 @@ function stripDataUrlPrefix(value: string): string {
   return match ? match[1].replace(/\s+/g, "") : trimmed.replace(/\s+/g, "");
 }
 
-function loadRefAudioBase64(input: MimoTtsSynthesizeInput): string {
+export type CloneRefAudioPayload = {
+  base64: string;
+  /** DataURL 内 audio/* 子类型，如 wav / mpeg / ogg */
+  mimeSubtype: string;
+};
+
+/**
+ * 根据路径扩展名与文件魔数推断 clone 参考音频 mime 子类型。
+ * 优先魔数（RIFF/ID3/OggS），扩展名兜底；未知则 wav。
+ */
+export function resolveCloneRefMimeSubtype(input: {
+  filePath?: string | null;
+  bytes?: Buffer | null;
+}): string {
+  const bytes = input.bytes;
+  if (bytes && bytes.length >= 12) {
+    const head4 = bytes.subarray(0, 4).toString("ascii");
+    if (head4 === "RIFF") {
+      return "wav";
+    }
+    if (head4 === "OggS") {
+      return "ogg";
+    }
+    if (head4 === "fLaC") {
+      return "flac";
+    }
+    // ID3 标签或 MPEG frame sync
+    if (
+      head4.startsWith("ID3")
+      || (bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0)
+    ) {
+      return "mpeg";
+    }
+  }
+
+  const ext = (input.filePath ?? "").split(".").pop()?.toLowerCase() ?? "";
+  if (ext === "wav" || ext === "wave") return "wav";
+  if (ext === "mp3" || ext === "mpeg") return "mpeg";
+  if (ext === "ogg" || ext === "oga") return "ogg";
+  if (ext === "flac") return "flac";
+  if (ext === "m4a" || ext === "mp4") return "mp4";
+  return "wav";
+}
+
+function loadRefAudioPayload(input: MimoTtsSynthesizeInput): CloneRefAudioPayload {
   if (input.refAudioBase64?.trim()) {
-    const bare = stripDataUrlPrefix(input.refAudioBase64);
+    const raw = input.refAudioBase64.trim();
+    const dataUrlMatch = /^data:audio\/([a-z0-9.+-]+);base64,(.+)$/i.exec(raw);
+    const bare = dataUrlMatch
+      ? dataUrlMatch[2].replace(/\s+/g, "")
+      : stripDataUrlPrefix(raw);
     if (!bare) {
       throw new AppError("clone 参考音频 base64 为空。", 400);
     }
@@ -164,7 +212,9 @@ function loadRefAudioBase64(input: MimoTtsSynthesizeInput): string {
     if (approxBytes > MAX_REF_AUDIO_BYTES) {
       throw new AppError(`clone 参考音频过大（>${MAX_REF_AUDIO_BYTES} bytes）。`, 400);
     }
-    return bare;
+    const mimeSubtype = dataUrlMatch?.[1]?.toLowerCase()
+      || resolveCloneRefMimeSubtype({ bytes: Buffer.from(bare, "base64") });
+    return { base64: bare, mimeSubtype };
   }
 
   const refPath = input.refAudioPath?.trim();
@@ -180,7 +230,12 @@ function loadRefAudioBase64(input: MimoTtsSynthesizeInput): string {
   if (stat.size > MAX_REF_AUDIO_BYTES) {
     throw new AppError(`clone 参考音频过大（>${MAX_REF_AUDIO_BYTES} bytes）。`, 400);
   }
-  return fs.readFileSync(absoluteRef).toString("base64");
+  const bytes = fs.readFileSync(absoluteRef);
+  const mimeSubtype = resolveCloneRefMimeSubtype({ filePath: absoluteRef, bytes });
+  return {
+    base64: bytes.toString("base64"),
+    mimeSubtype,
+  };
 }
 
 /**
@@ -239,8 +294,8 @@ export function buildMimoTtsRequestBody(input: MimoTtsSynthesizeInput): MimoTtsR
     };
   }
 
-  // clone
-  const refBare = loadRefAudioBase64(input);
+  // clone：DataURL mime 与参考文件一致（mp3/ogg 不得写死 audio/wav）
+  const ref = loadRefAudioPayload(input);
   const style = input.style?.trim() || DEFAULT_AUDIOBOOK_NARRATOR_STYLE;
   return {
     model,
@@ -250,7 +305,7 @@ export function buildMimoTtsRequestBody(input: MimoTtsSynthesizeInput): MimoTtsR
     ],
     audio: {
       format,
-      voice: `data:audio/wav;base64,${refBare}`,
+      voice: `data:audio/${ref.mimeSubtype};base64,${ref.base64}`,
     },
     stream: false,
   };

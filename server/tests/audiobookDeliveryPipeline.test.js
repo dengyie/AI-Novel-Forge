@@ -443,3 +443,136 @@ test("asymmetric mergeKey falls back to style equality (no false merge)", () => 
   const coalesced = coalesceSegmentsBySpeaker([a, b]);
   assert.equal(coalesced.length, 2);
 });
+
+const {
+  shouldInvalidateCachedAnnotation,
+} = require("../dist/services/audiobook/AudiobookPipelineService.js");
+const {
+  hashAudiobookChapterContent,
+} = require("../dist/services/audiobook/AudiobookAnnotationService.js");
+
+test("hashAudiobookChapterContent normalizes CRLF and is stable", () => {
+  const a = hashAudiobookChapterContent("甲\r\n乙\n");
+  const b = hashAudiobookChapterContent("甲\n乙");
+  assert.equal(a, b);
+  assert.equal(a.length, 16);
+  assert.notEqual(hashAudiobookChapterContent("甲\n乙"), hashAudiobookChapterContent("甲\n丙"));
+});
+
+test("buildNarratorOnlyAnnotation stamps contentSha1", () => {
+  const body = "甲说：「走。」";
+  const ann = buildNarratorOnlyAnnotation({
+    chapterId: "ch1",
+    chapterOrder: 1,
+    chapterTitle: "夜",
+    chapterContent: body,
+    narrator: { voice: "茉莉", style: "旁白" },
+  });
+  assert.equal(ann.contentSha1, hashAudiobookChapterContent(body));
+  assert.equal(ann.deliveryStyleMode, "off");
+});
+
+test("shouldInvalidateCachedAnnotation on content drift", () => {
+  const body = "原文第一版。";
+  const sha = hashAudiobookChapterContent(body);
+  const ann = {
+    chapterId: "ch1",
+    chapterOrder: 1,
+    chapterTitle: "夜",
+    deliveryStyleMode: "off",
+    contentSha1: sha,
+    segments: [{
+      index: 0,
+      speakerKind: "narrator",
+      speakerLabel: "旁白",
+      text: body,
+      voice: "茉莉",
+    }],
+  };
+  assert.equal(shouldInvalidateCachedAnnotation({
+    annotation: ann,
+    deliveryStyleMode: "off",
+    chapterContent: body,
+  }), false);
+  assert.equal(shouldInvalidateCachedAnnotation({
+    annotation: ann,
+    deliveryStyleMode: "off",
+    chapterContent: "改稿后第二版。",
+  }), true);
+});
+
+test("shouldInvalidateCachedAnnotation when contentSha1 missing", () => {
+  const ann = {
+    chapterId: "ch1",
+    chapterOrder: 1,
+    chapterTitle: "夜",
+    deliveryStyleMode: "off",
+    segments: [{
+      index: 0,
+      speakerKind: "narrator",
+      speakerLabel: "旁白",
+      text: "旧缓存无 hash。",
+      voice: "茉莉",
+    }],
+  };
+  assert.equal(shouldInvalidateCachedAnnotation({
+    annotation: ann,
+    deliveryStyleMode: "off",
+    chapterContent: "旧缓存无 hash。",
+  }), true);
+});
+
+test("shouldInvalidateCachedAnnotation on mode mismatch", () => {
+  const body = "对白。";
+  const ann = {
+    chapterId: "ch1",
+    chapterOrder: 1,
+    chapterTitle: "夜",
+    deliveryStyleMode: "characters",
+    contentSha1: hashAudiobookChapterContent(body),
+    segments: [{
+      index: 0,
+      speakerKind: "character",
+      characterId: "c1",
+      speakerLabel: "何屿",
+      text: body,
+      voice: "白桦",
+    }],
+  };
+  assert.equal(shouldInvalidateCachedAnnotation({
+    annotation: ann,
+    deliveryStyleMode: "off",
+    chapterContent: body,
+  }), true);
+});
+
+test("shouldInvalidateCachedAnnotation null mode + off + dirty delivery", () => {
+  const body = "你听我说。";
+  const ann = {
+    chapterId: "ch1",
+    chapterOrder: 1,
+    chapterTitle: "夜",
+    // 无 deliveryStyleMode 戳
+    contentSha1: hashAudiobookChapterContent(body),
+    segments: [{
+      index: 0,
+      speakerKind: "character",
+      characterId: "c1",
+      speakerLabel: "何屿",
+      text: body,
+      voice: "白桦",
+      delivery: normalizeDelivery(GOOD),
+    }],
+  };
+  assert.equal(shouldInvalidateCachedAnnotation({
+    annotation: ann,
+    deliveryStyleMode: "off",
+    chapterContent: body,
+  }), true);
+  // characters 模式允许保留 delivery（仅 mode 戳缺失不单独失效，只要 sha 对）
+  assert.equal(shouldInvalidateCachedAnnotation({
+    annotation: ann,
+    deliveryStyleMode: "characters",
+    chapterContent: body,
+  }), false);
+});
