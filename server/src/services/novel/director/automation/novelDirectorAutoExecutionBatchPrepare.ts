@@ -10,6 +10,7 @@
  */
 import type { VolumePlanDocument } from "@ai-novel/shared/types/novel";
 import { isFullBookAutopilotRunMode } from "@ai-novel/shared/types/novelDirector";
+import { assessChapterExecutionContractShape } from "@ai-novel/shared/types/chapterTaskSheetQuality";
 import type { NovelVolumeService } from "../../volume/NovelVolumeService";
 import {
   hasDirectorSyncedChapterExecutionContext,
@@ -148,7 +149,7 @@ export async function prepareNextAutoExecutionBatch(
   deps: PrepareNextAutoExecutionBatchDeps,
   input: PrepareNextAutoExecutionBatchInput,
 ): Promise<PrepareNextAutoExecutionBatchResult> {
-  const { novelId, taskId, decision, previousState, request } = input;
+  const { novelId, taskId, decision, previousState, previousRange, request } = input;
 
   if (decision.kind !== "reenter_structured_outline") {
     throw new Error(
@@ -161,6 +162,16 @@ export async function prepareNextAutoExecutionBatch(
   }
   if (!request) {
     throw new Error("prepareNextAutoExecutionBatch 缺少 request（provider/model/runMode 不可达）。");
+  }
+  // previousRange is required by the type for debt/window continuity; refuse rewind.
+  if (
+    previousRange
+    && Number.isFinite(previousRange.endOrder)
+    && nextRange.startOrder <= previousRange.endOrder
+  ) {
+    throw new Error(
+      `批续窗 prepare 拒绝回卷：nextRange ${nextRange.startOrder}-${nextRange.endOrder} 未严格位于 previousRange 末尾 ${previousRange.endOrder} 之后。`,
+    );
   }
 
   const baseWorkspace = await deps.volumeService.getVolumes(novelId);
@@ -417,6 +428,7 @@ export async function prepareNextAutoExecutionBatch(
   }
 
   const chapterByOrder = new Map(chapters.map((chapter) => [chapter.order, chapter] as const));
+  // Soft row/sync presence: execution-table must have rows with at least synced fields.
   const missingExecutionContextOrders = selectedChapterOrders.filter((order) => {
     const chapter = chapterByOrder.get(order);
     return !chapter || !hasDirectorSyncedChapterExecutionContext(chapter);
@@ -427,19 +439,54 @@ export async function prepareNextAutoExecutionBatch(
     );
   }
 
-  // Hard gate: still unprepared after detail+sync → fail loud (never fake expand).
-  const stillUnready = selectedChapterOrders.filter((order) => {
-    const chapter = chapterByOrder.get(order);
-    if (!chapter) {
+  // P2-2 hard gate: real assess canEnterExecution. Prisma Chapter rows lack purpose /
+  // exclusiveEvent / endingState / nextChapterEntryState — enrich from workspace
+  // VolumeChapterPlan (same pattern as Service resolveBatchRoll readiness).
+  const workspaceChapterByOrder = new Map(
+    (persistedOutlineWorkspace.volumes ?? []).flatMap((volume) =>
+      (volume.chapters ?? []).map((chapter) => [chapter.chapterOrder, chapter] as const),
+    ),
+  );
+  const assessQualityMode = isFullBookAutopilotRunMode(request.runMode)
+    ? "full_book_autopilot" as const
+    : "ai_copilot" as const;
+  const notExecutableOrders = selectedChapterOrders.filter((order) => {
+    const execChapter = chapterByOrder.get(order);
+    const planChapter = workspaceChapterByOrder.get(order);
+    if (!execChapter) {
       return true;
     }
-    // Reuse assess path via hasDirectorSynced — full canEnterExecution is enforced
-    // by readiness on next resolveBatchRoll; here require at least synced contract shape.
-    return !hasDirectorSyncedChapterExecutionContext(chapter);
+    const sceneCards = execChapter.sceneCards
+      ?? (typeof planChapter?.sceneCards === "string"
+        ? planChapter.sceneCards
+        : (planChapter?.sceneCards ? JSON.stringify(planChapter.sceneCards) : null));
+    // DirectorAutoExecutionChapterRef has no title/summary/purpose/boundary —
+    // those live on VolumeChapterPlan; exec row only contributes synced fields.
+    return !assessChapterExecutionContractShape({
+      novelId,
+      volumeId: planChapter?.volumeId,
+      chapterId: execChapter.id,
+      chapterOrder: order,
+      title: planChapter?.title ?? "",
+      summary: planChapter?.summary ?? null,
+      purpose: planChapter?.purpose ?? null,
+      exclusiveEvent: planChapter?.exclusiveEvent ?? null,
+      endingState: planChapter?.endingState ?? null,
+      nextChapterEntryState: planChapter?.nextChapterEntryState ?? null,
+      conflictLevel: execChapter.conflictLevel ?? planChapter?.conflictLevel ?? null,
+      revealLevel: execChapter.revealLevel ?? planChapter?.revealLevel ?? null,
+      targetWordCount: execChapter.targetWordCount ?? planChapter?.targetWordCount ?? null,
+      mustAvoid: execChapter.mustAvoid ?? planChapter?.mustAvoid ?? null,
+      payoffRefs: planChapter?.payoffRefs,
+      taskSheet: execChapter.taskSheet ?? planChapter?.taskSheet ?? null,
+      sceneCards,
+    }, {
+      qualityMode: assessQualityMode,
+    }).canEnterExecution;
   });
-  if (stillUnready.length > 0) {
+  if (notExecutableOrders.length > 0) {
     throw new Error(
-      `批续窗 prepare 后第 ${stillUnready.slice(0, 5).join("、")} 章仍不可执行。`,
+      `批续窗 prepare 后第 ${notExecutableOrders.slice(0, 5).join("、")} 章 canEnterExecution=false（合同边界/任务单/场景卡未齐），不能进入章节执行。`,
     );
   }
 

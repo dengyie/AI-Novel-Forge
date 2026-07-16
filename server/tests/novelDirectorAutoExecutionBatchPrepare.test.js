@@ -546,3 +546,138 @@ test("prepareNextAutoExecutionBatch autopilot throws when titles missing", async
     /懒规划模式仍缺/,
   );
 });
+
+test("prepareNextAutoExecutionBatch rejects nextRange that rewinds into previousRange", async () => {
+  await assert.rejects(
+    () => prepareNextAutoExecutionBatch({
+      volumeService: { getVolumes: async () => ({ volumes: [] }) },
+      novelContextService: { listChapters: async () => [] },
+    }, {
+      novelId: "novel-demo",
+      taskId: "task-rewind",
+      decision: {
+        kind: "reenter_structured_outline",
+        reason: "bad window",
+        nextRange: { startOrder: 5, endOrder: 10 },
+      },
+      previousState: buildPreviousState(1, 10),
+      previousRange: {
+        startOrder: 1,
+        endOrder: 10,
+        totalChapterCount: 10,
+        firstChapterId: "chapter-1",
+      },
+      request: buildRequest(),
+    }),
+    /拒绝回卷/,
+  );
+});
+
+test("prepareNextAutoExecutionBatch hard-fails when soft context exists but canEnterExecution is false", async () => {
+  const restorePrisma = installPrismaResetMocks();
+  // Start fully detailed so recovery cursor advances past chapter_detail_bundle
+  // (same assess as hasPreparedOutlineChapterExecutionDetail). Then strip
+  // purpose/boundary on the exit update so soft listChapters still passes
+  // while exit hard gate assess canEnterExecution fails.
+  let workspace = buildVolumeWorkspaceDocument({
+    novelId: "novel-demo",
+    volumes: [
+      createVolume(
+        "volume-1",
+        1,
+        "第一卷",
+        [51, 52].map((order) => createDetailedChapter(`chapter-${order}`, order)),
+      ),
+    ],
+    beatSheets: [
+      {
+        volumeId: "volume-1",
+        volumeSortOrder: 1,
+        status: "generated",
+        beats: [{
+          key: "volume-1-beat",
+          label: "卷一起势",
+          summary: "卷一起势摘要",
+          chapterSpanHint: "51-52章",
+          mustDeliver: ["卷一起势"],
+        }],
+      },
+    ],
+  });
+  const generateCalls = [];
+
+  try {
+    await assert.rejects(
+      () => prepareNextAutoExecutionBatch({
+        volumeService: {
+          async getVolumes() {
+            return clone(workspace);
+          },
+          async generateVolumes(_novelId, options) {
+            generateCalls.push(options.scope);
+            return clone(options.draftWorkspace ?? workspace);
+          },
+          async updateVolumesWithOptions(_novelId, document) {
+            const next = clone(document);
+            for (const volume of next.volumes ?? []) {
+              for (const chapter of volume.chapters ?? []) {
+                chapter.purpose = null;
+                chapter.exclusiveEvent = null;
+                chapter.endingState = null;
+                chapter.nextChapterEntryState = null;
+              }
+            }
+            workspace = next;
+            return clone(workspace);
+          },
+          async syncVolumeChaptersWithOptions() {
+            return { synced: true };
+          },
+        },
+        novelContextService: {
+          async listChapters() {
+            // Soft-synced execution rows (no purpose/boundary fields on ref).
+            return [51, 52].map((order) => ({
+              id: `chapter-${order}`,
+              order,
+              conflictLevel: 3,
+              revealLevel: 2,
+              targetWordCount: 2500,
+              mustAvoid: "avoid",
+              taskSheet: "独占事件 在场人物 人物选择 现场压力 功能兑付 禁止事项",
+              sceneCards: createSceneCards(order),
+              generationState: "planned",
+              chapterStatus: "unplanned",
+              content: "",
+            }));
+          },
+        },
+        characterDynamicsService: {
+          async rebuildDynamics() {
+            return { ok: true };
+          },
+        },
+      }, {
+        novelId: "novel-demo",
+        taskId: "task-hard-gate",
+        decision: {
+          kind: "reenter_structured_outline",
+          reason: "need prepare",
+          nextRange: { startOrder: 51, endOrder: 52 },
+        },
+        previousState: buildPreviousState(41, 50),
+        previousRange: {
+          startOrder: 41,
+          endOrder: 50,
+          totalChapterCount: 10,
+          firstChapterId: "chapter-41",
+        },
+        request: buildRequest(),
+      }),
+      /canEnterExecution=false/,
+    );
+    assert.deepEqual(generateCalls, [], "must not re-enter chapter_detail when plan already detailed");
+  } finally {
+    restorePrisma();
+  }
+});
