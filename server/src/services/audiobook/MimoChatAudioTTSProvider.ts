@@ -129,6 +129,19 @@ export function isRetryableMimoTtsStatus(statusCode: number): boolean {
   return false;
 }
 
+/** 失败日志用：不带密钥，仅 endpoint id + 状态/短消息。 */
+export function summarizeMimoTtsEndpointFailure(input: {
+  endpointId: string;
+  error: unknown;
+}): string {
+  const { endpointId, error } = input;
+  if (error instanceof AppError) {
+    return `[mimo-tts] endpoint ${endpointId} failed status=${error.statusCode}: ${error.message.slice(0, 180)}`;
+  }
+  const msg = error instanceof Error ? error.message : String(error);
+  return `[mimo-tts] endpoint ${endpointId} failed: ${msg.slice(0, 180)}`;
+}
+
 export function resolveMimoTtsEndpointChain(input: {
   primaryBaseURL: string;
   primaryApiKey: string;
@@ -478,6 +491,10 @@ export class MimoChatAudioTTSProvider {
         }
         // 还有下一端点则换后端；否则抛最后错误
         if (index < endpoints.length - 1) {
+          const next = endpoints[index + 1];
+          console.warn(
+            `${summarizeMimoTtsEndpointFailure({ endpointId: endpoint.id, error })}; trying ${next.id}`,
+          );
           continue;
         }
         throw error;
