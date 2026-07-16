@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   DEFAULT_AUDIOBOOK_NARRATOR_STYLE,
@@ -9,6 +9,7 @@ import {
   type AudiobookTaskAnnotationsView,
   type AudiobookTaskSummary,
   type AudiobookVoicePlanItem,
+  type AudiobookVoiceReadinessSummary,
   type CharacterVoicePreviewStatus,
 } from "@ai-novel/shared/types/audiobook";
 import { Button } from "@/components/ui/button";
@@ -71,6 +72,8 @@ interface NovelAudiobookPanelProps {
   onNarratorChange?: (patch: { audiobookNarratorVoice?: string; audiobookNarratorStyle?: string }) => void;
   onSaveNarrator?: () => void;
   isSavingNarrator?: boolean;
+  /** workspace bootstrap 的 active readiness job，传给就绪看板 seed */
+  bootstrapActiveJobId?: string | null;
 }
 
 function statusLabel(status: AudiobookTaskSummary["status"]): string {
@@ -688,6 +691,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
     onNarratorChange,
     onSaveNarrator,
     isSavingNarrator,
+    bootstrapActiveJobId,
   } = props;
 
   const queryClient = useQueryClient();
@@ -701,11 +705,16 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
   const [voicePlanOverwrite, setVoicePlanOverwrite] = useState(false);
   /** D8：可选全量试听硬门禁（默认关，仅 voice 硬拦） */
   const [requireReadyPreview, setRequireReadyPreview] = useState(false);
+  /** D18 SoT：就绪看板回传；create 门禁 / 缺音色 banner 优先用它 */
+  const [readinessSummary, setReadinessSummary] = useState<AudiobookVoiceReadinessSummary | null>(null);
   const [previewAudioUrl, setPreviewAudioUrl] = useState<string | null>(null);
   const [previewLabel, setPreviewLabel] = useState("");
   const [previewDurationSec, setPreviewDurationSec] = useState<number | null>(null);
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
   const previewUrlSlotRef = useRef(createObjectUrlSlot());
+  const handleReadinessChange = useCallback((summary: AudiobookVoiceReadinessSummary | null) => {
+    setReadinessSummary(summary);
+  }, []);
 
   useEffect(() => {
     const slot = previewUrlSlotRef.current;
@@ -752,10 +761,30 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
     [characters],
   );
 
-  const missingVoiceCharacters = useMemo(
-    () => characterVoiceRows.filter((row) => !row.binding.ready).map((row) => row.character),
-    [characterVoiceRows],
-  );
+  /**
+   * D18 SoT：create 门禁 / 缺音色 banner 优先 readiness.items（含 invalid/clone 文件缺失），
+   * readiness 未返回前回退本地 binding.ready。
+   */
+  const missingVoiceCharacters = useMemo(() => {
+    if (readinessSummary?.items?.length) {
+      return readinessSummary.items
+        .filter((item) => item.voiceBindingStatus !== "configured")
+        .map((item) => {
+          const character = characters.find((row) => row.id === item.characterId);
+          return {
+            id: item.characterId,
+            name: character?.name ?? item.characterName,
+          };
+        });
+    }
+    return characterVoiceRows
+      .filter((row) => !row.binding.ready)
+      .map((row) => ({ id: row.character.id, name: row.character.name }));
+  }, [readinessSummary, characters, characterVoiceRows]);
+
+  const voiceGateBlocked = readinessSummary
+    ? !readinessSummary.voiceOk
+    : missingVoiceCharacters.length > 0;
 
   const tasksQuery = useQuery({
     queryKey: ["novel-audiobook-tasks", novelId],
@@ -1016,10 +1045,10 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
         </div>
         <Badge
           className="shrink-0"
-          variant={missingVoiceCharacters.length > 0 ? "destructive" : "outline"}
+          variant={voiceGateBlocked ? "destructive" : "outline"}
         >
-          {missingVoiceCharacters.length > 0
-            ? `${missingVoiceCharacters.length} 个角色缺音色`
+          {voiceGateBlocked
+            ? `${missingVoiceCharacters.length || readinessSummary?.voiceMissing || "?"} 个角色缺/无效音色`
             : "角色音色齐全"}
         </Badge>
       </div>
@@ -1027,8 +1056,10 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
       {/* D18 SoT：就绪看板；一键就绪/单角色生成/播放 */}
       <AudiobookVoiceReadinessSection
         novelId={novelId}
+        bootstrapActiveJobId={bootstrapActiveJobId}
         playPending={previewVoiceMutation.isPending}
         onMessage={setMessage}
+        onReadinessChange={handleReadinessChange}
         onPlayCharacter={({ characterId, characterName, previewStatus }) => {
           const character = characters.find((item) => item.id === characterId);
           if (!character) {
@@ -1226,9 +1257,9 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
         </div>
       </div>
 
-      {missingVoiceCharacters.length > 0 ? (
+      {voiceGateBlocked && missingVoiceCharacters.length > 0 ? (
         <div className="rounded-xl border border-amber-200/80 bg-amber-50/70 p-3 text-sm leading-6 text-amber-900">
-          以下角色缺音色，可用上方「一键就绪」或「音色规划」补齐：
+          以下角色缺音色或配置无效，可用上方「一键就绪」或「音色规划」补齐：
           {" "}
           {missingVoiceCharacters.map((character) => character.name).join("、")}
         </div>
@@ -1262,7 +1293,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
           disabled={
             createMutation.isPending
             || sortedChapters.length === 0
-            || missingVoiceCharacters.length > 0
+            || voiceGateBlocked
           }
           onClick={() => createMutation.mutate()}
         >

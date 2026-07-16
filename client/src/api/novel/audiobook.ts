@@ -27,6 +27,9 @@ import type {
 } from "@ai-novel/shared/types/audiobook";
 import { API_AUTH_TOKEN, API_BASE_URL } from "@/lib/constants";
 import { apiClient } from "../client";
+import { parseReadinessJobActiveError } from "./parseReadinessJobActiveError";
+
+export { parseReadinessJobActiveError };
 
 export async function listAudiobookVoices() {
   const { data } = await apiClient.get<ApiResponse<AudiobookVoiceCatalogItem[]>>("/novels/audiobook/voices");
@@ -60,9 +63,11 @@ export async function prepareAudiobookVoiceReadiness(
   novelId: string,
   payload: AudiobookVoiceReadinessPrepareInput = {},
 ) {
+  // 409 READINESS_JOB_ACTIVE 由 parseReadinessJobActiveError 程序化接管，不弹全局 toast
   const { data } = await apiClient.post<ApiResponse<AudiobookVoiceReadinessPrepareResult>>(
     `/novels/${novelId}/audiobook/voice-readiness/prepare`,
     payload,
+    { silentErrorStatuses: [409] },
   );
   return data;
 }
@@ -79,23 +84,6 @@ export async function cancelAudiobookVoiceReadinessJob(novelId: string, jobId: s
     `/novels/${novelId}/audiobook/voice-readiness/jobs/${jobId}/cancel`,
   );
   return data;
-}
-
-/** 解析 prepare 409（READINESS_JOB_ACTIVE） */
-export function parseReadinessJobActiveError(
-  error: unknown,
-): AudiobookVoiceReadinessJobActiveErrorData | null {
-  const response = (error as {
-    response?: { status?: number; data?: ApiResponse<AudiobookVoiceReadinessJobActiveErrorData> };
-  })?.response;
-  if (response?.status !== 409) {
-    return null;
-  }
-  const payload = response.data?.data;
-  if (payload?.code === "READINESS_JOB_ACTIVE" && typeof payload.activeJobId === "string") {
-    return payload;
-  }
-  return null;
 }
 
 export async function suggestAudiobookVoicePlan(

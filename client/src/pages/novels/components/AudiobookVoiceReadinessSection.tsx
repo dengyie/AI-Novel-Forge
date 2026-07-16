@@ -86,6 +86,13 @@ export type AudiobookVoiceReadinessSectionProps = {
   }) => void;
   playPending?: boolean;
   onMessage?: (message: string) => void;
+  /**
+   * workspace bootstrap 注入的 active job（刷新后服务端仍在跑时优先于空 sessionStorage）。
+   * 仅作 seed，不覆盖用户本地已跟踪的 jobId。
+   */
+  bootstrapActiveJobId?: string | null;
+  /** 父面板消费 readiness 的 voice 门禁 / 徽章（D18 SoT） */
+  onReadinessChange?: (summary: AudiobookVoiceReadinessSummary | null) => void;
 };
 
 /**
@@ -93,13 +100,34 @@ export type AudiobookVoiceReadinessSectionProps = {
  * 一键就绪 / job 轮询 / 单角色固化试听；不负责 suggest 规划草稿区。
  */
 export default function AudiobookVoiceReadinessSection(props: AudiobookVoiceReadinessSectionProps) {
-  const { novelId, onPlayCharacter, playPending, onMessage } = props;
+  const {
+    novelId,
+    onPlayCharacter,
+    playPending,
+    onMessage,
+    bootstrapActiveJobId,
+    onReadinessChange,
+  } = props;
   const queryClient = useQueryClient();
-  const [activeJobId, setActiveJobId] = useState<string | null>(() => readStoredJobId(novelId));
+  const [activeJobId, setActiveJobId] = useState<string | null>(() => {
+    const stored = readStoredJobId(novelId);
+    return stored || bootstrapActiveJobId?.trim() || null;
+  });
 
   useEffect(() => {
-    setActiveJobId(readStoredJobId(novelId));
-  }, [novelId]);
+    const stored = readStoredJobId(novelId);
+    if (stored) {
+      setActiveJobId(stored);
+      return;
+    }
+    const boot = bootstrapActiveJobId?.trim() || null;
+    if (boot) {
+      writeStoredJobId(novelId, boot);
+      setActiveJobId(boot);
+      return;
+    }
+    setActiveJobId(null);
+  }, [novelId, bootstrapActiveJobId]);
 
   const readinessQuery = useQuery({
     queryKey: queryKeys.novels.audiobookVoiceReadiness(novelId),
@@ -113,6 +141,10 @@ export default function AudiobookVoiceReadinessSection(props: AudiobookVoiceRead
     enabled: Boolean(novelId),
     staleTime: 15_000,
   });
+
+  useEffect(() => {
+    onReadinessChange?.(readinessQuery.data ?? null);
+  }, [readinessQuery.data, onReadinessChange]);
 
   const jobQuery = useQuery({
     queryKey: queryKeys.novels.audiobookVoiceReadinessJob(novelId, activeJobId ?? ""),
