@@ -99,7 +99,8 @@ export class NovelDirectorAutoExecutionRuntime {
         input.taskId,
         decision.reason,
         {
-          stage: "quality_repair",
+          // Batch-roll halt is execution/supervisor scope, not quality_repair ticket.
+          stage: "chapter_execution",
           itemKey: "batch_roll",
           itemLabel: "批续窗暂停",
           checkpointType: "chapter_batch_ready",
@@ -131,9 +132,58 @@ export class NovelDirectorAutoExecutionRuntime {
     }
     if (decision.kind === "expand_range" && decision.nextRange) {
       const chapters = await this.deps.novelContextService.listChapters(input.novelId);
+      const nextRange = decision.nextRange;
+      const persistedInWindow = chapters.filter((chapter) => (
+        chapter.order >= nextRange.startOrder && chapter.order <= nextRange.endOrder
+      ));
+      // P2-1: workspace readiness can mark a window prepared while execution-table
+      // rows still lag. Expanding into an empty persisted window would thrash the
+      // loop (remaining stays 0 / missing-order errors) instead of surfacing halt.
+      if (persistedInWindow.length === 0) {
+        const emptyReason = (
+          `下一可执行窗第 ${nextRange.startOrder}-${nextRange.endOrder} 章合同在大纲区已就绪，`
+          + "但执行表尚无对应章节行，禁止空窗 expand。请先 sync 执行合同或走 reenter 细化。"
+        );
+        await this.deps.workflowService.markTaskFailed(
+          input.taskId,
+          emptyReason,
+          {
+            stage: "chapter_execution",
+            itemKey: "batch_roll_empty_expand",
+            itemLabel: "批续窗空窗拦截",
+            checkpointType: "chapter_batch_ready",
+            checkpointSummary: emptyReason,
+            chapterId: input.autoExecution.nextChapterId ?? input.range.firstChapterId,
+            progress: 0.97,
+          },
+        );
+        await syncAutoExecutionTaskState(this.deps, {
+          taskId: input.taskId,
+          novelId: input.novelId,
+          request: input.request,
+          range: input.range,
+          autoExecution: {
+            ...input.autoExecution,
+            pipelineJobId: null,
+            pipelineStatus: null,
+          },
+          isBackgroundRunning: false,
+          resumeStage: "pipeline",
+        });
+        return {
+          range: input.range,
+          autoExecution: input.autoExecution,
+          consecutiveBatchRolls: input.consecutiveBatchRolls + 1,
+          decision: {
+            kind: "halt_for_review",
+            reason: emptyReason,
+            nextRange,
+          },
+        };
+      }
       const expanded = applyExpandRangeBatchRoll({
         previousState: input.autoExecution,
-        nextRange: decision.nextRange,
+        nextRange,
         chapters,
       });
       await syncAutoExecutionTaskState(this.deps, {
@@ -158,7 +208,7 @@ export class NovelDirectorAutoExecutionRuntime {
           input.taskId,
           `批续窗需要细化第 ${decision.nextRange.startOrder}-${decision.nextRange.endOrder} 章，但未配置 prepareNextAutoExecutionBatch。`,
           {
-            stage: "quality_repair",
+            stage: "structured_outline",
             itemKey: "batch_roll_outline",
             itemLabel: "批续窗待细化",
             checkpointType: "chapter_batch_ready",
@@ -344,8 +394,8 @@ export class NovelDirectorAutoExecutionRuntime {
           input.taskId,
           `自动执行循环已超过 ${MAX_RUN_FROM_READY_ITERATIONS} 次迭代上限，已停止以防止死循环。`,
           {
-            stage: "quality_repair",
-            itemKey: "batch_roll",
+            stage: "chapter_execution",
+            itemKey: "batch_roll_iteration_cap",
             itemLabel: "自动执行循环超限",
             checkpointType: "chapter_batch_ready",
             checkpointSummary: `连续迭代超过 ${MAX_RUN_FROM_READY_ITERATIONS} 次仍未推进，可能存在 readiness 与实际章节数据不一致或决策函数未执行 cap。`,

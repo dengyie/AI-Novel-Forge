@@ -163,6 +163,7 @@ export class NovelDirectorService {
         qualityMode: isFullBookAutopilotRunMode(request?.runMode) ? "full_book_autopilot" as const : undefined,
       };
       const chapters = await this.novelContextService.listChapters(novelId);
+      const chapterByOrder = new Map(chapters.map((row) => [row.order, row] as const));
       let readiness = buildBatchRollReadinessFromChapters(
         chapters as Parameters<typeof buildBatchRollReadinessFromChapters>[0],
         readinessOptions,
@@ -173,27 +174,30 @@ export class NovelDirectorService {
       try {
         const workspace = await this.volumeService.getVolumes(novelId);
         const workspaceChapters = (workspace.volumes ?? []).flatMap((volume) =>
-          (volume.chapters ?? []).map((chapter) => ({
-            id: chapter.chapterId ?? chapter.id,
-            order: chapter.chapterOrder,
-            title: chapter.title,
-            content: null,
-            purpose: chapter.purpose,
-            exclusiveEvent: chapter.exclusiveEvent,
-            endingState: chapter.endingState,
-            nextChapterEntryState: chapter.nextChapterEntryState,
-            conflictLevel: chapter.conflictLevel,
-            revealLevel: chapter.revealLevel,
-            targetWordCount: chapter.targetWordCount,
-            mustAvoid: chapter.mustAvoid,
-            taskSheet: chapter.taskSheet,
-            sceneCards: typeof chapter.sceneCards === "string"
-              ? chapter.sceneCards
-              : (chapter.sceneCards ? JSON.stringify(chapter.sceneCards) : null),
-            generationState: chapters.find((row) => row.order === chapter.chapterOrder)?.generationState ?? null,
-            chapterStatus: chapters.find((row) => row.order === chapter.chapterOrder)?.chapterStatus ?? null,
-            riskFlags: chapters.find((row) => row.order === chapter.chapterOrder)?.riskFlags ?? null,
-          })),
+          (volume.chapters ?? []).map((chapter) => {
+            const execRow = chapterByOrder.get(chapter.chapterOrder);
+            return {
+              id: chapter.chapterId ?? chapter.id,
+              order: chapter.chapterOrder,
+              title: chapter.title,
+              content: null,
+              purpose: chapter.purpose,
+              exclusiveEvent: chapter.exclusiveEvent,
+              endingState: chapter.endingState,
+              nextChapterEntryState: chapter.nextChapterEntryState,
+              conflictLevel: chapter.conflictLevel,
+              revealLevel: chapter.revealLevel,
+              targetWordCount: chapter.targetWordCount,
+              mustAvoid: chapter.mustAvoid,
+              taskSheet: chapter.taskSheet,
+              sceneCards: typeof chapter.sceneCards === "string"
+                ? chapter.sceneCards
+                : (chapter.sceneCards ? JSON.stringify(chapter.sceneCards) : null),
+              generationState: execRow?.generationState ?? null,
+              chapterStatus: execRow?.chapterStatus ?? null,
+              riskFlags: execRow?.riskFlags ?? null,
+            };
+          }),
         );
         if (workspaceChapters.length > 0) {
           readiness = buildBatchRollReadinessFromChapters(

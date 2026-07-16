@@ -469,8 +469,8 @@ test("runFromReady reenter without prepare port fails and does not expand", asyn
       async recordCheckpoint(_id, input) {
         calls.push(["recordCheckpoint", input.checkpointType]);
       },
-      async markTaskFailed(_taskId, message) {
-        calls.push(["markTaskFailed", String(message)]);
+      async markTaskFailed(_taskId, message, patch) {
+        calls.push(["markTaskFailed", String(message), patch ?? null]);
       },
     },
     buildDirectorSeedPayload(_r, _n, extra) { return extra ?? {}; },
@@ -501,6 +501,79 @@ test("runFromReady reenter without prepare port fails and does not expand", asyn
   });
 
   assert.equal(calls.some((c) => c[0] === "startPipelineJob"), false);
-  assert.ok(calls.some((c) => c[0] === "markTaskFailed" && /prepareNextAutoExecutionBatch/.test(c[1])));
+  const failed = calls.find((c) => c[0] === "markTaskFailed");
+  assert.ok(failed && /prepareNextAutoExecutionBatch/.test(String(failed[1])));
+  assert.equal(failed[2]?.stage, "structured_outline");
+  assert.equal(failed[2]?.itemKey, "batch_roll_outline");
+  assert.equal(calls.some((c) => c[0] === "recordCheckpoint" && c[1] === "workflow_completed"), false);
+});
+
+test("runFromReady expand into empty persisted window halts without thrashing", async () => {
+  const calls = [];
+  const runtime = new NovelDirectorAutoExecutionRuntime({
+    novelContextService: {
+      async listChapters() {
+        // Window 1 exists; window 2 is "prepared" only in decision, not in execution table.
+        return [withExecutionDetail({
+          id: "chapter-1",
+          order: 1,
+          generationState: "approved",
+          chapterStatus: "completed",
+          content: "done",
+        })];
+      },
+    },
+    novelService: {
+      async startPipelineJob() {
+        calls.push(["startPipelineJob"]);
+        return { id: "job", status: "queued" };
+      },
+      async findActivePipelineJobForRange() { return null; },
+      async getPipelineJobById() { return null; },
+      async cancelPipelineJob() {},
+      async resumePipelineJob() {},
+    },
+    workflowService: {
+      async bootstrapTask() {},
+      async getTaskById() { return { status: "running" }; },
+      async markTaskRunning() {},
+      async recordCheckpoint(_id, input) {
+        calls.push(["recordCheckpoint", input.checkpointType]);
+      },
+      async markTaskFailed(_taskId, message, patch) {
+        calls.push(["markTaskFailed", String(message), patch ?? null]);
+      },
+    },
+    buildDirectorSeedPayload(_r, _n, extra) { return extra ?? {}; },
+    enableBatchRoll: true,
+    resolveBatchRoll: async () => ({
+      kind: "expand_range",
+      reason: "workspace says next ready",
+      nextRange: { startOrder: 2, endOrder: 2 },
+    }),
+  });
+
+  await runtime.runFromReady({
+    taskId: "task-empty-expand",
+    novelId: "novel-1",
+    request: buildMinimalRequest(),
+    existingState: {
+      enabled: true,
+      mode: "chapter_range",
+      startOrder: 1,
+      endOrder: 1,
+      totalChapterCount: 1,
+      firstChapterId: "chapter-1",
+      autoReview: true,
+      autoRepair: true,
+    },
+  });
+
+  assert.equal(calls.some((c) => c[0] === "startPipelineJob"), false);
+  const failed = calls.find((c) => c[0] === "markTaskFailed");
+  assert.ok(failed, "must halt on empty expand");
+  assert.match(String(failed[1]), /空窗|执行表|禁止空窗/);
+  assert.equal(failed[2]?.stage, "chapter_execution");
+  assert.equal(failed[2]?.itemKey, "batch_roll_empty_expand");
   assert.equal(calls.some((c) => c[0] === "recordCheckpoint" && c[1] === "workflow_completed"), false);
 });
