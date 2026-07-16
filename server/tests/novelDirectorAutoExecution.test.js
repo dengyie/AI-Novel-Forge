@@ -2,11 +2,14 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
+  buildDirectorAutoExecutionDeferredQualityState,
   buildDirectorAutoExecutionState,
   buildDirectorAutoExecutionScopeLabel,
   buildDirectorAutoExecutionPipelineOptions,
+  canPreserveDirectorAutoExecutionSkippedChapter,
   hasBlockingQualityLoopDebtForAutoExecution,
   isDirectorAutoExecutionChapterProcessed,
+  isDirectorAutoExecutionPipelineSkipEligibleChapter,
   normalizeDirectorAutoExecutionPlan,
   resolveDirectorAutoExecutionRange,
   resolveDirectorAutoExecutionRepairMode,
@@ -376,4 +379,145 @@ test("resolveDirectorAutoExecutionWorkflowState maps review and repair into qual
   assert.equal(draftingState.stage, "chapter_execution");
   assert.equal(draftingState.itemKey, "chapter_execution");
   assert.match(draftingState.itemLabel, /自动执行第 1-10 章/);
+});
+
+test("contentful defer_and_continue is pipeline-skip-eligible and preservable even when AE blocking", () => {
+  const deferBlockingFlags = JSON.stringify({
+    qualityLoop: {
+      overallStatus: "invalid",
+      recommendedAction: "patch_repair",
+      rootCauseCode: "draft_obligation_unmet",
+      terminalAction: "defer_and_continue",
+      signals: [{
+        artifactType: "prose_quality",
+        status: "invalid",
+        issueCodes: ["sot_banned_term"],
+      }],
+    },
+  });
+  const chapter = {
+    id: "chapter-57",
+    order: 57,
+    content: "有正文但有 L0 债",
+    generationState: "reviewed",
+    chapterStatus: "pending_review",
+    riskFlags: deferBlockingFlags,
+  };
+  assert.equal(hasBlockingQualityLoopDebtForAutoExecution(chapter), true);
+  assert.equal(isDirectorAutoExecutionChapterProcessed(chapter), false);
+  assert.equal(isDirectorAutoExecutionPipelineSkipEligibleChapter(chapter), true);
+  assert.equal(canPreserveDirectorAutoExecutionSkippedChapter(chapter), true);
+
+  const replanFlags = JSON.stringify({
+    qualityLoop: {
+      overallStatus: "invalid",
+      recommendedAction: "replan",
+      rootCauseCode: "replan_required",
+      terminalAction: "defer_and_continue",
+    },
+  });
+  const replanChapter = {
+    ...chapter,
+    id: "chapter-replan",
+    order: 58,
+    riskFlags: replanFlags,
+  };
+  assert.equal(isDirectorAutoExecutionPipelineSkipEligibleChapter(replanChapter), false);
+  assert.equal(canPreserveDirectorAutoExecutionSkippedChapter(replanChapter), false);
+});
+
+test("buildDirectorAutoExecutionState advances past contentful defer debt when registered as skipped", () => {
+  const deferFlags = JSON.stringify({
+    qualityLoop: {
+      overallStatus: "invalid",
+      recommendedAction: "patch_repair",
+      rootCauseCode: "draft_obligation_unmet",
+      terminalAction: "defer_and_continue",
+      signals: [{
+        artifactType: "prose_quality",
+        status: "invalid",
+        issueCodes: ["prose_system_hud"],
+      }],
+    },
+  });
+  const deferred = buildDirectorAutoExecutionDeferredQualityState({
+    state: {
+      enabled: true,
+      mode: "chapter_range",
+      startOrder: 57,
+      endOrder: 60,
+      totalChapterCount: 4,
+      firstChapterId: "chapter-57",
+      nextChapterId: "chapter-57",
+      nextChapterOrder: 57,
+      remainingChapterCount: 2,
+    },
+    reason: "管线 skipCompleted，登记债务后继续",
+    source: "quality_loop",
+    chapter: {
+      id: "chapter-57",
+      order: 57,
+      content: "正文 57",
+      generationState: "reviewed",
+      chapterStatus: "pending_review",
+      riskFlags: deferFlags,
+    },
+  });
+  assert.deepEqual(deferred.skippedChapterIds, ["chapter-57"]);
+  assert.deepEqual(deferred.skippedChapterOrders, [57]);
+
+  const state = buildDirectorAutoExecutionState({
+    range: {
+      startOrder: 57,
+      endOrder: 60,
+      totalChapterCount: 4,
+      firstChapterId: "chapter-57",
+    },
+    chapters: [
+      {
+        id: "chapter-57",
+        order: 57,
+        content: "正文 57",
+        generationState: "reviewed",
+        chapterStatus: "pending_review",
+        riskFlags: deferFlags,
+      },
+      {
+        id: "chapter-58",
+        order: 58,
+        content: "",
+        generationState: "planned",
+        chapterStatus: "unplanned",
+        riskFlags: null,
+      },
+      {
+        id: "chapter-59",
+        order: 59,
+        content: "",
+        generationState: "planned",
+        chapterStatus: "unplanned",
+        riskFlags: null,
+      },
+      {
+        id: "chapter-60",
+        order: 60,
+        content: "",
+        generationState: "planned",
+        chapterStatus: "unplanned",
+        riskFlags: null,
+      },
+    ],
+    plan: deferred,
+  });
+  assert.equal(state.nextChapterOrder, 58);
+  assert.ok(state.remainingChapterCount >= 1);
+  assert.ok((state.skippedChapterIds ?? []).includes("chapter-57"));
+  assert.equal(isDirectorAutoExecutionChapterProcessed({
+    id: "chapter-57",
+    order: 57,
+    content: "正文 57",
+    generationState: "reviewed",
+    chapterStatus: "pending_review",
+    riskFlags: deferFlags,
+  }), false, "debt chapter stays unprocessed for board visibility");
 });

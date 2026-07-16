@@ -10,6 +10,7 @@ import {
   buildDirectorAutoExecutionScopeLabelFromState,
   buildDirectorAutoExecutionDeferredQualityState,
   buildDirectorAutoExecutionPipelineOptions,
+  isDirectorAutoExecutionPipelineSkipEligibleChapter,
   resolveDirectorAutoExecutionRepairMode,
   resolveDirectorAutoExecutionWorkflowState,
   type DirectorAutoExecutionChapterRef,
@@ -555,6 +556,76 @@ export class NovelDirectorAutoExecutionRuntime {
               pipelineStatus: "succeeded",
             });
             return;
+          }
+          // 管线 skipCompleted 与 AE remaining 口径不一致：next 章有正文且已
+          // terminalAction=defer_and_continue（无 replan）时，startPipeline 会空跑；
+          // 强制登记 skipped 债务后重算 next，推进到下一空章，禁止 rethrow 死锁。
+          const stuckChapter = await this.resolveStuckNoGeneratableChapter(
+            input.novelId,
+            autoExecution,
+          );
+          if (stuckChapter && isDirectorAutoExecutionPipelineSkipEligibleChapter(stuckChapter)) {
+            const previousNextChapterId = autoExecution.nextChapterId ?? null;
+            const previousNextChapterOrder = autoExecution.nextChapterOrder ?? null;
+            const deferredState = buildDirectorAutoExecutionDeferredQualityState({
+              state: autoExecution,
+              reason: [
+                `第${stuckChapter.order}章正文已存在且管线将 skipCompleted（defer_and_continue），`,
+                "导演侧仍有不可自动放行质量债，已登记为暂存债务并继续后续空章。",
+              ].join(""),
+              source: "quality_loop",
+              chapter: stuckChapter,
+            });
+            ({ range, autoExecution } = await resolveAutoExecutionRuntimeRangeAndState(this.deps, {
+              novelId: input.novelId,
+              existingState: deferredState,
+              pipelineJobId: null,
+              pipelineStatus: "queued",
+              allowLazyChapterPlanning,
+            }));
+            const advanced = (
+              autoExecution.nextChapterId !== previousNextChapterId
+              || autoExecution.nextChapterOrder !== previousNextChapterOrder
+              || (autoExecution.remainingChapterCount ?? 0) === 0
+            );
+            if (advanced) {
+              consecutiveDefers += 1;
+              if (consecutiveDefers >= MAX_CONSECUTIVE_DEFERS) {
+                await this.deps.workflowService.markTaskFailed(input.taskId,
+                  `连续 ${MAX_CONSECUTIVE_DEFERS} 章被暂存质量问题且未能收敛，自动执行已停止。`,
+                  {
+                    stage: "quality_repair",
+                    itemKey: "quality_repair",
+                    itemLabel: "质量问题持续累积",
+                    checkpointType: "chapter_batch_ready",
+                    checkpointSummary: `连续 ${MAX_CONSECUTIVE_DEFERS} 章触发了 no-generatable defer，说明可能存在系统性问题需要人工介入。`,
+                    chapterId: autoExecution.nextChapterId ?? range.firstChapterId,
+                    progress: 0.98,
+                  },
+                );
+                await syncAutoExecutionTaskState(this.deps, {
+                  taskId: input.taskId,
+                  novelId: input.novelId,
+                  request: input.request,
+                  range,
+                  autoExecution,
+                  isBackgroundRunning: false,
+                  resumeStage: "pipeline",
+                });
+                return;
+              }
+              pipelineJobId = "";
+              await syncAutoExecutionTaskState(this.deps, {
+                taskId: input.taskId,
+                novelId: input.novelId,
+                request: input.request,
+                range,
+                autoExecution,
+                isBackgroundRunning: true,
+                resumeStage: input.resumeStage,
+              });
+              continue autoExecutionLoop;
+            }
           }
           throw error;
         }
@@ -1103,6 +1174,34 @@ export class NovelDirectorAutoExecutionRuntime {
     }
     const chapters = await this.deps.novelContextService.listChapters(novelId);
     return chapters.find((chapter) => chapter.order === startOrder) ?? null;
+  }
+
+  /**
+   * no-generatable 时定位 AE next 章，用于判断是否可按管线 skipCompleted 口径 defer 跳过。
+   */
+  private async resolveStuckNoGeneratableChapter(
+    novelId: string,
+    autoExecution: DirectorAutoExecutionState,
+  ): Promise<DirectorAutoExecutionChapterRef | null> {
+    const nextOrder = typeof autoExecution.nextChapterOrder === "number"
+      && Number.isFinite(autoExecution.nextChapterOrder)
+      ? autoExecution.nextChapterOrder
+      : null;
+    const nextId = autoExecution.nextChapterId?.trim() || null;
+    if (nextOrder == null && !nextId) {
+      return null;
+    }
+    const chapters = await this.deps.novelContextService.listChapters(novelId);
+    if (nextId) {
+      const byId = chapters.find((chapter) => chapter.id === nextId);
+      if (byId) {
+        return byId;
+      }
+    }
+    if (nextOrder != null) {
+      return chapters.find((chapter) => chapter.order === nextOrder) ?? null;
+    }
+    return null;
   }
 }
 
