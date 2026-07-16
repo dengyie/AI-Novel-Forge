@@ -114,7 +114,7 @@ export default function AudiobookProjectPage() {
   }
 
   return (
-    <div className="mx-auto max-w-4xl space-y-6 px-4 py-6">
+    <div className="mx-auto max-w-4xl space-y-6 px-4 py-6 pb-[max(7rem,calc(5.5rem+env(safe-area-inset-bottom)))] md:pb-10">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="space-y-2">
           <Button asChild size="sm" variant="ghost" className="-ml-2 w-fit">
