@@ -2,6 +2,7 @@ import { serializeCommercialTagsJson } from "@ai-novel/shared/types/novelFraming
 import type { NovelAutoDirectorTaskSummary } from "@ai-novel/shared/types/novel";
 import { sanitizeChapterTaskSheetForPersistence } from "@ai-novel/shared/types/chapterTaskSheetQuality";
 import { projectLiteraryPassFromRiskFlags } from "@ai-novel/shared/types/literaryQualityPass";
+import { projectL0ClearFromRiskFlags } from "@ai-novel/shared/types/chapterQualityLoop";
 import { prisma } from "../../db/prisma";
 import { AppError } from "../../middleware/errorHandler";
 import { mapNovelAutoDirectorTaskSummary } from "../task/novelWorkflowTaskSummary";
@@ -455,6 +456,7 @@ export class NovelCoreCrudService {
    * 返回章节全行（含 riskFlags）。导演 auto-execution 用本接口判定 blocking 债，
    * 禁止改成省略 riskFlags 的 select 投影，否则会静默跳过有债章节。
    * literaryPass：从 qualityLoop.literary_score 投影（≠ qualityScore/overall）。
+   * l0Clear：无 non-deferrable prose/sot/HUD（≠ literaryPass）。
    */
   async listChapters(novelId: string) {
     const chapters = await prisma.chapter.findMany({
@@ -465,6 +467,7 @@ export class NovelCoreCrudService {
     return chapters.map((chapter) => ({
       ...chapter,
       literaryPass: projectLiteraryPassFromRiskFlags(chapter.riskFlags),
+      l0Clear: projectL0ClearFromRiskFlags(chapter.riskFlags),
     }));
   }
 

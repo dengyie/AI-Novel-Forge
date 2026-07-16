@@ -1,7 +1,7 @@
 # 写文质量硬门：开发文档（L0 真拦 · 不可 defer 降级）
 
 > **文档类型**：可执行开发计划（完备设计）  
-> **状态**：**文档完备 · 待审阅冻结开工** · 2026-07-17  
+> **状态**：**实现完成** · 2026-07-17 · 分支 `feat/writing-quality-hardgate` · 阶段 1–3 已交付  
 > **仓库**：`AI-Novel-Writing-Assistant`  
 > **触发证据**：pxed《源世界》卷二自动化抽查（task `cmrnm5kaq0kev0k9ki820qlpr` · chapter_range 52–80）——高分/litPass 与政策硬伤（废弃术语 / 系统 HUD）共存；`defer_and_continue` 将本应 L0 的问题记成 non_blocking 债；短章 litPass 无观测标签  
 > **生产书**（仅作验收夹具与 Manual 词表目标，**不**写死进引擎）：novelId `cmriiu3u300006m9k2jo45w93`  
