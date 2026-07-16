@@ -1,4 +1,3 @@
-import fs from "node:fs";
 import type {
   AudiobookChapterAnnotation,
   AudiobookChapterReprocessMode,
@@ -30,6 +29,7 @@ import {
   wipeChapterAudioArtifacts,
 } from "./audiobookPaths";
 import { resolveDeliveryStyleMode } from "./deliveryStyle";
+import { checkVoiceRefAudioPath } from "./voiceRefPath";
 
 const AUDIOBOOK_HEARTBEAT_INTERVAL_MS = Math.max(
   5_000,
@@ -856,25 +856,10 @@ export class AudiobookTaskService {
             );
             continue;
           }
-          if (refPath.includes("..") || refPath.includes("\0")) {
+          const checked = checkVoiceRefAudioPath(refPath);
+          if (!checked.ok) {
             executeBindingErrors.push(
-              `角色「${character.characterName}」clone 参考音频路径非法。`,
-            );
-            continue;
-          }
-          try {
-            if (!fs.existsSync(refPath) || !fs.statSync(refPath).isFile()) {
-              executeBindingErrors.push(
-                `角色「${character.characterName}」clone 参考音频不存在或不可读。`,
-              );
-            } else if (fs.statSync(refPath).size <= 0) {
-              executeBindingErrors.push(
-                `角色「${character.characterName}」clone 参考音频为空文件。`,
-              );
-            }
-          } catch {
-            executeBindingErrors.push(
-              `角色「${character.characterName}」clone 参考音频无法访问。`,
+              `角色「${character.characterName}」${checked.reason}`,
             );
           }
           continue;

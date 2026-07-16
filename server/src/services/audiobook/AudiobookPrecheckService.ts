@@ -1,4 +1,3 @@
-import fs from "node:fs";
 import {
   DEFAULT_AUDIOBOOK_NARRATOR_STYLE,
   DEFAULT_AUDIOBOOK_NARRATOR_VOICE,
@@ -19,6 +18,7 @@ import {
   DEFAULT_CHARACTER_VOICE_PREVIEW_TEXT,
   resolveCharacterVoicePreviewStatus,
 } from "./characterVoicePreview";
+import { checkVoiceRefAudioPath } from "./voiceRefPath";
 
 function parseScopeMode(value: string | undefined): AudiobookScopeMode {
   if (value === "chapter" || value === "range" || value === "full") {
@@ -160,19 +160,9 @@ export class AudiobookPrecheckService {
       }
 
       if (item.ttsMode === "clone" && item.ttsRefAudioPath) {
-        if (item.ttsRefAudioPath.includes("..") || item.ttsRefAudioPath.includes("\0")) {
-          blockingErrors.push(`角色「${item.characterName}」参考音频路径非法。`);
-        } else if (!fs.existsSync(item.ttsRefAudioPath)) {
-          blockingErrors.push(`角色「${item.characterName}」参考音频文件不存在。`);
-        } else {
-          try {
-            const stat = fs.statSync(item.ttsRefAudioPath);
-            if (!stat.isFile() || stat.size <= 0) {
-              blockingErrors.push(`角色「${item.characterName}」参考音频不可用。`);
-            }
-          } catch {
-            blockingErrors.push(`角色「${item.characterName}」参考音频无法读取。`);
-          }
+        const checked = checkVoiceRefAudioPath(item.ttsRefAudioPath);
+        if (!checked.ok) {
+          blockingErrors.push(`角色「${item.characterName}」${checked.reason}`);
         }
       }
     }

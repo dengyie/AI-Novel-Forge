@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { resolveDataRoot } from "../../runtime/appPaths";
+import { isValidPcmWavFile } from "./audiobookWav";
 
 function assertSafePathSegment(value: string, label: string): string {
   const trimmed = value?.trim();
@@ -217,14 +218,10 @@ export function wipeChapterAnnotationArtifact(taskDir: string, chapterId: string
   safeUnlink(`${ann}.part`);
 }
 
-/** 章音频已落盘（存在且大于最小 WAV 头），用于任务摘要/渐进播放。 */
+/** 章音频已落盘且为合法 PCM WAV，用于任务摘要/渐进播放。 */
 export function isChapterAudioReady(taskDir: string, chapterId: string): boolean {
   try {
-    const filePath = resolveChapterAudioPath(taskDir, chapterId);
-    if (!fs.existsSync(filePath)) {
-      return false;
-    }
-    return fs.statSync(filePath).size > 44;
+    return isValidPcmWavFile(resolveChapterAudioPath(taskDir, chapterId));
   } catch {
     return false;
   }

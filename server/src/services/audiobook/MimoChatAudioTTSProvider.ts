@@ -1,5 +1,4 @@
 import fs from "node:fs";
-import path from "node:path";
 import {
   DEFAULT_AUDIOBOOK_NARRATOR_STYLE,
   MIMO_TTS_MODELS,
@@ -18,7 +17,7 @@ import {
 } from "../../llm/providers";
 import { AppError } from "../../middleware/errorHandler";
 import { isMissingAudiobookTaskTableError } from "./audiobookErrors";
-import { resolveVoiceRefRoot } from "./audiobookPaths";
+import { checkVoiceRefAudioPath } from "./voiceRefPath";
 
 export interface MimoTtsSynthesizeInput {
   /** 旁白/对白正文（assistant 侧） */
@@ -155,13 +154,6 @@ function stripDataUrlPrefix(value: string): string {
   return match ? match[1].replace(/\s+/g, "") : trimmed.replace(/\s+/g, "");
 }
 
-function isPathInside(parent: string, target: string): boolean {
-  const parentResolved = path.resolve(parent);
-  const targetResolved = path.resolve(target);
-  const rel = path.relative(parentResolved, targetResolved);
-  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
-}
-
 function loadRefAudioBase64(input: MimoTtsSynthesizeInput): string {
   if (input.refAudioBase64?.trim()) {
     const bare = stripDataUrlPrefix(input.refAudioBase64);
@@ -179,25 +171,12 @@ function loadRefAudioBase64(input: MimoTtsSynthesizeInput): string {
   if (!refPath) {
     throw new AppError("clone 模式需要 refAudioPath 或 refAudioBase64。", 400);
   }
-  if (refPath.includes("\0") || refPath.includes("..")) {
-    throw new AppError("clone 参考音频路径非法。", 400);
+  const checked = checkVoiceRefAudioPath(refPath);
+  if (!checked.ok) {
+    throw new AppError(checked.reason, 400);
   }
-  // 强制限制在 voice-refs 根目录内，防路径穿越读任意文件
-  const voiceRefRoot = resolveVoiceRefRoot();
-  const absoluteRef = path.resolve(refPath);
-  if (!isPathInside(voiceRefRoot, absoluteRef)) {
-    throw new AppError("clone 参考音频路径越界（必须位于 voice-refs 目录）。", 400);
-  }
-  if (!fs.existsSync(absoluteRef)) {
-    throw new AppError(`clone 参考音频不存在：${refPath}`, 400);
-  }
+  const absoluteRef = checked.absolutePath;
   const stat = fs.statSync(absoluteRef);
-  if (!stat.isFile()) {
-    throw new AppError("clone 参考音频路径不是文件。", 400);
-  }
-  if (stat.size <= 0) {
-    throw new AppError("clone 参考音频为空文件。", 400);
-  }
   if (stat.size > MAX_REF_AUDIO_BYTES) {
     throw new AppError(`clone 参考音频过大（>${MAX_REF_AUDIO_BYTES} bytes）。`, 400);
   }

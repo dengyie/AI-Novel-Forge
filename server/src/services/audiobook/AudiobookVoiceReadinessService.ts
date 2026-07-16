@@ -1,5 +1,4 @@
 import crypto from "node:crypto";
-import fs from "node:fs";
 import {
   type AudiobookVoicePlanApplyItem,
   type AudiobookVoicePlanStrategy,
@@ -30,6 +29,7 @@ import {
   resolveVoiceReadinessPreviewProgress,
   resolveVoiceReadinessProgressWeights,
 } from "./voiceReadinessJobLogic";
+import { probeVoiceRefAudioOk } from "./voiceRefPath";
 
 const JOB_TTL_MS = 60 * 60 * 1000;
 const MAX_JOBS = 200;
@@ -52,22 +52,7 @@ function sliceError(error: unknown, max = 200): string {
 }
 
 function probeRefAudioOk(pathValue?: string | null): boolean | null {
-  const refPath = pathValue?.trim() || "";
-  if (!refPath) {
-    return null;
-  }
-  if (refPath.includes("..") || refPath.includes("\0")) {
-    return false;
-  }
-  try {
-    if (!fs.existsSync(refPath)) {
-      return false;
-    }
-    const stat = fs.statSync(refPath);
-    return stat.isFile() && stat.size > 0;
-  } catch {
-    return false;
-  }
+  return probeVoiceRefAudioOk(pathValue);
 }
 
 function resolvePreviewStatusForRow(character: {
