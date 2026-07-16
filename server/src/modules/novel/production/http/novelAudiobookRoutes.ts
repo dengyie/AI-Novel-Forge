@@ -239,6 +239,8 @@ const createAudiobookTaskSchema = z.object({
   model: z.string().trim().min(1).optional(),
   temperature: z.number().min(0).max(2).optional(),
   requireReadyPreview: z.boolean().optional(),
+  /** 段级语境表演；默认服务端 off（听测前勿开） */
+  deliveryStyleMode: z.enum(["off", "characters", "all"]).optional(),
 }).superRefine((value, ctx) => {
   if (value.scopeMode === "chapter" && !value.chapterId) {
     ctx.addIssue({
