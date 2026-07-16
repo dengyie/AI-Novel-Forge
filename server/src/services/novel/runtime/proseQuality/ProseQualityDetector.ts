@@ -71,13 +71,22 @@ const ENGINEERING_TERM_SOFT_PATTERN = /本章|下一章|读者|伏笔|前文|后
  * 关键词或键值块命中 → prose_system_hud；短专名/别称不拦。
  */
 const FULLWIDTH_BRACKET_PAIR_PATTERN = /【([^【】]{1,120})】/gu;
-/** 系统面板启发式子串（可配置扩展，默认冻结于实现）。 */
-const SYSTEM_HUD_KEYWORD_PATTERN =
-  /系统|状态面板|状态栏|任务面板|任务栏|冷却|等级|面板|技能树|属性点|背包|界面|进度条|当前任务|任务目标|冷却中|剩余时间|血量|蓝量|能量值|经验值|\bHP\b|\bMP\b|\bEXP\b|\bLV\b|\bLv\.?\b/iu;
+/**
+ * 硬 HUD 关键词：单独出现即判系统面板（系统/状态栏/数值缩写等）。
+ * 勿把「等级/冷却/面板」这类可作绰号的软词放这里——见 soft pattern。
+ */
+const SYSTEM_HUD_HARD_KEYWORD_PATTERN =
+  /系统|状态面板|状态栏|任务面板|任务栏|技能树|属性点|进度条|当前任务|任务目标|冷却中|剩余时间|血量|蓝量|能量值|经验值|\bHP\b|\bMP\b|\bEXP\b|\bLV\b|\bLv\.?\b/iu;
+/**
+ * 软 HUD 关键词：短括号内单独出现时放行（【等级】【冷却】绰号）；
+ * 仅当括号内容较长，或同时命中键值/多字段时才判 HUD。
+ */
+const SYSTEM_HUD_SOFT_KEYWORD_PATTERN =
+  /冷却|等级|面板|界面|背包|状态/iu;
 /** 键值块：如「HP：100/100」「等级:12」「冷却中：3秒」 */
 const SYSTEM_HUD_KEY_VALUE_PATTERN =
   /(?:HP|MP|EXP|LV|Lv\.?|等级|冷却|状态|任务|进度|血量|蓝量|经验)[：:\s]*[0-9０-９]+/iu;
-/** 短专名上限（字）：仅关键词/键值不命中时放行。 */
+/** 短专名上限（字）：无硬关键词且无键值时放行。 */
 const SYSTEM_HUD_SHORT_NAME_MAX_CHARS = 8;
 /** ≥ 该数量的 HUD 命中 → severity 抬到 critical。 */
 const SYSTEM_HUD_MULTI_BLOCK_CRITICAL_AT = 3;
@@ -478,23 +487,26 @@ export function looksLikeSystemHudInner(inner: string): boolean {
   if (!text) {
     return false;
   }
-  SYSTEM_HUD_KEYWORD_PATTERN.lastIndex = 0;
+  SYSTEM_HUD_HARD_KEYWORD_PATTERN.lastIndex = 0;
+  SYSTEM_HUD_SOFT_KEYWORD_PATTERN.lastIndex = 0;
   SYSTEM_HUD_KEY_VALUE_PATTERN.lastIndex = 0;
-  const hasKeyword = SYSTEM_HUD_KEYWORD_PATTERN.test(text);
+  const hasHardKeyword = SYSTEM_HUD_HARD_KEYWORD_PATTERN.test(text);
+  const hasSoftKeyword = SYSTEM_HUD_SOFT_KEYWORD_PATTERN.test(text);
   const hasKeyValue = SYSTEM_HUD_KEY_VALUE_PATTERN.test(text);
-  if (hasKeyword || hasKeyValue) {
+  // 硬关键词或键值 → 一律 HUD
+  if (hasHardKeyword || hasKeyValue) {
     return true;
   }
-  // 多字段块：含 ≥2 个中文/英文冒号分隔的伪 UI 行感（如「等级:1 任务:清扫」无关键词时仍可拦）
+  // 多字段块：含 ≥2 个中文/英文冒号分隔的伪 UI 行感
   const fieldLike = (text.match(/[：:]/gu) ?? []).length;
   if (fieldLike >= 2 && visibleLength(text) >= 6) {
     return true;
   }
-  // 短专名/别称：无关键词无键值 → 放行
-  if (visibleLength(text) <= SYSTEM_HUD_SHORT_NAME_MAX_CHARS) {
-    return false;
+  // 软关键词：短括号当绰号放行；超短名上限才当面板特征
+  if (hasSoftKeyword && visibleLength(text) > SYSTEM_HUD_SHORT_NAME_MAX_CHARS) {
+    return true;
   }
-  // 长括号内容但无面板特征：保守放行，避免误杀长引用/旁白标题
+  // 短专名/别称 / 长旁白无面板特征 → 放行
   return false;
 }
 

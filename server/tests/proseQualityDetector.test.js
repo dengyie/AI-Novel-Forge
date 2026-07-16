@@ -200,11 +200,22 @@ test("detectProseQuality ignores harmless fullwidth brackets as short names", ()
     "他自称【裂空】，旁人只当是绰号。",
     "地图上标着【北港】两个字。",
     "她把【旧钥】塞进他掌心，没有多说。",
+    "他外号【等级】，同伴只当玩笑。",
+    "她把那块【冷却】石塞回口袋。",
     "潮声压在城墙外，守夜人握紧刀柄。",
   ].join("\n"));
 
   assert.equal(codes(report).includes("prose_system_hud"), false, `codes=${codes(report).join(",")}`);
   assert.equal(report.hasBlockingFindings, false);
+});
+
+test("detectProseQuality still flags soft keyword + key-value HUD", () => {
+  const report = detectProseQuality([
+    "舱壁亮起一行字。",
+    "【等级:12　冷却:3秒】",
+    "他没再看那行字。",
+  ].join("\n"));
+  assert.ok(codes(report).includes("prose_system_hud"), `codes=${codes(report).join(",")}`);
 });
 
 test("detectProseQuality does not treat narrative without brackets as HUD", () => {

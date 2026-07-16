@@ -624,13 +624,16 @@ export function isProseOrSotIssueCode(code: string | null | undefined): boolean 
 }
 
 /**
- * prose_quality signal：
- * - sot_* / critical prose / prose_system_hud → **invalid**（不可 defer 降级）
- * - 其它 severity≥high → risk
+ * prose_quality signal（channel-1 契约，冻结）：
+ * - **仅** non-deferrable 码（sot_* / critical prose / prose_system_hud）→ **invalid**
+ * - 其它 severity≥high（如 prose_negative_flip、prose_engineering_term_leak high）→ **risk**
  * - medium/low → valid（issueCodes 仍保留可观测）
  *
+ * 禁止用「任意 high severity」抬 invalid：channel-1 的 invalid 是
+ * {@link hasNonDeferrableProseOrSotDebt} 主路径，误抬会把可 defer 的文风债变成硬门。
+ *
  * issueCodes 投影仍截断到 8（签名/展示）；门禁以 status=invalid 与
- * {@link hasNonDeferrableProseOrSotDebt} 全量码集合为准，不依赖截断列表。
+ * channel-2 全量码集合为准，不依赖截断列表。
  */
 function buildProseQualitySignal(input: ChapterQualityLoopAssessmentInput): ChapterQualityLoopSignal {
   const proseIssues = input.runtimePackage?.audit.openIssues.filter((issue) => (
@@ -645,6 +648,7 @@ function buildProseQualitySignal(input: ChapterQualityLoopAssessmentInput): Chap
     };
   }
 
+  // channel-1：invalid 仅来自 non-deferrable 集合 / sot_* 前缀，不看 severity  alone
   const hasNonDeferrable = proseIssues.some((issue) => (
     isNonDeferrableProseOrSotIssueCode(issue.code)
   ));
