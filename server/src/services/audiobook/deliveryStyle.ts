@@ -715,6 +715,8 @@ export function computeDeliveryChapterStats(
   deliveryApplyRate: number;
   avgResolvedUserLen: number;
   mergeChunkMultiplier: number | null;
+  unresolvedSpeakerCount: number;
+  unresolvedSpeakerNames: string[];
 } {
   const segmentCount = segments.length;
   let characterSegmentCount = 0;
@@ -722,6 +724,9 @@ export function computeDeliveryChapterStats(
   let characterDeliveryApplied = 0;
   let narratorDeliveryApplied = 0;
   let userLenSum = 0;
+  let unresolvedSpeakerCount = 0;
+  const unresolvedNameOrder: string[] = [];
+  const unresolvedNameSeen = new Set<string>();
   for (const seg of segments) {
     if (seg.speakerKind === "character") {
       characterSegmentCount += 1;
@@ -729,6 +734,16 @@ export function computeDeliveryChapterStats(
     } else {
       narratorSegmentCount += 1;
       if (seg.delivery) narratorDeliveryApplied += 1;
+    }
+    if (seg.speakerUnresolved) {
+      unresolvedSpeakerCount += 1;
+      const raw = (seg.unresolvedSpeakerName || seg.speakerLabel || "").trim();
+      if (raw && !unresolvedNameSeen.has(raw)) {
+        unresolvedNameSeen.add(raw);
+        if (unresolvedNameOrder.length < 8) {
+          unresolvedNameOrder.push(raw);
+        }
+      }
     }
     const user =
       (seg.ttsMode === "design" ? seg.designPrompt : seg.style) || "";
@@ -759,5 +774,7 @@ export function computeDeliveryChapterStats(
     avgResolvedUserLen: Number(avgResolvedUserLen.toFixed(1)),
     mergeChunkMultiplier:
       mergeChunkMultiplier == null ? null : Number(mergeChunkMultiplier.toFixed(3)),
+    unresolvedSpeakerCount,
+    unresolvedSpeakerNames: unresolvedNameOrder,
   };
 }

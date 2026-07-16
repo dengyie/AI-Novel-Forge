@@ -542,6 +542,16 @@ function collectQualityWarnings(annotations: AudiobookChapterAnnotation[]): stri
         `第 ${annotation.chapterOrder} 章：chunk 倍率 ${stats.mergeChunkMultiplier}（表演分桶偏碎）`,
       );
     }
+    const unresolved = stats?.unresolvedSpeakerCount ?? 0;
+    if (unresolved > 0) {
+      const names = (stats?.unresolvedSpeakerNames ?? []).filter(Boolean);
+      const nameHint = names.length
+        ? `：${names.slice(0, 6).join("、")}${names.length > 6 ? "…" : ""}`
+        : "";
+      warnings.push(
+        `第 ${annotation.chapterOrder} 章：${unresolved} 段角色名未匹配卡表已用旁白音色${nameHint}（请补 speaker 别名后重标）`,
+      );
+    }
   }
   return warnings;
 }
