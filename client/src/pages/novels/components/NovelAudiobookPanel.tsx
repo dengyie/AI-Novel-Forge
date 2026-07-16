@@ -943,9 +943,10 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
     mutationFn: async (mode: "missing" | "rebalance") => {
       const overwriteMode = mode === "rebalance";
       setVoicePlanOverwrite(overwriteMode);
+      // 补齐缺失：auto 保守语义；重新差异化：prefer_design 拉高身份音色区分度
       const response = await suggestAudiobookVoicePlan(novelId, {
         onlyMissing: !overwriteMode,
-        strategy: "auto",
+        strategy: overwriteMode ? "prefer_design" : "auto",
       });
       return { data: response.data, overwriteMode };
     },
@@ -960,8 +961,15 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
         );
         return;
       }
-      setMessage(
+      const obsBits = [
+          data.summary.slotOverrideCount ? `override ${data.summary.slotOverrideCount}` : "",
+          data.summary.softCollisionCount ? `soft ${data.summary.softCollisionCount}` : "",
+          data.summary.seedInferredCount ? `seed推断 ${data.summary.seedInferredCount}` : "",
+        ].filter(Boolean);
+        setMessage(
         `${overwriteMode ? "重新差异化" : "补齐缺失"}规划 ${items.length} 项：preset ${data.summary.presetCount} / design ${data.summary.designCount}${
+          obsBits.length ? `（${obsBits.join(" / ")}）` : ""
+        }${
           overwriteMode ? "（写入时将覆盖已绑定）" : ""
         }。`,
       );
@@ -1157,7 +1165,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
           <div>
             <div className="text-sm font-medium text-foreground">音色规划（可选）</div>
             <div className="text-xs leading-5 text-muted-foreground">
-              一键就绪会自动规划并写入缺失音色。此处保留「重新差异化 / 手动审阅写入」与规划草稿临时试听（不固化角色卡）。
+              一键就绪会按 auto 保守策略补缺失音色。「重新差异化」走 VoiceDesign（prefer_design），特征只读角色卡、不读正文；写入后请一键就绪/生成试听。规划草稿临时试听不固化角色卡。
             </div>
           </div>
           <div className="flex flex-wrap gap-2">
