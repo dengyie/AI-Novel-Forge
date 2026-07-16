@@ -285,6 +285,32 @@ export function classifyChapterQualityLoopRiskFlags(
   return classifyChapterQualityLoopRisk(parseRiskFlagsObject(riskFlags)?.qualityLoop);
 }
 
+/**
+ * L0 清净投影：无 non-deferrable prose/sot/HUD 债务 → true。
+ * **≠ literaryPass**（文学三维）；高分 + HUD/sot 仍可为 l0Clear=false。
+ * 无 qualityLoop / 不可解析 → null（与 literaryPass 列表语义对齐）。
+ */
+export function projectL0ClearFromQualityLoop(qualityLoop: unknown): boolean | null {
+  if (!isRecord(qualityLoop)) {
+    return null;
+  }
+  // 有 qualityLoop 对象即视为已评估过；以 non-deferrable 双通道为准
+  return !hasNonDeferrableProseOrSotDebt(qualityLoop);
+}
+
+/**
+ * 从章行 riskFlags JSON 投影 l0Clear（qualityLoop 内 prose/sot/HUD）。
+ */
+export function projectL0ClearFromRiskFlags(
+  riskFlags: string | null | undefined,
+): boolean | null {
+  const parsed = parseRiskFlagsObject(riskFlags);
+  if (!parsed) {
+    return null;
+  }
+  return projectL0ClearFromQualityLoop(parsed.qualityLoop);
+}
+
 export function hasContinuableChapterQualityLoopRiskFlags(riskFlags: string | null | undefined): boolean {
   const parsed = parseRiskFlagsObject(riskFlags);
   const qualityLoop = parsed?.qualityLoop;

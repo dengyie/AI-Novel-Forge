@@ -230,6 +230,11 @@ export interface Chapter {
    * 列表由 qualityLoop.literary_score 或完整三维分推导；不可用时为 null/undefined。
    */
   literaryPass?: boolean | null;
+  /**
+   * L0 清净投影：无 sot/critical prose/HUD 等不可 defer 债务。
+   * **≠ literaryPass**；列表由 qualityLoop 投影；无 qualityLoop 时为 null。
+   */
+  l0Clear?: boolean | null;
   riskFlags?: string | null;
   hook?: string | null;
   expectation?: string | null;
