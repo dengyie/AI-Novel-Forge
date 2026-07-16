@@ -246,7 +246,7 @@ AudiobookTask 合成（消费卡上 tts*；delivery 只改演法）
 
 | strategy | 行为 |
 |----------|------|
-| `prefer_design` | 除 clone skip 外，**全部**候选 → design + 结构化防撞 prompt |
+| `prefer_design`（**v2 分簇**） | **lead/cast** → design + 结构化防撞 + `minSeparation=2`；**extra/narrator** → 路人/旁白 preset 簇（**不再**全员 design）；clone+ref 仍 skip |
 | `preset_only` | 仅 preset 负载均衡；**不**升 design |
 | `auto`（**保守修订**） | 见下表 |
 
@@ -271,7 +271,20 @@ AudiobookTask 合成（消费卡上 tts*；delivery 只改演法）
 
 - 旧「两男两女分 preset」测：保留在 `preset_only` 或低重要 `auto`。  
 - 旧 auto「至少一 design 或两不同 preset」：改为对 **有 texture 的高重要双男主** 断言 **至少一 design**（修死区后应更稳）。  
-- `prefer_design` 测：全 design + prompt 非空 + 含互斥/结构标记。
+- `prefer_design` 测（**v2**）：lead/cast design + prompt 非空 + 互斥；extra/narrator preset；lead 判定不误伤「主角的父亲」。
+
+### 4.1.1 音色分簇 v2（`feat/audiobook-voice-clusters-v2`）
+
+| 簇 | 判定要点 | prefer_design |
+|----|----------|---------------|
+| lead | `castRole=protagonist` 或 `isLeadRoleText(role)`（禁「主角的父亲」；女主归 cast） | design；默认 energy 忌 even→heavy；prompt 主心骨/忌死气 |
+| cast | CAST_ROLES / importance≥50（显式路人 role 例外） | design；槽距 minSeparation=2 |
+| extra | 其余低戏份 | preset（extra 池） |
+| narrator | cast/role/name 旁白 | preset（narrator 池，与角色 design 隔离） |
+
+- plan item 可选字段 `cluster`（分配维可观测）。  
+- 路人/旁白与主角团的隔离主路径是 **modality（design vs preset）**；preset 名池仍可能与 seed 的重要 preset 撞车，属已知限制。  
+- 听感验收仍 Manual，禁止把 slot 不撞写成听感已分。
 
 ### 4.2 声线槽位（prompt 约束 · 非 ML · 非听感证明）
 

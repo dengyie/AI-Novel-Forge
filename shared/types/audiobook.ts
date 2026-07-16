@@ -380,6 +380,9 @@ export function isMimoTtsPresetVoice(value: string): value is MimoTtsPresetVoice
 /** 人物卡 → 音色资产规划：策略 */
 export type AudiobookVoicePlanStrategy = "auto" | "preset_only" | "prefer_design";
 
+/** 音色分簇（规划分配维，非听感证明）：主角 / 主角团 / 路人 / 旁白 */
+export type AudiobookVoiceCluster = "lead" | "cast" | "extra" | "narrator";
+
 /** 单角色建议（不落库，apply 时写 Character 字段） */
 export interface AudiobookVoicePlanItem {
   characterId: string;
@@ -402,6 +405,8 @@ export interface AudiobookVoicePlanItem {
   ageBucket: "youth" | "adult" | "elder" | "unknown";
   /** 重要性 0–100，越高越优先差异化 */
   importance: number;
+  /** 分簇（prefer_design 用；可选兼容字段） */
+  cluster?: AudiobookVoiceCluster;
   /** 当前已绑定摘要 */
   currentBinding?: {
     ttsMode?: string | null;
