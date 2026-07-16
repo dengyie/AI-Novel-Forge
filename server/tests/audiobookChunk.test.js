@@ -756,3 +756,5 @@ test("encodeFullBookM4b skips when ffmpeg is unavailable", async () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// prefer_design → Mimo design 契约见 tests/mimoChatAudioRequestContract.test.js
