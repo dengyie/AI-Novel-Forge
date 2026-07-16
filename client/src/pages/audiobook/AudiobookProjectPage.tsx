@@ -154,6 +154,7 @@ export default function AudiobookProjectPage() {
             characters={workspace.characters}
             narratorVoice={narratorVoice}
             narratorStyle={narratorStyle}
+            bootstrapActiveJobId={workspace.readiness?.activeReadinessJobId ?? null}
             onNarratorChange={(patch) => {
               saveNarratorMutation.reset();
               if (patch.audiobookNarratorVoice !== undefined) {

@@ -25,9 +25,16 @@ import {
   DEFAULT_CHARACTER_VOICE_PREVIEW_TEXT,
   resolveCharacterVoicePreviewStatus,
 } from "./characterVoicePreview";
+import {
+  resolveVoiceReadinessJobTerminalStatus,
+  resolveVoiceReadinessPreviewProgress,
+  resolveVoiceReadinessProgressWeights,
+} from "./voiceReadinessJobLogic";
 
 const JOB_TTL_MS = 60 * 60 * 1000;
 const MAX_JOBS = 200;
+/** 预订占位前缀：await 期间同步占用 activeByNovel，防止 TOCTOU 双 job */
+const RESERVE_PREFIX = "reserve:";
 
 type InternalJob = AudiobookVoiceReadinessJob & {
   /** 仅进程内 */
@@ -117,6 +124,10 @@ export class AudiobookVoiceReadinessService {
     if (!jobId) {
       return null;
     }
+    // 预订占位：prepare 的 await 窗口内视为已有活跃任务
+    if (jobId.startsWith(RESERVE_PREFIX)) {
+      return jobId.slice(RESERVE_PREFIX.length) || jobId;
+    }
     const job = this.jobs.get(jobId);
     if (!job || (job.status !== "queued" && job.status !== "running")) {
       this.activeByNovel.delete(novelId);
@@ -125,25 +136,110 @@ export class AudiobookVoiceReadinessService {
     return jobId;
   }
 
+  /**
+   * 同步预订 novel 槽位（在任何 await 之前调用）。
+   * 成功返回 reserved jobId；已有活跃任务返回 null。
+   */
+  private tryReserveNovel(novelId: string): string | null {
+    const existing = this.getActiveJobId(novelId);
+    if (existing) {
+      return null;
+    }
+    const id = crypto.randomUUID();
+    this.activeByNovel.set(novelId, `${RESERVE_PREFIX}${id}`);
+    return id;
+  }
+
+  private releaseReservation(novelId: string, reservedId: string): void {
+    const current = this.activeByNovel.get(novelId);
+    if (current === `${RESERVE_PREFIX}${reservedId}`) {
+      this.activeByNovel.delete(novelId);
+    }
+  }
+
   getJob(jobId: string): AudiobookVoiceReadinessJob | null {
     this.gcJobs();
     const job = this.jobs.get(jobId);
-    return job ? this.publicJob(job) : null;
+    if (job) {
+      return this.publicJob(job);
+    }
+    // prepare 预订窗口：job 尚未写入 Map，但 id 已对外（409 activeJobId）；返回合成 queued 避免前端 404 丢跟踪
+    for (const [novelId, active] of this.activeByNovel) {
+      if (active === `${RESERVE_PREFIX}${jobId}`) {
+        const createdAt = nowIso();
+        return {
+          id: jobId,
+          novelId,
+          status: "queued",
+          progress: 0,
+          currentCharacterId: null,
+          currentCharacterName: null,
+          currentLabel: "准备中",
+          createdAt,
+          updatedAt: createdAt,
+          startedAt: null,
+          finishedAt: null,
+          cancelRequested: false,
+          options: {
+            fillMissingVoice: true,
+            generatePreview: true,
+            regenerateStale: true,
+            planStrategy: "auto",
+          },
+          items: [],
+          summary: null,
+          lastError: null,
+        };
+      }
+    }
+    return null;
   }
 
   cancelJob(novelId: string, jobId: string): AudiobookVoiceReadinessJob {
     const job = this.jobs.get(jobId);
-    if (!job || job.novelId !== novelId) {
-      throw new AppError("就绪任务不存在。", 404);
-    }
-    if (job.status === "queued" || job.status === "running") {
-      job.cancelRequested = true;
-      job.updatedAt = nowIso();
-      if (job.status === "queued") {
-        this.finalizeCancelledQueued(job);
+    if (job) {
+      if (job.novelId !== novelId) {
+        throw new AppError("就绪任务不存在。", 404);
       }
+      if (job.status === "queued" || job.status === "running") {
+        job.cancelRequested = true;
+        job.updatedAt = nowIso();
+        if (job.status === "queued") {
+          this.finalizeCancelledQueued(job);
+        }
+      }
+      return this.publicJob(job);
     }
-    return this.publicJob(job);
+    // 预订窗口内取消：释放槽位并返回合成 cancelled
+    const reserved = this.activeByNovel.get(novelId);
+    if (reserved === `${RESERVE_PREFIX}${jobId}`) {
+      this.activeByNovel.delete(novelId);
+      const createdAt = nowIso();
+      return {
+        id: jobId,
+        novelId,
+        status: "cancelled",
+        progress: 100,
+        currentCharacterId: null,
+        currentCharacterName: null,
+        currentLabel: "已取消",
+        createdAt,
+        updatedAt: createdAt,
+        startedAt: null,
+        finishedAt: createdAt,
+        cancelRequested: true,
+        options: {
+          fillMissingVoice: true,
+          generatePreview: true,
+          regenerateStale: true,
+          planStrategy: "auto",
+        },
+        items: [],
+        summary: { appliedVoice: 0, generatedPreview: 0, skipped: 0, failed: 0 },
+        lastError: null,
+      };
+    }
+    throw new AppError("就绪任务不存在。", 404);
   }
 
   async assess(
@@ -273,87 +369,121 @@ export class AudiobookVoiceReadinessService {
   ): Promise<AudiobookVoiceReadinessPrepareResult> {
     this.gcJobs();
 
-    const activeId = this.getActiveJobId(novelId);
-    if (activeId) {
+    // 同步预订：必须在任何 await 之前，关闭 TOCTOU 双 job 窗口
+    const reservedId = this.tryReserveNovel(novelId);
+    if (!reservedId) {
+      const activeId = this.getActiveJobId(novelId);
       throw new AppError(
         "该小说已有进行中的音色就绪任务，请等待或取消后再试。",
         409,
         {
           code: "READINESS_JOB_ACTIVE" as const,
-          activeJobId: activeId,
+          activeJobId: activeId ?? "unknown",
         },
       );
     }
 
-    // 校验小说存在
-    const exists = await prisma.novel.findUnique({
-      where: { id: novelId },
-      select: { id: true },
-    });
-    if (!exists) {
-      throw new AppError("小说不存在。", 404);
-    }
-
-    const characterIds = normalizeCharacterIds(input.characterIds);
-    const options = {
-      fillMissingVoice: input.fillMissingVoice !== false,
-      generatePreview: input.generatePreview !== false,
-      regenerateStale: input.regenerateStale !== false,
-      planStrategy: (input.planStrategy ?? "auto") as AudiobookVoicePlanStrategy,
-      characterIds,
-      previewText: input.previewText?.trim() || undefined,
-    };
-
-    const snap = await this.assess(novelId, { characterIds });
-    const items: AudiobookVoiceReadinessJobItem[] = snap.items.map((item) => ({
-      characterId: item.characterId,
-      characterName: item.characterName,
-      status: "pending",
-      phase: "idle",
-      error: null,
-      previewStatusAfter: null,
-    }));
-
-    const id = crypto.randomUUID();
-    const createdAt = nowIso();
-    const job: InternalJob = {
-      id,
-      novelId,
-      status: "queued",
-      progress: 0,
-      currentCharacterId: null,
-      currentCharacterName: null,
-      currentLabel: "排队中",
-      createdAt,
-      updatedAt: createdAt,
-      startedAt: null,
-      finishedAt: null,
-      cancelRequested: false,
-      options,
-      items,
-      summary: null,
-      lastError: null,
-    };
-
-    // noop：两阶段都关
-    if (!options.fillMissingVoice && !options.generatePreview) {
-      job.status = "succeeded";
-      job.progress = 100;
-      job.finishedAt = createdAt;
-      job.currentLabel = "无需操作";
-      job.summary = { appliedVoice: 0, generatedPreview: 0, skipped: 0, failed: 0 };
-      for (const item of job.items) {
-        item.status = "skipped";
+    try {
+      // 校验小说存在
+      const exists = await prisma.novel.findUnique({
+        where: { id: novelId },
+        select: { id: true },
+      });
+      if (!exists) {
+        throw new AppError("小说不存在。", 404);
       }
-      this.jobs.set(id, job);
-      return { job: this.publicJob(job) };
-    }
 
-    this.jobs.set(id, job);
-    this.activeByNovel.set(novelId, id);
-    this.queue.push(id);
-    void this.pump();
-    return { job: this.publicJob(job) };
+      const characterIds = normalizeCharacterIds(input.characterIds);
+      const options = {
+        fillMissingVoice: input.fillMissingVoice !== false,
+        generatePreview: input.generatePreview !== false,
+        regenerateStale: input.regenerateStale !== false,
+        planStrategy: (input.planStrategy ?? "auto") as AudiobookVoicePlanStrategy,
+        characterIds,
+        previewText: input.previewText?.trim() || undefined,
+      };
+
+      const snap = await this.assess(novelId, { characterIds });
+      const items: AudiobookVoiceReadinessJobItem[] = snap.items.map((item) => ({
+        characterId: item.characterId,
+        characterName: item.characterName,
+        status: "pending",
+        phase: "idle",
+        error: null,
+        previewStatusAfter: null,
+      }));
+
+      const id = reservedId;
+      const createdAt = nowIso();
+      // await 之后：若预订已被 cancel 释放（或被其它路径抢占），不再晋升
+      const stillReserved = this.activeByNovel.get(novelId) === `${RESERVE_PREFIX}${reservedId}`;
+      if (!stillReserved) {
+        const cancelledJob: InternalJob = {
+          id,
+          novelId,
+          status: "cancelled",
+          progress: 100,
+          currentCharacterId: null,
+          currentCharacterName: null,
+          currentLabel: "已取消",
+          createdAt,
+          updatedAt: createdAt,
+          startedAt: null,
+          finishedAt: createdAt,
+          cancelRequested: true,
+          options,
+          items: items.map((item) => ({ ...item, status: "skipped" })),
+          summary: { appliedVoice: 0, generatedPreview: 0, skipped: items.length, failed: 0 },
+          lastError: null,
+        };
+        this.jobs.set(id, cancelledJob);
+        return { job: this.publicJob(cancelledJob) };
+      }
+
+      const job: InternalJob = {
+        id,
+        novelId,
+        status: "queued",
+        progress: 0,
+        currentCharacterId: null,
+        currentCharacterName: null,
+        currentLabel: "排队中",
+        createdAt,
+        updatedAt: createdAt,
+        startedAt: null,
+        finishedAt: null,
+        cancelRequested: false,
+        options,
+        items,
+        summary: null,
+        lastError: null,
+      };
+
+      // noop：两阶段都关 — 不占 active 槽
+      if (!options.fillMissingVoice && !options.generatePreview) {
+        job.status = "succeeded";
+        job.progress = 100;
+        job.finishedAt = createdAt;
+        job.currentLabel = "无需操作";
+        job.summary = { appliedVoice: 0, generatedPreview: 0, skipped: 0, failed: 0 };
+        for (const item of job.items) {
+          item.status = "skipped";
+        }
+        this.jobs.set(id, job);
+        this.releaseReservation(novelId, reservedId);
+        return { job: this.publicJob(job) };
+      }
+
+      this.jobs.set(id, job);
+      // 把预订升级为真实 job id（同 id，去掉 reserve: 前缀）
+      this.activeByNovel.set(novelId, id);
+      this.queue.push(id);
+      void this.pump();
+      return { job: this.publicJob(job) };
+    } catch (error) {
+      this.releaseReservation(novelId, reservedId);
+      throw error;
+    }
   }
 
   private publicJob(job: InternalJob): AudiobookVoiceReadinessJob {
@@ -434,10 +564,10 @@ export class AudiobookVoiceReadinessService {
     let attemptedVoiceApply = false;
     let attemptedPreview = false;
 
-    const weightVoice = job.options.fillMissingVoice ? 15 : 0;
-    const weightPreview = job.options.generatePreview
-      ? (job.options.fillMissingVoice ? 85 : 100)
-      : 0;
+    const { weightVoice, weightPreview } = resolveVoiceReadinessProgressWeights({
+      fillMissingVoice: job.options.fillMissingVoice,
+      generatePreview: job.options.generatePreview,
+    });
 
     try {
       if (job.options.fillMissingVoice && !job.cancelRequested) {
@@ -582,10 +712,12 @@ export class AudiobookVoiceReadinessService {
             job.lastError = sliceError(error);
           }
 
-          job.progress = Math.min(
-            100,
-            weightVoice + Math.round(((i + 1) / Math.max(targets.length, 1)) * weightPreview),
-          );
+          job.progress = resolveVoiceReadinessPreviewProgress({
+            weightVoice,
+            weightPreview,
+            completedCount: i + 1,
+            total: targets.length,
+          });
           job.updatedAt = nowIso();
         }
       }
@@ -620,18 +752,14 @@ export class AudiobookVoiceReadinessService {
         failed,
       };
 
-      if (job.cancelRequested) {
-        job.status = "cancelled";
-      } else if (
-        failed > 0
-        && appliedVoice === 0
-        && generatedPreview === 0
-        && (attemptedVoiceApply || attemptedPreview)
-      ) {
-        job.status = "failed";
-      } else {
-        job.status = "succeeded";
-      }
+      job.status = resolveVoiceReadinessJobTerminalStatus({
+        cancelRequested: job.cancelRequested,
+        failed,
+        appliedVoice,
+        generatedPreview,
+        attemptedVoiceApply,
+        attemptedPreview,
+      });
     } catch (error) {
       job.status = "failed";
       job.lastError = sliceError(error);
