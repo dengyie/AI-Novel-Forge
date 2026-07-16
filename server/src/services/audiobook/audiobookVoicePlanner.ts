@@ -90,7 +90,7 @@ const ENERGY_ZH: Record<VoiceEnergyBand, string> = {
   heavy: "沉稳有分量",
 };
 
-/** 与 TEXTURE_ZH 对立的原句线索：槽位扰动后禁止再拼进【声线】 */
+/** 与 TEXTURE_ZH 对立的原句线索：槽位扰动后禁止再拼进身份文案 flavor */
 const TEXTURE_CONFLICT_HINTS: Record<VoiceTextureBand, RegExp> = {
   bright: /沙哑|低沉|沉稳|沧桑|粗|哑|暗|厚|冷硬|气声|虚|飘|薄|柔弱/,
   neutral: /沙哑|清亮|甜|脆|气声|虚|飘|明快|软糯/,
@@ -424,20 +424,17 @@ export function allocateVoiceSlot(input: {
   return { slot: preferred.slot, key: preferred.key, softCollision: true };
 }
 
-function ageLabel(age: VoiceAgeBucket): string {
-  if (age === "youth") return "偏年轻";
-  if (age === "elder") return "偏年长";
-  return "青壮年";
-}
-
-function genderLabel(gender: VoiceGenderBucket): string {
-  if (gender === "female") return "女性";
-  if (gender === "male") return "男性";
-  return "中性偏柔";
-}
-
 function textureConflictsWithSlot(textureCore: string, textureBand: VoiceTextureBand): boolean {
   return TEXTURE_CONFLICT_HINTS[textureBand].test(textureCore);
+}
+
+/** 卡面是否已给出可用的角色/功能标签（有则不用 archetype useCase 覆盖） */
+function hasRoleSignal(character: VoicePlannerCharacterInput): boolean {
+  return Boolean(
+    character.role?.trim()
+    || character.castRole?.trim()
+    || character.storyFunction?.trim(),
+  );
 }
 
 /**
@@ -512,9 +509,13 @@ export function buildDesignPrompt(input: {
     flavorParts.push("气质克制坚定");
   }
 
+  // 卡面已有 role/castRole 时优先 resolve；archetype useCase 仅补无角色信号的弱卡
+  const resolvedUseCase = resolveDesignUseCase(character, cluster, gender);
+  const archUseCase = input.archetypeUseCase?.trim().slice(0, 24) || "";
   const useCase =
-    (input.archetypeUseCase?.trim() && input.archetypeUseCase.trim().slice(0, 24))
-    || resolveDesignUseCase(character, cluster);
+    (!hasRoleSignal(character) && archUseCase)
+      ? archUseCase
+      : resolvedUseCase;
   const bodyMid = flavorParts.filter(Boolean).join("，");
   let body = bodyMid
     ? `${core}，${bodyMid}，适合${useCase}`
@@ -537,16 +538,14 @@ export function buildDesignPrompt(input: {
     return prompt;
   }
 
-  // 丢弃顺序：archetype/气质细节 → 次互斥缩短 → use case 缩短 → 仍超则硬截（保三元+ soft 首句）
+  // 丢弃顺序：气质 → texture 风味 → use case 缩短 → 只留 core → 次互斥缩短
   const dropSteps: Array<() => void> = [
     () => {
-      // 去掉气质片段
       const withoutVibe = flavorParts.filter((p) => !p.startsWith("气质"));
       const mid = withoutVibe.join("，");
       body = mid ? `${core}，${mid}，适合${useCase}` : `${core}，适合${useCase}`;
     },
     () => {
-      // 去掉额外 texture 风味，只留吐字
       const keep = flavorParts.filter((p) => p.startsWith("吐字") || p.includes("主心骨"));
       const mid = keep.join("，") || "吐字清楚";
       body = `${core}，${mid}，适合${useCase}`;
@@ -570,13 +569,17 @@ export function buildDesignPrompt(input: {
     }
   }
 
-  // 硬保：三元 core + soft 首句（若有）
+  // 硬保：三元 core + soft 首句（若有）；超顶则回退纯 core，避免切片切断三元
   const hardTail = mutexPrimary ? `${mutexPrimary}。` : `${mutexSecondary}。`;
   const hard = `${core}。${hardTail}`;
   if (hard.length <= DESIGN_PROMPT_MAX) {
     return hard;
   }
-  return hard.slice(0, DESIGN_PROMPT_MAX);
+  const coreOnly = `${core}。`;
+  if (coreOnly.length <= DESIGN_PROMPT_MAX) {
+    return coreOnly;
+  }
+  return coreOnly.slice(0, DESIGN_PROMPT_MAX);
 }
 
 function ageLabelNatural(age: VoiceAgeBucket): string {
@@ -605,11 +608,18 @@ function shortenUseCase(useCase: string): string {
 function resolveDesignUseCase(
   character: VoicePlannerCharacterInput,
   cluster: VoiceCluster,
+  gender: VoiceGenderBucket = "unknown",
 ): string {
-  const role = `${character.role || ""} ${character.castRole || ""}`;
+  const role = `${character.role || ""} ${character.castRole || ""} ${character.storyFunction || ""}`;
   if (/反派|antagonist|BOSS|boss|对手/i.test(role)) return "权谋反派对白";
-  if (/女主|heroine|love_interest/i.test(role)) return "女主情感对白";
-  if (cluster === "lead" || /主角|protagonist|男主/i.test(role)) return "男主对白";
+  if (/女主|heroine/i.test(role)) return "女主情感对白";
+  if (/love_interest|红颜|情郎|爱人/i.test(role)) return "情感对白";
+  if (/男主/i.test(role)) return "男主对白";
+  if (cluster === "lead" || /主角|protagonist/i.test(role)) {
+    if (gender === "female") return "女主对白";
+    if (gender === "male") return "男主对白";
+    return "主角对白";
+  }
   if (cluster === "cast") return "主角团对白";
   if (cluster === "narrator") return "旁白叙述";
   return "网文角色对白";

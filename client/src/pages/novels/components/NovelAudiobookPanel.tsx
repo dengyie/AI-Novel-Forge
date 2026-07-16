@@ -1098,6 +1098,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
     onSuccess: ({ data, overwriteMode }) => {
       const items = data?.items ?? [];
       setVoicePlanItems(items);
+      setExpandedPlanDesignIds({});
       if (!data || items.length === 0) {
         setMessage(
           data?.skipped?.length
@@ -1149,6 +1150,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
           : "音色已写入。",
       );
       setVoicePlanItems([]);
+      setExpandedPlanDesignIds({});
       setVoicePlanOverwrite(false);
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: queryKeys.novels.detail(novelId) }),
