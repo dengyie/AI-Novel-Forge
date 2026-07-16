@@ -418,15 +418,14 @@ export function chunkLayoutFingerprint(
 }
 
 /**
- * 合成前唯一解析 style/designPrompt。
- * - 无 delivery：旁白/角色脏「本句表演」剥回 base 或剥标记
- * - 有 delivery：旁白/角色均以干净 base + delivery 重 compile（不盲信旧 style 字符串）
+ * 合成前唯一解析 style/designPrompt（SoT = base* + delivery）。
+ * - 无 delivery：只用干净 base（剥编译标记），不盲信缓存 style/design
+ * - 有 delivery：旁白/角色均以干净 base + delivery 重 compile
  */
 export function resolveChunkSynthesizeFields(segment: AudiobookDialogueSegment): {
   style?: string | null;
   designPrompt?: string | null;
 } {
-  const hasDelivery = Boolean(segment.delivery);
   const styleRaw = typeof segment.style === "string" ? segment.style : "";
   const designRaw = typeof segment.designPrompt === "string" ? segment.designPrompt : "";
   const dirtyStyle = styleRaw.includes("本句表演：")
@@ -434,44 +433,23 @@ export function resolveChunkSynthesizeFields(segment: AudiobookDialogueSegment):
     || styleRaw.includes("表演指令：");
   const dirtyDesign = designRaw.includes("表演指令：");
 
-  if (!hasDelivery) {
-    // 无 delivery：残留编译标记 → 剥回 base 或剥标记，避免脏缓存出声
-    if (segment.speakerKind === "narrator" && (dirtyStyle || dirtyDesign)) {
-      return {
-        style: segment.baseStyle ?? peelCompiledDeliveryMarks(segment.style),
-        designPrompt: segment.baseDesignPrompt ?? peelCompiledDeliveryMarks(segment.designPrompt),
-      };
-    }
-    if (segment.speakerKind === "character" && (dirtyStyle || dirtyDesign)) {
-      return {
-        style: segment.baseStyle ?? peelCompiledDeliveryMarks(segment.style),
-        designPrompt: segment.baseDesignPrompt ?? peelCompiledDeliveryMarks(segment.designPrompt),
-      };
-    }
+  const baseStyleClean = peelCompiledDeliveryMarks(segment.baseStyle)
+    ?? (dirtyStyle
+      ? peelCompiledDeliveryMarks(segment.style)
+      : (segment.baseStyle ?? segment.style ?? null));
+  const baseDesignClean = peelCompiledDeliveryMarks(segment.baseDesignPrompt)
+    ?? (dirtyDesign
+      ? peelCompiledDeliveryMarks(segment.designPrompt)
+      : (segment.baseDesignPrompt ?? segment.designPrompt ?? null));
+
+  if (!segment.delivery) {
     return {
-      style: segment.style,
-      designPrompt: segment.designPrompt,
+      style: baseStyleClean,
+      designPrompt: baseDesignClean,
     };
   }
 
-  const baseStyleClean = peelCompiledDeliveryMarks(segment.baseStyle)
-    ?? (dirtyStyle ? peelCompiledDeliveryMarks(segment.style) : (segment.baseStyle ?? segment.style ?? null));
-  const baseDesignClean = peelCompiledDeliveryMarks(segment.baseDesignPrompt)
-    ?? (dirtyDesign ? peelCompiledDeliveryMarks(segment.designPrompt) : (segment.baseDesignPrompt ?? segment.designPrompt ?? null));
-
-  // 旁白：干净「本句叙述」可透传；脏「本句表演」强制重算
   if (segment.speakerKind === "narrator") {
-    const narratorClean =
-      styleRaw.includes("本句叙述：")
-      && !styleRaw.includes("本句表演：")
-      && !styleRaw.includes("表演指令：")
-      && !designRaw.includes("表演指令：");
-    if (narratorClean) {
-      return {
-        style: segment.style,
-        designPrompt: segment.designPrompt,
-      };
-    }
     const rebuilt = applyDeliveryToSegment(
       {
         ...segment,
@@ -491,7 +469,6 @@ export function resolveChunkSynthesizeFields(segment: AudiobookDialogueSegment):
     };
   }
 
-  // 角色：始终干净 base + delivery 重 compile，避免改卡后旧 base 嵌在 style 里二次叠表演
   return resolveSynthesizeInput({
     ttsMode: segment.ttsMode,
     baseStyle: baseStyleClean,
