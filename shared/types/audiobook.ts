@@ -209,6 +209,11 @@ export interface AudiobookChapterAnnotation {
   contentTruncated?: boolean;
   /** 段级表演统计；mode=off 时也可有零值 */
   deliveryStats?: AudiobookDeliveryChapterStats | null;
+  /**
+   * 标注时生效的 deliveryStyleMode 快照。
+   * resume 时若与任务 progressJson 不一致，应 reannotate 而非盲用旧段。
+   */
+  deliveryStyleMode?: DeliveryStyleMode | null;
 }
 
 export interface CreateAudiobookTaskInput {

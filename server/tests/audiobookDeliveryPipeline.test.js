@@ -336,6 +336,86 @@ test("resolveChunkSynthesizeFields rebuilds narrator without resolved style", ()
   assert.equal((synth.style || "").includes("本句表演"), false);
 });
 
+test("resolveChunkSynthesizeFields rebuilds dirty narrator 本句表演 on resynthesize", () => {
+  const delivery = normalizeDelivery(GOOD);
+  const dirty = {
+    index: 0,
+    speakerKind: "narrator",
+    characterId: null,
+    speakerLabel: "旁白",
+    text: "夜色渐深，长街只剩脚步声。",
+    ttsMode: "preset",
+    voice: "茉莉",
+    style: "知性旁白\n本句表演：平静公事地压着怒，强装镇定。",
+    baseStyle: "知性旁白",
+    delivery,
+    deliveryMergeKey: deliveryMergeKey(delivery),
+  };
+  const synth = resolveChunkSynthesizeFields(dirty);
+  assert.match(synth.style || "", /本句叙述：/);
+  assert.equal((synth.style || "").includes("本句表演"), false);
+});
+
+test("resolveChunkSynthesizeFields peels dirty narrator without delivery", () => {
+  const dirty = {
+    index: 0,
+    speakerKind: "narrator",
+    characterId: null,
+    speakerLabel: "旁白",
+    text: "天色将明。",
+    ttsMode: "preset",
+    voice: "茉莉",
+    style: "知性旁白\n本句表演：嘶吼崩溃。",
+    baseStyle: "知性旁白",
+    delivery: null,
+  };
+  const synth = resolveChunkSynthesizeFields(dirty);
+  assert.equal(synth.style, "知性旁白");
+  assert.equal((synth.style || "").includes("本句表演"), false);
+});
+
+test("fingerprint changes when refAudioPath changes", () => {
+  const baseSeg = {
+    index: 0,
+    speakerKind: "character",
+    characterId: "c1",
+    speakerLabel: "何屿",
+    text: "你听我说。",
+    ttsMode: "clone",
+    voice: "",
+    style: "基线",
+    refAudioPath: "/data/storage/voice-refs/n1/c1/ref.wav",
+  };
+  const fpA = chunkLayoutFingerprint([{ text: baseSeg.text, segment: baseSeg }]);
+  const fpB = chunkLayoutFingerprint([{
+    text: baseSeg.text,
+    segment: { ...baseSeg, refAudioPath: "/data/storage/voice-refs/n1/c1/ref2.wav" },
+  }]);
+  assert.notEqual(fpA, fpB);
+});
+
+test("fingerprint changes when mid-text changes (same prefix+length)", () => {
+  // 前 64 字相同但中部不同时旧实现会撞指纹；现用全文 hash
+  const prefix = "甲".repeat(64);
+  const textA = `${prefix}${"乙".repeat(20)}`;
+  const textB = `${prefix}${"丙".repeat(20)}`;
+  assert.equal(textA.length, textB.length);
+  assert.equal(textA.slice(0, 64), textB.slice(0, 64));
+  const seg = {
+    index: 0,
+    speakerKind: "narrator",
+    characterId: null,
+    speakerLabel: "旁白",
+    text: textA,
+    ttsMode: "preset",
+    voice: "茉莉",
+    style: "旁白",
+  };
+  const fpA = chunkLayoutFingerprint([{ text: textA, segment: { ...seg, text: textA } }]);
+  const fpB = chunkLayoutFingerprint([{ text: textB, segment: { ...seg, text: textB } }]);
+  assert.notEqual(fpA, fpB);
+});
+
 test("asymmetric mergeKey falls back to style equality (no false merge)", () => {
   const key = deliveryMergeKey(normalizeDelivery(GOOD));
   const a = {

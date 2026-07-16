@@ -86,9 +86,14 @@ function resolveCharacter(
     return exact;
   }
 
-  // 子串回退：优先最长候选，降低短别名误命中
+  // 子串回退：两侧均 ≥2 字；优先最长候选。
+  // - speaker 包含角色名：允许（「小美姐姐」→「小美」）
+  // - 角色名包含 speaker：仅长度差 ≤1（「王小明」←「小明」；拒绝「弟弟」→「远哥弟弟」）
   let best: AudiobookCharacterVoiceConfig | null = null;
   let bestLen = 0;
+  if (raw.length < 2) {
+    return null;
+  }
   for (const item of new Set(index.byExact.values())) {
     const candidates = [
       item.characterName,
@@ -97,7 +102,12 @@ function resolveCharacter(
       .map((name) => name?.trim())
       .filter((name): name is string => Boolean(name) && name.length >= 2);
     for (const name of candidates) {
-      if (!(raw.includes(name) || name.includes(raw))) {
+      const speakerContainsName = raw.includes(name);
+      const nameContainsSpeaker = name.includes(raw);
+      if (!speakerContainsName && !nameContainsSpeaker) {
+        continue;
+      }
+      if (nameContainsSpeaker && !speakerContainsName && name.length - raw.length > 1) {
         continue;
       }
       if (name.length > bestLen) {
@@ -153,6 +163,7 @@ export function buildNarratorOnlyAnnotation(input: {
     segments,
     annotatedAt: new Date().toISOString(),
     error: input.error ?? (text ? null : "章节正文为空。"),
+    deliveryStyleMode: "off",
   };
 }
 
@@ -369,6 +380,7 @@ export class AudiobookAnnotationService {
         error: null,
         contentTruncated: contentTruncated || undefined,
         deliveryStats,
+        deliveryStyleMode,
       };
     } catch (error) {
       if (input.signal?.aborted) {

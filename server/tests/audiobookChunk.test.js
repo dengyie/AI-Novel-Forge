@@ -636,6 +636,10 @@ test("matchCharacterBySpeakerName prefers exact then longest alias", () => {
   // 子串：优先更长候选「远哥弟弟」
   assert.equal(matchCharacterBySpeakerNameForTest("远哥弟弟说", voices)?.characterId, "c2");
   assert.equal(matchCharacterBySpeakerNameForTest("旁白", voices), null);
+  // 单字别名仅 exact：长 speaker 含子串「远」不得误绑
+  assert.equal(matchCharacterBySpeakerNameForTest("远远观望的人", voices), null);
+  // 角色名包含 speaker 且差 >1：不绑（避免「弟弟」误绑「远哥弟弟」）
+  assert.equal(matchCharacterBySpeakerNameForTest("弟弟", voices), null);
 });
 
 test("buildM4bFfmetadata writes chapter blocks with ms timebase", () => {
