@@ -521,10 +521,10 @@ function neighborLabel(slot: VoiceSlot): string {
 
 /**
  * 纯函数：根据人物卡批量规划差异化音色。
- * - prefer_design：非 clone 全 design + 槽位 prompt 防撞
+ * - prefer_design：非「clone+ref」全 design + 槽位 prompt 防撞
  * - auto（保守）：importance≥70 且有 voiceTexture → design；重要 preset 位满 → design；其余 preset
  * - preset_only：仅 preset 负载均衡
- * - clone 永不改写
+ * - clone+非空 ref 永不改写；无 ref 的 half-clone 可规划为 preset/design
  * - 覆盖语义由调用方 onlyMissing + apply.overwrite 处理（本函数不接收 overwrite）
  */
 export function planCharacterVoices(input: {
@@ -565,14 +565,12 @@ export function planCharacterVoices(input: {
     }
 
     const mode = character.ttsMode?.trim() || "preset";
-    // clone 一律不由规划器改写（含无 ref 的半配置）；仅人工上传参考音频
-    if (mode === "clone") {
+    // 仅「clone + 非空 ref」永久 skip；无 ref 的 half-clone 可规划为 preset/design（apply 可覆盖）
+    if (mode === "clone" && character.ttsRefAudioPath?.trim()) {
       skipped.push({
         characterId: character.characterId,
         characterName: character.characterName,
-        reason: character.ttsRefAudioPath?.trim()
-          ? "已配置 clone 参考音频。"
-          : "ttsMode=clone（规划不改写；请上传参考音频或在角色卡改 mode）。",
+        reason: "已配置 clone 参考音频。",
       });
       continue;
     }
@@ -639,7 +637,7 @@ export function planCharacterVoices(input: {
         && importantCount >= maxImportantPerPreset
       ) {
         ttsMode = "design";
-        reason = `预置「${voice}」重要角色已满，升 design 避免撞声。`;
+        reason = `预置「${voice}」重要角色位已满，升 design 避免同 preset 复用（分配维，非听感证明）。`;
       } else {
         ttsMode = "preset";
         ttsVoice = voice;

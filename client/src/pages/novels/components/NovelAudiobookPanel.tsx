@@ -961,11 +961,14 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
         );
         return;
       }
-      setMessage(
+      const obsBits = [
+          data.summary.slotOverrideCount ? `override ${data.summary.slotOverrideCount}` : "",
+          data.summary.softCollisionCount ? `soft ${data.summary.softCollisionCount}` : "",
+          data.summary.seedInferredCount ? `seed推断 ${data.summary.seedInferredCount}` : "",
+        ].filter(Boolean);
+        setMessage(
         `${overwriteMode ? "重新差异化" : "补齐缺失"}规划 ${items.length} 项：preset ${data.summary.presetCount} / design ${data.summary.designCount}${
-          (data.summary.slotOverrideCount || data.summary.softCollisionCount)
-            ? `（override ${data.summary.slotOverrideCount ?? 0} / soft ${data.summary.softCollisionCount ?? 0}）`
-            : ""
+          obsBits.length ? `（${obsBits.join(" / ")}）` : ""
         }${
           overwriteMode ? "（写入时将覆盖已绑定）" : ""
         }。`,

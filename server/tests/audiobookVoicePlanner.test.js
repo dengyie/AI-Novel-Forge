@@ -499,7 +499,7 @@ test("planCharacterVoices never rewrites configured clone bindings even when onl
   assert.equal(items[0].ttsMode, "design");
 });
 
-test("clone without ref audio is still skipped (planner never rewrites clone mode)", () => {
+test("half-clone without ref is re-planned (only clone+ref is permanent skip)", () => {
   const { items, skipped } = planCharacterVoices({
     onlyMissing: false,
     strategy: "prefer_design",
@@ -513,10 +513,11 @@ test("clone without ref audio is still skipped (planner never rewrites clone mod
       },
     ],
   });
-  assert.equal(items.length, 0);
-  assert.equal(skipped.length, 1);
-  assert.equal(skipped[0].characterId, "half-clone");
-  assert.match(skipped[0].reason, /clone/);
+  assert.equal(skipped.length, 0);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].characterId, "half-clone");
+  assert.equal(items[0].ttsMode, "design");
+  assert.equal(items[0].wouldOverwrite, false);
 });
 
 test("legacy design prompt without labels seeds as seed:inferred", () => {
@@ -563,6 +564,44 @@ test("auto design reason does not claim 听感保证", () => {
   assert.equal(items[0].ttsMode, "design");
   assert.match(items[0].reason, /非听感证明/);
   assert.equal(/保证声线辨识度/.test(items[0].reason), false);
+});
+
+test("auto preset-full promote reason uses 非听感证明 not 撞声保证", () => {
+  const { items } = planCharacterVoices({
+    onlyMissing: true,
+    strategy: "auto",
+    maxImportantPerPreset: 1,
+    characters: [
+      {
+        characterId: "bound",
+        characterName: "已绑男主",
+        gender: "male",
+        castRole: "protagonist",
+        ttsMode: "preset",
+        ttsVoice: "白桦",
+      },
+      {
+        characterId: "bound2",
+        characterName: "已绑男配",
+        gender: "male",
+        castRole: "ally",
+        ttsMode: "preset",
+        ttsVoice: "苏打",
+      },
+      {
+        characterId: "new",
+        characterName: "新男重要",
+        gender: "male",
+        castRole: "antagonist",
+        // 无 texture：走 preset 池；重要位被 seed 占满后应升 design
+      },
+    ],
+  });
+  const item = items.find((i) => i.characterId === "new");
+  assert.ok(item);
+  assert.equal(item.ttsMode, "design");
+  assert.match(item.reason, /非听感证明/);
+  assert.equal(/避免撞声(?!.*分配)/.test(item.reason), false);
 });
 
 test("inferVoiceSlot reads rough/low cues from texture", () => {
