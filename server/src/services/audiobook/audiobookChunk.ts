@@ -137,6 +137,7 @@ function canMergeSegments(
 }
 
 function findPreferSplit(window: string): number {
+  // 硬断：句号/问叹/分号/换行 — 优先保留句级气口，避免长对白在逗号处打断情绪弧
   const hardBreaks = ["\n", "。", "！", "？", "；", "!", "?", ";", "…"];
   for (const mark of hardBreaks) {
     const idx = window.lastIndexOf(mark);
@@ -145,10 +146,12 @@ function findPreferSplit(window: string): number {
     }
   }
 
+  // 软断仅在窗口后 55% 且不靠前：减少「情绪半句」切开
   const softBreaks = ["，", ",", "、", " "];
+  const softMin = Math.floor(window.length * 0.55);
   for (const mark of softBreaks) {
     const idx = window.lastIndexOf(mark);
-    if (idx > Math.floor(window.length * 0.4)) {
+    if (idx >= softMin) {
       return idx + mark.length;
     }
   }

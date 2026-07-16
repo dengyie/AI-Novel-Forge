@@ -3,11 +3,15 @@ const assert = require("node:assert/strict");
 
 const {
   computeDeliveryChapterStats,
+  applyDeliveryToSegment,
 } = require("../dist/services/audiobook/deliveryStyle.js");
 const {
   resolveChunkSynthesizeFields,
   peelCompiledDeliveryMarks,
 } = require("../dist/services/audiobook/AudiobookPipelineService.js");
+const {
+  splitTextForTts,
+} = require("../dist/services/audiobook/audiobookChunk.js");
 
 test("computeDeliveryChapterStats counts unresolved speakers", () => {
   const stats = computeDeliveryChapterStats([
@@ -96,6 +100,21 @@ test("resolveChunkSynthesizeFields with delivery always recompiles from base", (
   assert.equal((synth.style || "").includes("旧基线"), false);
   const matches = (synth.style || "").match(/本句表演：/g) || [];
   assert.equal(matches.length, 1);
+});
+
+test("splitTextForTts prefers hard punctuation over early commas", () => {
+  // 窗口 80：前半多逗号，句号落在窗口内；后句再拉长保证会切块
+  const head = "甲说，乙听，丙看，丁想，戊走，";
+  const pad = "字".repeat(50);
+  const tail = "然后继续第二句，还要再拉长一些，确保总长超过窗口。".repeat(3);
+  const text = `${head}${pad}。${tail}`;
+  assert.ok(text.length > 80);
+  const chunks = splitTextForTts(text, 80);
+  assert.ok(chunks.length > 1, `expected multi-chunk, got ${chunks.length}: ${JSON.stringify(chunks)}`);
+  // 第一刀应落在句号后（硬断），而非第一个逗号
+  assert.ok(chunks[0].endsWith("。"), `expected hard break ending first chunk, got: ${chunks[0]}`);
+  assert.equal(chunks[0].includes("然后继续"), false);
+  assert.equal(chunks.join(""), text);
 });
 
 test("peelCompiledDeliveryMarks still strips marks", () => {
