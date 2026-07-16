@@ -6,9 +6,11 @@ const {
   parseMimoTtsFallbackApiKeys,
   isRetryableMimoTtsStatus,
   resolveMimoTtsEndpointChain,
+  summarizeMimoTtsEndpointFailure,
   mimoChatAudioTTSProvider,
   buildMimoTtsRequestBody,
 } = require("../dist/services/audiobook/MimoChatAudioTTSProvider.js");
+const { AppError } = require("../dist/middleware/errorHandler.js");
 
 test("parseMimoTtsFallbackBaseUrls splits comma/newline and keeps slots", () => {
   const urls = parseMimoTtsFallbackBaseUrls(
@@ -210,4 +212,163 @@ test("buildMimoTtsRequestBody still valid after provider refactor", () => {
     designPrompt: "青年女声，清亮",
   });
   assert.equal(Object.prototype.hasOwnProperty.call(body.audio, "voice"), false);
+});
+
+test("summarizeMimoTtsEndpointFailure never includes api keys", () => {
+  const line = summarizeMimoTtsEndpointFailure({
+    endpointId: "primary",
+    error: new AppError("MiMo TTS 请求失败 [primary] (502): boom sk-secret-should-not-matter", 502),
+  });
+  assert.match(line, /\[mimo-tts\]/);
+  assert.match(line, /primary/);
+  assert.match(line, /502/);
+  assert.ok(line.length <= 220);
+});
+
+test("synthesize fails over on 504 timeout-class then succeeds", async () => {
+  const originalFetch = global.fetch;
+  const originalEnv = process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS;
+  const originalKeys = process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_API_KEYS;
+  const prevOpenAi = process.env.OPENAI_BASE_URL;
+  const prevKey = process.env.OPENAI_API_KEY;
+  const calls = [];
+  const fakeAudio = Buffer.from("UklGRiQAAABXQVZFZm10IBAAAAABAAEA").toString("base64");
+
+  process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS = "https://fufu.test/v1";
+  process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_API_KEYS = "sk-fufu";
+  process.env.OPENAI_BASE_URL = "http://primary.test/v1";
+  process.env.OPENAI_API_KEY = "sk-primary";
+
+  try {
+    global.fetch = async (url) => {
+      calls.push(String(url));
+      if (String(url).includes("primary.test")) {
+        return new Response(JSON.stringify({ error: { message: "gateway timeout" } }), {
+          status: 504,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(
+        JSON.stringify({ choices: [{ message: { audio: { data: fakeAudio } } }] }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    };
+
+    const result = await mimoChatAudioTTSProvider.synthesize({
+      text: "超时后换端。",
+      mode: "preset",
+      voice: "茉莉",
+      provider: "openai",
+    });
+    assert.equal(result.audioBase64, fakeAudio);
+    assert.equal(calls.length, 2);
+    assert.match(calls[0], /primary\.test/);
+    assert.match(calls[1], /fufu\.test/);
+  } finally {
+    global.fetch = originalFetch;
+    process.env.OPENAI_BASE_URL = prevOpenAi;
+    process.env.OPENAI_API_KEY = prevKey;
+    if (originalEnv === undefined) delete process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS;
+    else process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS = originalEnv;
+    if (originalKeys === undefined) delete process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_API_KEYS;
+    else process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_API_KEYS = originalKeys;
+  }
+});
+
+test("synthesize fails over on 429 then succeeds", async () => {
+  const originalFetch = global.fetch;
+  const originalEnv = process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS;
+  const prevOpenAi = process.env.OPENAI_BASE_URL;
+  const prevKey = process.env.OPENAI_API_KEY;
+  const calls = [];
+  const fakeAudio = Buffer.from("UklGRiQAAABXQVZFZm10IBAAAAABAAEA").toString("base64");
+
+  process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS = "https://fufu.test/v1";
+  process.env.OPENAI_BASE_URL = "http://primary.test/v1";
+  process.env.OPENAI_API_KEY = "sk-primary";
+
+  try {
+    global.fetch = async (url) => {
+      calls.push(String(url));
+      if (String(url).includes("primary.test")) {
+        return new Response(JSON.stringify({ error: { message: "rate limited" } }), {
+          status: 429,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(
+        JSON.stringify({ choices: [{ message: { audio: { data: fakeAudio } } }] }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    };
+
+    const result = await mimoChatAudioTTSProvider.synthesize({
+      text: "限流后换端。",
+      mode: "preset",
+      voice: "茉莉",
+      provider: "openai",
+    });
+    assert.equal(result.audioBase64, fakeAudio);
+    assert.equal(calls.length, 2);
+  } finally {
+    global.fetch = originalFetch;
+    process.env.OPENAI_BASE_URL = prevOpenAi;
+    process.env.OPENAI_API_KEY = prevKey;
+    if (originalEnv === undefined) delete process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS;
+    else process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS = originalEnv;
+  }
+});
+
+test("synthesize exhausts chain and surfaces last retryable error", async () => {
+  const originalFetch = global.fetch;
+  const originalEnv = process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS;
+  const prevOpenAi = process.env.OPENAI_BASE_URL;
+  const prevKey = process.env.OPENAI_API_KEY;
+  const calls = [];
+
+  process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS = "https://fufu.test/v1";
+  process.env.OPENAI_BASE_URL = "http://primary.test/v1";
+  process.env.OPENAI_API_KEY = "sk-primary";
+
+  try {
+    global.fetch = async (url) => {
+      calls.push(String(url));
+      const host = String(url).includes("fufu") ? "fallback-1" : "primary";
+      return new Response(JSON.stringify({ error: { message: `${host} down` } }), {
+        status: 502,
+        headers: { "Content-Type": "application/json" },
+      });
+    };
+
+    await assert.rejects(
+      () => mimoChatAudioTTSProvider.synthesize({
+        text: "双端都挂。",
+        mode: "preset",
+        voice: "茉莉",
+        provider: "openai",
+      }),
+      (err) => {
+        assert.match(String(err?.message || err), /fallback-1|502|down/);
+        return true;
+      },
+    );
+    assert.equal(calls.length, 2);
+  } finally {
+    global.fetch = originalFetch;
+    process.env.OPENAI_BASE_URL = prevOpenAi;
+    process.env.OPENAI_API_KEY = prevKey;
+    if (originalEnv === undefined) delete process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS;
+    else process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS = originalEnv;
+  }
+});
+
+test("resolveMimoTtsEndpointChain without fallback env is primary only", () => {
+  const chain = resolveMimoTtsEndpointChain({
+    primaryBaseURL: "http://cpa.local/v1",
+    primaryApiKey: "sk-primary",
+    fallbackBaseUrlsRaw: "",
+    fallbackApiKeysRaw: "",
+  });
+  assert.equal(chain.length, 1);
+  assert.equal(chain[0].id, "primary");
 });
