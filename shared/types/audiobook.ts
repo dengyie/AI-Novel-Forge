@@ -431,6 +431,12 @@ export interface AudiobookVoicePlanSuggestResult {
     presetCount: number;
     designCount: number;
     overwriteCount: number;
+    /** reason 含 collision:soft 的 design 项（prompt 启发式，非听感证明） */
+    softCollisionCount: number;
+    /** reason 含 slot:override 的 design 项 */
+    slotOverrideCount: number;
+    /** onlyMissing 时已绑定 design 无结构化标签、用卡字段推断占槽 */
+    seedInferredCount: number;
   };
 }
 

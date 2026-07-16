@@ -963,6 +963,10 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
       }
       setMessage(
         `${overwriteMode ? "重新差异化" : "补齐缺失"}规划 ${items.length} 项：preset ${data.summary.presetCount} / design ${data.summary.designCount}${
+          (data.summary.slotOverrideCount || data.summary.softCollisionCount)
+            ? `（override ${data.summary.slotOverrideCount ?? 0} / soft ${data.summary.softCollisionCount ?? 0}）`
+            : ""
+        }${
           overwriteMode ? "（写入时将覆盖已绑定）" : ""
         }。`,
       );

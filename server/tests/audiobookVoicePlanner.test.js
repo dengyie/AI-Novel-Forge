@@ -499,6 +499,72 @@ test("planCharacterVoices never rewrites configured clone bindings even when onl
   assert.equal(items[0].ttsMode, "design");
 });
 
+test("clone without ref audio is still skipped (planner never rewrites clone mode)", () => {
+  const { items, skipped } = planCharacterVoices({
+    onlyMissing: false,
+    strategy: "prefer_design",
+    characters: [
+      {
+        characterId: "half-clone",
+        characterName: "半克隆",
+        gender: "male",
+        ttsMode: "clone",
+        ttsRefAudioPath: "",
+      },
+    ],
+  });
+  assert.equal(items.length, 0);
+  assert.equal(skipped.length, 1);
+  assert.equal(skipped[0].characterId, "half-clone");
+  assert.match(skipped[0].reason, /clone/);
+});
+
+test("legacy design prompt without labels seeds as seed:inferred", () => {
+  const { items, skipped } = planCharacterVoices({
+    onlyMissing: true,
+    strategy: "prefer_design",
+    characters: [
+      {
+        characterId: "legacy",
+        characterName: "旧稿",
+        gender: "male",
+        ttsMode: "design",
+        ttsDesignPrompt: "青年男声，沉稳沙哑",
+        voiceTexture: "沉稳沙哑低沉",
+      },
+      {
+        characterId: "new",
+        characterName: "新角",
+        gender: "male",
+        voiceTexture: "沉稳沙哑低沉",
+      },
+    ],
+  });
+  assert.equal(skipped.some((s) => s.characterId === "legacy" && s.reason.includes("seed:inferred")), true);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].characterId, "new");
+  assert.equal(items[0].ttsMode, "design");
+});
+
+test("auto design reason does not claim 听感保证", () => {
+  const { items } = planCharacterVoices({
+    onlyMissing: true,
+    strategy: "auto",
+    characters: [
+      {
+        characterId: "a",
+        characterName: "主",
+        gender: "male",
+        castRole: "protagonist",
+        voiceTexture: "沉稳沙哑",
+      },
+    ],
+  });
+  assert.equal(items[0].ttsMode, "design");
+  assert.match(items[0].reason, /非听感证明/);
+  assert.equal(/保证声线辨识度/.test(items[0].reason), false);
+});
+
 test("inferVoiceSlot reads rough/low cues from texture", () => {
   const slot = inferVoiceSlot({
     characterId: "1",
