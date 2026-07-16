@@ -119,11 +119,13 @@ function canMergeSegments(
     return false;
   }
 
-  // D7：优先 deliveryMergeKey 桶；旧数据无 mergeKey 时回退 style/design 全等
+  // D7：两侧都有 mergeKey 才用桶；仅一侧有 key 时回退 style/design 全等（防 undefined??"none" 误合并）
   const prevKey = prev.deliveryMergeKey;
   const nextKey = next.deliveryMergeKey;
-  if (prevKey != null || nextKey != null) {
-    return (prevKey ?? "none") === (nextKey ?? "none");
+  const prevHasKey = prevKey != null && String(prevKey).length > 0;
+  const nextHasKey = nextKey != null && String(nextKey).length > 0;
+  if (prevHasKey && nextHasKey) {
+    return prevKey === nextKey;
   }
   if ((prev.style ?? "").trim() !== (next.style ?? "").trim()) {
     return false;

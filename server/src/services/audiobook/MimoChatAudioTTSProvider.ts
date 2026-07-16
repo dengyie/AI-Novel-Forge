@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import path from "node:path";
 import {
   DEFAULT_AUDIOBOOK_NARRATOR_STYLE,
   MIMO_TTS_MODELS,
@@ -17,6 +18,7 @@ import {
 } from "../../llm/providers";
 import { AppError } from "../../middleware/errorHandler";
 import { isMissingAudiobookTaskTableError } from "./audiobookErrors";
+import { resolveVoiceRefRoot } from "./audiobookPaths";
 
 export interface MimoTtsSynthesizeInput {
   /** 旁白/对白正文（assistant 侧） */
@@ -153,6 +155,13 @@ function stripDataUrlPrefix(value: string): string {
   return match ? match[1].replace(/\s+/g, "") : trimmed.replace(/\s+/g, "");
 }
 
+function isPathInside(parent: string, target: string): boolean {
+  const parentResolved = path.resolve(parent);
+  const targetResolved = path.resolve(target);
+  const rel = path.relative(parentResolved, targetResolved);
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
 function loadRefAudioBase64(input: MimoTtsSynthesizeInput): string {
   if (input.refAudioBase64?.trim()) {
     const bare = stripDataUrlPrefix(input.refAudioBase64);
@@ -173,10 +182,16 @@ function loadRefAudioBase64(input: MimoTtsSynthesizeInput): string {
   if (refPath.includes("\0") || refPath.includes("..")) {
     throw new AppError("clone 参考音频路径非法。", 400);
   }
-  if (!fs.existsSync(refPath)) {
+  // 强制限制在 voice-refs 根目录内，防路径穿越读任意文件
+  const voiceRefRoot = resolveVoiceRefRoot();
+  const absoluteRef = path.resolve(refPath);
+  if (!isPathInside(voiceRefRoot, absoluteRef)) {
+    throw new AppError("clone 参考音频路径越界（必须位于 voice-refs 目录）。", 400);
+  }
+  if (!fs.existsSync(absoluteRef)) {
     throw new AppError(`clone 参考音频不存在：${refPath}`, 400);
   }
-  const stat = fs.statSync(refPath);
+  const stat = fs.statSync(absoluteRef);
   if (!stat.isFile()) {
     throw new AppError("clone 参考音频路径不是文件。", 400);
   }
@@ -186,7 +201,7 @@ function loadRefAudioBase64(input: MimoTtsSynthesizeInput): string {
   if (stat.size > MAX_REF_AUDIO_BYTES) {
     throw new AppError(`clone 参考音频过大（>${MAX_REF_AUDIO_BYTES} bytes）。`, 400);
   }
-  return fs.readFileSync(refPath).toString("base64");
+  return fs.readFileSync(absoluteRef).toString("base64");
 }
 
 /**
@@ -324,7 +339,11 @@ export class MimoChatAudioTTSProvider {
         const message = typeof payload === "object" && payload && "error" in payload
           ? JSON.stringify((payload as { error: unknown }).error)
           : rawText.slice(0, 400);
-        throw new AppError(`MiMo TTS 请求失败 (${response.status}): ${message}`, 502);
+        // 4xx 客户端/鉴权类不伪装 502；5xx/其它保持 502 以便重试
+        const statusCode = response.status >= 400 && response.status < 500
+          ? response.status
+          : 502;
+        throw new AppError(`MiMo TTS 请求失败 (${response.status}): ${message}`, statusCode);
       }
 
       const audioBase64 = extractAudioBase64(payload);

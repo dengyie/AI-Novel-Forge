@@ -845,6 +845,13 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
     ? !readinessSummary.voiceOk
     : missingVoiceCharacters.length > 0;
 
+  /** requireReadyPreview 开启时，试听未就绪也禁止创建 */
+  const previewGateBlocked = Boolean(
+    requireReadyPreview
+    && readinessSummary
+    && readinessSummary.previewOk === false,
+  );
+
   const tasksQuery = useQuery({
     queryKey: ["novel-audiobook-tasks", novelId],
     queryFn: async () => {
@@ -1090,7 +1097,8 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
       endChapterOrder: scopeMode === "range" ? Number(endOrder) : undefined,
       narratorVoice: narrator,
       requireReadyPreview: requireReadyPreview || undefined,
-      deliveryStyleMode: deliveryStyleMode === "off" ? undefined : deliveryStyleMode,
+      // 始终显式发送，含 off，避免服务端 env 默认覆盖 UI 选择
+      deliveryStyleMode,
     };
   }
 
@@ -1371,6 +1379,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
             createMutation.isPending
             || sortedChapters.length === 0
             || voiceGateBlocked
+            || previewGateBlocked
           }
           onClick={() => createMutation.mutate()}
         >

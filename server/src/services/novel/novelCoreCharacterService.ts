@@ -58,12 +58,21 @@ export class NovelCoreCharacterService {
       };
     }
 
-    const { prohibitions, ttsRefAudioBase64, ttsSpeakerAliases, ...data } = payload;
+    // 安全：剥离客户端裸 ttsRefAudioPath，仅允许 base64 落盘后由服务端写路径
+    const {
+      prohibitions,
+      ttsRefAudioBase64,
+      ttsSpeakerAliases,
+      ttsRefAudioPath: _ignoredClientRefPath,
+      ...data
+    } = payload;
+    void _ignoredClientRefPath;
     const aliasesJson = normalizeTtsSpeakerAliases(ttsSpeakerAliases);
     const created = await prisma.character.create({
       data: {
         novelId,
         ...data,
+        ttsRefAudioPath: null,
         ...(aliasesJson !== undefined ? { ttsSpeakerAliases: aliasesJson } : {}),
         ...(prohibitions ? { prohibitionsJson: serializeCharacterProhibitions(prohibitions) } : {}),
       },
@@ -98,7 +107,14 @@ export class NovelCoreCharacterService {
 
     const hasStateChanged = typeof input.currentState === "string" && input.currentState !== exists.currentState;
     const hasGoalChanged = typeof input.currentGoal === "string" && input.currentGoal !== exists.currentGoal;
-    const { prohibitions, ttsRefAudioBase64, ttsSpeakerAliases, ...data } = input;
+    // 安全：剥离客户端裸 ttsRefAudioPath；仅 base64 落盘或显式 null 清空
+    const {
+      prohibitions,
+      ttsRefAudioBase64,
+      ttsSpeakerAliases,
+      ttsRefAudioPath: clientRefPath,
+      ...data
+    } = input;
     const aliasesJson = normalizeTtsSpeakerAliases(ttsSpeakerAliases);
 
     let nextData: Record<string, unknown> = {
@@ -107,6 +123,10 @@ export class NovelCoreCharacterService {
       ...(prohibitions ? { prohibitionsJson: serializeCharacterProhibitions(prohibitions) } : {}),
       ...(hasStateChanged || hasGoalChanged ? { lastEvolvedAt: new Date() } : {}),
     };
+    // 禁止客户端任意写路径；null 允许清空；有值的字符串一律忽略
+    if (clientRefPath === null) {
+      nextData.ttsRefAudioPath = null;
+    }
 
     if (ttsRefAudioBase64?.trim()) {
       const refPath = writeCharacterVoiceRefFromBase64({
