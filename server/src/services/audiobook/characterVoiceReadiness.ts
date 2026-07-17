@@ -124,6 +124,7 @@ export function buildVoiceDetailLabel(input: {
   mode: string;
   ttsVoice?: string | null;
   ttsDesignPrompt?: string | null;
+  ttsVoiceAssetId?: string | null;
   reason?: string | null;
 }): string {
   const mode = input.mode || "preset";
@@ -145,6 +146,10 @@ export function buildVoiceDetailLabel(input: {
     return prompt ? `design·${prompt.length > 16 ? `${prompt.slice(0, 16)}…` : prompt}` : "design";
   }
   if (mode === "clone") {
+    const assetId = input.ttsVoiceAssetId?.trim();
+    if (assetId) {
+      return `clone·库/${assetId.slice(0, 10)}`;
+    }
     return "clone";
   }
   const voice = input.ttsVoice?.trim() || "";
@@ -160,6 +165,7 @@ export type CharacterReadinessRowInput = {
   ttsVoice?: string | null;
   ttsDesignPrompt?: string | null;
   ttsRefAudioPath?: string | null;
+  ttsVoiceAssetId?: string | null;
   refAudioOk: boolean | null;
   previewStatus: CharacterVoicePreviewStatus;
   previewGeneratedAt?: string | null;
@@ -185,6 +191,7 @@ export function buildCharacterReadinessItem(row: CharacterReadinessRowInput): Ch
     mode: actionMode,
     ttsVoice: row.ttsVoice,
     ttsDesignPrompt: row.ttsDesignPrompt,
+    ttsVoiceAssetId: row.ttsVoiceAssetId,
     reason: binding.reason,
   });
 
@@ -196,6 +203,7 @@ export function buildCharacterReadinessItem(row: CharacterReadinessRowInput): Ch
     voiceBindingStatus: binding.status,
     ttsMode: mode,
     ttsVoice: row.ttsVoice?.trim() || null,
+    ttsVoiceAssetId: row.ttsVoiceAssetId?.trim() || null,
     voiceDetailLabel,
     previewStatus: row.previewStatus,
     previewGeneratedAt: row.previewGeneratedAt ?? null,

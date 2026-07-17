@@ -255,6 +255,7 @@ export class AudiobookVoiceAssetService {
             ttsStyle: true,
             ttsDesignPrompt: true,
             ttsRefAudioPath: true,
+            ttsVoiceAssetId: true,
             ttsSpeakerAliases: true,
             ttsPreviewAudioPath: true,
             ttsPreviewSampleText: true,
@@ -319,6 +320,7 @@ export class AudiobookVoiceAssetService {
             ttsStyle: true,
             ttsDesignPrompt: true,
             ttsRefAudioPath: true,
+            ttsVoiceAssetId: true,
             ttsSpeakerAliases: true,
           },
           orderBy: { createdAt: "asc" },
@@ -377,6 +379,7 @@ export class AudiobookVoiceAssetService {
             ttsVoice: true,
             ttsDesignPrompt: true,
             ttsRefAudioPath: true,
+            ttsVoiceAssetId: true,
           },
         },
       },
@@ -470,8 +473,9 @@ export class AudiobookVoiceAssetService {
       const data: Record<string, unknown> = {
         ttsMode: item.ttsMode,
         ttsStyle: item.ttsStyle?.trim() || null,
-        // 切到 preset/design 时清掉 clone 参考路径，避免预检/合成仍走旧 clone
+        // 切到 preset/design 时清掉 clone 参考路径与库绑定，避免预检/合成仍走旧 clone
         ttsRefAudioPath: null,
+        ttsVoiceAssetId: null,
       };
 
       if (item.ttsMode === "preset") {
@@ -581,6 +585,7 @@ export class AudiobookVoiceAssetService {
         ttsStyle: true,
         ttsDesignPrompt: true,
         ttsRefAudioPath: true,
+        ttsVoiceAssetId: true,
         ttsPreviewAudioPath: true,
         ttsPreviewSampleText: true,
         ttsPreviewFingerprint: true,
@@ -638,6 +643,7 @@ export class AudiobookVoiceAssetService {
         ttsStyle: true,
         ttsDesignPrompt: true,
         ttsRefAudioPath: true,
+        ttsVoiceAssetId: true,
       },
     });
     if (!character) {
@@ -814,6 +820,7 @@ export class AudiobookVoiceAssetService {
         ttsStyle: true,
         ttsDesignPrompt: true,
         ttsRefAudioPath: true,
+        ttsVoiceAssetId: true,
       },
     });
     if (!character) {
@@ -916,6 +923,7 @@ export class AudiobookVoiceAssetService {
         ttsStyle: true,
         ttsDesignPrompt: true,
         ttsRefAudioPath: true,
+        ttsVoiceAssetId: true,
         ttsPreviewAudioPath: true,
         ttsPreviewSampleText: true,
         ttsPreviewFingerprint: true,
@@ -982,6 +990,8 @@ export class AudiobookVoiceAssetService {
       data: {
         ttsMode: "clone",
         ttsRefAudioPath: refPath,
+        // 本地 clone ≠ 库资产
+        ttsVoiceAssetId: null,
         // 保留 design 文案审计；preset voice 可清
         ttsVoice: null,
       },

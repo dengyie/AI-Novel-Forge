@@ -43,6 +43,7 @@ import {
   resolveFullBookM4bPath,
 } from "../../../../services/audiobook/audiobookPaths";
 import { isPathInside } from "../../../../services/audiobook/voiceRefPath";
+import { voiceLibraryService } from "../../../../services/audiobook/voiceLibraryService";
 
 const novelParamsSchema = z.object({
   id: z.string().trim().min(1),
@@ -369,6 +370,138 @@ const workspaceOverviewBodySchema = z.object({
 
 export function registerNovelAudiobookRoutes(input: { router: Router }): void {
   const { router } = input;
+
+
+  // ---------- 全站 VoiceAsset 库（Milestone A）----------
+  router.get("/audiobook/voice-library", async (req, res, next) => {
+    try {
+      const q = req.query as Record<string, string | undefined>;
+      const status = q.status?.includes(",")
+        ? q.status.split(",").map((s) => s.trim()).filter(Boolean)
+        : q.status;
+      const kind = q.kind?.includes(",")
+        ? q.kind.split(",").map((s) => s.trim()).filter(Boolean)
+        : q.kind;
+      const data = voiceLibraryService.list({
+        status: status as any,
+        kind: kind as any,
+        tag: q.tag,
+        q: q.q,
+        limit: q.limit ? Number(q.limit) : undefined,
+      });
+      res.json({ success: true, data } satisfies ApiResponse<typeof data>);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post(
+    "/audiobook/voice-library/import-file",
+    validate({
+      body: z.object({
+        sourcePath: z.string().trim().min(1),
+        slug: z.string().trim().min(1).max(80),
+        displayName: z.string().trim().min(1).max(120),
+        kind: z.enum(["clone_ref", "design_prompt", "preset_alias"]).optional(),
+        status: z.enum(["draft", "approved", "archived", "deprecated"]).optional(),
+        tags: z.array(z.string().trim().min(1).max(40)).max(32).optional(),
+        sampleText: z.string().trim().max(500).nullable().optional(),
+        designPrompt: z.string().trim().max(2000).nullable().optional(),
+        license: z.object({
+          source: z.string().trim().min(1).max(200),
+          rights: z.string().trim().min(1).max(200),
+          notes: z.string().trim().max(1000).nullable().optional(),
+          url: z.string().trim().max(500).nullable().optional(),
+        }),
+        backendTargets: z.array(z.enum(["mimo_chat_audio", "kokoro", "other"])).optional(),
+        packId: z.string().trim().max(80).nullable().optional(),
+        overwrite: z.boolean().optional(),
+      }),
+    }),
+    async (req, res, next) => {
+      try {
+        const data = voiceLibraryService.importFromFile(req.body);
+        res.status(201).json({ success: true, data } satisfies ApiResponse<typeof data>);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  router.post(
+    "/audiobook/voice-library/import-seed-pack",
+    validate({
+      body: z.object({
+        packRoot: z.string().trim().min(1).optional(),
+        forceStatus: z.enum(["draft", "approved", "archived", "deprecated"]).nullable().optional(),
+        overwrite: z.boolean().optional(),
+      }).optional(),
+    }),
+    async (req, res, next) => {
+      try {
+        const data = voiceLibraryService.importYuanworldSeedPack(req.body ?? {});
+        res.status(201).json({ success: true, data } satisfies ApiResponse<typeof data>);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  router.get(
+    "/audiobook/voice-library/:assetId",
+    validate({ params: z.object({ assetId: z.string().trim().min(1) }) }),
+    async (req, res, next) => {
+      try {
+        const { assetId } = req.params as { assetId: string };
+        const asset = voiceLibraryService.getById(assetId);
+        if (!asset) {
+          throw new AppError("VoiceAsset 不存在。", 404);
+        }
+        res.json({ success: true, data: asset } satisfies ApiResponse<typeof asset>);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  router.patch(
+    "/audiobook/voice-library/:assetId/status",
+    validate({
+      params: z.object({ assetId: z.string().trim().min(1) }),
+      body: z.object({
+        status: z.enum(["draft", "approved", "archived", "deprecated"]),
+      }),
+    }),
+    async (req, res, next) => {
+      try {
+        const { assetId } = req.params as { assetId: string };
+        const data = voiceLibraryService.setStatus(assetId, req.body.status);
+        res.json({ success: true, data } satisfies ApiResponse<typeof data>);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  router.post(
+    "/:id/characters/:charId/voice-library/bind",
+    validate({
+      params: characterParamsSchema,
+      body: z.object({
+        voiceAssetId: z.string().trim().min(1).max(80),
+        requireApproved: z.boolean().optional(),
+      }),
+    }),
+    async (req, res, next) => {
+      try {
+        const { id, charId } = req.params as z.infer<typeof characterParamsSchema>;
+        const data = await voiceLibraryService.bindCharacter(id, charId, req.body);
+        res.json({ success: true, data } satisfies ApiResponse<typeof data>);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
 
   router.get("/audiobook/voices", async (_req, res, next) => {
     try {

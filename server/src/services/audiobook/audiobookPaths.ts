@@ -28,6 +28,25 @@ export function resolveVoiceRefRoot(): string {
   return path.join(resolveDataRoot(), "storage", "voice-refs");
 }
 
+/** 全站 VoiceAsset 库根：位于 voice-refs 内，保证 checkVoiceRefAudioPath 可通过。 */
+export function resolveGlobalVoiceLibraryRoot(): string {
+  return path.join(resolveVoiceRefRoot(), "global");
+}
+
+export function resolveGlobalVoiceRegistryPath(): string {
+  return path.join(resolveGlobalVoiceLibraryRoot(), "registry.json");
+}
+
+export function resolveGlobalVoiceAssetDir(assetId: string): string {
+  const safeId = assertSafePathSegment(assetId, "voiceAssetId");
+  return path.join(resolveGlobalVoiceLibraryRoot(), "assets", safeId);
+}
+
+export function resolveGlobalVoiceAssetRefPath(assetId: string, ext = "wav"): string {
+  const safeExt = (ext || "wav").replace(/[^a-z0-9]/gi, "").toLowerCase() || "wav";
+  return path.join(resolveGlobalVoiceAssetDir(assetId), `ref.${safeExt}`);
+}
+
 export function resolveCharacterVoiceRefDir(novelId: string, characterId: string): string {
   const safeNovelId = assertSafePathSegment(novelId, "novelId");
   const safeCharacterId = assertSafePathSegment(characterId, "characterId");
