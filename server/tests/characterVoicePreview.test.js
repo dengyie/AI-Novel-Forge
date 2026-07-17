@@ -6,11 +6,16 @@ const path = require("node:path");
 
 const {
   DEFAULT_CHARACTER_VOICE_PREVIEW_TEXT,
+  LEGACY_CHARACTER_VOICE_PREVIEW_TEXT,
+  CHARACTER_VOICE_PREVIEW_SAMPLE_TEXT_MAX,
   buildCharacterVoicePreviewFingerprint,
   resolveCharacterVoicePreviewStatus,
   resolvePreviewTtsMode,
   assertCharacterVoiceReadyForPreview,
   buildCharacterVoicePreviewAudioUrl,
+  resolveDefaultCharacterVoicePreviewText,
+  clampCharacterVoicePreviewSampleText,
+  countPreviewSentenceEnders,
 } = require("../dist/services/audiobook/characterVoicePreview.js");
 
 const {
@@ -212,4 +217,17 @@ test("writeCharacterVoicePreviewFromBase64 accepts PCM WAV and rejects fake/non-
   } finally {
     fs.rmSync(writtenDir, { recursive: true, force: true });
   }
+});
+
+test("default preview corpus is multi-sentence and under max", () => {
+  const text = resolveDefaultCharacterVoicePreviewText();
+  assert.ok(text.length >= 40);
+  assert.ok(text.length <= CHARACTER_VOICE_PREVIEW_SAMPLE_TEXT_MAX);
+  assert.ok(countPreviewSentenceEnders(text) >= 2);
+  assert.notEqual(text, LEGACY_CHARACTER_VOICE_PREVIEW_TEXT);
+});
+
+test("clampCharacterVoicePreviewSampleText hard-caps at 200", () => {
+  const long = "啊".repeat(300);
+  assert.equal(clampCharacterVoicePreviewSampleText(long).length, 200);
 });

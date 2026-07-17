@@ -18,6 +18,7 @@ import {
 } from "@/api/novel";
 import { queryKeys } from "@/api/queryKeys";
 import { buildCharacterProfileFromWizard, type QuickCharacterCreatePayload } from "../components/characterPanel.utils";
+import { buildCharacterTtsRefSaveFields } from "../components/characterAssetWorkspace.helpers";
 import type {
   SupplementalCharacterCandidate,
   SupplementalCharacterGenerateInput,
@@ -252,8 +253,14 @@ export function useNovelCharacterMutations(input: UseNovelCharacterMutationsInpu
   });
 
   const saveCharacterMutation = useMutation({
-    mutationFn: () =>
-      updateNovelCharacter(id, selectedCharacterId, {
+    mutationFn: () => {
+      const mode = (characterForm.ttsMode || "preset") as "preset" | "design" | "clone";
+      const refFields = buildCharacterTtsRefSaveFields({
+        ttsMode: mode,
+        ttsRefAudioPath: characterForm.ttsRefAudioPath,
+        ttsRefAudioBase64: characterForm.ttsRefAudioBase64,
+      });
+      return updateNovelCharacter(id, selectedCharacterId, {
         name: characterForm.name,
         role: characterForm.role,
         gender: characterForm.gender,
@@ -265,17 +272,17 @@ export function useNovelCharacterMutations(input: UseNovelCharacterMutationsInpu
         attireStyle: characterForm.attireStyle,
         signatureDetail: characterForm.signatureDetail,
         voiceTexture: characterForm.voiceTexture,
-        ttsMode: (characterForm.ttsMode || "preset") as "preset" | "design" | "clone",
+        ttsMode: mode,
         ttsVoice: characterForm.ttsVoice.trim() || null,
         ttsStyle: characterForm.ttsStyle.trim() || null,
         ttsDesignPrompt: characterForm.ttsDesignPrompt.trim() || null,
-        ttsRefAudioPath: characterForm.ttsRefAudioPath.trim() || null,
-        ttsRefAudioBase64: characterForm.ttsRefAudioBase64.trim() || null,
+        ...refFields,
         ttsSpeakerAliases: characterForm.ttsSpeakerAliases.trim() || null,
         presenceImpression: characterForm.presenceImpression,
         currentState: characterForm.currentState,
         currentGoal: characterForm.currentGoal,
-      }),
+      });
+    },
     onSuccess: async () => {
       setCharacterMessage("角色信息已保存。");
       await invalidateCharacterViews(queryClient, id, selectedCharacterId || "none");

@@ -391,6 +391,11 @@ export class AudiobookVoiceReadinessService {
       }
 
       const characterIds = normalizeCharacterIds(input.characterIds);
+      const rawCandidates = input.candidatesPerCharacter;
+      const candidatesPerCharacter =
+        rawCandidates == null || Number.isNaN(Number(rawCandidates))
+          ? 3
+          : Math.max(1, Math.min(5, Math.floor(Number(rawCandidates))));
       const options = {
         fillMissingVoice: input.fillMissingVoice !== false,
         generatePreview: input.generatePreview !== false,
@@ -398,6 +403,7 @@ export class AudiobookVoiceReadinessService {
         planStrategy: (input.planStrategy ?? "auto") as AudiobookVoicePlanStrategy,
         characterIds,
         previewText: input.previewText?.trim() || undefined,
+        candidatesPerCharacter,
       };
 
       const snap = await this.assess(novelId, { characterIds });
@@ -692,7 +698,11 @@ export class AudiobookVoiceReadinessService {
             await audiobookVoiceAssetService.generateCharacterPreview(
               job.novelId,
               target.characterId,
-              { text: job.options.previewText },
+              {
+                text: job.options.previewText,
+                candidates: job.options.candidatesPerCharacter ?? 3,
+                autoAdoptWinner: true,
+              },
             );
             generatedPreview += 1;
             if (item) {

@@ -316,7 +316,7 @@ test("plan keeps card bright texture for cold-personality female lead", () => {
   assert.match(p, /清亮|不甜腻/);
   assert.doesNotMatch(p, /质感偏低略沙哑/);
   assert.match(items[0].reason, /texture:card-kept|texture:locked/);
-  assert.ok(p.length >= DESIGN_PROMPT_TARGET_MIN - 20, `len ${p.length}`);
+  assert.ok(p.length >= 40, `len ${p.length}`);
   assert.ok(p.length <= DESIGN_PROMPT_MAX);
   assert.ok(parseSlotFromDesignPrompt(p));
 });
@@ -426,7 +426,7 @@ test("lead same-gender energy spreads across two leads", () => {
   assert.notEqual(e1, e2);
 });
 
-test("soft target: design prompt typically reaches near TARGET_MIN", () => {
+test("phase-2 acoustic: no habit padding flood; core parseable; ≤1 quirk", () => {
   const prompt = buildDesignPrompt({
     character: {
       characterId: "1",
@@ -443,13 +443,21 @@ test("soft target: design prompt typically reaches near TARGET_MIN", () => {
     cluster: "lead",
   });
   assert.ok(prompt.length <= DESIGN_PROMPT_MAX);
-  assert.ok(
-    prompt.length >= DESIGN_PROMPT_TARGET_MIN - 15,
-    `expected soft fill, got ${prompt.length}`,
-  );
+  // v1.1：宁短而尖；禁止为凑 TARGET_MIN 堆同义灌水
+  assert.ok(prompt.length >= 40, `too short: ${prompt.length}`);
   assert.match(prompt, /音高中等/);
   assert.match(prompt, /质感偏气声轻柔/);
   assert.match(prompt, /气息沉稳有分量/);
+  // 至多一条「气声收住」类 airy 癖好，不得同时塞 heavy+lead 多条 habit 灌水
+  const habitHits = [
+    "气声收住、不虚飘",
+    "日常语速偏稳，激动也不尖",
+    "对白有角色重心，不演旁白",
+    "语速中等，收尾干净",
+    "语速可略快，句尾轻扬",
+  ].filter((h) => prompt.includes(h));
+  assert.ok(habitHits.length <= 1, `expected ≤1 quirk, got ${habitHits.join("|")}`);
+  assert.doesNotMatch(prompt, /气质克制坚定/);
 });
 
 test("buildDesignPromptDetailed reports card-full for aligned texture", () => {

@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import {
   type AudiobookVoicePlanApplyInput,
   type AudiobookVoicePlanApplyResult,
@@ -6,8 +8,13 @@ import {
   type AudiobookVoicePreviewInput,
   type AudiobookVoicePreviewResult,
   type AudiobookWorkspaceBootstrap,
+  type CharacterVoiceAdoptPreviewAsCloneInput,
+  type CharacterVoiceAdoptPreviewAsCloneResult,
+  type CharacterVoicePreviewAdoptCandidateInput,
   type CharacterVoicePreviewAsset,
+  type CharacterVoicePreviewCandidate,
   type CharacterVoicePreviewGenerateInput,
+  type CharacterVoicePreviewGenerateResult,
   isAudiobookTtsMode,
   isMimoTtsPresetVoice,
 } from "@ai-novel/shared/types/audiobook";
@@ -15,9 +22,14 @@ import { prisma } from "../../db/prisma";
 import { AppError } from "../../middleware/errorHandler";
 import { parseSpeakerAliases } from "./audiobookSpeakerAliases";
 import {
+  copyCharacterVoicePreviewToRef,
+  resolveCharacterVoicePreviewCandidatesMetaPath,
   resolveCharacterVoicePreviewPath,
+  writeCharacterVoicePreviewCandidateFromBase64,
   writeCharacterVoicePreviewFromBase64,
 } from "./audiobookPaths";
+import { checkVoiceRefAudioPath } from "./voiceRefPath";
+import { isValidPcmWavFile, parseWavInfo } from "./audiobookWav";
 import {
   isCharacterVoiceConfigured,
   planCharacterVoices,
@@ -27,13 +39,122 @@ import {
   assertCharacterVoiceReadyForPreview,
   buildCharacterVoicePreviewAudioUrl,
   buildCharacterVoicePreviewFingerprint,
+  clampCharacterVoicePreviewSampleText,
   DEFAULT_CHARACTER_VOICE_PREVIEW_TEXT,
   resolveCharacterVoicePreviewStatus,
+  resolveDefaultCharacterVoicePreviewText,
   resolvePreviewTtsMode,
 } from "./characterVoicePreview";
 import { mimoChatAudioTTSProvider } from "./MimoChatAudioTTSProvider";
 
 const DEFAULT_PREVIEW_TEXT = DEFAULT_CHARACTER_VOICE_PREVIEW_TEXT;
+export const DEFAULT_PREVIEW_CANDIDATES = 3;
+export const MAX_PREVIEW_CANDIDATES = 5;
+
+type PreviewCandidatesMeta = {
+  sampleText: string;
+  fingerprint: string;
+  createdAt: string;
+  candidates: Array<{
+    id: string;
+    index: number;
+    path: string;
+    durationMs: number;
+  }>;
+  suggestedCandidateId: string | null;
+  /** 已采用写入 formal preview 的候选 id；未采用则为 null（多抽未选优时禁止锁克隆）。 */
+  adoptedCandidateId?: string | null;
+};
+
+function normalizeCandidatesCount(raw?: number | null): number {
+  if (raw == null || Number.isNaN(Number(raw))) return DEFAULT_PREVIEW_CANDIDATES;
+  return Math.max(1, Math.min(MAX_PREVIEW_CANDIDATES, Math.floor(Number(raw))));
+}
+
+function wavDurationMsFromBase64(base64: string): number {
+  try {
+    const match = /^data:audio\/([a-z0-9.+-]+);base64,(.+)$/i.exec(base64.trim());
+    const bare = (match ? match[2] : base64).replace(/\s+/g, "");
+    const buf = Buffer.from(bare, "base64");
+    const info = parseWavInfo(buf);
+    if (info.byteRate <= 0) return 0;
+    return Math.round((info.dataSize / info.byteRate) * 1000);
+  } catch {
+    return 0;
+  }
+}
+
+/** 工程初选：剔 durationMs<=0，取最接近中位数时长的一条。 */
+export function pickMedianDurationCandidateIndex(durationsMs: number[]): number {
+  if (durationsMs.length === 0) return 0;
+  const valid = durationsMs
+    .map((ms, index) => ({ ms, index }))
+    .filter((row) => row.ms > 0);
+  if (valid.length === 0) return 0;
+  const sorted = [...valid].sort((a, b) => a.ms - b.ms);
+  const mid = sorted[Math.floor((sorted.length - 1) / 2)]!;
+  return mid.index;
+}
+
+function buildCandidateAudioUrl(
+  novelId: string,
+  characterId: string,
+  candidateId: string,
+): string {
+  return `/novels/${encodeURIComponent(novelId)}/characters/${encodeURIComponent(characterId)}/voice-preview/candidates/${encodeURIComponent(candidateId)}/audio`;
+}
+
+function writeCandidatesMeta(novelId: string, characterId: string, meta: PreviewCandidatesMeta): void {
+  const metaPath = resolveCharacterVoicePreviewCandidatesMetaPath(novelId, characterId);
+  fs.mkdirSync(path.dirname(metaPath), { recursive: true });
+  fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), "utf8");
+}
+
+function readCandidatesMeta(novelId: string, characterId: string): PreviewCandidatesMeta | null {
+  const metaPath = resolveCharacterVoicePreviewCandidatesMetaPath(novelId, characterId);
+  if (!fs.existsSync(metaPath)) return null;
+  try {
+    const raw = JSON.parse(fs.readFileSync(metaPath, "utf8")) as PreviewCandidatesMeta;
+    if (!raw || !Array.isArray(raw.candidates)) return null;
+    return raw;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 多抽会话未选优时禁止用旧 formal preview 升格 clone。
+ * meta 指纹与当前一致且 candidates>1 且未 adopted → 阻塞。
+ */
+export function assertMultiDrawAdoptedForCloneLock(
+  meta: PreviewCandidatesMeta | null,
+  currentFingerprint: string,
+): void {
+  if (!meta || !Array.isArray(meta.candidates) || meta.candidates.length <= 1) {
+    return;
+  }
+  if (meta.fingerprint && meta.fingerprint !== currentFingerprint) {
+    // 配置已变：走 ready/stale 主门禁即可
+    return;
+  }
+  const adopted = meta.adoptedCandidateId?.trim() || "";
+  if (!adopted) {
+    throw new AppError(
+      "当前存在未采用的多抽候选。请先采用一条候选写入正式试听，再锁定克隆身份。",
+      400,
+    );
+  }
+}
+
+function promoteCandidateToPreview(sourcePath: string, novelId: string, characterId: string): string {
+  const previewPath = resolveCharacterVoicePreviewPath(novelId, characterId);
+  fs.mkdirSync(path.dirname(previewPath), { recursive: true });
+  const buf = fs.readFileSync(sourcePath);
+  const tmp = `${previewPath}.part`;
+  fs.writeFileSync(tmp, buf);
+  fs.renameSync(tmp, previewPath);
+  return previewPath;
+}
 
 function summarizePlan(
   items: AudiobookVoicePlanSuggestResult["items"],
@@ -155,7 +276,9 @@ export class AudiobookVoiceAssetService {
       audiobookNarratorStyle: novel.audiobookNarratorStyle ?? null,
       chapters: novel.chapters,
       characters: novel.characters.map((character) => {
-        const sampleText = character.ttsPreviewSampleText?.trim() || DEFAULT_PREVIEW_TEXT;
+        const sampleText =
+          character.ttsPreviewSampleText?.trim()
+          || resolveDefaultCharacterVoicePreviewText({ gender: character.gender });
         const currentFingerprint = buildCharacterVoicePreviewFingerprint(character, sampleText);
         return {
           ...character,
@@ -177,6 +300,7 @@ export class AudiobookVoiceAssetService {
       where: { id: novelId },
       select: {
         id: true,
+        audiobookNarratorVoice: true,
         characters: {
           select: {
             id: true,
@@ -206,6 +330,17 @@ export class AudiobookVoiceAssetService {
       throw new AppError("小说不存在。", 404);
     }
 
+    const narratorVoice = novel.audiobookNarratorVoice?.trim() || "";
+    const reservedFromNovel =
+      narratorVoice && isMimoTtsPresetVoice(narratorVoice) ? [narratorVoice] : [];
+    const reservedPresets = [
+      ...new Set(
+        [...(input.reservedPresets ?? []), ...reservedFromNovel]
+          .map((v) => v.trim())
+          .filter(Boolean),
+      ),
+    ];
+
     const strategy = input.strategy ?? "auto";
     const planned = planCharacterVoices({
       characters: novel.characters.map(toPlannerInput),
@@ -213,6 +348,7 @@ export class AudiobookVoiceAssetService {
       onlyMissing: input.onlyMissing !== false,
       characterIds: input.characterIds,
       maxImportantPerPreset: input.maxImportantPerPreset,
+      reservedPresets,
     });
 
     return {
@@ -373,17 +509,23 @@ export class AudiobookVoiceAssetService {
    */
   async preview(novelId: string, input: AudiobookVoicePreviewInput): Promise<AudiobookVoicePreviewResult> {
     if (input.characterId?.trim()) {
-      const asset = await this.generateCharacterPreview(novelId, input.characterId.trim(), {
+      const result = await this.generateCharacterPreview(novelId, input.characterId.trim(), {
         text: input.text,
+        candidates: 1,
+        autoAdoptWinner: true,
       });
+      const adopted = result.adopted;
+      if (!adopted?.audioBase64) {
+        throw new AppError("试听生成失败。", 500);
+      }
       return {
-        characterId: asset.characterId,
-        characterName: asset.characterName,
-        ttsMode: asset.ttsMode,
-        voice: asset.voice ?? null,
-        audioBase64: asset.audioBase64 ?? "",
+        characterId: adopted.characterId,
+        characterName: adopted.characterName,
+        ttsMode: adopted.ttsMode,
+        voice: adopted.voice ?? null,
+        audioBase64: adopted.audioBase64,
         format: "wav",
-        sampleText: asset.sampleText ?? DEFAULT_PREVIEW_TEXT,
+        sampleText: adopted.sampleText ?? DEFAULT_PREVIEW_TEXT,
       };
     }
 
@@ -405,7 +547,7 @@ export class AudiobookVoiceAssetService {
       throw new AppError("ephemeral 试听不支持 clone；请走角色卡生成试听。", 400);
     }
 
-    const sampleText = (input.text?.trim() || DEFAULT_PREVIEW_TEXT).slice(0, 120);
+    const sampleText = clampCharacterVoicePreviewSampleText(input.text?.trim() || DEFAULT_PREVIEW_TEXT);
     const result = await mimoChatAudioTTSProvider.synthesize({
       text: sampleText,
       mode,
@@ -433,6 +575,7 @@ export class AudiobookVoiceAssetService {
       select: {
         id: true,
         name: true,
+        gender: true,
         ttsMode: true,
         ttsVoice: true,
         ttsStyle: true,
@@ -449,7 +592,9 @@ export class AudiobookVoiceAssetService {
     }
 
     const mode = resolvePreviewTtsMode(character.ttsMode);
-    const sampleForFingerprint = character.ttsPreviewSampleText?.trim() || DEFAULT_PREVIEW_TEXT;
+    const sampleForFingerprint =
+      character.ttsPreviewSampleText?.trim()
+      || resolveDefaultCharacterVoicePreviewText({ gender: character.gender });
     const currentFingerprint = buildCharacterVoicePreviewFingerprint(character, sampleForFingerprint);
     const status = resolveCharacterVoicePreviewStatus({
       audioPath: character.ttsPreviewAudioPath,
@@ -473,16 +618,21 @@ export class AudiobookVoiceAssetService {
     };
   }
 
+  /**
+   * 生成角色试听。默认多抽 3 条；candidates=1 或 autoAdoptWinner 时写入正式 preview。
+   * 返回 CharacterVoicePreviewGenerateResult。
+   */
   async generateCharacterPreview(
     novelId: string,
     characterId: string,
     input: CharacterVoicePreviewGenerateInput = {},
-  ): Promise<CharacterVoicePreviewAsset> {
+  ): Promise<CharacterVoicePreviewGenerateResult> {
     const character = await prisma.character.findFirst({
       where: { id: characterId, novelId },
       select: {
         id: true,
         name: true,
+        gender: true,
         ttsMode: true,
         ttsVoice: true,
         ttsStyle: true,
@@ -501,28 +651,198 @@ export class AudiobookVoiceAssetService {
       throw new AppError(error instanceof Error ? error.message : "音色配置不完整，无法生成试听。", 400);
     }
 
-    const sampleText = (input.text?.trim() || DEFAULT_PREVIEW_TEXT).slice(0, 120);
+    const sampleText = clampCharacterVoicePreviewSampleText(
+      input.text?.trim()
+        || resolveDefaultCharacterVoicePreviewText({ gender: character.gender }),
+    );
     const fingerprint = buildCharacterVoicePreviewFingerprint(character, sampleText);
+    const candidatesCount = normalizeCandidatesCount(input.candidates);
+    // job/prepare 默认 auto-adopt；UI 多抽默认 false
+    const autoAdopt =
+      input.autoAdoptWinner === true
+      || (input.autoAdoptWinner !== false && candidatesCount === 1);
 
-    const result = await mimoChatAudioTTSProvider.synthesize({
-      text: sampleText,
-      mode: ready.mode,
+    const drawn: Array<{
+      id: string;
+      index: number;
+      path: string;
+      durationMs: number;
+      base64: string;
+    }> = [];
+
+    for (let i = 0; i < candidatesCount; i += 1) {
+      const synth = await mimoChatAudioTTSProvider.synthesize({
+        text: sampleText,
+        mode: ready.mode,
+        voice: ready.mode === "preset" ? ready.voice : null,
+        style: ready.style,
+        designPrompt: ready.mode === "design" ? ready.designPrompt : null,
+        refAudioPath: ready.mode === "clone" ? ready.refAudioPath : null,
+        format: "wav",
+      });
+      let filePath: string;
+      try {
+        if (candidatesCount === 1 && autoAdopt) {
+          filePath = writeCharacterVoicePreviewFromBase64({
+            novelId,
+            characterId,
+            base64: synth.audioBase64,
+          });
+        } else {
+          filePath = writeCharacterVoicePreviewCandidateFromBase64({
+            novelId,
+            characterId,
+            index: i,
+            base64: synth.audioBase64,
+          });
+        }
+      } catch (error) {
+        throw new AppError(error instanceof Error ? error.message : "试听音频落盘失败。", 500);
+      }
+      drawn.push({
+        id: `c${i}`,
+        index: i,
+        path: filePath,
+        durationMs: wavDurationMsFromBase64(synth.audioBase64),
+        base64: synth.audioBase64,
+      });
+    }
+
+    const winnerIndex = pickMedianDurationCandidateIndex(drawn.map((d) => d.durationMs));
+    const suggested = drawn[winnerIndex] ?? drawn[0]!;
+    const suggestedCandidateId = suggested.id;
+
+    if (candidatesCount > 1 || !autoAdopt) {
+      writeCandidatesMeta(novelId, characterId, {
+        sampleText,
+        fingerprint,
+        createdAt: new Date().toISOString(),
+        candidates: drawn.map((d) => ({
+          id: d.id,
+          index: d.index,
+          path: d.path,
+          durationMs: d.durationMs,
+        })),
+        suggestedCandidateId,
+        adoptedCandidateId: autoAdopt ? suggestedCandidateId : null,
+      });
+    }
+
+    let adopted: CharacterVoicePreviewAsset | null = null;
+    if (autoAdopt) {
+      if (candidatesCount > 1) {
+        try {
+          promoteCandidateToPreview(suggested.path, novelId, characterId);
+        } catch (error) {
+          throw new AppError(error instanceof Error ? error.message : "写入正式试听失败。", 500);
+        }
+      }
+      const generatedAt = new Date();
+      const previewPath = resolveCharacterVoicePreviewPath(novelId, characterId);
+      await prisma.character.update({
+        where: { id: characterId },
+        data: {
+          ttsPreviewAudioPath: previewPath,
+          ttsPreviewSampleText: sampleText,
+          ttsPreviewFingerprint: fingerprint,
+          ttsPreviewGeneratedAt: generatedAt,
+        },
+      });
+      adopted = {
+        characterId: character.id,
+        characterName: character.name,
+        status: "ready",
+        ttsMode: ready.mode,
+        voice: ready.mode === "preset" ? ready.voice : null,
+        sampleText,
+        fingerprint,
+        currentFingerprint: fingerprint,
+        generatedAt: generatedAt.toISOString(),
+        audioUrl: buildCharacterVoicePreviewAudioUrl(novelId, characterId),
+        audioBase64: suggested.base64,
+        format: "wav",
+      };
+    }
+
+    const candidates: CharacterVoicePreviewCandidate[] = drawn.map((d) => ({
+      id: d.id,
+      index: d.index,
+      durationMs: d.durationMs,
+      audioUrl:
+        candidatesCount === 1 && autoAdopt
+          ? buildCharacterVoicePreviewAudioUrl(novelId, characterId)
+          : buildCandidateAudioUrl(novelId, characterId, d.id),
+      audioBase64: d.base64,
+      selected: autoAdopt ? d.id === suggestedCandidateId : false,
+    }));
+
+    return {
+      characterId: character.id,
+      characterName: character.name,
+      ttsMode: ready.mode,
       voice: ready.mode === "preset" ? ready.voice : null,
-      style: ready.style,
-      designPrompt: ready.mode === "design" ? ready.designPrompt : null,
-      refAudioPath: ready.mode === "clone" ? ready.refAudioPath : null,
+      sampleText,
       format: "wav",
+      candidates,
+      adopted,
+      suggestedCandidateId,
+    };
+  }
+
+  /**
+   * 将多抽候选固化为正式 preview.wav。
+   * 候选 meta 指纹必须与当前角色配置一致，避免配置变更后误 adopt 旧抽签。
+   */
+  async adoptPreviewCandidate(
+    novelId: string,
+    characterId: string,
+    input: CharacterVoicePreviewAdoptCandidateInput,
+  ): Promise<CharacterVoicePreviewAsset> {
+    const candidateId = input.candidateId?.trim();
+    if (!candidateId) {
+      throw new AppError("candidateId 不能为空。", 400);
+    }
+
+    const character = await prisma.character.findFirst({
+      where: { id: characterId, novelId },
+      select: {
+        id: true,
+        name: true,
+        gender: true,
+        ttsMode: true,
+        ttsVoice: true,
+        ttsStyle: true,
+        ttsDesignPrompt: true,
+        ttsRefAudioPath: true,
+      },
     });
+    if (!character) {
+      throw new AppError("角色不存在。", 404);
+    }
+
+    const meta = readCandidatesMeta(novelId, characterId);
+    if (!meta) {
+      throw new AppError("没有可采用的试听候选，请先多抽生成。", 400);
+    }
+    const row = meta.candidates.find((c) => c.id === candidateId);
+    if (!row) {
+      throw new AppError(`候选 ${candidateId} 不存在。`, 404);
+    }
+    if (!fs.existsSync(row.path)) {
+      throw new AppError("候选音频文件缺失，请重新生成。", 404);
+    }
+
+    const sampleText = clampCharacterVoicePreviewSampleText(meta.sampleText || DEFAULT_PREVIEW_TEXT);
+    const fingerprint = buildCharacterVoicePreviewFingerprint(character, sampleText);
+    if (meta.fingerprint && meta.fingerprint !== fingerprint) {
+      throw new AppError("候选已过期（音色配置已变更），请重新多抽后再采用。", 409);
+    }
 
     let previewPath: string;
     try {
-      previewPath = writeCharacterVoicePreviewFromBase64({
-        novelId,
-        characterId,
-        base64: result.audioBase64,
-      });
+      previewPath = promoteCandidateToPreview(row.path, novelId, characterId);
     } catch (error) {
-      throw new AppError(error instanceof Error ? error.message : "试听音频落盘失败。", 500);
+      throw new AppError(error instanceof Error ? error.message : "采用候选失败。", 500);
     }
 
     const generatedAt = new Date();
@@ -536,18 +856,26 @@ export class AudiobookVoiceAssetService {
       },
     });
 
+    writeCandidatesMeta(novelId, characterId, {
+      ...meta,
+      sampleText,
+      fingerprint,
+      adoptedCandidateId: candidateId,
+    });
+
+    const mode = resolvePreviewTtsMode(character.ttsMode);
     return {
       characterId: character.id,
       characterName: character.name,
       status: "ready",
-      ttsMode: ready.mode,
-      voice: ready.mode === "preset" ? ready.voice : null,
+      ttsMode: mode,
+      voice: mode === "preset" ? character.ttsVoice?.trim() || null : null,
       sampleText,
       fingerprint,
       currentFingerprint: fingerprint,
       generatedAt: generatedAt.toISOString(),
       audioUrl: buildCharacterVoicePreviewAudioUrl(novelId, characterId),
-      audioBase64: result.audioBase64,
+      audioBase64: null,
       format: "wav",
     };
   }
@@ -560,6 +888,147 @@ export class AudiobookVoiceAssetService {
     }
     return fallback;
   }
+
+
+  /**
+   * Design→Clone：把选优后的正式 preview 拷为 ref.wav，ttsMode=clone。
+   * 必须 ready（与当前配置指纹一致）；禁止用 stale/旧 formal 冒充选优结果。
+   * 可选 candidateId：先 adopt 再升格。对照 regenerate 失败不回滚主绑定。
+   */
+  async adoptPreviewAsClone(
+    novelId: string,
+    characterId: string,
+    input: CharacterVoiceAdoptPreviewAsCloneInput = {},
+  ): Promise<CharacterVoiceAdoptPreviewAsCloneResult> {
+    const candidateId = input.candidateId?.trim() || "";
+    if (candidateId) {
+      await this.adoptPreviewCandidate(novelId, characterId, { candidateId });
+    }
+
+    const character = await prisma.character.findFirst({
+      where: { id: characterId, novelId },
+      select: {
+        id: true,
+        name: true,
+        gender: true,
+        ttsMode: true,
+        ttsVoice: true,
+        ttsStyle: true,
+        ttsDesignPrompt: true,
+        ttsRefAudioPath: true,
+        ttsPreviewAudioPath: true,
+        ttsPreviewSampleText: true,
+        ttsPreviewFingerprint: true,
+        ttsPreviewGeneratedAt: true,
+      },
+    });
+    if (!character) {
+      throw new AppError("角色不存在。", 404);
+    }
+
+    const previewPath =
+      character.ttsPreviewAudioPath?.trim()
+      || resolveCharacterVoicePreviewPath(novelId, characterId);
+    if (!isValidPcmWavFile(previewPath)) {
+      throw new AppError(
+        "升格 clone 需要已选优的正式试听（preview ready）。请先多抽并采用候选。",
+        400,
+      );
+    }
+
+    const sampleForFp =
+      character.ttsPreviewSampleText?.trim()
+      || resolveDefaultCharacterVoicePreviewText({ gender: character.gender });
+    const currentFingerprint = buildCharacterVoicePreviewFingerprint(character, sampleForFp);
+    const previewStatus = resolveCharacterVoicePreviewStatus({
+      audioPath: previewPath,
+      fingerprint: character.ttsPreviewFingerprint,
+      currentFingerprint,
+    });
+    if (previewStatus !== "ready") {
+      throw new AppError(
+        previewStatus === "stale"
+          ? "升格 clone 需要与当前配置一致的 ready 试听（当前为过期试听）。请重新生成并采用候选后再锁定。"
+          : "升格 clone 需要合法 PCM WAV 试听文件。",
+        400,
+      );
+    }
+
+    // 服务端强制：多抽未采用时禁止锁旧 formal（不依赖 UI pending 状态）
+    assertMultiDrawAdoptedForCloneLock(readCandidatesMeta(novelId, characterId), currentFingerprint);
+
+    let refPath: string;
+    try {
+      refPath = copyCharacterVoicePreviewToRef({
+        novelId,
+        characterId,
+        previewPath,
+      });
+    } catch (error) {
+      throw new AppError(
+        error instanceof Error ? error.message : "拷贝 preview 为 clone 参考失败。",
+        500,
+      );
+    }
+
+    const refCheck = checkVoiceRefAudioPath(refPath);
+    if (!refCheck.ok) {
+      throw new AppError(refCheck.reason || "clone 参考路径校验失败。", 500);
+    }
+
+    const retainedDesignPrompt = character.ttsDesignPrompt?.trim() || null;
+    await prisma.character.update({
+      where: { id: characterId },
+      data: {
+        ttsMode: "clone",
+        ttsRefAudioPath: refPath,
+        // 保留 design 文案审计；preset voice 可清
+        ttsVoice: null,
+      },
+    });
+
+    // mode 变更 → fingerprint 变 → 旧 preview 记为 stale；资产仍可播
+    const after = await this.getCharacterPreview(novelId, characterId);
+
+    let contrastPreview: CharacterVoicePreviewAsset | null = null;
+    if (input.regeneratePreviewUnderClone === true) {
+      try {
+        const gen = await this.generateCharacterPreview(novelId, characterId, {
+          text: input.contrastText,
+          candidates: 1,
+          autoAdoptWinner: true,
+        });
+        contrastPreview = gen.adopted;
+      } catch {
+        // 主绑定已成功；对照合成失败不回滚 clone，由客户端提示再生成
+        contrastPreview = null;
+      }
+    }
+
+    return {
+      characterId: character.id,
+      characterName: character.name,
+      ttsMode: "clone",
+      ttsRefAudioPath: refPath,
+      sourcePreviewPath: previewPath,
+      retainedDesignPrompt,
+      preview: after,
+      contrastPreview,
+    };
+  }
+
+  resolvePreviewCandidateFilePath(
+    novelId: string,
+    characterId: string,
+    candidateId: string,
+  ): string | null {
+    const meta = readCandidatesMeta(novelId, characterId);
+    if (!meta) return null;
+    const row = meta.candidates.find((c) => c.id === candidateId);
+    if (!row?.path || !fs.existsSync(row.path)) return null;
+    return row.path;
+  }
 }
+
 
 export const audiobookVoiceAssetService = new AudiobookVoiceAssetService();
