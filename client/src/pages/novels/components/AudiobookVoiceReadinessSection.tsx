@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
   AudiobookVoiceReadinessJob,
@@ -18,6 +18,7 @@ import {
 import { queryKeys } from "@/api/queryKeys";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { toast } from "@/components/ui/toast";
 import { resolveCharacterVoicePreviewBadge } from "./characterAssetWorkspace.helpers";
 
 const JOB_STORAGE_PREFIX = "ainovel.voiceReadinessJob.";
@@ -76,6 +77,38 @@ function isActiveJob(job: AudiobookVoiceReadinessJob | null | undefined): boolea
   return Boolean(job && (job.status === "queued" || job.status === "running"));
 }
 
+function shortHead(text: string, max = 80): string {
+  const one = text.replace(/\s+/g, " ").trim();
+  if (one.length <= max) return one;
+  return `${one.slice(0, max - 1)}…`;
+}
+
+/** 终态 toast 为主；onMessage 仅失败明细或进度短句（§4.2.5）。 */
+function reportReadinessTerminal(
+  kind: "success" | "error" | "info",
+  title: string,
+  detail: string | undefined,
+  onMessage?: (message: string) => void,
+): void {
+  const head = shortHead(title, 72);
+  if (kind === "success") {
+    toast.success(head);
+    onMessage?.(detail ? shortHead(detail, 160) : "");
+    return;
+  }
+  if (kind === "error") {
+    toast.error(head);
+    onMessage?.(detail || title);
+    return;
+  }
+  toast(head);
+  if (detail) {
+    onMessage?.(shortHead(detail, 160));
+  } else {
+    onMessage?.("");
+  }
+}
+
 export type AudiobookVoiceReadinessSectionProps = {
   novelId: string;
   /** 用于播放试听的回调（面板共享 audio 槽） */
@@ -113,6 +146,8 @@ export default function AudiobookVoiceReadinessSection(props: AudiobookVoiceRead
     const stored = readStoredJobId(novelId);
     return stored || bootstrapActiveJobId?.trim() || null;
   });
+  /** 同一 job 终态只 toast 一次（onMessage 引用变化会重跑 effect） */
+  const reportedTerminalJobKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
     const stored = readStoredJobId(novelId);
@@ -171,9 +206,19 @@ export default function AudiobookVoiceReadinessSection(props: AudiobookVoiceRead
       return;
     }
     if (jobQuery.isError) {
+      const lostKey = `lost:${activeJobId}`;
+      if (reportedTerminalJobKeyRef.current === lostKey) {
+        return;
+      }
+      reportedTerminalJobKeyRef.current = lostKey;
       writeStoredJobId(novelId, null);
       setActiveJobId(null);
-      onMessage?.("就绪任务已丢失（可能服务重启），请重新一键就绪。");
+      reportReadinessTerminal(
+        "error",
+        "就绪任务已丢失",
+        "可能服务重启，请重新一键就绪。",
+        onMessage,
+      );
       return;
     }
     const job = jobQuery.data;
@@ -182,8 +227,14 @@ export default function AudiobookVoiceReadinessSection(props: AudiobookVoiceRead
     }
     if (isActiveJob(job)) {
       writeStoredJobId(novelId, job.id);
+      reportedTerminalJobKeyRef.current = null;
       return;
     }
+    const terminalKey = `${job.id}:${job.status}:${job.updatedAt}`;
+    if (reportedTerminalJobKeyRef.current === terminalKey) {
+      return;
+    }
+    reportedTerminalJobKeyRef.current = terminalKey;
     // 终态：清 storage、刷 readiness/workspace
     writeStoredJobId(novelId, null);
     void Promise.all([
@@ -191,17 +242,23 @@ export default function AudiobookVoiceReadinessSection(props: AudiobookVoiceRead
       queryClient.invalidateQueries({ queryKey: queryKeys.novels.audiobookWorkspace(novelId) }),
       queryClient.invalidateQueries({ queryKey: queryKeys.novels.characters(novelId) }),
       queryClient.invalidateQueries({ queryKey: queryKeys.novels.detail(novelId) }),
+      queryClient.invalidateQueries({ queryKey: ["novels", "audiobook-workspace-overview"] }),
     ]);
     const summary = job.summary;
     const tail = summary
       ? `写入音色 ${summary.appliedVoice} · 生成试听 ${summary.generatedPreview} · 跳过 ${summary.skipped} · 失败 ${summary.failed}`
       : "";
     if (job.status === "succeeded") {
-      onMessage?.(`一键就绪完成。${tail}`);
+      reportReadinessTerminal("success", "一键就绪完成", tail || undefined, onMessage);
     } else if (job.status === "cancelled") {
-      onMessage?.(`一键就绪已取消。${tail}`);
+      reportReadinessTerminal("info", "一键就绪已取消", tail || undefined, onMessage);
     } else if (job.status === "failed") {
-      onMessage?.(job.lastError ? `一键就绪失败：${job.lastError}` : `一键就绪失败。${tail}`);
+      reportReadinessTerminal(
+        "error",
+        "一键就绪失败",
+        job.lastError || tail || undefined,
+        onMessage,
+      );
     }
     setActiveJobId(null);
   }, [
@@ -225,7 +282,7 @@ export default function AudiobookVoiceReadinessSection(props: AudiobookVoiceRead
     },
     onSuccess: (job) => {
       if (!job) {
-        onMessage?.("就绪任务创建无返回。");
+        reportReadinessTerminal("error", "就绪任务创建无返回", undefined, onMessage);
         return;
       }
       const active = job.status === "queued" || job.status === "running";
@@ -235,7 +292,9 @@ export default function AudiobookVoiceReadinessSection(props: AudiobookVoiceRead
         void queryClient.invalidateQueries({
           queryKey: queryKeys.novels.audiobookVoiceReadinessJob(novelId, job.id),
         });
+        // 进度短句：只进 message，不 toast 抢视
         onMessage?.("一键就绪已启动，正在串行补齐音色与试听…");
+        void queryClient.invalidateQueries({ queryKey: ["novels", "audiobook-workspace-overview"] });
         return;
       }
       // 即时终态：不进 job 轮询，直接刷看板
@@ -244,17 +303,33 @@ export default function AudiobookVoiceReadinessSection(props: AudiobookVoiceRead
         queryClient.invalidateQueries({ queryKey: queryKeys.novels.audiobookVoiceReadiness(novelId) }),
         queryClient.invalidateQueries({ queryKey: queryKeys.novels.audiobookWorkspace(novelId) }),
         queryClient.invalidateQueries({ queryKey: queryKeys.novels.characters(novelId) }),
+        queryClient.invalidateQueries({ queryKey: ["novels", "audiobook-workspace-overview"] }),
       ]);
       const summary = job.summary;
       const tail = summary
         ? `写入音色 ${summary.appliedVoice} · 生成试听 ${summary.generatedPreview} · 跳过 ${summary.skipped} · 失败 ${summary.failed}`
         : "";
       if (job.status === "succeeded") {
-        onMessage?.(tail ? `一键就绪完成。${tail}` : "当前无需操作，就绪任务已即时完成。");
+        reportReadinessTerminal(
+          "success",
+          tail ? "一键就绪完成" : "当前无需操作，已即时完成",
+          tail || undefined,
+          onMessage,
+        );
       } else if (job.status === "failed") {
-        onMessage?.(job.lastError ? `一键就绪失败：${job.lastError}` : `一键就绪失败。${tail}`);
+        reportReadinessTerminal(
+          "error",
+          "一键就绪失败",
+          job.lastError || tail || undefined,
+          onMessage,
+        );
       } else {
-        onMessage?.(`一键就绪已结束（${job.status}）。${tail}`);
+        reportReadinessTerminal(
+          "info",
+          `一键就绪已结束（${job.status}）`,
+          tail || undefined,
+          onMessage,
+        );
       }
     },
     onError: (error) => {
@@ -262,10 +337,20 @@ export default function AudiobookVoiceReadinessSection(props: AudiobookVoiceRead
       if (active?.activeJobId) {
         writeStoredJobId(novelId, active.activeJobId);
         setActiveJobId(active.activeJobId);
-        onMessage?.("已有进行中的就绪任务，改为跟踪该任务。");
+        reportReadinessTerminal(
+          "info",
+          "已有进行中的就绪任务",
+          "改为跟踪该任务。",
+          onMessage,
+        );
         return;
       }
-      onMessage?.(error instanceof Error ? error.message : "启动一键就绪失败。");
+      reportReadinessTerminal(
+        "error",
+        "启动一键就绪失败",
+        error instanceof Error ? error.message : undefined,
+        onMessage,
+      );
     },
   });
 
@@ -281,10 +366,15 @@ export default function AudiobookVoiceReadinessSection(props: AudiobookVoiceRead
           job,
         );
       }
-      onMessage?.("已请求取消就绪任务。");
+      reportReadinessTerminal("info", "已请求取消就绪任务", undefined, onMessage);
     },
     onError: (error) => {
-      onMessage?.(error instanceof Error ? error.message : "取消就绪任务失败。");
+      reportReadinessTerminal(
+        "error",
+        "取消就绪任务失败",
+        error instanceof Error ? error.message : undefined,
+        onMessage,
+      );
     },
   });
 
@@ -297,17 +387,28 @@ export default function AudiobookVoiceReadinessSection(props: AudiobookVoiceRead
       return { item, data: response.data };
     },
     onSuccess: async ({ item }) => {
-      onMessage?.(`已生成 ${item.characterName} 的固定试听。`);
+      reportReadinessTerminal(
+        "success",
+        `已生成 ${item.characterName} 的固定试听`,
+        undefined,
+        onMessage,
+      );
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: queryKeys.novels.audiobookVoiceReadiness(novelId) }),
         queryClient.invalidateQueries({ queryKey: queryKeys.novels.audiobookWorkspace(novelId) }),
         queryClient.invalidateQueries({
           queryKey: queryKeys.novels.characterVoicePreview(novelId, item.characterId),
         }),
+        queryClient.invalidateQueries({ queryKey: ["novels", "audiobook-workspace-overview"] }),
       ]);
     },
     onError: (error) => {
-      onMessage?.(error instanceof Error ? error.message : "生成试听失败。");
+      reportReadinessTerminal(
+        "error",
+        "生成试听失败",
+        error instanceof Error ? error.message : undefined,
+        onMessage,
+      );
     },
   });
 

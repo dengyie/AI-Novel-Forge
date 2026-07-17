@@ -177,3 +177,25 @@ test("project panel IA anchors + mobile fixed CTA + queryKeys tasks", () => {
   assert.doesNotMatch(panel, /\["novel-audiobook-tasks"/);
   assert.match(panel, /from "@\/components\/ui\/toast"/);
 });
+
+test("ReadinessSection native toast + overview invalidate; panel no dual toast bridge", () => {
+  const readiness = readFileSync(
+    path.join(clientRoot, "src/pages/novels/components/AudiobookVoiceReadinessSection.tsx"),
+    "utf8",
+  );
+  const panel = readFileSync(
+    path.join(clientRoot, "src/pages/novels/components/NovelAudiobookPanel.tsx"),
+    "utf8",
+  );
+  assert.match(readiness, /from "@\/components\/ui\/toast"/);
+  assert.match(readiness, /function reportReadinessTerminal/);
+  assert.match(readiness, /toast\.success/);
+  assert.match(readiness, /toast\.error/);
+  assert.match(readiness, /audiobook-workspace-overview/);
+  // panel readiness onMessage must not re-toast with regex dual path
+  assert.doesNotMatch(
+    panel,
+    /onMessage=\{\(text\) => \{[\s\S]*?toast\.(success|error)/,
+  );
+  assert.match(panel, /ReadinessSection 终态已 toast/);
+});
