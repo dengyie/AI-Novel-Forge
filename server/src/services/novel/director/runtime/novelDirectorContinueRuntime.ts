@@ -110,9 +110,27 @@ function inferPhaseFromTaskState(input: {
 }
 
 /**
- * 是否跳过当前质量修复检查点。
- * 写文质量 P0：仅显式 continuationMode === "skip_quality_repair" 才跳过；
- * auto_execute_range 在 quality_repair / 「质量」阶段不再隐式 skip（禁止策略化盲跳）。
+ * skip_quality_repair 已废弃为质量旁路：
+ * - 永不跳过质量修复债（skipCurrentQualityRepair 恒 false）
+ * - 为兼容旧客户端，续跑审批语义按 auto_execute_range 处理
+ */
+function resolveContinuationExecutionFlags(continuationMode: DirectorContinuationMode | null): {
+  skipCurrentQualityRepair: false;
+  requestedAutoExecutionContinue: boolean;
+} {
+  const isAutoRange =
+    continuationMode === "auto_execute_range"
+    || continuationMode === "skip_quality_repair";
+  return {
+    skipCurrentQualityRepair: false,
+    requestedAutoExecutionContinue: isAutoRange,
+  };
+}
+
+/**
+ * 质量旁路死门：恒 false。
+ * 历史 API 仍可传 continuationMode=skip_quality_repair，但不得再写 review_skip 债。
+ * 续跑语义见 resolveContinuationExecutionFlags。
  */
 function shouldSkipCurrentQualityRepair(input: {
   continuationMode: DirectorContinuationMode | null;
@@ -120,10 +138,11 @@ function shouldSkipCurrentQualityRepair(input: {
   currentItemKey?: string | null;
   currentStage?: string | null;
 }): boolean {
+  void input.continuationMode;
   void input.checkpointType;
   void input.currentItemKey;
   void input.currentStage;
-  return input.continuationMode === "skip_quality_repair";
+  return false;
 }
 
 export class NovelDirectorContinueRuntime {
@@ -289,13 +308,16 @@ export class NovelDirectorContinueRuntime {
       throw new Error("自动导演任务缺少恢复所需上下文。");
     }
 
-    const requestedSkipQualityRepair = shouldSkipCurrentQualityRepair({
-      continuationMode,
-      checkpointType: row.checkpointType,
-      currentItemKey: row.currentItemKey,
-      currentStage: row.currentStage,
-    });
-    const requestedAutoExecutionContinue = continuationMode === "auto_execute_range" || requestedSkipQualityRepair;
+    const continuationFlags = resolveContinuationExecutionFlags(continuationMode);
+    // 纵深：flags 已恒 false；shouldSkip 再钉死，防未来误恢复 true 路径。
+    const requestedSkipQualityRepair = continuationFlags.skipCurrentQualityRepair
+      || shouldSkipCurrentQualityRepair({
+        continuationMode,
+        checkpointType: row.checkpointType,
+        currentItemKey: row.currentItemKey,
+        currentStage: row.currentStage,
+      });
+    const requestedAutoExecutionContinue = continuationFlags.requestedAutoExecutionContinue;
     const baseRunMode = normalizeDirectorRunMode(directorInput.runMode ?? fallbackRunMode);
     const runMode = requestedAutoExecutionContinue && !isDirectorAutoExecutionRunMode(baseRunMode)
       ? "auto_to_execution"
@@ -455,10 +477,9 @@ export class NovelDirectorContinueRuntime {
       chapterId: recoveryResumeTarget?.chapterId,
       // The phase branch leaves the chapter-level checkpoint (e.g. replan_required /
       // chapter_batch_ready) to re-enter a structured phase. Clear it so the next
-      // continue is not misclassified by shouldSkipCurrentQualityRepair (which treats
-      // a lingering replan_required checkpoint as a skip-quality-repair signal and
-      // forces runMode into auto_to_execution, bypassing the outline phase this
-      // branch intends to run). The auto_execution branch already clears it (L346-354);
+      // continue is not misclassified by residual checkpoint state. (skip_quality_repair
+      // no longer elevates runMode via quality bypass; clearCheckpoint still keeps
+      // outline re-entry deterministic.) The auto_execution branch already clears it;
       // this makes the phase branch symmetric.
       clearCheckpoint: true,
     });
