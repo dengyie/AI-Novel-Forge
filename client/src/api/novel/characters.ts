@@ -214,6 +214,8 @@ export async function createNovelCharacter(
     ttsDesignPrompt?: string | null;
     ttsRefAudioPath?: string | null;
     ttsRefAudioBase64?: string | null;
+    /** 全站 approved VoiceAsset.id；服务端 bind 写路径。 */
+    ttsVoiceAssetId?: string | null;
     ttsSpeakerAliases?: string | string[] | null;
     presenceImpression?: string;
     arcStart?: string;
@@ -261,6 +263,8 @@ export async function updateNovelCharacter(
     ttsDesignPrompt: string | null;
     ttsRefAudioPath: string | null;
     ttsRefAudioBase64: string | null;
+    /** 全站 approved VoiceAsset.id；服务端 bind 写路径。null 清空绑定。 */
+    ttsVoiceAssetId: string | null;
     ttsSpeakerAliases: string | string[] | null;
     presenceImpression: string;
     arcStart: string;

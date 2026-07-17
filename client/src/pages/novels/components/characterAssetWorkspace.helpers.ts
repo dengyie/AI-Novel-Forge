@@ -73,7 +73,7 @@ export const CHARACTER_VOICE_MODE_OPTIONS: Array<{
 }> = [
   { value: "preset", label: "预置", helper: "点名 MiMo 现成音色，最快可生成" },
   { value: "design", label: "文案设计", helper: "用描述造声线，适合定制人设" },
-  { value: "clone", label: "克隆", helper: "上传参考音，保存后可试听/合成" },
+  { value: "clone", label: "克隆", helper: "从全站库绑定或上传参考音，保存后可试听/合成" },
 ];
 
 export function resolveCharacterVoiceMode(value?: string | null): CharacterVoiceMode {
@@ -98,6 +98,7 @@ export function resolveCharacterVoiceBinding(character?: {
   ttsVoice?: string | null;
   ttsDesignPrompt?: string | null;
   ttsRefAudioPath?: string | null;
+  ttsVoiceAssetId?: string | null;
 } | null): CharacterVoiceBinding {
   const mode = resolveCharacterVoiceMode(character?.ttsMode);
   const modeLabel = TTS_MODE_LABELS[mode];
@@ -118,16 +119,20 @@ export function resolveCharacterVoiceBinding(character?: {
 
   if (mode === "clone") {
     const path = character?.ttsRefAudioPath?.trim() ?? "";
-    const ready = path.length > 0;
+    const assetId = character?.ttsVoiceAssetId?.trim() ?? "";
+    const ready = path.length > 0 || assetId.length > 0;
+    const shortAsset = assetId ? `库/${assetId.slice(0, 10)}` : "";
     const fileName = path ? path.split(/[\\/]/).pop() || path : "";
     return {
       mode,
       ready,
       modeLabel,
-      shortLabel: ready ? "克隆音色" : "未配音色",
+      shortLabel: ready ? (assetId ? "库克隆" : "克隆音色") : "未配音色",
       detailLabel: ready
-        ? `${modeLabel} · ${fileName}`
-        : `${modeLabel} · 缺参考音频`,
+        ? assetId
+          ? `${modeLabel} · ${shortAsset}${fileName ? ` · ${fileName}` : ""}`
+          : `${modeLabel} · ${fileName}`
+        : `${modeLabel} · 缺参考音频/库绑定`,
     };
   }
 
@@ -153,6 +158,8 @@ export type CharacterVoiceFormSlice = {
   ttsDesignPrompt?: string | null;
   ttsRefAudioPath?: string | null;
   ttsRefAudioBase64?: string | null;
+  /** 全站 VoiceAsset.id（clone 库绑定）。 */
+  ttsVoiceAssetId?: string | null;
   /** 表单为逗号串；已保存角色可能是 string[]。 */
   ttsSpeakerAliases?: string | string[] | null;
 };
@@ -186,6 +193,9 @@ export function isCharacterVoiceFormDirty(
   if ((form.ttsRefAudioPath ?? "").trim() !== (saved?.ttsRefAudioPath ?? "").trim()) {
     return true;
   }
+  if ((form.ttsVoiceAssetId ?? "").trim() !== (saved?.ttsVoiceAssetId ?? "").trim()) {
+    return true;
+  }
   if (normalizeSpeakerAliases(form.ttsSpeakerAliases) !== normalizeSpeakerAliases(saved?.ttsSpeakerAliases)) {
     return true;
   }
@@ -197,7 +207,7 @@ export function isCharacterVoiceFormDirty(
 
 /**
  * 能否基于当前表单配置调用服务端生成试听（不含 dirty 门禁）。
- * clone 只接受已落盘路径；草稿 base64 只能本地试听。
+ * clone：已落盘 path 或已绑库 assetId 可生成；草稿 base64 只能本地试听。
  */
 export function canPreviewCharacterVoice(form: CharacterVoiceFormSlice): {
   ok: boolean;
@@ -222,13 +232,14 @@ export function canPreviewCharacterVoice(form: CharacterVoiceFormSlice): {
     return { ok: true, reason: "" };
   }
   const path = form.ttsRefAudioPath?.trim() ?? "";
-  if (!path) {
-    if (form.ttsRefAudioBase64?.trim()) {
-      return { ok: false, reason: "新参考音需先保存角色，再生成试听；可先本地听参考轨。" };
-    }
-    return { ok: false, reason: "请先上传并保存参考音频。" };
+  const assetId = form.ttsVoiceAssetId?.trim() ?? "";
+  if (path || assetId) {
+    return { ok: true, reason: "" };
   }
-  return { ok: true, reason: "" };
+  if (form.ttsRefAudioBase64?.trim()) {
+    return { ok: false, reason: "新参考音需先保存角色，再生成试听；可先本地听参考轨。" };
+  }
+  return { ok: false, reason: "请先从音色库绑定或上传并保存参考音频。" };
 }
 
 /**
@@ -248,30 +259,45 @@ export function canGenerateCharacterVoicePreview(input: {
 }
 
 /**
- * 角色保存时的 ttsRef 请求片段（与 zod：path 仅 null / base64 上传 对齐）。
- * - 有 base64 → 只传 base64，由服务端落盘写路径
- * - clone 且已有服务端路径 → 省略 path，避免 400 且不误清
- * - 其它情况 → path:null 清空，防半绑定残留
+ * 角色保存时的 ttsRef / 库绑定请求片段。
+ * - 有 base64 → 只传 base64（服务端清 asset 并写路径）
+ * - clone + assetId → 传 ttsVoiceAssetId（服务端 assert approved 写路径）
+ * - clone 且仅有服务端 path → 省略 path/asset，避免 400 且不误清
+ * - 其它情况 → path:null + assetId:null 清空半绑定
  */
 export function buildCharacterTtsRefSaveFields(input: {
   ttsMode?: string | null;
   ttsRefAudioPath?: string | null;
   ttsRefAudioBase64?: string | null;
+  ttsVoiceAssetId?: string | null;
 }): {
   ttsRefAudioBase64?: string | null;
   ttsRefAudioPath?: null;
+  ttsVoiceAssetId?: string | null;
 } {
   const mode = resolveCharacterVoiceMode(input.ttsMode);
   const trimmedPath = (input.ttsRefAudioPath ?? "").trim();
   const trimmedBase64 = (input.ttsRefAudioBase64 ?? "").trim();
+  const trimmedAssetId = (input.ttsVoiceAssetId ?? "").trim();
   if (trimmedBase64) {
-    return { ttsRefAudioBase64: trimmedBase64 };
+    // base64 上传优先；服务端会清 asset 绑定
+    return { ttsRefAudioBase64: trimmedBase64, ttsVoiceAssetId: null };
+  }
+  if (mode === "clone" && trimmedAssetId) {
+    return {
+      ttsRefAudioBase64: null,
+      ttsVoiceAssetId: trimmedAssetId,
+    };
   }
   const keepServerRef = mode === "clone" && Boolean(trimmedPath);
   if (keepServerRef) {
     return { ttsRefAudioBase64: null };
   }
-  return { ttsRefAudioBase64: null, ttsRefAudioPath: null };
+  return {
+    ttsRefAudioBase64: null,
+    ttsRefAudioPath: null,
+    ttsVoiceAssetId: null,
+  };
 }
 
 export type CharacterVoicePreviewStatusLabel = "missing" | "ready" | "stale";
