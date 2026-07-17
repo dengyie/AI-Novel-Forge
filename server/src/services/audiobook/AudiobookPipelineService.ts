@@ -42,7 +42,11 @@ import {
   parseWavInfo,
   writeWavFileAtomic,
 } from "./audiobookWav";
-import { mimoChatAudioTTSProvider } from "./MimoChatAudioTTSProvider";
+import {
+  hasEffectiveMimoTtsMultiEndpointChain,
+  isMimoTtsEndpointChainExhaustedError,
+  mimoChatAudioTTSProvider,
+} from "./MimoChatAudioTTSProvider";
 import {
   applyDeliveryToSegment,
   fingerprintStyleParts,
@@ -155,7 +159,8 @@ export function reconcileAnnotationSegmentsWithVoices(
 
   const nextSegments = segments.map((seg) => {
     if (seg.speakerKind === "narrator" || !seg.characterId) {
-      const baseStyle = input.narrator.style || null;
+      // 与 synth SoT 一致：卡/旁白 base 先剥编译标记，避免指纹与 TTS 双路径
+      const baseStyle = peelCompiledDeliveryMarks(input.narrator.style || null);
       const base: AudiobookDialogueSegment = {
         ...seg,
         speakerKind: "narrator",
@@ -190,7 +195,7 @@ export function reconcileAnnotationSegmentsWithVoices(
         orphanCharacterIds.push(seg.characterId);
         orphanSpeakerLabels.push(seg.speakerLabel || seg.characterId);
       }
-      const baseStyle = input.narrator.style || null;
+      const baseStyle = peelCompiledDeliveryMarks(input.narrator.style || null);
       const base: AudiobookDialogueSegment = {
         ...seg,
         speakerKind: "narrator",
@@ -216,8 +221,10 @@ export function reconcileAnnotationSegmentsWithVoices(
 
     const rawMode = matched.ttsMode?.trim() || "preset";
     const ttsMode = rawMode === "design" || rawMode === "clone" ? rawMode : "preset";
-    const baseStyle = (matched.ttsStyle ?? input.narrator.style) || null;
-    const baseDesignPrompt = matched.ttsDesignPrompt ?? null;
+    const baseStyle = peelCompiledDeliveryMarks(
+      (matched.ttsStyle ?? input.narrator.style) || null,
+    );
+    const baseDesignPrompt = peelCompiledDeliveryMarks(matched.ttsDesignPrompt ?? null);
     const base: AudiobookDialogueSegment = {
       ...seg,
       speakerKind: "character",
@@ -230,6 +237,9 @@ export function reconcileAnnotationSegmentsWithVoices(
       baseDesignPrompt,
       style: baseStyle,
       designPrompt: baseDesignPrompt,
+      // 对账到真实角色卡后清除未匹配标记
+      speakerUnresolved: false,
+      unresolvedSpeakerName: null,
     };
 
     if (seg.delivery && shouldApplyDelivery(mode, "character")) {
@@ -388,14 +398,20 @@ function listExistingChunkPaths(taskDir: string, chapterId: string, expectedCoun
 
 /**
  * 章内 chunk 布局指纹。
- * D11：style + designPrompt；另含 refAudioPath 与全文 sha1，防 clone 换文件/正文中部改写仍 skip。
+ * D11：style + designPrompt 必须与 TTS 注入一致（resolveChunkSynthesizeFields SoT）；
+ * 另含 refAudioPath 与全文 sha1，防 clone 换文件/正文中部改写仍 skip。
  */
 export function chunkLayoutFingerprint(
   jobs: Array<{ text: string; segment: AudiobookDialogueSegment }>,
 ): string {
   const hash = createHash("sha1");
   for (const job of jobs) {
-    const styleParts = fingerprintStyleParts(job.segment);
+    // 与 synthesize 同一 SoT，避免缓存 style 与 peel/recompile 后注入漂移导致错误 skip/wipe
+    const synth = resolveChunkSynthesizeFields(job.segment);
+    const styleParts = fingerprintStyleParts({
+      style: synth.style ?? "",
+      designPrompt: synth.designPrompt ?? "",
+    });
     const textHash = createHash("sha1").update(job.text).digest("hex").slice(0, 12);
     hash.update(speakerKeyFromSegment(job.segment));
     hash.update("\0");
@@ -418,15 +434,14 @@ export function chunkLayoutFingerprint(
 }
 
 /**
- * 合成前唯一解析 style/designPrompt。
- * - 无 delivery：旁白/角色脏「本句表演」剥回 base 或剥标记
- * - 有 delivery：旁白/角色均以干净 base + delivery 重 compile（不盲信旧 style 字符串）
+ * 合成前唯一解析 style/designPrompt（SoT = base* + delivery）。
+ * - 无 delivery：只用干净 base（剥编译标记），不盲信缓存 style/design
+ * - 有 delivery：旁白/角色均以干净 base + delivery 重 compile
  */
 export function resolveChunkSynthesizeFields(segment: AudiobookDialogueSegment): {
   style?: string | null;
   designPrompt?: string | null;
 } {
-  const hasDelivery = Boolean(segment.delivery);
   const styleRaw = typeof segment.style === "string" ? segment.style : "";
   const designRaw = typeof segment.designPrompt === "string" ? segment.designPrompt : "";
   const dirtyStyle = styleRaw.includes("本句表演：")
@@ -434,44 +449,23 @@ export function resolveChunkSynthesizeFields(segment: AudiobookDialogueSegment):
     || styleRaw.includes("表演指令：");
   const dirtyDesign = designRaw.includes("表演指令：");
 
-  if (!hasDelivery) {
-    // 无 delivery：残留编译标记 → 剥回 base 或剥标记，避免脏缓存出声
-    if (segment.speakerKind === "narrator" && (dirtyStyle || dirtyDesign)) {
-      return {
-        style: segment.baseStyle ?? peelCompiledDeliveryMarks(segment.style),
-        designPrompt: segment.baseDesignPrompt ?? peelCompiledDeliveryMarks(segment.designPrompt),
-      };
-    }
-    if (segment.speakerKind === "character" && (dirtyStyle || dirtyDesign)) {
-      return {
-        style: segment.baseStyle ?? peelCompiledDeliveryMarks(segment.style),
-        designPrompt: segment.baseDesignPrompt ?? peelCompiledDeliveryMarks(segment.designPrompt),
-      };
-    }
+  const baseStyleClean = peelCompiledDeliveryMarks(segment.baseStyle)
+    ?? (dirtyStyle
+      ? peelCompiledDeliveryMarks(segment.style)
+      : (segment.baseStyle ?? segment.style ?? null));
+  const baseDesignClean = peelCompiledDeliveryMarks(segment.baseDesignPrompt)
+    ?? (dirtyDesign
+      ? peelCompiledDeliveryMarks(segment.designPrompt)
+      : (segment.baseDesignPrompt ?? segment.designPrompt ?? null));
+
+  if (!segment.delivery) {
     return {
-      style: segment.style,
-      designPrompt: segment.designPrompt,
+      style: baseStyleClean,
+      designPrompt: baseDesignClean,
     };
   }
 
-  const baseStyleClean = peelCompiledDeliveryMarks(segment.baseStyle)
-    ?? (dirtyStyle ? peelCompiledDeliveryMarks(segment.style) : (segment.baseStyle ?? segment.style ?? null));
-  const baseDesignClean = peelCompiledDeliveryMarks(segment.baseDesignPrompt)
-    ?? (dirtyDesign ? peelCompiledDeliveryMarks(segment.designPrompt) : (segment.baseDesignPrompt ?? segment.designPrompt ?? null));
-
-  // 旁白：干净「本句叙述」可透传；脏「本句表演」强制重算
   if (segment.speakerKind === "narrator") {
-    const narratorClean =
-      styleRaw.includes("本句叙述：")
-      && !styleRaw.includes("本句表演：")
-      && !styleRaw.includes("表演指令：")
-      && !designRaw.includes("表演指令：");
-    if (narratorClean) {
-      return {
-        style: segment.style,
-        designPrompt: segment.designPrompt,
-      };
-    }
     const rebuilt = applyDeliveryToSegment(
       {
         ...segment,
@@ -491,7 +485,6 @@ export function resolveChunkSynthesizeFields(segment: AudiobookDialogueSegment):
     };
   }
 
-  // 角色：始终干净 base + delivery 重 compile，避免改卡后旧 base 嵌在 style 里二次叠表演
   return resolveSynthesizeInput({
     ttsMode: segment.ttsMode,
     baseStyle: baseStyleClean,
@@ -542,11 +535,28 @@ function collectQualityWarnings(annotations: AudiobookChapterAnnotation[]): stri
         `第 ${annotation.chapterOrder} 章：chunk 倍率 ${stats.mergeChunkMultiplier}（表演分桶偏碎）`,
       );
     }
+    const unresolved = stats?.unresolvedSpeakerCount ?? 0;
+    if (unresolved > 0) {
+      const names = (stats?.unresolvedSpeakerNames ?? []).filter(Boolean);
+      const nameHint = names.length
+        ? `：${names.slice(0, 6).join("、")}${names.length > 6 ? "…" : ""}`
+        : "";
+      warnings.push(
+        `第 ${annotation.chapterOrder} 章：${unresolved} 段角色名未匹配卡表已用旁白音色${nameHint}（请补 speaker 别名后重标）`,
+      );
+    }
   }
   return warnings;
 }
 
-async function synthesizeChunkWithRetry(input: {
+/** 外层合成重试次数：有效多端点链时默认 1，否则 3；显式 maxAttempts 优先。 */
+export function resolveSynthesizeChunkMaxAttempts(maxAttempts?: number): number {
+  const defaultAttempts = hasEffectiveMimoTtsMultiEndpointChain() ? 1 : 3;
+  return Math.max(1, maxAttempts ?? defaultAttempts);
+}
+
+/** @internal 导出供门禁单测；生产仅 pipeline 调用。 */
+export async function synthesizeChunkWithRetry(input: {
   text: string;
   voice: string;
   style?: string | null;
@@ -557,7 +567,9 @@ async function synthesizeChunkWithRetry(input: {
   signal?: AbortSignal;
   maxAttempts?: number;
 }): Promise<Buffer> {
-  const maxAttempts = Math.max(1, input.maxAttempts ?? 3);
+  // 有效多端点时 provider 内已走完整链；外层默认 1，避免 chain×N。
+  // 仅 primary（含 FALLBACK 与 primary 去重后仍单端）保留短暂 5xx/504 重试（默认 3）。
+  const maxAttempts = resolveSynthesizeChunkMaxAttempts(input.maxAttempts);
   let lastError: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
@@ -580,10 +592,21 @@ async function synthesizeChunkWithRetry(input: {
       if (input.signal?.aborted) {
         throw error;
       }
-      // 400 客户端错误、408 取消：不重试；504 超时、502 上游：可重试
-      if (error instanceof AppError && (error.statusCode === 400 || error.statusCode === 408)) {
+      // 400 客户端错误、408 取消：不重试；401/403 鉴权也不重试
+      if (
+        error instanceof AppError
+        && (error.statusCode === 400
+          || error.statusCode === 401
+          || error.statusCode === 403
+          || error.statusCode === 408)
+      ) {
         throw error;
       }
+      // provider 已耗尽多端点链：禁止外层再整链放大
+      if (isMimoTtsEndpointChainExhaustedError(error)) {
+        throw error;
+      }
+      // 504 超时、502 上游：可重试（仅 primary-only 默认路径）
       if (attempt < maxAttempts) {
         await new Promise((resolve) => setTimeout(resolve, 400 * attempt));
       }

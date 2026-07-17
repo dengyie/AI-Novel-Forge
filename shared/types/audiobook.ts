@@ -55,9 +55,14 @@ export type AudiobookSpeakerKind = "narrator" | "character";
 
 /**
  * 段级语境表演开关。
- * - off：完全沿用角色卡静态 style/design（默认）
+ * - off：完全沿用角色卡静态 style/design
  * - characters：仅角色对白注入 delivery
  * - all：角色 + 旁白轻量 delivery
+ *
+ * 默认约定（勿混）：
+ * - 工作台 UI 默认 characters（成书听感）
+ * - createTask API / resolveDeliveryStyleMode 代码默认 off；可用 env AUDIOBOOK_DELIVERY_STYLE_MODE 覆盖
+ * - 固定试听 / 一键就绪只用角色基线，不走 delivery
  */
 export type DeliveryStyleMode = "off" | "characters" | "all";
 
@@ -171,6 +176,13 @@ export interface AudiobookDialogueSegment {
    * canMerge 用此字段（及音色字段），不用全文 style 字符串。
    */
   deliveryMergeKey?: string | null;
+  /**
+   * 标注时 speaker 未匹配角色卡，已强制旁白音色出声。
+   * 仅审计/UI/质量警告；合成仍走旁白 voice。
+   */
+  speakerUnresolved?: boolean;
+  /** 模型原始 speaker 名（未匹配时保留，便于补 alias） */
+  unresolvedSpeakerName?: string | null;
 }
 
 /** 章级表演质量指标（annotate 后写入，供 UI / 听测门禁） */
@@ -196,6 +208,10 @@ export interface AudiobookDeliveryChapterStats {
   avgResolvedUserLen: number;
   /** expand 后 chunk 数 / 段数；>1 表示被切碎 */
   mergeChunkMultiplier?: number | null;
+  /** 标注时未匹配角色卡、强制旁白出声的段数 */
+  unresolvedSpeakerCount?: number;
+  /** 未匹配原始名（去重，最多约 8 个，供警告/UI） */
+  unresolvedSpeakerNames?: string[];
 }
 
 export interface AudiobookChapterAnnotation {
@@ -242,8 +258,9 @@ export interface CreateAudiobookTaskInput {
    */
   requireReadyPreview?: boolean;
   /**
-   * 段级语境表演模式。缺省由服务端解析（代码默认 off，env AUDIOBOOK_DELIVERY_STYLE_MODE 可覆盖）。
-   * 听测前请保持 off，勿污染固定试听/readiness 基线。
+   * 段级语境表演模式。
+   * 缺省：服务端 resolveDeliveryStyleMode → 代码默认 off，env AUDIOBOOK_DELIVERY_STYLE_MODE 可覆盖。
+   * 工作台 UI 会显式传 characters（与 API 默认不同）。固定试听/readiness 不走本字段。
    */
   deliveryStyleMode?: DeliveryStyleMode;
 }
@@ -442,6 +459,10 @@ export interface AudiobookVoicePlanSuggestResult {
     slotOverrideCount: number;
     /** onlyMissing 时已绑定 design 无结构化标签、用卡字段推断占槽 */
     seedInferredCount: number;
+    /** design 文案平均长度（可选观测） */
+    designPromptAvgLen?: number;
+    /** reason 含 archetype: 的 design 项 */
+    archetypeHitCount?: number;
   };
 }
 

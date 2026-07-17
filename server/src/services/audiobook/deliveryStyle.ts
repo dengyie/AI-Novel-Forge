@@ -505,17 +505,31 @@ function buildDesignUser(baseDesign: string | null, line: string): string {
   if (out.length <= MIMO_USER_MAX) {
     return out;
   }
-  // design 也限制 280：优先保 base 前段 + 表演 + guard
+  // design 也限制 280：优先保 identity 句首三元锚点，再表演，再 guard
   const budgetForBase = Math.max(
     40,
     MIMO_USER_MAX - performance.length - guard.length - 8,
   );
-  return [clip(base, budgetForBase), performance, guard].filter(Boolean).join("\n\n");
+  let clippedBase = clip(base, budgetForBase);
+  // 若尾部互斥句被切掉但预算仍够一句短互斥，补回（串戏防护）
+  if (
+    base.includes("避免播音腔")
+    && !clippedBase.includes("避免播音腔")
+    && clippedBase.length + 12 <= budgetForBase
+  ) {
+    const shortMutex = "避免播音腔与串戏。";
+    const room = budgetForBase - shortMutex.length;
+    if (room >= 40) {
+      clippedBase = `${clip(base, room)}${shortMutex}`;
+    }
+  }
+  return [clippedBase, performance, guard].filter(Boolean).join("\n\n");
 }
 
 /**
  * 解析 createTask / env 的 deliveryStyleMode；非法 → off。
- * 优先级：显式入参 > env > 代码默认 off
+ * 优先级：显式入参 > env > 代码默认 off。
+ * 注意：工作台 UI 默认 characters 且会显式传参；本函数默认 off 仅服务 API/脚本兼容。
  */
 export function resolveDeliveryStyleMode(
   explicit?: string | null,
@@ -702,6 +716,8 @@ export function computeDeliveryChapterStats(
   deliveryApplyRate: number;
   avgResolvedUserLen: number;
   mergeChunkMultiplier: number | null;
+  unresolvedSpeakerCount: number;
+  unresolvedSpeakerNames: string[];
 } {
   const segmentCount = segments.length;
   let characterSegmentCount = 0;
@@ -709,6 +725,9 @@ export function computeDeliveryChapterStats(
   let characterDeliveryApplied = 0;
   let narratorDeliveryApplied = 0;
   let userLenSum = 0;
+  let unresolvedSpeakerCount = 0;
+  const unresolvedNameOrder: string[] = [];
+  const unresolvedNameSeen = new Set<string>();
   for (const seg of segments) {
     if (seg.speakerKind === "character") {
       characterSegmentCount += 1;
@@ -716,6 +735,16 @@ export function computeDeliveryChapterStats(
     } else {
       narratorSegmentCount += 1;
       if (seg.delivery) narratorDeliveryApplied += 1;
+    }
+    if (seg.speakerUnresolved) {
+      unresolvedSpeakerCount += 1;
+      const raw = (seg.unresolvedSpeakerName || seg.speakerLabel || "").trim();
+      if (raw && !unresolvedNameSeen.has(raw)) {
+        unresolvedNameSeen.add(raw);
+        if (unresolvedNameOrder.length < 8) {
+          unresolvedNameOrder.push(raw);
+        }
+      }
     }
     const user =
       (seg.ttsMode === "design" ? seg.designPrompt : seg.style) || "";
@@ -746,5 +775,7 @@ export function computeDeliveryChapterStats(
     avgResolvedUserLen: Number(avgResolvedUserLen.toFixed(1)),
     mergeChunkMultiplier:
       mergeChunkMultiplier == null ? null : Number(mergeChunkMultiplier.toFixed(3)),
+    unresolvedSpeakerCount,
+    unresolvedSpeakerNames: unresolvedNameOrder,
   };
 }
