@@ -1,4 +1,5 @@
 import type { VolumeChapterPlan, VolumePlan, VolumePlanDocument } from "@ai-novel/shared/types/novel";
+import { sanitizeChapterTaskSheetForPersistence } from "@ai-novel/shared/types/chapterTaskSheetQuality";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "../../../db/prisma";
 import { withSqliteRetry } from "../../../db/sqliteRetry";
@@ -178,7 +179,7 @@ function toVolumeChapterPlanData(volumeId: string, chapter: VolumeChapterPlan): 
     revealLevel: chapter.revealLevel ?? null,
     targetWordCount: chapter.targetWordCount ?? null,
     mustAvoid: chapter.mustAvoid ?? null,
-    taskSheet: chapter.taskSheet ?? null,
+    taskSheet: sanitizeChapterTaskSheetForPersistence(chapter.taskSheet),
     sceneCards: chapter.sceneCards ?? null,
     payoffRefsJson: JSON.stringify(chapter.payoffRefs),
   };

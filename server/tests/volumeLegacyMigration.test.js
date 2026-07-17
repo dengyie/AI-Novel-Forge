@@ -2,8 +2,15 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   buildFallbackVolumesFromLegacy,
+  normalizeVolumeDraftInput,
   parseLegacyStructuredOutline,
 } = require("../dist/services/novel/volume/volumePlanUtils.js");
+const {
+  mergeChapterDetail,
+} = require("../dist/services/novel/volume/volumeGenerationHelpers.js");
+const {
+  containsInternalQualityCodes,
+} = require("../../shared/dist/types/chapterTaskSheetQuality.js");
 
 test("legacy structured outline migration upgrades old volume payloads into normalized v2 volumes and merges arc signals", () => {
   const structuredOutline = JSON.stringify({
@@ -97,4 +104,126 @@ test("parseLegacyStructuredOutline accepts flat chapter arrays and turns them in
   assert.equal(parsed[0].title, "第1卷");
   assert.equal(parsed[0].chapters.length, 2);
   assert.equal(parsed[0].chapters[1].chapterOrder, 2);
+});
+
+test("volume plan write edges strip internal quality codes from taskSheet", () => {
+  const dirty = "推进资源危机；payoff_missing_progress；draft_obligation_unmet 后收尾。";
+  const draft = normalizeVolumeDraftInput("novel-sanitize", [{
+    title: "第一卷",
+    summary: "卷摘要",
+    mainPromise: "反压成立",
+    escalationMode: "压迫升级",
+    protagonistChange: "从退让到反压",
+    climax: "卷末反压",
+    nextVolumeHook: "更强敌人",
+    chapters: [{
+      title: "第1章",
+      summary: "开局压迫",
+      taskSheet: dirty,
+    }],
+  }]);
+  assert.equal(draft.length, 1);
+  const draftSheet = draft[0].chapters[0].taskSheet;
+  assert.ok(draftSheet);
+  assert.equal(containsInternalQualityCodes(draftSheet), false);
+  assert.match(draftSheet, /资源危机/);
+  assert.match(draftSheet, /收尾/);
+
+  const legacy = buildFallbackVolumesFromLegacy("novel-sanitize-legacy", {
+    outline: "被压制的小人物逐步反压。",
+    chapters: [{
+      order: 1,
+      title: "第1章",
+      expectation: "主角开局被压制",
+      taskSheet: dirty,
+    }],
+  });
+  assert.equal(legacy.length, 1);
+  const legacySheet = legacy[0].chapters[0].taskSheet;
+  assert.ok(legacySheet);
+  assert.equal(containsInternalQualityCodes(legacySheet), false);
+  assert.match(legacySheet, /资源危机/);
+
+  // codes-only residue collapses to null on plan normalize path
+  const emptied = normalizeVolumeDraftInput("novel-sanitize-empty", [{
+    title: "第一卷",
+    summary: "卷摘要",
+    mainPromise: "反压成立",
+    escalationMode: "压迫升级",
+    protagonistChange: "从退让到反压",
+    climax: "卷末反压",
+    nextVolumeHook: "更强敌人",
+    chapters: [{
+      title: "第1章",
+      summary: "开局压迫",
+      taskSheet: "payoff_missing_progress replan_required",
+    }],
+  }]);
+  assert.equal(emptied[0].chapters[0].taskSheet, null);
+});
+
+test("mergeChapterDetail sanitizes generated taskSheet before merge write", () => {
+  const now = new Date(0).toISOString();
+  const document = {
+    novelId: "novel-sanitize-merge",
+    workspaceVersion: "v2",
+    activeVersionId: null,
+    activeVersionNumber: null,
+    strategy: null,
+    volumes: [{
+      id: "volume-1",
+      novelId: "novel-sanitize-merge",
+      order: 1,
+      title: "第一卷",
+      summary: "卷摘要",
+      mainPromise: "反压",
+      escalationMode: "升级",
+      protagonistChange: "变化",
+      climax: "高潮",
+      nextVolumeHook: "钩子",
+      openPayoffs: [],
+      closedPayoffs: [],
+      chapters: [{
+        id: "chapter-1",
+        volumeId: "volume-1",
+        chapterOrder: 1,
+        title: "第1章",
+        summary: "开局",
+        purpose: null,
+        turningPoint: null,
+        emotionalBeat: null,
+        endingHook: null,
+        mustAvoid: null,
+        targetWordCount: 3000,
+        conflictLevel: 50,
+        conflictLevelSource: "ai",
+        revealLevel: 10,
+        payoffRefs: [],
+        taskSheet: "旧合同",
+        taskSheetType: null,
+        chapterId: null,
+      }],
+      createdAt: now,
+      updatedAt: now,
+    }],
+    beatSheets: [],
+    rebalanceResults: [],
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  const merged = mergeChapterDetail({
+    document,
+    targetVolumeId: "volume-1",
+    targetChapterId: "chapter-1",
+    detailMode: "full",
+    generatedDetail: {
+      taskSheet: "推进资源危机；payoff_missing_progress；draft_obligation_unmet 后收尾。",
+    },
+  });
+  const sheet = merged.volumes[0].chapters[0].taskSheet;
+  assert.ok(sheet);
+  assert.equal(containsInternalQualityCodes(sheet), false);
+  assert.match(sheet, /资源危机/);
+  assert.match(sheet, /收尾/);
 });
