@@ -41,6 +41,7 @@ interface CharacterFormState {
   ttsDesignPrompt: string;
   ttsRefAudioPath: string;
   ttsRefAudioBase64: string;
+  ttsVoiceAssetId: string;
   ttsSpeakerAliases: string;
   presenceImpression: string;
   currentState: string;
@@ -224,12 +225,14 @@ export default function CharacterAssetWorkspace(props: CharacterAssetWorkspacePr
       ttsVoice: characterForm.ttsVoice,
       ttsDesignPrompt: characterForm.ttsDesignPrompt,
       ttsRefAudioPath: characterForm.ttsRefAudioPath,
+      ttsVoiceAssetId: characterForm.ttsVoiceAssetId,
     }),
     [
       characterForm.ttsMode,
       characterForm.ttsVoice,
       characterForm.ttsDesignPrompt,
       characterForm.ttsRefAudioPath,
+      characterForm.ttsVoiceAssetId,
     ],
   );
 
@@ -476,6 +479,7 @@ export default function CharacterAssetWorkspace(props: CharacterAssetWorkspacePr
                 ttsDesignPrompt: characterForm.ttsDesignPrompt,
                 ttsRefAudioPath: characterForm.ttsRefAudioPath,
                 ttsRefAudioBase64: characterForm.ttsRefAudioBase64,
+                ttsVoiceAssetId: characterForm.ttsVoiceAssetId,
                 ttsSpeakerAliases: characterForm.ttsSpeakerAliases,
               }}
               saved={selectedCharacter}
