@@ -1109,7 +1109,8 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
     mutationFn: async (mode: "missing" | "rebalance") => {
       const overwriteMode = mode === "rebalance";
       setVoicePlanOverwrite(overwriteMode);
-      // 补齐缺失：auto 保守语义；重新差异化：prefer_design 拉高身份音色区分度
+      // 补齐缺失：auto 在有 approved 库时对 lead/cast/narrator 可推荐 clone；
+      // 重新差异化：prefer_design 拉高身份音色区分度（不注入库）
       const response = await suggestAudiobookVoicePlan(novelId, {
         onlyMissing: !overwriteMode,
         strategy: overwriteMode ? "prefer_design" : "auto",
@@ -1128,17 +1129,23 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
         setMessage(text);
         return;
       }
+      const cloneCount = data.summary.cloneCount ?? 0;
       const obsBits = [
         data.summary.slotOverrideCount ? `override ${data.summary.slotOverrideCount}` : "",
         data.summary.softCollisionCount ? `soft ${data.summary.softCollisionCount}` : "",
         data.summary.seedInferredCount ? `seed推断 ${data.summary.seedInferredCount}` : "",
+        cloneCount ? `库clone ${cloneCount}` : "",
       ].filter(Boolean);
-      const detail = `${overwriteMode ? "重新差异化" : "补齐缺失"}规划 ${items.length} 项：preset ${data.summary.presetCount} / design ${data.summary.designCount}${
+      const detail = `${overwriteMode ? "重新差异化" : "补齐缺失"}规划 ${items.length} 项：preset ${data.summary.presetCount} / design ${data.summary.designCount} / clone ${cloneCount}${
         obsBits.length ? `（${obsBits.join(" / ")}）` : ""
       }${
         overwriteMode ? "（写入时将覆盖已绑定）" : ""
-      }。`;
-      toast.success(`${overwriteMode ? "重新差异化" : "补齐缺失"}规划 ${items.length} 项`);
+      }${
+        cloneCount > 0 ? "。clone 项将经服务端 bind 写库资产（需已批准）。" : "。"
+      }`;
+      toast.success(
+        `${overwriteMode ? "重新差异化" : "补齐缺失"}规划 ${items.length} 项（clone ${cloneCount}）`,
+      );
       setMessage(detail);
     },
     onError: (error) => {
@@ -1161,6 +1168,8 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
           ttsVoice: item.ttsVoice,
           ttsStyle: item.ttsStyle,
           ttsDesignPrompt: item.ttsDesignPrompt,
+          // clone 必须透传 assetId；服务端 bind 禁止客户端 path
+          ttsVoiceAssetId: item.ttsVoiceAssetId ?? null,
           speakerAliases: item.speakerAliases,
         })),
       });
@@ -1207,7 +1216,13 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
         });
         return {
           mode: "ephemeral" as const,
-          label: `${item.characterName} · 规划草稿 · ${item.ttsMode}${item.ttsVoice ? `/${item.ttsVoice}` : ""}`,
+          label: `${item.characterName} · 规划草稿 · ${item.ttsMode}${
+            item.ttsMode === "clone" && item.ttsVoiceAssetId
+              ? `·库/${item.ttsVoiceAssetId.slice(0, 10)}`
+              : item.ttsVoice
+                ? `/${item.ttsVoice}`
+                : ""
+          }`,
           characterName: item.characterName,
           data: response.data,
         };
@@ -1397,7 +1412,11 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
                         {item.characterName}
                         <span className="ml-2 text-xs font-normal text-muted-foreground">
                           {item.ttsMode}
-                          {item.ttsVoice ? ` · ${item.ttsVoice}` : ""}
+                          {item.ttsMode === "clone" && item.ttsVoiceAssetId
+                            ? ` · 库/${item.ttsVoiceAssetId.slice(0, 10)}`
+                            : item.ttsVoice
+                              ? ` · ${item.ttsVoice}`
+                              : ""}
                           {` · 重要度 ${item.importance}`}
                         </span>
                       </div>

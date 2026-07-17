@@ -159,6 +159,7 @@ export function matchLibraryAsset(input: {
   if (!available.length) return null;
 
   let best: { asset: VoicePlannerLibraryAsset; score: number; reason: string } | null = null;
+  const isLeadOrCast = input.cluster === "lead" || input.cluster === "cast";
 
   for (const asset of available) {
     const tags = normalizeTags(asset.tags);
@@ -175,32 +176,51 @@ export function matchLibraryAsset(input: {
       continue;
     }
 
+    const genderHit =
+      input.genderBucket !== "unknown" && genderTags.includes(input.genderBucket);
+    const clusterHit = clusterTags.includes(input.cluster);
+    const genderOpen = genderTags.length === 0 || genderTags.includes("unknown");
+    const clusterOpen = clusterTags.length === 0;
+
+    // 主/配角禁止无信号乱塞：须 gender 命中或 cluster 命中至少一端
+    // （无 tags 的 approved 样本不能当男主/女主英雄声）
+    if (isLeadOrCast && !genderHit && !clusterHit) {
+      continue;
+    }
+
     let score = 10; // 基础可用分
     const bits: string[] = [];
 
-    if (input.genderBucket !== "unknown" && genderTags.includes(input.genderBucket)) {
+    if (genderHit) {
       score += 40;
       bits.push(`gender:${input.genderBucket}`);
-    } else if (genderTags.length === 0 || genderTags.includes("unknown")) {
+    } else if (genderOpen) {
       score += 5;
       bits.push("gender:open");
     }
 
-    if (clusterTags.includes(input.cluster)) {
+    if (clusterHit) {
       score += 35;
       bits.push(`cluster:${input.cluster}`);
-    } else if (clusterTags.length === 0) {
+    } else if (clusterOpen) {
       score += 8;
       bits.push("cluster:open");
     } else {
-      // 有其它簇标签但不匹配：仍可弱匹配（避免库太少时全灭）
+      // 有其它簇标签但不匹配：弱匹配（仅 extra/narrator 可达此分支）
       score += 2;
       bits.push("cluster:weak");
     }
 
     // lead 优先更精确匹配
-    if (input.cluster === "lead" && clusterTags.includes("lead")) {
+    if (input.cluster === "lead" && clusterHit) {
       score += 10;
+    }
+
+    // 无任何 gender/cluster 命中：提高门槛，避免空 tags 路人/旁白过松
+    // base10+open5+open8=23；要求 ≥28 → 至少再有弱信号，或显式命中
+    const floor = genderHit || clusterHit ? 20 : 28;
+    if (score < floor) {
+      continue;
     }
 
     if (!best || score > best.score) {
@@ -212,8 +232,7 @@ export function matchLibraryAsset(input: {
     }
   }
 
-  // 太弱的匹配不采用（避免任意一个 asset 乱塞）
-  if (!best || best.score < 20) return null;
+  if (!best) return null;
   return best;
 }
 

@@ -1162,3 +1162,82 @@ test("library assets are not double-assigned", () => {
   assert.ok(other);
   assert.equal(other.ttsMode, "design");
 });
+
+test("untagged approved asset is rejected for lead/cast", () => {
+  const hit = matchLibraryAsset({
+    genderBucket: "male",
+    cluster: "lead",
+    usedAssetIds: new Set(),
+    assets: [
+      {
+        id: "va_open",
+        slug: "open",
+        displayName: "open",
+        status: "approved",
+        kind: "clone_ref",
+        tags: [],
+      },
+    ],
+  });
+  assert.equal(hit, null);
+
+  const { items } = planCharacterVoices({
+    onlyMissing: true,
+    strategy: "prefer_library",
+    libraryAssets: [
+      {
+        id: "va_open",
+        slug: "open",
+        displayName: "open",
+        status: "approved",
+        kind: "clone_ref",
+        tags: [],
+      },
+    ],
+    characters: [
+      { characterId: "m", characterName: "男主", gender: "male", castRole: "protagonist" },
+    ],
+  });
+  assert.equal(items[0].ttsMode, "design");
+  assert.equal(items[0].ttsVoiceAssetId, null);
+});
+
+test("untagged approved asset is rejected for extra/narrator (score floor)", () => {
+  const hit = matchLibraryAsset({
+    genderBucket: "male",
+    cluster: "extra",
+    usedAssetIds: new Set(),
+    assets: [
+      {
+        id: "va_open",
+        slug: "open",
+        displayName: "open",
+        status: "approved",
+        kind: "clone_ref",
+        tags: [],
+      },
+    ],
+  });
+  assert.equal(hit, null);
+});
+
+test("cluster-only tag can still match lead without gender tag", () => {
+  const hit = matchLibraryAsset({
+    genderBucket: "male",
+    cluster: "lead",
+    usedAssetIds: new Set(),
+    assets: [
+      {
+        id: "va_lead",
+        slug: "lead-only",
+        displayName: "lead",
+        status: "approved",
+        kind: "clone_ref",
+        tags: ["lead"],
+      },
+    ],
+  });
+  assert.ok(hit);
+  assert.equal(hit.asset.id, "va_lead");
+});
+

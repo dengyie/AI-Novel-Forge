@@ -234,6 +234,11 @@ function loadApprovedLibraryAssets(): VoicePlannerLibraryAsset[] {
     kind: "clone_ref",
     limit: 500,
   });
+  if (listed.total > listed.items.length) {
+    console.warn(
+      `[voice-plan] approved clone_ref library truncated for planner: total=${listed.total} injected=${listed.items.length} limit=500`,
+    );
+  }
   return listed.items.map((a) => ({
     id: a.id,
     slug: a.slug,
@@ -452,7 +457,7 @@ export class AudiobookVoiceAssetService {
           continue;
         }
 
-        // 已有 clone 绑库且未 overwrite：永不覆盖
+        // 已有 clone 绑库且未 overwrite：永不覆盖；overwrite=true 时换绑仍走 assertBindable
         const alreadyClone =
           (character.ttsMode?.trim() || "") === "clone"
           && Boolean(
@@ -466,10 +471,9 @@ export class AudiobookVoiceAssetService {
           });
           continue;
         }
-        if (alreadyClone && overwrite) {
-          // 允许 overwrite 换库资产；仍走 assertBindableCloneRef
-        } else if (
-          isCharacterVoiceConfigured(character)
+        if (
+          !alreadyClone
+          && isCharacterVoiceConfigured(character)
           && !overwrite
         ) {
           skipped.push({
