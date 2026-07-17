@@ -289,13 +289,31 @@ test("A7: no default-true skip_quality_repair strategy mapping in follow-up / co
     path.join(__dirname, "../src/services/novel/director/runtime/novelDirectorContinueRuntime.ts"),
     "utf8",
   );
+  // skip_quality_repair 质量旁路死门：enum 可收，执行面永不放行 skip
   assert.match(continueSrc, /function shouldSkipCurrentQualityRepair/);
-  assert.match(continueSrc, /return input\.continuationMode === "skip_quality_repair"/);
+  assert.match(continueSrc, /function resolveContinuationExecutionFlags/);
+  assert.match(continueSrc, /skipCurrentQualityRepair:\s*false/);
+  assert.doesNotMatch(
+    continueSrc,
+    /return input\.continuationMode === "skip_quality_repair"/,
+  );
+  // 旧 mode 仍可映射为 auto-range 续跑，但不得再做质量债旁路
+  assert.match(
+    continueSrc,
+    /continuationMode === "auto_execute_range"[\s\S]{0,80}continuationMode === "skip_quality_repair"/,
+  );
   // 不得再有 auto_execute_range + quality 检查点的隐式 skip 分支
   assert.doesNotMatch(
     continueSrc,
     /continuationMode !== "auto_execute_range"[\s\S]{0,200}quality_repair/,
   );
+
+  const checkpointSrc = fs.readFileSync(
+    path.join(__dirname, "../src/services/novel/director/automation/novelDirectorAutoExecutionCheckpointRuntime.ts"),
+    "utf8",
+  );
+  assert.match(checkpointSrc, /const canSkipCurrentQualityRepair = false/);
+  assert.doesNotMatch(checkpointSrc, /source:\s*"review_skip"/);
 });
 
 // ─── A8 ────────────────────────────────────────────────────────────

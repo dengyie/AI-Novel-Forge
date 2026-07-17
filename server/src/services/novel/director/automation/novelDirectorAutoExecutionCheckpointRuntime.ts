@@ -10,7 +10,6 @@ import { buildNovelEditResumeTarget } from "../../workflow/novelWorkflow.shared"
 import {
   buildDirectorAutoExecutionCompletedLabel,
   buildDirectorAutoExecutionCompletedSummary,
-  buildDirectorAutoExecutionDeferredQualityState,
   buildDirectorAutoExecutionPausedLabel,
   buildDirectorAutoExecutionPausedSummary,
   buildDirectorAutoExecutionScopeLabelFromState,
@@ -287,11 +286,11 @@ export async function resolveQualityRepairNoticeAction(
     && !isHardPauseNotice
     && isAiDriverExecution
     && hasQualityAlertDetails;
-  const canSkipCurrentQualityRepair = Boolean(
-    input.skipCurrentQualityRepair
-    && isAiDriverExecution
-    && !isHardPauseNotice,
-  );
+  // skip_quality_repair / skipCurrentQualityRepair 质量旁路已死门：
+  // 不得再 auto_continue + source review_skip 债。历史 state 仍可读展示。
+  const canSkipCurrentQualityRepair = false;
+  void input.skipCurrentQualityRepair;
+  void canSkipCurrentQualityRepair;
   const canContinueAfterExplicitApproval = Boolean(
     input.approveAutoExecutionScope
     && checkpointType === "chapter_batch_ready"
@@ -326,20 +325,6 @@ export async function resolveQualityRepairNoticeAction(
       action: "auto_continue",
       checkpointType,
       checkpointState,
-      qualityRepairRisk,
-    };
-  }
-
-  if (canSkipCurrentQualityRepair) {
-    return {
-      action: "auto_continue",
-      checkpointType,
-      checkpointState: buildDirectorAutoExecutionDeferredQualityState({
-        state: checkpointState,
-        reason: input.noticeSummary,
-        source: "review_skip",
-        chapter: input.qualityIssueChapter ?? null,
-      }),
       qualityRepairRisk,
     };
   }
