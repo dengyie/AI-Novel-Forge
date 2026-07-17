@@ -291,8 +291,14 @@ export class NovelDirectorContinueRuntime {
       novelId,
       summary: row.pendingManualRecovery
         ? "用户确认后，自动导演从待恢复状态继续。"
-        : "自动导演按当前工作区内容重新判断后继续运行。",
-      reason: row.pendingManualRecovery ? "manual_recovery_confirmed" : "continue_requested",
+        : input?.forceResume === true
+          ? "强制恢复：自动导演从当前检查点重新进入，不复用已成功步骤。"
+          : "自动导演按当前工作区内容重新判断后继续运行。",
+      reason: row.pendingManualRecovery
+        ? "manual_recovery_confirmed"
+        : input?.forceResume === true
+          ? "force_resume"
+          : "continue_requested",
     });
     const resumedCandidateStage = await this.continueCandidateStageTask(taskId, {
       novelId,
@@ -497,6 +503,9 @@ export class NovelDirectorContinueRuntime {
         batchAlreadyStartedCount: input?.batchAlreadyStartedCount,
         approveCurrentGate,
         approveAutoExecutionScope: requestedAutoExecutionContinue || isFullBookAutopilot,
+        // forceResume continue: pipeline must not short-circuit on fact-completed /
+        // historically succeeded steps (ghost no-op resume).
+        forceResume: input?.forceResume === true,
       });
     });
   }
