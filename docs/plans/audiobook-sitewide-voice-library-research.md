@@ -40,8 +40,13 @@
 - 种子人耳批准前保持 draft
 - 开放 API 下能力限制在 service/HTTP，不假设 token 全局 auth
 
-## 后续（见 ops-and-ai 计划，未开实现前勿当已交付）
-- **D** 库管理台 + list/picker UX
+## Milestone D（已交付 · 见 ops-and-ai §2.6）
+- SPA `/audiobook/voice-library`：list/filter/pagination/详情 + seed/import draft
+- client `listVoiceLibrary` 传 `offset`；`importVoiceLibraryFile` / `importVoiceLibrarySeedPack`
+- 工作台入口；角色卡 picker `q` + 加载更多
+- **无** auto-approve / 客户端写 path
+
+## 后续（见 ops-and-ai 计划）
 - **E** 种子人耳 approve（库级 preview + 单条 setStatus）
 - **F** setStatus 运维门禁（可选 `VOICE_LIBRARY_APPROVE_TOKEN`）
 - **G** 真 LLM design rewrite

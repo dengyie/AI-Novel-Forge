@@ -93,6 +93,17 @@ G 不阻塞 E/F 生产可用。
 - 在线编辑 WAV  
 - 删除资产物理文件（可后续 soft archive only）
 
+### 2.6 交付记录（2026-07-18）
+
+| 项 | 状态 |
+|---|---|
+| D1 client `offset` + import-file / seed-pack 封装 | ✅ |
+| D2 `/audiobook/voice-library` 管理页 list/filter/pagination/详情 | ✅ |
+| D3 导入种子 + allowlist 路径 WAV（固定 draft，无 approved 控件） | ✅ |
+| 工作台入口「全站音色库」 | ✅ |
+| 角色卡 picker：`q` + 加载更多（limit 递增，offset=0） | ✅ |
+| auto-approve / 客户端写 path | ❌ 未引入 |
+
 ---
 
 ## 3. Milestone E — 种子人耳 approve 闭环
@@ -266,5 +277,7 @@ Manual-required：无（空库可验）
 
 | 日期 | tip / 提交 | 说明 |
 |---|---|---|
+| 2026-07-18 | Milestone D | 库管理台 SPA + picker q/分页；见 §2.6 |
+| 2026-07-18 | `661c372` | 本计划文档上 main |
 | 2026-07-18 | `1b7078b` | harden live；本计划立项 |
 | 2026-07-18 | A/B/C `5ed6c25` | 库+planner+picker 生产基线 |

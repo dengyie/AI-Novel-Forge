@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Headphones, BookOpenText, Search } from "lucide-react";
+import { Headphones, BookOpenText, Library, Search } from "lucide-react";
 import { getNovelList } from "@/api/novel";
 import { postAudiobookWorkspaceOverview } from "@/api/novel/audiobook";
 import { queryKeys } from "@/api/queryKeys";
@@ -69,12 +69,20 @@ export default function AudiobookWorkspacePage() {
             选择一本小说，配置角色音色并生成多角色有声书（WAV / M4B）。
           </p>
         </div>
-        <Button type="button" variant="outline" asChild>
-          <Link to="/novels">
-            <BookOpenText className="h-4 w-4" />
-            小说列表
-          </Link>
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button type="button" variant="outline" asChild>
+            <Link to="/audiobook/voice-library">
+              <Library className="h-4 w-4" />
+              全站音色库
+            </Link>
+          </Button>
+          <Button type="button" variant="outline" asChild>
+            <Link to="/novels">
+              <BookOpenText className="h-4 w-4" />
+              小说列表
+            </Link>
+          </Button>
+        </div>
       </div>
 
       <Card>
