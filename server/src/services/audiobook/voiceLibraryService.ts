@@ -2,9 +2,11 @@
  * 全站 VoiceAsset 库：JSON registry + voice-refs/global 文件。
  * 安全：所有 clone 路径必须过 checkVoiceRefAudioPath；客户端只提交 asset id。
  * registry.primaryFile.path 存相对 voice-refs 根的路径；角色 denormalize 写绝对路径（bind 时 resolve）。
+ * 导入路径只允许 allowlist 根；import/seed 不得直批 approved（须 setStatus 人耳批准）。
  */
 import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import type {
   VoiceAsset,
@@ -26,6 +28,7 @@ import {
 } from "@ai-novel/shared/types/audiobook";
 import { prisma } from "../../db/prisma";
 import { AppError } from "../../middleware/errorHandler";
+import { resolveDataRoot } from "../../runtime/appPaths";
 import {
   resolveGlobalVoiceAssetDir,
   resolveGlobalVoiceAssetRefPath,
@@ -37,6 +40,10 @@ import { isValidPcmWavFile, parseWavInfo } from "./audiobookWav";
 import { checkVoiceRefAudioPath, isPathInside } from "./voiceRefPath";
 
 const DEFAULT_PACK_REL = path.join("docs", "voice-packs", "05-yuanworld-seed-from-mimo");
+const LIST_DEFAULT_LIMIT = 200;
+const LIST_MAX_LIMIT = 500;
+const REGISTRY_LOCK_STALE_MS = 15_000;
+const REGISTRY_LOCK_WAIT_MS = 5_000;
 
 type RegistryFile = {
   version: 1;
@@ -69,27 +76,70 @@ function emptyRegistry(): RegistryFile {
   return { version: 1, updatedAt: nowIso(), assets: [] };
 }
 
+function clampListLimit(raw: number | undefined): number {
+  if (typeof raw !== "number" || !Number.isFinite(raw)) {
+    return LIST_DEFAULT_LIMIT;
+  }
+  return Math.max(1, Math.min(LIST_MAX_LIMIT, Math.floor(raw)));
+}
+
+function clampListOffset(raw: number | undefined): number {
+  if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0) {
+    return 0;
+  }
+  return Math.floor(raw);
+}
+
+/** 损坏 registry 备份后抛错，禁止静默清空导致丢库。 */
+function quarantineCorruptRegistry(file: string, reason: string): never {
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const backup = `${file}.corrupt.${stamp}`;
+  try {
+    fs.renameSync(file, backup);
+  } catch {
+    try {
+      fs.copyFileSync(file, backup);
+    } catch {
+      /* ignore */
+    }
+  }
+  throw new AppError(
+    `VoiceAsset registry 损坏（${reason}），已尝试备份为 ${path.basename(backup)}。请人工恢复后再写库。`,
+    500,
+  );
+}
+
 function readRegistry(): RegistryFile {
   const file = resolveGlobalVoiceRegistryPath();
   if (!fs.existsSync(file)) {
     return emptyRegistry();
   }
+  let text: string;
   try {
-    const raw = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<RegistryFile>;
-    if (!raw || !Array.isArray(raw.assets)) {
-      return emptyRegistry();
-    }
-    return {
-      version: 1,
-      updatedAt: raw.updatedAt || nowIso(),
-      assets: raw.assets.filter((a): a is VoiceAsset => Boolean(a && typeof a.id === "string")),
-    };
-  } catch {
-    return emptyRegistry();
+    text = fs.readFileSync(file, "utf8");
+  } catch (error) {
+    throw new AppError(
+      `无法读取 VoiceAsset registry：${error instanceof Error ? error.message : String(error)}`,
+      500,
+    );
   }
+  let raw: Partial<RegistryFile>;
+  try {
+    raw = JSON.parse(text) as Partial<RegistryFile>;
+  } catch {
+    quarantineCorruptRegistry(file, "JSON 解析失败");
+  }
+  if (!raw || !Array.isArray(raw.assets)) {
+    quarantineCorruptRegistry(file, "缺少 assets 数组");
+  }
+  return {
+    version: 1,
+    updatedAt: raw.updatedAt || nowIso(),
+    assets: raw.assets.filter((a): a is VoiceAsset => Boolean(a && typeof a.id === "string")),
+  };
 }
 
-function writeRegistry(registry: RegistryFile): void {
+function writeRegistryUnlocked(registry: RegistryFile): void {
   const root = resolveGlobalVoiceLibraryRoot();
   fs.mkdirSync(root, { recursive: true });
   const file = resolveGlobalVoiceRegistryPath();
@@ -103,10 +153,107 @@ function writeRegistry(registry: RegistryFile): void {
   fs.renameSync(tmp, file);
 }
 
+/** 跨请求串行写 registry（文件锁；单进程内同步代码本已原子）。 */
+function withRegistryWriteLock<T>(fn: () => T): T {
+  const lockPath = `${resolveGlobalVoiceRegistryPath()}.lock`;
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+  const started = Date.now();
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    try {
+      const fd = fs.openSync(lockPath, "wx");
+      try {
+        return fn();
+      } finally {
+        try {
+          fs.closeSync(fd);
+        } catch {
+          /* ignore */
+        }
+        try {
+          fs.unlinkSync(lockPath);
+        } catch {
+          /* ignore */
+        }
+      }
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      if (code !== "EEXIST") {
+        throw error;
+      }
+      try {
+        const st = fs.statSync(lockPath);
+        if (Date.now() - st.mtimeMs > REGISTRY_LOCK_STALE_MS) {
+          fs.unlinkSync(lockPath);
+          continue;
+        }
+      } catch {
+        /* ignore */
+      }
+      if (Date.now() - started > REGISTRY_LOCK_WAIT_MS) {
+        throw new AppError("VoiceAsset registry 正忙，请稍后重试。", 503);
+      }
+      const waitUntil = Date.now() + 15;
+      while (Date.now() < waitUntil) {
+        /* brief spin; sync API 无 await */
+      }
+    }
+  }
+}
+
+function writeRegistry(registry: RegistryFile): void {
+  withRegistryWriteLock(() => {
+    writeRegistryUnlocked(registry);
+  });
+}
+
+/** 在写锁内完成读-改-写，避免并发 import/setStatus 丢资产。 */
+function mutateRegistry(mutator: (registry: RegistryFile) => void): RegistryFile {
+  return withRegistryWriteLock(() => {
+    const registry = readRegistry();
+    mutator(registry);
+    writeRegistryUnlocked(registry);
+    return registry;
+  });
+}
+
 function sha256File(filePath: string): string {
   const hash = crypto.createHash("sha256");
   hash.update(fs.readFileSync(filePath));
   return hash.digest("hex");
+}
+
+/** import 源路径允许根：data/voice-refs、docs/voice-packs、data 根、os.tmpdir（单测）。 */
+function listImportSourceRoots(): string[] {
+  const roots = new Set<string>();
+  const add = (p: string) => {
+    try {
+      roots.add(path.resolve(p));
+    } catch {
+      /* ignore */
+    }
+  };
+  add(resolveDataRoot());
+  add(resolveVoiceRefRoot());
+  add(resolveGlobalVoiceLibraryRoot());
+  add(path.resolve(process.cwd(), "docs", "voice-packs"));
+  add(path.resolve(process.cwd(), "..", "docs", "voice-packs"));
+  add(path.resolve(process.cwd(), "docs"));
+  add(path.join(resolveDataRoot(), "tmp"));
+  add(path.join(resolveDataRoot(), "storage"));
+  add(os.tmpdir());
+  return [...roots];
+}
+
+function assertPathUnderAllowlist(absolutePath: string, label: string): void {
+  const abs = path.resolve(absolutePath);
+  const ok = listImportSourceRoots().some((root) => isPathInside(root, abs) || abs === root);
+  if (!ok) {
+    throw new AppError(
+      `${label} 不在允许目录内（须位于 data/voice-refs、docs/voice-packs 或应用数据根下）。`,
+      400,
+    );
+  }
 }
 
 function resolveSourcePath(sourcePath: string): string {
@@ -121,7 +268,25 @@ function resolveSourcePath(sourcePath: string): string {
   if (!fs.existsSync(absolute) || !fs.statSync(absolute).isFile()) {
     throw new AppError(`源文件不存在：${absolute}`, 400);
   }
+  assertPathUnderAllowlist(absolute, "sourcePath");
   return absolute;
+}
+
+/** 导入链路禁止直批 approved；人耳批准只走 setStatus。 */
+function normalizeImportStatus(raw: VoiceAssetStatus | undefined | null): VoiceAssetStatus {
+  if (raw == null || raw === undefined) {
+    return "draft";
+  }
+  if (!isVoiceAssetStatus(raw)) {
+    throw new AppError("status 非法。", 400);
+  }
+  if (raw === "approved") {
+    throw new AppError(
+      "import 禁止 status=approved；请先以 draft 入库，人耳确认后 PATCH status。",
+      400,
+    );
+  }
+  return raw;
 }
 
 function assertLicense(license: VoiceAssetLicense | undefined | null): VoiceAssetLicense {
@@ -222,8 +387,14 @@ function discoverPackRoot(explicit?: string | null): string {
     const absolute = path.isAbsolute(explicit)
       ? path.resolve(explicit)
       : path.resolve(process.cwd(), explicit);
-    if (fs.existsSync(absolute)) return absolute;
-    throw new AppError(`种子包路径不存在：${absolute}`, 400);
+    if (!fs.existsSync(absolute) || !fs.statSync(absolute).isDirectory()) {
+      throw new AppError(`种子包路径不存在：${absolute}`, 400);
+    }
+    assertPathUnderAllowlist(absolute, "packRoot");
+    if (!fs.existsSync(path.join(absolute, "SEED_MANIFEST.json"))) {
+      throw new AppError(`种子包缺少 SEED_MANIFEST.json：${absolute}`, 400);
+    }
+    return absolute;
   }
   const candidates = [
     path.resolve(process.cwd(), DEFAULT_PACK_REL),
@@ -323,8 +494,9 @@ export class VoiceLibraryService {
     }
     items.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     const total = items.length;
-    const limit = Math.max(1, Math.min(500, query.limit ?? 200));
-    return { items: items.slice(0, limit), total };
+    const limit = clampListLimit(query.limit);
+    const offset = clampListOffset(query.offset);
+    return { items: items.slice(offset, offset + limit), total };
   }
 
   getById(assetId: string): VoiceAsset | null {
@@ -379,8 +551,8 @@ export class VoiceLibraryService {
     const displayName = input.displayName?.trim() || slug;
     const kind: VoiceAssetKind =
       input.kind && isVoiceAssetKind(input.kind) ? input.kind : "clone_ref";
-    const status: VoiceAssetStatus =
-      input.status && isVoiceAssetStatus(input.status) ? input.status : "draft";
+    // 禁止 import 直批 approved（open API 下的提权面）
+    const status = normalizeImportStatus(input.status);
     if (kind !== "clone_ref") {
       throw new AppError("当前仅支持 kind=clone_ref 文件导入。", 400);
     }
@@ -388,72 +560,84 @@ export class VoiceLibraryService {
     if (!isValidPcmWavFile(sourceAbs)) {
       throw new AppError("clone_ref 导入仅接受合法 PCM WAV。", 400);
     }
-    const registry = readRegistry();
-    const existing = registry.assets.find((a) => a.slug === slug);
-    if (existing && !input.overwrite) {
-      throw new AppError(`slug「${slug}」已存在（id=${existing.id}）。传 overwrite=true 可覆盖。`, 409);
-    }
-    const assetId = existing?.id || newAssetId();
-    const destDir = resolveGlobalVoiceAssetDir(assetId);
-    fs.mkdirSync(destDir, { recursive: true });
-    const destPath = resolveGlobalVoiceAssetRefPath(assetId, "wav");
-    const tmp = `${destPath}.part`;
-    fs.copyFileSync(sourceAbs, tmp);
-    fs.renameSync(tmp, destPath);
-    const checked = checkVoiceRefAudioPath(destPath);
-    if (!checked.ok) {
-      try {
-        fs.unlinkSync(destPath);
-      } catch {
-        /* ignore */
-      }
-      throw new AppError(`导入后路径校验失败：${checked.reason}`, 500);
-    }
-    const meta = wavMetaFromFile(checked.absolutePath);
-    const sha = sha256File(checked.absolutePath);
-    const relativePath = toVoiceRefRelativePath(checked.absolutePath);
-    const now = nowIso();
     const backendTargets: VoiceAssetBackendTarget[] = (
       input.backendTargets?.length ? input.backendTargets : ["mimo_chat_audio"]
     ) as VoiceAssetBackendTarget[];
-    const asset: VoiceAsset = {
-      id: assetId,
-      slug,
-      displayName,
-      kind,
-      status,
-      tags: Array.isArray(input.tags)
-        ? input.tags.map((t) => t.trim()).filter(Boolean).slice(0, 32)
-        : [],
-      sampleText: input.sampleText?.trim() || null,
-      designPrompt: input.designPrompt?.trim() || null,
-      presetVoice: null,
-      license,
-      backendTargets,
-      primaryFile: {
-        path: relativePath,
-        sha256: sha,
-        bytes: meta.bytes,
-        format: "wav",
-        sampleRate: meta.sampleRate,
-        durationSec: meta.durationSec,
-        channels: meta.channels,
-      },
-      packId: input.packId?.trim() || null,
-      createdAt: existing?.createdAt || now,
-      updatedAt: now,
-    };
-    if (existing) {
-      registry.assets = registry.assets.map((a) => (a.id === assetId ? asset : a));
-    } else {
-      registry.assets.push(asset);
-    }
-    writeRegistry(registry);
-    return asset;
+    const tags = Array.isArray(input.tags)
+      ? input.tags.map((t) => t.trim()).filter(Boolean).slice(0, 32)
+      : [];
+    const sampleText = input.sampleText?.trim() || null;
+    const designPrompt = input.designPrompt?.trim() || null;
+    const packId = input.packId?.trim() || null;
+    let result: VoiceAsset | null = null;
+    mutateRegistry((registry) => {
+      const existing = registry.assets.find((a) => a.slug === slug);
+      if (existing && !input.overwrite) {
+        throw new AppError(`slug「${slug}」已存在（id=${existing.id}）。传 overwrite=true 可覆盖。`, 409);
+      }
+      const assetId = existing?.id || newAssetId();
+      const destDir = resolveGlobalVoiceAssetDir(assetId);
+      fs.mkdirSync(destDir, { recursive: true });
+      const destPath = resolveGlobalVoiceAssetRefPath(assetId, "wav");
+      const tmp = `${destPath}.part`;
+      fs.copyFileSync(sourceAbs, tmp);
+      fs.renameSync(tmp, destPath);
+      const checked = checkVoiceRefAudioPath(destPath);
+      if (!checked.ok) {
+        try {
+          fs.unlinkSync(destPath);
+        } catch {
+          /* ignore */
+        }
+        throw new AppError(`导入后路径校验失败：${checked.reason}`, 500);
+      }
+      const meta = wavMetaFromFile(checked.absolutePath);
+      const sha = sha256File(checked.absolutePath);
+      const relativePath = toVoiceRefRelativePath(checked.absolutePath);
+      const now = nowIso();
+      const asset: VoiceAsset = {
+        id: assetId,
+        slug,
+        displayName,
+        kind,
+        status,
+        tags,
+        sampleText,
+        designPrompt,
+        presetVoice: null,
+        license,
+        backendTargets,
+        primaryFile: {
+          path: relativePath,
+          sha256: sha,
+          bytes: meta.bytes,
+          format: "wav",
+          sampleRate: meta.sampleRate,
+          durationSec: meta.durationSec,
+          channels: meta.channels,
+        },
+        packId,
+        createdAt: existing?.createdAt || now,
+        updatedAt: now,
+      };
+      if (existing) {
+        registry.assets = registry.assets.map((a) => (a.id === assetId ? asset : a));
+      } else {
+        registry.assets.push(asset);
+      }
+      result = asset;
+    });
+    return result!;
   }
 
   importYuanworldSeedPack(input: VoiceAssetImportPackInput = {}): VoiceAssetImportPackResult {
     this.ensureLibraryRoot();
+    if (input.forceStatus === "approved") {
+      throw new AppError(
+        "import-seed-pack 禁止 forceStatus=approved；种子须 draft 入库，人耳确认后 PATCH status。",
+        400,
+      );
+    }
     const packRoot = discoverPackRoot(input.packRoot);
     const manifestPath = path.join(packRoot, "SEED_MANIFEST.json");
     let manifest: {
@@ -484,14 +668,13 @@ export class VoiceLibraryService {
         }
         const sourcePath = path.join(packRoot, fileRel);
         const licenseRaw = (raw.license || {}) as Record<string, string | null | undefined>;
-        const statusRaw: VoiceAssetStatus =
-          input.forceStatus
-          || (typeof raw.status === "string" && isVoiceAssetStatus(raw.status)
-            ? raw.status
-            : "draft");
-        // 种子默认 draft：人耳批准前禁止 approved 批量写
-        const status: VoiceAssetStatus =
-          statusRaw === "approved" && !input.forceStatus ? "draft" : statusRaw;
+        // 种子恒 draft（除非 force 到非 approved 状态）；manifest 写 approved 也降级
+        let status: VoiceAssetStatus = "draft";
+        if (input.forceStatus && isVoiceAssetStatus(input.forceStatus)) {
+          status = normalizeImportStatus(input.forceStatus);
+        } else if (typeof raw.status === "string" && isVoiceAssetStatus(raw.status)) {
+          status = raw.status === "approved" ? "draft" : raw.status;
+        }
         const existing = this.getBySlug(normalizeSlug(slug));
         if (existing && !input.overwrite) {
           skipped.push({ slug, reason: `已存在 id=${existing.id}` });
@@ -532,26 +715,28 @@ export class VoiceLibraryService {
     if (!isVoiceAssetStatus(status)) {
       throw new AppError("status 非法。", 400);
     }
-    const registry = readRegistry();
-    const idx = registry.assets.findIndex((a) => a.id === assetId.trim());
-    if (idx < 0) {
-      throw new AppError("VoiceAsset 不存在。", 404);
-    }
-    const prev = registry.assets[idx]!;
-    if (status === "approved" && prev.kind === "clone_ref") {
-      assertCloneRefUsable({ ...prev, status: "approved" }, false);
-      if (!prev.license?.source || !prev.license?.rights) {
-        throw new AppError("approved 前必须具备 license.source/rights。", 400);
+    let result: VoiceAsset | null = null;
+    mutateRegistry((registry) => {
+      const idx = registry.assets.findIndex((a) => a.id === assetId.trim());
+      if (idx < 0) {
+        throw new AppError("VoiceAsset 不存在。", 404);
       }
-    }
-    const next: VoiceAsset = {
-      ...prev,
-      status,
-      updatedAt: nowIso(),
-    };
-    registry.assets[idx] = next;
-    writeRegistry(registry);
-    return next;
+      const prev = registry.assets[idx]!;
+      if (status === "approved" && prev.kind === "clone_ref") {
+        assertCloneRefUsable({ ...prev, status: "approved" }, false);
+        if (!prev.license?.source || !prev.license?.rights) {
+          throw new AppError("approved 前必须具备 license.source/rights。", 400);
+        }
+      }
+      const next: VoiceAsset = {
+        ...prev,
+        status,
+        updatedAt: nowIso(),
+      };
+      registry.assets[idx] = next;
+      result = next;
+    });
+    return result!;
   }
 
   async bindCharacter(

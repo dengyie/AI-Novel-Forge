@@ -47,6 +47,35 @@ test("buildSummaryFromRows skipRefAudioProbe avoids probe path for clone with pa
   assert.equal(summary.items[0].voiceBindingStatus, "configured");
 });
 
+test("buildSummaryFromRows skipRefAudioProbe still rejects missing library assetId", () => {
+  const summary = audiobookVoiceReadinessService.buildSummaryFromRows({
+    novelId: "n-list-asset",
+    narratorVoice: "茉莉",
+    narratorStyle: null,
+    characters: [
+      {
+        id: "c-asset",
+        name: "库幽灵",
+        gender: "male",
+        castRole: "protagonist",
+        ttsMode: "clone",
+        ttsVoice: null,
+        ttsStyle: null,
+        ttsDesignPrompt: null,
+        ttsRefAudioPath: null,
+        ttsVoiceAssetId: "va_definitely_missing_asset",
+        ttsPreviewAudioPath: null,
+        ttsPreviewSampleText: null,
+        ttsPreviewFingerprint: null,
+        ttsPreviewGeneratedAt: null,
+      },
+    ],
+    skipRefAudioProbe: true,
+  });
+  assert.equal(summary.voiceOk, false);
+  assert.equal(summary.items[0].voiceBindingStatus, "invalid");
+});
+
 test("buildSummaryFromRows default path probes clone and marks invalid when missing", () => {
   const summary = audiobookVoiceReadinessService.buildSummaryFromRows({
     novelId: "n-detail",

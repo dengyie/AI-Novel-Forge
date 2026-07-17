@@ -335,8 +335,17 @@ export class AudiobookVoiceReadinessService {
         const effectivePath = resolved || character.ttsRefAudioPath?.trim() || "";
         const hasPath = Boolean(effectivePath);
         if (skipProbe) {
-          // 列表态势：有 assetId 或 path 即视为可配（不 probe 文件/库状态）
-          refAudioOk = hasPath || Boolean(character.ttsVoiceAssetId?.trim()) ? true : null;
+          // 列表态势：不 probe 文件，但仍走库 resolve（requireApproved），
+          // 避免 draft/archived/缺失 assetId 被盲信为 configured。
+          if (resolved) {
+            refAudioOk = true;
+          } else if (character.ttsVoiceAssetId?.trim()) {
+            refAudioOk = false;
+          } else if (hasPath) {
+            refAudioOk = true;
+          } else {
+            refAudioOk = null;
+          }
         } else if (hasPath) {
           refAudioOk = probeRefAudioOk(effectivePath);
         } else if (character.ttsVoiceAssetId?.trim()) {

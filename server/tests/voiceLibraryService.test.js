@@ -200,20 +200,31 @@ describe("voiceLibraryService", () => {
     });
   });
 
-  it("resolveEffectiveCloneRefPath 优先 assetId 且拒绝 archived", async () => {
+  it("import 禁止 status=approved；须 setStatus 后 resolve", async () => {
     await withIsolatedLibrary(async () => {
       const {
         resolveEffectiveCloneRefPath,
       } = require("../dist/services/audiobook/voiceLibraryService");
       const wav = writeSilentPcmWav(path.join(TMP_ROOT, "src5.wav"));
+      assert.throws(
+        () =>
+          voiceLibraryService.importFromFile({
+            sourcePath: wav,
+            slug: "eff-path",
+            displayName: "Eff",
+            license: { source: "test", rights: "internal" },
+            status: "approved",
+          }),
+        /禁止.*approved|approved/,
+      );
       let asset = voiceLibraryService.importFromFile({
         sourcePath: wav,
         slug: "eff-path",
         displayName: "Eff",
         license: { source: "test", rights: "internal" },
-        status: "approved",
       });
-      // import 允许 status approved
+      assert.equal(asset.status, "draft");
+      asset = voiceLibraryService.setStatus(asset.id, "approved");
       assert.equal(asset.status, "approved");
       const abs = resolveEffectiveCloneRefPath({
         ttsVoiceAssetId: asset.id,
@@ -230,6 +241,65 @@ describe("voiceLibraryService", () => {
           }),
         /archived/,
       );
+    });
+  });
+
+  it("sourcePath 越界拒绝；seed forceStatus=approved 拒绝", async () => {
+    await withIsolatedLibrary(async () => {
+      const outside = path.join(os.tmpdir(), `voice-lib-outside-${process.pid}`);
+      // os.tmpdir 在 allowlist 内；用 /etc/hosts 或系统根下只读文件测越界
+      const outsideCandidates = ["/etc/hosts", "/var/log/system.log", "/usr/share/dict/words"];
+      const outsideFile = outsideCandidates.find((p) => fs.existsSync(p));
+      if (outsideFile) {
+        assert.throws(
+          () =>
+            voiceLibraryService.importFromFile({
+              sourcePath: outsideFile,
+              slug: "outside-path",
+              displayName: "Out",
+              license: { source: "test", rights: "internal" },
+            }),
+          /允许目录|不在允许/,
+        );
+      }
+      assert.throws(
+        () =>
+          voiceLibraryService.importYuanworldSeedPack({
+            forceStatus: "approved",
+            overwrite: true,
+          }),
+        /forceStatus|approved/,
+      );
+      // 占位避免 unused
+      void outside;
+    });
+  });
+
+  it("list limit 非有限数回落默认；offset 分页；corrupt registry 抛错", async () => {
+    await withIsolatedLibrary(async () => {
+      const wav = writeSilentPcmWav(path.join(TMP_ROOT, "src-list.wav"));
+      for (let i = 0; i < 3; i += 1) {
+        voiceLibraryService.importFromFile({
+          sourcePath: wav,
+          slug: `list-item-${i}`,
+          displayName: `L${i}`,
+          license: { source: "test", rights: "internal" },
+        });
+      }
+      const badLimit = voiceLibraryService.list({ limit: Number.NaN });
+      assert.equal(badLimit.total, 3);
+      assert.ok(badLimit.items.length === 3);
+      const page = voiceLibraryService.list({ limit: 1, offset: 1 });
+      assert.equal(page.total, 3);
+      assert.equal(page.items.length, 1);
+
+      const regPath = resolveGlobalVoiceRegistryPath();
+      fs.writeFileSync(regPath, "{not-json", "utf8");
+      assert.throws(() => voiceLibraryService.list({}), /损坏|registry/);
+      // 备份存在
+      const dir = path.dirname(regPath);
+      const backups = fs.readdirSync(dir).filter((n) => n.includes(".corrupt."));
+      assert.ok(backups.length >= 1);
     });
   });
 
