@@ -40,5 +40,5 @@
 
 ## Related
 
-- [tension-curve-plan](../plans/tension-curve-plan.md) — 紧张度曲线（本决策的第一个消费场景）
+- 紧张度曲线（本决策的第一个消费场景）—— 已落地为 `client/src/components/tensionCurve/` 下的 React Flow + d3 实现；原实施计划已清理。
 - `scripts/check-deps.cjs` — 源码用户依赖防呆检查，本次批量引入正是它要兜底的场景
