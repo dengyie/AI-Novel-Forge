@@ -20,24 +20,26 @@
 用于记录阶段性检查点、架构迁移里程碑、进度审计和对照说明。
 
 - [Chapter Editor V2 Progress](./checkpoints/chapter-editor-v2-progress.md)
-- [Prompt Governance Audit 2026-05-08](./checkpoints/prompt-governance-audit-2026-05-08.md)
 - [LLM Schema Refactor Checkpoint](./checkpoints/llm-schema-refactor-checkpoint.md)
+- [LLM Structured DeepSeek CPA Review](./checkpoints/llm-structured-deepseek-cpa-review.md)
+- [Prompt Governance Audit 2026-05-08](./checkpoints/prompt-governance-audit-2026-05-08.md)
 - [Windows Desktop Installer Manual Checklist](./checkpoints/windows-desktop-installer-manual-checklist.md)
 
 ### `docs/plans`
 
-用于放仍有执行价值的模块计划、工作拆解和产品推进方案。
+用于放仍有执行价值的模块计划、工作拆解和产品推进方案。**已落地计划已清理**，本目录只保留当前推进中的 ACTIVE 计划。
 
+- [Director Self-Cycle P0 Review Fix](./plans/director-self-cycle-p0-review-fix.md)
+- [Character System Upgrade](./plans/character-system-upgrade-plan.md)
+- [Character Resource Ledger](./plans/character-resource-ledger-plan.md)
+- [Book Analysis Expansion](./plans/book-analysis-expansion-plan.md)
+- [Auto Director Creation Redesign](./plans/auto-director-creation-redesign-plan.md)
+- [Drama Production Pipeline v3](./plans/drama-production-pipeline-v3.md)
+- [Novel to Short-Drama Adaptation](./plans/novel-to-shortdrama-adaptation-plan.md)
+- [Imitation Writing and Chain Hardening](./plans/imitation-writing-and-chain-hardening-plan.md)
 - [Assistant UI Plan](./plans/assistant-ui-plan.md)
-- [Chapter Editor V2 Plan](./plans/chapter-editor-v2-plan.md)
-- [Character Resource Ledger Plan](./plans/character-resource-ledger-plan.md)
-- [Prompt Workbench, Context and Step Runtime Plan](./plans/prompt-workbench-context-and-step-runtime-plan.md)
-- [Auto Director Execution Plane Isolation Plan](./plans/auto-director-execution-plane-isolation-plan.md)
-- [Director Self-Cycle Pipeline Plan](./plans/director-self-cycle-pipeline-plan.md)（批续窗 / 合同 strip / recovery 不回卷，监管只重启）
-- [Writing Quality Architecture Plan](./plans/writing-quality-architecture-plan.md)（修文 adopt/discard · isPass 对齐 · L0 接线）
-- [Writing Quality Hardgate Architecture Plan](./plans/writing-quality-hardgate-architecture-plan.md)（L0 真拦 · 不可 defer 降级 · HUD · 词表可观测）
-- [Setting Alignment Quality Architecture Plan](./plans/setting-alignment-quality-architecture-plan.md)（设定对齐 · settingQualityMode）
-- [Director Mode Module and State Refactor Checklist](./plans/director-mode-module-state-refactor-checklist.md)
+- [AI Comic Adaptation](./plans/ai-comic-adaptation-plan.md)
+- [AI Comic Product Design](./plans/ai-comic-product-design.md)
 
 ### `docs/design`
 
@@ -47,8 +49,10 @@
 - [Style Engine v1](./design/style-engine-v1.md)
 - [Style Engine Prompt Compiler v1](./design/style-engine-prompt-compiler-v1.md)
 - [Style Engine Boundary and PRD v2](./design/style-engine-boundary-prd-v2.md)
+- [Visualization Stack](./design/visualization-stack.md)
 - [World Management v2](./design/world-management-v2.md)
 - [World Story Interface v1](./design/world-story-interface-v1.md)
+- [Anti-AI Humanizer Integration v1](./design/anti-ai-humanizer-integration-v1.md)
 
 ### `docs/architecture`
 
@@ -68,12 +72,7 @@ Wiki 不替代计划、检查点或发布说明：
 - `docs/design` 记录模块设计、领域建模和产品机制。
 - `docs/releases` 记录用户可见变化。
 
-- [Wiki Index](./wiki/README.md)
-- [Wiki Entry Template](./wiki/entry-template.md)
-- [Module Boundaries](./wiki/architecture/module-boundaries.md)
-- [Auto Director Runtime](./wiki/workflows/auto-director-runtime.md)
-- [Chapter Production Chain](./wiki/workflows/chapter-production-chain.md)
-- [Prompt Registry and Structured Output](./wiki/prompts/prompt-registry-and-structured-output.md)
+完整索引见 [Wiki Index](./wiki/README.md)（按 architecture / workflows / product / prompts / rag / debugging 分组）。
 
 ### `docs/releases`
 
@@ -85,8 +84,20 @@ Wiki 不替代计划、检查点或发布说明：
 
 用于放历史初始化方案、已不再作为主执行依据但仍需要保留的资料。
 
-- [Project Init Spec](./archive/project-init-spec.md)
-- [Outdated Docs Index](./archive/outdated/README.md)
+- [Project Init Spec](./archive/project-init-spec.md) —— 2024 项目初始化方案
+- [Outdated Docs Index](./archive/outdated/README.md) —— 被当前发布事实取代的归档清单
+- [`./archive/audiobook/`](./archive/audiobook/) —— 已停的有声书/音色计划（9 份）
+
+### 其他目录（不纳入 docs 治理，保留备查）
+
+- `docs/public/`：对外介绍与模块手册（落地页素材）。
+- `docs/superpowers/`：superpowers 技能生成的执行计划产物。
+- `docs/humanizer-reference/`：外部 `blader/humanizer` skill v2.8.2 副本（非本项目自有）。
+- `docs/voice-packs/`：音频种子资产（wav + manifest），属资产非文档。
+
+### 开发导航
+
+- [开发文档总入口 DEVELOPMENT.md](./DEVELOPMENT.md) —— 从这进入可导航到任意模块。
 
 ## 新文档命名规则
 
