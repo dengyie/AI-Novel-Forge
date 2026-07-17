@@ -45,6 +45,82 @@ export function resolveCharacterVoicePreviewPath(novelId: string, characterId: s
 }
 
 /**
+ * 多抽候选 WAV：candidate-0.wav …（同目录，未 adopt 前不覆盖 preview.wav）。
+ * index 须为 0–9 整数。
+ */
+export function resolveCharacterVoicePreviewCandidatePath(
+  novelId: string,
+  characterId: string,
+  index: number,
+): string {
+  const safeIndex = Math.max(0, Math.min(9, Math.floor(index)));
+  return path.join(
+    resolveCharacterVoiceRefDir(novelId, characterId),
+    `preview-candidate-${safeIndex}.wav`,
+  );
+}
+
+/** 多抽元数据（JSON）：记录最近一次候选列表，供 adopt 校验。 */
+export function resolveCharacterVoicePreviewCandidatesMetaPath(
+  novelId: string,
+  characterId: string,
+): string {
+  return path.join(resolveCharacterVoiceRefDir(novelId, characterId), "preview-candidates.json");
+}
+
+/**
+ * 将 base64 落盘为 preview 候选 WAV，返回绝对路径。
+ */
+export function writeCharacterVoicePreviewCandidateFromBase64(input: {
+  novelId: string;
+  characterId: string;
+  index: number;
+  base64: string;
+  maxBytes?: number;
+}): string {
+  const maxBytes = input.maxBytes ?? 3 * 1024 * 1024;
+  const raw = input.base64.trim();
+  if (!raw) {
+    throw new Error("试听候选 base64 不能为空。");
+  }
+  const match = /^data:audio\/([a-z0-9.+-]+);base64,(.+)$/i.exec(raw);
+  const bare = (match ? match[2] : raw).replace(/\s+/g, "");
+  if (!bare) {
+    throw new Error("试听候选 base64 无效。");
+  }
+  const buf = Buffer.from(bare, "base64");
+  if (buf.length <= 0) {
+    throw new Error("试听候选解码后为空。");
+  }
+  if (buf.length > maxBytes) {
+    throw new Error(`试听候选过大（>${maxBytes} bytes）。`);
+  }
+  try {
+    const info = parseWavInfo(buf);
+    if (info.dataSize < 2 || buf.length < info.dataOffset + Math.min(info.dataSize, 2)) {
+      throw new Error("试听候选不是合法 PCM WAV。");
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("试听候选")) {
+      throw error;
+    }
+    throw new Error("试听候选仅接受合法 PCM WAV。");
+  }
+
+  const dir = resolveCharacterVoiceRefDir(input.novelId, input.characterId);
+  fs.mkdirSync(dir, { recursive: true });
+  const target = resolveCharacterVoicePreviewCandidatePath(
+    input.novelId,
+    input.characterId,
+    input.index,
+  );
+  const tmp = `${target}.part`;
+  fs.writeFileSync(tmp, buf);
+  fs.renameSync(tmp, target);
+  return target;
+}
+
+/**
  * 将 base64（可带 data: 前缀）落盘为角色固定试听 WAV，返回绝对路径。
  * 与 preview ready / chapter ready 同一套：必须为合法 PCM WAV。
  */
@@ -132,6 +208,30 @@ export function writeCharacterVoiceRefFromBase64(input: {
   const dir = resolveCharacterVoiceRefDir(input.novelId, input.characterId);
   fs.mkdirSync(dir, { recursive: true });
   const target = resolveCharacterVoiceRefPath(input.novelId, input.characterId, ext);
+  const tmp = `${target}.part`;
+  fs.writeFileSync(tmp, buf);
+  fs.renameSync(tmp, target);
+  return target;
+}
+
+
+/**
+ * 将正式 preview.wav 原子拷贝为 clone ref.wav（Design→Clone）。
+ * 源必须是合法 PCM WAV；返回 ref 绝对路径。
+ */
+export function copyCharacterVoicePreviewToRef(input: {
+  novelId: string;
+  characterId: string;
+  previewPath?: string | null;
+}): string {
+  const source = (input.previewPath?.trim()
+    || resolveCharacterVoicePreviewPath(input.novelId, input.characterId));
+  if (!isValidPcmWavFile(source)) {
+    throw new Error("升格 clone 需要合法 PCM WAV 试听文件。");
+  }
+  const target = resolveCharacterVoiceRefPath(input.novelId, input.characterId, "wav");
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  const buf = fs.readFileSync(source);
   const tmp = `${target}.part`;
   fs.writeFileSync(tmp, buf);
   fs.renameSync(tmp, target);

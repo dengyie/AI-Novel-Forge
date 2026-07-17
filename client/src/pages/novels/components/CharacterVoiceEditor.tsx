@@ -1,16 +1,22 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import type { ApiResponse } from "@ai-novel/shared/types/api";
 import {
   DEFAULT_AUDIOBOOK_NARRATOR_STYLE,
   MIMO_TTS_VOICE_CATALOG,
   type CharacterVoicePreviewAsset,
+  type CharacterVoicePreviewCandidate,
+  type CharacterVoicePreviewGenerateResult,
   type CharacterVoicePreviewStatus,
 } from "@ai-novel/shared/types/audiobook";
 import {
+  adoptCharacterVoicePreviewAsClone,
+  adoptCharacterVoicePreviewCandidate,
   generateCharacterVoicePreview,
   getCharacterVoicePreview,
   issueCharacterVoicePreviewMediaUrl,
 } from "@/api/novel/audiobook";
+import type { NovelDetailResponse } from "@/api/novel/shared";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -50,6 +56,9 @@ interface CharacterVoiceEditorProps {
   novelId: string;
   characterId: string;
   characterName: string;
+  /** 角色卡 role/castRole：用于 lead 引导 Design→Clone（extra 不误导） */
+  castRole?: string | null;
+  role?: string | null;
   form: CharacterVoiceEditorForm;
   saved?: CharacterVoiceFormSlice | null;
   onChange: (field: CharacterVoiceEditorField, value: string) => void;
@@ -120,6 +129,8 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
     novelId,
     characterId,
     characterName,
+    castRole,
+    role,
     form,
     saved,
     onChange,
@@ -149,6 +160,10 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
   const [previewLabel, setPreviewLabel] = useState("");
   const [previewMessage, setPreviewMessage] = useState("");
   const [previewDurationSec, setPreviewDurationSec] = useState<number | null>(null);
+  const [candidates, setCandidates] = useState<CharacterVoicePreviewCandidate[]>([]);
+  const [suggestedCandidateId, setSuggestedCandidateId] = useState<string | null>(null);
+  /** 多抽后尚未写入正式 preview 的会话态；采用任一候选后清空，避免误锁旧 formal。 */
+  const [pendingMultiDraw, setPendingMultiDraw] = useState(false);
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
   const previewUrlSlotRef = useRef(createObjectUrlSlot());
 
@@ -179,6 +194,9 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
     setPreviewLabel("");
     setPreviewMessage("");
     setPreviewDurationSec(null);
+    setCandidates([]);
+    setSuggestedCandidateId(null);
+    setPendingMultiDraw(false);
   }, [characterId]);
 
   useEffect(() => {
@@ -230,10 +248,83 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
       if (!gate.ok) {
         throw new Error(gate.reason);
       }
-      const response = await generateCharacterVoicePreview(novelId, characterId, {});
+      const response = await generateCharacterVoicePreview(novelId, characterId, {
+        candidates: 3,
+        autoAdoptWinner: false,
+      });
+      return response.data as CharacterVoicePreviewGenerateResult;
+    },
+    onSuccess: async (data) => {
+      setCandidates(data.candidates ?? []);
+      setSuggestedCandidateId(data.suggestedCandidateId ?? null);
+      const multiPending =
+        !data.adopted
+        && Array.isArray(data.candidates)
+        && data.candidates.length > 1;
+      setPendingMultiDraw(multiPending);
+      if (data.adopted) {
+        queryClient.setQueryData(
+          queryKeys.novels.characterVoicePreview(novelId, characterId),
+          data.adopted,
+        );
+      }
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.novels.detail(novelId) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.novels.characters(novelId) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.novels.audiobookWorkspace(novelId) }),
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.novels.characterVoicePreview(novelId, characterId),
+        }),
+      ]);
+      try {
+        const playTarget = data.adopted
+          ?? (data.candidates[0]
+            ? {
+                characterId: data.characterId,
+                characterName: data.characterName,
+                status: "ready" as const,
+                ttsMode: data.ttsMode,
+                voice: data.voice ?? null,
+                sampleText: data.sampleText,
+                fingerprint: null,
+                currentFingerprint: "",
+                generatedAt: null,
+                audioUrl: data.candidates[0].audioUrl,
+                audioBase64: data.candidates[0].audioBase64 ?? null,
+                format: "wav" as const,
+              }
+            : null);
+        if (playTarget) {
+          await playFromAsset(playTarget);
+        }
+        const durationText =
+          data.candidates[0]?.durationMs
+            ? `约 ${(data.candidates[0].durationMs / 1000).toFixed(1)} 秒`
+            : "时长待解析";
+        setPreviewMessage(
+          data.adopted
+            ? `试听已写入角色卡（${durationText}），正在播放。`
+            : `已多抽 ${data.candidates.length} 条候选（${durationText}），请点选采用后再锁定克隆。`,
+        );
+      } catch (error) {
+        setPreviewMessage(error instanceof Error ? error.message : "试听已生成，但播放失败。");
+      }
+    },
+    onError: (error) => {
+      setPreviewMessage(error instanceof Error ? error.message : "生成试听失败。");
+    },
+  });
+
+  const adoptMutation = useMutation({
+    mutationFn: async (candidateId: string) => {
+      const response = await adoptCharacterVoicePreviewCandidate(novelId, characterId, {
+        candidateId,
+      });
       return response.data as CharacterVoicePreviewAsset;
     },
     onSuccess: async (data) => {
+      setCandidates((prev) => prev.map((c) => ({ ...c, selected: false })));
+      setPendingMultiDraw(false);
       queryClient.setQueryData(
         queryKeys.novels.characterVoicePreview(novelId, characterId),
         data,
@@ -245,20 +336,115 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
       ]);
       try {
         await playFromAsset(data);
-        const durationText = previewDurationSec != null
-          ? `约 ${previewDurationSec.toFixed(1)} 秒`
-          : "时长待解析";
-        setPreviewMessage(
-          data.status === "ready"
-            ? `试听已写入角色卡（${durationText}），正在播放。`
-            : `试听已生成（${durationText}）。`,
-        );
+        setPreviewMessage("已采用所选候选并写入角色卡。");
       } catch (error) {
-        setPreviewMessage(error instanceof Error ? error.message : "试听已生成，但播放失败。");
+        setPreviewMessage(error instanceof Error ? error.message : "已采用，但播放失败。");
       }
     },
     onError: (error) => {
-      setPreviewMessage(error instanceof Error ? error.message : "生成试听失败。");
+      setPreviewMessage(error instanceof Error ? error.message : "采用候选失败。");
+    },
+  });
+
+  const roleBlob = `${castRole || ""} ${role || ""} ${characterName || ""}`.toLowerCase();
+  const isLeadish =
+    castRole === "protagonist"
+    || /主角|男主|女主|protagonist|heroine/.test(roleBlob);
+  const isExtraish =
+    castRole === "extra"
+    || /路人|龙套|extra|crowd/.test(roleBlob);
+  const showLockCloneGuide = isLeadish || (!isExtraish && mode === "design");
+  const canLockClone =
+    showLockCloneGuide
+    && canPlay
+    && assetStatus === "ready"
+    && !pendingMultiDraw
+    && !dirty
+    && resolveCharacterVoiceMode(form.ttsMode) !== "clone";
+  const lockCloneBlockReason = dirty
+    ? "请先保存当前音色配置再锁定"
+    : pendingMultiDraw
+      ? "请先点选「采用」将多抽候选写入正式试听，再锁定克隆"
+      : assetStatus !== "ready"
+        ? "需要 ready 正式试听才能锁定（过期/缺失请重新生成并采用）"
+        : resolveCharacterVoiceMode(form.ttsMode) === "clone"
+          ? "已是克隆模式"
+          : "copy 正式 preview → ref.wav，ttsMode=clone";
+
+  const lockCloneMutation = useMutation({
+    mutationFn: async (opts?: { regenerate?: boolean; candidateId?: string }) => {
+      if (pendingMultiDraw && !opts?.candidateId) {
+        throw new Error("请先采用多抽候选，再锁定为克隆身份。");
+      }
+      if (assetStatus !== "ready" && !opts?.candidateId) {
+        throw new Error("升格需要 ready 正式试听；请重新生成并采用候选。");
+      }
+      const response = await adoptCharacterVoicePreviewAsClone(novelId, characterId, {
+        candidateId: opts?.candidateId,
+        regeneratePreviewUnderClone: Boolean(opts?.regenerate),
+      });
+      const data = response.data;
+      if (!data) {
+        throw new Error("锁定克隆身份失败：服务端未返回结果。");
+      }
+      return data;
+    },
+    onSuccess: async (data) => {
+      // 服务端已写 clone+ref；同步表单 + novel detail 缓存，避免「未保存」假脏与错误清空 ref
+      onChange("ttsMode", "clone");
+      onChange("ttsRefAudioPath", data.ttsRefAudioPath || "");
+      onChange("ttsRefAudioBase64", "");
+      onChange("ttsVoice", "");
+      setPendingMultiDraw(false);
+      setCandidates([]);
+      queryClient.setQueryData(
+        queryKeys.novels.characterVoicePreview(novelId, characterId),
+        data.contrastPreview || data.preview,
+      );
+      queryClient.setQueryData<ApiResponse<NovelDetailResponse>>(
+        queryKeys.novels.detail(novelId),
+        (prev) => {
+          if (!prev?.data?.characters) return prev;
+          return {
+            ...prev,
+            data: {
+              ...prev.data,
+              characters: prev.data.characters.map((c) =>
+                c.id === characterId
+                  ? {
+                      ...c,
+                      ttsMode: "clone",
+                      ttsRefAudioPath: data.ttsRefAudioPath || null,
+                      ttsVoice: null,
+                      ttsDesignPrompt: data.retainedDesignPrompt ?? c.ttsDesignPrompt,
+                    }
+                  : c,
+              ),
+            },
+          };
+        },
+      );
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.novels.detail(novelId) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.novels.characters(novelId) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.novels.audiobookWorkspace(novelId) }),
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.novels.characterVoicePreview(novelId, characterId),
+        }),
+      ]);
+      setPreviewMessage(
+        data.contrastPreview
+          ? "已锁定克隆身份，并生成对照试听（长书防漂）。"
+          : "已锁定克隆身份。配置变更后旧试听会过期，建议再生成一条对照。",
+      );
+      try {
+        await playFromAsset(data.contrastPreview || data.preview);
+      } catch {
+        // ignore play errors after lock
+      }
+    },
+    onError: (error) => {
+      setPreviewMessage(error instanceof Error ? error.message : "锁定克隆身份失败。");
     },
   });
 
@@ -350,7 +536,7 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
               size="sm"
               variant="default"
               disabled={generateMutation.isPending || !generateGate.ok}
-              title={generateGate.ok ? `为 ${characterName} 生成固定试听` : generateGate.reason}
+              title={generateGate.ok ? `为 ${characterName} 多抽 3 条试听` : generateGate.reason}
               onClick={() => generateMutation.mutate()}
             >
               {generateMutation.isPending
@@ -380,6 +566,35 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
               配置已变，可播旧版；建议重新生成。
             </div>
           ) : null}
+          {showLockCloneGuide && resolveCharacterVoiceMode(form.ttsMode) !== "clone" ? (
+            <div className="max-w-[20rem] space-y-1 text-right">
+              <div className="text-[11px] leading-4 text-muted-foreground">
+                {isLeadish
+                  ? "主角建议：将选优试听锁定为克隆身份，长书跨章不漂。"
+                  : "可将选优试听升格为克隆身份（可选）。"}
+              </div>
+              <Button
+                type="button"
+                size="sm"
+                variant={isLeadish ? "default" : "outline"}
+                disabled={lockCloneMutation.isPending || !canLockClone}
+                title={lockCloneBlockReason}
+                onClick={() => lockCloneMutation.mutate({ regenerate: false })}
+              >
+                {lockCloneMutation.isPending ? "锁定中..." : "锁定为克隆身份"}
+              </Button>
+              {!canLockClone && !lockCloneMutation.isPending ? (
+                <div className="text-[11px] leading-4 text-amber-700 dark:text-amber-400">
+                  {lockCloneBlockReason}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+          {resolveCharacterVoiceMode(form.ttsMode) === "clone" && form.ttsRefAudioPath ? (
+            <div className="max-w-[18rem] text-right text-[11px] leading-4 text-muted-foreground">
+              已绑定克隆参考（长书身份锚）。
+            </div>
+          ) : null}
         </div>
       </div>
 
@@ -395,7 +610,57 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
               ? ` · 生成于 ${new Date(previewQuery.data.generatedAt).toLocaleString()}`
               : ""}
           </div>
-          <audio ref={previewAudioRef} controls preload="auto" src={previewAudioUrl} className="w-full" />
+          
+      {candidates.length > 1 ? (
+        <div className="space-y-2 rounded-lg border border-border/60 bg-background/60 p-2">
+          <div className="text-xs font-medium text-muted-foreground">
+            多抽候选（工程建议 {suggestedCandidateId || "—"}，请人耳选）
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {candidates.map((c) => (
+              <div key={c.id} className="flex items-center gap-1 rounded-md border border-border/50 px-2 py-1">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    if (c.audioBase64) {
+                      void playFromAsset({
+                        characterId,
+                        characterName,
+                        status: "ready",
+                        ttsMode: "preset",
+                        voice: null,
+                        sampleText: null,
+                        fingerprint: null,
+                        currentFingerprint: "",
+                        generatedAt: null,
+                        audioUrl: c.audioUrl,
+                        audioBase64: c.audioBase64,
+                        format: "wav",
+                      });
+                    }
+                  }}
+                >
+                  听 {c.id}
+                  {c.durationMs > 0 ? ` · ${(c.durationMs / 1000).toFixed(1)}s` : ""}
+                  {c.id === suggestedCandidateId ? " · 建议" : ""}
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={c.selected ? "default" : "secondary"}
+                  disabled={adoptMutation.isPending}
+                  onClick={() => adoptMutation.mutate(c.id)}
+                >
+                  采用
+                </Button>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+<audio ref={previewAudioRef} controls preload="auto" src={previewAudioUrl} className="w-full" />
         </div>
       ) : null}
 

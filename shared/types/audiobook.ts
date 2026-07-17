@@ -440,6 +440,8 @@ export interface AudiobookVoicePlanSuggestInput {
   strategy?: AudiobookVoicePlanStrategy;
   /** 同 preset 重要角色数超过该值后改 design；默认 1 */
   maxImportantPerPreset?: number;
+  /** 旁白等占用的预置，角色 preset 池剔除 */
+  reservedPresets?: string[];
 }
 
 export interface AudiobookVoicePlanSuggestResult {
@@ -511,8 +513,80 @@ export interface AudiobookVoicePreviewResult {
 export type CharacterVoicePreviewStatus = "missing" | "ready" | "stale";
 
 export interface CharacterVoicePreviewGenerateInput {
-  /** 可选样例句；默认系统短句。 */
+  /** 可选样例句；默认系统鉴声句库。 */
   text?: string;
+  /**
+   * 同配置连抽次数。默认 3（听感主路径）；1 = 旧行为立即写 preview.wav。
+   * 上限 5。candidates>1 时不覆盖已有 ready preview，须再调 adopt-candidate。
+   */
+  candidates?: number;
+  /**
+   * candidates>1 时是否自动把工程初选 winner 写入正式 preview。
+   * prepare/job 默认 true；交互 UI 默认 false（等人耳选）。
+   */
+  autoAdoptWinner?: boolean;
+}
+
+export interface CharacterVoicePreviewCandidate {
+  id: string;
+  index: number;
+  durationMs: number;
+  /** 相对路径；播放前需 media-access 或带 access query */
+  audioUrl: string | null;
+  audioBase64?: string | null;
+  /** 是否被工程初选 / 人耳 adopt 为正式 preview */
+  selected?: boolean;
+}
+
+export interface CharacterVoicePreviewGenerateResult {
+  characterId: string;
+  characterName: string;
+  ttsMode: AudiobookTtsMode;
+  voice?: string | null;
+  sampleText: string;
+  format: "wav";
+  candidates: CharacterVoicePreviewCandidate[];
+  /** 已写入正式 preview 时非 null（candidates=1 或 autoAdoptWinner） */
+  adopted: CharacterVoicePreviewAsset | null;
+  /** 工程初选 winner 的 candidate id（未人耳确认时仅供参考） */
+  suggestedCandidateId?: string | null;
+}
+
+export interface CharacterVoicePreviewAdoptCandidateInput {
+  candidateId: string;
+}
+
+/**
+ * 将「选优后的正式 preview」升格为 clone 身份锚（Design→Clone）。
+ * 禁止半绑定：必须有与当前配置指纹一致的 ready preview（stale 拒绝）。
+ */
+export interface CharacterVoiceAdoptPreviewAsCloneInput {
+  /**
+   * 可选：先采用该候选再升格；不传则要求当前 preview 已 ready。
+   * 多抽未 adopt 时客户端应传此字段或先走 adopt-candidate。
+   */
+  candidateId?: string;
+  /**
+   * 升格后是否立刻用 clone 再合成 1 条对照试听并写入 preview（默认 false，避免静默打上游）。
+   * 对照失败不回滚 clone 绑定，contrastPreview 为 null。
+   */
+  regeneratePreviewUnderClone?: boolean;
+  /** 对照句；默认沿用当前 preview 样例或句库。 */
+  contrastText?: string;
+}
+
+export interface CharacterVoiceAdoptPreviewAsCloneResult {
+  characterId: string;
+  characterName: string;
+  ttsMode: "clone";
+  ttsRefAudioPath: string;
+  /** 升格来源 preview 路径（拷贝源） */
+  sourcePreviewPath: string;
+  /** design 文案保留供审计（mode 已是 clone） */
+  retainedDesignPrompt: string | null;
+  preview: CharacterVoicePreviewAsset;
+  /** 若请求 regenerate 且成功，为 clone 模式下的新 preview；否则 null */
+  contrastPreview: CharacterVoicePreviewAsset | null;
 }
 
 export interface CharacterVoicePreviewAsset {
@@ -618,6 +692,8 @@ export interface AudiobookVoiceReadinessPrepareInput {
   regenerateStale?: boolean;
   planStrategy?: AudiobookVoicePlanStrategy;
   previewText?: string;
+  /** 每角色多抽次数，默认 3，上限 5 */
+  candidatesPerCharacter?: number;
 }
 
 export type AudiobookVoiceReadinessJobStatus =
@@ -663,6 +739,7 @@ export interface AudiobookVoiceReadinessJob {
     planStrategy: AudiobookVoicePlanStrategy;
     characterIds?: string[];
     previewText?: string;
+    candidatesPerCharacter?: number;
   };
   items: AudiobookVoiceReadinessJobItem[];
   summary?: {
