@@ -8,17 +8,38 @@ const {
   chapterStatePairAfterDraftSave,
   chapterStatePairAfterPlannedReset,
   mergeChapterPatchForGenerationStateBump,
+  chapterStatePairAfterQualityGates,
 } = require("../dist/services/novel/chapterLifecycleState.js");
 
-test("chapterStatePairAfterManualQualityReview matches pass / fail semantics", () => {
-  assert.deepEqual(chapterStatePairAfterManualQualityReview(true), {
-    generationState: "reviewed",
-    chapterStatus: "completed",
-  });
-  assert.deepEqual(chapterStatePairAfterManualQualityReview(false), {
-    generationState: "reviewed",
-    chapterStatus: "needs_repair",
-  });
+test("chapterStatePairAfterManualQualityReview requires dual-gate", () => {
+  assert.deepEqual(
+    chapterStatePairAfterManualQualityReview({ literaryPass: true, styleClear: true }),
+    {
+      generationState: "reviewed",
+      chapterStatus: "completed",
+    },
+  );
+  assert.deepEqual(
+    chapterStatePairAfterManualQualityReview({ literaryPass: true, styleClear: false }),
+    {
+      generationState: "reviewed",
+      chapterStatus: "needs_repair",
+    },
+  );
+  assert.deepEqual(
+    chapterStatePairAfterManualQualityReview({ literaryPass: false, styleClear: true }),
+    {
+      generationState: "reviewed",
+      chapterStatus: "needs_repair",
+    },
+  );
+  assert.deepEqual(
+    chapterStatePairAfterManualQualityReview({ literaryPass: false, styleClear: false }),
+    {
+      generationState: "reviewed",
+      chapterStatus: "needs_repair",
+    },
+  );
 });
 
 test("chapterStatePairAfterPipelineApproval aligns approved with completed", () => {
@@ -57,7 +78,7 @@ test("chapterStatePairAfterPlannedReset pairs planned with unplanned", () => {
   });
 });
 
-test("mergeChapterPatchForGenerationStateBump only completes when literaryPass proven (A6)", () => {
+test("mergeChapterPatchForGenerationStateBump only completes when dual-gate proven (fail-closed)", () => {
   assert.deepEqual(mergeChapterPatchForGenerationStateBump({}, "reviewed"), {
     generationState: "reviewed",
   });
@@ -72,8 +93,19 @@ test("mergeChapterPatchForGenerationStateBump only completes when literaryPass p
       chapterStatus: "pending_review",
     },
   );
+  // literaryPass true 但 styleClear 省略 → fail-closed needs_repair
   assert.deepEqual(
     mergeChapterPatchForGenerationStateBump({}, "approved", { literaryPass: true }),
+    {
+      generationState: "reviewed",
+      chapterStatus: "needs_repair",
+    },
+  );
+  assert.deepEqual(
+    mergeChapterPatchForGenerationStateBump({}, "approved", {
+      literaryPass: true,
+      styleClear: true,
+    }),
     {
       generationState: "approved",
       chapterStatus: "completed",
@@ -110,12 +142,12 @@ test("mergeChapterPatchForGenerationStateBump dual-gate: styleClear false blocks
       chapterStatus: "needs_repair",
     },
   );
-  // styleClear 省略仍兼容旧路径视为 true
+  // styleClear 省略不再兼容旧路径视为 true（fail-closed）
   assert.deepEqual(
     mergeChapterPatchForGenerationStateBump({}, "approved", { literaryPass: true }),
     {
-      generationState: "approved",
-      chapterStatus: "completed",
+      generationState: "reviewed",
+      chapterStatus: "needs_repair",
     },
   );
   // 省略 literaryPass：无论 styleClear 如何都不假 completed
@@ -125,4 +157,19 @@ test("mergeChapterPatchForGenerationStateBump dual-gate: styleClear false blocks
       generationState: "approved",
     },
   );
+});
+
+test("chapterStatePairAfterQualityGates dual-gate matrix", () => {
+  assert.deepEqual(chapterStatePairAfterQualityGates({ literaryPass: true, styleClear: true }), {
+    generationState: "approved",
+    chapterStatus: "completed",
+  });
+  assert.deepEqual(chapterStatePairAfterQualityGates({ literaryPass: true, styleClear: false }), {
+    generationState: "reviewed",
+    chapterStatus: "needs_repair",
+  });
+  assert.deepEqual(chapterStatePairAfterQualityGates({ literaryPass: false, styleClear: true }), {
+    generationState: "reviewed",
+    chapterStatus: "needs_repair",
+  });
 });

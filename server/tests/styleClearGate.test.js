@@ -144,6 +144,14 @@ test("A-style: !styleClear cannot quality-over-approve completed on ch1", () => 
     generationState: "approved",
     chapterStatus: "completed",
   });
+  // fail-closed：styleClear 省略不得 completed
+  assert.deepEqual(
+    mergeChapterPatchForGenerationStateBump({}, "approved", { literaryPass: true }),
+    {
+      generationState: "reviewed",
+      chapterStatus: "needs_repair",
+    },
+  );
 });
 
 test("qualityLoop：开篇 residual 高 → style_residual risk，styleClear 投影 false", () => {
