@@ -10,7 +10,10 @@ const {
   inferVoiceSlot,
   allocateVoiceSlot,
   buildDesignPrompt,
+  buildDesignPromptDetailed,
   DESIGN_PROMPT_MAX,
+  DESIGN_PROMPT_TARGET_MIN,
+  DESIGN_PROMPT_TARGET_MAX,
   slotKey,
   parseSlotFromDesignPrompt,
   slotsEqual,
@@ -807,4 +810,61 @@ test("buildDesignPrompt natural language stays within hard max and parses", () =
     textureBand: "bright",
     energyBand: "heavy",
   });
+});
+
+test("soft-target estimate uses real mutex tail not placeholder", () => {
+  const longNeighbor = "偏低偏低略沙哑声线且偏气声轻柔的邻槽";
+  const { prompt: collisionPrompt } = buildDesignPromptDetailed({
+    character: {
+      characterId: "lead-soft",
+      characterName: "何屿",
+      role: "主角",
+      castRole: "protagonist",
+      personality: "克制",
+      voiceTexture: "清亮",
+    },
+    gender: "male",
+    age: "adult",
+    slot: { pitchBand: "mid", textureBand: "bright", energyBand: "heavy" },
+    preferredSlot: { pitchBand: "mid", textureBand: "bright", energyBand: "heavy" },
+    cluster: "lead",
+    softCollision: true,
+    neighborSlotLabel: longNeighbor,
+  });
+  // 真 tail 含长 neighbor；估长与最终同构 → 不因假尾误塞 habits 撞 hard max
+  assert.ok(collisionPrompt.length <= DESIGN_PROMPT_MAX);
+  assert.match(collisionPrompt, /明显区分/);
+  assert.match(collisionPrompt, new RegExp(longNeighbor));
+  assert.match(collisionPrompt, /避免播音腔/);
+
+  const plain = buildDesignPrompt({
+    character: {
+      characterId: "lead-plain",
+      characterName: "林婉",
+      role: "主角",
+      castRole: "protagonist",
+      personality: "克制",
+      voiceTexture: "清亮",
+    },
+    gender: "female",
+    age: "adult",
+    slot: { pitchBand: "mid", textureBand: "bright", energyBand: "heavy" },
+    preferredSlot: { pitchBand: "mid", textureBand: "bright", energyBand: "heavy" },
+    cluster: "lead",
+    softCollision: false,
+  });
+  assert.ok(plain.length <= DESIGN_PROMPT_MAX);
+  // plain 无长 mutex 时应塞进 lead habit
+  assert.match(plain, /对白有角色重心/);
+  // soft 区间是目标不是 hard floor；habit 耗尽可低于 TARGET_MIN
+  assert.ok(
+    plain.length <= DESIGN_PROMPT_TARGET_MAX + 40,
+    `plain should stay near soft band, got ${plain.length}: ${plain}`,
+  );
+  assert.ok(
+    collisionPrompt.includes(longNeighbor),
+    "collision path must keep real mutex neighbor in tail",
+  );
+  assert.ok(DESIGN_PROMPT_TARGET_MIN >= 100);
+  assert.ok(DESIGN_PROMPT_TARGET_MAX <= DESIGN_PROMPT_MAX);
 });

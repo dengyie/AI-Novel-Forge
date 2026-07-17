@@ -673,7 +673,7 @@ export function buildDesignPromptDetailed(input: {
     flavorParts.push("气质克制坚定");
   }
 
-  // 先解析 useCase，再估算 soft-target 长度（禁止占位「网文角色对白」低估长 useCase）
+  // 先解析 useCase + 真实 mutex tail，再估 soft-target（禁止「。尾。」假尾误估）
   const resolvedUseCase = resolveDesignUseCase(character, cluster, gender);
   const archUseCase = input.archetypeUseCase?.trim().slice(0, 24) || "";
   const useCase =
@@ -681,17 +681,31 @@ export function buildDesignPromptDetailed(input: {
       ? archUseCase
       : resolvedUseCase;
 
-  // 软目标：补声线习惯，把 identity 抬到 TARGET_MIN～TARGET_MAX
+  const mutexPrimary = input.softCollision && input.neighborSlotLabel
+    ? `与「${input.neighborSlotLabel}」明显区分`
+    : "";
+  const mutexSecondary = cluster === "lead" || cluster === "cast"
+    ? "避免播音腔、空壳标准声与死气平板播读"
+    : "避免播音腔与无特征标准声";
+  const tailParts: string[] = [];
+  if (mutexPrimary) tailParts.push(mutexPrimary);
+  tailParts.push(mutexSecondary);
+  let tail = tailParts.join("；");
+
+  // 软目标：补声线习惯；估长与最终 `${body}。${tail}。` 同构
   const habits = speechHabitCandidates(slot, cluster);
-  const mutexReserve = 36; // 尾句互斥粗估
+  const estimatePromptLen = (midParts: string[]): number => {
+    const mid = midParts.filter(Boolean).join("，");
+    const bodyEst = mid ? `${core}，${mid}，适合${useCase}` : `${core}，适合${useCase}`;
+    return `${bodyEst}。${tail}。`.length;
+  };
   for (const habit of habits) {
     if (flavorParts.includes(habit)) continue;
-    const trialMid = [...flavorParts, habit].join("，");
-    const trialLen = `${core}，${trialMid}，适合${useCase}。尾。`.length + mutexReserve;
+    const trialParts = [...flavorParts, habit];
+    const trialLen = estimatePromptLen(trialParts);
     if (trialLen > DESIGN_PROMPT_TARGET_MAX && flavorParts.length > 0) {
       // 已有内容且会超软顶则停；仍低于 MIN 时允许冲到 MAX
-      const currentApprox =
-        `${core}，${flavorParts.join("，")}，适合${useCase}。尾。`.length + mutexReserve;
+      const currentApprox = estimatePromptLen(flavorParts);
       if (currentApprox >= DESIGN_PROMPT_TARGET_MIN) break;
     }
     if (trialLen > DESIGN_PROMPT_MAX) break;
@@ -702,18 +716,6 @@ export function buildDesignPromptDetailed(input: {
   let body = bodyMid
     ? `${core}，${bodyMid}，适合${useCase}`
     : `${core}，适合${useCase}`;
-
-  const mutexPrimary = input.softCollision && input.neighborSlotLabel
-    ? `与「${input.neighborSlotLabel}」明显区分`
-    : "";
-  const mutexSecondary = cluster === "lead" || cluster === "cast"
-    ? "避免播音腔、空壳标准声与死气平板播读"
-    : "避免播音腔与无特征标准声";
-
-  const tailParts: string[] = [];
-  if (mutexPrimary) tailParts.push(mutexPrimary);
-  tailParts.push(mutexSecondary);
-  let tail = tailParts.join("；");
 
   let prompt = `${body}。${tail}。`;
   if (prompt.length <= DESIGN_PROMPT_MAX) {
