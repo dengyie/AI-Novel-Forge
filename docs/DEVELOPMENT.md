@@ -57,6 +57,7 @@ pnpm build              # shared + server + client 构建
 - [Assistant UI Plan](./plans/assistant-ui-plan.md)
 - [AI Comic Adaptation](./plans/ai-comic-adaptation-plan.md)
 - [AI Comic Product Design](./plans/ai-comic-product-design.md)
+- [Codebase Audit Remediation Plan](./plans/codebase-audit-remediation-plan.md)（2026-07-18 全面审查整改：C1 文件规模/C2 RAG 配置泄漏/C3 director 根收敛/C4 routes 迁移/C5-C7 文档失真 + P-A–P-F 合规防回归 + R12/R13/G5/G6 待审）
 
 有声书 / 音色库工作流（main 上活跃，基线 `1b7078b`，Milestone A/B/C/Harden/D 已交付，E/F/G 在轨）：
 
