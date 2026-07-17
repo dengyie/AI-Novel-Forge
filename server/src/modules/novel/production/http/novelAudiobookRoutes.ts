@@ -715,7 +715,7 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
         res.status(200).json({
           success: true,
           data,
-          message: `音色规划完成：${data.summary.planned} 项（preset ${data.summary.presetCount} / design ${data.summary.designCount}）。`,
+          message: `音色规划完成：${data.summary.planned} 项（preset ${data.summary.presetCount} / design ${data.summary.designCount} / clone ${data.summary.cloneCount}）。`,
         } satisfies ApiResponse<AudiobookVoicePlanSuggestResult>);
       } catch (error) {
         next(error);
