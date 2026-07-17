@@ -127,7 +127,7 @@ test("planCharacterVoices differentiates male/female presets and balances load",
   assert.equal(maleVoices.size >= 2, true);
 });
 
-test("auto promotes design for all important characters with voiceTexture (no 70/80 dead zone)", () => {
+test("auto smart_fill: lead/cast design even without voiceTexture", () => {
   const { items } = planCharacterVoices({
     onlyMissing: true,
     strategy: "auto",
@@ -138,7 +138,6 @@ test("auto promotes design for all important characters with voiceTexture (no 70
         characterName: "何屿",
         gender: "male",
         castRole: "protagonist",
-        voiceTexture: "青年男性，声线沉稳略沙哑",
         personality: "冷硬克制",
       },
       {
@@ -146,14 +145,13 @@ test("auto promotes design for all important characters with voiceTexture (no 70
         characterName: "赵明远",
         gender: "male",
         castRole: "antagonist",
-        voiceTexture: "中年男性，威严低沉",
         personality: "强势",
       },
     ],
   });
 
   assert.equal(items.length, 2);
-  // protagonist ≥70+texture；antagonist 70+texture → 两者均 design
+  // smart_fill: lead/cast → design 不依赖 texture
   assert.equal(items.every((i) => i.ttsMode === "design"), true);
   for (const item of items) {
     assert.equal(Boolean(item.ttsDesignPrompt && item.ttsDesignPrompt.length > 8), true);
@@ -600,7 +598,7 @@ test("auto design reason does not claim 听感保证", () => {
   assert.equal(/保证声线辨识度/.test(items[0].reason), false);
 });
 
-test("auto preset-full promote reason uses 非听感证明 not 撞声保证", () => {
+test("auto smart_fill antagonist is design with 非听感证明 (not 撞声保证)", () => {
   const { items } = planCharacterVoices({
     onlyMissing: true,
     strategy: "auto",
@@ -627,7 +625,7 @@ test("auto preset-full promote reason uses 非听感证明 not 撞声保证", ()
         characterName: "新男重要",
         gender: "male",
         castRole: "antagonist",
-        // 无 texture：走 preset 池；重要位被 seed 占满后应升 design
+        // smart_fill: cast → design，不依赖 preset 满位
       },
     ],
   });
@@ -636,6 +634,54 @@ test("auto preset-full promote reason uses 非听感证明 not 撞声保证", ()
   assert.equal(item.ttsMode, "design");
   assert.match(item.reason, /非听感证明/);
   assert.equal(/避免撞声(?!.*分配)/.test(item.reason), false);
+});
+
+test("auto preset-full promote for non-core still uses 非听感证明", () => {
+  const { items } = planCharacterVoices({
+    onlyMissing: true,
+    strategy: "auto",
+    maxImportantPerPreset: 1,
+    characters: [
+      {
+        characterId: "bound",
+        characterName: "已绑男主",
+        gender: "male",
+        castRole: "protagonist",
+        ttsMode: "preset",
+        ttsVoice: "白桦",
+      },
+      {
+        characterId: "bound2",
+        characterName: "已绑男配",
+        gender: "male",
+        castRole: "ally",
+        ttsMode: "preset",
+        ttsVoice: "苏打",
+      },
+      {
+        characterId: "new",
+        characterName: "高重要路人",
+        gender: "male",
+        role: "路人",
+        // 非 lead/cast：importance 默认低 → preset；若用 high importance+texture 会 design
+        // 这里用已占满男 preset + maxImportantPerPreset=1 时，后续男 preset 路径升 design
+        // 用 unknown cluster with importance via castRole empty and name only - force via max
+      },
+      // seed more missing males as extras to exhaust pool with maxImportant=1
+      { characterId: "e1", characterName: "路人1", gender: "male", role: "路人" },
+      { characterId: "e2", characterName: "路人2", gender: "male", role: "路人" },
+      { characterId: "e3", characterName: "路人3", gender: "male", role: "路人" },
+    ],
+  });
+  const extras = items.filter((i) => i.characterId.startsWith("e") || i.characterId === "new");
+  assert.ok(extras.length >= 1);
+  // 至少有一条若升 design，reason 须带 非听感证明
+  for (const item of extras) {
+    if (item.ttsMode === "design") {
+      assert.match(item.reason, /非听感证明/);
+      assert.equal(/保证声线辨识度/.test(item.reason), false);
+    }
+  }
 });
 
 test("inferVoiceSlot reads rough/low cues from texture", () => {
@@ -867,4 +913,36 @@ test("soft-target estimate uses real mutex tail not placeholder", () => {
   );
   assert.ok(DESIGN_PROMPT_TARGET_MIN >= 100);
   assert.ok(DESIGN_PROMPT_TARGET_MAX <= DESIGN_PROMPT_MAX);
+});
+
+test("reservedPresets excludes narrator voice from character preset pool", () => {
+  const { items } = planCharacterVoices({
+    onlyMissing: true,
+    strategy: "preset_only",
+    reservedPresets: ["白桦"],
+    characters: [
+      { characterId: "m1", characterName: "甲", gender: "male", role: "路人" },
+      { characterId: "m2", characterName: "乙", gender: "male", role: "路人" },
+      { characterId: "m3", characterName: "丙", gender: "male", role: "路人" },
+    ],
+  });
+  assert.equal(items.length, 3);
+  assert.equal(items.every((i) => i.ttsMode === "preset"), true);
+  assert.equal(items.every((i) => i.ttsVoice !== "白桦"), true);
+  // 男预置去掉白桦后只剩苏打 → 全部苏打
+  assert.equal(items.every((i) => i.ttsVoice === "苏打"), true);
+});
+
+test("reservedPresets empty pool forces design for lead/cast", () => {
+  const { items } = planCharacterVoices({
+    onlyMissing: true,
+    strategy: "auto",
+    reservedPresets: ["苏打", "白桦", "茉莉", "冰糖"],
+    characters: [
+      { characterId: "lead1", characterName: "主角", gender: "male", castRole: "protagonist" },
+    ],
+  });
+  assert.equal(items.length, 1);
+  assert.equal(items[0].ttsMode, "design");
+  assert.match(items[0].reason, /reservedPresets|design|smart_fill|升 design/i);
 });

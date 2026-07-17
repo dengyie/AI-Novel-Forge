@@ -14,6 +14,7 @@ import {
   type AudiobookWorkspaceBootstrap,
   type AudiobookWorkspaceOverviewResult,
   type CharacterVoicePreviewAsset,
+  type CharacterVoicePreviewGenerateResult,
   type CreateAudiobookTaskInput,
 } from "@ai-novel/shared/types/audiobook";
 import { z } from "zod";
@@ -64,6 +65,18 @@ const characterParamsSchema = z.object({
 
 const characterVoicePreviewGenerateSchema = z.object({
   text: z.string().trim().max(200).optional(),
+  candidates: z.number().int().min(1).max(5).optional(),
+  autoAdoptWinner: z.boolean().optional(),
+});
+
+const characterVoicePreviewAdoptSchema = z.object({
+  candidateId: z.string().trim().min(1).max(32),
+});
+
+const characterVoicePreviewCandidateParamsSchema = z.object({
+  id: z.string().trim().min(1),
+  charId: z.string().trim().min(1),
+  candidateId: z.string().trim().min(1).max(32),
 });
 
 function parseRangeHeader(
@@ -268,6 +281,7 @@ const voicePlanSuggestSchema = z.object({
   characterIds: z.array(z.string().trim().min(1)).max(200).optional(),
   strategy: z.enum(["auto", "preset_only", "prefer_design"]).optional(),
   maxImportantPerPreset: z.number().int().min(1).max(8).optional(),
+  reservedPresets: z.array(z.string().trim().min(1).max(64)).max(16).optional(),
 });
 
 const voicePlanApplySchema = z.object({
@@ -334,6 +348,7 @@ const voiceReadinessPrepareSchema = z.object({
   regenerateStale: z.boolean().optional(),
   planStrategy: z.enum(["auto", "preset_only", "prefer_design"]).optional(),
   previewText: z.string().trim().max(200).optional(),
+  candidatesPerCharacter: z.number().int().min(1).max(5).optional(),
 });
 
 const voiceReadinessJobParamsSchema = z.object({
@@ -595,10 +610,32 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
         const { id, charId } = req.params as z.infer<typeof characterParamsSchema>;
         const body = req.body as z.infer<typeof characterVoicePreviewGenerateSchema>;
         const data = await audiobookVoiceAssetService.generateCharacterPreview(id, charId, body);
+        const message = data.adopted
+          ? `试听已生成并写入角色卡（${data.candidates.length} 条候选，已自动采用）。`
+          : `试听已多抽 ${data.candidates.length} 条，请听后选择采用。`;
         res.status(200).json({
           success: true,
           data,
-          message: "试听资产已生成并写入角色卡。",
+          message,
+        } satisfies ApiResponse<CharacterVoicePreviewGenerateResult>);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  router.post(
+    "/:id/characters/:charId/voice-preview/adopt-candidate",
+    validate({ params: characterParamsSchema, body: characterVoicePreviewAdoptSchema }),
+    async (req, res, next) => {
+      try {
+        const { id, charId } = req.params as z.infer<typeof characterParamsSchema>;
+        const body = req.body as z.infer<typeof characterVoicePreviewAdoptSchema>;
+        const data = await audiobookVoiceAssetService.adoptPreviewCandidate(id, charId, body);
+        res.status(200).json({
+          success: true,
+          data,
+          message: "已采用所选试听候选。",
         } satisfies ApiResponse<CharacterVoicePreviewAsset>);
       } catch (error) {
         next(error);
@@ -707,6 +744,57 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
           return;
         }
         streamWavFile(req, res, preferred, `character-${charId}-preview.wav`);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  /** 多抽候选 WAV 播放（path 必须在 voice-refs 角色目录内）。 */
+  router.get(
+    "/:id/characters/:charId/voice-preview/candidates/:candidateId/audio",
+    validate({ params: characterVoicePreviewCandidateParamsSchema }),
+    async (req, res, next) => {
+      try {
+        const { id, charId, candidateId } = req.params as z.infer<
+          typeof characterVoicePreviewCandidateParamsSchema
+        >;
+        const headerAuthorized = Boolean((req as RequestWithApiAuth).apiAuthViaHeader);
+        if (!headerAuthorized) {
+          const access = typeof req.query?.access === "string" ? req.query.access : null;
+          const mode = resolveAuthMode();
+          if (mode === "token") {
+            if (!verifyCharacterVoicePreviewAccess({ access, novelId: id, characterId: charId })) {
+              res.status(401).json({
+                success: false,
+                error: "未授权：试听媒体令牌无效或已过期。",
+              } satisfies ApiResponse<null>);
+              return;
+            }
+          }
+        }
+
+        const preferred = audiobookVoiceAssetService.resolvePreviewCandidateFilePath(
+          id,
+          charId,
+          candidateId,
+        );
+        if (!preferred) {
+          res.status(404).json({
+            success: false,
+            error: "试听候选不存在。",
+          } satisfies ApiResponse<null>);
+          return;
+        }
+        const refDir = resolveCharacterVoiceRefDir(id, charId);
+        if (!isPathInside(refDir, preferred)) {
+          res.status(400).json({
+            success: false,
+            error: "试听候选路径非法。",
+          } satisfies ApiResponse<null>);
+          return;
+        }
+        streamWavFile(req, res, preferred, `character-${charId}-preview-${candidateId}.wav`);
       } catch (error) {
         next(error);
       }

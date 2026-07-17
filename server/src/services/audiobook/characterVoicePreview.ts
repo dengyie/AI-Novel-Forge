@@ -3,7 +3,58 @@ import type { AudiobookTtsMode, CharacterVoicePreviewStatus } from "@ai-novel/sh
 import { isAudiobookTtsMode, isMimoTtsPresetVoice } from "@ai-novel/shared/types/audiobook";
 import { isValidPcmWavFile } from "./audiobookWav";
 
-export const DEFAULT_CHARACTER_VOICE_PREVIEW_TEXT = "我是这段故事里的角色，请听听我的声音是否合适。";
+/** 试听样例硬顶（与 fingerprint 切片一致；Skills 2–5 句空间）。 */
+export const CHARACTER_VOICE_PREVIEW_SAMPLE_TEXT_MAX = 200;
+
+/**
+ * 旧产品腔一句（禁止作默认鉴声句；仅兼容测旧指纹/回归）。
+ * @deprecated 产品默认请用 resolveDefaultCharacterVoicePreviewText
+ */
+export const LEGACY_CHARACTER_VOICE_PREVIEW_TEXT =
+  "我是这段故事里的角色，请听听我的声音是否合适。";
+
+/**
+ * 默认鉴声句：中性叙事/对白，3 句、有停顿，非产品 meta。
+ * 无角色上下文时用此常量。
+ */
+export const DEFAULT_CHARACTER_VOICE_PREVIEW_TEXT =
+  "路是自己选的，就不必再回头望。风从巷口灌进来，我把领口拢了拢，继续往灯火少的那边走。谁先认输，谁就先把今晚的话咽回去。";
+
+const PREVIEW_TEXT_HEAVY =
+  "夜里的路灯只亮了半边。我站在门廊下，把要说的话压回胸口，声音放低，却一句不让。风从巷口灌进来，鞋底在青石上停了停，再往前一步。";
+
+const PREVIEW_TEXT_LIVELY =
+  "哎，你先别急着走！巷子那头还有个转弯，灯火一跳，我追了两步把话说明白。行了行了，今晚这事算我记下了，回头再找你。";
+
+const PREVIEW_TEXT_FEMALE =
+  "我把窗关严，又把袖口理平。你说的那些，我听见了，不会装没听懂。灯影一晃，我把语气放稳，把该回的话一句句说完。";
+
+export type CharacterVoicePreviewCorpusHint = {
+  gender?: string | null;
+  energyBand?: "lively" | "even" | "heavy" | null;
+  cluster?: "lead" | "cast" | "extra" | "narrator" | null;
+};
+
+/** 按角色底色选默认试听句；无 hint 时用通用中性句。 */
+export function resolveDefaultCharacterVoicePreviewText(
+  hint: CharacterVoicePreviewCorpusHint = {},
+): string {
+  const gender = (hint.gender ?? "").trim().toLowerCase();
+  if (hint.energyBand === "lively") return PREVIEW_TEXT_LIVELY;
+  if (hint.energyBand === "heavy") return PREVIEW_TEXT_HEAVY;
+  if (gender === "female" || gender === "f") return PREVIEW_TEXT_FEMALE;
+  return DEFAULT_CHARACTER_VOICE_PREVIEW_TEXT;
+}
+
+export function clampCharacterVoicePreviewSampleText(text: string): string {
+  return text.trim().slice(0, CHARACTER_VOICE_PREVIEW_SAMPLE_TEXT_MAX);
+}
+
+/** 句末标点计数（。！？…）；鉴声句质量门代理。 */
+export function countPreviewSentenceEnders(text: string): number {
+  const matches = text.match(/[。！？…]/g);
+  return matches?.length ?? 0;
+}
 
 export type CharacterVoicePreviewConfig = {
   ttsMode?: string | null;
@@ -29,7 +80,7 @@ export function buildCharacterVoicePreviewFingerprint(
     normalizePart(config.ttsStyle),
     normalizePart(config.ttsDesignPrompt),
     normalizePart(config.ttsRefAudioPath),
-    normalizePart(sampleText).slice(0, 120),
+    clampCharacterVoicePreviewSampleText(normalizePart(sampleText)),
   ].join("|");
   return crypto.createHash("sha256").update(payload, "utf8").digest("hex");
 }
