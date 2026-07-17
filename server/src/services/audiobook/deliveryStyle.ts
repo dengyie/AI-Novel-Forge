@@ -528,7 +528,8 @@ function buildDesignUser(baseDesign: string | null, line: string): string {
 
 /**
  * 解析 createTask / env 的 deliveryStyleMode；非法 → off。
- * 优先级：显式入参 > env > 代码默认 off
+ * 优先级：显式入参 > env > 代码默认 off。
+ * 注意：工作台 UI 默认 characters 且会显式传参；本函数默认 off 仅服务 API/脚本兼容。
  */
 export function resolveDeliveryStyleMode(
   explicit?: string | null,

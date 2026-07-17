@@ -155,7 +155,8 @@ export function reconcileAnnotationSegmentsWithVoices(
 
   const nextSegments = segments.map((seg) => {
     if (seg.speakerKind === "narrator" || !seg.characterId) {
-      const baseStyle = input.narrator.style || null;
+      // 与 synth SoT 一致：卡/旁白 base 先剥编译标记，避免指纹与 TTS 双路径
+      const baseStyle = peelCompiledDeliveryMarks(input.narrator.style || null);
       const base: AudiobookDialogueSegment = {
         ...seg,
         speakerKind: "narrator",
@@ -190,7 +191,7 @@ export function reconcileAnnotationSegmentsWithVoices(
         orphanCharacterIds.push(seg.characterId);
         orphanSpeakerLabels.push(seg.speakerLabel || seg.characterId);
       }
-      const baseStyle = input.narrator.style || null;
+      const baseStyle = peelCompiledDeliveryMarks(input.narrator.style || null);
       const base: AudiobookDialogueSegment = {
         ...seg,
         speakerKind: "narrator",
@@ -216,8 +217,10 @@ export function reconcileAnnotationSegmentsWithVoices(
 
     const rawMode = matched.ttsMode?.trim() || "preset";
     const ttsMode = rawMode === "design" || rawMode === "clone" ? rawMode : "preset";
-    const baseStyle = (matched.ttsStyle ?? input.narrator.style) || null;
-    const baseDesignPrompt = matched.ttsDesignPrompt ?? null;
+    const baseStyle = peelCompiledDeliveryMarks(
+      (matched.ttsStyle ?? input.narrator.style) || null,
+    );
+    const baseDesignPrompt = peelCompiledDeliveryMarks(matched.ttsDesignPrompt ?? null);
     const base: AudiobookDialogueSegment = {
       ...seg,
       speakerKind: "character",
@@ -230,6 +233,9 @@ export function reconcileAnnotationSegmentsWithVoices(
       baseDesignPrompt,
       style: baseStyle,
       designPrompt: baseDesignPrompt,
+      // 对账到真实角色卡后清除未匹配标记
+      speakerUnresolved: false,
+      unresolvedSpeakerName: null,
     };
 
     if (seg.delivery && shouldApplyDelivery(mode, "character")) {
@@ -388,14 +394,20 @@ function listExistingChunkPaths(taskDir: string, chapterId: string, expectedCoun
 
 /**
  * 章内 chunk 布局指纹。
- * D11：style + designPrompt；另含 refAudioPath 与全文 sha1，防 clone 换文件/正文中部改写仍 skip。
+ * D11：style + designPrompt 必须与 TTS 注入一致（resolveChunkSynthesizeFields SoT）；
+ * 另含 refAudioPath 与全文 sha1，防 clone 换文件/正文中部改写仍 skip。
  */
 export function chunkLayoutFingerprint(
   jobs: Array<{ text: string; segment: AudiobookDialogueSegment }>,
 ): string {
   const hash = createHash("sha1");
   for (const job of jobs) {
-    const styleParts = fingerprintStyleParts(job.segment);
+    // 与 synthesize 同一 SoT，避免缓存 style 与 peel/recompile 后注入漂移导致错误 skip/wipe
+    const synth = resolveChunkSynthesizeFields(job.segment);
+    const styleParts = fingerprintStyleParts({
+      style: synth.style ?? "",
+      designPrompt: synth.designPrompt ?? "",
+    });
     const textHash = createHash("sha1").update(job.text).digest("hex").slice(0, 12);
     hash.update(speakerKeyFromSegment(job.segment));
     hash.update("\0");
