@@ -1176,8 +1176,16 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
       return response.data;
     },
     onSuccess: async (data) => {
+      const appliedClone = data
+        ? data.applied.filter(
+            (row) =>
+              row.ttsMode === "clone" || Boolean(row.ttsVoiceAssetId?.trim()),
+          ).length
+        : 0;
       const text = data
-        ? `已写入 ${data.applied.length} 个角色音色，跳过 ${data.skipped.length}。角色卡缓存已刷新。`
+        ? `已写入 ${data.applied.length} 个角色音色${
+            appliedClone > 0 ? `（库 clone ${appliedClone}）` : ""
+          }，跳过 ${data.skipped.length}。角色卡缓存已刷新。`
         : "音色已写入。";
       toast.success(text);
       setMessage("");
@@ -1208,6 +1216,12 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
       // 规划草稿：未写入角色卡，ephemeral 预览（禁止带 characterId，否则会固化）
       if (target.kind === "plan") {
         const item = target.item;
+        // clone 必须先 bind 再走角色卡固定试听；ephemeral 不支持 clone（防客户端 path）
+        if (item.ttsMode === "clone") {
+          throw new Error(
+            `${item.characterName} 为库 clone 规划项，草稿不可直接试听。请先「写入规划」，再在本台生成/播放固定试听。`,
+          );
+        }
         const response = await previewAudiobookVoice(novelId, {
           ttsMode: item.ttsMode,
           ttsVoice: item.ttsVoice,
@@ -1217,11 +1231,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
         return {
           mode: "ephemeral" as const,
           label: `${item.characterName} · 规划草稿 · ${item.ttsMode}${
-            item.ttsMode === "clone" && item.ttsVoiceAssetId
-              ? `·库/${item.ttsVoiceAssetId.slice(0, 10)}`
-              : item.ttsVoice
-                ? `/${item.ttsVoice}`
-                : ""
+            item.ttsVoice ? `/${item.ttsVoice}` : ""
           }`,
           characterName: item.characterName,
           data: response.data,
@@ -1461,10 +1471,18 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
                     <Button
                       size="sm"
                       variant="ghost"
-                      disabled={previewVoiceMutation.isPending}
+                      disabled={
+                        previewVoiceMutation.isPending
+                        || item.ttsMode === "clone"
+                      }
+                      title={
+                        item.ttsMode === "clone"
+                          ? "库 clone 需先写入再生成固定试听"
+                          : undefined
+                      }
                       onClick={() => previewVoiceMutation.mutate({ kind: "plan", item })}
                     >
-                      试听规划草稿
+                      {item.ttsMode === "clone" ? "需先写入" : "试听规划草稿"}
                     </Button>
                   </div>
                 ))}
