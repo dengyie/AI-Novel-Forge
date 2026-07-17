@@ -79,8 +79,8 @@ export class ChapterPipelineRuntimeAdapter {
               runtimePackage: finalized.runtimePackage,
             };
           },
-          markChapterGenerationState: (targetChapterId, generationState) =>
-            this.markChapterGenerationState(targetChapterId, generationState),
+          markChapterGenerationState: (targetChapterId, generationState, options) =>
+            this.markChapterGenerationState(targetChapterId, generationState, options),
           markChapterNeedsRepair: (targetChapterId) =>
             this.deps.streamOrchestrator.markChapterStatus(targetChapterId, "needs_repair"),
         },
@@ -100,7 +100,7 @@ export class ChapterPipelineRuntimeAdapter {
   private async markChapterGenerationState(
     chapterId: string,
     generationState: "reviewed" | "approved",
-    options?: { literaryPass?: boolean },
+    options?: { literaryPass?: boolean; styleClear?: boolean },
   ): Promise<void> {
     await prisma.chapter.update({
       where: { id: chapterId },

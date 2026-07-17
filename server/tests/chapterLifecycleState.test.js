@@ -87,3 +87,42 @@ test("mergeChapterPatchForGenerationStateBump only completes when literaryPass p
     },
   );
 });
+
+test("mergeChapterPatchForGenerationStateBump dual-gate: styleClear false blocks completed", () => {
+  // literaryPass ∧ styleClear 才 completed；styleClear 显式 false → needs_repair
+  assert.deepEqual(
+    mergeChapterPatchForGenerationStateBump({}, "approved", {
+      literaryPass: true,
+      styleClear: true,
+    }),
+    {
+      generationState: "approved",
+      chapterStatus: "completed",
+    },
+  );
+  assert.deepEqual(
+    mergeChapterPatchForGenerationStateBump({}, "approved", {
+      literaryPass: true,
+      styleClear: false,
+    }),
+    {
+      generationState: "reviewed",
+      chapterStatus: "needs_repair",
+    },
+  );
+  // styleClear 省略仍兼容旧路径视为 true
+  assert.deepEqual(
+    mergeChapterPatchForGenerationStateBump({}, "approved", { literaryPass: true }),
+    {
+      generationState: "approved",
+      chapterStatus: "completed",
+    },
+  );
+  // 省略 literaryPass：无论 styleClear 如何都不假 completed
+  assert.deepEqual(
+    mergeChapterPatchForGenerationStateBump({}, "approved", { styleClear: true }),
+    {
+      generationState: "approved",
+    },
+  );
+});
