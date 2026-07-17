@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
+  buildMustFixAndPlanHints,
   buildQualityFeedbackPacket,
   buildQualityFeedbackRewriteSignature,
   buildQualityFeedbackSignature,
@@ -11,6 +12,7 @@ const {
   formatPriorQualityFeedbackLines,
   isAutoPatchAvoidedByFeedback,
   isAutoPatchAvoidedByRiskFlags,
+  mergeQualityFeedbackIntoRiskFlags,
   mergeQualityFeedbackList,
   QUALITY_FEEDBACK_PREPARE_SUMMARY_CHARS,
   QUALITY_FEEDBACK_ROLLING_MAX,
@@ -206,4 +208,85 @@ test("compactQualityFeedbackForPlanner projects planner-safe fields only", () =>
   assert.ok(Array.isArray(compact[0].codes));
   assert.ok(Array.isArray(compact[0].planHints));
   assert.equal(typeof compact[0].signature, "string");
+});
+
+test("patch_repair alone is soft severity; discard/plateau stay blocking", () => {
+  const soft = buildQualityFeedbackPacket({
+    assessment: assessment({
+      recommendedAction: "patch_repair",
+      rootCauseCode: "length_drift",
+      signals: [{
+        artifactType: "literary_score",
+        status: "invalid",
+        issueCodes: ["length_short"],
+        reason: "略短",
+      }],
+    }),
+  });
+  assert.ok(soft);
+  assert.equal(soft.avoidRetry, false);
+  assert.equal(soft.severity, "soft");
+
+  const blocking = buildQualityFeedbackPacket({
+    assessment: assessment({ recommendedAction: "patch_repair" }),
+    repairDecision: "discard",
+  });
+  assert.ok(blocking);
+  assert.equal(blocking.avoidRetry, true);
+  assert.equal(blocking.severity, "blocking");
+});
+
+test("signature-scoped avoidRetry does not widen to other signatures", () => {
+  const packet = buildQualityFeedbackPacket({
+    assessment: assessment(),
+    repairDecision: "discard",
+  });
+  assert.ok(packet);
+  const miss = isAutoPatchAvoidedByFeedback([packet], "qfb:other-signature");
+  assert.equal(miss.avoided, false);
+  const hit = isAutoPatchAvoidedByFeedback([packet], packet.signature);
+  assert.equal(hit.avoided, true);
+  const chapterScope = isAutoPatchAvoidedByFeedback([packet]);
+  assert.equal(chapterScope.avoided, true);
+});
+
+test("mergeQualityFeedbackIntoRiskFlags is projection-only on feedback key", () => {
+  const packet = buildQualityFeedbackPacket({
+    assessment: assessment(),
+    repairDecision: "discard",
+  });
+  assert.ok(packet);
+  const previous = JSON.stringify({
+    qualityLoop: {
+      overallStatus: "invalid",
+      recommendedAction: "repair",
+      source: "pipeline_review",
+      feedback: [],
+    },
+    settingAlignment: { mode: "warn" },
+  });
+  const next = mergeQualityFeedbackIntoRiskFlags(previous, [packet]);
+  const parsed = JSON.parse(next);
+  assert.equal(parsed.qualityLoop.overallStatus, "invalid");
+  assert.equal(parsed.qualityLoop.recommendedAction, "repair");
+  assert.equal(parsed.qualityLoop.source, "pipeline_review");
+  assert.equal(parsed.settingAlignment.mode, "warn");
+  assert.equal(parsed.qualityLoop.feedback.length, 1);
+  assert.equal(parsed.qualityLoop.feedback[0].signature, packet.signature);
+
+  const cleared = JSON.parse(mergeQualityFeedbackIntoRiskFlags(next, []));
+  assert.equal(cleared.qualityLoop.overallStatus, "invalid");
+  assert.equal("feedback" in cleared.qualityLoop, false);
+  assert.equal(cleared.settingAlignment.mode, "warn");
+});
+
+test("prose_ban planHints never spell banned term 称重", () => {
+  const hints = buildMustFixAndPlanHints({
+    rootCause: "prose_ban",
+    codes: ["prose.ban.chengzhong"],
+    assessment: assessment(),
+  });
+  const joined = [...hints.mustFix, ...hints.planHints].join("\n");
+  assert.equal(joined.includes("称重"), false);
+  assert.match(joined, /废弃术语|禁词|mustAvoid|prose ban/i);
 });

@@ -24,6 +24,7 @@ import { ChapterPatchRepairFailedError } from "../../chapterPatchRepairService";
 import {
   isPass,
   logPipelineError,
+  logPipelineInfo,
   ruleScore,
   type RepairOptions,
   type ReviewOptions,
@@ -145,16 +146,16 @@ export class ChapterRepairStreamRuntime {
       throw new ChapterContextAssemblyError(novelId, chapterId, "repair", error);
     }
 
-    // A2 QFP：avoidRetry 时强制 heavy rewrite，禁止同签名自动 light patch（从不 skip_quality）。
+    // A2 QFP：avoidRetry 时强制 heavy rewrite，禁止同路径自动 light patch（从不 skip_quality）。
     const patchAvoid = isAutoPatchAvoidedByRiskFlags(chapter.riskFlags);
     if (patchAvoid.avoided) {
-      logPipelineError("QFP avoidRetry: forcing full rewrite instead of auto patch.", {
+      logPipelineInfo("QFP avoidRetry: forcing full rewrite instead of auto patch.", {
         novelId,
         chapterId,
         operation: "repair",
         provider: options.provider ?? null,
         model: options.model ?? null,
-        error: patchAvoid.reason,
+        reason: patchAvoid.reason,
       });
     }
 
@@ -353,14 +354,13 @@ export class ChapterRepairStreamRuntime {
         data: { repairHistory: nextRepairHistory },
       });
 
-      // A2 QFP：discard/plateau 抬 failedPatchCount + avoidRetry（不写正文、不 skip_quality）
-      await chapterQualityLoopService.recordAssessment({
+      // A2 QFP：projection-only 写 feedback（不重写 qualityLoop 主体 / chapterStatus / 不 skip_quality）
+      await chapterQualityLoopService.recordRepairFeedbackDecision({
         novelId: input.novelId,
         chapterId: input.chapterId,
         chapterOrder: baselineChapter.order,
         score: baselineScore,
         issues: baselineReview.issues,
-        source: "repair_recheck",
         repairDecision: adoptDecision.decision === "plateau_stop" ? "plateau_stop" : "discard",
       }).catch((error) => {
         logPipelineError("Failed to record QFP repairDecision after discard/plateau.", {

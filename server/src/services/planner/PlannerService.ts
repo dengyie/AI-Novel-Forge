@@ -755,11 +755,25 @@ export class PlannerService {
     if (!targetChapter) {
       throw new Error("当前小说没有可重规划的章节。");
     }
-    const [allChapters, recentAuditReports, pendingReviewProposalCount, payoffLedger] = await Promise.all([
+    // QFP replan：章节 id/order 全量；riskFlags 仅锚点 ±8，避免全卷大 JSON 扫描。
+    const replanFeedbackOrderMin = targetChapter.order - 8;
+    const replanFeedbackOrderMax = targetChapter.order + 8;
+    const [allChapters, nearbyRiskChapters, recentAuditReports, pendingReviewProposalCount, payoffLedger] = await Promise.all([
       prisma.chapter.findMany({
         where: { novelId },
         orderBy: { order: "asc" },
-        select: { id: true, order: true, riskFlags: true },
+        select: { id: true, order: true },
+      }),
+      prisma.chapter.findMany({
+        where: {
+          novelId,
+          order: {
+            gte: replanFeedbackOrderMin,
+            lte: replanFeedbackOrderMax,
+          },
+        },
+        orderBy: { order: "asc" },
+        select: { order: true, riskFlags: true },
       }),
       prisma.auditReport.findMany({
         where: { novelId, chapterId: targetChapter.id },
@@ -833,7 +847,7 @@ export class PlannerService {
       updatedAt: report.updatedAt.toISOString(),
     }));
     const requestedWindowSize = input.windowSize ?? 3;
-    const qualityFeedbackPackets = allChapters.flatMap((item) => {
+    const qualityFeedbackPackets = nearbyRiskChapters.flatMap((item) => {
       const raw = item.riskFlags;
       if (typeof raw === "string") {
         return extractQualityFeedbackFromRiskFlags(raw);
@@ -847,14 +861,12 @@ export class PlannerService {
         return [];
       }
     });
-    // Prefer packets near the replan anchor so the window decider sees local debt first.
+    // riskFlags 已按锚点 ±8 加载；再滤一次 packet.chapterOrder，防止历史脏数据跨窗。
     const nearbyQualityFeedback = qualityFeedbackPackets.filter(
       (packet) => Math.abs(packet.chapterOrder - targetChapter.order) <= 8,
     );
     const qualityFeedbackJson = JSON.stringify(
-      compactQualityFeedbackForPlanner(
-        nearbyQualityFeedback.length > 0 ? nearbyQualityFeedback : qualityFeedbackPackets,
-      ),
+      compactQualityFeedbackForPlanner(nearbyQualityFeedback),
     );
     const replanDecision = await replanWindowDecisionService.decide({
       requestedWindowSize,
