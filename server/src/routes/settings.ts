@@ -98,6 +98,8 @@ const ragSettingsSchema = z.object({
   workerMaxAttempts: z.coerce.number().int().min(1).max(20),
   workerRetryBaseMs: z.coerce.number().int().min(1000).max(300000),
   httpTimeoutMs: z.coerce.number().int().min(1000).max(300000),
+  retrievalTraceSampleRate: z.coerce.number().min(0).max(1),
+  retrievalTraceRetentionDays: z.coerce.number().int().min(1).max(365),
 });
 
 const styleEngineRuntimeSettingsSchema = z.object({
@@ -365,6 +367,8 @@ router.put(
           workerMaxAttempts: body.workerMaxAttempts,
           workerRetryBaseMs: body.workerRetryBaseMs,
           httpTimeoutMs: body.httpTimeoutMs,
+          retrievalTraceSampleRate: body.retrievalTraceSampleRate,
+          retrievalTraceRetentionDays: body.retrievalTraceRetentionDays,
         }),
       ]);
 

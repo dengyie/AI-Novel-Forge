@@ -38,6 +38,8 @@ import {
   WORKER_MAX_ATTEMPTS_KEY,
   WORKER_RETRY_BASE_MS_KEY,
   HTTP_TIMEOUT_MS_KEY,
+  RETRIEVAL_TRACE_SAMPLE_RATE_KEY,
+  RETRIEVAL_TRACE_RETENTION_DAYS_KEY,
 } from "./ragSettingKeys";
 
 interface RagCompatibilityBootstrapReport {
@@ -155,6 +157,14 @@ function buildRagSettingImportCandidates(): RagSettingImportCandidate[] {
     {
       key: HTTP_TIMEOUT_MS_KEY,
       value: process.env.RAG_HTTP_TIMEOUT_MS,
+    },
+    {
+      key: RETRIEVAL_TRACE_SAMPLE_RATE_KEY,
+      value: process.env.RAG_RETRIEVAL_TRACE_SAMPLE_RATE,
+    },
+    {
+      key: RETRIEVAL_TRACE_RETENTION_DAYS_KEY,
+      value: process.env.RAG_RETRIEVAL_TRACE_RETENTION_DAYS,
     },
   ];
 }

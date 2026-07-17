@@ -80,6 +80,8 @@ export default function KnowledgePage() {
     workerMaxAttempts: 5,
     workerRetryBaseMs: 5000,
     httpTimeoutMs: 30000,
+    retrievalTraceSampleRate: 1,
+    retrievalTraceRetentionDays: 14,
   });
 
   const activeTab = normalizeTab(searchParams.get("tab"));
@@ -167,6 +169,8 @@ export default function KnowledgePage() {
       workerMaxAttempts: data.workerMaxAttempts,
       workerRetryBaseMs: data.workerRetryBaseMs,
       httpTimeoutMs: data.httpTimeoutMs,
+      retrievalTraceSampleRate: data.retrievalTraceSampleRate ?? 1,
+      retrievalTraceRetentionDays: data.retrievalTraceRetentionDays ?? 14,
     });
   }, [ragSettingsQuery.data?.data]);
 
@@ -230,6 +234,8 @@ export default function KnowledgePage() {
           workerMaxAttempts: data.workerMaxAttempts,
           workerRetryBaseMs: data.workerRetryBaseMs,
           httpTimeoutMs: data.httpTimeoutMs,
+          retrievalTraceSampleRate: data.retrievalTraceSampleRate ?? 1,
+          retrievalTraceRetentionDays: data.retrievalTraceRetentionDays ?? 14,
         }));
       }
       await queryClient.invalidateQueries({ queryKey: queryKeys.settings.rag });
@@ -442,6 +448,8 @@ export default function KnowledgePage() {
       workerMaxAttempts: ragForm.workerMaxAttempts,
       workerRetryBaseMs: ragForm.workerRetryBaseMs,
       httpTimeoutMs: ragForm.httpTimeoutMs,
+      retrievalTraceSampleRate: ragForm.retrievalTraceSampleRate,
+      retrievalTraceRetentionDays: ragForm.retrievalTraceRetentionDays,
     });
   };
 
