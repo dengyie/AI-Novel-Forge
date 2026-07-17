@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const {
   resolveSecondRoundEnabled,
   resolveSecondRoundThreshold,
+  resolveHotspotRewriteEnabled,
   DEFAULT_SECOND_ROUND_THRESHOLD,
 } = require("../dist/services/novel/runtime/PostGenerationStyleReviewPolicyResolver.js");
 
@@ -105,5 +106,37 @@ test("越界 / 非数值 → 回落默认", () => {
   });
   withEnv("HUMANIZER_SECOND_ROUND_THRESHOLD", "abc", () => {
     assert.equal(resolveSecondRoundThreshold(), DEFAULT_SECOND_ROUND_THRESHOLD);
+  });
+});
+
+// ============ resolveHotspotRewriteEnabled ============
+
+test("热点改写：未设置 → 默认启用", () => {
+  withEnv("HUMANIZER_HOTSPOT_REWRITE_ENABLED", undefined, () => {
+    assert.equal(resolveHotspotRewriteEnabled(), true);
+  });
+});
+
+test("热点改写：空字符串 → 默认启用", () => {
+  withEnv("HUMANIZER_HOTSPOT_REWRITE_ENABLED", "", () => {
+    assert.equal(resolveHotspotRewriteEnabled(), true);
+  });
+});
+
+test("热点改写：false / 0 → 关闭", () => {
+  withEnv("HUMANIZER_HOTSPOT_REWRITE_ENABLED", "false", () => {
+    assert.equal(resolveHotspotRewriteEnabled(), false);
+  });
+  withEnv("HUMANIZER_HOTSPOT_REWRITE_ENABLED", "0", () => {
+    assert.equal(resolveHotspotRewriteEnabled(), false);
+  });
+});
+
+test("热点改写：true / 1 → 启用", () => {
+  withEnv("HUMANIZER_HOTSPOT_REWRITE_ENABLED", "true", () => {
+    assert.equal(resolveHotspotRewriteEnabled(), true);
+  });
+  withEnv("HUMANIZER_HOTSPOT_REWRITE_ENABLED", "1", () => {
+    assert.equal(resolveHotspotRewriteEnabled(), true);
   });
 });
