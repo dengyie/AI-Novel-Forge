@@ -376,15 +376,32 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
   router.get("/audiobook/voice-library", async (req, res, next) => {
     try {
       const q = req.query as Record<string, string | undefined>;
-      const status = q.status?.includes(",")
-        ? q.status.split(",").map((s) => s.trim()).filter(Boolean)
-        : q.status;
-      const kind = q.kind?.includes(",")
-        ? q.kind.split(",").map((s) => s.trim()).filter(Boolean)
-        : q.kind;
+      const parseEnumList = <T extends string>(
+        raw: string | undefined,
+        allowed: readonly T[],
+        label: string,
+      ): T[] | undefined => {
+        if (!raw?.trim()) return undefined;
+        const parts = raw.includes(",")
+          ? raw.split(",").map((s) => s.trim()).filter(Boolean)
+          : [raw.trim()];
+        const invalid = parts.filter((p) => !(allowed as readonly string[]).includes(p));
+        if (invalid.length > 0) {
+          throw new AppError(`${label} 非法：${invalid.join(", ")}`, 400);
+        }
+        return parts as T[];
+      };
       const data = voiceLibraryService.list({
-        status: status as any,
-        kind: kind as any,
+        status: parseEnumList(
+          q.status,
+          ["draft", "approved", "archived", "deprecated"] as const,
+          "status",
+        ),
+        kind: parseEnumList(
+          q.kind,
+          ["clone_ref", "design_prompt", "preset_alias"] as const,
+          "kind",
+        ),
         tag: q.tag,
         q: q.q,
         limit: q.limit ? Number(q.limit) : undefined,
@@ -489,13 +506,15 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
       params: characterParamsSchema,
       body: z.object({
         voiceAssetId: z.string().trim().min(1).max(80),
-        requireApproved: z.boolean().optional(),
       }),
     }),
     async (req, res, next) => {
       try {
         const { id, charId } = req.params as z.infer<typeof characterParamsSchema>;
-        const data = await voiceLibraryService.bindCharacter(id, charId, req.body);
+        // 合成绑库恒 require approved；不接受客户端旁路
+        const data = await voiceLibraryService.bindCharacter(id, charId, {
+          voiceAssetId: req.body.voiceAssetId,
+        });
         res.json({ success: true, data } satisfies ApiResponse<typeof data>);
       } catch (error) {
         next(error);
