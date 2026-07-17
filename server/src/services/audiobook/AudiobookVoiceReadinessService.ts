@@ -249,6 +249,7 @@ export class AudiobookVoiceReadinessService {
             ttsStyle: true,
             ttsDesignPrompt: true,
             ttsRefAudioPath: true,
+            ttsVoiceAssetId: true,
             ttsPreviewAudioPath: true,
             ttsPreviewSampleText: true,
             ttsPreviewFingerprint: true,
@@ -281,6 +282,7 @@ export class AudiobookVoiceReadinessService {
         ttsStyle: character.ttsStyle,
         ttsDesignPrompt: character.ttsDesignPrompt,
         ttsRefAudioPath: character.ttsRefAudioPath,
+        ttsVoiceAssetId: character.ttsVoiceAssetId,
         ttsPreviewAudioPath: character.ttsPreviewAudioPath,
         ttsPreviewSampleText: character.ttsPreviewSampleText,
         ttsPreviewFingerprint: character.ttsPreviewFingerprint,
@@ -305,6 +307,7 @@ export class AudiobookVoiceReadinessService {
         | "ttsStyle"
         | "ttsDesignPrompt"
         | "ttsRefAudioPath"
+        | "ttsVoiceAssetId"
         | "ttsPreviewAudioPath"
         | "ttsPreviewSampleText"
         | "ttsPreviewFingerprint"
@@ -339,6 +342,7 @@ export class AudiobookVoiceReadinessService {
         ttsVoice: character.ttsVoice,
         ttsDesignPrompt: character.ttsDesignPrompt,
         ttsRefAudioPath: character.ttsRefAudioPath,
+        ttsVoiceAssetId: character.ttsVoiceAssetId,
         refAudioOk,
         previewStatus,
         previewGeneratedAt: character.ttsPreviewGeneratedAt ?? null,

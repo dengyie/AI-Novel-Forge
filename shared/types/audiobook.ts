@@ -131,6 +131,8 @@ export interface AudiobookCharacterVoiceConfig {
   ttsDesignPrompt?: string | null;
   /** clone：参考音频相对/绝对路径（服务端可读）。 */
   ttsRefAudioPath?: string | null;
+  /** 全站 VoiceAsset.id（library clone）。 */
+  ttsVoiceAssetId?: string | null;
   /** 说话人别名（称呼/外号），用于标注 speakerName 归一。 */
   speakerAliases?: string[] | null;
   /** 角色卡声线描述（roster 摘要；不进合成）。 */
@@ -624,6 +626,7 @@ export interface AudiobookWorkspaceCharacter {
   ttsStyle?: string | null;
   ttsDesignPrompt?: string | null;
   ttsRefAudioPath?: string | null;
+  ttsVoiceAssetId?: string | null;
   ttsSpeakerAliases?: string | null;
   ttsPreviewAudioPath?: string | null;
   ttsPreviewSampleText?: string | null;
@@ -654,6 +657,8 @@ export interface CharacterVoiceReadinessItem {
   voiceBindingStatus: CharacterVoiceBindingStatus;
   ttsMode: AudiobookTtsMode;
   ttsVoice?: string | null;
+  /** library clone 时填充 */
+  ttsVoiceAssetId?: string | null;
   voiceDetailLabel: string;
   previewStatus: CharacterVoicePreviewStatus;
   previewGeneratedAt?: string | null;
@@ -843,4 +848,115 @@ export interface AudiobookWorkspaceOverviewResult {
   items: AudiobookWorkspaceNovelOverview[];
   /** novelIds 超过上限时截断前 50 */
   truncated?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// 全站 VoiceAsset 库（Milestone A）：JSON registry + voice-refs/global
+// ---------------------------------------------------------------------------
+
+export type VoiceAssetKind = "clone_ref" | "design_prompt" | "preset_alias";
+export const VOICE_ASSET_KINDS = ["clone_ref", "design_prompt", "preset_alias"] as const;
+export function isVoiceAssetKind(value: string): value is VoiceAssetKind {
+  return (VOICE_ASSET_KINDS as readonly string[]).includes(value);
+}
+
+export type VoiceAssetStatus = "draft" | "approved" | "archived" | "deprecated";
+export const VOICE_ASSET_STATUSES = ["draft", "approved", "archived", "deprecated"] as const;
+export function isVoiceAssetStatus(value: string): value is VoiceAssetStatus {
+  return (VOICE_ASSET_STATUSES as readonly string[]).includes(value);
+}
+
+export type VoiceAssetBackendTarget = "mimo_chat_audio" | "kokoro" | "other";
+
+export interface VoiceAssetLicense {
+  source: string;
+  rights: string;
+  notes?: string | null;
+  url?: string | null;
+}
+
+export interface VoiceAssetPrimaryFile {
+  path: string;
+  sha256: string;
+  bytes: number;
+  format: "wav";
+  sampleRate?: number | null;
+  durationSec?: number | null;
+  channels?: number | null;
+}
+
+export interface VoiceAsset {
+  id: string;
+  slug: string;
+  displayName: string;
+  kind: VoiceAssetKind;
+  status: VoiceAssetStatus;
+  tags: string[];
+  sampleText?: string | null;
+  designPrompt?: string | null;
+  presetVoice?: string | null;
+  license: VoiceAssetLicense;
+  backendTargets: VoiceAssetBackendTarget[];
+  primaryFile?: VoiceAssetPrimaryFile | null;
+  packId?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface VoiceAssetListQuery {
+  status?: VoiceAssetStatus | VoiceAssetStatus[];
+  kind?: VoiceAssetKind | VoiceAssetKind[];
+  tag?: string;
+  q?: string;
+  limit?: number;
+}
+
+export interface VoiceAssetListResult {
+  items: VoiceAsset[];
+  total: number;
+}
+
+export interface VoiceAssetImportFromFileInput {
+  sourcePath: string;
+  slug: string;
+  displayName: string;
+  kind?: VoiceAssetKind;
+  status?: VoiceAssetStatus;
+  tags?: string[];
+  sampleText?: string | null;
+  designPrompt?: string | null;
+  license: VoiceAssetLicense;
+  backendTargets?: VoiceAssetBackendTarget[];
+  packId?: string | null;
+  overwrite?: boolean;
+}
+
+export interface VoiceAssetImportPackInput {
+  packRoot?: string;
+  forceStatus?: VoiceAssetStatus | null;
+  overwrite?: boolean;
+}
+
+export interface VoiceAssetImportPackResult {
+  packId: string;
+  imported: VoiceAsset[];
+  skipped: Array<{ slug: string; reason: string }>;
+  failed: Array<{ slug: string; reason: string }>;
+}
+
+export interface VoiceAssetBindCharacterInput {
+  voiceAssetId: string;
+  requireApproved?: boolean;
+}
+
+export interface VoiceAssetBindCharacterResult {
+  novelId: string;
+  characterId: string;
+  voiceAssetId: string;
+  ttsMode: "clone";
+  ttsRefAudioPath: string;
+}
+
+export interface VoiceAssetSetStatusInput {
+  status: VoiceAssetStatus;
 }

@@ -1,0 +1,515 @@
+/**
+ * 全站 VoiceAsset 库：JSON registry + voice-refs/global 文件。
+ * 安全：所有 clone 路径必须过 checkVoiceRefAudioPath；客户端只提交 asset id。
+ */
+import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import type {
+  VoiceAsset,
+  VoiceAssetBackendTarget,
+  VoiceAssetImportFromFileInput,
+  VoiceAssetImportPackInput,
+  VoiceAssetImportPackResult,
+  VoiceAssetKind,
+  VoiceAssetLicense,
+  VoiceAssetListQuery,
+  VoiceAssetListResult,
+  VoiceAssetStatus,
+  VoiceAssetBindCharacterInput,
+  VoiceAssetBindCharacterResult,
+} from "@ai-novel/shared/types/audiobook";
+import {
+  isVoiceAssetKind,
+  isVoiceAssetStatus,
+} from "@ai-novel/shared/types/audiobook";
+import { prisma } from "../../db/prisma";
+import { AppError } from "../../middleware/errorHandler";
+import {
+  resolveGlobalVoiceAssetDir,
+  resolveGlobalVoiceAssetRefPath,
+  resolveGlobalVoiceLibraryRoot,
+  resolveGlobalVoiceRegistryPath,
+} from "./audiobookPaths";
+import { isValidPcmWavFile, parseWavInfo } from "./audiobookWav";
+import { checkVoiceRefAudioPath } from "./voiceRefPath";
+
+const DEFAULT_PACK_REL = path.join("docs", "voice-packs", "05-yuanworld-seed-from-mimo");
+
+type RegistryFile = {
+  version: 1;
+  updatedAt: string;
+  assets: VoiceAsset[];
+};
+
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
+function newAssetId(): string {
+  return `va_${crypto.randomBytes(8).toString("hex")}`;
+}
+
+function normalizeSlug(raw: string): string {
+  const s = raw
+    .trim()
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}_-]+/gu, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+  if (!s || s.length > 80) {
+    throw new AppError("slug 非法或过长。", 400);
+  }
+  return s;
+}
+
+function emptyRegistry(): RegistryFile {
+  return { version: 1, updatedAt: nowIso(), assets: [] };
+}
+
+function readRegistry(): RegistryFile {
+  const file = resolveGlobalVoiceRegistryPath();
+  if (!fs.existsSync(file)) {
+    return emptyRegistry();
+  }
+  try {
+    const raw = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<RegistryFile>;
+    if (!raw || !Array.isArray(raw.assets)) {
+      return emptyRegistry();
+    }
+    return {
+      version: 1,
+      updatedAt: raw.updatedAt || nowIso(),
+      assets: raw.assets.filter((a): a is VoiceAsset => Boolean(a && typeof a.id === "string")),
+    };
+  } catch {
+    return emptyRegistry();
+  }
+}
+
+function writeRegistry(registry: RegistryFile): void {
+  const root = resolveGlobalVoiceLibraryRoot();
+  fs.mkdirSync(root, { recursive: true });
+  const file = resolveGlobalVoiceRegistryPath();
+  const next: RegistryFile = {
+    version: 1,
+    updatedAt: nowIso(),
+    assets: registry.assets,
+  };
+  const tmp = `${file}.part`;
+  fs.writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+  fs.renameSync(tmp, file);
+}
+
+function sha256File(filePath: string): string {
+  const hash = crypto.createHash("sha256");
+  hash.update(fs.readFileSync(filePath));
+  return hash.digest("hex");
+}
+
+function resolveSourcePath(sourcePath: string): string {
+  const raw = sourcePath.trim();
+  if (!raw) {
+    throw new AppError("sourcePath 不能为空。", 400);
+  }
+  if (raw.includes("\0")) {
+    throw new AppError("sourcePath 非法。", 400);
+  }
+  const absolute = path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(process.cwd(), raw);
+  if (!fs.existsSync(absolute) || !fs.statSync(absolute).isFile()) {
+    throw new AppError(`源文件不存在：${absolute}`, 400);
+  }
+  return absolute;
+}
+
+function assertLicense(license: VoiceAssetLicense | undefined | null): VoiceAssetLicense {
+  const source = license?.source?.trim() || "";
+  const rights = license?.rights?.trim() || "";
+  if (!source || !rights) {
+    throw new AppError("导入必须提供 license.source 与 license.rights。", 400);
+  }
+  return {
+    source,
+    rights,
+    notes: license?.notes?.trim() || null,
+    url: license?.url?.trim() || null,
+  };
+}
+
+function assertCloneRefUsable(asset: VoiceAsset, requireApproved: boolean): string {
+  if (asset.kind !== "clone_ref") {
+    throw new AppError(`资产「${asset.displayName}」不是 clone_ref，不能绑角色 clone。`, 400);
+  }
+  if (requireApproved && asset.status !== "approved") {
+    throw new AppError(
+      `资产「${asset.displayName}」状态为 ${asset.status}，合成绑库需要 approved。`,
+      400,
+    );
+  }
+  if (asset.status === "archived" || asset.status === "deprecated") {
+    throw new AppError(`资产「${asset.displayName}」已 ${asset.status}，禁止绑定。`, 400);
+  }
+  const refPath = asset.primaryFile?.path?.trim() || "";
+  if (!refPath) {
+    throw new AppError(`资产「${asset.displayName}」缺少 primaryFile。`, 400);
+  }
+  const checked = checkVoiceRefAudioPath(refPath);
+  if (!checked.ok) {
+    throw new AppError(`资产「${asset.displayName}」参考音频不可用：${checked.reason}`, 400);
+  }
+  if (!isValidPcmWavFile(checked.absolutePath)) {
+    throw new AppError(`资产「${asset.displayName}」参考音频不是合法 PCM WAV。`, 400);
+  }
+  return checked.absolutePath;
+}
+
+function wavMetaFromFile(filePath: string): {
+  sampleRate: number | null;
+  durationSec: number | null;
+  channels: number | null;
+  bytes: number;
+} {
+  const bytes = fs.statSync(filePath).size;
+  try {
+    const buf = fs.readFileSync(filePath);
+    const info = parseWavInfo(buf);
+    const durationSec = info.byteRate > 0
+      ? Number((info.dataSize / info.byteRate).toFixed(3))
+      : null;
+    return {
+      sampleRate: info.sampleRate || null,
+      durationSec,
+      channels: info.numChannels || null,
+      bytes,
+    };
+  } catch {
+    return { sampleRate: null, durationSec: null, channels: null, bytes };
+  }
+}
+
+function discoverPackRoot(explicit?: string | null): string {
+  if (explicit?.trim()) {
+    const absolute = path.isAbsolute(explicit)
+      ? path.resolve(explicit)
+      : path.resolve(process.cwd(), explicit);
+    if (fs.existsSync(absolute)) return absolute;
+    throw new AppError(`种子包路径不存在：${absolute}`, 400);
+  }
+  const candidates = [
+    path.resolve(process.cwd(), DEFAULT_PACK_REL),
+    path.resolve(process.cwd(), "..", DEFAULT_PACK_REL),
+    path.resolve(__dirname, "../../../../../../", DEFAULT_PACK_REL),
+    path.resolve(__dirname, "../../../../../", DEFAULT_PACK_REL),
+  ];
+  for (const c of candidates) {
+    if (fs.existsSync(path.join(c, "SEED_MANIFEST.json"))) {
+      return c;
+    }
+  }
+  throw new AppError(
+    `未找到种子包（期望 ${DEFAULT_PACK_REL}/SEED_MANIFEST.json，cwd=${process.cwd()}）。`,
+    400,
+  );
+}
+
+export class VoiceLibraryService {
+  ensureLibraryRoot(): void {
+    fs.mkdirSync(resolveGlobalVoiceLibraryRoot(), { recursive: true });
+    fs.mkdirSync(path.join(resolveGlobalVoiceLibraryRoot(), "assets"), { recursive: true });
+    if (!fs.existsSync(resolveGlobalVoiceRegistryPath())) {
+      writeRegistry(emptyRegistry());
+    }
+  }
+
+  list(query: VoiceAssetListQuery = {}): VoiceAssetListResult {
+    const registry = readRegistry();
+    let items = [...registry.assets];
+    const statuses = query.status
+      ? Array.isArray(query.status)
+        ? query.status
+        : [query.status]
+      : null;
+    if (statuses?.length) {
+      const set = new Set(statuses);
+      items = items.filter((a) => set.has(a.status));
+    }
+    const kinds = query.kind
+      ? Array.isArray(query.kind)
+        ? query.kind
+        : [query.kind]
+      : null;
+    if (kinds?.length) {
+      const set = new Set(kinds);
+      items = items.filter((a) => set.has(a.kind));
+    }
+    const tag = query.tag?.trim().toLowerCase();
+    if (tag) {
+      items = items.filter((a) => a.tags.some((t) => t.toLowerCase() === tag));
+    }
+    const q = query.q?.trim().toLowerCase();
+    if (q) {
+      items = items.filter(
+        (a) =>
+          a.slug.toLowerCase().includes(q)
+          || a.displayName.toLowerCase().includes(q)
+          || a.id.toLowerCase().includes(q)
+          || a.tags.some((t) => t.toLowerCase().includes(q)),
+      );
+    }
+    items.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    const total = items.length;
+    const limit = Math.max(1, Math.min(500, query.limit ?? 200));
+    return { items: items.slice(0, limit), total };
+  }
+
+  getById(assetId: string): VoiceAsset | null {
+    const id = assetId.trim();
+    if (!id) return null;
+    return readRegistry().assets.find((a) => a.id === id) ?? null;
+  }
+
+  getBySlug(slug: string): VoiceAsset | null {
+    const s = slug.trim().toLowerCase();
+    if (!s) return null;
+    return readRegistry().assets.find((a) => a.slug === s) ?? null;
+  }
+
+  /**
+   * 若有 ttsVoiceAssetId 则优先走库；否则返回 null（调用方用 legacy ttsRefAudioPath）。
+   */
+  resolveCloneRefForCharacter(input: {
+    ttsVoiceAssetId?: string | null;
+    requireApproved?: boolean;
+  }): string | null {
+    const id = input.ttsVoiceAssetId?.trim();
+    if (!id) return null;
+    const asset = this.getById(id);
+    if (!asset) {
+      throw new AppError(`VoiceAsset 不存在：${id}`, 404);
+    }
+    return assertCloneRefUsable(asset, input.requireApproved !== false);
+  }
+
+  importFromFile(input: VoiceAssetImportFromFileInput): VoiceAsset {
+    this.ensureLibraryRoot();
+    const license = assertLicense(input.license);
+    const slug = normalizeSlug(input.slug);
+    const displayName = input.displayName?.trim() || slug;
+    const kind: VoiceAssetKind =
+      input.kind && isVoiceAssetKind(input.kind) ? input.kind : "clone_ref";
+    const status: VoiceAssetStatus =
+      input.status && isVoiceAssetStatus(input.status) ? input.status : "draft";
+    if (kind !== "clone_ref") {
+      throw new AppError("当前仅支持 kind=clone_ref 文件导入。", 400);
+    }
+    const sourceAbs = resolveSourcePath(input.sourcePath);
+    if (!isValidPcmWavFile(sourceAbs)) {
+      throw new AppError("clone_ref 导入仅接受合法 PCM WAV。", 400);
+    }
+    const registry = readRegistry();
+    const existing = registry.assets.find((a) => a.slug === slug);
+    if (existing && !input.overwrite) {
+      throw new AppError(`slug「${slug}」已存在（id=${existing.id}）。传 overwrite=true 可覆盖。`, 409);
+    }
+    const assetId = existing?.id || newAssetId();
+    const destDir = resolveGlobalVoiceAssetDir(assetId);
+    fs.mkdirSync(destDir, { recursive: true });
+    const destPath = resolveGlobalVoiceAssetRefPath(assetId, "wav");
+    const tmp = `${destPath}.part`;
+    fs.copyFileSync(sourceAbs, tmp);
+    fs.renameSync(tmp, destPath);
+    const checked = checkVoiceRefAudioPath(destPath);
+    if (!checked.ok) {
+      try {
+        fs.unlinkSync(destPath);
+      } catch {
+        /* ignore */
+      }
+      throw new AppError(`导入后路径校验失败：${checked.reason}`, 500);
+    }
+    const meta = wavMetaFromFile(checked.absolutePath);
+    const sha = sha256File(checked.absolutePath);
+    const now = nowIso();
+    const backendTargets: VoiceAssetBackendTarget[] = (
+      input.backendTargets?.length ? input.backendTargets : ["mimo_chat_audio"]
+    ) as VoiceAssetBackendTarget[];
+    const asset: VoiceAsset = {
+      id: assetId,
+      slug,
+      displayName,
+      kind,
+      status,
+      tags: Array.isArray(input.tags)
+        ? input.tags.map((t) => t.trim()).filter(Boolean).slice(0, 32)
+        : [],
+      sampleText: input.sampleText?.trim() || null,
+      designPrompt: input.designPrompt?.trim() || null,
+      presetVoice: null,
+      license,
+      backendTargets,
+      primaryFile: {
+        path: checked.absolutePath,
+        sha256: sha,
+        bytes: meta.bytes,
+        format: "wav",
+        sampleRate: meta.sampleRate,
+        durationSec: meta.durationSec,
+        channels: meta.channels,
+      },
+      packId: input.packId?.trim() || null,
+      createdAt: existing?.createdAt || now,
+      updatedAt: now,
+    };
+    if (existing) {
+      registry.assets = registry.assets.map((a) => (a.id === assetId ? asset : a));
+    } else {
+      registry.assets.push(asset);
+    }
+    writeRegistry(registry);
+    return asset;
+  }
+
+  importYuanworldSeedPack(input: VoiceAssetImportPackInput = {}): VoiceAssetImportPackResult {
+    this.ensureLibraryRoot();
+    const packRoot = discoverPackRoot(input.packRoot);
+    const manifestPath = path.join(packRoot, "SEED_MANIFEST.json");
+    let manifest: {
+      packId?: string;
+      items?: Array<Record<string, unknown>>;
+    };
+    try {
+      manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    } catch {
+      throw new AppError(`无法读取 SEED_MANIFEST.json：${manifestPath}`, 400);
+    }
+    const packId = String(manifest.packId || "yuanworld-seed-from-mimo");
+    const items = Array.isArray(manifest.items) ? manifest.items : [];
+    const imported: VoiceAsset[] = [];
+    const skipped: Array<{ slug: string; reason: string }> = [];
+    const failed: Array<{ slug: string; reason: string }> = [];
+
+    for (const raw of items) {
+      const slug = String(raw.slug || "").trim();
+      if (!slug) {
+        failed.push({ slug: "(empty)", reason: "缺 slug" });
+        continue;
+      }
+      try {
+        const fileRel = String(raw.file || "").trim();
+        if (!fileRel || fileRel.includes("..") || path.isAbsolute(fileRel)) {
+          throw new AppError("manifest file 必须为包内相对路径。", 400);
+        }
+        const sourcePath = path.join(packRoot, fileRel);
+        const licenseRaw = (raw.license || {}) as Record<string, string | null | undefined>;
+        const statusRaw: VoiceAssetStatus =
+          input.forceStatus
+          || (typeof raw.status === "string" && isVoiceAssetStatus(raw.status)
+            ? raw.status
+            : "draft");
+        // 种子默认 draft：人耳批准前禁止 approved 批量写
+        const status: VoiceAssetStatus =
+          statusRaw === "approved" && !input.forceStatus ? "draft" : statusRaw;
+        const existing = this.getBySlug(normalizeSlug(slug));
+        if (existing && !input.overwrite) {
+          skipped.push({ slug, reason: `已存在 id=${existing.id}` });
+          continue;
+        }
+        const asset = this.importFromFile({
+          sourcePath,
+          slug,
+          displayName: String(raw.displayName || slug),
+          kind: "clone_ref",
+          status,
+          tags: Array.isArray(raw.tags) ? raw.tags.map(String) : ["seed"],
+          sampleText: raw.sampleText != null ? String(raw.sampleText) : null,
+          license: {
+            source: licenseRaw.source || "app-seed",
+            rights: licenseRaw.rights || "internal-test-only",
+            notes: licenseRaw.notes || null,
+            url: licenseRaw.url || null,
+          },
+          backendTargets: Array.isArray(raw.backendTargets)
+            ? (raw.backendTargets as VoiceAssetBackendTarget[])
+            : ["mimo_chat_audio"],
+          packId,
+          overwrite: Boolean(input.overwrite || existing),
+        });
+        imported.push(asset);
+      } catch (error) {
+        failed.push({
+          slug,
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    return { packId, imported, skipped, failed };
+  }
+
+  setStatus(assetId: string, status: VoiceAssetStatus): VoiceAsset {
+    if (!isVoiceAssetStatus(status)) {
+      throw new AppError("status 非法。", 400);
+    }
+    const registry = readRegistry();
+    const idx = registry.assets.findIndex((a) => a.id === assetId.trim());
+    if (idx < 0) {
+      throw new AppError("VoiceAsset 不存在。", 404);
+    }
+    const prev = registry.assets[idx]!;
+    if (status === "approved" && prev.kind === "clone_ref") {
+      assertCloneRefUsable({ ...prev, status: "approved" }, false);
+      if (!prev.license?.source || !prev.license?.rights) {
+        throw new AppError("approved 前必须具备 license.source/rights。", 400);
+      }
+    }
+    const next: VoiceAsset = {
+      ...prev,
+      status,
+      updatedAt: nowIso(),
+    };
+    registry.assets[idx] = next;
+    writeRegistry(registry);
+    return next;
+  }
+
+  async bindCharacter(
+    novelId: string,
+    characterId: string,
+    input: VoiceAssetBindCharacterInput,
+  ): Promise<VoiceAssetBindCharacterResult> {
+    const assetId = input.voiceAssetId?.trim();
+    if (!assetId) {
+      throw new AppError("voiceAssetId 不能为空。", 400);
+    }
+    const asset = this.getById(assetId);
+    if (!asset) {
+      throw new AppError(`VoiceAsset 不存在：${assetId}`, 404);
+    }
+    const absolutePath = assertCloneRefUsable(asset, input.requireApproved !== false);
+    const character = await prisma.character.findFirst({
+      where: { id: characterId, novelId },
+      select: { id: true },
+    });
+    if (!character) {
+      throw new AppError("角色不存在。", 404);
+    }
+    await prisma.character.update({
+      where: { id: characterId },
+      data: {
+        ttsMode: "clone",
+        ttsRefAudioPath: absolutePath,
+        ttsVoiceAssetId: asset.id,
+        ttsVoice: null,
+        ttsDesignPrompt: null,
+      },
+    });
+    return {
+      novelId,
+      characterId,
+      voiceAssetId: asset.id,
+      ttsMode: "clone",
+      ttsRefAudioPath: absolutePath,
+    };
+  }
+}
+
+export const voiceLibraryService = new VoiceLibraryService();

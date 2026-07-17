@@ -631,6 +631,8 @@ model Character {
   ttsMode         String?
   ttsDesignPrompt String?
   ttsRefAudioPath String?
+  /** 全站 VoiceAsset.id（library clone）。 */
+  ttsVoiceAssetId String?
   /** JSON string array of speaker aliases for audiobook annotation. */
   ttsSpeakerAliases String?
   /** Fixed character-card voice preview wav path (not task output). */
