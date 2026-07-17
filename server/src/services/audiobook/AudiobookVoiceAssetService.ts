@@ -45,6 +45,7 @@ import {
   resolveDefaultCharacterVoicePreviewText,
   resolvePreviewTtsMode,
 } from "./characterVoicePreview";
+import { tryResolveEffectiveCloneRefPath } from "./voiceLibraryService";
 import { mimoChatAudioTTSProvider } from "./MimoChatAudioTTSProvider";
 
 const DEFAULT_PREVIEW_TEXT = DEFAULT_CHARACTER_VOICE_PREVIEW_TEXT;
@@ -650,9 +651,20 @@ export class AudiobookVoiceAssetService {
       throw new AppError("角色不存在。", 404);
     }
 
+    const effectiveRef =
+      tryResolveEffectiveCloneRefPath({
+        ttsVoiceAssetId: character.ttsVoiceAssetId,
+        ttsRefAudioPath: character.ttsRefAudioPath,
+        requireApproved: true,
+      }) || character.ttsRefAudioPath;
+    const previewConfig = {
+      ...character,
+      ttsRefAudioPath: effectiveRef,
+    };
+
     let ready: ReturnType<typeof assertCharacterVoiceReadyForPreview>;
     try {
-      ready = assertCharacterVoiceReadyForPreview(character);
+      ready = assertCharacterVoiceReadyForPreview(previewConfig);
     } catch (error) {
       throw new AppError(error instanceof Error ? error.message : "音色配置不完整，无法生成试听。", 400);
     }
@@ -661,7 +673,7 @@ export class AudiobookVoiceAssetService {
       input.text?.trim()
         || resolveDefaultCharacterVoicePreviewText({ gender: character.gender }),
     );
-    const fingerprint = buildCharacterVoicePreviewFingerprint(character, sampleText);
+    const fingerprint = buildCharacterVoicePreviewFingerprint(previewConfig, sampleText);
     const candidatesCount = normalizeCandidatesCount(input.candidates);
     // job/prepare 默认 auto-adopt；UI 多抽默认 false
     const autoAdopt =

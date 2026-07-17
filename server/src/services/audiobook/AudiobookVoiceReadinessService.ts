@@ -30,6 +30,7 @@ import {
   resolveVoiceReadinessProgressWeights,
 } from "./voiceReadinessJobLogic";
 import { probeVoiceRefAudioOk } from "./voiceRefPath";
+import { tryResolveEffectiveCloneRefPath } from "./voiceLibraryService";
 
 const JOB_TTL_MS = 60 * 60 * 1000;
 const MAX_JOBS = 200;
@@ -326,11 +327,21 @@ export class AudiobookVoiceReadinessService {
       const mode = character.ttsMode?.trim() || "preset";
       let refAudioOk: boolean | null = null;
       if (mode === "clone") {
-        const hasPath = Boolean(character.ttsRefAudioPath?.trim());
+        const resolved = tryResolveEffectiveCloneRefPath({
+          ttsVoiceAssetId: character.ttsVoiceAssetId,
+          ttsRefAudioPath: character.ttsRefAudioPath,
+          requireApproved: true,
+        });
+        const effectivePath = resolved || character.ttsRefAudioPath?.trim() || "";
+        const hasPath = Boolean(effectivePath);
         if (skipProbe) {
-          refAudioOk = hasPath ? true : null;
+          // 列表态势：有 assetId 或 path 即视为可配（不 probe 文件/库状态）
+          refAudioOk = hasPath || Boolean(character.ttsVoiceAssetId?.trim()) ? true : null;
         } else if (hasPath) {
-          refAudioOk = probeRefAudioOk(character.ttsRefAudioPath);
+          refAudioOk = probeRefAudioOk(effectivePath);
+        } else if (character.ttsVoiceAssetId?.trim()) {
+          // 有 assetId 但 resolve 失败（draft/archived/缺失）→ invalid
+          refAudioOk = false;
         }
       }
       return buildCharacterReadinessItem({

@@ -946,7 +946,6 @@ export interface VoiceAssetImportPackResult {
 
 export interface VoiceAssetBindCharacterInput {
   voiceAssetId: string;
-  requireApproved?: boolean;
 }
 
 export interface VoiceAssetBindCharacterResult {

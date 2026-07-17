@@ -96,8 +96,14 @@ describe("voiceLibraryService", () => {
       });
       assert.equal(asset.kind, "clone_ref");
       assert.equal(asset.status, "draft");
-      assert.ok(asset.primaryFile?.path.includes(`${path.sep}voice-refs${path.sep}global${path.sep}`));
-      assert.ok(fs.existsSync(asset.primaryFile.path));
+      // registry 存相对 voice-refs 路径
+      assert.match(asset.primaryFile?.path || "", /^global\/assets\/va_[a-f0-9]+\/ref\.wav$/);
+      const {
+        resolveVoiceAssetStoredPath,
+      } = require("../dist/services/audiobook/voiceLibraryService");
+      const abs = resolveVoiceAssetStoredPath(asset.primaryFile.path);
+      assert.ok(abs && fs.existsSync(abs));
+      assert.ok(abs.includes(`${path.sep}voice-refs${path.sep}global${path.sep}`));
       assert.ok(fs.existsSync(resolveGlobalVoiceRegistryPath()));
     });
   });
@@ -172,4 +178,59 @@ describe("voiceLibraryService", () => {
     });
     assert.match(label, /clone·库\/va_abcdef/);
   });
+
+  it("相对路径 resolve 与 approved 门禁；draft 拒绝", async () => {
+    await withIsolatedLibrary(async () => {
+      const wav = writeSilentPcmWav(path.join(TMP_ROOT, "src4.wav"));
+      let asset = voiceLibraryService.importFromFile({
+        sourcePath: wav,
+        slug: "rel-path",
+        displayName: "Rel",
+        license: { source: "test", rights: "internal" },
+      });
+      assert.match(asset.primaryFile.path, /^global\//);
+      assert.throws(
+        () => voiceLibraryService.assertBindableCloneRef(asset.id),
+        /approved/,
+      );
+      asset = voiceLibraryService.setStatus(asset.id, "approved");
+      const { absolutePath } = voiceLibraryService.assertBindableCloneRef(asset.id);
+      assert.ok(fs.existsSync(absolutePath));
+      assert.ok(path.isAbsolute(absolutePath));
+    });
+  });
+
+  it("resolveEffectiveCloneRefPath 优先 assetId 且拒绝 archived", async () => {
+    await withIsolatedLibrary(async () => {
+      const {
+        resolveEffectiveCloneRefPath,
+      } = require("../dist/services/audiobook/voiceLibraryService");
+      const wav = writeSilentPcmWav(path.join(TMP_ROOT, "src5.wav"));
+      let asset = voiceLibraryService.importFromFile({
+        sourcePath: wav,
+        slug: "eff-path",
+        displayName: "Eff",
+        license: { source: "test", rights: "internal" },
+        status: "approved",
+      });
+      // import 允许 status approved
+      assert.equal(asset.status, "approved");
+      const abs = resolveEffectiveCloneRefPath({
+        ttsVoiceAssetId: asset.id,
+        ttsRefAudioPath: "/tmp/stale.wav",
+        requireApproved: true,
+      });
+      assert.ok(abs && fs.existsSync(abs));
+      voiceLibraryService.setStatus(asset.id, "archived");
+      assert.throws(
+        () =>
+          resolveEffectiveCloneRefPath({
+            ttsVoiceAssetId: asset.id,
+            requireApproved: true,
+          }),
+        /archived/,
+      );
+    });
+  });
+
 });

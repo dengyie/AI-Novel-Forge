@@ -1,6 +1,7 @@
 /**
  * 全站 VoiceAsset 库：JSON registry + voice-refs/global 文件。
  * 安全：所有 clone 路径必须过 checkVoiceRefAudioPath；客户端只提交 asset id。
+ * registry.primaryFile.path 存相对 voice-refs 根的路径；角色 denormalize 写绝对路径（bind 时 resolve）。
  */
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -30,9 +31,10 @@ import {
   resolveGlobalVoiceAssetRefPath,
   resolveGlobalVoiceLibraryRoot,
   resolveGlobalVoiceRegistryPath,
+  resolveVoiceRefRoot,
 } from "./audiobookPaths";
 import { isValidPcmWavFile, parseWavInfo } from "./audiobookWav";
-import { checkVoiceRefAudioPath } from "./voiceRefPath";
+import { checkVoiceRefAudioPath, isPathInside } from "./voiceRefPath";
 
 const DEFAULT_PACK_REL = path.join("docs", "voice-packs", "05-yuanworld-seed-from-mimo");
 
@@ -136,6 +138,30 @@ function assertLicense(license: VoiceAssetLicense | undefined | null): VoiceAsse
   };
 }
 
+/** 将 registry 内 path（相对 voice-refs 或历史绝对路径）解析为绝对路径。 */
+export function resolveVoiceAssetStoredPath(stored: string | null | undefined): string | null {
+  const raw = stored?.trim() || "";
+  if (!raw) return null;
+  if (path.isAbsolute(raw)) {
+    return path.resolve(raw);
+  }
+  return path.resolve(resolveVoiceRefRoot(), raw);
+}
+
+/** 绝对路径 → 相对 voice-refs 根；越界则抛错。 */
+export function toVoiceRefRelativePath(absolutePath: string): string {
+  const abs = path.resolve(absolutePath);
+  const root = resolveVoiceRefRoot();
+  if (!isPathInside(root, abs)) {
+    throw new AppError("参考音频路径越界（必须位于 voice-refs 目录）。", 400);
+  }
+  const rel = path.relative(root, abs);
+  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) {
+    throw new AppError("参考音频路径无法转为 voice-refs 相对路径。", 400);
+  }
+  return rel.split(path.sep).join("/");
+}
+
 function assertCloneRefUsable(asset: VoiceAsset, requireApproved: boolean): string {
   if (asset.kind !== "clone_ref") {
     throw new AppError(`资产「${asset.displayName}」不是 clone_ref，不能绑角色 clone。`, 400);
@@ -149,11 +175,15 @@ function assertCloneRefUsable(asset: VoiceAsset, requireApproved: boolean): stri
   if (asset.status === "archived" || asset.status === "deprecated") {
     throw new AppError(`资产「${asset.displayName}」已 ${asset.status}，禁止绑定。`, 400);
   }
-  const refPath = asset.primaryFile?.path?.trim() || "";
-  if (!refPath) {
+  const stored = asset.primaryFile?.path?.trim() || "";
+  if (!stored) {
     throw new AppError(`资产「${asset.displayName}」缺少 primaryFile。`, 400);
   }
-  const checked = checkVoiceRefAudioPath(refPath);
+  const absoluteCandidate = resolveVoiceAssetStoredPath(stored);
+  if (!absoluteCandidate) {
+    throw new AppError(`资产「${asset.displayName}」primaryFile 路径无效。`, 400);
+  }
+  const checked = checkVoiceRefAudioPath(absoluteCandidate);
   if (!checked.ok) {
     throw new AppError(`资产「${asset.displayName}」参考音频不可用：${checked.reason}`, 400);
   }
@@ -210,6 +240,41 @@ function discoverPackRoot(explicit?: string | null): string {
     `未找到种子包（期望 ${DEFAULT_PACK_REL}/SEED_MANIFEST.json，cwd=${process.cwd()}）。`,
     400,
   );
+}
+
+/**
+ * 有 ttsVoiceAssetId 时按库 resolve 绝对 clone 路径；无 id 时返回 legacy path 或 null。
+ * 默认 requireApproved=true。asset 不存在/不可用时抛 AppError。
+ */
+export function resolveEffectiveCloneRefPath(input: {
+  ttsVoiceAssetId?: string | null;
+  ttsRefAudioPath?: string | null;
+  requireApproved?: boolean;
+}): string | null {
+  const id = input.ttsVoiceAssetId?.trim();
+  if (id) {
+    return voiceLibraryService.resolveCloneRefForCharacter({
+      ttsVoiceAssetId: id,
+      requireApproved: input.requireApproved !== false,
+    });
+  }
+  const legacy = input.ttsRefAudioPath?.trim();
+  return legacy || null;
+}
+
+/**
+ * 尽力 resolve：库 id 失败时不抛，返回 null（readiness probe 用）。
+ */
+export function tryResolveEffectiveCloneRefPath(input: {
+  ttsVoiceAssetId?: string | null;
+  ttsRefAudioPath?: string | null;
+  requireApproved?: boolean;
+}): string | null {
+  try {
+    return resolveEffectiveCloneRefPath(input);
+  } catch {
+    return null;
+  }
 }
 
 export class VoiceLibraryService {
@@ -276,6 +341,7 @@ export class VoiceLibraryService {
 
   /**
    * 若有 ttsVoiceAssetId 则优先走库；否则返回 null（调用方用 legacy ttsRefAudioPath）。
+   * 合成/绑库路径默认 requireApproved=true。
    */
   resolveCloneRefForCharacter(input: {
     ttsVoiceAssetId?: string | null;
@@ -288,6 +354,22 @@ export class VoiceLibraryService {
       throw new AppError(`VoiceAsset 不存在：${id}`, 404);
     }
     return assertCloneRefUsable(asset, input.requireApproved !== false);
+  }
+
+  /**
+   * 绑库前校验（不写角色）。用于 create 避免半成品角色。
+   */
+  assertBindableCloneRef(voiceAssetId: string): { asset: VoiceAsset; absolutePath: string } {
+    const assetId = voiceAssetId.trim();
+    if (!assetId) {
+      throw new AppError("voiceAssetId 不能为空。", 400);
+    }
+    const asset = this.getById(assetId);
+    if (!asset) {
+      throw new AppError(`VoiceAsset 不存在：${assetId}`, 404);
+    }
+    const absolutePath = assertCloneRefUsable(asset, true);
+    return { asset, absolutePath };
   }
 
   importFromFile(input: VoiceAssetImportFromFileInput): VoiceAsset {
@@ -329,6 +411,7 @@ export class VoiceLibraryService {
     }
     const meta = wavMetaFromFile(checked.absolutePath);
     const sha = sha256File(checked.absolutePath);
+    const relativePath = toVoiceRefRelativePath(checked.absolutePath);
     const now = nowIso();
     const backendTargets: VoiceAssetBackendTarget[] = (
       input.backendTargets?.length ? input.backendTargets : ["mimo_chat_audio"]
@@ -348,7 +431,7 @@ export class VoiceLibraryService {
       license,
       backendTargets,
       primaryFile: {
-        path: checked.absolutePath,
+        path: relativePath,
         sha256: sha,
         bytes: meta.bytes,
         format: "wav",
@@ -476,15 +559,8 @@ export class VoiceLibraryService {
     characterId: string,
     input: VoiceAssetBindCharacterInput,
   ): Promise<VoiceAssetBindCharacterResult> {
-    const assetId = input.voiceAssetId?.trim();
-    if (!assetId) {
-      throw new AppError("voiceAssetId 不能为空。", 400);
-    }
-    const asset = this.getById(assetId);
-    if (!asset) {
-      throw new AppError(`VoiceAsset 不存在：${assetId}`, 404);
-    }
-    const absolutePath = assertCloneRefUsable(asset, input.requireApproved !== false);
+    // 合成绑库恒 require approved；服务层不再接受 body 旁路
+    const { asset, absolutePath } = this.assertBindableCloneRef(input.voiceAssetId);
     const character = await prisma.character.findFirst({
       where: { id: characterId, novelId },
       select: { id: true },
