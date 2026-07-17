@@ -40,12 +40,12 @@ export const queryKeys = {
     /** 有声书工作台轻量 bootstrap（无章节正文） */
     audiobookWorkspace: (id: string) => ["novels", "audiobook-workspace", id] as const,
     /**
-     * 选书页 bulk 态势。page+keyword 稳定 key，避免 ids 顺序抖动双缓存。
-     * 项目页 create/cancel/就绪/reprocess 后用 audiobookWorkspaceOverviewPrefix invalidate。
+     * 选书页 bulk 态势。prefix 用于 create/cancel/就绪/reprocess/旁白保存后 invalidate。
+     * 完整 key 含 page/keyword/**novelIdsKey**（稳定 join 的当前页 id），避免 list 身份变化仍命中旧缓存。
      */
     audiobookWorkspaceOverviewPrefix: ["novels", "audiobook-workspace-overview"] as const,
-    audiobookWorkspaceOverview: (page: number, keyword: string) =>
-      ["novels", "audiobook-workspace-overview", page, keyword] as const,
+    audiobookWorkspaceOverview: (page: number, keyword: string, novelIdsKey: string) =>
+      ["novels", "audiobook-workspace-overview", page, keyword, novelIdsKey] as const,
     audiobookTasks: (id: string) => ["novels", "audiobook-tasks", id] as const,
     /** 音色/试听就绪评估（工作台徽章 SoT） */
     audiobookVoiceReadiness: (id: string) => ["novels", "audiobook-voice-readiness", id] as const,
