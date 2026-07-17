@@ -1,5 +1,7 @@
 import {
   classifyChapterQualityLoopRisk,
+  projectL0ClearFromQualityLoop,
+  projectStyleClearFromQualityLoop,
   type ChapterQualityLoopAction,
   type ChapterQualityLoopRiskClassification,
   type ChapterQualityLoopSignalStatus,
@@ -13,6 +15,13 @@ import {
   type GenreBeatKind,
   type GenreFramingInput,
 } from "@ai-novel/shared/types/genreBeatQuota";
+import { projectLiteraryPassFromQualityLoopSignals } from "@ai-novel/shared/types/literaryQualityPass";
+import {
+  parseQualityFeedbackList,
+  type QualityFeedbackPacket,
+  type QualityFeedbackRootCause,
+  type QualityFeedbackSeverity,
+} from "@ai-novel/shared/types/qualityFeedback";
 
 /**
  * 运行范围内（pipeline job 的 startOrder–endOrder，或债板聚合的章节集合）
@@ -35,6 +44,18 @@ export interface QualityDebtChapterRow {
   riskFlags?: string | null;
 }
 
+/** 债板可见的最新 QFP 摘要（不回传完整 evidence 列表，避免 UI 噪声）。 */
+export interface QualityDebtBoardFeedbackSummary {
+  severity: QualityFeedbackSeverity;
+  rootCause: QualityFeedbackRootCause;
+  signature: string;
+  avoidRetry: boolean;
+  failedPatchCount: number;
+  codes: string[];
+  mustFix: string[];
+  evaluatedAt: string;
+}
+
 export interface QualityDebtBoardItem {
   chapterId: string;
   chapterOrder: number;
@@ -48,6 +69,16 @@ export interface QualityDebtBoardItem {
   riskClassification: ChapterQualityLoopRiskClassification;
   evaluatedAt: string | null;
   pauseReason: string | null;
+  /** 文学 isPass 投影；null=无 literary_score 信号 */
+  literaryPass: boolean | null;
+  /** L0 清净（无 non-deferrable prose/sot/HUD）；null=不可解析 */
+  l0Clear: boolean | null;
+  /** 文风门；null=无 qualityLoop */
+  styleClear: boolean | null;
+  /** style_residual 解析 residual=N；null=无/未知 */
+  residualRiskScore: number | null;
+  /** 最新 QFP 摘要（无 feedback → null） */
+  latestFeedback: QualityDebtBoardFeedbackSummary | null;
 }
 
 export interface QualityDebtBoardSummary {
@@ -374,12 +405,64 @@ function asAction(value: unknown): ChapterQualityLoopAction | null {
     : null;
 }
 
+/**
+ * 从 qualityLoop.signals 解析 residual=N（style_residual）。
+ * missing / 无码 → null；risk/invalid 无码 → 不猜测具体数字，返回 null（styleClear 已单独投影）。
+ */
+export function extractResidualRiskScoreFromQualityLoop(
+  qualityLoop: Record<string, unknown> | null | undefined,
+): number | null {
+  if (!qualityLoop) {
+    return null;
+  }
+  const signals = Array.isArray(qualityLoop.signals) ? qualityLoop.signals : [];
+  for (const signal of signals) {
+    if (!isRecord(signal) || signal.artifactType !== "style_residual") {
+      continue;
+    }
+    const codes = Array.isArray(signal.issueCodes) ? signal.issueCodes : [];
+    const residualCode = codes.find((c) => typeof c === "string" && c.startsWith("residual="));
+    if (typeof residualCode === "string") {
+      const n = Number(residualCode.slice("residual=".length));
+      if (Number.isFinite(n)) {
+        return n;
+      }
+    }
+  }
+  return null;
+}
+
+function projectLatestFeedbackSummary(
+  qualityLoop: Record<string, unknown>,
+): QualityDebtBoardFeedbackSummary | null {
+  const packets = parseQualityFeedbackList(qualityLoop.feedback);
+  if (packets.length === 0) {
+    return null;
+  }
+  // feedback 滚动窗口：最新在末尾
+  const latest: QualityFeedbackPacket = packets[packets.length - 1]!;
+  return {
+    severity: latest.severity,
+    rootCause: latest.rootCause,
+    signature: latest.signature,
+    avoidRetry: latest.avoidRetry,
+    failedPatchCount: latest.failedPatchCount,
+    codes: latest.codes.slice(0, 6),
+    mustFix: latest.mustFix.slice(0, 3),
+    evaluatedAt: latest.evaluatedAt,
+  };
+}
+
 export function buildQualityDebtBoardItem(
   chapter: Required<Pick<QualityDebtChapterRow, "id" | "order">> & QualityDebtChapterRow,
 ): QualityDebtBoardItem | null {
   const qualityLoop = parseQualityLoopFromRiskFlags(chapter.riskFlags);
   if (!qualityLoop) {
     return null;
+  }
+  // 保证投影函数能读到 chapterOrder（riskFlags 内可能缺）
+  if (typeof qualityLoop.chapterOrder !== "number" || !Number.isFinite(qualityLoop.chapterOrder)) {
+    qualityLoop.chapterOrder = chapter.order;
   }
   const riskClassification = classifyChapterQualityLoopRisk(qualityLoop);
   if (
@@ -389,6 +472,7 @@ export function buildQualityDebtBoardItem(
   ) {
     return null;
   }
+  const signals = Array.isArray(qualityLoop.signals) ? qualityLoop.signals : [];
   return {
     chapterId: chapter.id,
     chapterOrder: chapter.order,
@@ -402,6 +486,11 @@ export function buildQualityDebtBoardItem(
     riskClassification,
     evaluatedAt: typeof qualityLoop.evaluatedAt === "string" ? qualityLoop.evaluatedAt : null,
     pauseReason: typeof qualityLoop.pauseReason === "string" ? qualityLoop.pauseReason : null,
+    literaryPass: projectLiteraryPassFromQualityLoopSignals(signals),
+    l0Clear: projectL0ClearFromQualityLoop(qualityLoop),
+    styleClear: projectStyleClearFromQualityLoop(qualityLoop),
+    residualRiskScore: extractResidualRiskScoreFromQualityLoop(qualityLoop),
+    latestFeedback: projectLatestFeedbackSummary(qualityLoop),
   };
 }
 

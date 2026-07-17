@@ -38,6 +38,11 @@ export function resolveWorkflowContinuationFeedback(
   };
 }
 
+/**
+ * 客户端续跑策略映射。
+ * 禁止把质量检查点策略化映射为 skip_quality_repair（监管契约 / A7）。
+ * skip 仅可由显式 API 载荷携带；UI 主路径不得默认跳过质量建议。
+ */
 export function resolveDirectorContinueMode(task: Pick<
   UnifiedTaskDetail,
   "checkpointType" | "currentItemKey" | "currentStage" | "pendingManualRecovery"
@@ -45,12 +50,13 @@ export function resolveDirectorContinueMode(task: Pick<
   if (task?.pendingManualRecovery) {
     return "resume";
   }
+  // 质量相关检查点：resume 让服务端按真实 quality 债决策，禁止客户端 skip
   if (
     task?.checkpointType === "replan_required"
     || task?.currentItemKey === "quality_repair"
     || task?.currentStage?.includes("质量")
   ) {
-    return "skip_quality_repair";
+    return "resume";
   }
   if (task?.checkpointType === "chapter_batch_ready") {
     return "auto_execute_range";
