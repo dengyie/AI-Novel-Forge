@@ -20,6 +20,10 @@ import {
   ruleScore,
 } from "./novelCoreShared";
 import { GenerationContextAssembler } from "./runtime/GenerationContextAssembler";
+import {
+  hasBlockingPronounProseFromIssueCodes,
+  projectStyleClear,
+} from "@ai-novel/shared/types/styleClearGate";
 import { chapterQualityLoopService } from "./quality/ChapterQualityLoopService";
 import { chapterStatePairAfterManualQualityReview } from "./chapterLifecycleState";
 import { directorAutomationLedgerEventService } from "./director/runtime/DirectorAutomationLedgerEventService";
@@ -30,6 +34,11 @@ import {
   assembleChapterAuditContextPackage,
 } from "./runtime/repair/chapterAuditContext";
 import { persistChapterQualityScores } from "./quality/chapterQualityScorePersist";
+import {
+  collectPronounStyleViolations,
+  computePronounRiskFloor,
+} from "../styleEngine/StyleDetectionService";
+import { detectProseQuality } from "./runtime/proseQuality/ProseQualityDetector";
 
 /**
  * 审校/流水线写 QualityReport，并拍平到 Chapter 可运营分数字段。
@@ -80,7 +89,18 @@ export class NovelCoreReviewService {
       return review;
     }
 
-    const chapterStatePatch = chapterStatePairAfterManualQualityReview(isPass(review.score));
+    // 双门：文学 isPass ∧ styleClear；styleClear 由 L0 pronoun + 确定性 residual 投影（fail-closed）。
+    const contentForStyle = options.content ?? chapter.content ?? "";
+    const literaryPass = isPass(review.score);
+    const styleClear = projectStyleClearFromManualReview({
+      content: contentForStyle,
+      issues: review.issues,
+      chapterOrder: chapter.order,
+    });
+    const chapterStatePatch = chapterStatePairAfterManualQualityReview({
+      literaryPass,
+      styleClear,
+    });
     await prisma.chapter.update({
       where: { id: chapterId },
       data: chapterStatePatch,
@@ -356,4 +376,35 @@ export class NovelCoreReviewService {
       operation,
     });
   }
+}
+
+/**
+ * 人工/API 审校路径的 styleClear 投影（同步、确定性，不调 LLM）。
+ * - L0 hard pronoun（stack/density）→ false
+ * - residual = L0 pronoun risk floor（0 或 ≥40）；开篇 residual≥35 挡 completed
+ * - 中盘仅 residual 高仍可 true（债不挡 completed；blocking pronoun 仍 false）
+ */
+export function projectStyleClearFromManualReview(input: {
+  content: string;
+  issues: Array<{ code?: string | null } | ReviewIssue>;
+  chapterOrder: number;
+}): boolean {
+  const issueCodes = input.issues
+    .map((issue) => {
+      const anyIssue = issue as { code?: string | null };
+      return typeof anyIssue.code === "string" && anyIssue.code.length > 0 ? anyIssue.code : null;
+    })
+    .filter((code): code is string => code != null);
+  const proseCodes = detectProseQuality(input.content).findings.map((f) => f.code);
+  const hasBlockingPronounProse = hasBlockingPronounProseFromIssueCodes([
+    ...issueCodes,
+    ...proseCodes,
+  ]);
+  // 确定性 residual：pronoun floor 即可区分「干净」与「开篇硬门 residual」；不阻塞 LLM。
+  const residualRiskScore = computePronounRiskFloor(collectPronounStyleViolations(input.content));
+  return projectStyleClear({
+    residualRiskScore,
+    hasBlockingPronounProse,
+    chapterOrder: input.chapterOrder,
+  });
 }

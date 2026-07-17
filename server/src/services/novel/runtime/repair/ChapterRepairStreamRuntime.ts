@@ -41,6 +41,10 @@ import {
   projectStyleClear,
 } from "@ai-novel/shared/types/styleClearGate";
 import {
+  collectPronounStyleViolations,
+  computePronounRiskFloor,
+} from "../../../styleEngine/StyleDetectionService";
+import {
   ChapterContextAssemblyError,
   assembleChapterAuditContextPackage,
 } from "./chapterAuditContext";
@@ -449,8 +453,7 @@ export class ChapterRepairStreamRuntime {
 
     // A6 + styleClear：文学 isPass ∧ 文风门皆过才 completed；!pass 写成 needs_repair
     const literaryPass = isPass(review.score);
-    // repair recheck 无 styleReview 包：用 L0 pronoun hard 投影；无 residual 信息时 residual=null
-    // → 中盘仍可 styleClear=true，开篇未知 residual 会挡 completed（与 projectStyleClear 一致）。
+    // repair recheck 无 styleReview 包：L0 pronoun + 确定性 residual floor（不再 residual=null）。
     const styleClear = projectStyleClearFromRepairReview({
       content: repairedContent,
       issues: review.issues,
@@ -560,7 +563,10 @@ async function* createSingleChunkStream(content: string): AsyncIterable<BaseMess
 /**
  * repair 路径无完整 styleReview residual 时的 styleClear 投影。
  * - L0 hard pronoun（stack/density）→ false
- * - residual 未知：开篇挡 completed；中盘仅 pronoun 可过
+ * - residual = 确定性 pronoun risk floor（不再 hardcode null）
+ *   · 0 → 干净，开篇可通过
+ *   · ≥40（pronoun floor）→ 开篇 residual 硬门挡 completed
+ *   · 中盘仅 residual 高仍 true（债不挡；blocking pronoun 仍 false）
  */
 function projectStyleClearFromRepairReview(input: {
   content: string;
@@ -579,8 +585,10 @@ function projectStyleClearFromRepairReview(input: {
     ...issueCodes,
     ...proseCodes,
   ]);
+  // fail-closed residual：用 L0 pronoun floor 作可测 residual，禁止 null 在开篇假/真漂移
+  const residualRiskScore = computePronounRiskFloor(collectPronounStyleViolations(input.content));
   return projectStyleClear({
-    residualRiskScore: null,
+    residualRiskScore,
     hasBlockingPronounProse,
     chapterOrder: input.chapterOrder,
   });
