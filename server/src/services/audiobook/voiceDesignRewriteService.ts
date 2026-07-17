@@ -1,5 +1,6 @@
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
+import { isBuiltinLLMProvider } from "@ai-novel/shared/types/llm";
 import type {
   VoiceDesignRewriteInput,
   VoiceDesignRewriteResult,
@@ -22,10 +23,13 @@ export type VoiceDesignRewriteLlm = {
   invoke: (messages: unknown[]) => Promise<{ content?: unknown } | string | null | undefined>;
 };
 
-function isLlmProvider(value: string | null | undefined): value is LLMProvider {
-  if (!value?.trim()) return false;
-  // 与现网 provider 字面量兼容；非法时由 getLLM 再抛
-  return true;
+function resolveOptionalProvider(value: string | null | undefined): LLMProvider | undefined {
+  const raw = value?.trim();
+  if (!raw) return undefined;
+  if (!isBuiltinLLMProvider(raw)) {
+    throw new AppError(`不支持的 LLM provider：${raw}`, 400);
+  }
+  return raw;
 }
 
 function extractTextContent(content: unknown): string {
@@ -223,19 +227,18 @@ export async function rewriteCharacterVoiceDesign(input: {
 
   let designPrompt = "";
   let source: VoiceDesignRewriteResult["source"] = "rule_fallback";
+  let fallbackReason: string | null = null;
 
   try {
+    const provider = resolveOptionalProvider(body.provider);
     const llm =
       input.llm
-      ?? (await getLLM(
-        isLlmProvider(body.provider) ? (body.provider as LLMProvider) : undefined,
-        {
-          model: body.model?.trim() || undefined,
-          temperature: 0.55,
-          maxTokens: 600,
-          taskType: "chat",
-        },
-      ));
+      ?? (await getLLM(provider, {
+        model: body.model?.trim() || undefined,
+        temperature: 0.55,
+        maxTokens: 600,
+        taskType: "chat",
+      }));
     const messages = buildRewriteMessages(ctx);
     const response = await llm.invoke(messages);
     const raw =
@@ -248,10 +251,25 @@ export async function rewriteCharacterVoiceDesign(input: {
     } else {
       designPrompt = ruleFallbackPrompt(ctx);
       source = "rule_fallback";
+      fallbackReason = "llm_output_too_short";
+      console.warn(
+        "voice_design_rewrite_fallback",
+        `characterId=${characterId}`,
+        "reason=llm_output_too_short",
+      );
     }
-  } catch {
+  } catch (error) {
+    if (error instanceof AppError) {
+      throw error;
+    }
     designPrompt = ruleFallbackPrompt(ctx);
     source = "rule_fallback";
+    fallbackReason = error instanceof Error ? error.message.slice(0, 160) : "llm_error";
+    console.warn(
+      "voice_design_rewrite_fallback",
+      `characterId=${characterId}`,
+      `reason=${fallbackReason.replace(/\s+/g, "_")}`,
+    );
   }
 
   if (!designPrompt || designPrompt.length < 8) {
@@ -263,5 +281,6 @@ export async function rewriteCharacterVoiceDesign(input: {
     tags: extractTags(designPrompt),
     source,
     applied: false,
+    fallbackReason: source === "rule_fallback" ? fallbackReason : null,
   };
 }

@@ -125,6 +125,7 @@ describe("voiceLibraryService", () => {
           }),
         /approved/,
       );
+      voiceLibraryService.markLibraryPreviewHeard(asset.id);
       asset = voiceLibraryService.setStatus(asset.id, "approved");
       assert.equal(asset.status, "approved");
       const abs = voiceLibraryService.resolveCloneRefForCharacter({
@@ -193,6 +194,7 @@ describe("voiceLibraryService", () => {
         () => voiceLibraryService.assertBindableCloneRef(asset.id),
         /approved/,
       );
+      voiceLibraryService.markLibraryPreviewHeard(asset.id);
       asset = voiceLibraryService.setStatus(asset.id, "approved");
       const { absolutePath } = voiceLibraryService.assertBindableCloneRef(asset.id);
       assert.ok(fs.existsSync(absolutePath));
@@ -224,6 +226,7 @@ describe("voiceLibraryService", () => {
         license: { source: "test", rights: "internal" },
       });
       assert.equal(asset.status, "draft");
+      voiceLibraryService.markLibraryPreviewHeard(asset.id);
       asset = voiceLibraryService.setStatus(asset.id, "approved");
       assert.equal(asset.status, "approved");
       const abs = resolveEffectiveCloneRefPath({
@@ -321,6 +324,27 @@ describe("voiceLibraryService", () => {
         () => voiceLibraryService.resolveLibraryPreviewAudioPath(asset.id),
         /archived/,
       );
+    });
+  });
+
+  it("未 heard 不可 approved；markLibraryPreviewHeard 后可升权", async () => {
+    await withIsolatedLibrary(async () => {
+      const wav = writeSilentPcmWav(path.join(TMP_ROOT, "src-heard.wav"));
+      const asset = voiceLibraryService.importFromFile({
+        sourcePath: wav,
+        slug: "need-heard",
+        displayName: "NeedHeard",
+        license: { source: "test", rights: "internal" },
+      });
+      assert.throws(
+        () => voiceLibraryService.setStatus(asset.id, "approved"),
+        /heardAt|试听/,
+      );
+      const marked = voiceLibraryService.markLibraryPreviewHeard(asset.id);
+      assert.ok(marked.review?.heardAt);
+      const approved = voiceLibraryService.setStatus(asset.id, "approved");
+      assert.equal(approved.status, "approved");
+      assert.ok(approved.review?.heardAt);
     });
   });
 

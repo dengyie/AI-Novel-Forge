@@ -734,6 +734,38 @@ export class VoiceLibraryService {
     return { asset, absolutePath };
   }
 
+  /**
+   * 标记人耳已听（写 registry.review.heardAt）。
+   * 在库级 audio 实际被拉取时调用；media-access 签发不写。
+   */
+  markLibraryPreviewHeard(assetId: string): VoiceAsset {
+    const id = assetId.trim();
+    if (!id) {
+      throw new AppError("assetId 必填。", 400);
+    }
+    // 先校验可试听，再写 heard
+    this.resolveLibraryPreviewAudioPath(id);
+    let result: VoiceAsset | null = null;
+    mutateRegistry((registry) => {
+      const idx = registry.assets.findIndex((a) => a.id === id);
+      if (idx < 0) {
+        throw new AppError("VoiceAsset 不存在。", 404);
+      }
+      const prev = registry.assets[idx]!;
+      const next: VoiceAsset = {
+        ...prev,
+        review: {
+          ...(prev.review ?? {}),
+          heardAt: nowIso(),
+        },
+        updatedAt: nowIso(),
+      };
+      registry.assets[idx] = next;
+      result = next;
+    });
+    return result!;
+  }
+
   setStatus(assetId: string, status: VoiceAssetStatus): VoiceAsset {
     if (!isVoiceAssetStatus(status)) {
       throw new AppError("status 非法。", 400);
@@ -752,6 +784,12 @@ export class VoiceLibraryService {
           assertCloneRefUsable({ ...prev, status: "approved" }, false);
           if (!prev.license?.source || !prev.license?.rights) {
             throw new AppError("approved 前必须具备 license.source/rights。", 400);
+          }
+          if (!prev.review?.heardAt?.trim()) {
+            throw new AppError(
+              "升为 approved 前须先库级试听（服务端未记录 heardAt）。请先播放试听音频。",
+              400,
+            );
           }
         }
         const next: VoiceAsset = {
