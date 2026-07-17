@@ -55,9 +55,14 @@ export type AudiobookSpeakerKind = "narrator" | "character";
 
 /**
  * 段级语境表演开关。
- * - off：完全沿用角色卡静态 style/design（默认）
+ * - off：完全沿用角色卡静态 style/design
  * - characters：仅角色对白注入 delivery
  * - all：角色 + 旁白轻量 delivery
+ *
+ * 默认约定（勿混）：
+ * - 工作台 UI 默认 characters（成书听感）
+ * - createTask API / resolveDeliveryStyleMode 代码默认 off；可用 env AUDIOBOOK_DELIVERY_STYLE_MODE 覆盖
+ * - 固定试听 / 一键就绪只用角色基线，不走 delivery
  */
 export type DeliveryStyleMode = "off" | "characters" | "all";
 
@@ -253,8 +258,9 @@ export interface CreateAudiobookTaskInput {
    */
   requireReadyPreview?: boolean;
   /**
-   * 段级语境表演模式。缺省由服务端解析（代码默认 off，env AUDIOBOOK_DELIVERY_STYLE_MODE 可覆盖）。
-   * 听测前请保持 off，勿污染固定试听/readiness 基线。
+   * 段级语境表演模式。
+   * 缺省：服务端 resolveDeliveryStyleMode → 代码默认 off，env AUDIOBOOK_DELIVERY_STYLE_MODE 可覆盖。
+   * 工作台 UI 会显式传 characters（与 API 默认不同）。固定试听/readiness 不走本字段。
    */
   deliveryStyleMode?: DeliveryStyleMode;
 }

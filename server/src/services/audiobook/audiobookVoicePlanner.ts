@@ -673,28 +673,31 @@ export function buildDesignPromptDetailed(input: {
     flavorParts.push("气质克制坚定");
   }
 
-  // 软目标：补声线习惯，把 identity 抬到 TARGET_MIN～TARGET_MAX
-  const habits = speechHabitCandidates(slot, cluster);
-  const mutexReserve = 36; // 尾句互斥粗估
-  for (const habit of habits) {
-    if (flavorParts.includes(habit)) continue;
-    const trialMid = [...flavorParts, habit].join("，");
-    const trialLen = `${core}，${trialMid}，适合${"网文角色对白"}。尾。`.length + mutexReserve;
-    if (trialLen > DESIGN_PROMPT_TARGET_MAX && flavorParts.length > 0) {
-      // 已有内容且会超软顶则停；仍低于 MIN 时允许冲到 MAX
-      const currentApprox = `${core}，${flavorParts.join("，")}，适合xx。尾。`.length + mutexReserve;
-      if (currentApprox >= DESIGN_PROMPT_TARGET_MIN) break;
-    }
-    if (trialLen > DESIGN_PROMPT_MAX) break;
-    flavorParts.push(habit);
-  }
-
+  // 先解析 useCase，再估算 soft-target 长度（禁止占位「网文角色对白」低估长 useCase）
   const resolvedUseCase = resolveDesignUseCase(character, cluster, gender);
   const archUseCase = input.archetypeUseCase?.trim().slice(0, 24) || "";
   const useCase =
     (!hasRoleSignal(character) && archUseCase)
       ? archUseCase
       : resolvedUseCase;
+
+  // 软目标：补声线习惯，把 identity 抬到 TARGET_MIN～TARGET_MAX
+  const habits = speechHabitCandidates(slot, cluster);
+  const mutexReserve = 36; // 尾句互斥粗估
+  for (const habit of habits) {
+    if (flavorParts.includes(habit)) continue;
+    const trialMid = [...flavorParts, habit].join("，");
+    const trialLen = `${core}，${trialMid}，适合${useCase}。尾。`.length + mutexReserve;
+    if (trialLen > DESIGN_PROMPT_TARGET_MAX && flavorParts.length > 0) {
+      // 已有内容且会超软顶则停；仍低于 MIN 时允许冲到 MAX
+      const currentApprox =
+        `${core}，${flavorParts.join("，")}，适合${useCase}。尾。`.length + mutexReserve;
+      if (currentApprox >= DESIGN_PROMPT_TARGET_MIN) break;
+    }
+    if (trialLen > DESIGN_PROMPT_MAX) break;
+    flavorParts.push(habit);
+  }
+
   const bodyMid = flavorParts.filter(Boolean).join("，");
   let body = bodyMid
     ? `${core}，${bodyMid}，适合${useCase}`
