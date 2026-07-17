@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { BaseMessageChunk } from "@langchain/core/messages";
 import type { QualityScore, ReviewIssue } from "@ai-novel/shared/types/novel";
+import { isAutoPatchAvoidedByRiskFlags } from "@ai-novel/shared/types/qualityFeedback";
 import {
   appendRepairAdoptHistoryLine,
   countTrailingRepairNoImprove,
@@ -27,6 +28,7 @@ import {
   type RepairOptions,
   type ReviewOptions,
 } from "../../novelCoreShared";
+import { chapterQualityLoopService } from "../../quality/ChapterQualityLoopService";
 import type { ChapterArtifactSyncService } from "../ChapterArtifactSyncService";
 import type { GenerationContextAssembler } from "../GenerationContextAssembler";
 import {
@@ -143,6 +145,19 @@ export class ChapterRepairStreamRuntime {
       throw new ChapterContextAssemblyError(novelId, chapterId, "repair", error);
     }
 
+    // A2 QFP：avoidRetry 时强制 heavy rewrite，禁止同签名自动 light patch（从不 skip_quality）。
+    const patchAvoid = isAutoPatchAvoidedByRiskFlags(chapter.riskFlags);
+    if (patchAvoid.avoided) {
+      logPipelineError("QFP avoidRetry: forcing full rewrite instead of auto patch.", {
+        novelId,
+        chapterId,
+        operation: "repair",
+        provider: options.provider ?? null,
+        model: options.model ?? null,
+        error: patchAvoid.reason,
+      });
+    }
+
     const prepared = await prepareChapterRepairExecution({
       novelId,
       chapterId,
@@ -152,11 +167,13 @@ export class ChapterRepairStreamRuntime {
       issues,
       repairContext: repairContextPackage.chapterRepairContext,
       bibleContent: bible?.rawContent ?? "",
+      forceFullRewrite: patchAvoid.avoided,
       options: {
         provider: options.provider,
         model: options.model,
         temperature: options.temperature,
-        repairMode: options.repairMode,
+        // avoidRetry 时即便调用方传 light_repair 也走 heavy 路径（prepare 内再抬级）
+        repairMode: patchAvoid.avoided ? "heavy_repair" : options.repairMode,
       },
     });
 
@@ -252,8 +269,10 @@ export class ChapterRepairStreamRuntime {
       where: { id: input.chapterId, novelId: input.novelId },
       select: {
         id: true,
+        order: true,
         content: true,
         repairHistory: true,
+        riskFlags: true,
         qualityScore: true,
         continuityScore: true,
         characterScore: true,
@@ -332,6 +351,26 @@ export class ChapterRepairStreamRuntime {
       await prisma.chapter.update({
         where: { id: input.chapterId },
         data: { repairHistory: nextRepairHistory },
+      });
+
+      // A2 QFP：discard/plateau 抬 failedPatchCount + avoidRetry（不写正文、不 skip_quality）
+      await chapterQualityLoopService.recordAssessment({
+        novelId: input.novelId,
+        chapterId: input.chapterId,
+        chapterOrder: baselineChapter.order,
+        score: baselineScore,
+        issues: baselineReview.issues,
+        source: "repair_recheck",
+        repairDecision: adoptDecision.decision === "plateau_stop" ? "plateau_stop" : "discard",
+      }).catch((error) => {
+        logPipelineError("Failed to record QFP repairDecision after discard/plateau.", {
+          novelId: input.novelId,
+          chapterId: input.chapterId,
+          operation: "repair",
+          provider: input.options.provider ?? null,
+          model: input.options.model ?? null,
+          error: error instanceof Error ? error.message : String(error),
+        });
       });
 
       input.helpers.writeFrame({

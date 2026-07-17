@@ -2,6 +2,10 @@ import type { GenerationContextPackage } from "@ai-novel/shared/types/chapterRun
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
 import type { AuditReport, ReplanResult } from "@ai-novel/shared/types/novel";
 import type { PayoffLedgerSummary } from "@ai-novel/shared/types/payoffLedger";
+import {
+  compactQualityFeedbackForPlanner,
+  extractQualityFeedbackFromRiskFlags,
+} from "@ai-novel/shared/types/qualityFeedback";
 import { prisma } from "../../db/prisma";
 import { parseJsonStringArray } from "../novel/novelP0Utils";
 import { characterDynamicsQueryService } from "../novel/dynamics/CharacterDynamicsQueryService";
@@ -755,7 +759,7 @@ export class PlannerService {
       prisma.chapter.findMany({
         where: { novelId },
         orderBy: { order: "asc" },
-        select: { id: true, order: true },
+        select: { id: true, order: true, riskFlags: true },
       }),
       prisma.auditReport.findMany({
         where: { novelId, chapterId: targetChapter.id },
@@ -829,6 +833,29 @@ export class PlannerService {
       updatedAt: report.updatedAt.toISOString(),
     }));
     const requestedWindowSize = input.windowSize ?? 3;
+    const qualityFeedbackPackets = allChapters.flatMap((item) => {
+      const raw = item.riskFlags;
+      if (typeof raw === "string") {
+        return extractQualityFeedbackFromRiskFlags(raw);
+      }
+      if (raw == null) {
+        return [];
+      }
+      try {
+        return extractQualityFeedbackFromRiskFlags(JSON.stringify(raw));
+      } catch {
+        return [];
+      }
+    });
+    // Prefer packets near the replan anchor so the window decider sees local debt first.
+    const nearbyQualityFeedback = qualityFeedbackPackets.filter(
+      (packet) => Math.abs(packet.chapterOrder - targetChapter.order) <= 8,
+    );
+    const qualityFeedbackJson = JSON.stringify(
+      compactQualityFeedbackForPlanner(
+        nearbyQualityFeedback.length > 0 ? nearbyQualityFeedback : qualityFeedbackPackets,
+      ),
+    );
     const replanDecision = await replanWindowDecisionService.decide({
       requestedWindowSize,
       availableChapterOrders: allChapters.map((item) => item.order),
@@ -842,6 +869,7 @@ export class PlannerService {
       nextAction: resolvedStateDrivenContext.nextAction,
       chapterStateGoal: resolvedStateDrivenContext.chapterStateGoal,
       protectedSecrets: resolvedStateDrivenContext.protectedSecrets,
+      qualityFeedbackJson,
       provider: input.provider,
       model: input.model,
       temperature: input.temperature,

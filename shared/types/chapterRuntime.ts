@@ -720,6 +720,11 @@ export const chapterWriteContextSchema = z.object({
   characterResourceContext: characterResourceContextSchema.nullable().optional(),
   recentChapterSummaries: z.array(z.string()).default([]),
   previousChapterTail: z.string().nullable().optional(),
+  /**
+   * Prior-window Quality Feedback Packet lines for writer/repair
+   * (deterministic templates; never a second blocking engine).
+   */
+  priorQualityFeedback: z.array(z.string()).default([]),
   openingAntiRepeatHint: z.string(),
   styleContract: runtimeStyleContractSchema.nullable().optional(),
   styleConstraints: z.array(z.string()).default([]),
@@ -768,6 +773,11 @@ export const generationContextPackageSchema = z.object({
   openAuditIssues: z.array(runtimeAuditIssueSchema),
   previousChaptersSummary: z.array(z.string()),
   previousChapterTail: z.string().nullable().optional(),
+  /**
+   * Prior chapters' quality feedback lines (QFP bus → writer context).
+   * Populated by GenerationContextAssembler from riskFlags.qualityLoop.feedback.
+   */
+  priorQualityFeedback: z.array(z.string()).default([]),
   openingHint: z.string(),
   /**
    * 写作近邻窗场景多样性软强制（仅写作路径；≠ 债板前 N 章观测窗）。

@@ -1,4 +1,10 @@
 import type { GenerationContextPackage } from "@ai-novel/shared/types/chapterRuntime";
+import {
+  extractQualityFeedbackFromRiskFlags,
+  formatPriorQualityFeedbackLines,
+  QUALITY_FEEDBACK_PRIOR_LOOKBACK,
+  type QualityFeedbackPacket,
+} from "@ai-novel/shared/types/qualityFeedback";
 import { buildCompressionLog } from "../../../prompting/core/contextBudget";
 import { prisma } from "../../../db/prisma";
 import { ragServices } from "../../rag";
@@ -308,6 +314,7 @@ export class GenerationContextAssembler {
         orderBy: { chapter: { order: "desc" } },
         take: 3,
       }),
+      // A3 QFP：近邻 PRIOR_LOOKBACK 章，取正文尾 + riskFlags.feedback
       prisma.chapter.findMany({
         where: {
           novelId,
@@ -315,8 +322,8 @@ export class GenerationContextAssembler {
           content: { not: null },
         },
         orderBy: { order: "desc" },
-        take: 1,
-        select: { order: true, title: true, content: true },
+        take: QUALITY_FEEDBACK_PRIOR_LOOKBACK,
+        select: { order: true, title: true, content: true, riskFlags: true },
       }),
       // 写作近邻多样性：当前章前序 N 章 title/taskSheet + summary（≠ 债板前 30 观测窗）
       prisma.chapter.findMany({
@@ -522,6 +529,11 @@ export class GenerationContextAssembler {
     } satisfies GenerationContextPackage["continuation"];
 
     const previousChapterTail = extractChapterTail(recentChapters[0]?.content);
+    // A3：近邻章 QFP 投影 → writer/repair「上章纠偏」（确定性模板，非第二 blocking 引擎）
+    const priorQualityPackets: QualityFeedbackPacket[] = recentChapters.flatMap((row) =>
+      extractQualityFeedbackFromRiskFlags(row.riskFlags),
+    );
+    const priorQualityFeedback = formatPriorQualityFeedbackLines(priorQualityPackets);
 
     // 写作近邻同质 → 软强制换场景（advisory；不接 volumeReplanGate；≠ 债板 recommendForce 窗）
     const sceneDiversityRecentTexts = [...sceneDiversitySourceChapters]
@@ -580,6 +592,7 @@ export class GenerationContextAssembler {
       openAuditIssues: mappedOpenAuditIssues,
       previousChaptersSummary,
       previousChapterTail,
+      priorQualityFeedback,
       openingHint,
       sceneDiversityForce: sceneDiversityForce.shouldForce ? sceneDiversityForce : null,
       continuation: runtimeContinuation,

@@ -19,6 +19,7 @@ const CONTEXT_GROUP_LABELS: Record<string, string> = {
   payoff_ledger: "伏笔台账",
   previous_chapter_hook: "上一章钩子",
   previous_chapter_tail: "上一章结尾",
+  prior_quality_feedback: "上章纠偏",
   rag_context: "检索补充",
   recent_chapters: "近期章节摘要",
   repair_boundaries: "修文范围约束",
