@@ -1,15 +1,15 @@
 # 全站音色库运营与 AI 规划 — 开发计划（D–G）
 
-> **status: active** · 2026-07-18  
-> **基线 tip**：生产 / `origin/main` **`1b7078b`**（A/B/C + harden 已 live）  
+> **status: delivered (code)** · 2026-07-18  
+> **生产 tip**：pxed / `origin/main` 代码 **`0b776e6`**（A–G + review harden + heardSha 绑定）；docs 可叠在其后  
 > **前置 SoT**：`docs/plans/audiobook-sitewide-voice-library-research.md`  
 > **产品**：Obsidian `ainovel 小说转有声书 产品形态` · 调研 `ainovel 全站音色库与AI规划-调研`  
-> **运维 cutover**：vault `pxed ai-novel 部署与运维` §七点四十四（ABC）/ §七点四十五（harden）  
-> **原则**：里程碑驱动；每里程碑 ≤3 阶段；禁 auto-approve seeds；禁客户端裸 `ttsRefAudioPath`；生产 `AUTH_ALLOW_OPEN` 下能力限制必须在 **service/HTTP**，不假设 token 门禁。
+> **运维 cutover**：vault `pxed ai-novel 部署与运维` **§七点四十九**（heardSha + approve token live）/ §七点四十八 / §七点四十七 / §七点四十五（harden）/ §七点四十四（ABC）  
+> **原则**：里程碑驱动；每里程碑 ≤3 阶段；禁 auto-approve seeds；禁客户端裸 `ttsRefAudioPath`；生产 `AUTH_ALLOW_OPEN` 下能力限制必须在 **service/HTTP**；approve 另叠 env token + heardSha。
 
 ---
 
-## 0. 现状（以 main@1b7078b 为准）
+## 0. 现状（以 main@0b776e6 为准）
 
 ### 已交付
 
@@ -17,18 +17,25 @@
 |---|---|
 | 库存储 | JSON registry `storage/voice-refs/global`；`primaryFile.path` 相对 voice-refs；文件锁 `mutateRegistry`；损坏 quarantine |
 | Character | `ttsVoiceAssetId` + denormalize 绝对 `ttsRefAudioPath`（bind 时）；runtimeMigrations 幂等列 |
-| API | `GET/POST .../novels/audiobook/voice-library*`：list/get/import-file/import-seed-pack/status/bind |
+| API | list/get/**import-file**/import-seed-pack/status/bind + **media-access/audio/rewrite** |
 | 安全 harden | import/seed **禁** `approved`；`sourcePath`/`packRoot` allowlist；list limit/offset 有限；skipProbe 仍 `tryResolve(requireApproved)` |
 | Planner B | `prefer_library`；suggest 仅注入 approved clone_ref；apply clone 只经 assetId + assertBindable |
 | 工作台 C | `CharacterVoiceEditor` approved 库选择器；base64 覆盖清 assetId；`decideCharacterVoiceRefUpdate` 顺序 |
-| 生产 | pxed **`1b7078b`**；公网 voice-library 200 **空库**（无 approved） |
+| D 管理台 | SPA `/audiobook/voice-library` list/filter/import draft；picker q/分页 |
+| E 人耳 | 库级试听；`review.heardAt` + **`heardSha256`**；approve 须 heard 且 sha≡primaryFile |
+| F token | 生产 **已设** `VOICE_LIBRARY_APPROVE_TOKEN`；升 approved 须 `X-Voice-Library-Approve-Token` |
+| G rewrite | `POST .../voice-design/rewrite` 候选 `applied:false`；`source=llm` / `rule_fallback` + `fallbackReason` |
+| 生产 | pxed **`0b776e6`**；approve token live；E2E API 绿；库可有 draft/archived 测试项 |
 
-### 缺口（本计划范围）
+### 本计划 P0/P1 缺口
 
-1. **库管理 UI**：运营侧 list/filter/import/seed/status/详情；不仅角色卡 picker  
-2. **种子人耳 approve 闭环**：可听 preview → 批量/单个 draft→approved；**禁止**一键全库 auto-approve 无试听  
-3. **真 LLM design rewrite**：design 文案质量与 redesign 入口（非规则模板拼装）  
-4. **setStatus 二次门禁**：open 单租户下限制「谁能 approved」的运维面（env / confirm token / audit），不破坏现有人耳 PATCH 路径  
+**无**（D–G 代码 + 生产 cutover + API E2E 已闭环）。
+
+### 仍 Manual-required（不阻塞代码交付）
+
+1. 浏览器管理台：sessionStorage 填 approve token → **真人播放** → 点 approve  
+2. 真 LLM redesign 听感（API `source=llm` 已验；人耳听 design 试听未编造）  
+3. seed 包批量人耳后升 approved（**禁止** auto-approve）
 
 ### 明确不做（本计划外 / P2+）
 
@@ -153,6 +160,7 @@ G 不阻塞 E/F 生产可用。
 | E2 管理台试听 + session「已听」+ 单条 approve | ✅ |
 | E3 勾选 batch 仅已听项；零 auto-approve | ✅ |
 | 服务 `resolveLibraryPreviewAudioPath` + 单测 | ✅ |
+| **heardSha harden `0b776e6`**：`review.heardBy`/`heardSha256`；import/overwrite **清 review**；同 sha 二次 mark **skip 写锁**；`setStatus(approved)` 要求 heardAt 且 sha≡`primaryFile.sha256`；UI 批准前 GET 预检 | ✅ |
 
 ---
 
@@ -202,6 +210,7 @@ G 不阻塞 E/F 生产可用。
 | F2 管理台 sessionStorage token 输入；403 文案 | ✅ |
 | F3 audit 日志 `voice_library_status … ok=`（无 token 明文） | ✅ |
 | 未设 env 与现网兼容 | ✅ |
+| **生产 F3 live**：pxed `server/.env` **已设** token（不进 git）；无/错 token → **403**；正确 token + heardSha → approved | ✅ |
 
 ---
 
@@ -252,7 +261,8 @@ G 不阻塞 E/F 生产可用。
 | G1 `voiceDesignRewriteService` + mock LLM 单测 + rule_fallback | ✅ |
 | G2 `POST .../characters/:charId/voice-design/rewrite` 仅候选 | ✅ |
 | G3 角色卡 design 模式：生成候选 → 预览 → 应用到表单 | ✅ |
-| 真模型听感 | Manual-required |
+| 生产 E2E：rewrite `source=llm`、`applied=false`（林逸） | ✅ API |
+| 真模型听感 / 浏览器 UI 应用 | Manual-required |
 
 ---
 
@@ -264,7 +274,10 @@ G 不阻塞 E/F 生产可用。
 4. `sourcePath` 仅 allowlist。  
 5. registry 损坏 **不**静默空库。  
 6. 列表 skipProbe：**不**盲信幽灵 assetId。  
-7. **不** forceResume；**不**编造听感/真机结果。
+7. **不** forceResume；**不**编造听感/真机结果。  
+8. **`setStatus(approved)` + clone_ref**：须 `review.heardAt` 且 `review.heardSha256 === primaryFile.sha256`。  
+9. import/overwrite：**清 `review: null`**（防旧 heard 批准新音频）。  
+10. 生产若设 `VOICE_LIBRARY_APPROVE_TOKEN`：升 approved **必须**正确 header（timing-safe）；token **永不**进 git/bundle。
 
 单测锚点：`server/tests/voiceLibraryService.test.js`、`characterVoiceRefUpdate.test.js`、`audiobookWorkspaceOverview.test.js`、planner library tests。
 
@@ -276,15 +289,22 @@ G 不阻塞 E/F 生产可用。
 |---|---|
 | 本计划 | `docs/plans/audiobook-voice-library-ops-and-ai-plan.md`（本文） |
 | SoT 摘要 | `docs/plans/audiobook-sitewide-voice-library-research.md` 链到本文 |
-| 开发入口 | `docs/DEVELOPMENT.md`「当前推进中计划」增加链接（若该文件纳入版本） |
-| 运维 tip | vault §七点四十五 起；每里程碑 cutover 追加 § |
-| Obsidian 调研 | `ainovel 全站音色库与AI规划-调研` 链到仓库计划 |
+| 开发入口 | `docs/DEVELOPMENT.md` / `docs/README.md` 有声书工作流 |
+| 运维 tip | vault **§七点四十九**（`0b776e6` heardSha + token）；历史 §四十四–四十八 |
+| Obsidian 调研 | `ainovel 全站音色库与AI规划-调研` · 索引 `ainovel 文档索引` |
 
-Cutover 惯例不变：Mac dist tarball → scp → `git reset --hard origin/main` → extract → **re-link storage/tmp** → `pnpm -C server prisma:generate` → restart novel-server → `--noproxy` smoke。
+Cutover 惯例不变：Mac pack **`client/dist`+`server/dist`** → scp → `git reset --hard origin/main` → extract → **re-link storage/tmp** → `pnpm -C server prisma:generate` → restart novel-server → `curl --noproxy '*'` smoke（机上勿裸 curl，supervisord 代理会 404）。
+
+### 7.1 管理台 Manual 路径（浏览器）
+
+1. 打开 `https://ainovel.mangoq.ccwu.cc/audiobook/voice-library`  
+2. 若生产已设 approve token：在管理台输入框粘贴 token（**sessionStorage**，不进 git）  
+3. 对 draft `clone_ref`：**真人点播放** → 等 GET audio 完成 → 再 Approve  
+4. 预期：未听 / sha 失配 → 拒绝；无 token → 403；齐备 → approved 进 picker  
 
 ---
 
-## 8. 建议首轮执行契约（开 D 时粘贴）
+## 8. 历史执行契约（开 D 时曾用；已完成）
 
 ```text
 Milestone：D 库管理台 + list UX
@@ -298,13 +318,17 @@ Manual-required：无（空库可验）
 停止条件：D P0/P1 完成或阶段用尽
 ```
 
+D–G + heardSha 均已满足停止条件；**勿**自动开 QFP / P2-7 / listen M1–M6。
+
 ---
 
 ## 9. 变更记录
 
 | 日期 | tip / 提交 | 说明 |
 |---|---|---|
-| 2026-07-18 | Milestone E/F/G | 库试听+人耳 approve；approve token 门禁；LLM design rewrite |
+| 2026-07-18 | **`0b776e6`** | heardAt↔`primaryFile.sha256`；overwrite 清 review；同 sha skip mark；UI 预检；**生产 approve token live**；E2E API 绿；vault §七点四十九 |
+| 2026-07-18 | `791c64d` | media whitelist + heardAt 门禁 + rewrite 可观测 |
+| 2026-07-18 | `1d00fb6` | Milestone E/F/G 功能：库试听/人耳 approve/token 门禁/LLM rewrite |
 | 2026-07-18 | Milestone D `dc95736` | 库管理台 SPA + picker q/分页；见 §2.6 |
 | 2026-07-18 | `661c372` | 本计划文档上 main |
 | 2026-07-18 | `1b7078b` | harden live；本计划立项 |

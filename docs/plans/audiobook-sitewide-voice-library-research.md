@@ -1,7 +1,7 @@
 # 全站音色库 + AI 规划调研（SoT 摘要）
 
-> **基线 tip**：生产 / `origin/main` **`1b7078b`**（2026-07-18）  
-> **下一里程碑计划**：[`audiobook-voice-library-ops-and-ai-plan.md`](./audiobook-voice-library-ops-and-ai-plan.md)（D 库管理台 · E 人耳 approve · F setStatus 门禁 · G LLM redesign）
+> **生产 tip**：pxed / 代码 **`0b776e6`**（2026-07-18 · A–G + heardSha + approve token live）  
+> **运营计划（已交付代码）**：[`audiobook-voice-library-ops-and-ai-plan.md`](./audiobook-voice-library-ops-and-ai-plan.md)（D–G · cutover vault §七点四十九）
 
 ## Milestone A（已交付）
 - VoiceAsset JSON registry @ `storage/voice-refs/global`
@@ -48,6 +48,7 @@
 
 ## Milestone E/F/G（已交付 · 见 ops-and-ai §3.7/4.7/5.7）
 - **E**：库级 media-access + audio 直播 ref.wav；管理台试听 / session 已听 / 单条+勾选 approve（仅已听）
-- **F**：可选 `VOICE_LIBRARY_APPROVE_TOKEN`；仅升 approved 要 header；audit 无 token 明文；未设 env 兼容
-- **G**：`POST .../voice-design/rewrite` 候选不落库；角色卡 design 预览→应用表单；mock + rule_fallback 单测
-- Manual：人耳 seed 批准；真 LLM redesign 听感；生产是否设 approve token
+- **heardSha `0b776e6`**：`review.heardAt` + `heardSha256` 对齐 `primaryFile.sha256`；overwrite 清 review；同 sha mark skip 写；UI 批准前预检
+- **F**：`VOICE_LIBRARY_APPROVE_TOKEN`；仅升 approved 要 header；audit 无 token 明文；**生产已设 token live**
+- **G**：`POST .../voice-design/rewrite` 候选不落库；角色卡 design 预览→应用表单；mock + rule_fallback；E2E `source=llm`
+- Manual 仅剩：浏览器真人播放 + sessionStorage 填 token；真 LLM redesign 听感（不编造）

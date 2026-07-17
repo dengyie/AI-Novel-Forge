@@ -59,10 +59,10 @@ pnpm build              # shared + server + client 构建
 - [AI Comic Product Design](./plans/ai-comic-product-design.md)
 - [Codebase Audit Remediation Plan](./plans/codebase-audit-remediation-plan.md)（2026-07-18 全面审查整改：C1 文件规模/C2 RAG 配置泄漏/C3 director 根收敛/C4 routes 迁移/C5-C7 文档失真 + P-A–P-F 合规防回归 + R12/R13/G5/G6 待审）
 
-有声书 / 音色库工作流（main 上活跃，基线 `1b7078b`，Milestone A/B/C/Harden/D 已交付，E/F/G 在轨）：
+有声书 / 音色库工作流（main 上，生产 tip **`0b776e6`**：A/B/C/Harden/D/**E/F/G + heardSha** 代码已交付；approve token live；听感/浏览器 UI 仍 Manual）：
 
 - [全站音色库 + AI 规划调研（SoT 摘要）](./plans/audiobook-sitewide-voice-library-research.md)
-- [音色库运营与 AI 规划 D–G](./plans/audiobook-voice-library-ops-and-ai-plan.md)（active · D 库管理台 · E 人耳 approve · F setStatus 门禁 · G LLM redesign）
+- [音色库运营与 AI 规划 D–G](./plans/audiobook-voice-library-ops-and-ai-plan.md)（delivered code · D 库管理台 · E 人耳 approve · F setStatus 门禁 · G LLM redesign · §七点四十九）
 - [Audiobook Segment Delivery Style](./plans/audiobook-segment-delivery-style-plan.md)
 - [Audiobook Character Voice Differentiation](./plans/audiobook-character-voice-differentiation-plan.md)
 - [Audiobook Mimo TTS Multi Backend](./plans/audiobook-mimo-tts-multi-backend-plan.md)
@@ -111,7 +111,7 @@ pnpm build              # shared + server + client 构建
 - [Project Init Spec](./archive/project-init-spec.md) —— 2024 项目初始化方案（历史）
 - [Outdated Docs Index](./archive/outdated/README.md) —— 被当前发布事实取代的归档清单
 
-> 有声书 / 音色库计划不在归档区，main 上为**活跃工作流**（Milestone A/B/C/Harden/D 已交付，E/F/G 在轨），见上方「四、当前推进中计划」。
+> 有声书 / 音色库计划不在归档区；**D–G 代码已交付**（tip `0b776e6`），见上方「四、当前推进中计划」。后续听感 Manual / QFP / P2 不自动开里程碑。
 
 ## 九、运维边界（非本仓）
 
