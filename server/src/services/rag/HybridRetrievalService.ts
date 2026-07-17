@@ -260,6 +260,11 @@ export class HybridRetrievalService {
       })
       : [];
 
+    // ownerTypes 为硬范围：显式传入后只在该 ownerTypes 内召回。
+    // 论证 L242-251：filteredBaseOwnerTypes 先剥 knowledge_document，baseScope 只覆盖非知识 ownerType。
+    // 当 ownerTypes 仅含 knowledge_document（filteredBaseOwnerTypes 为空）时，baseScope=null，
+    // 即跳过非知识库的向量/关键词召回，仅保留下方 knowledgeScope 检索知识库文档。
+    // 不会回退到全局范围——这是有意的硬剪枝，避免跨租户/跨小说知识污染。
     const baseScope: SearchScopeOptions | null = options.ownerTypes && filteredBaseOwnerTypes.length === 0
       ? null
       : {
