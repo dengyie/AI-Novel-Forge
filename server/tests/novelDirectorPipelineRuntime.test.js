@@ -459,6 +459,135 @@ test("pipeline does not rerun book planning nodes when story macro and contract 
   assert.deepEqual(modules, ["character.cast.prepare", "volume.strategy.plan"]);
 });
 
+test("forceResume re-enters fact-completed planning modules with reuseCompletedStep false", async () => {
+  const calls = [];
+  const runtime = createRuntime({
+    storyMacroService: {
+      async getPlan() {
+        return {
+          id: "story_macro_existing",
+          storyInput: "story",
+          decomposition: { core_conflict: "conflict" },
+        };
+      },
+    },
+    bookContractService: {
+      async getByNovelId() {
+        return { id: "book_contract_existing" };
+      },
+    },
+    // Characters present so non-force safe-start would advance to volume_strategy;
+    // forceResume must still honor requested story_macro and re-enter earlier modules.
+    novelContextService: {
+      async listCharacters() {
+        return [{ id: "character_1", name: "Courier" }];
+      },
+    },
+    runtimeOrchestrator: {
+      async runStepModule(input) {
+        calls.push({
+          moduleId: input.module.id,
+          reuseCompletedStep: input.reuseCompletedStep,
+        });
+        if (input.module.id === "character.cast.prepare") {
+          return false;
+        }
+        // volume.strategy.plan null = checkpoint pause; stop after planning chain.
+        if (input.module.id === "volume.strategy.plan") {
+          return null;
+        }
+        return undefined;
+      },
+      async runChapterExecutionNode() {},
+      async markTaskRunning() {},
+    },
+  });
+
+  await runtime.runPipeline({
+    taskId: "task_pipeline_force_resume",
+    novelId: "novel_pipeline_force_resume",
+    input: buildDirectorInput({ workflowTaskId: "task_pipeline_force_resume" }),
+    startPhase: "story_macro",
+    forceResume: true,
+  });
+
+  // Without forceResume safe-start advances past story/book; with forceResume they re-enter.
+  assert.deepEqual(calls.map((c) => c.moduleId), [
+    "story.macro.plan",
+    "book.contract.create",
+    "character.cast.prepare",
+    "volume.strategy.plan",
+  ]);
+  assert.ok(calls.every((c) => c.reuseCompletedStep === false));
+});
+
+test("forceResume forces reuseCompletedStep false on structured outline step modules", async () => {
+  const calls = [];
+  const workspace = {
+    volumes: [{ id: "volume_1", chapters: [] }],
+    strategyPlan: { targetChapterCount: 30 },
+  };
+  const runtime = createRuntime({
+    // Prerequisites complete so safe-start stays at structured_outline (no rewind).
+    storyMacroService: {
+      async getPlan() {
+        return {
+          id: "story_macro_existing",
+          storyInput: "story",
+          decomposition: { core_conflict: "conflict" },
+        };
+      },
+    },
+    bookContractService: {
+      async getByNovelId() {
+        return { id: "book_contract_existing" };
+      },
+    },
+    novelContextService: {
+      async listCharacters() {
+        return [{ id: "character_1", name: "Courier" }];
+      },
+    },
+    volumeService: {
+      async getVolumes() {
+        return workspace;
+      },
+    },
+    runtimeOrchestrator: {
+      async runStepModule(input) {
+        calls.push({
+          moduleId: input.module.id,
+          reuseCompletedStep: input.reuseCompletedStep,
+        });
+        // undefined = step finished, continue pipeline (null would pause at volume gate).
+        return undefined;
+      },
+      async runChapterExecutionNode() {},
+      async markTaskRunning() {},
+    },
+  });
+
+  await runtime.runPipeline({
+    taskId: "task_pipeline_force_resume_outline",
+    novelId: "novel_pipeline_force_resume_outline",
+    input: buildDirectorInput({ workflowTaskId: "task_pipeline_force_resume_outline" }),
+    startPhase: "structured_outline",
+    forceResume: true,
+  });
+
+  const outlineModuleIds = [
+    "volume.beat_sheet.generate",
+    "volume.chapter_list.generate",
+    "volume.chapter_detail_bundle.generate",
+    "chapter.execution_contract.sync",
+  ];
+  for (const moduleId of outlineModuleIds) {
+    const hit = calls.find((c) => c.moduleId === moduleId);
+    assert.ok(hit, `expected module ${moduleId}; got ${calls.map((c) => c.moduleId).join(",")}`);
+    assert.equal(hit.reuseCompletedStep, false);
+  }
+});
+
 test("pipeline treats empty story macro shell as incomplete during recovery", async () => {
   const modules = [];
   const runtime = createRuntime({

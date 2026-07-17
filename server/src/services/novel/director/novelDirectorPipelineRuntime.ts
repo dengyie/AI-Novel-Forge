@@ -74,6 +74,11 @@ export interface DirectorPipelineRunInput {
   batchAlreadyStartedCount?: number;
   approveCurrentGate?: boolean;
   approveAutoExecutionScope?: boolean;
+  /**
+   * forceResume continue path: do not short-circuit on fact-completed modules
+   * or reuse historically succeeded idempotent steps (avoids ghost no-op resume).
+   */
+  forceResume?: boolean;
 }
 
 function isDirectorCharacterSetupPauseResult(value: unknown): value is Extract<
@@ -128,13 +133,27 @@ export class NovelDirectorPipelineRuntime {
       "volume_strategy",
       "structured_outline",
     ];
-    const startIndex = Math.max(0, sequence.indexOf(safeStartPhase));
+    // forceResume continue: never reuse succeeded steps; also re-enter fact-completed modules.
+    // Honor requested start when forceResume would otherwise be advanced past by safe-start
+    // (ghost no-op). Still allow safe-start to *rewind* when prerequisites are incomplete.
+    const forceNonReuse = input.forceResume === true;
+    const moduleReuse = forceNonReuse ? false : undefined;
+    const requestedIndex = sequence.indexOf(input.startPhase);
+    const safeIndex = sequence.indexOf(safeStartPhase);
+    const startIndex = Math.max(
+      0,
+      forceNonReuse && requestedIndex >= 0 && safeIndex >= 0
+        ? Math.min(requestedIndex, safeIndex)
+        : safeIndex >= 0
+          ? safeIndex
+          : 0,
+    );
     const approval = this.resolveRuntimeApproval(input);
     const bookContractApproval = approval;
     for (const phase of sequence.slice(startIndex)) {
       if (phase === "story_macro") {
         const storyMacroModule = getDirectorPlanningStepModule("story_macro");
-        if (!(await this.isModuleFactCompleted(storyMacroModule, input))) {
+        if (forceNonReuse || !(await this.isModuleFactCompleted(storyMacroModule, input))) {
           await this.deps.runtimeOrchestrator.runStepModule({
             module: storyMacroModule,
             taskId: input.taskId,
@@ -142,6 +161,7 @@ export class NovelDirectorPipelineRuntime {
             targetId: input.novelId,
             approveCurrentGate: approval.approveCurrentGate,
             approveAutoExecutionScope: approval.approveAutoExecutionScope,
+            reuseCompletedStep: moduleReuse,
           });
         }
         continue;
@@ -149,7 +169,7 @@ export class NovelDirectorPipelineRuntime {
 
       if (phase === "book_contract") {
         const bookContractModule = getDirectorPlanningStepModule("book_contract");
-        if (!(await this.isModuleFactCompleted(bookContractModule, input))) {
+        if (forceNonReuse || !(await this.isModuleFactCompleted(bookContractModule, input))) {
           await this.deps.runtimeOrchestrator.runStepModule({
             module: bookContractModule,
             taskId: input.taskId,
@@ -157,6 +177,7 @@ export class NovelDirectorPipelineRuntime {
             targetId: input.novelId,
             approveCurrentGate: bookContractApproval.approveCurrentGate,
             approveAutoExecutionScope: bookContractApproval.approveAutoExecutionScope,
+            reuseCompletedStep: moduleReuse,
           });
         }
         continue;
@@ -167,7 +188,7 @@ export class NovelDirectorPipelineRuntime {
           continue;
         }
         const module = getDirectorPlanningStepModule("world_setup");
-        if (!(await this.isModuleFactCompleted(module, input))) {
+        if (forceNonReuse || !(await this.isModuleFactCompleted(module, input))) {
           await this.deps.runtimeOrchestrator.runStepModule({
             module,
             taskId: input.taskId,
@@ -175,6 +196,7 @@ export class NovelDirectorPipelineRuntime {
             targetId: input.novelId,
             approveCurrentGate: approval.approveCurrentGate,
             approveAutoExecutionScope: approval.approveAutoExecutionScope,
+            reuseCompletedStep: moduleReuse,
           });
         }
         continue;
@@ -182,7 +204,7 @@ export class NovelDirectorPipelineRuntime {
 
       if (phase === "character_setup") {
         const module = getDirectorPlanningStepModule("character_setup");
-        if (await this.isModuleFactCompleted(module, input)) {
+        if (!forceNonReuse && await this.isModuleFactCompleted(module, input)) {
           continue;
         }
         const result = await this.deps.runtimeOrchestrator.runStepModule({
@@ -192,6 +214,7 @@ export class NovelDirectorPipelineRuntime {
           targetId: input.novelId,
           approveCurrentGate: approval.approveCurrentGate,
           approveAutoExecutionScope: approval.approveAutoExecutionScope,
+          reuseCompletedStep: moduleReuse,
         });
         if (isDirectorCharacterSetupPauseResult(result)) {
           return;
@@ -201,7 +224,7 @@ export class NovelDirectorPipelineRuntime {
 
       if (phase === "volume_strategy") {
         const module = getDirectorPlanningStepModule("volume_strategy");
-        if (await this.isModuleFactCompleted(module, input)) {
+        if (!forceNonReuse && await this.isModuleFactCompleted(module, input)) {
           continue;
         }
         const volumeApproval = this.resolveRuntimeApproval(input, "volume_strategy_ready");
@@ -212,6 +235,7 @@ export class NovelDirectorPipelineRuntime {
           targetId: input.novelId,
           approveCurrentGate: volumeApproval.approveCurrentGate,
           approveAutoExecutionScope: volumeApproval.approveAutoExecutionScope,
+          reuseCompletedStep: moduleReuse,
         });
         if (paused === null) {
           return;
@@ -226,7 +250,7 @@ export class NovelDirectorPipelineRuntime {
       await this.runStructuredOutlineNode(input, currentWorkspace);
       const executionContractSyncModule = getDirectorExecutionContractSyncStepModule();
       const structuredApproval = this.resolveRuntimeApproval(input, "structured_outline_ready");
-      if (!(await this.isModuleFactCompleted(executionContractSyncModule, input))) {
+      if (forceNonReuse || !(await this.isModuleFactCompleted(executionContractSyncModule, input))) {
         await this.deps.runtimeOrchestrator.runStepModule({
           module: executionContractSyncModule,
           taskId: input.taskId,
@@ -234,6 +258,7 @@ export class NovelDirectorPipelineRuntime {
           targetId: input.novelId,
           approveCurrentGate: structuredApproval.approveCurrentGate,
           approveAutoExecutionScope: structuredApproval.approveAutoExecutionScope,
+          reuseCompletedStep: moduleReuse,
         });
       }
       // C1：structured_outline_ready 审批通过时写入 outline freeze snapshot（best-effort）
@@ -251,13 +276,15 @@ export class NovelDirectorPipelineRuntime {
   ): Promise<void> {
     await this.assertOutlineStartAllowed(input, workspace);
     const approval = this.resolveRuntimeApproval(input, "structured_outline_ready");
+    const forceNonReuse = input.forceResume === true;
     for (const module of getDirectorStructuredOutlineStepModules()) {
       if (module.id === "chapter.execution_contract.sync") {
         continue;
       }
       // Detail bundle must re-run when plan range expands (e.g. 1-10 → 11-20);
       // historical succeeded step reuse would short-circuit incomplete contracts.
-      const forceRerunDetail = isChapterDetailBundleModule(module);
+      // forceResume continue also disables historical step reuse (ghost no-op).
+      const forceRerunDetail = isChapterDetailBundleModule(module) || forceNonReuse;
       await this.deps.runtimeOrchestrator.runStepModule({
         module,
         taskId: input.taskId,
