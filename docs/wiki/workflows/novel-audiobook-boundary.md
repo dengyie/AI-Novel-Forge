@@ -92,3 +92,5 @@
 - `client/src/api/novel/audiobook.ts` / `client/src/api/novel/characters.ts`
 - `client/src/pages/novels/components/NovelAudiobookPanel.tsx`
 - `client/src/pages/novels/components/CharacterAssetWorkspace.tsx`
+
+> 2026-07-17：选书页态势见 `POST /novels/audiobook/workspace-overview`（列表不 probe clone；项目页仍 assess）。详情：`docs/plans/audiobook-workbench-ux-optimization-plan.md`。
