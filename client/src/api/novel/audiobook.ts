@@ -30,12 +30,72 @@ import type {
   CharacterVoiceAdoptPreviewAsCloneInput,
   CharacterVoiceAdoptPreviewAsCloneResult,
   CreateAudiobookTaskInput,
+  VoiceAsset,
+  VoiceAssetBindCharacterResult,
+  VoiceAssetKind,
+  VoiceAssetListResult,
+  VoiceAssetStatus,
 } from "@ai-novel/shared/types/audiobook";
 import { API_AUTH_TOKEN, API_BASE_URL } from "@/lib/constants";
 import { apiClient } from "../client";
 import { parseReadinessJobActiveError } from "./parseReadinessJobActiveError";
 
 export { parseReadinessJobActiveError };
+
+export type ListVoiceLibraryParams = {
+  status?: VoiceAssetStatus | VoiceAssetStatus[];
+  kind?: VoiceAssetKind | VoiceAssetKind[];
+  tag?: string;
+  q?: string;
+  limit?: number;
+};
+
+function joinCsvParam(value?: string | string[]): string | undefined {
+  if (value == null) return undefined;
+  if (Array.isArray(value)) {
+    const parts = value.map((item) => item.trim()).filter(Boolean);
+    return parts.length ? parts.join(",") : undefined;
+  }
+  const single = value.trim();
+  return single || undefined;
+}
+
+/** 全站 VoiceAsset 库列表（UI 绑库默认只拉 approved + clone_ref）。 */
+export async function listVoiceLibrary(params: ListVoiceLibraryParams = {}) {
+  const { data } = await apiClient.get<ApiResponse<VoiceAssetListResult>>(
+    "/novels/audiobook/voice-library",
+    {
+      params: {
+        status: joinCsvParam(params.status),
+        kind: joinCsvParam(params.kind),
+        tag: params.tag?.trim() || undefined,
+        q: params.q?.trim() || undefined,
+        limit: params.limit,
+      },
+    },
+  );
+  return data;
+}
+
+export async function getVoiceLibraryAsset(assetId: string) {
+  const { data } = await apiClient.get<ApiResponse<VoiceAsset>>(
+    `/novels/audiobook/voice-library/${encodeURIComponent(assetId)}`,
+  );
+  return data;
+}
+
+/** 将 approved clone_ref 绑到角色（服务端写路径 + ttsVoiceAssetId）。 */
+export async function bindVoiceLibraryAsset(
+  novelId: string,
+  characterId: string,
+  voiceAssetId: string,
+) {
+  const { data } = await apiClient.post<ApiResponse<VoiceAssetBindCharacterResult>>(
+    `/novels/${novelId}/characters/${characterId}/voice-library/bind`,
+    { voiceAssetId },
+  );
+  return data;
+}
 
 export async function listAudiobookVoices() {
   const { data } = await apiClient.get<ApiResponse<AudiobookVoiceCatalogItem[]>>("/novels/audiobook/voices");

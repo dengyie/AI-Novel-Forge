@@ -19,6 +19,7 @@ import {
   resolveCharacterVoicePreviewStatus,
 } from "./characterVoicePreview";
 import { checkVoiceRefAudioPath } from "./voiceRefPath";
+import { tryResolveEffectiveCloneRefPath } from "./voiceLibraryService";
 
 function parseScopeMode(value: string | undefined): AudiobookScopeMode {
   if (value === "chapter" || value === "range" || value === "full") {
@@ -78,6 +79,7 @@ export class AudiobookPrecheckService {
             ttsStyle: true,
             ttsDesignPrompt: true,
             ttsRefAudioPath: true,
+            ttsVoiceAssetId: true,
             ttsSpeakerAliases: true,
             ttsPreviewAudioPath: true,
             ttsPreviewSampleText: true,
@@ -118,6 +120,14 @@ export class AudiobookPrecheckService {
 
     const characterVoices = novel.characters.map((character) => {
       const ttsMode = normalizeMode(character.ttsMode);
+      const resolvedRef =
+        ttsMode === "clone"
+          ? tryResolveEffectiveCloneRefPath({
+              ttsVoiceAssetId: character.ttsVoiceAssetId,
+              ttsRefAudioPath: character.ttsRefAudioPath,
+              requireApproved: true,
+            })
+          : null;
       return {
         characterId: character.id,
         characterName: character.name,
@@ -125,7 +135,8 @@ export class AudiobookPrecheckService {
         ttsVoice: character.ttsVoice?.trim() || "",
         ttsStyle: character.ttsStyle ?? null,
         ttsDesignPrompt: character.ttsDesignPrompt?.trim() || "",
-        ttsRefAudioPath: character.ttsRefAudioPath?.trim() || "",
+        ttsRefAudioPath: (resolvedRef || character.ttsRefAudioPath?.trim() || ""),
+        ttsVoiceAssetId: character.ttsVoiceAssetId?.trim() || null,
         speakerAliases: parseSpeakerAliases(character.ttsSpeakerAliases),
       };
     });

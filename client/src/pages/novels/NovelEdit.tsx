@@ -340,6 +340,7 @@ export default function NovelEdit() {
     ttsDesignPrompt: "",
     ttsRefAudioPath: "",
     ttsRefAudioBase64: "",
+    ttsVoiceAssetId: "",
     ttsSpeakerAliases: "",
     presenceImpression: "",
     currentState: "",

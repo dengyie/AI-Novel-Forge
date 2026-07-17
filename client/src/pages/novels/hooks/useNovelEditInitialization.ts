@@ -37,6 +37,7 @@ interface CharacterFormState {
   ttsDesignPrompt: string;
   ttsRefAudioPath: string;
   ttsRefAudioBase64: string;
+  ttsVoiceAssetId: string;
   ttsSpeakerAliases: string;
   presenceImpression: string;
   currentState: string;
@@ -84,6 +85,7 @@ const EMPTY_CHARACTER_FORM: CharacterFormState = {
   ttsDesignPrompt: "",
   ttsRefAudioPath: "",
   ttsRefAudioBase64: "",
+  ttsVoiceAssetId: "",
   ttsSpeakerAliases: "",
   presenceImpression: "",
   currentState: "",
@@ -237,6 +239,7 @@ export function useNovelEditInitialization({
       ttsDesignPrompt: selectedCharacter.ttsDesignPrompt ?? "",
       ttsRefAudioPath: selectedCharacter.ttsRefAudioPath ?? "",
       ttsRefAudioBase64: "",
+      ttsVoiceAssetId: selectedCharacter.ttsVoiceAssetId ?? "",
       ttsSpeakerAliases: Array.isArray(selectedCharacter.ttsSpeakerAliases)
         ? selectedCharacter.ttsSpeakerAliases.join("、")
         : (typeof selectedCharacter.ttsSpeakerAliases === "string"

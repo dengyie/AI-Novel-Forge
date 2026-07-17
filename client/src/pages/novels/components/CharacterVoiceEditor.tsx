@@ -8,13 +8,16 @@ import {
   type CharacterVoicePreviewCandidate,
   type CharacterVoicePreviewGenerateResult,
   type CharacterVoicePreviewStatus,
+  type VoiceAsset,
 } from "@ai-novel/shared/types/audiobook";
 import {
   adoptCharacterVoicePreviewAsClone,
   adoptCharacterVoicePreviewCandidate,
+  bindVoiceLibraryAsset,
   generateCharacterVoicePreview,
   getCharacterVoicePreview,
   issueCharacterVoicePreviewMediaUrl,
+  listVoiceLibrary,
 } from "@/api/novel/audiobook";
 import type { NovelDetailResponse } from "@/api/novel/shared";
 import { Badge } from "@/components/ui/badge";
@@ -30,6 +33,7 @@ import {
 import { queryKeys } from "@/api/queryKeys";
 import {
   CHARACTER_VOICE_MODE_OPTIONS,
+  buildCharacterVoiceModeSwitchPatches,
   canGenerateCharacterVoicePreview,
   findMimoVoiceCatalogItem,
   isCharacterVoiceFormDirty,
@@ -47,6 +51,7 @@ export type CharacterVoiceEditorForm = {
   ttsDesignPrompt: string;
   ttsRefAudioPath: string;
   ttsRefAudioBase64: string;
+  ttsVoiceAssetId: string;
   ttsSpeakerAliases: string;
 };
 
@@ -141,7 +146,7 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
   const queryClient = useQueryClient();
   const formVoice = useMemo(
     () => resolveCharacterVoiceBinding(form),
-    [form.ttsMode, form.ttsVoice, form.ttsDesignPrompt, form.ttsRefAudioPath],
+    [form.ttsMode, form.ttsVoice, form.ttsDesignPrompt, form.ttsRefAudioPath, form.ttsVoiceAssetId],
   );
   const savedVoice = useMemo(() => resolveCharacterVoiceBinding(saved), [saved]);
   const dirty = useMemo(() => isCharacterVoiceFormDirty(form, saved), [form, saved]);
@@ -155,6 +160,31 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
   const localCloneSrc = hasLocalCloneDraft
     ? resolveLocalAudioSrc(form.ttsRefAudioBase64)
     : "";
+  const boundAssetId = form.ttsVoiceAssetId?.trim() || "";
+  const libraryQueryKey = queryKeys.novels.voiceLibrary("approved-clone_ref");
+
+  const libraryQuery = useQuery({
+    queryKey: libraryQueryKey,
+    queryFn: async () => {
+      const response = await listVoiceLibrary({
+        status: "approved",
+        kind: "clone_ref",
+        limit: 200,
+      });
+      return {
+        items: (response.data?.items ?? []) as VoiceAsset[],
+        total: response.data?.total ?? 0,
+      };
+    },
+    enabled: Boolean(novelId && characterId && mode === "clone"),
+    staleTime: 60_000,
+  });
+  const libraryItems = libraryQuery.data?.items ?? [];
+  const libraryTotal = libraryQuery.data?.total ?? libraryItems.length;
+  const selectedLibraryAsset = useMemo(
+    () => libraryItems.find((item) => item.id === boundAssetId) ?? null,
+    [libraryItems, boundAssetId],
+  );
 
   const [previewAudioUrl, setPreviewAudioUrl] = useState<string | null>(null);
   const [previewLabel, setPreviewLabel] = useState("");
@@ -394,6 +424,7 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
       onChange("ttsMode", "clone");
       onChange("ttsRefAudioPath", data.ttsRefAudioPath || "");
       onChange("ttsRefAudioBase64", "");
+      onChange("ttsVoiceAssetId", "");
       onChange("ttsVoice", "");
       setPendingMultiDraw(false);
       setCandidates([]);
@@ -415,6 +446,7 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
                       ...c,
                       ttsMode: "clone",
                       ttsRefAudioPath: data.ttsRefAudioPath || null,
+                      ttsVoiceAssetId: null,
                       ttsVoice: null,
                       ttsDesignPrompt: data.retainedDesignPrompt ?? c.ttsDesignPrompt,
                     }
@@ -483,13 +515,82 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
     const reader = new FileReader();
     reader.onload = () => {
       const result = typeof reader.result === "string" ? reader.result : "";
+      // 本地上传覆盖库绑定：保存时 base64 优先，服务端会清 assetId
       onChange("ttsRefAudioBase64", result);
+      onChange("ttsVoiceAssetId", "");
       if (resolveCharacterVoiceMode(form.ttsMode) !== "clone") {
         onChange("ttsMode", "clone");
       }
     };
     reader.readAsDataURL(file);
   }
+
+  function applyVoiceMode(nextMode: CharacterVoiceMode) {
+    const patches = buildCharacterVoiceModeSwitchPatches(nextMode, form.ttsMode);
+    if (patches.ttsMode != null) onChange("ttsMode", patches.ttsMode);
+    if (patches.ttsVoiceAssetId != null) onChange("ttsVoiceAssetId", patches.ttsVoiceAssetId);
+    if (patches.ttsRefAudioPath != null) onChange("ttsRefAudioPath", patches.ttsRefAudioPath);
+    if (patches.ttsRefAudioBase64 != null) onChange("ttsRefAudioBase64", patches.ttsRefAudioBase64);
+  }
+
+  const bindLibraryMutation = useMutation({
+    mutationFn: async (voiceAssetId: string) => {
+      const id = voiceAssetId.trim();
+      if (!id) {
+        throw new Error("请选择库音色。");
+      }
+      const response = await bindVoiceLibraryAsset(novelId, characterId, id);
+      const data = response.data;
+      if (!data?.voiceAssetId) {
+        throw new Error("绑库失败：服务端未返回资产 id。");
+      }
+      return data;
+    },
+    onSuccess: async (data) => {
+      onChange("ttsMode", "clone");
+      onChange("ttsRefAudioPath", data.ttsRefAudioPath || "");
+      onChange("ttsVoiceAssetId", data.voiceAssetId || "");
+      onChange("ttsRefAudioBase64", "");
+      onChange("ttsVoice", "");
+      onChange("ttsDesignPrompt", "");
+      setPreviewMessage(`已绑定库音色 ${data.voiceAssetId.slice(0, 12)}…，可生成试听。`);
+      queryClient.setQueryData<ApiResponse<NovelDetailResponse>>(
+        queryKeys.novels.detail(novelId),
+        (prev) => {
+          if (!prev?.data?.characters) return prev;
+          return {
+            ...prev,
+            data: {
+              ...prev.data,
+              characters: prev.data.characters.map((c) =>
+                c.id === characterId
+                  ? {
+                      ...c,
+                      ttsMode: "clone",
+                      ttsRefAudioPath: data.ttsRefAudioPath || null,
+                      ttsVoiceAssetId: data.voiceAssetId,
+                      ttsVoice: null,
+                      ttsDesignPrompt: null,
+                    }
+                  : c,
+              ),
+            },
+          };
+        },
+      );
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.novels.detail(novelId) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.novels.characters(novelId) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.novels.audiobookWorkspace(novelId) }),
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.novels.characterVoicePreview(novelId, characterId),
+        }),
+      ]);
+    },
+    onError: (error) => {
+      setPreviewMessage(error instanceof Error ? error.message : "绑库失败。");
+    },
+  });
 
   return (
     <div className="space-y-3 rounded-xl border border-border/70 bg-muted/15 p-3">
@@ -590,9 +691,12 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
               ) : null}
             </div>
           ) : null}
-          {resolveCharacterVoiceMode(form.ttsMode) === "clone" && form.ttsRefAudioPath ? (
+          {resolveCharacterVoiceMode(form.ttsMode) === "clone"
+          && (form.ttsRefAudioPath || form.ttsVoiceAssetId) ? (
             <div className="max-w-[18rem] text-right text-[11px] leading-4 text-muted-foreground">
-              已绑定克隆参考（长书身份锚）。
+              {form.ttsVoiceAssetId
+                ? `已绑库克隆（${form.ttsVoiceAssetId.slice(0, 12)}…）。`
+                : "已绑定克隆参考（长书身份锚）。"}
             </div>
           ) : null}
         </div>
@@ -674,7 +778,7 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
                 key={option.value}
                 type="button"
                 className={`rounded-lg border px-3 py-2 text-left transition ${modeButtonClass(active)}`}
-                onClick={() => onChange("ttsMode", option.value as CharacterVoiceMode)}
+                onClick={() => applyVoiceMode(option.value)}
               >
                 <div className="text-sm font-medium text-foreground">{option.label}</div>
                 <div className="mt-0.5 text-[11px] leading-4 text-muted-foreground">{option.helper}</div>
@@ -726,27 +830,96 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
         ) : null}
 
         {mode === "clone" ? (
-          <div className="space-y-2 rounded-md border border-dashed p-2">
-            <p className="text-xs leading-5 text-muted-foreground">
-              上传参考 WAV/音频（base64 随角色保存落盘）。已绑定路径：
-              {form.ttsRefAudioPath ? ` ${form.ttsRefAudioPath}` : " 无"}
-            </p>
-            <input
-              type="file"
-              accept="audio/*,.wav,.mp3,.ogg"
-              className="block w-full text-sm"
-              onChange={(event) => handleCloneFile(event.target.files?.[0])}
-            />
-            {hasLocalCloneDraft ? (
-              <div className="space-y-1">
-                <p className="text-xs text-muted-foreground">
-                  已选择新参考音频（未保存）。可先本地听参考轨；保存后再生成固定试听。
-                </p>
-                {localCloneSrc ? (
-                  <audio controls src={localCloneSrc} className="w-full" />
-                ) : null}
-              </div>
-            ) : null}
+          <div className="space-y-3 rounded-md border border-dashed p-2">
+            <div className="space-y-2">
+              <div className="text-xs font-medium text-foreground">从全站音色库绑定</div>
+              <p className="text-xs leading-5 text-muted-foreground">
+                仅列出 approved 的 clone_ref。点选即写入角色（无需再点「保存音色」）；路径由服务端写，客户端不提交参考音路径。
+                {boundAssetId
+                  ? ` 当前：${selectedLibraryAsset
+                    ? `${selectedLibraryAsset.displayName}（${selectedLibraryAsset.slug}）`
+                    : boundAssetId}`
+                  : " 当前未绑库。"}
+              </p>
+              {libraryQuery.isLoading ? (
+                <div className="text-xs text-muted-foreground">加载库音色…</div>
+              ) : null}
+              {libraryQuery.isError ? (
+                <div className="text-xs text-destructive">
+                  库列表加载失败：
+                  {libraryQuery.error instanceof Error
+                    ? libraryQuery.error.message
+                    : "未知错误"}
+                </div>
+              ) : null}
+              {!libraryQuery.isLoading && !libraryQuery.isError && libraryItems.length === 0 ? (
+                <div className="text-xs text-muted-foreground">
+                  暂无 approved 库音色。请先人耳批准 seed/import 资产后再绑库。
+                </div>
+              ) : null}
+              {!libraryQuery.isLoading && !libraryQuery.isError && libraryTotal > libraryItems.length ? (
+                <div className="text-xs text-amber-700 dark:text-amber-400">
+                  库共 {libraryTotal} 条，当前仅展示前 {libraryItems.length} 条。
+                </div>
+              ) : null}
+              {libraryItems.length > 0 ? (
+                <div className="grid max-h-48 gap-2 overflow-y-auto sm:grid-cols-2">
+                  {libraryItems.map((asset) => {
+                    const active = boundAssetId === asset.id;
+                    const tags = asset.tags.slice(0, 4).join(" · ");
+                    return (
+                      <button
+                        key={asset.id}
+                        type="button"
+                        disabled={bindLibraryMutation.isPending}
+                        className={`rounded-lg border px-3 py-2 text-left transition ${presetChipClass(active)}`}
+                        title={`${asset.id} · ${asset.slug}`}
+                        onClick={() => {
+                          if (active) return;
+                          bindLibraryMutation.mutate(asset.id);
+                        }}
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-medium">{asset.displayName}</span>
+                          {active ? <Badge variant="secondary">已绑</Badge> : null}
+                        </div>
+                        <div className="mt-0.5 text-[11px] text-muted-foreground">
+                          {asset.slug}
+                          {tags ? ` · ${tags}` : ""}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : null}
+              {bindLibraryMutation.isPending ? (
+                <div className="text-xs text-muted-foreground">正在绑定库音色…</div>
+              ) : null}
+            </div>
+
+            <div className="space-y-2 border-t border-border/50 pt-2">
+              <div className="text-xs font-medium text-foreground">或上传本地参考音</div>
+              <p className="text-xs leading-5 text-muted-foreground">
+                上传 WAV/音频（base64 随角色保存落盘，会覆盖库绑定）。已落盘路径：
+                {form.ttsRefAudioPath ? ` ${form.ttsRefAudioPath}` : " 无"}
+              </p>
+              <input
+                type="file"
+                accept="audio/*,.wav,.mp3,.ogg"
+                className="block w-full text-sm"
+                onChange={(event) => handleCloneFile(event.target.files?.[0])}
+              />
+              {hasLocalCloneDraft ? (
+                <div className="space-y-1">
+                  <p className="text-xs text-muted-foreground">
+                    已选择新参考音频（未保存）。可先本地听参考轨；保存后再生成固定试听。
+                  </p>
+                  {localCloneSrc ? (
+                    <audio controls src={localCloneSrc} className="w-full" />
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
           </div>
         ) : null}
 

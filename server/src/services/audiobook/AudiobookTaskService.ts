@@ -31,6 +31,7 @@ import {
 } from "./audiobookPaths";
 import { resolveDeliveryStyleMode } from "./deliveryStyle";
 import { checkVoiceRefAudioPath } from "./voiceRefPath";
+import { resolveEffectiveCloneRefPath, tryResolveEffectiveCloneRefPath } from "./voiceLibraryService";
 
 const AUDIOBOOK_HEARTBEAT_INTERVAL_MS = Math.max(
   5_000,
@@ -808,6 +809,7 @@ export class AudiobookTaskService {
               ttsStyle: true,
               ttsDesignPrompt: true,
               ttsRefAudioPath: true,
+              ttsVoiceAssetId: true,
               ttsSpeakerAliases: true,
               personality: true,
               voiceTexture: true,
@@ -824,6 +826,22 @@ export class AudiobookTaskService {
           const modeRaw = character.ttsMode?.trim();
           const ttsMode: "preset" | "design" | "clone" =
             modeRaw === "design" || modeRaw === "clone" ? modeRaw : "preset";
+          let ttsRefAudioPath = character.ttsRefAudioPath?.trim() || null;
+          if (ttsMode === "clone") {
+            try {
+              ttsRefAudioPath = resolveEffectiveCloneRefPath({
+                ttsVoiceAssetId: character.ttsVoiceAssetId,
+                ttsRefAudioPath: character.ttsRefAudioPath,
+                requireApproved: true,
+              });
+            } catch {
+              // 门禁循环会用 checkVoiceRefAudioPath 报具体错误；这里保留 legacy path 或空
+              ttsRefAudioPath = tryResolveEffectiveCloneRefPath({
+                ttsVoiceAssetId: null,
+                ttsRefAudioPath: character.ttsRefAudioPath,
+              });
+            }
+          }
           return {
             characterId: character.id,
             characterName: character.name,
@@ -831,7 +849,8 @@ export class AudiobookTaskService {
             ttsVoice: character.ttsVoice?.trim() || null,
             ttsStyle: character.ttsStyle ?? null,
             ttsDesignPrompt: character.ttsDesignPrompt?.trim() || null,
-            ttsRefAudioPath: character.ttsRefAudioPath?.trim() || null,
+            ttsRefAudioPath,
+            ttsVoiceAssetId: character.ttsVoiceAssetId?.trim() || null,
             speakerAliases: parseSpeakerAliases(character.ttsSpeakerAliases),
             personality: character.personality ?? null,
             voiceTexture: character.voiceTexture ?? null,
@@ -859,6 +878,28 @@ export class AudiobookTaskService {
           continue;
         }
         if (character.ttsMode === "clone") {
+          const assetId = (character as { ttsVoiceAssetId?: string | null }).ttsVoiceAssetId?.trim() || "";
+          if (assetId) {
+            try {
+              const resolved = resolveEffectiveCloneRefPath({
+                ttsVoiceAssetId: assetId,
+                ttsRefAudioPath: character.ttsRefAudioPath,
+                requireApproved: true,
+              });
+              if (!resolved) {
+                executeBindingErrors.push(
+                  `角色「${character.characterName}」库资产 ${assetId} 无法解析参考音频。`,
+                );
+                continue;
+              }
+              character.ttsRefAudioPath = resolved;
+            } catch (error) {
+              executeBindingErrors.push(
+                `角色「${character.characterName}」${error instanceof Error ? error.message : String(error)}`,
+              );
+              continue;
+            }
+          }
           const refPath = character.ttsRefAudioPath?.trim() || "";
           if (!refPath) {
             executeBindingErrors.push(

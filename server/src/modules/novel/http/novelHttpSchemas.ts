@@ -281,6 +281,8 @@ export const characterSchema = z.object({
    * 上传参考音频请用 ttsRefAudioBase64。
    */
   ttsRefAudioPath: z.null().optional(),
+  /** 全站 VoiceAsset.id；服务端 bind 解析路径。 */
+  ttsVoiceAssetId: z.string().trim().min(1).max(80).nullable().optional(),
   /** 可选：base64 参考音频（可带 data: 前缀），服务端落盘后写 ttsRefAudioPath。 */
   ttsRefAudioBase64: z.string().trim().max(12_000_000).nullable().optional(),
   /** 说话人别名：数组或逗号分隔字符串，服务端规范化为 JSON。 */
@@ -338,6 +340,7 @@ export const updateCharacterSchema = z.object({
    * 上传参考音频请用 ttsRefAudioBase64。
    */
   ttsRefAudioPath: z.null().optional(),
+  ttsVoiceAssetId: z.string().trim().min(1).max(80).nullable().optional(),
   ttsRefAudioBase64: z.string().trim().max(12_000_000).nullable().optional(),
   ttsSpeakerAliases: z.union([
     z.array(z.string().trim().min(1).max(64)).max(24),

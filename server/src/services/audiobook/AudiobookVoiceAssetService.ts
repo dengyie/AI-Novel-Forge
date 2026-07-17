@@ -34,6 +34,7 @@ import {
   isCharacterVoiceConfigured,
   planCharacterVoices,
   type VoicePlannerCharacterInput,
+  type VoicePlannerLibraryAsset,
 } from "./audiobookVoicePlanner";
 import {
   assertCharacterVoiceReadyForPreview,
@@ -45,6 +46,7 @@ import {
   resolveDefaultCharacterVoicePreviewText,
   resolvePreviewTtsMode,
 } from "./characterVoicePreview";
+import { tryResolveEffectiveCloneRefPath, voiceLibraryService } from "./voiceLibraryService";
 import { mimoChatAudioTTSProvider } from "./MimoChatAudioTTSProvider";
 
 const DEFAULT_PREVIEW_TEXT = DEFAULT_CHARACTER_VOICE_PREVIEW_TEXT;
@@ -172,6 +174,9 @@ function summarizePlan(
     planned: items.length,
     presetCount: items.filter((item) => item.ttsMode === "preset").length,
     designCount: designItems.length,
+    cloneCount: items.filter(
+      (item) => item.ttsMode === "clone" && Boolean(item.ttsVoiceAssetId?.trim()),
+    ).length,
     overwriteCount: items.filter((item) => item.wouldOverwrite).length,
     softCollisionCount: items.filter((item) => item.reason.includes("collision:soft")).length,
     slotOverrideCount: items.filter((item) => item.reason.includes("slot:override")).length,
@@ -198,6 +203,7 @@ function toPlannerInput(row: {
   ttsStyle?: string | null;
   ttsDesignPrompt?: string | null;
   ttsRefAudioPath?: string | null;
+  ttsVoiceAssetId?: string | null;
   ttsSpeakerAliases?: string | null;
 }): VoicePlannerCharacterInput {
   return {
@@ -217,8 +223,30 @@ function toPlannerInput(row: {
     ttsStyle: row.ttsStyle,
     ttsDesignPrompt: row.ttsDesignPrompt,
     ttsRefAudioPath: row.ttsRefAudioPath,
+    ttsVoiceAssetId: row.ttsVoiceAssetId,
     ttsSpeakerAliases: row.ttsSpeakerAliases,
   };
+}
+
+function loadApprovedLibraryAssets(): VoicePlannerLibraryAsset[] {
+  const listed = voiceLibraryService.list({
+    status: "approved",
+    kind: "clone_ref",
+    limit: 500,
+  });
+  if (listed.total > listed.items.length) {
+    console.warn(
+      `[voice-plan] approved clone_ref library truncated for planner: total=${listed.total} injected=${listed.items.length} limit=500`,
+    );
+  }
+  return listed.items.map((a) => ({
+    id: a.id,
+    slug: a.slug,
+    displayName: a.displayName,
+    status: a.status,
+    kind: a.kind,
+    tags: a.tags ?? [],
+  }));
 }
 
 export class AudiobookVoiceAssetService {
@@ -255,6 +283,7 @@ export class AudiobookVoiceAssetService {
             ttsStyle: true,
             ttsDesignPrompt: true,
             ttsRefAudioPath: true,
+            ttsVoiceAssetId: true,
             ttsSpeakerAliases: true,
             ttsPreviewAudioPath: true,
             ttsPreviewSampleText: true,
@@ -319,6 +348,7 @@ export class AudiobookVoiceAssetService {
             ttsStyle: true,
             ttsDesignPrompt: true,
             ttsRefAudioPath: true,
+            ttsVoiceAssetId: true,
             ttsSpeakerAliases: true,
           },
           orderBy: { createdAt: "asc" },
@@ -342,6 +372,10 @@ export class AudiobookVoiceAssetService {
     ];
 
     const strategy = input.strategy ?? "auto";
+    const libraryAssets =
+      strategy === "preset_only" || strategy === "prefer_design"
+        ? []
+        : loadApprovedLibraryAssets();
     const planned = planCharacterVoices({
       characters: novel.characters.map(toPlannerInput),
       strategy,
@@ -349,6 +383,7 @@ export class AudiobookVoiceAssetService {
       characterIds: input.characterIds,
       maxImportantPerPreset: input.maxImportantPerPreset,
       reservedPresets,
+      libraryAssets,
     });
 
     return {
@@ -377,6 +412,7 @@ export class AudiobookVoiceAssetService {
             ttsVoice: true,
             ttsDesignPrompt: true,
             ttsRefAudioPath: true,
+            ttsVoiceAssetId: true,
           },
         },
       },
@@ -411,20 +447,84 @@ export class AudiobookVoiceAssetService {
       }
 
       if (item.ttsMode === "clone") {
-        skipped.push({
-          characterId: character.id,
-          characterName: character.name,
-          reason: "规划管线不自动写 clone；请在角色卡上传参考音频。",
-        });
+        const assetId = item.ttsVoiceAssetId?.trim() || "";
+        if (!assetId) {
+          skipped.push({
+            characterId: character.id,
+            characterName: character.name,
+            reason: "clone 需要 ttsVoiceAssetId（禁止客户端写参考路径）。",
+          });
+          continue;
+        }
+
+        // 已有 clone 绑库且未 overwrite：永不覆盖；overwrite=true 时换绑仍走 assertBindable
+        const alreadyClone =
+          (character.ttsMode?.trim() || "") === "clone"
+          && Boolean(
+            character.ttsRefAudioPath?.trim() || character.ttsVoiceAssetId?.trim(),
+          );
+        if (alreadyClone && !overwrite) {
+          skipped.push({
+            characterId: character.id,
+            characterName: character.name,
+            reason: "已配置 clone，apply 不覆盖（overwrite=false）。",
+          });
+          continue;
+        }
+        if (
+          !alreadyClone
+          && isCharacterVoiceConfigured(character)
+          && !overwrite
+        ) {
+          skipped.push({
+            characterId: character.id,
+            characterName: character.name,
+            reason: "已绑定音色且 overwrite=false。",
+          });
+          continue;
+        }
+
+        try {
+          const bound = await voiceLibraryService.bindCharacter(novelId, character.id, {
+            voiceAssetId: assetId,
+          });
+          if (item.speakerAliases) {
+            const aliases = parseSpeakerAliases(item.speakerAliases);
+            if (aliases && aliases.length > 0) {
+              await prisma.character.update({
+                where: { id: character.id },
+                data: { ttsSpeakerAliases: JSON.stringify(aliases) },
+              });
+            }
+          }
+          applied.push({
+            characterId: character.id,
+            characterName: character.name,
+            ttsMode: "clone",
+            ttsVoiceAssetId: bound.voiceAssetId,
+          });
+        } catch (error) {
+          skipped.push({
+            characterId: character.id,
+            characterName: character.name,
+            reason:
+              error instanceof Error
+                ? error.message
+                : "绑库失败。",
+          });
+        }
         continue;
       }
 
       const currentMode = character.ttsMode?.trim() || "preset";
-      if (currentMode === "clone" && character.ttsRefAudioPath?.trim()) {
+      if (
+        currentMode === "clone"
+        && (character.ttsRefAudioPath?.trim() || character.ttsVoiceAssetId?.trim())
+      ) {
         skipped.push({
           characterId: character.id,
           characterName: character.name,
-          reason: "已配置 clone 参考音频，apply 不覆盖。",
+          reason: "已配置 clone，apply 不覆盖为 preset/design。",
         });
         continue;
       }
@@ -470,8 +570,9 @@ export class AudiobookVoiceAssetService {
       const data: Record<string, unknown> = {
         ttsMode: item.ttsMode,
         ttsStyle: item.ttsStyle?.trim() || null,
-        // 切到 preset/design 时清掉 clone 参考路径，避免预检/合成仍走旧 clone
+        // 切到 preset/design 时清掉 clone 参考路径与库绑定，避免预检/合成仍走旧 clone
         ttsRefAudioPath: null,
+        ttsVoiceAssetId: null,
       };
 
       if (item.ttsMode === "preset") {
@@ -497,6 +598,7 @@ export class AudiobookVoiceAssetService {
         characterId: character.id,
         characterName: character.name,
         ttsMode: item.ttsMode,
+        ttsVoiceAssetId: null,
       });
     }
 
@@ -581,6 +683,7 @@ export class AudiobookVoiceAssetService {
         ttsStyle: true,
         ttsDesignPrompt: true,
         ttsRefAudioPath: true,
+        ttsVoiceAssetId: true,
         ttsPreviewAudioPath: true,
         ttsPreviewSampleText: true,
         ttsPreviewFingerprint: true,
@@ -638,15 +741,27 @@ export class AudiobookVoiceAssetService {
         ttsStyle: true,
         ttsDesignPrompt: true,
         ttsRefAudioPath: true,
+        ttsVoiceAssetId: true,
       },
     });
     if (!character) {
       throw new AppError("角色不存在。", 404);
     }
 
+    const effectiveRef =
+      tryResolveEffectiveCloneRefPath({
+        ttsVoiceAssetId: character.ttsVoiceAssetId,
+        ttsRefAudioPath: character.ttsRefAudioPath,
+        requireApproved: true,
+      }) || character.ttsRefAudioPath;
+    const previewConfig = {
+      ...character,
+      ttsRefAudioPath: effectiveRef,
+    };
+
     let ready: ReturnType<typeof assertCharacterVoiceReadyForPreview>;
     try {
-      ready = assertCharacterVoiceReadyForPreview(character);
+      ready = assertCharacterVoiceReadyForPreview(previewConfig);
     } catch (error) {
       throw new AppError(error instanceof Error ? error.message : "音色配置不完整，无法生成试听。", 400);
     }
@@ -655,7 +770,7 @@ export class AudiobookVoiceAssetService {
       input.text?.trim()
         || resolveDefaultCharacterVoicePreviewText({ gender: character.gender }),
     );
-    const fingerprint = buildCharacterVoicePreviewFingerprint(character, sampleText);
+    const fingerprint = buildCharacterVoicePreviewFingerprint(previewConfig, sampleText);
     const candidatesCount = normalizeCandidatesCount(input.candidates);
     // job/prepare 默认 auto-adopt；UI 多抽默认 false
     const autoAdopt =
@@ -814,6 +929,7 @@ export class AudiobookVoiceAssetService {
         ttsStyle: true,
         ttsDesignPrompt: true,
         ttsRefAudioPath: true,
+        ttsVoiceAssetId: true,
       },
     });
     if (!character) {
@@ -916,6 +1032,7 @@ export class AudiobookVoiceAssetService {
         ttsStyle: true,
         ttsDesignPrompt: true,
         ttsRefAudioPath: true,
+        ttsVoiceAssetId: true,
         ttsPreviewAudioPath: true,
         ttsPreviewSampleText: true,
         ttsPreviewFingerprint: true,
@@ -982,6 +1099,8 @@ export class AudiobookVoiceAssetService {
       data: {
         ttsMode: "clone",
         ttsRefAudioPath: refPath,
+        // 本地 clone ≠ 库资产
+        ttsVoiceAssetId: null,
         // 保留 design 文案审计；preset voice 可清
         ttsVoice: null,
       },

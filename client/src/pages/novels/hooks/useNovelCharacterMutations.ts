@@ -53,6 +53,7 @@ interface CharacterFormState {
   ttsDesignPrompt: string;
   ttsRefAudioPath: string;
   ttsRefAudioBase64: string;
+  ttsVoiceAssetId: string;
   ttsSpeakerAliases: string;
   presenceImpression: string;
   currentState: string;
@@ -259,6 +260,7 @@ export function useNovelCharacterMutations(input: UseNovelCharacterMutationsInpu
         ttsMode: mode,
         ttsRefAudioPath: characterForm.ttsRefAudioPath,
         ttsRefAudioBase64: characterForm.ttsRefAudioBase64,
+        ttsVoiceAssetId: characterForm.ttsVoiceAssetId,
       });
       return updateNovelCharacter(id, selectedCharacterId, {
         name: characterForm.name,

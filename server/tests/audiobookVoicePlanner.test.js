@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 
 const {
   planCharacterVoices,
+  matchLibraryAsset,
   inferGenderBucket,
   inferAgeBucket,
   scoreImportance,
@@ -947,3 +948,406 @@ test("reservedPresets empty pool forces design for lead/cast", () => {
   assert.equal(items[0].ttsMode, "design");
   assert.match(items[0].reason, /reservedPresets|design|smart_fill|升 design/i);
 });
+
+test("isCharacterVoiceConfigured treats clone+assetId as configured", () => {
+  assert.equal(
+    isCharacterVoiceConfigured({
+      ttsMode: "clone",
+      ttsVoiceAssetId: "va_abc",
+    }),
+    true,
+  );
+  assert.equal(
+    isCharacterVoiceConfigured({
+      ttsMode: "clone",
+      ttsRefAudioPath: "",
+      ttsVoiceAssetId: null,
+    }),
+    false,
+  );
+});
+
+test("matchLibraryAsset scores gender+cluster and skips used/gender-conflict", () => {
+  const assets = [
+    {
+      id: "va_male_lead",
+      slug: "yuan-male-lead",
+      displayName: "男主",
+      status: "approved",
+      kind: "clone_ref",
+      tags: ["male", "lead", "seed"],
+    },
+    {
+      id: "va_female_lead",
+      slug: "yuan-female-lead",
+      displayName: "女主",
+      status: "approved",
+      kind: "clone_ref",
+      tags: ["female", "lead"],
+    },
+    {
+      id: "va_draft",
+      slug: "drafty",
+      displayName: "draft",
+      status: "draft",
+      kind: "clone_ref",
+      tags: ["male", "lead"],
+    },
+  ];
+  const hit = matchLibraryAsset({
+    genderBucket: "male",
+    cluster: "lead",
+    assets,
+    usedAssetIds: new Set(),
+  });
+  assert.ok(hit);
+  assert.equal(hit.asset.id, "va_male_lead");
+
+  const used = matchLibraryAsset({
+    genderBucket: "male",
+    cluster: "lead",
+    assets,
+    usedAssetIds: new Set(["va_male_lead"]),
+  });
+  // 男 lead 已用完；女 lead gender 冲突 → null
+  assert.equal(used, null);
+
+  const female = matchLibraryAsset({
+    genderBucket: "female",
+    cluster: "lead",
+    assets,
+    usedAssetIds: new Set(),
+  });
+  assert.equal(female.asset.id, "va_female_lead");
+});
+
+test("prefer_library recommends approved assets and falls back without match", () => {
+  const libraryAssets = [
+    {
+      id: "va_m",
+      slug: "yuan-male-lead",
+      displayName: "源男主",
+      status: "approved",
+      kind: "clone_ref",
+      tags: ["male", "lead"],
+    },
+    {
+      id: "va_f",
+      slug: "yuan-female-lead",
+      displayName: "源女主",
+      status: "approved",
+      kind: "clone_ref",
+      tags: ["female", "lead"],
+    },
+  ];
+  const { items } = planCharacterVoices({
+    onlyMissing: true,
+    strategy: "prefer_library",
+    libraryAssets,
+    characters: [
+      { characterId: "m", characterName: "男主", gender: "male", castRole: "protagonist" },
+      { characterId: "f", characterName: "女主", gender: "female", castRole: "protagonist" },
+      { characterId: "x", characterName: "路人甲", gender: "male", role: "路人" },
+    ],
+  });
+  const male = items.find((i) => i.characterId === "m");
+  const female = items.find((i) => i.characterId === "f");
+  const extra = items.find((i) => i.characterId === "x");
+  assert.equal(male.ttsMode, "clone");
+  assert.equal(male.ttsVoiceAssetId, "va_m");
+  assert.equal(female.ttsMode, "clone");
+  assert.equal(female.ttsVoiceAssetId, "va_f");
+  // 无匹配 extra 库 → preset 回退
+  assert.equal(extra.ttsMode, "preset");
+  assert.ok(extra.ttsVoice);
+});
+
+test("prefer_library ignores draft assets", () => {
+  const { items } = planCharacterVoices({
+    onlyMissing: true,
+    strategy: "prefer_library",
+    libraryAssets: [
+      {
+        id: "va_draft",
+        slug: "draft",
+        displayName: "草稿",
+        status: "draft",
+        kind: "clone_ref",
+        tags: ["male", "lead"],
+      },
+    ],
+    characters: [
+      { characterId: "m", characterName: "男主", gender: "male", castRole: "protagonist" },
+    ],
+  });
+  assert.equal(items[0].ttsMode, "design");
+  assert.equal(items[0].ttsVoiceAssetId, null);
+});
+
+test("auto with libraryAssets prefers clone for lead", () => {
+  const { items } = planCharacterVoices({
+    onlyMissing: true,
+    strategy: "auto",
+    libraryAssets: [
+      {
+        id: "va_m",
+        slug: "yuan-male-lead",
+        displayName: "源男主",
+        status: "approved",
+        kind: "clone_ref",
+        tags: ["male", "lead"],
+      },
+    ],
+    characters: [
+      { characterId: "m", characterName: "男主", gender: "male", castRole: "protagonist" },
+    ],
+  });
+  assert.equal(items[0].ttsMode, "clone");
+  assert.equal(items[0].ttsVoiceAssetId, "va_m");
+});
+
+test("clone with only assetId is permanent skip", () => {
+  const { items, skipped } = planCharacterVoices({
+    onlyMissing: false,
+    strategy: "prefer_library",
+    libraryAssets: [
+      {
+        id: "va_other",
+        slug: "other",
+        displayName: "其它",
+        status: "approved",
+        kind: "clone_ref",
+        tags: ["male", "lead"],
+      },
+    ],
+    characters: [
+      {
+        characterId: "bound",
+        characterName: "已绑",
+        gender: "male",
+        castRole: "protagonist",
+        ttsMode: "clone",
+        ttsVoiceAssetId: "va_bound",
+      },
+    ],
+  });
+  assert.equal(items.length, 0);
+  assert.equal(skipped.some((s) => s.characterId === "bound"), true);
+});
+
+test("library assets are not double-assigned", () => {
+  const libraryAssets = [
+    {
+      id: "va_only",
+      slug: "one",
+      displayName: "唯一",
+      status: "approved",
+      kind: "clone_ref",
+      tags: ["male", "lead"],
+    },
+  ];
+  const { items } = planCharacterVoices({
+    onlyMissing: true,
+    strategy: "prefer_library",
+    libraryAssets,
+    characters: [
+      { characterId: "a", characterName: "甲", gender: "male", castRole: "protagonist" },
+      { characterId: "b", characterName: "乙", gender: "male", castRole: "protagonist" },
+    ],
+  });
+  const clones = items.filter((i) => i.ttsMode === "clone");
+  assert.equal(clones.length, 1);
+  assert.equal(clones[0].ttsVoiceAssetId, "va_only");
+  const other = items.find((i) => i.ttsMode !== "clone");
+  assert.ok(other);
+  assert.equal(other.ttsMode, "design");
+});
+
+test("untagged approved asset is rejected for lead/cast", () => {
+  const hit = matchLibraryAsset({
+    genderBucket: "male",
+    cluster: "lead",
+    usedAssetIds: new Set(),
+    assets: [
+      {
+        id: "va_open",
+        slug: "open",
+        displayName: "open",
+        status: "approved",
+        kind: "clone_ref",
+        tags: [],
+      },
+    ],
+  });
+  assert.equal(hit, null);
+
+  const { items } = planCharacterVoices({
+    onlyMissing: true,
+    strategy: "prefer_library",
+    libraryAssets: [
+      {
+        id: "va_open",
+        slug: "open",
+        displayName: "open",
+        status: "approved",
+        kind: "clone_ref",
+        tags: [],
+      },
+    ],
+    characters: [
+      { characterId: "m", characterName: "男主", gender: "male", castRole: "protagonist" },
+    ],
+  });
+  assert.equal(items[0].ttsMode, "design");
+  assert.equal(items[0].ttsVoiceAssetId, null);
+});
+
+test("untagged approved asset is rejected for extra/narrator (score floor)", () => {
+  const hit = matchLibraryAsset({
+    genderBucket: "male",
+    cluster: "extra",
+    usedAssetIds: new Set(),
+    assets: [
+      {
+        id: "va_open",
+        slug: "open",
+        displayName: "open",
+        status: "approved",
+        kind: "clone_ref",
+        tags: [],
+      },
+    ],
+  });
+  assert.equal(hit, null);
+});
+
+test("cluster-only tag can still match lead without gender tag", () => {
+  const hit = matchLibraryAsset({
+    genderBucket: "male",
+    cluster: "lead",
+    usedAssetIds: new Set(),
+    assets: [
+      {
+        id: "va_lead",
+        slug: "lead-only",
+        displayName: "lead",
+        status: "approved",
+        kind: "clone_ref",
+        tags: ["lead"],
+      },
+    ],
+  });
+  assert.ok(hit);
+  assert.equal(hit.asset.id, "va_lead");
+});
+
+test("gender-only tag is rejected for lead/cast (requires cluster tag)", () => {
+  const hit = matchLibraryAsset({
+    genderBucket: "male",
+    cluster: "lead",
+    usedAssetIds: new Set(),
+    assets: [
+      {
+        id: "va_male_only",
+        slug: "male-only",
+        displayName: "male-only",
+        status: "approved",
+        kind: "clone_ref",
+        tags: ["male"],
+      },
+    ],
+  });
+  assert.equal(hit, null);
+
+  const castHit = matchLibraryAsset({
+    genderBucket: "male",
+    cluster: "cast",
+    usedAssetIds: new Set(),
+    assets: [
+      {
+        id: "va_male_only",
+        slug: "male-only",
+        displayName: "male-only",
+        status: "approved",
+        kind: "clone_ref",
+        tags: ["male"],
+      },
+    ],
+  });
+  assert.equal(castHit, null);
+});
+
+test("narrator rejects gender-only and lead-tagged assets; requires narrator tag", () => {
+  const genderOnly = matchLibraryAsset({
+    genderBucket: "male",
+    cluster: "narrator",
+    usedAssetIds: new Set(),
+    assets: [
+      {
+        id: "va_male",
+        slug: "male",
+        displayName: "male",
+        status: "approved",
+        kind: "clone_ref",
+        tags: ["male"],
+      },
+    ],
+  });
+  assert.equal(genderOnly, null);
+
+  const leadTagged = matchLibraryAsset({
+    genderBucket: "male",
+    cluster: "narrator",
+    usedAssetIds: new Set(),
+    assets: [
+      {
+        id: "va_lead",
+        slug: "lead",
+        displayName: "lead",
+        status: "approved",
+        kind: "clone_ref",
+        tags: ["male", "lead"],
+      },
+    ],
+  });
+  assert.equal(leadTagged, null);
+
+  const narratorOk = matchLibraryAsset({
+    genderBucket: "male",
+    cluster: "narrator",
+    usedAssetIds: new Set(),
+    assets: [
+      {
+        id: "va_n",
+        slug: "narrator-m",
+        displayName: "旁白男",
+        status: "approved",
+        kind: "clone_ref",
+        tags: ["male", "narrator"],
+      },
+    ],
+  });
+  assert.ok(narratorOk);
+  assert.equal(narratorOk.asset.id, "va_n");
+});
+
+test("extra may still match gender-only approved assets", () => {
+  const hit = matchLibraryAsset({
+    genderBucket: "male",
+    cluster: "extra",
+    usedAssetIds: new Set(),
+    assets: [
+      {
+        id: "va_male",
+        slug: "male",
+        displayName: "male",
+        status: "approved",
+        kind: "clone_ref",
+        tags: ["male"],
+      },
+    ],
+  });
+  assert.ok(hit);
+  assert.equal(hit.asset.id, "va_male");
+});
+
