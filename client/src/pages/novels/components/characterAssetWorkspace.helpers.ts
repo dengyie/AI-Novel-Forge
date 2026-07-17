@@ -76,6 +76,34 @@ export const CHARACTER_VOICE_MODE_OPTIONS: Array<{
   { value: "clone", label: "克隆", helper: "从全站库绑定或上传参考音，保存后可试听/合成" },
 ];
 
+/**
+ * 切换音色模式时的表单补丁：离开 clone 时清库绑定 / 路径 / 本地 base64 草稿，避免残留半绑定。
+ */
+export function buildCharacterVoiceModeSwitchPatches(
+  nextMode: CharacterVoiceMode | string | null | undefined,
+  currentMode?: CharacterVoiceMode | string | null,
+): Partial<{
+  ttsMode: CharacterVoiceMode;
+  ttsVoiceAssetId: string;
+  ttsRefAudioPath: string;
+  ttsRefAudioBase64: string;
+}> {
+  const next = resolveCharacterVoiceMode(nextMode);
+  const current = resolveCharacterVoiceMode(currentMode);
+  if (next === current) {
+    return {};
+  }
+  if (next === "clone") {
+    return { ttsMode: next };
+  }
+  return {
+    ttsMode: next,
+    ttsVoiceAssetId: "",
+    ttsRefAudioPath: "",
+    ttsRefAudioBase64: "",
+  };
+}
+
 export function resolveCharacterVoiceMode(value?: string | null): CharacterVoiceMode {
   const mode = value?.trim();
   if (mode === "design" || mode === "clone" || mode === "preset") {
@@ -259,8 +287,8 @@ export function canGenerateCharacterVoicePreview(input: {
 }
 
 /**
- * 角色保存时的 ttsRef / 库绑定请求片段。
- * - 有 base64 → 只传 base64（服务端清 asset 并写路径）
+ * 角色保存时的 ttsRef / 库绑定请求片段（与 server decideCharacterVoiceRefUpdate 对齐）。
+ * - 有 base64 → base64 + assetId:null（服务端写盘并清库绑定，不可被 null 短路）
  * - clone + assetId → 传 ttsVoiceAssetId（服务端 assert approved 写路径）
  * - clone 且仅有服务端 path → 省略 path/asset，避免 400 且不误清
  * - 其它情况 → path:null + assetId:null 清空半绑定
@@ -280,7 +308,7 @@ export function buildCharacterTtsRefSaveFields(input: {
   const trimmedBase64 = (input.ttsRefAudioBase64 ?? "").trim();
   const trimmedAssetId = (input.ttsVoiceAssetId ?? "").trim();
   if (trimmedBase64) {
-    // base64 上传优先；服务端会清 asset 绑定
+    // base64 优先于库绑定；显式 null 让服务端清 asset 且仍写盘
     return { ttsRefAudioBase64: trimmedBase64, ttsVoiceAssetId: null };
   }
   if (mode === "clone" && trimmedAssetId) {
