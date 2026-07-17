@@ -9,13 +9,22 @@
  * Cross-ref: phases/novelDirectorStructuredOutlinePhase.ts (minimal logic copy; shared helper extraction is P2).
  */
 import type { VolumePlanDocument } from "@ai-novel/shared/types/novel";
-import { isFullBookAutopilotRunMode } from "@ai-novel/shared/types/novelDirector";
+import {
+  isFullBookAutopilotRunMode,
+  type DirectorAutoExecutionState,
+} from "@ai-novel/shared/types/novelDirector";
 import { assessChapterExecutionContractShape } from "@ai-novel/shared/types/chapterTaskSheetQuality";
+import {
+  buildQualityFeedbackWindowSummary,
+  extractQualityFeedbackFromRiskFlags,
+  QUALITY_FEEDBACK_PREPARE_SUMMARY_CHARS,
+} from "@ai-novel/shared/types/qualityFeedback";
 import type { NovelVolumeService } from "../../volume/NovelVolumeService";
 import {
   hasDirectorSyncedChapterExecutionContext,
   normalizeDirectorAutoExecutionPlan,
   type DirectorAutoExecutionChapterRef,
+  type DirectorAutoExecutionRange,
 } from "./novelDirectorAutoExecution";
 import {
   applyExpandRangeBatchRoll,
@@ -143,6 +152,47 @@ function workspaceHasTitleInRange(
 }
 
 /**
+ * A4：批续窗 prepare 时把上一窗 quality feedback 投影成 ≤500 字摘要，
+ * 写入 qualityDebtSummaries（source=quality_loop），由 applyExpandRangeBatchRoll 跨窗保留。
+ * fail-open：任何解析失败不影响批续。
+ */
+function withPriorWindowQualityDebtSummary(input: {
+  previousState: DirectorAutoExecutionState;
+  previousRange: DirectorAutoExecutionRange;
+  chapters: DirectorAutoExecutionChapterRef[];
+}): DirectorAutoExecutionState {
+  try {
+    const startOrder = Math.max(1, Math.round(input.previousRange.startOrder ?? 1));
+    const endOrder = Math.max(startOrder, Math.round(input.previousRange.endOrder ?? startOrder));
+    const packets = input.chapters
+      .filter((chapter) => chapter.order >= startOrder && chapter.order <= endOrder)
+      .flatMap((chapter) => extractQualityFeedbackFromRiskFlags(chapter.riskFlags ?? null));
+    const summary = buildQualityFeedbackWindowSummary(
+      packets,
+      QUALITY_FEEDBACK_PREPARE_SUMMARY_CHARS,
+    ).trim();
+    if (!summary) {
+      return input.previousState;
+    }
+    const debtEntry: NonNullable<DirectorAutoExecutionState["qualityDebtSummaries"]>[number] = {
+      chapterOrder: endOrder,
+      reason: summary,
+      source: "quality_loop",
+      deferredAt: new Date().toISOString(),
+    };
+    return {
+      ...input.previousState,
+      qualityDebtSummaries: [
+        ...(input.previousState.qualityDebtSummaries ?? []),
+        debtEntry,
+      ].slice(-40),
+    };
+  } catch {
+    return input.previousState;
+  }
+}
+
+/**
  * Prepare the next auto-execution batch window (detail + sync) without pausing for approval.
  */
 export async function prepareNextAutoExecutionBatch(
@@ -212,7 +262,11 @@ export async function prepareNextAutoExecutionBatch(
     );
     const chapters = await deps.novelContextService.listChapters(novelId);
     return applyExpandRangeBatchRoll({
-      previousState,
+      previousState: withPriorWindowQualityDebtSummary({
+        previousState,
+        previousRange,
+        chapters,
+      }),
       nextRange,
       chapters,
     });
@@ -496,7 +550,11 @@ export async function prepareNextAutoExecutionBatch(
   // Runtime continues autoExecutionLoop after this return.
 
   return applyExpandRangeBatchRoll({
-    previousState,
+    previousState: withPriorWindowQualityDebtSummary({
+      previousState,
+      previousRange,
+      chapters,
+    }),
     nextRange,
     chapters,
   });

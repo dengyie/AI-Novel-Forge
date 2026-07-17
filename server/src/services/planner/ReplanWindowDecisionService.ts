@@ -22,6 +22,8 @@ interface ReplanWindowDecisionInput {
   nextAction: GenerationNextAction | null;
   chapterStateGoal: ChapterStateGoal | null;
   protectedSecrets: string[];
+  /** A4 QFP：compact quality feedback JSON（确定性投影，可空） */
+  qualityFeedbackJson?: string | null;
   provider?: LLMProvider;
   model?: string;
   temperature?: number;
@@ -30,6 +32,14 @@ interface ReplanWindowDecisionInput {
 function compactJson(value: unknown, maxLength = 9000): string {
   const text = JSON.stringify(value ?? null);
   return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+}
+
+function safeParseJson(text: string): unknown {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return text;
+  }
 }
 
 export class ReplanWindowDecisionService {
@@ -50,6 +60,9 @@ export class ReplanWindowDecisionService {
         nextAction: input.nextAction ?? "none",
         chapterStateGoalJson: compactJson(input.chapterStateGoal),
         protectedSecretsJson: compactJson(input.protectedSecrets),
+        qualityFeedbackJson: input.qualityFeedbackJson?.trim()
+          ? compactJson(safeParseJson(input.qualityFeedbackJson), 4000)
+          : "[]",
       },
       options: {
         provider: input.provider,

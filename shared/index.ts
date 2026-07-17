@@ -41,4 +41,5 @@ export * from "./types/canonicalState";
 export * from "./types/literaryQualityPass";
 export * from "./types/repairAdoptDecision";
 export * from "./types/sotBannedTerms";
+export * from "./types/qualityFeedback";
 export * from "./utils/bookAnalysisTimeline";

@@ -318,6 +318,11 @@ export function buildChapterWriteContext(input: {
     characterResourceContext: input.contextPackage.characterResourceContext ?? null,
     recentChapterSummaries: takeUnique(input.contextPackage.previousChaptersSummary.slice(0, 3), 3),
     previousChapterTail: compactText(input.contextPackage.previousChapterTail) || null,
+    priorQualityFeedback: Array.isArray(input.contextPackage.priorQualityFeedback)
+      ? input.contextPackage.priorQualityFeedback
+        .map((line) => compactText(line))
+        .filter((line): line is string => Boolean(line))
+      : [],
     openingAntiRepeatHint: compactText(input.contextPackage.openingHint, "No recent opening guidance."),
     styleContract: input.contextPackage.styleContext?.compiledBlocks?.contract ?? null,
     styleConstraints: summarizeStyleConstraints(input.contextPackage),
@@ -397,6 +402,9 @@ function normalizeChapterWriteContext(writeContext: ChapterWriteContext): Chapte
     },
     characterHardFacts: writeContext.characterHardFacts ?? [],
     previousChapterTail: writeContext.previousChapterTail ?? null,
+    priorQualityFeedback: Array.isArray(writeContext.priorQualityFeedback)
+      ? writeContext.priorQualityFeedback.filter((line): line is string => typeof line === "string" && line.trim().length > 0)
+      : [],
     styleConstraints: writeContext.styleConstraints ?? [],
     continuationConstraints: writeContext.continuationConstraints ?? [],
     ragFacts: writeContext.ragFacts ?? [],
@@ -755,6 +763,19 @@ export function buildChapterWriterContextBlocks(
         content: [
           "上一章实际尾段（本章开头必须直接承接这里的时间、地点、人物状态和未兑现动作）：",
           writeContext.previousChapterTail,
+        ].join("\n"),
+      })
+      : null,
+    writeContext.priorQualityFeedback.length > 0
+      ? createContextBlock({
+        id: "prior_quality_feedback",
+        group: "prior_quality_feedback",
+        priority: 98,
+        required: false,
+        allowSummary: true,
+        content: [
+          "上章纠偏（质量反馈总线；按建议规避同类硬伤，禁止 skip_quality / 同签连 patch）：",
+          ...writeContext.priorQualityFeedback.map((line) => `- ${line}`),
         ].join("\n"),
       })
       : null,

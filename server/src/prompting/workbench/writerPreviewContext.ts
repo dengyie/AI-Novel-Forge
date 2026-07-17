@@ -256,6 +256,7 @@ function buildPreviewGenerationContextPackage(input: {
     openAuditIssues: [],
     previousChaptersSummary: [],
     previousChapterTail: null,
+    priorQualityFeedback: [],
     openingHint: "使用章节任务或场景卡直接开场，避免重复解释设定。",
     continuation: {
       enabled: false,

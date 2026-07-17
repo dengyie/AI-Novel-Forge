@@ -16,6 +16,8 @@ export interface ReplanWindowDecisionPromptInput {
   nextAction: string;
   chapterStateGoalJson: string;
   protectedSecretsJson: string;
+  /** A4 QFP compact packets JSON string */
+  qualityFeedbackJson: string;
 }
 
 export const replanWindowDecisionPrompt: PromptAsset<
@@ -29,7 +31,7 @@ export const replanWindowDecisionPrompt: PromptAsset<
   language: "zh",
   contextPolicy: {
     maxTokensBudget: 2200,
-    preferredGroups: ["canonical_state", "audit", "payoff_ledger", "chapter_goal"],
+    preferredGroups: ["canonical_state", "audit", "payoff_ledger", "chapter_goal", "quality_feedback"],
     dropOrder: ["protected_secrets"],
   },
   outputSchema: aiReplanWindowDecisionSchema,
@@ -46,6 +48,7 @@ export const replanWindowDecisionPrompt: PromptAsset<
       "4. chapter_rewrite 只在结构性缺章或原计划完全不可用时使用。",
       "5. 不要把 protectedSecrets 写进剧情结论，只能作为选择窗口时的保密约束。",
       "6. triggerReason、windowReason、whyTheseChapters 必须让新手能理解为什么要调整这些章节。",
+      "7. 若【质量反馈总线】出现 avoidRetry=true / severity=replan|blocking，优先考虑把对应章节纳入窗口，并倾向 state_realign / payoff_rebalance / chapter_rewrite，禁止建议 skip_quality 或同签名连续 patch。",
     ].join("\n")),
     new HumanMessage([
       `触发类型：${input.triggerType}`,
@@ -57,6 +60,9 @@ export const replanWindowDecisionPrompt: PromptAsset<
       "",
       "【审校报告】",
       input.auditReportsJson,
+      "",
+      "【质量反馈总线】",
+      input.qualityFeedbackJson,
       "",
       "【伏笔账本摘要】",
       input.payoffSummaryJson,
