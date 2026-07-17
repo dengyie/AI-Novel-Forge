@@ -235,6 +235,48 @@ export default function VoiceLibraryAdminPage() {
       const results: Array<{ id: string; ok: boolean; error?: string }> = [];
       for (const id of assetIds) {
         try {
+          // 批准前再读服务端：本地 heardIds 可能抢跑，以 review.heardAt + heardSha 为准
+          const latest = await getVoiceLibraryAsset(id);
+          const asset = latest.data;
+          const heardAt = asset?.review?.heardAt?.trim();
+          const fileSha = asset?.primaryFile?.sha256?.trim() || "";
+          const heardSha = asset?.review?.heardSha256?.trim() || "";
+          if (!heardAt) {
+            results.push({
+              id,
+              ok: false,
+              error: "服务端尚未记录试听（heardAt），请先播放试听音频。",
+            });
+            continue;
+          }
+          if (fileSha && heardSha && heardSha !== fileSha) {
+            results.push({
+              id,
+              ok: false,
+              error: "试听记录与当前音频不一致，请重新试听后再批准。",
+            });
+            setHeardIds((prev) => {
+              if (!prev.has(id)) return prev;
+              const next = new Set(prev);
+              next.delete(id);
+              return next;
+            });
+            continue;
+          }
+          if (fileSha && !heardSha) {
+            results.push({
+              id,
+              ok: false,
+              error: "试听记录缺少内容指纹，请重新试听后再批准。",
+            });
+            setHeardIds((prev) => {
+              if (!prev.has(id)) return prev;
+              const next = new Set(prev);
+              next.delete(id);
+              return next;
+            });
+            continue;
+          }
           await setVoiceLibraryAssetStatus(id, "approved", { approveToken: token });
           results.push({ id, ok: true });
         } catch (error) {

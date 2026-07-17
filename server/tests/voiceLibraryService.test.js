@@ -24,7 +24,7 @@ const {
 } = require("../dist/services/audiobook/characterVoiceReadiness");
 const { voiceLibraryService } = require("../dist/services/audiobook/voiceLibraryService");
 
-function writeSilentPcmWav(filePath, { rate = 24000, seconds = 0.12 } = {}) {
+function writeSilentPcmWav(filePath, { rate = 24000, seconds = 0.12, seed = 0 } = {}) {
   const numSamples = Math.max(1, Math.floor(rate * seconds));
   const dataSize = numSamples * 2;
   const buf = Buffer.alloc(44 + dataSize);
@@ -41,6 +41,13 @@ function writeSilentPcmWav(filePath, { rate = 24000, seconds = 0.12 } = {}) {
   buf.writeUInt16LE(16, 34);
   buf.write("data", 36);
   buf.writeUInt32LE(dataSize, 40);
+  // seed≠0 时写入非零 PCM，保证不同 seed 的 sha256 不同
+  if (seed) {
+    for (let i = 0; i < numSamples; i += 1) {
+      const sample = ((i * 31 + seed * 17) % 400) - 200;
+      buf.writeInt16LE(sample, 44 + i * 2);
+    }
+  }
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, buf);
   return filePath;
@@ -340,11 +347,92 @@ describe("voiceLibraryService", () => {
         () => voiceLibraryService.setStatus(asset.id, "approved"),
         /heardAt|试听/,
       );
-      const marked = voiceLibraryService.markLibraryPreviewHeard(asset.id);
+      const marked = voiceLibraryService.markLibraryPreviewHeard(asset.id, {
+        heardBy: "test-op",
+      });
       assert.ok(marked.review?.heardAt);
+      assert.equal(marked.review?.heardBy, "test-op");
+      assert.equal(marked.review?.heardSha256, asset.primaryFile.sha256);
       const approved = voiceLibraryService.setStatus(asset.id, "approved");
       assert.equal(approved.status, "approved");
       assert.ok(approved.review?.heardAt);
+    });
+  });
+
+  it("同 sha 二次 mark 不改 heardAt；overwrite 清 review 须重听", async () => {
+    await withIsolatedLibrary(async () => {
+      const wavA = writeSilentPcmWav(path.join(TMP_ROOT, "src-a.wav"), { seed: 1 });
+      let asset = voiceLibraryService.importFromFile({
+        sourcePath: wavA,
+        slug: "overwrite-heard",
+        displayName: "OverwriteHeard",
+        license: { source: "test", rights: "internal" },
+      });
+      const first = voiceLibraryService.markLibraryPreviewHeard(asset.id);
+      assert.ok(first.review?.heardAt);
+      const firstAt = first.review.heardAt;
+      const firstSha = first.review.heardSha256;
+      const second = voiceLibraryService.markLibraryPreviewHeard(asset.id);
+      assert.equal(second.review?.heardAt, firstAt);
+      assert.equal(second.review?.heardSha256, firstSha);
+
+      const wavB = writeSilentPcmWav(path.join(TMP_ROOT, "src-b.wav"), { seed: 99 });
+      asset = voiceLibraryService.importFromFile({
+        sourcePath: wavB,
+        slug: "overwrite-heard",
+        displayName: "OverwriteHeard",
+        license: { source: "test", rights: "internal" },
+        overwrite: true,
+      });
+      assert.equal(asset.review, null);
+      assert.notEqual(asset.primaryFile.sha256, firstSha);
+      assert.throws(
+        () => voiceLibraryService.setStatus(asset.id, "approved"),
+        /heardAt|试听/,
+      );
+      const reheard = voiceLibraryService.markLibraryPreviewHeard(asset.id);
+      assert.ok(reheard.review?.heardAt);
+      assert.equal(reheard.review?.heardSha256, asset.primaryFile.sha256);
+      const approved = voiceLibraryService.setStatus(asset.id, "approved");
+      assert.equal(approved.status, "approved");
+    });
+  });
+
+  it("旧 heardAt 无 heardSha256 或 sha 不匹配时拒绝 approved", async () => {
+    await withIsolatedLibrary(async () => {
+      const wav = writeSilentPcmWav(path.join(TMP_ROOT, "src-legacy.wav"), { seed: 3 });
+      const asset = voiceLibraryService.importFromFile({
+        sourcePath: wav,
+        slug: "legacy-heard",
+        displayName: "LegacyHeard",
+        license: { source: "test", rights: "internal" },
+      });
+      voiceLibraryService.markLibraryPreviewHeard(asset.id);
+      const marked = voiceLibraryService.getById(asset.id);
+      const regFile = resolveGlobalVoiceRegistryPath();
+      const reg = JSON.parse(fs.readFileSync(regFile, "utf8"));
+      const idx = reg.assets.findIndex((a) => a.id === asset.id);
+      assert.ok(idx >= 0);
+      reg.assets[idx].review = {
+        heardAt: marked.review.heardAt,
+        heardBy: "legacy",
+        heardSha256: "0".repeat(64),
+      };
+      fs.writeFileSync(regFile, `${JSON.stringify(reg, null, 2)}\n`);
+      assert.throws(
+        () => voiceLibraryService.setStatus(asset.id, "approved"),
+        /不一致|重听|sha/i,
+      );
+
+      reg.assets[idx].review = {
+        heardAt: marked.review.heardAt,
+        heardBy: "legacy",
+      };
+      fs.writeFileSync(regFile, `${JSON.stringify(reg, null, 2)}\n`);
+      assert.throws(
+        () => voiceLibraryService.setStatus(asset.id, "approved"),
+        /不一致|重听|sha|试听/i,
+      );
     });
   });
 

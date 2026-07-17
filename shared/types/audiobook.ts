@@ -918,11 +918,13 @@ export interface VoiceAssetPrimaryFile {
   channels?: number | null;
 }
 
-/** 人耳审核轻量字段；升 approved 前 clone_ref 须有 heardAt。 */
+/** 人耳审核轻量字段；升 approved 前 clone_ref 须有 heardAt，且与当前 primaryFile.sha256 一致。 */
 export interface VoiceAssetReview {
   /** ISO 时间：库级音频曾被拉取/播放 */
   heardAt?: string | null;
   heardBy?: string | null;
+  /** 试听时 primaryFile.sha256；文件覆盖后与当前 sha 不一致则须重听 */
+  heardSha256?: string | null;
 }
 
 export interface VoiceAsset {

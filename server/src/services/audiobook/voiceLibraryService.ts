@@ -596,6 +596,7 @@ export class VoiceLibraryService {
       const sha = sha256File(checked.absolutePath);
       const relativePath = toVoiceRefRelativePath(checked.absolutePath);
       const now = nowIso();
+      // 导入/覆盖均不继承 review：内容可能已变，须重新拉流试听
       const asset: VoiceAsset = {
         id: assetId,
         slug,
@@ -618,6 +619,7 @@ export class VoiceLibraryService {
           channels: meta.channels,
         },
         packId,
+        review: null,
         createdAt: existing?.createdAt || now,
         updatedAt: now,
       };
@@ -735,16 +737,29 @@ export class VoiceLibraryService {
   }
 
   /**
-   * 标记人耳已听（写 registry.review.heardAt）。
+   * 标记人耳已听（写 registry.review.heardAt + heardSha256）。
    * 在库级 audio 实际被拉取时调用；media-access 签发不写。
+   * 已有同 sha 的 heard 记录则跳过写锁（Range 分片友好）。
    */
-  markLibraryPreviewHeard(assetId: string): VoiceAsset {
+  markLibraryPreviewHeard(
+    assetId: string,
+    options?: { heardBy?: string | null },
+  ): VoiceAsset {
     const id = assetId.trim();
     if (!id) {
       throw new AppError("assetId 必填。", 400);
     }
-    // 先校验可试听，再写 heard
-    this.resolveLibraryPreviewAudioPath(id);
+    const { asset: previewAsset } = this.resolveLibraryPreviewAudioPath(id);
+    const fileSha = previewAsset.primaryFile?.sha256?.trim() || "";
+    const prevHeardAt = previewAsset.review?.heardAt?.trim() || "";
+    const prevHeardSha = previewAsset.review?.heardSha256?.trim() || "";
+    if (prevHeardAt && fileSha && prevHeardSha === fileSha) {
+      return previewAsset;
+    }
+    const heardByRaw = options?.heardBy?.trim();
+    const heardBy = heardByRaw
+      ? heardByRaw.slice(0, 64)
+      : "library-audio";
     let result: VoiceAsset | null = null;
     mutateRegistry((registry) => {
       const idx = registry.assets.findIndex((a) => a.id === id);
@@ -752,11 +767,20 @@ export class VoiceLibraryService {
         throw new AppError("VoiceAsset 不存在。", 404);
       }
       const prev = registry.assets[idx]!;
+      const currentSha = prev.primaryFile?.sha256?.trim() || fileSha;
+      const existingAt = prev.review?.heardAt?.trim() || "";
+      const existingSha = prev.review?.heardSha256?.trim() || "";
+      if (existingAt && currentSha && existingSha === currentSha) {
+        result = prev;
+        return;
+      }
       const next: VoiceAsset = {
         ...prev,
         review: {
           ...(prev.review ?? {}),
           heardAt: nowIso(),
+          heardBy,
+          heardSha256: currentSha || null,
         },
         updatedAt: nowIso(),
       };
@@ -788,6 +812,14 @@ export class VoiceLibraryService {
           if (!prev.review?.heardAt?.trim()) {
             throw new AppError(
               "升为 approved 前须先库级试听（服务端未记录 heardAt）。请先播放试听音频。",
+              400,
+            );
+          }
+          const fileSha = prev.primaryFile?.sha256?.trim() || "";
+          const heardSha = prev.review?.heardSha256?.trim() || "";
+          if (fileSha && (!heardSha || heardSha !== fileSha)) {
+            throw new AppError(
+              "试听记录与当前音频不一致（文件可能已覆盖或为旧版 heard）。请重新试听后再批准。",
               400,
             );
           }
