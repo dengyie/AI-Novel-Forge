@@ -645,42 +645,45 @@ export async function generateChapterTaskSheetDetail(params: {
     && existingChapter.taskSheet?.trim()
     && existingChapter.sceneCards?.trim()
   ) {
-    const chapterType = inferChapterTaskSheetType({
-      title: existingChapter.title,
-      summary: existingChapter.summary,
-      purpose: existingChapter.purpose,
-      exclusiveEvent: existingChapter.exclusiveEvent,
-      taskSheet: existingChapter.taskSheet,
-      conflictLevel: existingChapter.conflictLevel,
-    });
-    // base：书默认章长 → 章上历史 target → 2200；显式 target 会按分型带夹逼
-    const baseWordCount = params.promptInput.novel.defaultChapterLength
-      ?? existingChapter.targetWordCount
-      ?? 2200;
-    const resolvedTarget = resolveChapterTypeTargetWordCount({
-      baseWordCount,
-      chapterType,
-      explicitTargetWordCount: existingChapter.targetWordCount,
-    }) ?? baseWordCount;
-    const scenePlan = normalizeChapterScenePlan(
-      existingChapter.sceneCards,
-      resolvedTarget,
-    );
-    const preservedTaskSheet = sanitizeChapterTaskSheetForPersistence(existingChapter.taskSheet)
-      ?? existingChapter.taskSheet.trim();
-    return {
-      purpose: existingChapter.purpose?.trim() || existingChapter.summary.trim(),
-      exclusiveEvent: existingChapter.exclusiveEvent?.trim() || existingChapter.summary.trim(),
-      endingState: existingChapter.endingState?.trim() || "本章完成当前章节任务，并为下一章留下明确入口。",
-      nextChapterEntryState: existingChapter.nextChapterEntryState?.trim() || existingChapter.endingState?.trim() || "下一章承接本章结果继续推进。",
-      conflictLevel: existingChapter.conflictLevel ?? 3,
-      revealLevel: existingChapter.revealLevel ?? 2,
-      targetWordCount: resolvedTarget,
-      mustAvoid: existingChapter.mustAvoid?.trim() || "避免偏离本章任务单和卷节奏。",
-      payoffRefs: existingChapter.payoffRefs,
-      taskSheet: preservedTaskSheet,
-      sceneCards: serializeChapterScenePlan(scenePlan),
-    };
+    // Preserve only when sanitize leaves real narrative content.
+    // codes-only residue → null: fall through and regenerate (never re-persist internal codes).
+    const preservedTaskSheet = sanitizeChapterTaskSheetForPersistence(existingChapter.taskSheet);
+    if (preservedTaskSheet) {
+      const chapterType = inferChapterTaskSheetType({
+        title: existingChapter.title,
+        summary: existingChapter.summary,
+        purpose: existingChapter.purpose,
+        exclusiveEvent: existingChapter.exclusiveEvent,
+        taskSheet: preservedTaskSheet,
+        conflictLevel: existingChapter.conflictLevel,
+      });
+      // base：书默认章长 → 章上历史 target → 2200；显式 target 会按分型带夹逼
+      const baseWordCount = params.promptInput.novel.defaultChapterLength
+        ?? existingChapter.targetWordCount
+        ?? 2200;
+      const resolvedTarget = resolveChapterTypeTargetWordCount({
+        baseWordCount,
+        chapterType,
+        explicitTargetWordCount: existingChapter.targetWordCount,
+      }) ?? baseWordCount;
+      const scenePlan = normalizeChapterScenePlan(
+        existingChapter.sceneCards,
+        resolvedTarget,
+      );
+      return {
+        purpose: existingChapter.purpose?.trim() || existingChapter.summary.trim(),
+        exclusiveEvent: existingChapter.exclusiveEvent?.trim() || existingChapter.summary.trim(),
+        endingState: existingChapter.endingState?.trim() || "本章完成当前章节任务，并为下一章留下明确入口。",
+        nextChapterEntryState: existingChapter.nextChapterEntryState?.trim() || existingChapter.endingState?.trim() || "下一章承接本章结果继续推进。",
+        conflictLevel: existingChapter.conflictLevel ?? 3,
+        revealLevel: existingChapter.revealLevel ?? 2,
+        targetWordCount: resolvedTarget,
+        mustAvoid: existingChapter.mustAvoid?.trim() || "避免偏离本章任务单和卷节奏。",
+        payoffRefs: existingChapter.payoffRefs,
+        taskSheet: preservedTaskSheet,
+        sceneCards: serializeChapterScenePlan(scenePlan),
+      };
+    }
   }
 
   let lastError: Error | null = null;
@@ -765,8 +768,10 @@ export async function generateChapterTaskSheetDetail(params: {
         entrypoint: params.options.entrypoint,
         signal: params.options.signal,
       });
-      const sanitizedTaskSheet = sanitizeChapterTaskSheetForPersistence(generated.output.taskSheet)
-        ?? generated.output.taskSheet.trim();
+      // strip internal codes; codes-only / empty → "" (string return contract).
+      // Never `?? original.trim()` — that re-persists internal quality codes.
+      // Downstream merge/plan sanitize maps empty → null for persistence.
+      const sanitizedTaskSheet = sanitizeChapterTaskSheetForPersistence(generated.output.taskSheet) ?? "";
       return {
         purpose: generated.output.purpose.trim(),
         exclusiveEvent: generated.output.exclusiveEvent.trim(),
@@ -777,8 +782,6 @@ export async function generateChapterTaskSheetDetail(params: {
         targetWordCount: resolvedTarget,
         mustAvoid: generated.output.mustAvoid.trim(),
         payoffRefs: generated.output.payoffRefs,
-        // strip internal codes on write; empty residue still falls back to trimmed
-        // so quality gate can hard-fail empty sheets instead of silently nulling
         taskSheet: sanitizedTaskSheet,
         sceneCards: serializeChapterScenePlan(scenePlan),
       };
