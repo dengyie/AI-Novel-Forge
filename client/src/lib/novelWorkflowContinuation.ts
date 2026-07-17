@@ -28,20 +28,22 @@ export function resolveWorkflowContinuationFeedback(
     };
   }
 
+  // skip_quality_repair 已废弃为质量旁路：服务端永不跳过质量债，仅按 range 续跑。
+  // 旧客户端若仍传该 mode，toast 不得再暗示「已跳过质量建议」。
+  const isRangeContinue = options?.mode === "auto_execute_range"
+    || options?.mode === "skip_quality_repair";
   return {
     tone: "success",
-    message: options?.mode === "skip_quality_repair"
-      ? `已跳过本次质量建议，自动导演会继续执行${scopeLabel}。`
-      : options?.mode === "auto_execute_range"
-        ? `已继续自动执行${scopeLabel}。`
-        : "自动导演已继续推进。",
+    message: isRangeContinue
+      ? `已继续自动执行${scopeLabel}。`
+      : "自动导演已继续推进。",
   };
 }
 
 /**
  * 客户端续跑策略映射。
  * 禁止把质量检查点策略化映射为 skip_quality_repair（监管契约 / A7）。
- * skip 仅可由显式 API 载荷携带；UI 主路径不得默认跳过质量建议。
+ * skip 枚举仅兼容旧 API；UI 主路径不得发送，且服务端永不据此跳过质量债。
  */
 export function resolveDirectorContinueMode(task: Pick<
   UnifiedTaskDetail,
