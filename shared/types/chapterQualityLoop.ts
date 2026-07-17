@@ -11,6 +11,13 @@ import {
   isLiteraryQualityPass,
   type QualityIsPassThreshold,
 } from "./literaryQualityPass.js";
+import {
+  DEFAULT_RESIDUAL_RISK_HARD,
+  DEFAULT_STYLE_GATE_MAX_ORDER,
+  hasBlockingPronounProseFromIssueCodes,
+  projectResidualRiskScore,
+  projectStyleClear,
+} from "./styleClearGate.js";
 
 export const CHAPTER_QUALITY_LOOP_ARTIFACT_TYPES = [
   "chapter_retention_contract",
@@ -19,6 +26,10 @@ export const CHAPTER_QUALITY_LOOP_ARTIFACT_TYPES = [
   "prose_quality",
   "literary_score",
   "setting_alignment",
+  /** 句首他/她硬堆叠 / density hard：全书 invalid 门（与 prose_quality non-deferrable 双写可观测）。 */
+  "style_pronoun",
+  /** 风格 residual risk：开篇硬门 / 中盘可 continue 记债。 */
+  "style_residual",
 ] as const;
 
 export type ChapterQualityLoopArtifactType = typeof CHAPTER_QUALITY_LOOP_ARTIFACT_TYPES[number];
@@ -235,6 +246,14 @@ export function classifyChapterQualityLoopRisk(
   ) {
     return "non_blocking_quality_debt";
   }
+  // 中盘 style_residual 记债 + continue：non-blocking（开篇 residual 不会 continue）。
+  if (
+    qualityLoop.overallStatus === "risk"
+    && recommendedAction === "continue"
+    && hasStyleResidualOnlyNonBlockingSignal(qualityLoop)
+  ) {
+    return "non_blocking_quality_debt";
+  }
   if (qualityLoop.overallStatus === "risk" || qualityLoop.overallStatus === "invalid") {
     return "blocking";
   }
@@ -282,6 +301,30 @@ function hasTimelineExtractionDeferredSignal(qualityLoop: Record<string, unknown
   });
 }
 
+function hasStyleResidualOnlyNonBlockingSignal(qualityLoop: Record<string, unknown>): boolean {
+  const signals = Array.isArray(qualityLoop.signals) ? qualityLoop.signals : [];
+  const typed: ChapterQualityLoopSignal[] = [];
+  for (const signal of signals) {
+    if (
+      isRecord(signal)
+      && typeof signal.artifactType === "string"
+      && typeof signal.status === "string"
+      && typeof signal.reason === "string"
+      && Array.isArray(signal.issueCodes)
+    ) {
+      typed.push({
+        artifactType: signal.artifactType as ChapterQualityLoopArtifactType,
+        status: signal.status as ChapterQualityLoopSignalStatus,
+        reason: signal.reason,
+        issueCodes: signal.issueCodes.filter((c): c is string => typeof c === "string"),
+      });
+    }
+  }
+  const orderRaw = qualityLoop.chapterOrder;
+  const chapterOrder = typeof orderRaw === "number" && Number.isFinite(orderRaw) ? orderRaw : 0;
+  return isStyleResidualOnlyNonBlockingRisk(typed, chapterOrder);
+}
+
 export function classifyChapterQualityLoopRiskFlags(
   riskFlags: string | null | undefined,
 ): ChapterQualityLoopRiskClassification {
@@ -299,6 +342,64 @@ export function projectL0ClearFromQualityLoop(qualityLoop: unknown): boolean | n
   }
   // 有 qualityLoop 对象即视为已评估过；以 non-deferrable 双通道为准
   return !hasNonDeferrableProseOrSotDebt(qualityLoop);
+}
+
+/**
+ * 从 qualityLoop assessment 投影 styleClear。
+ * - style_pronoun invalid → false
+ * - style_residual risk 且关键章（order ≤ max）→ false
+ * - 中盘仅 residual risk → true（债可观测但不挡 style 维）
+ * 无 style 信号 → 若有 assessment 对象则 true（无 AI 味债）
+ */
+export function projectStyleClearFromQualityLoop(qualityLoop: unknown): boolean | null {
+  if (!isRecord(qualityLoop)) {
+    return null;
+  }
+  const signals = Array.isArray(qualityLoop.signals) ? qualityLoop.signals : [];
+  const orderRaw = qualityLoop.chapterOrder;
+  const chapterOrder = typeof orderRaw === "number" && Number.isFinite(orderRaw) ? orderRaw : 0;
+
+  let hasBlockingPronoun = false;
+  let residualRiskScore: number | null = null;
+
+  for (const signal of signals) {
+    if (!isRecord(signal)) {
+      continue;
+    }
+    if (signal.artifactType === "style_pronoun" && signal.status === "invalid") {
+      hasBlockingPronoun = true;
+    }
+    if (signal.artifactType === "style_residual") {
+      // risk / invalid 时从 issueCodes 解析 residual=N；缺省用硬阈标记为未知高风险
+      const codes = Array.isArray(signal.issueCodes) ? signal.issueCodes : [];
+      const residualCode = codes.find((c) => typeof c === "string" && c.startsWith("residual="));
+      if (typeof residualCode === "string") {
+        const n = Number(residualCode.slice("residual=".length));
+        residualRiskScore = Number.isFinite(n) ? n : DEFAULT_RESIDUAL_RISK_HARD;
+      } else if (signal.status === "risk" || signal.status === "invalid") {
+        residualRiskScore = DEFAULT_RESIDUAL_RISK_HARD;
+      } else if (signal.status === "valid") {
+        residualRiskScore = residualRiskScore ?? 0;
+      }
+      // missing → leave null（开篇假 true 防护）
+      if (signal.status === "missing") {
+        residualRiskScore = null;
+      }
+    }
+    // 双通道：prose_quality 上 hard pronoun 也算 blocking
+    if (signal.artifactType === "prose_quality") {
+      const codes = Array.isArray(signal.issueCodes) ? signal.issueCodes : [];
+      if (hasBlockingPronounProseFromIssueCodes(codes.map((c) => typeof c === "string" ? c : null))) {
+        hasBlockingPronoun = true;
+      }
+    }
+  }
+
+  return projectStyleClear({
+    residualRiskScore,
+    hasBlockingPronounProse: hasBlockingPronoun,
+    chapterOrder,
+  });
 }
 
 /**
@@ -755,7 +856,47 @@ function isSettingAlignmentOnlyNonBlockingRisk(signals: ChapterQualityLoopSignal
   ));
 }
 
-function resolveAction(overallStatus: ChapterQualityLoopSignalStatus, signals: ChapterQualityLoopSignal[]): ChapterQualityLoopAction {
+/**
+ * 中盘仅 style_residual risk：可 continue 记债。
+ * 开篇 residual 硬门：projectStyleClear=false → 本函数 false → 走 patch_repair。
+ */
+function isStyleResidualOnlyNonBlockingRisk(
+  signals: ChapterQualityLoopSignal[],
+  chapterOrder: number,
+): boolean {
+  const residual = signals.find((signal) => signal.artifactType === "style_residual");
+  if (!residual || residual.status !== "risk") {
+    return false;
+  }
+  const onlyResidualRisk = signals.every((signal) => (
+    signal.artifactType === "style_residual"
+      ? signal.status === "risk"
+      : signal.status === "valid"
+  ));
+  if (!onlyResidualRisk) {
+    return false;
+  }
+  const residualCode = residual.issueCodes.find((code) => code.startsWith("residual="));
+  let residualRiskScore: number | null = null;
+  if (typeof residualCode === "string") {
+    const n = Number(residualCode.slice("residual=".length));
+    residualRiskScore = Number.isFinite(n) ? n : DEFAULT_RESIDUAL_RISK_HARD;
+  } else {
+    residualRiskScore = DEFAULT_RESIDUAL_RISK_HARD;
+  }
+  // 仅当 style 维仍可通过时允许 continue（中盘 residual 高仍 styleClear true）
+  return projectStyleClear({
+    residualRiskScore,
+    hasBlockingPronounProse: false,
+    chapterOrder,
+  });
+}
+
+function resolveAction(
+  overallStatus: ChapterQualityLoopSignalStatus,
+  signals: ChapterQualityLoopSignal[],
+  chapterOrder = 0,
+): ChapterQualityLoopAction {
   const rollingWindow = signals.find((signal) => signal.artifactType === "rolling_window_review");
   if (rollingWindow?.status === "invalid") {
     return "replan";
@@ -771,6 +912,10 @@ function resolveAction(overallStatus: ChapterQualityLoopSignalStatus, signals: C
   }
   // advisory setting-only：risk signal 供债板/可观测，不抬升 repair/blocking
   if (overallStatus === "risk" && isSettingAlignmentOnlyNonBlockingRisk(signals)) {
+    return "continue";
+  }
+  // 中盘仅 style_residual risk：记债可 continue；开篇 residual 硬门不走此例外
+  if (overallStatus === "risk" && isStyleResidualOnlyNonBlockingRisk(signals, chapterOrder)) {
     return "continue";
   }
   if (setting?.status === "risk" && !isSettingAlignmentOnlyNonBlockingRisk(signals)) {
@@ -813,15 +958,101 @@ function extractLengthObservabilityTags(
   ));
 }
 
+/**
+ * style_pronoun：句首他/她硬堆叠与 density hard。
+ * hard 码 → invalid；仅 soft / 无 → valid。
+ */
+function buildStylePronounSignal(input: ChapterQualityLoopAssessmentInput): ChapterQualityLoopSignal {
+  const openIssues = input.runtimePackage?.audit.openIssues ?? [];
+  const hardCodes = openIssues
+    .map((issue) => issue.code)
+    .filter((code) => code === "prose_pronoun_subject_stack" || code === "prose_pronoun_density");
+  if (hardCodes.length === 0) {
+    return {
+      artifactType: "style_pronoun",
+      status: "valid",
+      reason: "未命中句首他/她硬堆叠或 pronoun density hard。",
+      issueCodes: [],
+    };
+  }
+  return {
+    artifactType: "style_pronoun",
+    status: "invalid",
+    reason: "正文存在句首他/她硬堆叠或 pronoun density hard，文风门 styleClear=false。",
+    issueCodes: Array.from(new Set(hardCodes)).slice(0, 8),
+  };
+}
+
+/**
+ * style_residual：风格改写后 residual risk。
+ * - residual 未知（null）→ missing（开篇 projectStyleClear 假 true 防护）
+ * - residual ≥ hard → risk（开篇挡 completed；中盘可 continue 记债）
+ * - residual < hard → valid
+ */
+function buildStyleResidualSignal(input: ChapterQualityLoopAssessmentInput): ChapterQualityLoopSignal {
+  const styleReview = input.runtimePackage?.styleReview ?? null;
+  const residualRiskScore = projectResidualRiskScore(styleReview);
+  const chapterOrder = input.chapterOrder
+    ?? input.runtimePackage?.context.chapter.order
+    ?? 0;
+  const order = typeof chapterOrder === "number" && Number.isFinite(chapterOrder) ? chapterOrder : 0;
+  const residualHard = DEFAULT_RESIDUAL_RISK_HARD;
+  const maxOrder = DEFAULT_STYLE_GATE_MAX_ORDER;
+
+  if (residualRiskScore == null || !Number.isFinite(residualRiskScore)) {
+    // 无 styleReview 包：不注入 missing 噪声（多数无风格路径）；有包但 residual 空 → 关键章 risk
+    if (!styleReview) {
+      return {
+        artifactType: "style_residual",
+        status: "valid",
+        reason: "无风格审查包，不记 residual 债。",
+        issueCodes: [],
+      };
+    }
+    const isGated = order > 0 && order <= maxOrder;
+    return {
+      artifactType: "style_residual",
+      // 关键章未知 residual 抬 risk，避免 overall=missing 被 resolveAction 落到 continue
+      status: isGated ? "risk" : "missing",
+      reason: isGated
+        ? "关键章风格 residual 未知，不得假 true 过 styleClear。"
+        : "风格 residual 未知，记 missing 供可观测。",
+      issueCodes: ["residual=unknown"],
+    };
+  }
+
+  if (residualRiskScore >= residualHard) {
+    return {
+      artifactType: "style_residual",
+      status: "risk",
+      reason: order > 0 && order <= maxOrder
+        ? `开篇/关键章 residual risk=${residualRiskScore} ≥ ${residualHard}，styleClear 硬门。`
+        : `风格 residual risk=${residualRiskScore}，中盘记债可不挡 styleClear。`,
+      issueCodes: [`residual=${residualRiskScore}`],
+    };
+  }
+
+  return {
+    artifactType: "style_residual",
+    status: "valid",
+    reason: `风格 residual risk=${residualRiskScore} 低于硬阈 ${residualHard}。`,
+    issueCodes: [`residual=${residualRiskScore}`],
+  };
+}
+
 export function buildChapterQualityLoopAssessment(
   input: ChapterQualityLoopAssessmentInput,
 ): ChapterQualityLoopAssessment {
+  const chapterOrder = input.chapterOrder ?? input.runtimePackage?.context.chapter.order ?? null;
+  const orderNum = typeof chapterOrder === "number" && Number.isFinite(chapterOrder) ? chapterOrder : 0;
   const baseSignals = [
     buildRetentionSignal(input),
     buildLiteraryScoreSignal(input),
     buildContinuitySignal(input),
     buildProseQualitySignal(input),
     buildRollingWindowSignal(input),
+    buildStylePronounSignal(input),
+    buildStyleResidualSignal(input),
   ];
   const settingSignal = buildSettingAlignmentSignal(input);
   const signals = settingSignal ? [...baseSignals, settingSignal] : baseSignals;
@@ -829,7 +1060,7 @@ export function buildChapterQualityLoopAssessment(
     (status, signal) => worseStatus(status, signal.status),
     "valid",
   );
-  const recommendedAction = resolveAction(overallStatus, signals);
+  const recommendedAction = resolveAction(overallStatus, signals, orderNum);
   const budget = buildLoopBudget({
     recommendedAction,
     signals,
@@ -840,8 +1071,8 @@ export function buildChapterQualityLoopAssessment(
   const settingOnlyAdvisory = settingSignal
     ? isSettingAlignmentOnlyNonBlockingRisk(signals)
     : false;
-  // advisory setting-only：overall 保持 risk 可见，但 continue → classify 走 non_blocking/none 边界
-  // 与 deferred timeline 一致：risk + continue 时 classify 读 non_blocking_quality_debt 路径
+  const residualOnlyNonBlocking = isStyleResidualOnlyNonBlockingRisk(signals, orderNum);
+  // advisory setting-only / 中盘 residual-only：overall 保持 risk 可见，continue → non_blocking
   const pauseReason = effectiveAction === "manual_gate"
     ? (
       settingSignal?.status === "invalid"
@@ -851,9 +1082,9 @@ export function buildChapterQualityLoopAssessment(
     : null;
   return {
     chapterId: input.chapterId,
-    chapterOrder: input.chapterOrder ?? input.runtimePackage?.context.chapter.order ?? null,
+    chapterOrder,
     evaluatedAt: normalizeEvaluatedAt(input.evaluatedAt),
-    overallStatus: settingOnlyAdvisory && recommendedAction === "continue"
+    overallStatus: (settingOnlyAdvisory || residualOnlyNonBlocking) && recommendedAction === "continue"
       ? "risk"
       : overallStatus,
     recommendedAction: effectiveAction,

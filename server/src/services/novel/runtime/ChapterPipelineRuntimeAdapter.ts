@@ -100,7 +100,7 @@ export class ChapterPipelineRuntimeAdapter {
   private async markChapterGenerationState(
     chapterId: string,
     generationState: "reviewed" | "approved",
-    options?: { literaryPass?: boolean },
+    options?: { literaryPass?: boolean; styleClear?: boolean },
   ): Promise<void> {
     await prisma.chapter.update({
       where: { id: chapterId },

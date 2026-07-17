@@ -150,9 +150,13 @@ export class PostGenerationStyleReviewRunner {
     }
 
     const autoRewritten = finalContent.trim() !== input.content.trim();
+    // residual 始终指向「交付正文」的 AI 味：优先重检 residual；无重检时回落 entry report。
+    // 禁止 no-rewrite residual=null 导致开篇 styleClear 假 true（projectResidualRiskScore 会读 report 兜底，
+    // 但 packaging 契约要求 residualReport 可观测；调用方债板优先 residual）。
+    const deliveryResidual = residualReport ?? report;
     return {
       report,
-      residualReport: autoRewritten ? residualReport : null,
+      residualReport: deliveryResidual,
       autoRewritten,
       originalContent: autoRewritten ? input.content : null,
       finalContent: autoRewritten ? finalContent : input.content,
@@ -255,14 +259,15 @@ export class PostGenerationStyleReviewRunner {
     }
   }
 
-  // 未发生改写的统一返回：finalContent 为原文，residualReport 为 null。
+  // 未发生改写的统一返回：finalContent 为原文；residualReport = entry report（可为 null）。
+  // 有 detect 结果时 residual 必须可观测，避免开篇 no-rewrite residual=null 假 true。
   private noRewriteResult(
     report: RuntimeStyleDetectionReport | null,
     content: string,
   ): StyleReviewResult {
     return {
       report,
-      residualReport: null,
+      residualReport: report,
       autoRewritten: false,
       originalContent: null,
       finalContent: content,

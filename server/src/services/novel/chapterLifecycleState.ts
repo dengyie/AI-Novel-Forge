@@ -43,9 +43,24 @@ export function chapterStatePairAfterPipelineApproval(): ChapterStatePairPatch {
 /**
  * 质量过审门：仅 literaryPass=true 时允许 completed 成对状态；否则 needs_repair。
  * 供 review / repair 写路径与验收测共用，避免 !literaryPass 被标 completed。
+ *
+ * 兼容入口：等价于 `chapterStatePairAfterQualityGates({ literaryPass, styleClear: true })`。
+ * 需要同时拦文风门时请用 {@link chapterStatePairAfterQualityGates}。
  */
 export function chapterStatePairAfterLiteraryQualityGate(literaryPass: boolean): ChapterStatePairPatch {
-  return literaryPass
+  return chapterStatePairAfterQualityGates({ literaryPass, styleClear: true });
+}
+
+/**
+ * 双门质量过审：literaryPass ∧ styleClear 才允许 completed。
+ * - 任一门 false → reviewed + needs_repair
+ * - 两门皆 true → approved + completed
+ */
+export function chapterStatePairAfterQualityGates(input: {
+  literaryPass: boolean;
+  styleClear: boolean;
+}): ChapterStatePairPatch {
+  return input.literaryPass && input.styleClear
     ? chapterStatePairAfterPipelineApproval()
     : {
       generationState: "reviewed",
@@ -78,31 +93,32 @@ export function chapterStatePairAfterPlannedReset(): ChapterStatePairPatch {
 /**
  * 将 `generationState` 升为 `approved` 时，顺带保证 `chapterStatus` 与用户可见「已完成」一致。
  *
- * **A6**：仅当调用方证明文学门已过（`literaryPass === true`）时才允许 `completed`。
- * - `literaryPass === true` → approved + completed
- * - `literaryPass === false` → reviewed + needs_repair（拒绝假完成）
- * - `literaryPass` 省略 → **不**自动 completed（只 bump generationState），
- *   避免 pipeline/adapter 旁路把未 isPass 章标完成。需要 completed 请走
- *   `chapterStatePairAfterLiteraryQualityGate(true)` / 传入 literaryPass:true。
+ * **A6 + styleClear**：仅当调用方证明文学门与文风门均过时才允许 `completed`。
+ * - `literaryPass === true` 且 `styleClear !== false` → approved + completed
+ *   （`styleClear` 省略视为 true，兼容旧调用方；关键路径应显式传入）
+ * - `literaryPass === false` 或 `styleClear === false` → reviewed + needs_repair
+ * - `literaryPass` 省略 → **不**自动 completed（只 bump generationState）
  */
 export function mergeChapterPatchForGenerationStateBump(
   current: ChapterStatePairPatch | undefined,
   nextGenerationState: PipelineGenerationState,
-  options?: { literaryPass?: boolean },
+  options?: { literaryPass?: boolean; styleClear?: boolean },
 ): ChapterStatePairPatch {
   const base: ChapterStatePairPatch = { ...(current ?? {}) };
 
   if (nextGenerationState === "approved") {
     if (options?.literaryPass === true) {
+      // styleClear 显式 false 时拒绝 completed；省略则兼容旧路径视为 true
+      const styleClear = options.styleClear !== false;
       return {
         ...base,
-        ...chapterStatePairAfterPipelineApproval(),
+        ...chapterStatePairAfterQualityGates({ literaryPass: true, styleClear }),
       };
     }
     if (options?.literaryPass === false) {
       return {
         ...base,
-        ...chapterStatePairAfterLiteraryQualityGate(false),
+        ...chapterStatePairAfterQualityGates({ literaryPass: false, styleClear: false }),
       };
     }
     // 未证明 literaryPass：只记 generation，不写 completed（防 A6 旁路）
