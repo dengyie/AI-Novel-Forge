@@ -83,11 +83,17 @@ test("source never contains quality→skip strategy ternary", async () => {
   assert.match(src, /禁止把质量检查点策略化映射为 skip_quality_repair/);
 });
 
-test("skip_quality_repair feedback copy retained for explicit API mode only", () => {
-  const feedback = resolveWorkflowContinuationFeedback(
+test("skip_quality_repair feedback aligns with auto_execute_range (no skip copy)", () => {
+  const skipFeedback = resolveWorkflowContinuationFeedback(
     { kind: "director_command_accepted", status: "running" },
     { mode: "skip_quality_repair", scopeLabel: "第3-5章" },
   );
-  assert.equal(feedback.tone, "success");
-  assert.match(feedback.message, /跳过本次质量建议/);
+  const rangeFeedback = resolveWorkflowContinuationFeedback(
+    { kind: "director_command_accepted", status: "running" },
+    { mode: "auto_execute_range", scopeLabel: "第3-5章" },
+  );
+  assert.equal(skipFeedback.tone, "success");
+  assert.equal(skipFeedback.message, rangeFeedback.message);
+  assert.equal(skipFeedback.message, "已继续自动执行第3-5章。");
+  assert.doesNotMatch(skipFeedback.message, /跳过/);
 });
