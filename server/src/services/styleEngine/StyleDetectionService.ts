@@ -1,7 +1,16 @@
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
-import type { StyleDetectionReport } from "@ai-novel/shared/types/styleEngine";
+import type {
+  AntiAiSeverity,
+  StyleDetectionReport,
+  StyleDetectionViolation,
+} from "@ai-novel/shared/types/styleEngine";
 import { runStructuredPrompt } from "../../prompting/core/promptRunner";
 import { styleDetectionPrompt } from "../../prompting/prompts/style/style.prompts";
+import {
+  detectProseQuality,
+  type ProseQualityFinding,
+  type ProseQualityIssueCode,
+} from "../novel/runtime/proseQuality/ProseQualityDetector";
 import {
   buildFullStyleContractText,
   buildStyleContractMetaText,
@@ -32,6 +41,144 @@ interface DetectionInput {
 const CLUSTERING_THRESHOLD = 3;
 // 成簇时 LLM 若给出偏低 riskScore，用此下限兜底，确保成簇文本不被漏放。
 const CLUSTERED_RISK_FLOOR = 45;
+// PostGenerationStyleReview 首轮 rewrite 阈值 35；确定性 pronoun L0 必须能越过该门槛。
+const PRONOUN_REWRITE_RISK_FLOOR_STACK = 55;
+const PRONOUN_REWRITE_RISK_FLOOR_DENSITY = 45;
+const PRONOUN_REWRITE_RISK_FLOOR_MIN = 40;
+
+/** 映射进 style violations 的硬 pronoun L0（不含 soft density）。 */
+export const HARD_PRONOUN_PROSE_CODES = [
+  "prose_pronoun_subject_stack",
+  "prose_pronoun_density",
+] as const satisfies readonly ProseQualityIssueCode[];
+
+const PRONOUN_L0_RULE_META: Record<
+  (typeof HARD_PRONOUN_PROSE_CODES)[number],
+  {
+    ruleId: string;
+    ruleName: string;
+    ruleType: "forbidden";
+  }
+> = {
+  prose_pronoun_subject_stack: {
+    ruleId: "l0:prose_pronoun_subject_stack",
+    ruleName: "禁止句首第三人称代词堆叠",
+    ruleType: "forbidden",
+  },
+  prose_pronoun_density: {
+    ruleId: "l0:prose_pronoun_density",
+    ruleName: "句首第三人称代词密度过高",
+    ruleType: "forbidden",
+  },
+};
+
+function mapProseSeverityToAntiAi(severity: ProseQualityFinding["severity"]): AntiAiSeverity {
+  if (severity === "low" || severity === "medium" || severity === "high") {
+    return severity;
+  }
+  // prose critical → style high（AntiAiSeverity 无 critical）
+  return "high";
+}
+
+/**
+ * 将 L0 hard pronoun findings 映射为可改写 style violations。
+ * soft density 不映射（不进 rewrite gate，仅 L0/qualityLoop 可观测）。
+ */
+export function mapPronounFindingsToStyleViolations(
+  findings: ProseQualityFinding[],
+): StyleDetectionViolation[] {
+  const hard = findings.filter((finding) =>
+    (HARD_PRONOUN_PROSE_CODES as readonly string[]).includes(finding.code),
+  );
+  // 同 code 多条 finding 合并为一条 violation（取最高 severity + 首条 excerpt）。
+  const byCode = new Map<string, ProseQualityFinding>();
+  for (const finding of hard) {
+    const existing = byCode.get(finding.code);
+    if (!existing) {
+      byCode.set(finding.code, finding);
+      continue;
+    }
+    const rank = (s: string) => (s === "critical" ? 3 : s === "high" ? 2 : s === "medium" ? 1 : 0);
+    if (rank(finding.severity) > rank(existing.severity)) {
+      byCode.set(finding.code, finding);
+    }
+  }
+  return Array.from(byCode.values()).map((finding) => {
+    const meta = PRONOUN_L0_RULE_META[finding.code as (typeof HARD_PRONOUN_PROSE_CODES)[number]];
+    return {
+      ruleId: meta.ruleId,
+      ruleName: meta.ruleName,
+      ruleType: meta.ruleType,
+      severity: mapProseSeverityToAntiAi(finding.severity),
+      source: "global_anti_ai" as const,
+      issueCategory: "style_expression" as const,
+      excerpt: finding.excerpt,
+      reason: finding.message,
+      suggestion: finding.fixSuggestion,
+      canAutoRewrite: true,
+    };
+  });
+}
+
+/** 有 hard pronoun violations 时抬 risk，保证 ≥35 可进 PostGenerationStyleReview 首轮。 */
+export function computePronounRiskFloor(violations: StyleDetectionViolation[]): number {
+  if (violations.length === 0) {
+    return 0;
+  }
+  let floor = PRONOUN_REWRITE_RISK_FLOOR_MIN;
+  for (const violation of violations) {
+    if (violation.ruleId === "l0:prose_pronoun_subject_stack") {
+      floor = Math.max(floor, PRONOUN_REWRITE_RISK_FLOOR_STACK);
+    }
+    if (violation.ruleId === "l0:prose_pronoun_density") {
+      floor = Math.max(floor, PRONOUN_REWRITE_RISK_FLOOR_DENSITY);
+    }
+  }
+  return Math.max(0, Math.min(100, floor));
+}
+
+/**
+ * 把确定性 pronoun violations 合并进 detection report。
+ * 覆盖 empty-contract / shouldSkipLlm 短路：无 LLM 时仍可产出 rewritable violations + 抬 risk。
+ */
+export function mergePronounIntoDetectionReport(
+  base: StyleDetectionReport,
+  pronounViolations: StyleDetectionViolation[],
+): StyleDetectionReport {
+  if (pronounViolations.length === 0) {
+    return base;
+  }
+  const existingIds = new Set(base.violations.map((item) => item.ruleId));
+  const extra = pronounViolations.filter((item) => !existingIds.has(item.ruleId));
+  // 已有同 ruleId（LLM 也报了）时仍抬 risk，但不再重复 violation。
+  const violations = extra.length > 0 ? [...base.violations, ...extra] : base.violations;
+  const riskScore = Math.max(base.riskScore, computePronounRiskFloor(pronounViolations));
+  const canAutoRewrite =
+    base.canAutoRewrite
+    || violations.some((item) => item.canAutoRewrite && item.suggestion.trim());
+  const appliedRuleIds = Array.from(new Set([
+    ...base.appliedRuleIds,
+    ...pronounViolations.map((item) => item.ruleId),
+  ]));
+  let summary = base.summary?.trim() ?? "";
+  if (extra.length > 0) {
+    const pronounNote = "检出句首第三人称代词堆叠或密度过高，需改写。";
+    summary = summary ? `${summary}；另${pronounNote}` : pronounNote;
+  }
+  return {
+    riskScore,
+    summary,
+    violations,
+    canAutoRewrite,
+    appliedRuleIds,
+  };
+}
+
+/** 对正文跑 L0 detect 并只取 hard pronoun → style violations。 */
+export function collectPronounStyleViolations(content: string): StyleDetectionViolation[] {
+  const prose = detectProseQuality(content);
+  return mapPronounFindingsToStyleViolations(prose.findings);
+}
 
 interface ClusteringScanRule {
   id: string;
@@ -100,6 +247,10 @@ export class StyleDetectionService {
   private readonly resolver = new StyleRuntimeResolver();
 
   async check(input: DetectionInput): Promise<StyleDetectionReport> {
+    // 确定性 pronoun L0 必须在所有 early-return 之前收集：empty contract / shouldSkipLlm
+    // 短路也不能漏掉句首他/她堆叠（deep review T2 must-fix）。
+    const pronounViolations = collectPronounStyleViolations(input.content);
+
     const resolved = await this.resolver.resolve({
       styleProfileId: input.styleProfileId,
       novelId: input.novelId,
@@ -120,31 +271,32 @@ export class StyleDetectionService {
     const antiRuleCatalogText = buildAntiAiRuleCatalogText(antiRules);
 
     if (!styleContractText && antiRules.length === 0) {
-      return {
+      return mergePronounIntoDetectionReport({
         riskScore: 0,
         summary: "当前没有可执行的写法检测约束，未执行写法违规检测。",
         violations: [],
         canAutoRewrite: false,
         appliedRuleIds,
-      };
+      }, pronounViolations);
     }
 
     // 字面量快扫 + 聚类判定（humanizer：单点从宽、成簇从严）：
     //  - forbidden 规则命中任意 1 个即走 LLM（硬违禁，单点也要查）。
     //  - 命中 ≥阈值个不同规则（含 risk）判定为成簇，强制走 LLM 深检并给 riskScore 兜底。
     //  - forbidden 有字面量但 0 命中且未成簇 → 短路跳过 LLM 省成本。
+    //  注意：短路后仍 merge pronoun；不得因 shouldSkipLlm 把 hard pronoun 清成 risk 0。
     const clustering = computeAntiAiClustering(input.content, antiRules);
     const isClustered = clustering.isClustered;
 
     if (clustering.shouldSkipLlm) {
       console.debug("[style-detect] fast-scan:skip-llm, no literal forbidden pattern matched, no cluster");
-      return {
+      return mergePronounIntoDetectionReport({
         riskScore: 0,
         summary: "快扫未检出字面量违禁词，也未构成 AI 痕迹聚类，跳过 LLM 深度检测。",
         violations: [],
         canAutoRewrite: false,
         appliedRuleIds,
-      };
+      }, pronounViolations);
     }
 
     const result = await runStructuredPrompt({
@@ -166,7 +318,7 @@ export class StyleDetectionService {
     // 确保后续 rewrite gate（riskScore≥阈值）能被触发，堵住"整章各套一种 tell"漏检。
     const hasViolations = (parsed.violations ?? []).length > 0;
     const effectiveRiskScore = applyClusteredRiskFloor(parsed.riskScore ?? 0, isClustered, hasViolations);
-    return {
+    const llmReport: StyleDetectionReport = {
       riskScore: effectiveRiskScore,
       summary: parsed.summary ?? "",
       violations: (parsed.violations ?? []).map((item) => {
@@ -194,5 +346,6 @@ export class StyleDetectionService {
       canAutoRewrite: Boolean(parsed.canAutoRewrite ?? (parsed.violations ?? []).some((item) => item.canAutoRewrite)),
       appliedRuleIds,
     };
+    return mergePronounIntoDetectionReport(llmReport, pronounViolations);
   }
 }

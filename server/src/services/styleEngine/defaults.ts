@@ -501,6 +501,21 @@ export const DEFAULT_ANTI_AI_RULES: DefaultAntiAiRuleDefinition[] = [
     globalBaselineEnabled: true,
   },
   {
+    // 确定性扫由 StyleDetectionService.mergePronoun（L0 detectProseQuality）执行；
+    // 此处 detectPatterns 故意留空：避免「他」字面量污染聚类计数。prompt 仅作 LLM 语义提示。
+    key: "forbid-pronoun-subject-stack",
+    name: "禁止句首第三人称代词堆叠",
+    type: "forbidden",
+    severity: "high",
+    description: "连续多句以「他/她」起句堆叠主语，是 AI 机械推进的典型痕迹。",
+    detectPatterns: [],
+    rewriteSuggestion: "改用专名、动作主语或环境起句打破句首他/她堆叠；禁止循环换称（主角/少年/男人）。",
+    promptInstruction: "禁止连续句首「他…他…他/她…」堆叠主语；改用专名、动作或环境起句，指代自然即可，勿为避重复循环换称。",
+    autoRewrite: true,
+    enabled: true,
+    globalBaselineEnabled: true,
+  },
+  {
     key: "risk-even-paragraph-length",
     name: "段落长度过于整齐",
     type: "risk",
