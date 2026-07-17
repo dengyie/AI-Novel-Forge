@@ -5,6 +5,16 @@
 > **状态**：`status: active` · 2026-07-18 · `分阶段推进,不一次开全部`
 > **执行纪律**：本计划对应"已审已定性"。整改候选阶段如下,P1 必做,P2 可单个 milestone 内并行或独立微 commit,**P3 与 Backlog 进 backlog,不自动晋升**。修复内循环每阶段 ≤3 次,验收用 `pnpm typecheck && pnpm test --filter @ai-novel/server`。
 
+### 推进状态（2026-07-18 更新）
+
+| 阶段 | 状态 | 提交 | 说明 |
+|---|---|---|---|
+| 阶段 1 (C2) | ✅ 完成 | `eb185f7` | retrievalTrace 4 步迁完 + rag.ts 12 键 env 泄漏清零（见下方 C2 章节，超出原 14 键子集的纯常量清理由此一并落地）。typecheck + 5 项 RAG/boundary 测试绿。 |
+| 阶段 2 (C5+C6+C7) | ✅ 完成 | `b57b0b0` `ac7f348` | 三处文档失真微提交；C6 复核为「无违规 / wiki 已正确」，HybridRetrievalService 加意图注释锁定硬剪枝语义。 |
+| 阶段 3 (C3+C4) | ✅ 完成（实质合规 + 契约锁定） | `0f39825` | **未执行 `git mv`**：C3 三 shim 已符合 L31，3 个 historic 根文件受 `directorDirectoryBoundary.test.js` 精确文件名固定；C4 6 候选不在 wiki 强制迁移范围（styleEngine 等），均 <700 行预算内。改为 director/README.md + routes/README.md 契约锁定语义（含迁移前提：需同步更新测试断言）。 |
+| 阶段 4 (C1) | ⏸️ 暂停 — Manual-required | — | **本阶段不开**：`novelAudiobookRoutes.ts` (1519 行) 与 `audiobookVoicePlanner.ts` (1494 行) 均在 audiobook E/F/G 在轨工作流（owner: dengyie，近 14 日 62 commits 横跨 phase-A/B/EFG/review）。按计划本节既定纪律（见下「关键纪律」与本阶段首句），拆分时点必须与 audiobook 责任人对齐，属 Manual-required。本会话不强行机械重构以免与在轨提交冲突。验证入口见下「C1 验证」。 |
+
+
 ## 阶段拆分
 
 | 阶段 | 范围 | 风险 | 建议时机 |
