@@ -8,6 +8,8 @@ import {
   type AudiobookVoicePreviewInput,
   type AudiobookVoicePreviewResult,
   type AudiobookWorkspaceBootstrap,
+  type CharacterVoiceAdoptPreviewAsCloneInput,
+  type CharacterVoiceAdoptPreviewAsCloneResult,
   type CharacterVoicePreviewAdoptCandidateInput,
   type CharacterVoicePreviewAsset,
   type CharacterVoicePreviewCandidate,
@@ -20,12 +22,14 @@ import { prisma } from "../../db/prisma";
 import { AppError } from "../../middleware/errorHandler";
 import { parseSpeakerAliases } from "./audiobookSpeakerAliases";
 import {
+  copyCharacterVoicePreviewToRef,
   resolveCharacterVoicePreviewCandidatesMetaPath,
   resolveCharacterVoicePreviewPath,
   writeCharacterVoicePreviewCandidateFromBase64,
   writeCharacterVoicePreviewFromBase64,
 } from "./audiobookPaths";
-import { parseWavInfo } from "./audiobookWav";
+import { checkVoiceRefAudioPath } from "./voiceRefPath";
+import { isValidPcmWavFile, parseWavInfo } from "./audiobookWav";
 import {
   isCharacterVoiceConfigured,
   planCharacterVoices,
@@ -844,6 +848,121 @@ export class AudiobookVoiceAssetService {
       return preferred;
     }
     return fallback;
+  }
+
+
+  /**
+   * Design→Clone：把选优后的正式 preview 拷为 ref.wav，ttsMode=clone。
+   * 禁止无 ready preview 的半绑定；可选立刻 clone 再 gen 对照。
+   */
+  async adoptPreviewAsClone(
+    novelId: string,
+    characterId: string,
+    input: CharacterVoiceAdoptPreviewAsCloneInput = {},
+  ): Promise<CharacterVoiceAdoptPreviewAsCloneResult> {
+    const candidateId = input.candidateId?.trim() || "";
+    if (candidateId) {
+      await this.adoptPreviewCandidate(novelId, characterId, { candidateId });
+    }
+
+    const character = await prisma.character.findFirst({
+      where: { id: characterId, novelId },
+      select: {
+        id: true,
+        name: true,
+        gender: true,
+        ttsMode: true,
+        ttsVoice: true,
+        ttsStyle: true,
+        ttsDesignPrompt: true,
+        ttsRefAudioPath: true,
+        ttsPreviewAudioPath: true,
+        ttsPreviewSampleText: true,
+        ttsPreviewFingerprint: true,
+        ttsPreviewGeneratedAt: true,
+      },
+    });
+    if (!character) {
+      throw new AppError("角色不存在。", 404);
+    }
+
+    const previewPath =
+      character.ttsPreviewAudioPath?.trim()
+      || resolveCharacterVoicePreviewPath(novelId, characterId);
+    if (!isValidPcmWavFile(previewPath)) {
+      throw new AppError(
+        "升格 clone 需要已选优的正式试听（preview ready）。请先多抽并采用候选。",
+        400,
+      );
+    }
+
+    const sampleForFp =
+      character.ttsPreviewSampleText?.trim()
+      || resolveDefaultCharacterVoicePreviewText({ gender: character.gender });
+    const currentFingerprint = buildCharacterVoicePreviewFingerprint(character, sampleForFp);
+    const previewStatus = resolveCharacterVoicePreviewStatus({
+      audioPath: previewPath,
+      fingerprint: character.ttsPreviewFingerprint,
+      currentFingerprint,
+    });
+    if (previewStatus === "missing") {
+      throw new AppError("升格 clone 需要合法 PCM WAV 试听文件。", 400);
+    }
+    // stale 仍允许（用户刚听的文件在盘上）；但强烈建议 ready
+
+    let refPath: string;
+    try {
+      refPath = copyCharacterVoicePreviewToRef({
+        novelId,
+        characterId,
+        previewPath,
+      });
+    } catch (error) {
+      throw new AppError(
+        error instanceof Error ? error.message : "拷贝 preview 为 clone 参考失败。",
+        500,
+      );
+    }
+
+    const refCheck = checkVoiceRefAudioPath(refPath);
+    if (!refCheck.ok) {
+      throw new AppError(refCheck.reason || "clone 参考路径校验失败。", 500);
+    }
+
+    const retainedDesignPrompt = character.ttsDesignPrompt?.trim() || null;
+    await prisma.character.update({
+      where: { id: characterId },
+      data: {
+        ttsMode: "clone",
+        ttsRefAudioPath: refPath,
+        // 保留 design 文案审计；preset voice 可清
+        ttsVoice: null,
+      },
+    });
+
+    // mode 变更 → fingerprint 变 → 旧 preview 记为 stale；资产仍可播
+    const after = await this.getCharacterPreview(novelId, characterId);
+
+    let contrastPreview: CharacterVoicePreviewAsset | null = null;
+    if (input.regeneratePreviewUnderClone === true) {
+      const gen = await this.generateCharacterPreview(novelId, characterId, {
+        text: input.contrastText,
+        candidates: 1,
+        autoAdoptWinner: true,
+      });
+      contrastPreview = gen.adopted;
+    }
+
+    return {
+      characterId: character.id,
+      characterName: character.name,
+      ttsMode: "clone",
+      ttsRefAudioPath: refPath,
+      sourcePreviewPath: previewPath,
+      retainedDesignPrompt,
+      preview: after,
+      contrastPreview,
+    };
   }
 
   resolvePreviewCandidateFilePath(

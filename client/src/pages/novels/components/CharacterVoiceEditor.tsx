@@ -9,6 +9,7 @@ import {
   type CharacterVoicePreviewStatus,
 } from "@ai-novel/shared/types/audiobook";
 import {
+  adoptCharacterVoicePreviewAsClone,
   adoptCharacterVoicePreviewCandidate,
   generateCharacterVoicePreview,
   getCharacterVoicePreview,
@@ -53,6 +54,9 @@ interface CharacterVoiceEditorProps {
   novelId: string;
   characterId: string;
   characterName: string;
+  /** 角色卡 role/castRole：用于 lead 引导 Design→Clone（extra 不误导） */
+  castRole?: string | null;
+  role?: string | null;
   form: CharacterVoiceEditorForm;
   saved?: CharacterVoiceFormSlice | null;
   onChange: (field: CharacterVoiceEditorField, value: string) => void;
@@ -123,6 +127,8 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
     novelId,
     characterId,
     characterName,
+    castRole,
+    role,
     form,
     saved,
     onChange,
@@ -329,7 +335,59 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
     },
   });
 
-  const playMutation = useMutation({
+  const roleBlob = `${castRole || ""} ${role || ""} ${characterName || ""}`.toLowerCase();
+  const isLeadish =
+    castRole === "protagonist"
+    || /主角|男主|女主|protagonist|heroine/.test(roleBlob);
+  const isExtraish =
+    castRole === "extra"
+    || /路人|龙套|extra|crowd/.test(roleBlob);
+  const showLockCloneGuide = isLeadish || (!isExtraish && mode === "design");
+
+  const lockCloneMutation = useMutation({
+    mutationFn: async (opts?: { regenerate?: boolean }) => {
+      const response = await adoptCharacterVoicePreviewAsClone(novelId, characterId, {
+        regeneratePreviewUnderClone: Boolean(opts?.regenerate),
+      });
+      const data = response.data;
+      if (!data) {
+        throw new Error("锁定克隆身份失败：服务端未返回结果。");
+      }
+      return data;
+    },
+    onSuccess: async (data) => {
+      onChange("ttsMode", "clone");
+      onChange("ttsRefAudioPath", data.ttsRefAudioPath || "");
+      onChange("ttsRefAudioBase64", "");
+      queryClient.setQueryData(
+        queryKeys.novels.characterVoicePreview(novelId, characterId),
+        data.contrastPreview || data.preview,
+      );
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.novels.detail(novelId) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.novels.characters(novelId) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.novels.audiobookWorkspace(novelId) }),
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.novels.characterVoicePreview(novelId, characterId),
+        }),
+      ]);
+      setPreviewMessage(
+        data.contrastPreview
+          ? "已锁定克隆身份，并生成对照试听（长书防漂）。"
+          : "已锁定克隆身份。配置变更后旧试听会过期，建议再生成一条对照。",
+      );
+      try {
+        await playFromAsset(data.contrastPreview || data.preview);
+      } catch {
+        // ignore play errors after lock
+      }
+    },
+    onError: (error) => {
+      setPreviewMessage(error instanceof Error ? error.message : "锁定克隆身份失败。");
+    },
+  });
+
+    const playMutation = useMutation({
     mutationFn: async () => {
       if (!canPlay) {
         throw new Error("尚无试听资产，请先生成试听。");
@@ -445,6 +503,34 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
           {assetStatus === "stale" ? (
             <div className="max-w-[18rem] text-right text-[11px] leading-4 text-amber-700 dark:text-amber-400">
               配置已变，可播旧版；建议重新生成。
+            </div>
+          ) : null}
+          {showLockCloneGuide && canPlay && resolveCharacterVoiceMode(form.ttsMode) !== "clone" ? (
+            <div className="max-w-[20rem] space-y-1 text-right">
+              <div className="text-[11px] leading-4 text-muted-foreground">
+                {isLeadish
+                  ? "主角建议：将选优试听锁定为克隆身份，长书跨章不漂。"
+                  : "可将选优试听升格为克隆身份（可选）。"}
+              </div>
+              <Button
+                type="button"
+                size="sm"
+                variant={isLeadish ? "default" : "outline"}
+                disabled={lockCloneMutation.isPending || dirty}
+                title={
+                  dirty
+                    ? "请先保存当前音色配置再锁定"
+                    : "copy 正式 preview → ref.wav，ttsMode=clone"
+                }
+                onClick={() => lockCloneMutation.mutate({ regenerate: false })}
+              >
+                {lockCloneMutation.isPending ? "锁定中..." : "锁定为克隆身份"}
+              </Button>
+            </div>
+          ) : null}
+          {resolveCharacterVoiceMode(form.ttsMode) === "clone" && form.ttsRefAudioPath ? (
+            <div className="max-w-[18rem] text-right text-[11px] leading-4 text-muted-foreground">
+              已绑定克隆参考（长书身份锚）。
             </div>
           ) : null}
         </div>

@@ -214,6 +214,30 @@ export function writeCharacterVoiceRefFromBase64(input: {
   return target;
 }
 
+
+/**
+ * 将正式 preview.wav 原子拷贝为 clone ref.wav（Design→Clone）。
+ * 源必须是合法 PCM WAV；返回 ref 绝对路径。
+ */
+export function copyCharacterVoicePreviewToRef(input: {
+  novelId: string;
+  characterId: string;
+  previewPath?: string | null;
+}): string {
+  const source = (input.previewPath?.trim()
+    || resolveCharacterVoicePreviewPath(input.novelId, input.characterId));
+  if (!isValidPcmWavFile(source)) {
+    throw new Error("升格 clone 需要合法 PCM WAV 试听文件。");
+  }
+  const target = resolveCharacterVoiceRefPath(input.novelId, input.characterId, "wav");
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  const buf = fs.readFileSync(source);
+  const tmp = `${target}.part`;
+  fs.writeFileSync(tmp, buf);
+  fs.renameSync(tmp, target);
+  return target;
+}
+
 export function resolveAudiobookTaskDir(novelId: string, taskId: string): string {
   const safeNovelId = assertSafePathSegment(novelId, "novelId");
   const safeTaskId = assertSafePathSegment(taskId, "taskId");

@@ -27,6 +27,8 @@ import type {
   CharacterVoicePreviewGenerateInput,
   CharacterVoicePreviewGenerateResult,
   CharacterVoicePreviewAdoptCandidateInput,
+  CharacterVoiceAdoptPreviewAsCloneInput,
+  CharacterVoiceAdoptPreviewAsCloneResult,
   CreateAudiobookTaskInput,
 } from "@ai-novel/shared/types/audiobook";
 import { API_AUTH_TOKEN, API_BASE_URL } from "@/lib/constants";
@@ -154,6 +156,19 @@ export async function adoptCharacterVoicePreviewCandidate(
 ) {
   const { data } = await apiClient.post<ApiResponse<CharacterVoicePreviewAsset>>(
     `/novels/${novelId}/characters/${characterId}/voice-preview/adopt-candidate`,
+    payload,
+  );
+  return data;
+}
+
+/** Design→Clone：选优 preview 升格为 clone 身份锚。 */
+export async function adoptCharacterVoicePreviewAsClone(
+  novelId: string,
+  characterId: string,
+  payload: CharacterVoiceAdoptPreviewAsCloneInput = {},
+) {
+  const { data } = await apiClient.post<ApiResponse<CharacterVoiceAdoptPreviewAsCloneResult>>(
+    `/novels/${novelId}/characters/${characterId}/voice-preview/adopt-preview-clone`,
     payload,
   );
   return data;

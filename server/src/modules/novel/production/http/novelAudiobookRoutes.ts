@@ -13,6 +13,7 @@ import {
   type AudiobookVoiceReadinessSummary,
   type AudiobookWorkspaceBootstrap,
   type AudiobookWorkspaceOverviewResult,
+  type CharacterVoiceAdoptPreviewAsCloneResult,
   type CharacterVoicePreviewAsset,
   type CharacterVoicePreviewGenerateResult,
   type CreateAudiobookTaskInput,
@@ -71,6 +72,12 @@ const characterVoicePreviewGenerateSchema = z.object({
 
 const characterVoicePreviewAdoptSchema = z.object({
   candidateId: z.string().trim().min(1).max(32),
+});
+
+const characterVoiceAdoptPreviewCloneSchema = z.object({
+  candidateId: z.string().trim().min(1).max(32).optional(),
+  regeneratePreviewUnderClone: z.boolean().optional(),
+  contrastText: z.string().trim().max(200).optional(),
 });
 
 const characterVoicePreviewCandidateParamsSchema = z.object({
@@ -637,6 +644,31 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
           data,
           message: "已采用所选试听候选。",
         } satisfies ApiResponse<CharacterVoicePreviewAsset>);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  /**
+   * Design→Clone：选优 preview 升格为 ref.wav + ttsMode=clone。
+   * lead 强烈推荐；禁止无 ready preview 半绑定。
+   */
+  router.post(
+    "/:id/characters/:charId/voice-preview/adopt-preview-clone",
+    validate({ params: characterParamsSchema, body: characterVoiceAdoptPreviewCloneSchema }),
+    async (req, res, next) => {
+      try {
+        const { id, charId } = req.params as z.infer<typeof characterParamsSchema>;
+        const body = req.body as z.infer<typeof characterVoiceAdoptPreviewCloneSchema>;
+        const data = await audiobookVoiceAssetService.adoptPreviewAsClone(id, charId, body);
+        res.status(200).json({
+          success: true,
+          data,
+          message: data.contrastPreview
+            ? "已锁定为克隆身份，并生成对照试听。"
+            : "已将选优试听锁定为克隆身份（长书防漂）。",
+        } satisfies ApiResponse<CharacterVoiceAdoptPreviewAsCloneResult>);
       } catch (error) {
         next(error);
       }

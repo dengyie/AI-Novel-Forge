@@ -556,6 +556,37 @@ export interface CharacterVoicePreviewAdoptCandidateInput {
   candidateId: string;
 }
 
+/**
+ * 将「选优后的正式 preview」升格为 clone 身份锚（Design→Clone）。
+ * 禁止半绑定：必须有 ready preview 文件。
+ */
+export interface CharacterVoiceAdoptPreviewAsCloneInput {
+  /**
+   * 可选：先采用该候选再升格；不传则要求当前 preview 已 ready。
+   */
+  candidateId?: string;
+  /**
+   * 升格后是否立刻用 clone 再合成 1 条对照试听并写入 preview（默认 false，避免静默打上游）。
+   */
+  regeneratePreviewUnderClone?: boolean;
+  /** 对照句；默认沿用当前 preview 样例或句库。 */
+  contrastText?: string;
+}
+
+export interface CharacterVoiceAdoptPreviewAsCloneResult {
+  characterId: string;
+  characterName: string;
+  ttsMode: "clone";
+  ttsRefAudioPath: string;
+  /** 升格来源 preview 路径（拷贝源） */
+  sourcePreviewPath: string;
+  /** design 文案保留供审计（mode 已是 clone） */
+  retainedDesignPrompt: string | null;
+  preview: CharacterVoicePreviewAsset;
+  /** 若请求 regenerate 且成功，为 clone 模式下的新 preview；否则 null */
+  contrastPreview: CharacterVoicePreviewAsset | null;
+}
+
 export interface CharacterVoicePreviewAsset {
   characterId: string;
   characterName: string;
