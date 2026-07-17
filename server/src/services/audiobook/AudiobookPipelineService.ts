@@ -42,7 +42,11 @@ import {
   parseWavInfo,
   writeWavFileAtomic,
 } from "./audiobookWav";
-import { mimoChatAudioTTSProvider } from "./MimoChatAudioTTSProvider";
+import {
+  hasMimoTtsFallbackEndpointsConfigured,
+  isMimoTtsEndpointChainExhaustedError,
+  mimoChatAudioTTSProvider,
+} from "./MimoChatAudioTTSProvider";
 import {
   applyDeliveryToSegment,
   fingerprintStyleParts,
@@ -556,7 +560,10 @@ async function synthesizeChunkWithRetry(input: {
   signal?: AbortSignal;
   maxAttempts?: number;
 }): Promise<Buffer> {
-  const maxAttempts = Math.max(1, input.maxAttempts ?? 3);
+  // 配置了 fallback 时 provider 内已走完整 endpoint 链；外层默认只 1 次，避免 chain×N。
+  // 仅 primary 时保留短暂 5xx/504 重试（默认 3）。
+  const defaultAttempts = hasMimoTtsFallbackEndpointsConfigured() ? 1 : 3;
+  const maxAttempts = Math.max(1, input.maxAttempts ?? defaultAttempts);
   let lastError: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
@@ -579,10 +586,21 @@ async function synthesizeChunkWithRetry(input: {
       if (input.signal?.aborted) {
         throw error;
       }
-      // 400 客户端错误、408 取消：不重试；504 超时、502 上游：可重试
-      if (error instanceof AppError && (error.statusCode === 400 || error.statusCode === 408)) {
+      // 400 客户端错误、408 取消：不重试；401/403 鉴权也不重试
+      if (
+        error instanceof AppError
+        && (error.statusCode === 400
+          || error.statusCode === 401
+          || error.statusCode === 403
+          || error.statusCode === 408)
+      ) {
         throw error;
       }
+      // provider 已耗尽多端点链：禁止外层再整链放大
+      if (isMimoTtsEndpointChainExhaustedError(error)) {
+        throw error;
+      }
+      // 504 超时、502 上游：可重试（仅 primary-only 默认路径）
       if (attempt < maxAttempts) {
         await new Promise((resolve) => setTimeout(resolve, 400 * attempt));
       }

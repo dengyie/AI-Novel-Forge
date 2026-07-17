@@ -7,6 +7,8 @@ const {
   isRetryableMimoTtsStatus,
   resolveMimoTtsEndpointChain,
   summarizeMimoTtsEndpointFailure,
+  hasMimoTtsFallbackEndpointsConfigured,
+  isMimoTtsEndpointChainExhaustedError,
   mimoChatAudioTTSProvider,
   buildMimoTtsRequestBody,
 } = require("../dist/services/audiobook/MimoChatAudioTTSProvider.js");
@@ -371,4 +373,91 @@ test("resolveMimoTtsEndpointChain without fallback env is primary only", () => {
   });
   assert.equal(chain.length, 1);
   assert.equal(chain[0].id, "primary");
+});
+
+test("hasMimoTtsFallbackEndpointsConfigured reflects raw/env", () => {
+  assert.equal(hasMimoTtsFallbackEndpointsConfigured(""), false);
+  assert.equal(hasMimoTtsFallbackEndpointsConfigured(null), false);
+  assert.equal(hasMimoTtsFallbackEndpointsConfigured("https://fufu.test/v1"), true);
+});
+
+test("isMimoTtsEndpointChainExhaustedError reads details flag", () => {
+  assert.equal(isMimoTtsEndpointChainExhaustedError(new Error("x")), false);
+  assert.equal(isMimoTtsEndpointChainExhaustedError(new AppError("x", 502)), false);
+  assert.equal(
+    isMimoTtsEndpointChainExhaustedError(
+      new AppError("x", 502, { mimoTtsEndpointChainExhausted: true }),
+    ),
+    true,
+  );
+});
+
+test("synthesize marks chain exhausted when multi-endpoint all fail", async () => {
+  const originalFetch = global.fetch;
+  const originalEnv = process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS;
+  const prevOpenAi = process.env.OPENAI_BASE_URL;
+  const prevKey = process.env.OPENAI_API_KEY;
+  process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS = "https://fufu.test/v1";
+  process.env.OPENAI_BASE_URL = "http://primary.test/v1";
+  process.env.OPENAI_API_KEY = "sk-primary";
+  try {
+    global.fetch = async () => new Response(JSON.stringify({ error: { message: "down" } }), {
+      status: 502,
+      headers: { "Content-Type": "application/json" },
+    });
+    await assert.rejects(
+      () => mimoChatAudioTTSProvider.synthesize({
+        text: "双端失败。",
+        mode: "preset",
+        voice: "茉莉",
+        provider: "openai",
+      }),
+      (err) => {
+        assert.equal(isMimoTtsEndpointChainExhaustedError(err), true);
+        assert.equal(err?.details?.mimoTtsEndpointCount, 2);
+        return true;
+      },
+    );
+  } finally {
+    global.fetch = originalFetch;
+    process.env.OPENAI_BASE_URL = prevOpenAi;
+    process.env.OPENAI_API_KEY = prevKey;
+    if (originalEnv === undefined) delete process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS;
+    else process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS = originalEnv;
+  }
+});
+
+test("synthesize primary-only failure is not chain-exhausted", async () => {
+  const originalFetch = global.fetch;
+  const originalEnv = process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS;
+  const prevOpenAi = process.env.OPENAI_BASE_URL;
+  const prevKey = process.env.OPENAI_API_KEY;
+  delete process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS;
+  process.env.OPENAI_BASE_URL = "http://primary.test/v1";
+  process.env.OPENAI_API_KEY = "sk-primary";
+  try {
+    global.fetch = async () => new Response(JSON.stringify({ error: { message: "down" } }), {
+      status: 502,
+      headers: { "Content-Type": "application/json" },
+    });
+    await assert.rejects(
+      () => mimoChatAudioTTSProvider.synthesize({
+        text: "仅主链。",
+        mode: "preset",
+        voice: "茉莉",
+        provider: "openai",
+      }),
+      (err) => {
+        assert.equal(isMimoTtsEndpointChainExhaustedError(err), false);
+        assert.match(String(err?.message || err), /502|down|primary/);
+        return true;
+      },
+    );
+  } finally {
+    global.fetch = originalFetch;
+    process.env.OPENAI_BASE_URL = prevOpenAi;
+    process.env.OPENAI_API_KEY = prevKey;
+    if (originalEnv === undefined) delete process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS;
+    else process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS = originalEnv;
+  }
 });

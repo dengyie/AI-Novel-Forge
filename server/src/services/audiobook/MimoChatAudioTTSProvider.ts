@@ -129,6 +129,23 @@ export function isRetryableMimoTtsStatus(statusCode: number): boolean {
   return false;
 }
 
+/** 是否配置了至少一个 fallback baseURL（用于外层 retry 降级为 1 次整链）。 */
+export function hasMimoTtsFallbackEndpointsConfigured(
+  raw?: string | null,
+): boolean {
+  return parseMimoTtsFallbackBaseUrls(
+    raw ?? process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS,
+  ).length > 0;
+}
+
+/** 错误是否已表示 endpoint 链已耗尽（外层不应再整链重试）。 */
+export function isMimoTtsEndpointChainExhaustedError(error: unknown): boolean {
+  if (!(error instanceof AppError)) return false;
+  const details = error.details;
+  if (!details || typeof details !== "object") return false;
+  return Boolean((details as { mimoTtsEndpointChainExhausted?: unknown }).mimoTtsEndpointChainExhausted);
+}
+
 /** 失败日志用：不带密钥，仅 endpoint id + 状态/短消息。 */
 export function summarizeMimoTtsEndpointFailure(input: {
   endpointId: string;
@@ -426,8 +443,31 @@ export function buildMimoTtsRequestBody(input: MimoTtsSynthesizeInput): MimoTtsR
  *
  * 多后端：主链 = LLM provider baseURL（通常 CPA）；
  * 可选 AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS（fufu 等）在 5xx/429/504 时换端点。
- * 每端点内仍可被 pipeline 的 synthesizeChunkWithRetry 再包一层。
+ * 4xx（含 401/403 鉴权、400 参数）与 408 取消不换端——备链 key 好但主链 key 坏须修主链。
+ * 链耗尽错误会带 details.mimoTtsEndpointChainExhausted；配置了 fallback 时 pipeline 外层不再整链×N。
  */
+
+function markMimoTtsEndpointChainExhausted(error: unknown, endpointCount: number): AppError {
+  const base = error instanceof AppError
+    ? error
+    : new AppError(
+      `MiMo TTS 合成失败：${error instanceof Error ? error.message : String(error)}`,
+      502,
+    );
+  const prev = (base.details && typeof base.details === "object")
+    ? (base.details as Record<string, unknown>)
+    : {};
+  // 仅多端点链耗尽时打标，单 primary 仍允许 pipeline 外层短暂重试瞬时 5xx
+  if (endpointCount <= 1) {
+    return base;
+  }
+  return new AppError(base.message, base.statusCode, {
+    ...prev,
+    mimoTtsEndpointChainExhausted: true,
+    mimoTtsEndpointCount: endpointCount,
+  });
+}
+
 export class MimoChatAudioTTSProvider {
   readonly providerId = "mimo-chat-audio";
 
@@ -489,7 +529,7 @@ export class MimoChatAudioTTSProvider {
         if (error instanceof AppError && !isRetryableMimoTtsStatus(error.statusCode)) {
           throw error;
         }
-        // 还有下一端点则换后端；否则抛最后错误
+        // 还有下一端点则换后端；否则标记链耗尽后抛出
         if (index < endpoints.length - 1) {
           const next = endpoints[index + 1];
           console.warn(
@@ -497,13 +537,16 @@ export class MimoChatAudioTTSProvider {
           );
           continue;
         }
-        throw error;
+        throw markMimoTtsEndpointChainExhausted(error, endpoints.length);
       }
     }
 
-    throw lastError instanceof AppError
-      ? lastError
-      : new AppError("MiMo TTS 合成失败。", 502);
+    throw markMimoTtsEndpointChainExhausted(
+      lastError instanceof AppError
+        ? lastError
+        : new AppError("MiMo TTS 合成失败。", 502),
+      endpoints.length,
+    );
   }
 
   private async synthesizeOnce(params: {
