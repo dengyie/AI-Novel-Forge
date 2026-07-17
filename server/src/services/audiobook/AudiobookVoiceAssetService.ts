@@ -34,6 +34,7 @@ import {
   isCharacterVoiceConfigured,
   planCharacterVoices,
   type VoicePlannerCharacterInput,
+  type VoicePlannerLibraryAsset,
 } from "./audiobookVoicePlanner";
 import {
   assertCharacterVoiceReadyForPreview,
@@ -45,7 +46,7 @@ import {
   resolveDefaultCharacterVoicePreviewText,
   resolvePreviewTtsMode,
 } from "./characterVoicePreview";
-import { tryResolveEffectiveCloneRefPath } from "./voiceLibraryService";
+import { tryResolveEffectiveCloneRefPath, voiceLibraryService } from "./voiceLibraryService";
 import { mimoChatAudioTTSProvider } from "./MimoChatAudioTTSProvider";
 
 const DEFAULT_PREVIEW_TEXT = DEFAULT_CHARACTER_VOICE_PREVIEW_TEXT;
@@ -173,6 +174,9 @@ function summarizePlan(
     planned: items.length,
     presetCount: items.filter((item) => item.ttsMode === "preset").length,
     designCount: designItems.length,
+    cloneCount: items.filter(
+      (item) => item.ttsMode === "clone" && Boolean(item.ttsVoiceAssetId?.trim()),
+    ).length,
     overwriteCount: items.filter((item) => item.wouldOverwrite).length,
     softCollisionCount: items.filter((item) => item.reason.includes("collision:soft")).length,
     slotOverrideCount: items.filter((item) => item.reason.includes("slot:override")).length,
@@ -199,6 +203,7 @@ function toPlannerInput(row: {
   ttsStyle?: string | null;
   ttsDesignPrompt?: string | null;
   ttsRefAudioPath?: string | null;
+  ttsVoiceAssetId?: string | null;
   ttsSpeakerAliases?: string | null;
 }): VoicePlannerCharacterInput {
   return {
@@ -218,8 +223,25 @@ function toPlannerInput(row: {
     ttsStyle: row.ttsStyle,
     ttsDesignPrompt: row.ttsDesignPrompt,
     ttsRefAudioPath: row.ttsRefAudioPath,
+    ttsVoiceAssetId: row.ttsVoiceAssetId,
     ttsSpeakerAliases: row.ttsSpeakerAliases,
   };
+}
+
+function loadApprovedLibraryAssets(): VoicePlannerLibraryAsset[] {
+  const listed = voiceLibraryService.list({
+    status: "approved",
+    kind: "clone_ref",
+    limit: 500,
+  });
+  return listed.items.map((a) => ({
+    id: a.id,
+    slug: a.slug,
+    displayName: a.displayName,
+    status: a.status,
+    kind: a.kind,
+    tags: a.tags ?? [],
+  }));
 }
 
 export class AudiobookVoiceAssetService {
@@ -345,6 +367,10 @@ export class AudiobookVoiceAssetService {
     ];
 
     const strategy = input.strategy ?? "auto";
+    const libraryAssets =
+      strategy === "preset_only" || strategy === "prefer_design"
+        ? []
+        : loadApprovedLibraryAssets();
     const planned = planCharacterVoices({
       characters: novel.characters.map(toPlannerInput),
       strategy,
@@ -352,6 +378,7 @@ export class AudiobookVoiceAssetService {
       characterIds: input.characterIds,
       maxImportantPerPreset: input.maxImportantPerPreset,
       reservedPresets,
+      libraryAssets,
     });
 
     return {
@@ -415,20 +442,85 @@ export class AudiobookVoiceAssetService {
       }
 
       if (item.ttsMode === "clone") {
-        skipped.push({
-          characterId: character.id,
-          characterName: character.name,
-          reason: "规划管线不自动写 clone；请在角色卡上传参考音频。",
-        });
+        const assetId = item.ttsVoiceAssetId?.trim() || "";
+        if (!assetId) {
+          skipped.push({
+            characterId: character.id,
+            characterName: character.name,
+            reason: "clone 需要 ttsVoiceAssetId（禁止客户端写参考路径）。",
+          });
+          continue;
+        }
+
+        // 已有 clone 绑库且未 overwrite：永不覆盖
+        const alreadyClone =
+          (character.ttsMode?.trim() || "") === "clone"
+          && Boolean(
+            character.ttsRefAudioPath?.trim() || character.ttsVoiceAssetId?.trim(),
+          );
+        if (alreadyClone && !overwrite) {
+          skipped.push({
+            characterId: character.id,
+            characterName: character.name,
+            reason: "已配置 clone，apply 不覆盖（overwrite=false）。",
+          });
+          continue;
+        }
+        if (alreadyClone && overwrite) {
+          // 允许 overwrite 换库资产；仍走 assertBindableCloneRef
+        } else if (
+          isCharacterVoiceConfigured(character)
+          && !overwrite
+        ) {
+          skipped.push({
+            characterId: character.id,
+            characterName: character.name,
+            reason: "已绑定音色且 overwrite=false。",
+          });
+          continue;
+        }
+
+        try {
+          const bound = await voiceLibraryService.bindCharacter(novelId, character.id, {
+            voiceAssetId: assetId,
+          });
+          if (item.speakerAliases) {
+            const aliases = parseSpeakerAliases(item.speakerAliases);
+            if (aliases && aliases.length > 0) {
+              await prisma.character.update({
+                where: { id: character.id },
+                data: { ttsSpeakerAliases: JSON.stringify(aliases) },
+              });
+            }
+          }
+          applied.push({
+            characterId: character.id,
+            characterName: character.name,
+            ttsMode: "clone",
+            ttsVoiceAssetId: bound.voiceAssetId,
+          });
+        } catch (error) {
+          skipped.push({
+            characterId: character.id,
+            characterName: character.name,
+            reason:
+              error instanceof Error
+                ? error.message
+                : "绑库失败。",
+          });
+        }
         continue;
       }
 
       const currentMode = character.ttsMode?.trim() || "preset";
-      if (currentMode === "clone" && character.ttsRefAudioPath?.trim()) {
+      if (
+        currentMode === "clone"
+        && (character.ttsRefAudioPath?.trim() || character.ttsVoiceAssetId?.trim())
+      ) {
         skipped.push({
           characterId: character.id,
           characterName: character.name,
-          reason: "已配置 clone 参考音频，apply 不覆盖。",
+          reason: "已配置 clone，apply 不覆盖为 preset/design。",
         });
         continue;
       }
@@ -502,6 +594,7 @@ export class AudiobookVoiceAssetService {
         characterId: character.id,
         characterName: character.name,
         ttsMode: item.ttsMode,
+        ttsVoiceAssetId: null,
       });
     }
 

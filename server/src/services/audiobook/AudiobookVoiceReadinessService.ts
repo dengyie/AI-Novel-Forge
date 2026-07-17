@@ -605,6 +605,7 @@ export class AudiobookVoiceReadinessService {
             ttsVoice: item.ttsVoice,
             ttsStyle: item.ttsStyle,
             ttsDesignPrompt: item.ttsDesignPrompt,
+            ttsVoiceAssetId: item.ttsVoiceAssetId,
             speakerAliases: item.speakerAliases,
           }));
           const result = await audiobookVoiceAssetService.apply(job.novelId, {

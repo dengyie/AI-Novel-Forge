@@ -397,7 +397,25 @@ export function isMimoTtsPresetVoice(value: string): value is MimoTtsPresetVoice
 }
 
 /** 人物卡 → 音色资产规划：策略 */
-export type AudiobookVoicePlanStrategy = "auto" | "preset_only" | "prefer_design";
+export type AudiobookVoicePlanStrategy =
+  | "auto"
+  | "preset_only"
+  | "prefer_design"
+  /** 优先匹配全站 approved VoiceAsset（clone）；无匹配再回退 design/preset */
+  | "prefer_library";
+
+export const AUDIOBOOK_VOICE_PLAN_STRATEGIES = [
+  "auto",
+  "preset_only",
+  "prefer_design",
+  "prefer_library",
+] as const;
+
+export function isAudiobookVoicePlanStrategy(
+  value: string,
+): value is AudiobookVoicePlanStrategy {
+  return (AUDIOBOOK_VOICE_PLAN_STRATEGIES as readonly string[]).includes(value);
+}
 
 /** 音色分簇（规划分配维，非听感证明）：主角 / 主角团 / 路人 / 旁白 */
 export type AudiobookVoiceCluster = "lead" | "cast" | "extra" | "narrator";
@@ -412,6 +430,11 @@ export interface AudiobookVoicePlanItem {
   ttsStyle?: string | null;
   /** design 时必有 */
   ttsDesignPrompt?: string | null;
+  /**
+   * clone 时必有：全站 VoiceAsset.id（仅 approved 可建议/apply）。
+   * 客户端禁止写 ttsRefAudioPath；apply 服务端 resolve 绑库。
+   */
+  ttsVoiceAssetId?: string | null;
   /** 建议说话人别名（可空） */
   speakerAliases?: string[] | null;
   /** 是否覆盖已有绑定 */
@@ -431,6 +454,7 @@ export interface AudiobookVoicePlanItem {
     ttsMode?: string | null;
     ttsVoice?: string | null;
     ttsDesignPrompt?: string | null;
+    ttsVoiceAssetId?: string | null;
   } | null;
 }
 
@@ -456,6 +480,8 @@ export interface AudiobookVoicePlanSuggestResult {
     planned: number;
     presetCount: number;
     designCount: number;
+    /** ttsMode=clone 且带 ttsVoiceAssetId 的库推荐项 */
+    cloneCount: number;
     overwriteCount: number;
     /** reason 含 collision:soft 的 design 项（prompt 启发式，非听感证明） */
     softCollisionCount: number;
@@ -476,6 +502,8 @@ export interface AudiobookVoicePlanApplyItem {
   ttsVoice?: string | null;
   ttsStyle?: string | null;
   ttsDesignPrompt?: string | null;
+  /** clone 时必填：仅服务端 approved VoiceAsset.id，禁止客户端 path */
+  ttsVoiceAssetId?: string | null;
   speakerAliases?: string[] | null;
 }
 
@@ -487,7 +515,12 @@ export interface AudiobookVoicePlanApplyInput {
 
 export interface AudiobookVoicePlanApplyResult {
   novelId: string;
-  applied: Array<{ characterId: string; characterName: string; ttsMode: string }>;
+  applied: Array<{
+    characterId: string;
+    characterName: string;
+    ttsMode: string;
+    ttsVoiceAssetId?: string | null;
+  }>;
   skipped: Array<{ characterId: string; characterName: string; reason: string }>;
 }
 
