@@ -246,6 +246,7 @@ export class PostGenerationStyleReviewRunner {
         content: paragraph,
         novelId: input.novelId,
         chapterId: input.chapterId,
+        chapterOrder: input.contextPackage?.chapter?.order ?? null,
         taskStyleProfileId: input.request.taskStyleProfileId,
         issues,
         provider: input.request.provider,
@@ -301,6 +302,7 @@ export class PostGenerationStyleReviewRunner {
         content: input.content,
         novelId: input.novelId,
         chapterId: input.chapterId,
+        chapterOrder: input.contextPackage?.chapter?.order ?? null,
         taskStyleProfileId: input.request.taskStyleProfileId,
         issues: issues.map((item) => ({
           ruleName: item.ruleName,

@@ -95,7 +95,12 @@ export class ChapterExecutionContractService {
       && chapter.taskSheet?.trim()
       && existingScenePlan
     ) {
-      const styleContract = await this.resolveStyleContract(novelId, chapterId, options.taskStyleProfileId);
+      const styleContract = await this.resolveStyleContract(
+        novelId,
+        chapterId,
+        options.taskStyleProfileId,
+        chapter.order,
+      );
       return {
         ...chapter,
         styleContract,
@@ -172,7 +177,12 @@ export class ChapterExecutionContractService {
       throw new Error(formatChapterTaskSheetQualityFailure(finalQuality));
     }
 
-    const styleContract = await this.resolveStyleContract(novelId, chapterId, options.taskStyleProfileId);
+    const styleContract = await this.resolveStyleContract(
+      novelId,
+      chapterId,
+      options.taskStyleProfileId,
+      chapter.order,
+    );
     targetChapter.styleContract = styleContract;
 
     const persistedChapter = await runVolumeWorkspaceTransaction(async (tx) => {
@@ -219,12 +229,16 @@ export class ChapterExecutionContractService {
     novelId: string,
     chapterId: string,
     taskStyleProfileId?: string,
+    chapterOrder?: number | null,
   ): Promise<string | null> {
     const resolvedStyleContext = await this.deps.styleBindingService.resolveForGeneration({
       novelId,
       chapterId,
       taskStyleProfileId,
     }).catch(() => null);
-    return buildWriterStyleContractText(resolvedStyleContext?.compiledBlocks?.contract ?? null) || null;
+    return buildWriterStyleContractText(
+      resolvedStyleContext?.compiledBlocks?.contract ?? null,
+      { chapterOrder },
+    ) || null;
   }
 }

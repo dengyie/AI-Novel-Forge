@@ -2,12 +2,17 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const promptRunner = require("../dist/prompting/core/promptRunner.js");
 
+const fs = require("node:fs");
+const path = require("node:path");
 const {
   runPipelineChapterWithRuntime,
 } = require("../dist/services/novel/runtime/chapterRuntimePipeline.js");
 const {
   ChapterEmptyContentError,
 } = require("../dist/services/novel/runtime/chapterEmptyContentError.js");
+const {
+  mergeChapterPatchForGenerationStateBump,
+} = require("../dist/services/novel/chapterLifecycleState.js");
 
 function createRuntimePackage(overallScore, options = {}) {
   return {
@@ -22,7 +27,7 @@ function createRuntimePackage(overallScore, options = {}) {
         voice: overallScore,
         overall: overallScore,
       },
-      openIssues: [{
+      openIssues: options.openIssues ?? [{
         auditType: "continuity",
         severity: "medium",
         evidence: "存在承接问题。",
@@ -30,6 +35,7 @@ function createRuntimePackage(overallScore, options = {}) {
         code: "CONTINUITY_GAP",
       }],
       reports: [],
+      hasBlockingIssues: options.hasBlockingIssues ?? false,
     },
     context: {
       chapterRepairContext: null,
@@ -37,8 +43,42 @@ function createRuntimePackage(overallScore, options = {}) {
       macroConstraints: null,
       volumeWindow: null,
       styleContext: options.styleContext ?? null,
+      chapter: options.chapter ?? { order: 1 },
+    },
+    timelineCheck: options.timelineCheck ?? { status: "passed" },
+    styleReview: options.styleReview ?? undefined,
+    meta: options.meta ?? {
+      acceptanceStatus: "accepted",
+      continuePolicy: "continue",
     },
   };
+}
+
+/** 文学门过、无 blocking、可进入 dual-gate mark 的 runtime 包。 */
+function createDualGatePassPackage(overrides = {}) {
+  return createRuntimePackage(90, {
+    openIssues: [],
+    hasBlockingIssues: false,
+    chapter: { order: 1 },
+    styleReview: {
+      autoRewritten: false,
+      report: {
+        riskScore: 10,
+        summary: "",
+        canAutoRewrite: false,
+        appliedRuleIds: [],
+        violations: [],
+      },
+      residualReport: {
+        riskScore: 10,
+        summary: "",
+        canAutoRewrite: false,
+        appliedRuleIds: [],
+        violations: [],
+      },
+    },
+    ...overrides,
+  });
 }
 
 function createAcceptanceGateUnavailableRuntimePackage(overallScore) {
@@ -1492,3 +1532,269 @@ test("runPipelineChapterWithRuntime clamps maxRetries to a single repair pass", 
     promptRunner.runStructuredPrompt = originalRunStructuredPrompt;
   }
 });
+
+
+// ─── Dual-gate wiring contract (styleClear × literaryPass → chapterStatus) ───
+// 捕获 markChapterGenerationState 的 options，经 mergeChapterPatchForGenerationStateBump
+// 投影运营状态。若 adapter/caller 丢弃第 3 参，completed 会假绿。
+
+function captureDualGateDeps(runtimePackageFactory) {
+  const marks = [];
+  return {
+    marks,
+    deps: {
+      validateRequest(input) {
+        return input;
+      },
+      async ensureNovelCharacters() {},
+      async assemble() {
+        return {
+          novel: { id: "novel-1", title: "测试小说" },
+          chapter: {
+            id: "chapter-1",
+            title: "第一章",
+            order: 1,
+            content: "已有正文",
+            expectation: null,
+          },
+          contextPackage: {},
+        };
+      },
+      async generateDraftFromWriter() {
+        throw new Error("existing content should not be regenerated");
+      },
+      async saveDraftAndArtifacts() {},
+      async syncFinalChapterArtifacts() {},
+      async finalizeChapterContent({ content }) {
+        return {
+          finalContent: content,
+          runtimePackage: runtimePackageFactory(),
+        };
+      },
+      async markChapterGenerationState(_chapterId, generationState, options) {
+        marks.push({ generationState, options: options ?? null });
+      },
+      async markChapterNeedsRepair() {},
+    },
+  };
+}
+
+function projectedStatusFromMarks(marks) {
+  // 模拟 adapter：把 options 传给 mergeChapterPatchForGenerationStateBump
+  let patch = {};
+  for (const mark of marks) {
+    patch = mergeChapterPatchForGenerationStateBump(
+      patch,
+      mark.generationState,
+      mark.options ?? undefined,
+    );
+  }
+  return patch;
+}
+
+test("dual-gate wiring: literaryPass+styleClear true → completed", async () => {
+  const { marks, deps } = captureDualGateDeps(() => createDualGatePassPackage());
+  const result = await runPipelineChapterWithRuntime(
+    deps,
+    "novel-1",
+    "chapter-1",
+    { autoReview: true, autoRepair: true },
+  );
+  assert.equal(result.pass, true);
+  const approved = marks.find((m) => m.generationState === "approved");
+  assert.ok(approved, "must mark approved");
+  assert.deepEqual(approved.options, { literaryPass: true, styleClear: true });
+  assert.deepEqual(projectedStatusFromMarks(marks), {
+    generationState: "approved",
+    chapterStatus: "completed",
+  });
+});
+
+test("dual-gate wiring: open-chapter residual hard → styleClear false → needs_repair", async () => {
+  const { marks, deps } = captureDualGateDeps(() => createDualGatePassPackage({
+    chapter: { order: 1 },
+    styleReview: {
+      autoRewritten: true,
+      report: {
+        riskScore: 55,
+        summary: "entry",
+        canAutoRewrite: true,
+        appliedRuleIds: [],
+        violations: [],
+      },
+      residualReport: {
+        riskScore: 50,
+        summary: "residual high on open chapter",
+        canAutoRewrite: true,
+        appliedRuleIds: [],
+        violations: [],
+      },
+    },
+  }));
+  const result = await runPipelineChapterWithRuntime(
+    deps,
+    "novel-1",
+    "chapter-1",
+    { autoReview: true, autoRepair: true },
+  );
+  // 文学分仍过 → pipeline pass=true，但 styleClear 应 false → 不得 completed
+  assert.equal(result.pass, true);
+  const approved = marks.find((m) => m.generationState === "approved");
+  assert.ok(approved);
+  assert.equal(approved.options?.literaryPass, true);
+  assert.equal(approved.options?.styleClear, false);
+  assert.deepEqual(projectedStatusFromMarks(marks), {
+    generationState: "reviewed",
+    chapterStatus: "needs_repair",
+  });
+});
+
+test("dual-gate wiring: blocking pronoun L0 → styleClear false → needs_repair", async () => {
+  const { marks, deps } = captureDualGateDeps(() => createDualGatePassPackage({
+    chapter: { order: 40 },
+    openIssues: [{
+      auditType: "mode_fit",
+      severity: "medium",
+      evidence: "他走到窗边。他坐下。他端杯。他沉默。",
+      fixSuggestion: "改用专名起句",
+      code: "prose_pronoun_subject_stack",
+    }],
+    hasBlockingIssues: false,
+    styleReview: {
+      autoRewritten: false,
+      report: {
+        riskScore: 10,
+        summary: "",
+        canAutoRewrite: false,
+        appliedRuleIds: ["l0:prose_pronoun_subject_stack"],
+        violations: [],
+      },
+      residualReport: {
+        riskScore: 10,
+        summary: "",
+        canAutoRewrite: false,
+        appliedRuleIds: [],
+        violations: [],
+      },
+    },
+  }));
+  const result = await runPipelineChapterWithRuntime(
+    deps,
+    "novel-1",
+    "chapter-1",
+    { autoReview: true, autoRepair: true },
+  );
+  assert.equal(result.pass, true);
+  const approved = marks.find((m) => m.generationState === "approved");
+  assert.ok(approved);
+  assert.equal(approved.options?.literaryPass, true);
+  assert.equal(approved.options?.styleClear, false);
+  assert.deepEqual(projectedStatusFromMarks(marks), {
+    generationState: "reviewed",
+    chapterStatus: "needs_repair",
+  });
+});
+
+test("dual-gate wiring: omit literaryPass (autoReview=false) never projects completed", async () => {
+  const marks = [];
+  const result = await runPipelineChapterWithRuntime(
+    {
+      validateRequest(input) {
+        return input;
+      },
+      async ensureNovelCharacters() {},
+      async assemble() {
+        return {
+          novel: { id: "novel-1", title: "测试小说" },
+          chapter: {
+            id: "chapter-1",
+            title: "第一章",
+            order: 1,
+            content: null,
+            expectation: null,
+          },
+          contextPackage: {},
+        };
+      },
+      async generateDraftFromWriter() {
+        return { content: "生成后的正文" };
+      },
+      async saveDraftAndArtifacts() {},
+      async syncFinalChapterArtifacts() {},
+      async finalizeChapterContent() {
+        throw new Error("should not finalize when autoReview=false");
+      },
+      async markChapterGenerationState(_chapterId, generationState, options) {
+        marks.push({ generationState, options: options ?? null });
+      },
+      async markChapterNeedsRepair() {},
+    },
+    "novel-1",
+    "chapter-1",
+    { autoReview: false, autoRepair: true },
+  );
+  assert.equal(result.pass, true);
+  assert.equal(marks.length, 1);
+  assert.equal(marks[0].generationState, "approved");
+  // 跳过审校：不传 literaryPass → merge 只 bump generationState
+  assert.equal(marks[0].options, null);
+  assert.deepEqual(projectedStatusFromMarks(marks), {
+    generationState: "approved",
+  });
+  assert.notEqual(projectedStatusFromMarks(marks).chapterStatus, "completed");
+});
+
+test("dual-gate wiring: ChapterPipelineRuntimeAdapter forwards options to merge", () => {
+  // 源码契约：adapter 绑定必须把第 3 参 options 透传；丢弃则生产 completed 假绿。
+  const adapterSrc = fs.readFileSync(
+    path.join(__dirname, "../src/services/novel/runtime/ChapterPipelineRuntimeAdapter.ts"),
+    "utf8",
+  );
+  assert.match(
+    adapterSrc,
+    /markChapterGenerationState:\s*\(\s*targetChapterId\s*,\s*generationState\s*,\s*options\s*\)\s*=>/,
+  );
+  assert.match(
+    adapterSrc,
+    /this\.markChapterGenerationState\(\s*targetChapterId\s*,\s*generationState\s*,\s*options\s*\)/,
+  );
+  // 禁止两参闭包丢弃 options（回归 guard）
+  assert.doesNotMatch(
+    adapterSrc,
+    /markChapterGenerationState:\s*\(\s*targetChapterId\s*,\s*generationState\s*\)\s*=>\s*\s*this\.markChapterGenerationState\(\s*targetChapterId\s*,\s*generationState\s*\)/,
+  );
+});
+
+
+test("open-chapter rewrite paths forward chapterOrder into style contract", () => {
+  // P2：改写与合同路径须把 chapterOrder 传给 buildWriterStyleContractText，
+  // 否则开篇声线提示只在 writer 首写生效、rewrite 丢失。
+  const rewriteSrc = fs.readFileSync(
+    path.join(__dirname, "../src/services/styleEngine/StyleRewriteService.ts"),
+    "utf8",
+  );
+  assert.match(rewriteSrc, /chapterOrder\?:\s*number\s*\|\s*null/);
+  assert.match(
+    rewriteSrc,
+    /buildWriterStyleContractText\([\s\S]*?chapterOrder:\s*input\.chapterOrder/,
+  );
+
+  const reviewSrc = fs.readFileSync(
+    path.join(__dirname, "../src/services/novel/runtime/PostGenerationStyleReviewRunner.ts"),
+    "utf8",
+  );
+  assert.match(
+    reviewSrc,
+    /chapterOrder:\s*input\.contextPackage\?\.chapter\?\.order\s*\?\?\s*null/,
+  );
+
+  const contractSrc = fs.readFileSync(
+    path.join(__dirname, "../src/services/novel/volume/ChapterExecutionContractService.ts"),
+    "utf8",
+  );
+  assert.match(
+    contractSrc,
+    /buildWriterStyleContractText\(\s*[\s\S]*?\{\s*chapterOrder\s*\}/,
+  );
+});
+
