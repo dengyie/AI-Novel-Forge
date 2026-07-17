@@ -824,7 +824,7 @@ function TaskAnnotationsPanel(props: {
                               className="text-xs leading-5 text-muted-foreground"
                             >
                               <span className="font-medium text-foreground">
-                                [{segment.speakerLabel}/{segment.voice}]
+                                [{segment.speakerLabel}{segment.speakerUnresolved ? " · 未匹配旁白" : ""}/{segment.voice}]
                               </span>
                               {emotion ? (
                                 <span className="ml-1 text-violet-700">
@@ -868,6 +868,8 @@ function TaskAnnotationsPanel(props: {
                         : ""}
                       {annotation.deliveryStats.deliveryPeeled > 0
                         ? ` · 剥除 ${annotation.deliveryStats.deliveryPeeled}`
+                        : ""}{(annotation.deliveryStats.unresolvedSpeakerCount ?? 0) > 0
+                        ? ` · 未匹配 ${annotation.deliveryStats.unresolvedSpeakerCount}`
                         : ""}
                       {annotation.contentTruncated ? " · 正文截断 28k" : ""}
                     </div>
@@ -910,11 +912,12 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
   const [overrideVoice, setOverrideVoice] = useState("");
   const [message, setMessage] = useState("");
   const [voicePlanItems, setVoicePlanItems] = useState<AudiobookVoicePlanItem[]>([]);
+  const [expandedPlanDesignIds, setExpandedPlanDesignIds] = useState<Record<string, boolean>>({});
   const [voicePlanOverwrite, setVoicePlanOverwrite] = useState(false);
   /** D8：可选全量试听硬门禁（默认关，仅 voice 硬拦） */
   const [requireReadyPreview, setRequireReadyPreview] = useState(false);
-  /** 段级语境表演；默认 off，不污染固定试听/readiness */
-  const [deliveryStyleMode, setDeliveryStyleMode] = useState<DeliveryStyleMode>("off");
+  /** 段级语境表演；默认 characters（成书听感）。固定试听/就绪仍只用角色基线。 */
+  const [deliveryStyleMode, setDeliveryStyleMode] = useState<DeliveryStyleMode>("characters");
   /** D18 SoT：就绪看板回传；create 门禁 / 缺音色 banner 优先用它 */
   const [readinessSummary, setReadinessSummary] = useState<AudiobookVoiceReadinessSummary | null>(null);
   const [previewAudioUrl, setPreviewAudioUrl] = useState<string | null>(null);
@@ -1097,6 +1100,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
     onSuccess: ({ data, overwriteMode }) => {
       const items = data?.items ?? [];
       setVoicePlanItems(items);
+      setExpandedPlanDesignIds({});
       if (!data || items.length === 0) {
         setMessage(
           data?.skipped?.length
@@ -1148,6 +1152,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
           : "音色已写入。",
       );
       setVoicePlanItems([]);
+      setExpandedPlanDesignIds({});
       setVoicePlanOverwrite(false);
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: queryKeys.novels.detail(novelId) }),
@@ -1365,10 +1370,41 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
                   </div>
                   <div className="text-xs leading-5 text-muted-foreground">
                     {item.reason}
-                    {item.ttsMode === "design" && item.ttsDesignPrompt
-                      ? ` · ${item.ttsDesignPrompt.slice(0, 80)}${item.ttsDesignPrompt.length > 80 ? "…" : ""}`
-                      : ""}
+                    {item.ttsMode === "design" && item.ttsDesignPrompt ? (
+                      <>
+                        {" · "}
+                        {expandedPlanDesignIds[item.characterId] || item.ttsDesignPrompt.length <= 100
+                          ? item.ttsDesignPrompt
+                          : `${item.ttsDesignPrompt.slice(0, 100)}…`}
+                        {item.ttsDesignPrompt.length > 100 ? (
+                          <button
+                            type="button"
+                            className="ml-1 text-[11px] text-primary underline-offset-2 hover:underline"
+                            onClick={() =>
+                              setExpandedPlanDesignIds((prev) => ({
+                                ...prev,
+                                [item.characterId]: !prev[item.characterId],
+                              }))
+                            }
+                          >
+                            {expandedPlanDesignIds[item.characterId] ? "收起" : "展开全文"}
+                          </button>
+                        ) : null}
+                      </>
+                    ) : null}
                   </div>
+                  {item.ttsMode === "design"
+                    && (item.reason.includes("texture:card-dropped")
+                      || item.reason.includes("texture:card-partial")
+                      || item.reason.includes("slot:override")) ? (
+                    <div className="mt-0.5 text-[11px] leading-4 text-amber-800 dark:text-amber-200">
+                      {item.reason.includes("texture:card-dropped")
+                        ? "卡面声线与分配槽冲突，未能写入 design；试听后可手改角色卡。"
+                        : item.reason.includes("texture:card-partial")
+                          ? "卡面声线仅部分并入 design（已去掉与槽位对立的词）。"
+                          : "槽位已为防撞改写；有卡面声线时会尽量锁定质感维。"}
+                    </div>
+                  ) : null}
                 </div>
                 <Button
                   size="sm"
@@ -1507,18 +1543,19 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
       </label>
 
       <div className="space-y-2 rounded-xl border border-border/70 bg-muted/10 px-3 py-2">
-        <div className="text-xs font-medium text-foreground">段级语境表演（实验）</div>
+        <div className="text-xs font-medium text-foreground">段级语境表演</div>
         <div className="text-xs leading-5 text-muted-foreground">
-          默认关闭。开启后标注会为角色对白注入语境表演到 MiMo user；固定试听/就绪看板仍只用角色基线。
-          off→characters 后需「重标+合成」才生效。
+          默认「角色对白表演」：成书对白会带语境指令。固定试听/一键就绪只用角色基线声线，
+          <span className="font-medium text-foreground">不等于成书完整听感</span>
+          。关表演或改模式后需「重标+合成」才生效。
         </div>
         <SelectControl
           className="w-full rounded-md border bg-background p-2 text-sm"
           value={deliveryStyleMode}
           onChange={(event) => setDeliveryStyleMode(event.target.value as DeliveryStyleMode)}
         >
-          <option value="off">关闭（默认，与旧听感一致）</option>
-          <option value="characters">角色对白表演</option>
+          <option value="characters">角色对白表演（推荐）</option>
+          <option value="off">关闭（仅身份基线，像念字）</option>
           <option value="all">角色 + 旁白轻量叙述</option>
         </SelectControl>
       </div>

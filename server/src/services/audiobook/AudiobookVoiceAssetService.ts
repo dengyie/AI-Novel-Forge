@@ -39,15 +39,24 @@ function summarizePlan(
   items: AudiobookVoicePlanSuggestResult["items"],
   skipped: AudiobookVoicePlanSuggestResult["skipped"] = [],
 ): AudiobookVoicePlanSuggestResult["summary"] {
+  const designItems = items.filter((item) => item.ttsMode === "design");
+  const designLens = designItems
+    .map((item) => item.ttsDesignPrompt?.trim().length ?? 0)
+    .filter((n) => n > 0);
+  const designPromptAvgLen = designLens.length
+    ? Math.round(designLens.reduce((a, b) => a + b, 0) / designLens.length)
+    : 0;
   return {
     total: items.length,
     planned: items.length,
     presetCount: items.filter((item) => item.ttsMode === "preset").length,
-    designCount: items.filter((item) => item.ttsMode === "design").length,
+    designCount: designItems.length,
     overwriteCount: items.filter((item) => item.wouldOverwrite).length,
     softCollisionCount: items.filter((item) => item.reason.includes("collision:soft")).length,
     slotOverrideCount: items.filter((item) => item.reason.includes("slot:override")).length,
     seedInferredCount: skipped.filter((item) => item.reason.includes("seed:inferred")).length,
+    designPromptAvgLen,
+    archetypeHitCount: items.filter((item) => item.reason.includes("archetype:")).length,
   };
 }
 

@@ -74,6 +74,158 @@ const MAX_REF_AUDIO_BYTES = Math.max(
   Number(process.env.AUDIOBOOK_CLONE_REF_MAX_BYTES ?? 8 * 1024 * 1024) || 8 * 1024 * 1024,
 );
 
+/** 单次上游合成端点（CPA 主链 + 可选 fufu 等 fallback）。 */
+export type MimoTtsEndpoint = {
+  /** 稳定短名，用于日志/错误（非密钥） */
+  id: string;
+  baseURL: string;
+  /** 缺省时沿用主链 resolveApiKey */
+  apiKey?: string | null;
+};
+
+/**
+ * 解析 AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS：
+ * 逗号/换行分隔的 OpenAI-compatible baseURL（不含 /chat/completions）。
+ * 保留原始槽位顺序与重复项，供 keys 按位对齐；去重在 resolve 时按原 index 跳过。
+ * 例：https://fufu.iqach.top/v1,http://127.0.0.1:18080/v1
+ */
+export function parseMimoTtsFallbackBaseUrls(raw: string | null | undefined): string[] {
+  if (!raw?.trim()) {
+    return [];
+  }
+  const out: string[] = [];
+  for (const part of raw.split(/[\n,]+/)) {
+    const trimmed = part.trim().replace(/\/+$/, "");
+    if (!trimmed) continue;
+    out.push(trimmed);
+  }
+  return out;
+}
+
+/**
+ * 解析 AUDIOBOOK_MIMO_TTS_FALLBACK_API_KEYS：与 fallback baseURL 按位对齐；
+ * 空位 / 缺项 = 沿用主链 key。
+ */
+export function parseMimoTtsFallbackApiKeys(raw: string | null | undefined): Array<string | null> {
+  if (raw == null) {
+    return [];
+  }
+  // 保留空槽位以与 baseURL 对齐（"sk-a,,sk-b"）
+  return raw.split(",").map((part) => {
+    const trimmed = part.trim();
+    return trimmed ? trimmed : null;
+  });
+}
+
+/** 5xx / 429 / 超时(504) / 取消以外的瞬时失败可换端点；4xx 客户端错误不换。 */
+export function isRetryableMimoTtsStatus(statusCode: number): boolean {
+  if (statusCode === 408) {
+    // 任务 cancel → 408；不重试。仅网络超时在 synthesize 内映射 504。
+    return false;
+  }
+  if (statusCode === 429) return true;
+  if (statusCode === 504) return true;
+  if (statusCode >= 500) return true;
+  return false;
+}
+
+/** 是否配置了至少一个 fallback baseURL 字符串（未做 primary 去重）。 */
+export function hasMimoTtsFallbackEndpointsConfigured(
+  raw?: string | null,
+): boolean {
+  return parseMimoTtsFallbackBaseUrls(
+    raw ?? process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS,
+  ).length > 0;
+}
+
+/**
+ * 解析后是否存在「独立于 primary」的备链（去重后 chain.length > 1）。
+ * pipeline 外层 defaultAttempts 必须看这个，避免 FALLBACK 写了与 primary 同 URL 时误降为 1。
+ */
+export function hasEffectiveMimoTtsMultiEndpointChain(input?: {
+  primaryBaseURL?: string | null;
+  fallbackBaseUrlsRaw?: string | null;
+}): boolean {
+  const primaryFromInput = input?.primaryBaseURL?.trim();
+  const primaryBase =
+    primaryFromInput
+    || resolveProviderBaseUrl("openai")
+    || "";
+  const fallbackRaw =
+    input?.fallbackBaseUrlsRaw ?? process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS;
+  if (!primaryBase) {
+    // 主链未知时：仅有配置字符串仍视为「可能多端」，保守降 outer retry
+    return hasMimoTtsFallbackEndpointsConfigured(fallbackRaw);
+  }
+  const chain = resolveMimoTtsEndpointChain({
+    primaryBaseURL: primaryBase,
+    primaryApiKey: "probe",
+    fallbackBaseUrlsRaw: fallbackRaw,
+  });
+  return chain.length > 1;
+}
+
+/** 错误是否已表示 endpoint 链已耗尽（外层不应再整链重试）。 */
+export function isMimoTtsEndpointChainExhaustedError(error: unknown): boolean {
+  if (!(error instanceof AppError)) return false;
+  const details = error.details;
+  if (!details || typeof details !== "object") return false;
+  return Boolean((details as { mimoTtsEndpointChainExhausted?: unknown }).mimoTtsEndpointChainExhausted);
+}
+
+/** 失败日志用：不带密钥，仅 endpoint id + 状态/短消息。 */
+export function summarizeMimoTtsEndpointFailure(input: {
+  endpointId: string;
+  error: unknown;
+}): string {
+  const { endpointId, error } = input;
+  if (error instanceof AppError) {
+    return `[mimo-tts] endpoint ${endpointId} failed status=${error.statusCode}: ${error.message.slice(0, 180)}`;
+  }
+  const msg = error instanceof Error ? error.message : String(error);
+  return `[mimo-tts] endpoint ${endpointId} failed: ${msg.slice(0, 180)}`;
+}
+
+export function resolveMimoTtsEndpointChain(input: {
+  primaryBaseURL: string;
+  primaryApiKey: string;
+  fallbackBaseUrlsRaw?: string | null;
+  fallbackApiKeysRaw?: string | null;
+}): MimoTtsEndpoint[] {
+  const primaryBase = input.primaryBaseURL.trim().replace(/\/+$/, "");
+  if (!primaryBase) {
+    return [];
+  }
+  const chain: MimoTtsEndpoint[] = [
+    {
+      id: "primary",
+      baseURL: primaryBase,
+      apiKey: input.primaryApiKey,
+    },
+  ];
+  const fallbackUrls = parseMimoTtsFallbackBaseUrls(
+    input.fallbackBaseUrlsRaw ?? process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS,
+  );
+  const fallbackKeys = parseMimoTtsFallbackApiKeys(
+    input.fallbackApiKeysRaw ?? process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_API_KEYS,
+  );
+  const seen = new Set([primaryBase.toLowerCase()]);
+  let fallbackOrdinal = 0;
+  fallbackUrls.forEach((baseURL, index) => {
+    const key = baseURL.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    fallbackOrdinal += 1;
+    const explicitKey = fallbackKeys[index] ?? null;
+    chain.push({
+      id: `fallback-${fallbackOrdinal}`,
+      baseURL,
+      apiKey: explicitKey,
+    });
+  });
+  return chain;
+}
+
 /** 仅 APIKey 表缺失时兜底；与 AudiobookTask 表无关，但 Prisma 缺表码相同 */
 function isMissingApiKeyTableError(error: unknown): boolean {
   return isMissingAudiobookTaskTableError(error)
@@ -312,10 +464,37 @@ export function buildMimoTtsRequestBody(input: MimoTtsSynthesizeInput): MimoTtsR
 }
 
 /**
- * MiMo TTS via CPA OpenAI-compatible chat-audio:
- * POST /v1/chat/completions
+ * MiMo TTS via OpenAI-compatible chat-audio:
+ * POST {baseURL}/chat/completions
  * 三模态：preset / design / clone（见 buildMimoTtsRequestBody）
+ *
+ * 多后端：主链 = LLM provider baseURL（通常 CPA）；
+ * 可选 AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS（fufu 等）在 5xx/429/504 时换端点。
+ * 4xx（含 401/403 鉴权、400 参数）与 408 取消不换端——备链 key 好但主链 key 坏须修主链。
+ * 链耗尽错误会带 details.mimoTtsEndpointChainExhausted；配置了 fallback 时 pipeline 外层不再整链×N。
  */
+
+function markMimoTtsEndpointChainExhausted(error: unknown, endpointCount: number): AppError {
+  const base = error instanceof AppError
+    ? error
+    : new AppError(
+      `MiMo TTS 合成失败：${error instanceof Error ? error.message : String(error)}`,
+      502,
+    );
+  const prev = (base.details && typeof base.details === "object")
+    ? (base.details as Record<string, unknown>)
+    : {};
+  // 仅多端点链耗尽时打标，单 primary 仍允许 pipeline 外层短暂重试瞬时 5xx
+  if (endpointCount <= 1) {
+    return base;
+  }
+  return new AppError(base.message, base.statusCode, {
+    ...prev,
+    mimoTtsEndpointChainExhausted: true,
+    mimoTtsEndpointCount: endpointCount,
+  });
+}
+
 export class MimoChatAudioTTSProvider {
   readonly providerId = "mimo-chat-audio";
 
@@ -343,7 +522,69 @@ export class MimoChatAudioTTSProvider {
       throw new AppError("未配置可用的 CPA/LLM API Key，无法调用 MiMo TTS。", 400);
     }
 
-    const url = `${baseURL.replace(/\/$/, "")}/chat/completions`;
+    const endpoints = resolveMimoTtsEndpointChain({
+      primaryBaseURL: baseURL,
+      primaryApiKey: apiKey,
+    });
+    if (endpoints.length === 0) {
+      throw new AppError("未解析到可用的 MiMo TTS 端点。", 400);
+    }
+
+    let lastError: unknown;
+    for (let index = 0; index < endpoints.length; index += 1) {
+      const endpoint = endpoints[index];
+      const endpointKey = (endpoint.apiKey?.trim() || apiKey).trim();
+      if (!endpointKey) {
+        lastError = new AppError(`MiMo TTS 端点 ${endpoint.id} 缺少 API Key。`, 400);
+        continue;
+      }
+      try {
+        return await this.synthesizeOnce({
+          body,
+          mode,
+          input,
+          endpoint,
+          apiKey: endpointKey,
+        });
+      } catch (error) {
+        lastError = error;
+        if (input.signal?.aborted) {
+          throw error instanceof AppError
+            ? error
+            : new AppError("MiMo TTS 请求已取消。", 408);
+        }
+        if (error instanceof AppError && !isRetryableMimoTtsStatus(error.statusCode)) {
+          throw error;
+        }
+        // 还有下一端点则换后端；否则标记链耗尽后抛出
+        if (index < endpoints.length - 1) {
+          const next = endpoints[index + 1];
+          console.warn(
+            `${summarizeMimoTtsEndpointFailure({ endpointId: endpoint.id, error })}; trying ${next.id}`,
+          );
+          continue;
+        }
+        throw markMimoTtsEndpointChainExhausted(error, endpoints.length);
+      }
+    }
+
+    throw markMimoTtsEndpointChainExhausted(
+      lastError instanceof AppError
+        ? lastError
+        : new AppError("MiMo TTS 合成失败。", 502),
+      endpoints.length,
+    );
+  }
+
+  private async synthesizeOnce(params: {
+    body: MimoTtsRequestBody;
+    mode: AudiobookTtsMode;
+    input: MimoTtsSynthesizeInput;
+    endpoint: MimoTtsEndpoint;
+    apiKey: string;
+  }): Promise<MimoTtsSynthesizeResult> {
+    const { body, mode, input, endpoint, apiKey } = params;
+    const url = `${endpoint.baseURL.replace(/\/$/, "")}/chat/completions`;
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -373,16 +614,22 @@ export class MimoChatAudioTTSProvider {
         const message = typeof payload === "object" && payload && "error" in payload
           ? JSON.stringify((payload as { error: unknown }).error)
           : rawText.slice(0, 400);
-        // 4xx 客户端/鉴权类不伪装 502；5xx/其它保持 502 以便重试
+        // 4xx 客户端/鉴权类不伪装 502；5xx/其它保持 502 以便重试/换端
         const statusCode = response.status >= 400 && response.status < 500
           ? response.status
           : 502;
-        throw new AppError(`MiMo TTS 请求失败 (${response.status}): ${message}`, statusCode);
+        throw new AppError(
+          `MiMo TTS 请求失败 [${endpoint.id}] (${response.status}): ${message}`,
+          statusCode,
+        );
       }
 
       const audioBase64 = extractAudioBase64(payload);
       if (!audioBase64) {
-        throw new AppError("MiMo TTS 响应缺少 message.audio.data。", 502);
+        throw new AppError(
+          `MiMo TTS 响应缺少 message.audio.data [${endpoint.id}]。`,
+          502,
+        );
       }
 
       const voiceLabel = mode === "preset"
@@ -406,14 +653,14 @@ export class MimoChatAudioTTSProvider {
       const aborted = error instanceof Error
         && (error.name === "AbortError" || /aborted/i.test(error.message));
       if (aborted) {
-        // 外部取消（任务 cancel）与本地超时分开：取消不重试，超时可重试
+        // 外部取消（任务 cancel）与本地超时分开：取消不重试，超时可换端/重试
         if (input.signal?.aborted) {
           throw new AppError("MiMo TTS 请求已取消。", 408);
         }
-        throw new AppError("MiMo TTS 请求超时。", 504);
+        throw new AppError(`MiMo TTS 请求超时 [${endpoint.id}]。`, 504);
       }
       throw new AppError(
-        `MiMo TTS 调用异常：${error instanceof Error ? error.message : String(error)}`,
+        `MiMo TTS 调用异常 [${endpoint.id}]：${error instanceof Error ? error.message : String(error)}`,
         502,
       );
     } finally {
