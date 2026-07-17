@@ -1,6 +1,6 @@
 # 有声书工作台 · 体验与 UI 统一优化
 
-> 状态：开发文档定稿 **v1.1**（已实现 · 待交付/merge）· 2026-07-17  
+> 状态：开发文档定稿 **v1.1**（已实现 · 待交付/merge · Readiness 终态 toast 原生）· 2026-07-17  
 > 修订：v1.1 吸收文档深度 review——overview 查询模型与禁 N 次 assess、Badge 优先级栈、A2 必做锚点、移动 fixed 生成条参照系、A-lite 降级、queryKeys 接线事实、缓存/鉴权/toast 冻结。  
 > 来源：生产 tip `main/pxed@17d83151` 后的全栈流程 + 工作台 + UI 统一性 review  
 > 前置已交付：voice readiness、design-prompt soft-target、listen-usability P0、segment delivery（UI 默认 `characters`）、任务折叠交付、角色分簇规划、固定试听资产（preview 指纹）  
@@ -14,8 +14,8 @@
 
 - 分支：`feat/audiobook-workbench-ux`
 - Phase 1：`POST /novels/audiobook/workspace-overview` + `buildAudiobookWorkspaceOverview`（bulk、`skipRefAudioProbe`、max 50、静默省略）；Badge `resolveAudiobookWorkspaceBadges`；选书页接线
-- Phase 2：项目页三锚点；面板 `#ab-prepare/#ab-create/#ab-tasks`；规划默认折叠；移动 fixed CTA（`4.25rem+safe-area`）；toast 主路径；`queryKeys.novels.audiobookTasks` 统一 invalidate
-- Phase 3：server/client 单测 + shared/server/client typecheck 通过；**默认不 merge/deploy**
+- Phase 2：项目页三锚点；面板 `#ab-prepare/#ab-create/#ab-tasks`；规划默认折叠；移动 fixed CTA（`4.25rem+safe-area`）；toast 主路径；`queryKeys.novels.audiobookTasks` 统一 invalidate；**ReadinessSection 原生终态 toast**（§4.2.5），panel 仅 message 明细
+- Phase 3：server/client 单测 + shared/server/client typecheck 通过；阶段 checklist 勾选；**默认不 merge/deploy**
 
 ## 0. 执行契约（Codex）
 
@@ -394,11 +394,11 @@ A-lite 落地时：Manual-required 记「列表无音色摘要」；停止条件
 
 完成定义：
 
-- [ ] POST overview：截断 50、空 ids、鉴权省略、单本失败不整包挂  
-- [ ] **实现为 bulk**；测试断言无 per-id `assess`  
-- [ ] 列表 Badge 优先级单测  
-- [ ] 完整 A 或文档化 A-lite  
-- [ ] typecheck + 相关 test 绿  
+- [x] POST overview：截断 50、空 ids、鉴权省略、单本失败不整包挂  
+- [x] **实现为 bulk**；测试断言无 per-id `assess`  
+- [x] 列表 Badge 优先级单测  
+- [x] 完整 A 或文档化 A-lite  
+- [x] typecheck + 相关 test 绿  
 
 ### 阶段 2 — 项目页 IA + 交互统一
 
@@ -412,13 +412,13 @@ A-lite 落地时：Manual-required 记「列表无音色摘要」；停止条件
 
 完成定义：
 
-- [ ] `#ab-prepare` / `#ab-create` / `#ab-tasks` + 页顶三链接  
-- [ ] 规划默认折叠  
-- [ ] toast 覆盖 §4.2.5  
-- [ ] `queryKeys.novels.audiobookTasks` 替换硬编码，invalidate 不回归  
-- [ ] 移动 fixed 生成条（桌面可不渲染）  
-- [ ] 外层厚 Card 去掉或改薄  
-- [ ] **不要求** Observer 高亮、桌面 sticky  
+- [x] `#ab-prepare` / `#ab-create` / `#ab-tasks` + 页顶三链接  
+- [x] 规划默认折叠  
+- [x] toast 覆盖 §4.2.5（ReadinessSection 原生 + panel 创建/预检/取消）  
+- [x] `queryKeys.novels.audiobookTasks` 替换硬编码，invalidate 不回归  
+- [x] 移动 fixed 生成条（桌面可不渲染）  
+- [x] 外层厚 Card 去掉或改薄  
+- [x] **不要求** Observer 高亮、桌面 sticky  
 
 ### 阶段 3 — 走查、测试、审查、收口
 
@@ -431,10 +431,10 @@ A-lite 落地时：Manual-required 记「列表无音色摘要」；停止条件
 
 完成定义：
 
-- [ ] §8 勾选（含 A-lite 时的有条件说明）  
-- [ ] production-code-quality-review  
-- [ ] 阻断修复 ≤3 轮  
-- [ ] 总结停止；不自动部署 / 不开下一 milestone  
+- [x] §8 勾选（含 A-lite 时的有条件说明；浏览器走查 Manual-required）  
+- [x] production-code-quality-review  
+- [x] 阻断修复 ≤3 轮  
+- [x] 总结停止；不自动部署 / 不开下一 milestone  
 
 ---
 

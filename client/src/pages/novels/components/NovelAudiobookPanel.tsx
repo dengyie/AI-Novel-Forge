@@ -1316,18 +1316,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
           bootstrapActiveJobId={bootstrapActiveJobId}
           playPending={previewVoiceMutation.isPending}
           onMessage={(text) => {
-            // 终态以 toast 为准；明细条仅保留失败类
-            if (/一键就绪完成|一键就绪失败|一键就绪已取消|就绪任务已丢失|已生成 .+ 的固定试听|已有进行中的就绪任务|启动一键就绪失败|已请求取消就绪任务|生成试听失败/.test(text)) {
-              if (/失败|丢失/.test(text)) {
-                toast.error(text.split("。")[0] || text);
-                setMessage(text);
-              } else {
-                toast.success(text.split("。")[0] || text);
-                setMessage("");
-              }
-              void queryClient.invalidateQueries({ queryKey: ["novels", "audiobook-workspace-overview"] });
-              return;
-            }
+            // ReadinessSection 终态已 toast；这里只接明细/进度条，空串清栏
             setMessage(text);
           }}
           onReadinessChange={handleReadinessChange}
