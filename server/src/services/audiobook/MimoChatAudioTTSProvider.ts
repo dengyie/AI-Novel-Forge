@@ -129,13 +129,40 @@ export function isRetryableMimoTtsStatus(statusCode: number): boolean {
   return false;
 }
 
-/** 是否配置了至少一个 fallback baseURL（用于外层 retry 降级为 1 次整链）。 */
+/** 是否配置了至少一个 fallback baseURL 字符串（未做 primary 去重）。 */
 export function hasMimoTtsFallbackEndpointsConfigured(
   raw?: string | null,
 ): boolean {
   return parseMimoTtsFallbackBaseUrls(
     raw ?? process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS,
   ).length > 0;
+}
+
+/**
+ * 解析后是否存在「独立于 primary」的备链（去重后 chain.length > 1）。
+ * pipeline 外层 defaultAttempts 必须看这个，避免 FALLBACK 写了与 primary 同 URL 时误降为 1。
+ */
+export function hasEffectiveMimoTtsMultiEndpointChain(input?: {
+  primaryBaseURL?: string | null;
+  fallbackBaseUrlsRaw?: string | null;
+}): boolean {
+  const primaryFromInput = input?.primaryBaseURL?.trim();
+  const primaryBase =
+    primaryFromInput
+    || resolveProviderBaseUrl("openai")
+    || "";
+  const fallbackRaw =
+    input?.fallbackBaseUrlsRaw ?? process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS;
+  if (!primaryBase) {
+    // 主链未知时：仅有配置字符串仍视为「可能多端」，保守降 outer retry
+    return hasMimoTtsFallbackEndpointsConfigured(fallbackRaw);
+  }
+  const chain = resolveMimoTtsEndpointChain({
+    primaryBaseURL: primaryBase,
+    primaryApiKey: "probe",
+    fallbackBaseUrlsRaw: fallbackRaw,
+  });
+  return chain.length > 1;
 }
 
 /** 错误是否已表示 endpoint 链已耗尽（外层不应再整链重试）。 */

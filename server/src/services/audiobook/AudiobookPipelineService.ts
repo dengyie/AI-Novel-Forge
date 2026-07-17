@@ -43,7 +43,7 @@ import {
   writeWavFileAtomic,
 } from "./audiobookWav";
 import {
-  hasMimoTtsFallbackEndpointsConfigured,
+  hasEffectiveMimoTtsMultiEndpointChain,
   isMimoTtsEndpointChainExhaustedError,
   mimoChatAudioTTSProvider,
 } from "./MimoChatAudioTTSProvider";
@@ -549,7 +549,14 @@ function collectQualityWarnings(annotations: AudiobookChapterAnnotation[]): stri
   return warnings;
 }
 
-async function synthesizeChunkWithRetry(input: {
+/** 外层合成重试次数：有效多端点链时默认 1，否则 3；显式 maxAttempts 优先。 */
+export function resolveSynthesizeChunkMaxAttempts(maxAttempts?: number): number {
+  const defaultAttempts = hasEffectiveMimoTtsMultiEndpointChain() ? 1 : 3;
+  return Math.max(1, maxAttempts ?? defaultAttempts);
+}
+
+/** @internal 导出供门禁单测；生产仅 pipeline 调用。 */
+export async function synthesizeChunkWithRetry(input: {
   text: string;
   voice: string;
   style?: string | null;
@@ -560,10 +567,9 @@ async function synthesizeChunkWithRetry(input: {
   signal?: AbortSignal;
   maxAttempts?: number;
 }): Promise<Buffer> {
-  // 配置了 fallback 时 provider 内已走完整 endpoint 链；外层默认只 1 次，避免 chain×N。
-  // 仅 primary 时保留短暂 5xx/504 重试（默认 3）。
-  const defaultAttempts = hasMimoTtsFallbackEndpointsConfigured() ? 1 : 3;
-  const maxAttempts = Math.max(1, input.maxAttempts ?? defaultAttempts);
+  // 有效多端点时 provider 内已走完整链；外层默认 1，避免 chain×N。
+  // 仅 primary（含 FALLBACK 与 primary 去重后仍单端）保留短暂 5xx/504 重试（默认 3）。
+  const maxAttempts = resolveSynthesizeChunkMaxAttempts(input.maxAttempts);
   let lastError: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
