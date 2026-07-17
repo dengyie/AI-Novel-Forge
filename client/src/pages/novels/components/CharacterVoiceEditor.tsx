@@ -160,6 +160,8 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
   const [previewDurationSec, setPreviewDurationSec] = useState<number | null>(null);
   const [candidates, setCandidates] = useState<CharacterVoicePreviewCandidate[]>([]);
   const [suggestedCandidateId, setSuggestedCandidateId] = useState<string | null>(null);
+  /** 多抽后尚未写入正式 preview 的会话态；采用任一候选后清空，避免误锁旧 formal。 */
+  const [pendingMultiDraw, setPendingMultiDraw] = useState(false);
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
   const previewUrlSlotRef = useRef(createObjectUrlSlot());
 
@@ -192,6 +194,7 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
     setPreviewDurationSec(null);
     setCandidates([]);
     setSuggestedCandidateId(null);
+    setPendingMultiDraw(false);
   }, [characterId]);
 
   useEffect(() => {
@@ -252,6 +255,11 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
     onSuccess: async (data) => {
       setCandidates(data.candidates ?? []);
       setSuggestedCandidateId(data.suggestedCandidateId ?? null);
+      const multiPending =
+        !data.adopted
+        && Array.isArray(data.candidates)
+        && data.candidates.length > 1;
+      setPendingMultiDraw(multiPending);
       if (data.adopted) {
         queryClient.setQueryData(
           queryKeys.novels.characterVoicePreview(novelId, characterId),
@@ -294,7 +302,7 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
         setPreviewMessage(
           data.adopted
             ? `试听已写入角色卡（${durationText}），正在播放。`
-            : `已多抽 ${data.candidates.length} 条候选（${durationText}），请点选采用。`,
+            : `已多抽 ${data.candidates.length} 条候选（${durationText}），请点选采用后再锁定克隆。`,
         );
       } catch (error) {
         setPreviewMessage(error instanceof Error ? error.message : "试听已生成，但播放失败。");
@@ -314,6 +322,7 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
     },
     onSuccess: async (data) => {
       setCandidates((prev) => prev.map((c) => ({ ...c, selected: false })));
+      setPendingMultiDraw(false);
       queryClient.setQueryData(
         queryKeys.novels.characterVoicePreview(novelId, characterId),
         data,
@@ -343,10 +352,33 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
     castRole === "extra"
     || /路人|龙套|extra|crowd/.test(roleBlob);
   const showLockCloneGuide = isLeadish || (!isExtraish && mode === "design");
+  const canLockClone =
+    showLockCloneGuide
+    && canPlay
+    && assetStatus === "ready"
+    && !pendingMultiDraw
+    && !dirty
+    && resolveCharacterVoiceMode(form.ttsMode) !== "clone";
+  const lockCloneBlockReason = dirty
+    ? "请先保存当前音色配置再锁定"
+    : pendingMultiDraw
+      ? "请先点选「采用」将多抽候选写入正式试听，再锁定克隆"
+      : assetStatus !== "ready"
+        ? "需要 ready 正式试听才能锁定（过期/缺失请重新生成并采用）"
+        : resolveCharacterVoiceMode(form.ttsMode) === "clone"
+          ? "已是克隆模式"
+          : "copy 正式 preview → ref.wav，ttsMode=clone";
 
   const lockCloneMutation = useMutation({
-    mutationFn: async (opts?: { regenerate?: boolean }) => {
+    mutationFn: async (opts?: { regenerate?: boolean; candidateId?: string }) => {
+      if (pendingMultiDraw && !opts?.candidateId) {
+        throw new Error("请先采用多抽候选，再锁定为克隆身份。");
+      }
+      if (assetStatus !== "ready" && !opts?.candidateId) {
+        throw new Error("升格需要 ready 正式试听；请重新生成并采用候选。");
+      }
       const response = await adoptCharacterVoicePreviewAsClone(novelId, characterId, {
+        candidateId: opts?.candidateId,
         regeneratePreviewUnderClone: Boolean(opts?.regenerate),
       });
       const data = response.data;
@@ -356,9 +388,13 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
       return data;
     },
     onSuccess: async (data) => {
+      // 服务端已写 clone+ref；同步表单以免 dirty，且勿把路径当客户端可写字段再提交
       onChange("ttsMode", "clone");
       onChange("ttsRefAudioPath", data.ttsRefAudioPath || "");
       onChange("ttsRefAudioBase64", "");
+      onChange("ttsVoice", "");
+      setPendingMultiDraw(false);
+      setCandidates([]);
       queryClient.setQueryData(
         queryKeys.novels.characterVoicePreview(novelId, characterId),
         data.contrastPreview || data.preview,
@@ -387,7 +423,7 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
     },
   });
 
-    const playMutation = useMutation({
+  const playMutation = useMutation({
     mutationFn: async () => {
       if (!canPlay) {
         throw new Error("尚无试听资产，请先生成试听。");
@@ -505,7 +541,7 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
               配置已变，可播旧版；建议重新生成。
             </div>
           ) : null}
-          {showLockCloneGuide && canPlay && resolveCharacterVoiceMode(form.ttsMode) !== "clone" ? (
+          {showLockCloneGuide && resolveCharacterVoiceMode(form.ttsMode) !== "clone" ? (
             <div className="max-w-[20rem] space-y-1 text-right">
               <div className="text-[11px] leading-4 text-muted-foreground">
                 {isLeadish
@@ -516,16 +552,17 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
                 type="button"
                 size="sm"
                 variant={isLeadish ? "default" : "outline"}
-                disabled={lockCloneMutation.isPending || dirty}
-                title={
-                  dirty
-                    ? "请先保存当前音色配置再锁定"
-                    : "copy 正式 preview → ref.wav，ttsMode=clone"
-                }
+                disabled={lockCloneMutation.isPending || !canLockClone}
+                title={lockCloneBlockReason}
                 onClick={() => lockCloneMutation.mutate({ regenerate: false })}
               >
                 {lockCloneMutation.isPending ? "锁定中..." : "锁定为克隆身份"}
               </Button>
+              {!canLockClone && !lockCloneMutation.isPending ? (
+                <div className="text-[11px] leading-4 text-amber-700 dark:text-amber-400">
+                  {lockCloneBlockReason}
+                </div>
+              ) : null}
             </div>
           ) : null}
           {resolveCharacterVoiceMode(form.ttsMode) === "clone" && form.ttsRefAudioPath ? (

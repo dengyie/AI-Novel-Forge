@@ -13,6 +13,10 @@ const {
 } = require("../dist/services/audiobook/audiobookPaths.js");
 const { checkVoiceRefAudioPath } = require("../dist/services/audiobook/voiceRefPath.js");
 const { isValidPcmWavFile } = require("../dist/services/audiobook/audiobookWav.js");
+const {
+  buildCharacterVoicePreviewFingerprint,
+  resolveCharacterVoicePreviewStatus,
+} = require("../dist/services/audiobook/characterVoicePreview.js");
 
 /** minimal PCM WAV (8 bytes silence-ish header+data) via handcrafted RIFF */
 function minimalPcmWavBase64() {
@@ -88,4 +92,79 @@ test("half-bound clone without preview is not a valid copy source", () => {
     () => copyCharacterVoicePreviewToRef({ novelId, characterId }),
     /合法 PCM WAV|试听/,
   );
+});
+
+test("clone lock gate: only ready (not stale/missing) is allowed", () => {
+  const novelId = `n-gate-${Date.now()}`;
+  const characterId = `c-gate-${Date.now()}`;
+  const previewPath = writeCharacterVoicePreviewFromBase64({
+    novelId,
+    characterId,
+    base64: minimalPcmWavBase64(),
+  });
+  const sample = "路是自己选的。";
+  const designCfg = {
+    ttsMode: "design",
+    ttsDesignPrompt: "偏低略沙青年男声",
+    ttsStyle: "沉稳",
+  };
+  const fp = buildCharacterVoicePreviewFingerprint(designCfg, sample);
+  assert.equal(
+    resolveCharacterVoicePreviewStatus({
+      audioPath: previewPath,
+      fingerprint: fp,
+      currentFingerprint: fp,
+    }),
+    "ready",
+  );
+  const staleFp = buildCharacterVoicePreviewFingerprint(
+    { ...designCfg, ttsDesignPrompt: "完全不同的声线" },
+    sample,
+  );
+  assert.equal(
+    resolveCharacterVoicePreviewStatus({
+      audioPath: previewPath,
+      fingerprint: fp,
+      currentFingerprint: staleFp,
+    }),
+    "stale",
+  );
+  assert.equal(
+    resolveCharacterVoicePreviewStatus({
+      audioPath: resolveCharacterVoicePreviewPath("no", "such"),
+      fingerprint: fp,
+      currentFingerprint: fp,
+    }),
+    "missing",
+  );
+  // product gate: lock only when ready
+  assert.notEqual(
+    resolveCharacterVoicePreviewStatus({
+      audioPath: previewPath,
+      fingerprint: fp,
+      currentFingerprint: staleFp,
+    }),
+    "ready",
+  );
+
+  try {
+    fs.unlinkSync(previewPath);
+  } catch {
+    /* ignore */
+  }
+});
+
+test("candidate meta fingerprint mismatch is detectable for adopt gate", () => {
+  const sample = "谁先认输，谁就先把今晚的话咽回去。";
+  const metaFp = buildCharacterVoicePreviewFingerprint(
+    { ttsMode: "design", ttsDesignPrompt: "旧设计" },
+    sample,
+  );
+  const currentFp = buildCharacterVoicePreviewFingerprint(
+    { ttsMode: "design", ttsDesignPrompt: "新设计" },
+    sample,
+  );
+  assert.notEqual(metaFp, currentFp);
+  // service rejects when meta.fingerprint !== current
+  assert.equal(Boolean(metaFp && metaFp !== currentFp), true);
 });

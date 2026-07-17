@@ -764,6 +764,7 @@ export class AudiobookVoiceAssetService {
 
   /**
    * 将多抽候选固化为正式 preview.wav。
+   * 候选 meta 指纹必须与当前角色配置一致，避免配置变更后误 adopt 旧抽签。
    */
   async adoptPreviewCandidate(
     novelId: string,
@@ -804,6 +805,12 @@ export class AudiobookVoiceAssetService {
       throw new AppError("候选音频文件缺失，请重新生成。", 404);
     }
 
+    const sampleText = clampCharacterVoicePreviewSampleText(meta.sampleText || DEFAULT_PREVIEW_TEXT);
+    const fingerprint = buildCharacterVoicePreviewFingerprint(character, sampleText);
+    if (meta.fingerprint && meta.fingerprint !== fingerprint) {
+      throw new AppError("候选已过期（音色配置已变更），请重新多抽后再采用。", 409);
+    }
+
     let previewPath: string;
     try {
       previewPath = promoteCandidateToPreview(row.path, novelId, characterId);
@@ -811,8 +818,6 @@ export class AudiobookVoiceAssetService {
       throw new AppError(error instanceof Error ? error.message : "采用候选失败。", 500);
     }
 
-    const sampleText = clampCharacterVoicePreviewSampleText(meta.sampleText || DEFAULT_PREVIEW_TEXT);
-    const fingerprint = buildCharacterVoicePreviewFingerprint(character, sampleText);
     const generatedAt = new Date();
     await prisma.character.update({
       where: { id: characterId },
@@ -853,7 +858,8 @@ export class AudiobookVoiceAssetService {
 
   /**
    * Design→Clone：把选优后的正式 preview 拷为 ref.wav，ttsMode=clone。
-   * 禁止无 ready preview 的半绑定；可选立刻 clone 再 gen 对照。
+   * 必须 ready（与当前配置指纹一致）；禁止用 stale/旧 formal 冒充选优结果。
+   * 可选 candidateId：先 adopt 再升格。对照 regenerate 失败不回滚主绑定。
    */
   async adoptPreviewAsClone(
     novelId: string,
@@ -905,10 +911,14 @@ export class AudiobookVoiceAssetService {
       fingerprint: character.ttsPreviewFingerprint,
       currentFingerprint,
     });
-    if (previewStatus === "missing") {
-      throw new AppError("升格 clone 需要合法 PCM WAV 试听文件。", 400);
+    if (previewStatus !== "ready") {
+      throw new AppError(
+        previewStatus === "stale"
+          ? "升格 clone 需要与当前配置一致的 ready 试听（当前为过期试听）。请重新生成并采用候选后再锁定。"
+          : "升格 clone 需要合法 PCM WAV 试听文件。",
+        400,
+      );
     }
-    // stale 仍允许（用户刚听的文件在盘上）；但强烈建议 ready
 
     let refPath: string;
     try {
@@ -945,12 +955,17 @@ export class AudiobookVoiceAssetService {
 
     let contrastPreview: CharacterVoicePreviewAsset | null = null;
     if (input.regeneratePreviewUnderClone === true) {
-      const gen = await this.generateCharacterPreview(novelId, characterId, {
-        text: input.contrastText,
-        candidates: 1,
-        autoAdoptWinner: true,
-      });
-      contrastPreview = gen.adopted;
+      try {
+        const gen = await this.generateCharacterPreview(novelId, characterId, {
+          text: input.contrastText,
+          candidates: 1,
+          autoAdoptWinner: true,
+        });
+        contrastPreview = gen.adopted;
+      } catch {
+        // 主绑定已成功；对照合成失败不回滚 clone，由客户端提示再生成
+        contrastPreview = null;
+      }
     }
 
     return {
