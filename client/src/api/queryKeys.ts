@@ -53,6 +53,8 @@ export const queryKeys = {
       ["novels", "audiobook-voice-readiness-job", id, jobId] as const,
     characterVoicePreview: (novelId: string, characterId: string) =>
       ["novels", "character-voice-preview", novelId, characterId] as const,
+    /** 全站 VoiceAsset 库列表（筛选串化入 key） */
+    voiceLibrary: (paramsKey = "default") => ["novels", "voice-library", paramsKey] as const,
   },
   worlds: {
     all: ["worlds"] as const,

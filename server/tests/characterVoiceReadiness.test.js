@@ -185,3 +185,54 @@ test("aggregate: invalid narrator fails voiceOk", () => {
   assert.equal(summary.narrator.valid, false);
   assert.equal(summary.blockingErrors.length >= 1, true);
 });
+
+test("resolveVoiceBindingStatus: clone + assetId only", () => {
+  assert.equal(
+    resolveVoiceBindingStatus({
+      ttsMode: "clone",
+      ttsVoiceAssetId: "va_abc",
+      refAudioOk: null,
+    }).status,
+    "configured",
+  );
+  assert.equal(
+    resolveVoiceBindingStatus({
+      ttsMode: "clone",
+      ttsVoiceAssetId: "va_abc",
+      refAudioOk: true,
+    }).status,
+    "configured",
+  );
+  assert.equal(
+    resolveVoiceBindingStatus({
+      ttsMode: "clone",
+      ttsVoiceAssetId: "va_abc",
+      refAudioOk: false,
+    }).status,
+    "invalid",
+  );
+  assert.equal(
+    resolveVoiceBindingStatus({
+      ttsMode: "clone",
+      ttsRefAudioPath: "",
+      ttsVoiceAssetId: "",
+      refAudioOk: null,
+    }).status,
+    "missing",
+  );
+});
+
+test("buildCharacterReadinessItem passes assetId into binding resolve", () => {
+  const item = buildCharacterReadinessItem({
+    characterId: "c-asset",
+    characterName: "库绑",
+    ttsMode: "clone",
+    ttsVoiceAssetId: "va_xyz",
+    refAudioOk: null,
+    previewStatus: "missing",
+  });
+  assert.equal(item.voiceBindingStatus, "configured");
+  assert.equal(item.ttsVoiceAssetId, "va_xyz");
+  assert.equal(item.action, "generate_preview");
+});
+

@@ -30,6 +30,7 @@ import {
   resolveVoiceReadinessProgressWeights,
 } from "./voiceReadinessJobLogic";
 import { probeVoiceRefAudioOk } from "./voiceRefPath";
+import { tryResolveEffectiveCloneRefPath } from "./voiceLibraryService";
 
 const JOB_TTL_MS = 60 * 60 * 1000;
 const MAX_JOBS = 200;
@@ -249,6 +250,7 @@ export class AudiobookVoiceReadinessService {
             ttsStyle: true,
             ttsDesignPrompt: true,
             ttsRefAudioPath: true,
+            ttsVoiceAssetId: true,
             ttsPreviewAudioPath: true,
             ttsPreviewSampleText: true,
             ttsPreviewFingerprint: true,
@@ -281,6 +283,7 @@ export class AudiobookVoiceReadinessService {
         ttsStyle: character.ttsStyle,
         ttsDesignPrompt: character.ttsDesignPrompt,
         ttsRefAudioPath: character.ttsRefAudioPath,
+        ttsVoiceAssetId: character.ttsVoiceAssetId,
         ttsPreviewAudioPath: character.ttsPreviewAudioPath,
         ttsPreviewSampleText: character.ttsPreviewSampleText,
         ttsPreviewFingerprint: character.ttsPreviewFingerprint,
@@ -305,6 +308,7 @@ export class AudiobookVoiceReadinessService {
         | "ttsStyle"
         | "ttsDesignPrompt"
         | "ttsRefAudioPath"
+        | "ttsVoiceAssetId"
         | "ttsPreviewAudioPath"
         | "ttsPreviewSampleText"
         | "ttsPreviewFingerprint"
@@ -323,11 +327,21 @@ export class AudiobookVoiceReadinessService {
       const mode = character.ttsMode?.trim() || "preset";
       let refAudioOk: boolean | null = null;
       if (mode === "clone") {
-        const hasPath = Boolean(character.ttsRefAudioPath?.trim());
+        const resolved = tryResolveEffectiveCloneRefPath({
+          ttsVoiceAssetId: character.ttsVoiceAssetId,
+          ttsRefAudioPath: character.ttsRefAudioPath,
+          requireApproved: true,
+        });
+        const effectivePath = resolved || character.ttsRefAudioPath?.trim() || "";
+        const hasPath = Boolean(effectivePath);
         if (skipProbe) {
-          refAudioOk = hasPath ? true : null;
+          // 列表态势：有 assetId 或 path 即视为可配（不 probe 文件/库状态）
+          refAudioOk = hasPath || Boolean(character.ttsVoiceAssetId?.trim()) ? true : null;
         } else if (hasPath) {
-          refAudioOk = probeRefAudioOk(character.ttsRefAudioPath);
+          refAudioOk = probeRefAudioOk(effectivePath);
+        } else if (character.ttsVoiceAssetId?.trim()) {
+          // 有 assetId 但 resolve 失败（draft/archived/缺失）→ invalid
+          refAudioOk = false;
         }
       }
       return buildCharacterReadinessItem({
@@ -339,6 +353,7 @@ export class AudiobookVoiceReadinessService {
         ttsVoice: character.ttsVoice,
         ttsDesignPrompt: character.ttsDesignPrompt,
         ttsRefAudioPath: character.ttsRefAudioPath,
+        ttsVoiceAssetId: character.ttsVoiceAssetId,
         refAudioOk,
         previewStatus,
         previewGeneratedAt: character.ttsPreviewGeneratedAt ?? null,
@@ -590,6 +605,7 @@ export class AudiobookVoiceReadinessService {
             ttsVoice: item.ttsVoice,
             ttsStyle: item.ttsStyle,
             ttsDesignPrompt: item.ttsDesignPrompt,
+            ttsVoiceAssetId: item.ttsVoiceAssetId,
             speakerAliases: item.speakerAliases,
           }));
           const result = await audiobookVoiceAssetService.apply(job.novelId, {

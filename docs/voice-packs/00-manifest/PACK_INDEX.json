@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "packs": [
+    {
+      "id": "05-yuanworld-seed-from-mimo",
+      "role": "primary-seed",
+      "compatibleWith": [
+        "mimo_chat_audio_clone"
+      ],
+      "notes": "Milestone A 主种子包"
+    }
+  ]
+}

@@ -5,8 +5,10 @@ import {
   characterWorldCheckPrompt,
 } from "../../prompting/prompts/novel/coreCharacter.prompts";
 import { writeCharacterVoiceRefFromBase64 } from "../audiobook/audiobookPaths";
+import { voiceLibraryService } from "../audiobook/voiceLibraryService";
 import { parseSpeakerAliases } from "../audiobook/audiobookSpeakerAliases";
 import { ragServices } from "../rag";
+import { decideCharacterVoiceRefUpdate } from "./characterVoiceRefUpdate";
 import { queueRagDelete, queueRagUpsert } from "./novelCoreSupport";
 import { WorldContextGateway } from "./worldContext/WorldContextGateway";
 import {
@@ -58,25 +60,49 @@ export class NovelCoreCharacterService {
       };
     }
 
-    // 安全：剥离客户端裸 ttsRefAudioPath，仅允许 base64 落盘后由服务端写路径
+    // 安全：剥离客户端裸 ttsRefAudioPath；仅 base64 / voiceAssetId 由服务端写路径
     const {
       prohibitions,
       ttsRefAudioBase64,
       ttsSpeakerAliases,
       ttsRefAudioPath: _ignoredClientRefPath,
+      ttsVoiceAssetId: clientAssetId,
       ...data
     } = payload;
     void _ignoredClientRefPath;
     const aliasesJson = normalizeTtsSpeakerAliases(ttsSpeakerAliases);
+
+    // 绑库前校验：失败不落库，避免半成品角色
+    let bindPrep: ReturnType<typeof voiceLibraryService.assertBindableCloneRef> | null = null;
+    if (clientAssetId?.trim()) {
+      bindPrep = voiceLibraryService.assertBindableCloneRef(clientAssetId.trim());
+    }
+
     const created = await prisma.character.create({
       data: {
         novelId,
         ...data,
-        ttsRefAudioPath: null,
+        ...(bindPrep
+          ? {
+              ttsMode: "clone",
+              ttsRefAudioPath: bindPrep.absolutePath,
+              ttsVoiceAssetId: bindPrep.asset.id,
+              ttsVoice: null,
+              ttsDesignPrompt: null,
+            }
+          : {
+              ttsRefAudioPath: null,
+              ttsVoiceAssetId: null,
+            }),
         ...(aliasesJson !== undefined ? { ttsSpeakerAliases: aliasesJson } : {}),
         ...(prohibitions ? { prohibitionsJson: serializeCharacterProhibitions(prohibitions) } : {}),
       },
     });
+
+    if (bindPrep) {
+      queueRagUpsert("character", created.id);
+      return created;
+    }
 
     if (ttsRefAudioBase64?.trim()) {
       const refPath = writeCharacterVoiceRefFromBase64({
@@ -86,7 +112,11 @@ export class NovelCoreCharacterService {
       });
       const withRef = await prisma.character.update({
         where: { id: created.id },
-        data: { ttsRefAudioPath: refPath, ttsMode: data.ttsMode ?? "clone" },
+        data: {
+          ttsRefAudioPath: refPath,
+          ttsMode: data.ttsMode ?? "clone",
+          ttsVoiceAssetId: null,
+        },
       });
       queueRagUpsert("character", withRef.id);
       return withRef;
@@ -107,12 +137,13 @@ export class NovelCoreCharacterService {
 
     const hasStateChanged = typeof input.currentState === "string" && input.currentState !== exists.currentState;
     const hasGoalChanged = typeof input.currentGoal === "string" && input.currentGoal !== exists.currentGoal;
-    // 安全：剥离客户端裸 ttsRefAudioPath；仅 base64 落盘或显式 null 清空
+    // 安全：剥离客户端裸 ttsRefAudioPath；仅 base64 落盘 / asset bind / 显式 null 清空
     const {
       prohibitions,
       ttsRefAudioBase64,
       ttsSpeakerAliases,
       ttsRefAudioPath: clientRefPath,
+      ttsVoiceAssetId: clientAssetId,
       ...data
     } = input;
     const aliasesJson = normalizeTtsSpeakerAliases(ttsSpeakerAliases);
@@ -128,17 +159,38 @@ export class NovelCoreCharacterService {
       nextData.ttsRefAudioPath = null;
     }
 
-    if (ttsRefAudioBase64?.trim()) {
+    // assetId 非空 → 绑库；否则 base64 写盘（含同请求 assetId:null）；否则仅 null 清 asset
+    // 不可先处理 assetId===null 再 else-if base64，否则会吞掉「上传覆盖库绑定」
+    const voiceRefDecision = decideCharacterVoiceRefUpdate({
+      ttsVoiceAssetId: clientAssetId,
+      ttsRefAudioBase64,
+    });
+    if (voiceRefDecision.action === "bind") {
+      const { asset, absolutePath } = voiceLibraryService.assertBindableCloneRef(
+        voiceRefDecision.voiceAssetId,
+      );
+      nextData = {
+        ...nextData,
+        ttsMode: "clone",
+        ttsRefAudioPath: absolutePath,
+        ttsVoiceAssetId: asset.id,
+        ttsVoice: null,
+        ttsDesignPrompt: null,
+      };
+    } else if (voiceRefDecision.action === "write_base64") {
       const refPath = writeCharacterVoiceRefFromBase64({
         novelId,
         characterId,
-        base64: ttsRefAudioBase64,
+        base64: voiceRefDecision.base64,
       });
       nextData = {
         ...nextData,
         ttsRefAudioPath: refPath,
         ttsMode: data.ttsMode ?? "clone",
+        ttsVoiceAssetId: null,
       };
+    } else if (voiceRefDecision.action === "clear_asset") {
+      nextData.ttsVoiceAssetId = null;
     }
 
     const updated = await prisma.character.update({

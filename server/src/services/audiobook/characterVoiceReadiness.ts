@@ -17,9 +17,13 @@ export type VoiceBindingResolveInput = {
   ttsVoice?: string | null;
   ttsDesignPrompt?: string | null;
   ttsRefAudioPath?: string | null;
+  /** 绑库 id：有 path 或 assetId 任一即可视为 clone 已配置（可用性仍看 refAudioOk） */
+  ttsVoiceAssetId?: string | null;
   /**
-   * clone 且 path 非空时：调用方 fs 探测结果。
-   * 非 clone 或 path 空时传 null。
+   * clone 探测结果：
+   * - path 存在时：true=文件可用 / false=不可用
+   * - 仅 assetId：true/null=信任库绑定 / false=库 resolve 失败
+   * - 非 clone：传 null
    */
   refAudioOk: boolean | null;
 };
@@ -46,6 +50,7 @@ export function resolveVoiceBindingStatus(input: VoiceBindingResolveInput): Reso
   const voice = input.ttsVoice?.trim() || "";
   const designPrompt = input.ttsDesignPrompt?.trim() || "";
   const refPath = input.ttsRefAudioPath?.trim() || "";
+  const assetId = input.ttsVoiceAssetId?.trim() || "";
 
   if (mode === "preset") {
     if (!voice) {
@@ -76,25 +81,37 @@ export function resolveVoiceBindingStatus(input: VoiceBindingResolveInput): Reso
     return { status: "configured", mode };
   }
 
-  // clone
-  if (!refPath) {
+  // clone：path 或库 assetId 任一可表示已绑定；可用性由调用方 refAudioOk 注入
+  if (!refPath && !assetId) {
     return {
       status: "missing",
-      reason: "角色卡未配置 clone 参考音频（ttsRefAudioPath）。",
+      reason: "角色卡未配置 clone 参考音频（ttsRefAudioPath 或 ttsVoiceAssetId）。",
       mode,
     };
   }
-  if (refPath.includes("..") || refPath.includes("\0")) {
-    return {
-      status: "invalid",
-      reason: "参考音频路径非法。",
-      mode,
-    };
+  if (refPath) {
+    if (refPath.includes("..") || refPath.includes("\0")) {
+      return {
+        status: "invalid",
+        reason: "参考音频路径非法。",
+        mode,
+      };
+    }
+    if (input.refAudioOk !== true) {
+      return {
+        status: "invalid",
+        reason: "参考音频文件不存在或不可用。",
+        mode,
+      };
+    }
+    return { status: "configured", mode };
   }
-  if (input.refAudioOk !== true) {
+
+  // 仅 assetId：false=库不可用；true/null=已绑库（null 表示未探测，信任绑定字段）
+  if (input.refAudioOk === false) {
     return {
       status: "invalid",
-      reason: "参考音频文件不存在或不可用。",
+      reason: "库资产不存在、未批准或参考音不可用。",
       mode,
     };
   }
@@ -124,6 +141,7 @@ export function buildVoiceDetailLabel(input: {
   mode: string;
   ttsVoice?: string | null;
   ttsDesignPrompt?: string | null;
+  ttsVoiceAssetId?: string | null;
   reason?: string | null;
 }): string {
   const mode = input.mode || "preset";
@@ -145,6 +163,10 @@ export function buildVoiceDetailLabel(input: {
     return prompt ? `design·${prompt.length > 16 ? `${prompt.slice(0, 16)}…` : prompt}` : "design";
   }
   if (mode === "clone") {
+    const assetId = input.ttsVoiceAssetId?.trim();
+    if (assetId) {
+      return `clone·库/${assetId.slice(0, 10)}`;
+    }
     return "clone";
   }
   const voice = input.ttsVoice?.trim() || "";
@@ -160,6 +182,7 @@ export type CharacterReadinessRowInput = {
   ttsVoice?: string | null;
   ttsDesignPrompt?: string | null;
   ttsRefAudioPath?: string | null;
+  ttsVoiceAssetId?: string | null;
   refAudioOk: boolean | null;
   previewStatus: CharacterVoicePreviewStatus;
   previewGeneratedAt?: string | null;
@@ -171,6 +194,7 @@ export function buildCharacterReadinessItem(row: CharacterReadinessRowInput): Ch
     ttsVoice: row.ttsVoice,
     ttsDesignPrompt: row.ttsDesignPrompt,
     ttsRefAudioPath: row.ttsRefAudioPath,
+    ttsVoiceAssetId: row.ttsVoiceAssetId,
     refAudioOk: row.refAudioOk,
   });
   const mode = isAudiobookTtsMode(String(binding.mode))
@@ -185,6 +209,7 @@ export function buildCharacterReadinessItem(row: CharacterReadinessRowInput): Ch
     mode: actionMode,
     ttsVoice: row.ttsVoice,
     ttsDesignPrompt: row.ttsDesignPrompt,
+    ttsVoiceAssetId: row.ttsVoiceAssetId,
     reason: binding.reason,
   });
 
@@ -196,6 +221,7 @@ export function buildCharacterReadinessItem(row: CharacterReadinessRowInput): Ch
     voiceBindingStatus: binding.status,
     ttsMode: mode,
     ttsVoice: row.ttsVoice?.trim() || null,
+    ttsVoiceAssetId: row.ttsVoiceAssetId?.trim() || null,
     voiceDetailLabel,
     previewStatus: row.previewStatus,
     previewGeneratedAt: row.previewGeneratedAt ?? null,

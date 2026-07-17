@@ -1,0 +1,70 @@
+{
+  "packId": "yuanworld-seed-from-mimo",
+  "version": 1,
+  "description": "应用侧种子音色（合成静音 PCM，仅验证导入链路；人耳批准前保持 draft）",
+  "items": [
+    {
+      "slug": "yuan-male-lead",
+      "displayName": "源·男主（种子）",
+      "kind": "clone_ref",
+      "file": "wavs/seed-male-lead.wav",
+      "tags": [
+        "seed",
+        "male",
+        "lead",
+        "yuanworld"
+      ],
+      "sampleText": "路是自己选的，就不必再回头望。",
+      "license": {
+        "source": "app-seed",
+        "rights": "internal-test-only",
+        "notes": "静音 PCM，不可当生产英雄声"
+      },
+      "status": "draft",
+      "backendTargets": [
+        "mimo_chat_audio"
+      ]
+    },
+    {
+      "slug": "yuan-female-lead",
+      "displayName": "源·女主（种子）",
+      "kind": "clone_ref",
+      "file": "wavs/seed-female-lead.wav",
+      "tags": [
+        "seed",
+        "female",
+        "lead",
+        "yuanworld"
+      ],
+      "sampleText": "我把窗关严，又把袖口理平。",
+      "license": {
+        "source": "app-seed",
+        "rights": "internal-test-only"
+      },
+      "status": "draft",
+      "backendTargets": [
+        "mimo_chat_audio"
+      ]
+    },
+    {
+      "slug": "yuan-narrator-warm",
+      "displayName": "源·暖旁白（种子）",
+      "kind": "clone_ref",
+      "file": "wavs/seed-narrator-warm.wav",
+      "tags": [
+        "seed",
+        "narrator",
+        "yuanworld"
+      ],
+      "sampleText": "夜里的路灯只亮了半边。",
+      "license": {
+        "source": "app-seed",
+        "rights": "internal-test-only"
+      },
+      "status": "draft",
+      "backendTargets": [
+        "mimo_chat_audio"
+      ]
+    }
+  ]
+}

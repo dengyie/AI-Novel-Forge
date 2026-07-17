@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   buildCharacterTtsRefSaveFields,
+  buildCharacterVoiceModeSwitchPatches,
   canGenerateCharacterVoicePreview,
   canPreviewCharacterVoice,
   isCharacterVoiceFormDirty,
@@ -43,6 +44,28 @@ test("resolveCharacterVoiceBinding readiness by mode", () => {
     resolveCharacterVoiceBinding({ ttsMode: "clone", ttsRefAudioPath: "/tmp/ref.wav" }).detailLabel,
     /ref\.wav/,
   );
+  assert.equal(
+    resolveCharacterVoiceBinding({
+      ttsMode: "clone",
+      ttsVoiceAssetId: "va_abcdef12deadbeef",
+      ttsRefAudioPath: "",
+    }).ready,
+    true,
+  );
+  assert.match(
+    resolveCharacterVoiceBinding({
+      ttsMode: "clone",
+      ttsVoiceAssetId: "va_abcdef12deadbeef",
+    }).detailLabel,
+    /库\/va_abcdef/,
+  );
+  assert.equal(
+    resolveCharacterVoiceBinding({
+      ttsMode: "clone",
+      ttsVoiceAssetId: "va_abcdef12deadbeef",
+    }).shortLabel,
+    "库克隆",
+  );
 });
 
 test("canPreviewCharacterVoice gates preset/design/clone", () => {
@@ -66,6 +89,14 @@ test("canPreviewCharacterVoice gates preset/design/clone", () => {
     canPreviewCharacterVoice({ ttsMode: "clone", ttsRefAudioPath: "/data/a.wav" }).ok,
     true,
   );
+  assert.equal(
+    canPreviewCharacterVoice({
+      ttsMode: "clone",
+      ttsVoiceAssetId: "va_approved01",
+      ttsRefAudioPath: "",
+    }).ok,
+    true,
+  );
 });
 
 test("canGenerateCharacterVoicePreview requires saved clean form", () => {
@@ -75,6 +106,7 @@ test("canGenerateCharacterVoicePreview requires saved clean form", () => {
     ttsStyle: "",
     ttsDesignPrompt: "",
     ttsRefAudioPath: "",
+    ttsVoiceAssetId: "",
     ttsSpeakerAliases: "",
   };
   assert.equal(canGenerateCharacterVoicePreview({ form: saved, saved }).ok, true);
@@ -91,6 +123,23 @@ test("canGenerateCharacterVoicePreview requires saved clean form", () => {
       saved,
     }).reason,
     /保存/,
+  );
+  const cloneSaved = {
+    ttsMode: "clone",
+    ttsVoice: "",
+    ttsStyle: "",
+    ttsDesignPrompt: "",
+    ttsRefAudioPath: "/data/voice-refs/global/assets/va_x/ref.wav",
+    ttsVoiceAssetId: "va_x",
+    ttsSpeakerAliases: "",
+  };
+  assert.equal(canGenerateCharacterVoicePreview({ form: cloneSaved, saved: cloneSaved }).ok, true);
+  assert.equal(
+    canGenerateCharacterVoicePreview({
+      form: { ...cloneSaved, ttsVoiceAssetId: "va_y" },
+      saved: cloneSaved,
+    }).ok,
+    false,
   );
 });
 
@@ -116,7 +165,7 @@ test("buildCharacterTtsRefSaveFields omits path for clone keep, nulls otherwise"
       ttsRefAudioPath: "/data/voice-refs/n/c/ref.wav",
       ttsRefAudioBase64: "  AA==  ",
     }),
-    { ttsRefAudioBase64: "AA==" },
+    { ttsRefAudioBase64: "AA==", ttsVoiceAssetId: null },
   );
   assert.deepEqual(
     buildCharacterTtsRefSaveFields({
@@ -124,7 +173,7 @@ test("buildCharacterTtsRefSaveFields omits path for clone keep, nulls otherwise"
       ttsRefAudioPath: "/data/voice-refs/n/c/ref.wav",
       ttsRefAudioBase64: "",
     }),
-    { ttsRefAudioBase64: null, ttsRefAudioPath: null },
+    { ttsRefAudioBase64: null, ttsRefAudioPath: null, ttsVoiceAssetId: null },
   );
   assert.deepEqual(
     buildCharacterTtsRefSaveFields({
@@ -132,7 +181,7 @@ test("buildCharacterTtsRefSaveFields omits path for clone keep, nulls otherwise"
       ttsRefAudioPath: "",
       ttsRefAudioBase64: null,
     }),
-    { ttsRefAudioBase64: null, ttsRefAudioPath: null },
+    { ttsRefAudioBase64: null, ttsRefAudioPath: null, ttsVoiceAssetId: null },
   );
   assert.deepEqual(
     buildCharacterTtsRefSaveFields({
@@ -140,8 +189,45 @@ test("buildCharacterTtsRefSaveFields omits path for clone keep, nulls otherwise"
       ttsRefAudioPath: "   ",
       ttsRefAudioBase64: "",
     }),
-    { ttsRefAudioBase64: null, ttsRefAudioPath: null },
+    { ttsRefAudioBase64: null, ttsRefAudioPath: null, ttsVoiceAssetId: null },
   );
+  assert.deepEqual(
+    buildCharacterTtsRefSaveFields({
+      ttsMode: "clone",
+      ttsVoiceAssetId: "va_approved01",
+      ttsRefAudioPath: "/data/stale.wav",
+      ttsRefAudioBase64: "",
+    }),
+    { ttsRefAudioBase64: null, ttsVoiceAssetId: "va_approved01" },
+  );
+  // base64 优先于 assetId；显式 null 与 server decideCharacterVoiceRefUpdate 对齐
+  assert.deepEqual(
+    buildCharacterTtsRefSaveFields({
+      ttsMode: "clone",
+      ttsVoiceAssetId: "va_approved01",
+      ttsRefAudioBase64: "QQ==",
+    }),
+    { ttsRefAudioBase64: "QQ==", ttsVoiceAssetId: null },
+  );
+});
+
+test("buildCharacterVoiceModeSwitchPatches clears clone residue when leaving clone", () => {
+  assert.deepEqual(buildCharacterVoiceModeSwitchPatches("clone", "clone"), {});
+  assert.deepEqual(buildCharacterVoiceModeSwitchPatches("clone", "preset"), {
+    ttsMode: "clone",
+  });
+  assert.deepEqual(buildCharacterVoiceModeSwitchPatches("preset", "clone"), {
+    ttsMode: "preset",
+    ttsVoiceAssetId: "",
+    ttsRefAudioPath: "",
+    ttsRefAudioBase64: "",
+  });
+  assert.deepEqual(buildCharacterVoiceModeSwitchPatches("design", "clone"), {
+    ttsMode: "design",
+    ttsVoiceAssetId: "",
+    ttsRefAudioPath: "",
+    ttsRefAudioBase64: "",
+  });
 });
 
 test("isCharacterVoiceFormDirty detects mode/fields/base64 draft", () => {
@@ -151,6 +237,7 @@ test("isCharacterVoiceFormDirty detects mode/fields/base64 draft", () => {
     ttsStyle: "",
     ttsDesignPrompt: "",
     ttsRefAudioPath: "",
+    ttsVoiceAssetId: "",
     ttsSpeakerAliases: ["远哥"],
   };
   assert.equal(
@@ -160,6 +247,7 @@ test("isCharacterVoiceFormDirty detects mode/fields/base64 draft", () => {
       ttsStyle: "",
       ttsDesignPrompt: "",
       ttsRefAudioPath: "",
+      ttsVoiceAssetId: "",
       ttsSpeakerAliases: "远哥",
     }, saved),
     false,
@@ -171,6 +259,46 @@ test("isCharacterVoiceFormDirty detects mode/fields/base64 draft", () => {
       ttsSpeakerAliases: "远哥",
     }, saved),
     true,
+  );
+  assert.equal(
+    isCharacterVoiceFormDirty({
+      ttsMode: "clone",
+      ttsVoice: "",
+      ttsStyle: "",
+      ttsDesignPrompt: "",
+      ttsRefAudioPath: "/p.wav",
+      ttsVoiceAssetId: "va_a",
+      ttsSpeakerAliases: "",
+    }, {
+      ttsMode: "clone",
+      ttsVoice: "",
+      ttsStyle: "",
+      ttsDesignPrompt: "",
+      ttsRefAudioPath: "/p.wav",
+      ttsVoiceAssetId: "va_b",
+      ttsSpeakerAliases: "",
+    }),
+    true,
+  );
+  assert.equal(
+    isCharacterVoiceFormDirty({
+      ttsMode: "clone",
+      ttsVoice: "",
+      ttsStyle: "",
+      ttsDesignPrompt: "",
+      ttsRefAudioPath: "/p.wav",
+      ttsVoiceAssetId: "va_a",
+      ttsSpeakerAliases: "",
+    }, {
+      ttsMode: "clone",
+      ttsVoice: "",
+      ttsStyle: "",
+      ttsDesignPrompt: "",
+      ttsRefAudioPath: "/p.wav",
+      ttsVoiceAssetId: "va_a",
+      ttsSpeakerAliases: "",
+    }),
+    false,
   );
   assert.equal(
     isCharacterVoiceFormDirty({

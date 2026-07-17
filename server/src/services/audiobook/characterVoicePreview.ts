@@ -62,6 +62,7 @@ export type CharacterVoicePreviewConfig = {
   ttsStyle?: string | null;
   ttsDesignPrompt?: string | null;
   ttsRefAudioPath?: string | null;
+  ttsVoiceAssetId?: string | null;
 };
 
 function normalizePart(value?: string | null): string {
@@ -80,6 +81,7 @@ export function buildCharacterVoicePreviewFingerprint(
     normalizePart(config.ttsStyle),
     normalizePart(config.ttsDesignPrompt),
     normalizePart(config.ttsRefAudioPath),
+    normalizePart(config.ttsVoiceAssetId),
     clampCharacterVoicePreviewSampleText(normalizePart(sampleText)),
   ].join("|");
   return crypto.createHash("sha256").update(payload, "utf8").digest("hex");

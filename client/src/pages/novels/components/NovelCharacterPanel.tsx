@@ -57,6 +57,7 @@ interface CharacterFormState {
   ttsDesignPrompt: string;
   ttsRefAudioPath: string;
   ttsRefAudioBase64: string;
+  ttsVoiceAssetId: string;
   ttsSpeakerAliases: string;
   presenceImpression: string;
   currentState: string;
