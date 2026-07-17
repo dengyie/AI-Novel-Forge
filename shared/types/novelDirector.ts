@@ -268,6 +268,12 @@ export interface DirectorAutoExecutionState extends DirectorAutoExecutionPlan {
     chapterId?: string | null;
     chapterOrder?: number | null;
     reason: string;
+    /**
+     * quality_loop / replan_loop / repair_failure: real quality deferrals.
+     * review_skip: takeover progress skip of a blocked chapter when later pending
+     * chapters exist — historical label only. NOT API continuationMode=skip_quality_repair
+     * (that quality-bypass mint path is dead on the server).
+     */
     source: "quality_loop" | "replan_loop" | "repair_failure" | "review_skip";
     deferredAt: string;
   }>;

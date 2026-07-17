@@ -115,6 +115,9 @@ function reconcileAutoExecutionStateAfterStaleNoChapterFailure(input: {
     return state;
   }
 
+  // Progress deferral when later pending chapters exist — NOT the deprecated
+  // API continuationMode=skip_quality_repair quality bypass (that path is dead).
+  // source remains "review_skip" for historical state / board compatibility.
   const deferredState = buildDirectorAutoExecutionDeferredQualityState({
     state,
     reason: "继续已有进度时已跳过当前待修章节，后续章节继续执行。",

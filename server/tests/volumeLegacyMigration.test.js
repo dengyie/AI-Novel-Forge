@@ -227,3 +227,46 @@ test("mergeChapterDetail sanitizes generated taskSheet before merge write", () =
   assert.match(sheet, /资源危机/);
   assert.match(sheet, /收尾/);
 });
+
+test("sanitize never re-persists codes-only residue (generate path contract)", () => {
+  const {
+    sanitizeChapterTaskSheetForPersistence,
+  } = require("../../shared/dist/types/chapterTaskSheetQuality.js");
+  assert.equal(
+    sanitizeChapterTaskSheetForPersistence("payoff_missing_progress replan_required"),
+    null,
+  );
+  assert.equal(
+    sanitizeChapterTaskSheetForPersistence("推进资源危机；payoff_missing_progress 后收尾。")?.includes("payoff_"),
+    false,
+  );
+  // generate return contract: never `?? original.trim()` — empty string is the safe fallback
+  assert.equal(
+    sanitizeChapterTaskSheetForPersistence("draft_obligation_unmet") ?? "",
+    "",
+  );
+});
+
+test("volumeGenerationHelpers generate/preserve must not fall back to unsanitized taskSheet", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const helpersSrc = fs.readFileSync(
+    path.join(__dirname, "../src/services/novel/volume/volumeGenerationHelpers.ts"),
+    "utf8",
+  );
+  assert.doesNotMatch(
+    helpersSrc,
+    /\?\?\s*(?:existingChapter\.taskSheet|generated\.output\.taskSheet)\.trim\(\)/,
+    "must not re-persist unsanitized taskSheet via ?? original.trim()",
+  );
+  assert.match(
+    helpersSrc,
+    /sanitizeChapterTaskSheetForPersistence\(generated\.output\.taskSheet\)\s*\?\?\s*""/,
+    "LLM generate path should map codes-only to empty string, not original",
+  );
+  assert.match(
+    helpersSrc,
+    /codes-only residue → null: fall through and regenerate/,
+    "preserve path should skip codes-only sheets and regenerate",
+  );
+});
