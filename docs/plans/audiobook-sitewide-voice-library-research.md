@@ -1,5 +1,8 @@
 # 全站音色库 + AI 规划调研（SoT 摘要）
 
+> **基线 tip**：生产 / `origin/main` **`1b7078b`**（2026-07-18）  
+> **下一里程碑计划**：[`audiobook-voice-library-ops-and-ai-plan.md`](./audiobook-voice-library-ops-and-ai-plan.md)（D 库管理台 · E 人耳 approve · F setStatus 门禁 · G LLM redesign）
+
 ## Milestone A（已交付）
 - VoiceAsset JSON registry @ `storage/voice-refs/global`
 - Character.ttsVoiceAssetId + 服务端 bind（禁客户端裸 path）
@@ -23,12 +26,22 @@
 - 本地 base64 上传覆盖库绑定；客户端不写 `ttsRefAudioPath`
 - 分支：`feat/voice-library-milestone-c@b9940e7`（基于 B）
 
-## 安全
+## Harden（已交付 · `1b7078b`）
+- import / seed **禁止** `status|forceStatus=approved`（HTTP schema + service）
+- `sourcePath` / `packRoot` allowlist（data / voice-refs / docs/voice-packs / tmpdir）
+- registry 损坏 quarantine 备份后 500；`mutateRegistry` 文件锁
+- list `limit` 非有限回落 + `offset` 分页
+- 列表 skipProbe 仍 `tryResolve(requireApproved)`，幽灵 assetId → invalid
+- pxed cutover §七点四十五
+
+## 安全（不变量）
 - ttsRefAudioPath 仅 null 或服务端写
 - bind / plan apply clone 恒 requireApproved
 - 种子人耳批准前保持 draft
+- 开放 API 下能力限制在 service/HTTP，不假设 token 全局 auth
 
-## 后续 backlog（未开）
-- 真 LLM design rewrite
-- 人耳 approve 种子 / 生产 cutover
-- 库选择器检索/分页（当前 limit 200）
+## 后续（见 ops-and-ai 计划，未开实现前勿当已交付）
+- **D** 库管理台 + list/picker UX
+- **E** 种子人耳 approve（库级 preview + 单条 setStatus）
+- **F** setStatus 运维门禁（可选 `VOICE_LIBRARY_APPROVE_TOKEN`）
+- **G** 真 LLM design rewrite
