@@ -303,4 +303,25 @@ describe("voiceLibraryService", () => {
     });
   });
 
+  it("库级试听 draft 可解析；archived 拒绝", async () => {
+    await withIsolatedLibrary(async () => {
+      const wav = writeSilentPcmWav(path.join(TMP_ROOT, "src-preview.wav"));
+      const asset = voiceLibraryService.importFromFile({
+        sourcePath: wav,
+        slug: "preview-draft",
+        displayName: "Preview",
+        license: { source: "test", rights: "internal" },
+      });
+      assert.equal(asset.status, "draft");
+      const preview = voiceLibraryService.resolveLibraryPreviewAudioPath(asset.id);
+      assert.equal(preview.asset.id, asset.id);
+      assert.ok(fs.existsSync(preview.absolutePath));
+      voiceLibraryService.setStatus(asset.id, "archived");
+      assert.throws(
+        () => voiceLibraryService.resolveLibraryPreviewAudioPath(asset.id),
+        /archived/,
+      );
+    });
+  });
+
 });

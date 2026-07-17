@@ -37,6 +37,7 @@ import {
   resolveVoiceRefRoot,
 } from "./audiobookPaths";
 import { isValidPcmWavFile, parseWavInfo } from "./audiobookWav";
+import { auditVoiceLibraryStatusChange } from "./voiceLibraryApproveGate";
 import { checkVoiceRefAudioPath, isPathInside } from "./voiceRefPath";
 
 const DEFAULT_PACK_REL = path.join("docs", "voice-packs", "05-yuanworld-seed-from-mimo");
@@ -711,31 +712,72 @@ export class VoiceLibraryService {
     return { packId, imported, skipped, failed };
   }
 
+  /**
+   * 库级试听：解析 clone_ref 的 ref.wav 绝对路径。
+   * draft/approved 均可听；archived/deprecated 拒绝；不要求 approved。
+   */
+  resolveLibraryPreviewAudioPath(assetId: string): {
+    asset: VoiceAsset;
+    absolutePath: string;
+  } {
+    const asset = this.getById(assetId);
+    if (!asset) {
+      throw new AppError("VoiceAsset 不存在。", 404);
+    }
+    if (asset.kind !== "clone_ref") {
+      throw new AppError("仅 clone_ref 支持库级 WAV 试听。", 400);
+    }
+    if (asset.status === "archived" || asset.status === "deprecated") {
+      throw new AppError(`资产已 ${asset.status}，禁止试听。`, 400);
+    }
+    const absolutePath = assertCloneRefUsable(asset, false);
+    return { asset, absolutePath };
+  }
+
   setStatus(assetId: string, status: VoiceAssetStatus): VoiceAsset {
     if (!isVoiceAssetStatus(status)) {
       throw new AppError("status 非法。", 400);
     }
     let result: VoiceAsset | null = null;
-    mutateRegistry((registry) => {
-      const idx = registry.assets.findIndex((a) => a.id === assetId.trim());
-      if (idx < 0) {
-        throw new AppError("VoiceAsset 不存在。", 404);
-      }
-      const prev = registry.assets[idx]!;
-      if (status === "approved" && prev.kind === "clone_ref") {
-        assertCloneRefUsable({ ...prev, status: "approved" }, false);
-        if (!prev.license?.source || !prev.license?.rights) {
-          throw new AppError("approved 前必须具备 license.source/rights。", 400);
+    let fromStatus = "";
+    try {
+      mutateRegistry((registry) => {
+        const idx = registry.assets.findIndex((a) => a.id === assetId.trim());
+        if (idx < 0) {
+          throw new AppError("VoiceAsset 不存在。", 404);
         }
-      }
-      const next: VoiceAsset = {
-        ...prev,
-        status,
-        updatedAt: nowIso(),
-      };
-      registry.assets[idx] = next;
-      result = next;
-    });
+        const prev = registry.assets[idx]!;
+        fromStatus = prev.status;
+        if (status === "approved" && prev.kind === "clone_ref") {
+          assertCloneRefUsable({ ...prev, status: "approved" }, false);
+          if (!prev.license?.source || !prev.license?.rights) {
+            throw new AppError("approved 前必须具备 license.source/rights。", 400);
+          }
+        }
+        const next: VoiceAsset = {
+          ...prev,
+          status,
+          updatedAt: nowIso(),
+        };
+        registry.assets[idx] = next;
+        result = next;
+      });
+      auditVoiceLibraryStatusChange({
+        assetId: assetId.trim(),
+        from: fromStatus || "?",
+        to: status,
+        ok: true,
+      });
+    } catch (error) {
+      auditVoiceLibraryStatusChange({
+        assetId: assetId.trim(),
+        from: fromStatus || "?",
+        to: status,
+        ok: false,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
     return result!;
   }
 

@@ -145,6 +145,15 @@ G 不阻塞 E/F 生产可用。
 - 人耳听感（不可自动化通过）  
 - 生产 seed 是否入库由运营决定（默认可不导入）
 
+### 3.7 交付记录（2026-07-18）
+
+| 项 | 状态 |
+|---|---|
+| E1 库级 media-access + GET audio（clone_ref 直播 ref.wav；draft 可听） | ✅ |
+| E2 管理台试听 + session「已听」+ 单条 approve | ✅ |
+| E3 勾选 batch 仅已听项；零 auto-approve | ✅ |
+| 服务 `resolveLibraryPreviewAudioPath` + 单测 | ✅ |
+
 ---
 
 ## 4. Milestone F — setStatus 运维门禁
@@ -184,6 +193,15 @@ G 不阻塞 E/F 生产可用。
 
 - 完整 RBAC / 多用户账号体系  
 - 把 token 写进前端 bundle
+
+### 4.7 交付记录（2026-07-18）
+
+| 项 | 状态 |
+|---|---|
+| F1 `VOICE_LIBRARY_APPROVE_TOKEN` + header 校验 + timing-safe + 单测 set/unset | ✅ |
+| F2 管理台 sessionStorage token 输入；403 文案 | ✅ |
+| F3 audit 日志 `voice_library_status … ok=`（无 token 明文） | ✅ |
+| 未设 env 与现网兼容 | ✅ |
 
 ---
 
@@ -226,6 +244,15 @@ G 不阻塞 E/F 生产可用。
 
 - 自动 Design→Clone 全自动无人审  
 - 多模型辩论
+
+### 5.7 交付记录（2026-07-18）
+
+| 项 | 状态 |
+|---|---|
+| G1 `voiceDesignRewriteService` + mock LLM 单测 + rule_fallback | ✅ |
+| G2 `POST .../characters/:charId/voice-design/rewrite` 仅候选 | ✅ |
+| G3 角色卡 design 模式：生成候选 → 预览 → 应用到表单 | ✅ |
+| 真模型听感 | Manual-required |
 
 ---
 
@@ -277,7 +304,8 @@ Manual-required：无（空库可验）
 
 | 日期 | tip / 提交 | 说明 |
 |---|---|---|
-| 2026-07-18 | Milestone D | 库管理台 SPA + picker q/分页；见 §2.6 |
+| 2026-07-18 | Milestone E/F/G | 库试听+人耳 approve；approve token 门禁；LLM design rewrite |
+| 2026-07-18 | Milestone D `dc95736` | 库管理台 SPA + picker q/分页；见 §2.6 |
 | 2026-07-18 | `661c372` | 本计划文档上 main |
 | 2026-07-18 | `1b7078b` | harden live；本计划立项 |
 | 2026-07-18 | A/B/C `5ed6c25` | 库+planner+picker 生产基线 |

@@ -18,6 +18,7 @@ import {
   getCharacterVoicePreview,
   issueCharacterVoicePreviewMediaUrl,
   listVoiceLibrary,
+  rewriteCharacterVoiceDesign,
 } from "@/api/novel/audiobook";
 import type { NovelDetailResponse } from "@/api/novel/shared";
 import { Badge } from "@/components/ui/badge";
@@ -165,6 +166,9 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
   const [libraryKeyword, setLibraryKeyword] = useState("");
   const [debouncedLibraryKeyword, setDebouncedLibraryKeyword] = useState("");
   const [libraryPages, setLibraryPages] = useState(1);
+  const [rewriteNotes, setRewriteNotes] = useState("");
+  const [rewriteCandidate, setRewriteCandidate] = useState<string | null>(null);
+  const [rewriteMeta, setRewriteMeta] = useState<string>("");
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -610,6 +614,30 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
     },
   });
 
+  const rewriteDesignMutation = useMutation({
+    mutationFn: async () => {
+      const response = await rewriteCharacterVoiceDesign(novelId, characterId, {
+        currentDesignPrompt: form.ttsDesignPrompt?.trim() || null,
+        notes: rewriteNotes.trim() || null,
+      });
+      const data = response.data;
+      if (!data?.designPrompt?.trim()) {
+        throw new Error("rewrite 未返回有效 designPrompt。");
+      }
+      return data;
+    },
+    onSuccess: (data) => {
+      setRewriteCandidate(data.designPrompt);
+      setRewriteMeta(
+        `来源 ${data.source}${data.tags?.length ? ` · tags: ${data.tags.join(", ")}` : ""}（未写入角色卡）`,
+      );
+      setPreviewMessage("design 候选已生成，可预览后点「应用到表单」。");
+    },
+    onError: (error) => {
+      setPreviewMessage(error instanceof Error ? error.message : "design rewrite 失败。");
+    },
+  });
+
   return (
     <div className="space-y-3 rounded-xl border border-border/70 bg-muted/15 p-3">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
@@ -843,6 +871,46 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
             />
             <div className="text-xs text-muted-foreground">
               描述越具体，试听与成书越稳。可写年龄感、性别倾向、语速、情绪底色。
+            </div>
+            <div className="space-y-2 rounded-md border border-dashed p-2">
+              <div className="text-xs font-medium text-foreground">AI 重写设计描述</div>
+              <Input
+                className="h-9 text-sm"
+                placeholder="可选额外约束（语速/情绪/场景…）"
+                value={rewriteNotes}
+                onChange={(event) => setRewriteNotes(event.target.value)}
+              />
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={rewriteDesignMutation.isPending}
+                  onClick={() => rewriteDesignMutation.mutate()}
+                >
+                  {rewriteDesignMutation.isPending ? "生成中..." : "生成候选"}
+                </Button>
+                {rewriteCandidate ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={() => {
+                      onChange("ttsDesignPrompt", rewriteCandidate);
+                      setPreviewMessage("已应用 design 候选到表单（请再保存角色）。");
+                    }}
+                  >
+                    应用到表单
+                  </Button>
+                ) : null}
+              </div>
+              {rewriteCandidate ? (
+                <div className="space-y-1">
+                  <div className="text-[11px] text-muted-foreground">{rewriteMeta}</div>
+                  <div className="max-h-28 overflow-y-auto rounded border bg-background p-2 text-xs leading-5">
+                    {rewriteCandidate}
+                  </div>
+                </div>
+              ) : null}
             </div>
           </div>
         ) : null}

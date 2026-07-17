@@ -995,3 +995,30 @@ export interface VoiceAssetBindCharacterResult {
 export interface VoiceAssetSetStatusInput {
   status: VoiceAssetStatus;
 }
+
+/** 库资产试听：直接播 clone_ref 的 ref.wav（不强制绑角色）。 */
+export interface VoiceAssetLibraryPreviewResult {
+  assetId: string;
+  status: VoiceAssetStatus;
+  kind: VoiceAssetKind;
+  audioUrl: string;
+  sampleText?: string | null;
+  durationSec?: number | null;
+}
+
+export interface VoiceDesignRewriteInput {
+  /** 可选：覆盖当前角色卡草稿描述作为 rewrite 输入 */
+  currentDesignPrompt?: string | null;
+  /** 额外约束（语速/情绪等） */
+  notes?: string | null;
+  provider?: string | null;
+  model?: string | null;
+}
+
+export interface VoiceDesignRewriteResult {
+  designPrompt: string;
+  tags: string[];
+  source: "llm" | "rule_fallback";
+  /** 未写入角色卡；仅候选 */
+  applied: false;
+}

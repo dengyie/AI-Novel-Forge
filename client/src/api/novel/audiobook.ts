@@ -35,6 +35,8 @@ import type {
   VoiceAssetKind,
   VoiceAssetListResult,
   VoiceAssetStatus,
+  VoiceDesignRewriteInput,
+  VoiceDesignRewriteResult,
 } from "@ai-novel/shared/types/audiobook";
 import { API_AUTH_TOKEN, API_BASE_URL } from "@/lib/constants";
 import { apiClient } from "../client";
@@ -145,6 +147,59 @@ export async function importVoiceLibrarySeedPack(body: ImportVoiceLibrarySeedPac
       failed: Array<{ slug: string; reason: string }>;
     }>
   >("/novels/audiobook/voice-library/import-seed-pack", body);
+  return data;
+}
+
+/** 人耳批准 / 改状态；升 approved 时可选带 approve token header。 */
+export async function setVoiceLibraryAssetStatus(
+  assetId: string,
+  status: VoiceAssetStatus,
+  options?: { approveToken?: string | null },
+) {
+  const headers: Record<string, string> = {};
+  const token = options?.approveToken?.trim();
+  if (token) {
+    headers["X-Voice-Library-Approve-Token"] = token;
+  }
+  const { data } = await apiClient.patch<ApiResponse<VoiceAsset>>(
+    `/novels/audiobook/voice-library/${encodeURIComponent(assetId)}/status`,
+    { status },
+    { headers },
+  );
+  return data;
+}
+
+/** 签发库资产试听短时 URL（供 <audio>）。 */
+export async function issueVoiceLibraryAssetMediaUrl(assetId: string): Promise<string> {
+  const { data } = await apiClient.post<ApiResponse<AudiobookMediaAccessResult>>(
+    `/novels/audiobook/voice-library/${encodeURIComponent(assetId)}/media-access`,
+  );
+  const path = data.data?.urlPath;
+  if (!path) {
+    return buildVoiceLibraryAssetAudioUrl(assetId);
+  }
+  const base = API_BASE_URL.replace(/\/$/, "");
+  if (path.startsWith("http://") || path.startsWith("https://")) {
+    return path;
+  }
+  return `${base}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
+export function buildVoiceLibraryAssetAudioUrl(assetId: string): string {
+  const base = API_BASE_URL.replace(/\/$/, "");
+  return `${base}/novels/audiobook/voice-library/${encodeURIComponent(assetId)}/audio`;
+}
+
+/** design rewrite 候选（不写角色卡）。 */
+export async function rewriteCharacterVoiceDesign(
+  novelId: string,
+  characterId: string,
+  body: VoiceDesignRewriteInput = {},
+) {
+  const { data } = await apiClient.post<ApiResponse<VoiceDesignRewriteResult>>(
+    `/novels/${novelId}/characters/${characterId}/voice-design/rewrite`,
+    body,
+  );
   return data;
 }
 
