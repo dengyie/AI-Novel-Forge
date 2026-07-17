@@ -12,6 +12,7 @@ import {
   type AudiobookVoiceReadinessPrepareResult,
   type AudiobookVoiceReadinessSummary,
   type AudiobookWorkspaceBootstrap,
+  type AudiobookWorkspaceOverviewResult,
   type CharacterVoicePreviewAsset,
   type CreateAudiobookTaskInput,
 } from "@ai-novel/shared/types/audiobook";
@@ -30,6 +31,7 @@ import {
 import { audiobookTaskService } from "../../../../services/audiobook/AudiobookTaskService";
 import { audiobookVoiceAssetService } from "../../../../services/audiobook/AudiobookVoiceAssetService";
 import { audiobookVoiceReadinessService } from "../../../../services/audiobook/AudiobookVoiceReadinessService";
+import { buildAudiobookWorkspaceOverview } from "../../../../services/audiobook/audiobookWorkspaceOverview";
 import {
   resolveAudiobookTaskDir,
   resolveChapterAudioPath,
@@ -339,6 +341,10 @@ const voiceReadinessJobParamsSchema = z.object({
   jobId: z.string().trim().min(1),
 });
 
+const workspaceOverviewBodySchema = z.object({
+  novelIds: z.array(z.string()).max(200).default([]),
+});
+
 export function registerNovelAudiobookRoutes(input: { router: Router }): void {
   const { router } = input;
 
@@ -353,6 +359,30 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
       next(error);
     }
   });
+
+  /**
+   * 选书页 bulk 态势：单次批量读库 + 纯函数摘要 + 每本 latest task。
+   * 禁止 N× assess；列表不 probe clone 文件。
+   */
+  router.post(
+    "/audiobook/workspace-overview",
+    validate({ body: workspaceOverviewBodySchema }),
+    async (req, res, next) => {
+      try {
+        const body = req.body as z.infer<typeof workspaceOverviewBodySchema>;
+        const data = await buildAudiobookWorkspaceOverview(body.novelIds ?? []);
+        res.status(200).json({
+          success: true,
+          data,
+          message: data.truncated
+            ? "有声书工作台态势（已截断至 50 本）。"
+            : "有声书工作台态势。",
+        } satisfies ApiResponse<AudiobookWorkspaceOverviewResult>);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
 
   /** 有声书工作台首屏：轻量章节选项 + 角色音色字段（不含正文）。 */
   router.get(

@@ -21,6 +21,8 @@ import type {
   AudiobookVoiceReadinessPrepareResult,
   AudiobookVoiceReadinessSummary,
   AudiobookWorkspaceBootstrap,
+  AudiobookWorkspaceOverviewRequest,
+  AudiobookWorkspaceOverviewResult,
   CharacterVoicePreviewAsset,
   CharacterVoicePreviewGenerateInput,
   CreateAudiobookTaskInput,
@@ -40,6 +42,15 @@ export async function listAudiobookVoices() {
 export async function getAudiobookWorkspace(novelId: string) {
   const { data } = await apiClient.get<ApiResponse<AudiobookWorkspaceBootstrap>>(
     `/novels/${novelId}/audiobook/workspace`,
+  );
+  return data;
+}
+
+/** 选书页 bulk 态势（禁 N× assess；服务端截断 50）。 */
+export async function postAudiobookWorkspaceOverview(body: AudiobookWorkspaceOverviewRequest) {
+  const { data } = await apiClient.post<ApiResponse<AudiobookWorkspaceOverviewResult>>(
+    "/novels/audiobook/workspace-overview",
+    body,
   );
   return data;
 }

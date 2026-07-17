@@ -1,13 +1,15 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Headphones, BookOpenText, Search } from "lucide-react";
 import { getNovelList } from "@/api/novel";
+import { postAudiobookWorkspaceOverview } from "@/api/novel/audiobook";
 import { queryKeys } from "@/api/queryKeys";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { resolveAudiobookWorkspaceBadges } from "./audiobookWorkspaceBadges";
 
 const PAGE_SIZE = 50;
 const SEARCH_DEBOUNCE_MS = 300;
@@ -33,6 +35,25 @@ export default function AudiobookWorkspacePage() {
 
   const items = novelListQuery.data?.data?.items ?? [];
   const totalPages = novelListQuery.data?.data?.totalPages ?? 1;
+  const novelIds = useMemo(() => items.map((item) => item.id), [items]);
+
+  const overviewQuery = useQuery({
+    queryKey: queryKeys.novels.audiobookWorkspaceOverview(page, debouncedKeyword),
+    queryFn: async () => {
+      const response = await postAudiobookWorkspaceOverview({ novelIds });
+      return response.data;
+    },
+    enabled: novelIds.length > 0 && !novelListQuery.isLoading && !novelListQuery.isError,
+    staleTime: 20_000,
+  });
+
+  const overviewById = useMemo(() => {
+    const map = new Map<string, NonNullable<typeof overviewQuery.data>["items"][number]>();
+    for (const row of overviewQuery.data?.items ?? []) {
+      map.set(row.novelId, row);
+    }
+    return map;
+  }, [overviewQuery.data]);
 
   return (
     <div className="mx-auto max-w-4xl space-y-6 px-4 py-6">
@@ -59,6 +80,7 @@ export default function AudiobookWorkspacePage() {
           <CardTitle className="text-base">选择小说</CardTitle>
           <CardDescription>
             有声书任务挂在小说角色卡与章节上，无需单独建项目。选中后进入该小说的有声书开发页。
+            列表展示轻量态势（生成中 / 缺音色 / 可听等），精确试听与 clone 探针以项目页为准。
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -91,34 +113,52 @@ export default function AudiobookWorkspacePage() {
           ) : null}
 
           <div className="space-y-3">
-            {items.map((novel) => (
-              <div
-                key={novel.id}
-                className="flex flex-col gap-3 rounded-xl border border-border/70 bg-muted/20 p-4 sm:flex-row sm:items-center sm:justify-between"
-              >
-                <div className="min-w-0 space-y-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <div className="truncate text-sm font-semibold text-foreground">{novel.title}</div>
-                    {novel.status ? (
-                      <Badge variant="outline" className="text-[10px]">
-                        {novel.status}
-                      </Badge>
-                    ) : null}
+            {items.map((novel) => {
+              const overview = overviewById.get(novel.id);
+              const badges = resolveAudiobookWorkspaceBadges(overview);
+              return (
+                <div
+                  key={novel.id}
+                  className="flex flex-col gap-3 rounded-xl border border-border/70 bg-muted/20 p-4 sm:flex-row sm:items-center sm:justify-between"
+                >
+                  <div className="min-w-0 space-y-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <div className="truncate text-sm font-semibold text-foreground">{novel.title}</div>
+                      {novel.status ? (
+                        <Badge variant="outline" className="text-[10px]">
+                          {novel.status}
+                        </Badge>
+                      ) : null}
+                      {badges.primary ? (
+                        <Badge variant={badges.primary.variant} className="text-[10px]">
+                          {badges.primary.label}
+                        </Badge>
+                      ) : overviewQuery.isFetching && !overviewQuery.data ? (
+                        <Badge variant="outline" className="text-[10px] text-muted-foreground">
+                          态势…
+                        </Badge>
+                      ) : null}
+                      {badges.secondary.map((badge) => (
+                        <Badge key={badge.label} variant={badge.variant} className="text-[10px]">
+                          {badge.label}
+                        </Badge>
+                      ))}
+                    </div>
+                    <div className="line-clamp-2 text-xs leading-5 text-muted-foreground">
+                      {novel.description?.trim() || "暂无简介"}
+                    </div>
                   </div>
-                  <div className="line-clamp-2 text-xs leading-5 text-muted-foreground">
-                    {novel.description?.trim() || "暂无简介"}
+                  <div className="flex shrink-0 flex-wrap gap-2">
+                    <Button type="button" size="sm" asChild>
+                      <Link to={`/audiobook/novels/${novel.id}`}>打开有声书</Link>
+                    </Button>
+                    <Button type="button" size="sm" variant="outline" asChild>
+                      <Link to={`/novels/${novel.id}/edit`}>编辑小说</Link>
+                    </Button>
                   </div>
                 </div>
-                <div className="flex shrink-0 flex-wrap gap-2">
-                  <Button type="button" size="sm" asChild>
-                    <Link to={`/audiobook/novels/${novel.id}`}>打开有声书</Link>
-                  </Button>
-                  <Button type="button" size="sm" variant="outline" asChild>
-                    <Link to={`/novels/${novel.id}/edit`}>编辑小说</Link>
-                  </Button>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           {totalPages > 1 ? (
