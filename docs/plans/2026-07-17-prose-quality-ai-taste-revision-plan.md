@@ -1,5 +1,6 @@
 # 正文质量至上 · 去 AI 味 · 完整改稿流水线 Implementation Plan
 
+> **状态：已交付（worktree `feat/prose-quality-ai-taste`）** · 2026-07-17  
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 把「写完即可过审」改成「质量至上的定稿流水线」：确定性拦 他/她 堆叠与其它 AI 味硬信号；Style Review 支持热点段落多候选改写；残留文风债进入 qualityLoop 且关键章可强制风格门；写 ≠ 完成。

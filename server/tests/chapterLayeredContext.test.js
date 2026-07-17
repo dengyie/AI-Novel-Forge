@@ -965,3 +965,74 @@ test("sceneDiversityForce idle leaves existing constraints unchanged", () => {
   assert.ok(!writeContext.chapterMission.riskNotes.some((item) => item.includes("scene_diversity_force")));
   assert.deepEqual(writeContext.recentScenePatterns, []);
 });
+
+test("style_contract is non-empty when StyleProfile is bound", () => {
+  const contextPackage = createContextPackage();
+  contextPackage.styleContext = createStyleContext();
+
+  const writeContext = buildChapterWriteContext({
+    bookContract: contextPackage.bookContract,
+    macroConstraints: contextPackage.macroConstraints,
+    volumeWindow: contextPackage.volumeWindow,
+    contextPackage,
+  });
+  const writerBlocks = buildChapterWriterContextBlocks(writeContext);
+  const styleBlock = assertNonEmptyBlock(writerBlocks, "style_contract");
+  assert.match(styleBlock.content, /保持高压反压的叙事手感/);
+});
+
+test("open-chapter style_contract appends pronoun voice hint when order≤3", () => {
+  const contextPackage = createContextPackage();
+  contextPackage.chapter = {
+    ...contextPackage.chapter,
+    id: "chapter-1",
+    title: "第1章 开篇",
+    order: 1,
+  };
+  contextPackage.chapterStateGoal = {
+    ...contextPackage.chapterStateGoal,
+    chapterId: "chapter-1",
+    chapterOrder: 1,
+  };
+  contextPackage.plan = {
+    ...contextPackage.plan,
+    id: "plan-1",
+    chapterId: "chapter-1",
+    title: "第1章计划",
+  };
+  contextPackage.styleContext = createStyleContext();
+
+  const writeContext = buildChapterWriteContext({
+    bookContract: contextPackage.bookContract,
+    macroConstraints: contextPackage.macroConstraints,
+    volumeWindow: contextPackage.volumeWindow,
+    contextPackage,
+  });
+  assert.equal(writeContext.chapterMission.chapterOrder, 1);
+
+  const writerBlocks = buildChapterWriterContextBlocks(writeContext);
+  const styleBlock = assertNonEmptyBlock(writerBlocks, "style_contract");
+  assert.match(styleBlock.content, /【开篇声线】/);
+  assert.match(styleBlock.content, /开篇忌连续句首他\/她；优先专名与动作起句/);
+  assert.match(styleBlock.content, /保持高压反压的叙事手感/);
+});
+
+test("mid-book style_contract does not append open-chapter pronoun hint when order>3", () => {
+  const contextPackage = createContextPackage();
+  // default order=5
+  contextPackage.styleContext = createStyleContext();
+
+  const writeContext = buildChapterWriteContext({
+    bookContract: contextPackage.bookContract,
+    macroConstraints: contextPackage.macroConstraints,
+    volumeWindow: contextPackage.volumeWindow,
+    contextPackage,
+  });
+  assert.equal(writeContext.chapterMission.chapterOrder, 5);
+
+  const writerBlocks = buildChapterWriterContextBlocks(writeContext);
+  const styleBlock = assertNonEmptyBlock(writerBlocks, "style_contract");
+  assert.match(styleBlock.content, /保持高压反压的叙事手感/);
+  assert.doesNotMatch(styleBlock.content, /【开篇声线】/);
+  assert.doesNotMatch(styleBlock.content, /开篇忌连续句首他\/她/);
+});
