@@ -628,10 +628,18 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
     },
     onSuccess: (data) => {
       setRewriteCandidate(data.designPrompt);
+      const fallback =
+        data.source === "rule_fallback" && data.fallbackReason
+          ? ` · fallback: ${data.fallbackReason}`
+          : "";
       setRewriteMeta(
-        `来源 ${data.source}${data.tags?.length ? ` · tags: ${data.tags.join(", ")}` : ""}（未写入角色卡）`,
+        `来源 ${data.source}${data.tags?.length ? ` · tags: ${data.tags.join(", ")}` : ""}${fallback}（未写入角色卡）`,
       );
-      setPreviewMessage("design 候选已生成，可预览后点「应用到表单」。");
+      setPreviewMessage(
+        data.source === "rule_fallback"
+          ? "LLM 不可用，已用规则候选；可预览后点「应用到表单」。"
+          : "design 候选已生成，可预览后点「应用到表单」。",
+      );
     },
     onError: (error) => {
       setPreviewMessage(error instanceof Error ? error.message : "design rewrite 失败。");

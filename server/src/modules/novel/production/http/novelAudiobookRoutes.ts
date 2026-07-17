@@ -577,6 +577,17 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
           }
         }
         const { absolutePath } = voiceLibraryService.resolveLibraryPreviewAudioPath(assetId);
+        // 实际拉流才记人耳；media-access 签发不算
+        try {
+          voiceLibraryService.markLibraryPreviewHeard(assetId);
+        } catch (markError) {
+          // 标记失败不阻断试听；approve 仍会被 heard 门禁拦住
+          console.warn(
+            "voice_library_mark_heard_failed",
+            assetId,
+            markError instanceof Error ? markError.message : String(markError),
+          );
+        }
         streamWavFile(req, res, absolutePath, `voice-library-${assetId}.wav`);
       } catch (error) {
         next(error);

@@ -77,4 +77,31 @@ describe("voiceDesignRewriteService", () => {
       /必填/,
     );
   });
+
+  it("非法 provider → 400；fallback 带 fallbackReason", async () => {
+    await assert.rejects(
+      () =>
+        rewriteCharacterVoiceDesign({
+          novelId: "novel-1",
+          characterId: "char-1",
+          body: { provider: "not-a-real-provider" },
+          loadCharacter: async () => SAMPLE_CHAR,
+        }),
+      /provider/,
+    );
+
+    const result = await rewriteCharacterVoiceDesign({
+      novelId: "novel-1",
+      characterId: "char-1",
+      loadCharacter: async () => SAMPLE_CHAR,
+      llm: {
+        invoke: async () => {
+          throw new Error("upstream timeout");
+        },
+      },
+    });
+    assert.equal(result.source, "rule_fallback");
+    assert.ok(result.fallbackReason);
+    assert.match(String(result.fallbackReason), /timeout|upstream/i);
+  });
 });

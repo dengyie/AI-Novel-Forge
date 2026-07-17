@@ -918,6 +918,13 @@ export interface VoiceAssetPrimaryFile {
   channels?: number | null;
 }
 
+/** 人耳审核轻量字段；升 approved 前 clone_ref 须有 heardAt。 */
+export interface VoiceAssetReview {
+  /** ISO 时间：库级音频曾被拉取/播放 */
+  heardAt?: string | null;
+  heardBy?: string | null;
+}
+
 export interface VoiceAsset {
   id: string;
   slug: string;
@@ -932,6 +939,8 @@ export interface VoiceAsset {
   backendTargets: VoiceAssetBackendTarget[];
   primaryFile?: VoiceAssetPrimaryFile | null;
   packId?: string | null;
+  /** 可选审核状态（E：人耳） */
+  review?: VoiceAssetReview | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -996,16 +1005,6 @@ export interface VoiceAssetSetStatusInput {
   status: VoiceAssetStatus;
 }
 
-/** 库资产试听：直接播 clone_ref 的 ref.wav（不强制绑角色）。 */
-export interface VoiceAssetLibraryPreviewResult {
-  assetId: string;
-  status: VoiceAssetStatus;
-  kind: VoiceAssetKind;
-  audioUrl: string;
-  sampleText?: string | null;
-  durationSec?: number | null;
-}
-
 export interface VoiceDesignRewriteInput {
   /** 可选：覆盖当前角色卡草稿描述作为 rewrite 输入 */
   currentDesignPrompt?: string | null;
@@ -1021,4 +1020,6 @@ export interface VoiceDesignRewriteResult {
   source: "llm" | "rule_fallback";
   /** 未写入角色卡；仅候选 */
   applied: false;
+  /** rule_fallback 时可选原因（可观测，非密钥） */
+  fallbackReason?: string | null;
 }

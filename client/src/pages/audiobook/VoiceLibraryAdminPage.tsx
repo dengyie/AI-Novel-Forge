@@ -129,6 +129,34 @@ export default function VoiceLibraryAdminPage() {
   const page = Math.floor(offset / PAGE_SIZE) + 1;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
+  const markHeard = (assetId: string) => {
+    setHeardIds((prev) => {
+      if (prev.has(assetId)) return prev;
+      const next = new Set(prev);
+      next.add(assetId);
+      return next;
+    });
+  };
+
+  // 服务端 review.heardAt 与 session 本地并集
+  useEffect(() => {
+    const serverHeard = items
+      .filter((asset) => Boolean(asset.review?.heardAt?.trim()))
+      .map((asset) => asset.id);
+    if (serverHeard.length === 0) return;
+    setHeardIds((prev) => {
+      let changed = false;
+      const next = new Set(prev);
+      for (const id of serverHeard) {
+        if (!next.has(id)) {
+          next.add(id);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [items]);
+
   const detailQuery = useQuery({
     queryKey: queryKeys.novels.voiceLibrary(`detail:${selectedId || ""}`),
     queryFn: async () => {
@@ -139,6 +167,12 @@ export default function VoiceLibraryAdminPage() {
     enabled: Boolean(selectedId),
     staleTime: 10_000,
   });
+
+  useEffect(() => {
+    const heardAt = detailQuery.data?.review?.heardAt?.trim();
+    const id = detailQuery.data?.id;
+    if (heardAt && id) markHeard(id);
+  }, [detailQuery.data?.id, detailQuery.data?.review?.heardAt]);
 
   const invalidateLibrary = async () => {
     await queryClient.invalidateQueries({ queryKey: ["novels", "voice-library"] });
@@ -230,15 +264,6 @@ export default function VoiceLibraryAdminPage() {
     },
   });
 
-  const markHeard = (assetId: string) => {
-    setHeardIds((prev) => {
-      if (prev.has(assetId)) return prev;
-      const next = new Set(prev);
-      next.add(assetId);
-      return next;
-    });
-  };
-
   const handlePreview = async (assetId: string) => {
     setPreviewLoadingId(assetId);
     setActionMessage("");
@@ -246,7 +271,7 @@ export default function VoiceLibraryAdminPage() {
       const url = await issueVoiceLibraryAssetMediaUrl(assetId);
       setPreviewUrl(url);
       setSelectedId(assetId);
-      markHeard(assetId);
+      // 不在签发 URL 时 markHeard：须 audio 拉流/播放；服务端在 GET /audio 写 review.heardAt
     } catch (error) {
       setActionMessage(`试听失败：${formatError(error)}`);
     } finally {
@@ -528,6 +553,11 @@ export default function VoiceLibraryAdminPage() {
                       controls
                       className="w-full"
                       src={previewUrl}
+                      onLoadedData={() => {
+                        // GET /audio 已写服务端 heardAt；本地同步 UI
+                        markHeard(detailQuery.data!.id);
+                        void invalidateLibrary();
+                      }}
                       onPlay={() => markHeard(detailQuery.data!.id)}
                     />
                   ) : null}
@@ -569,7 +599,7 @@ export default function VoiceLibraryAdminPage() {
                   </div>
                   {detailQuery.data.status === "draft" ? (
                     <p className="rounded-lg border border-border/60 bg-muted/20 px-2 py-1.5 text-xs text-muted-foreground">
-                      draft 不可绑角色。须先点试听标记「已听」，再单条或勾选批准。
+                      draft 不可绑角色。须实际播放/拉取试听音频（服务端记录 heardAt）后才能批准。
                       未听不可 batch approve。生产 env 配置 token 时须填上方令牌。
                     </p>
                   ) : null}
