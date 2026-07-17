@@ -1068,7 +1068,8 @@ export default function NovelEdit() {
     },
   });
   const continueAutoExecutionMutation = useMutation({
-    mutationFn: async (input?: { directorTaskId?: string; continuationMode?: "auto_execute_range" | "skip_quality_repair" }) => {
+    // UI 主路径只发 auto_execute_range；废弃 skip_quality_repair 不得从编辑页露出
+    mutationFn: async (input?: { directorTaskId?: string; continuationMode?: "auto_execute_range" }) => {
       const targetTaskId = input?.directorTaskId || actionTargetDirectorTaskId;
       if (!targetTaskId) {
         throw new Error("当前没有可继续自动执行的自动导演任务。");

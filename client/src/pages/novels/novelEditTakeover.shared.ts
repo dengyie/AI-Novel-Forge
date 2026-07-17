@@ -134,10 +134,6 @@ export function buildContinueAutoExecutionActionLabel(scopeLabel: string, isPend
   return isPending ? "继续执行中..." : `继续自动执行${scopeLabel}`;
 }
 
-export function buildSkipQualityRepairActionLabel(scopeLabel: string, isPending: boolean): string {
-  return isPending ? "继续执行中..." : `跳过本次建议，继续${scopeLabel}`;
-}
-
 export function buildContinueAutoExecutionToast(scopeLabel: string): string {
   return `自动导演已继续执行${scopeLabel}，并会在后台自动审核与修复。`;
 }

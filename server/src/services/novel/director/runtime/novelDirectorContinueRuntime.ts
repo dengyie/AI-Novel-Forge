@@ -128,16 +128,16 @@ function resolveContinuationExecutionFlags(continuationMode: DirectorContinuatio
 }
 
 /**
- * 质量旁路死门：恒 false。
+ * 质量旁路死门：恒 false（验收 A7 钉此函数名 + 恒 false）。
  * 历史 API 仍可传 continuationMode=skip_quality_repair，但不得再写 review_skip 债。
- * 续跑语义见 resolveContinuationExecutionFlags。
+ * 执行面以 resolveContinuationExecutionFlags 为准；本函数仅作纵深钉死，勿恢复 mode 分支。
  */
 function shouldSkipCurrentQualityRepair(input: {
   continuationMode: DirectorContinuationMode | null;
   checkpointType?: string | null;
   currentItemKey?: string | null;
   currentStage?: string | null;
-}): boolean {
+}): false {
   void input.continuationMode;
   void input.checkpointType;
   void input.currentItemKey;
