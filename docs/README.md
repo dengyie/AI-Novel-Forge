@@ -44,10 +44,10 @@
 
 #### 有声书 / 音色库工作流（main 上活跃）
 
-基线 `1b7078b`，Milestone A/B/C/Harden/D 已交付，E/F/G 在轨。详见 [SoT 摘要](./plans/audiobook-sitewide-voice-library-research.md) 与 [运营与 AI 规划 D–G](./plans/audiobook-voice-library-ops-and-ai-plan.md)。
+生产 tip **`0b776e6`**：Milestone A/B/C/Harden/D/**E/F/G + heardSha** 代码已交付；approve token live。详见 [SoT 摘要](./plans/audiobook-sitewide-voice-library-research.md) 与 [运营与 AI 规划 D–G](./plans/audiobook-voice-library-ops-and-ai-plan.md)。
 
 - [全站音色库 + AI 规划调研（SoT 摘要）](./plans/audiobook-sitewide-voice-library-research.md)
-- [音色库运营与 AI 规划 D–G](./plans/audiobook-voice-library-ops-and-ai-plan.md)（active · D 库管理台 · E 人耳 approve · F setStatus 门禁 · G LLM redesign）
+- [音色库运营与 AI 规划 D–G](./plans/audiobook-voice-library-ops-and-ai-plan.md)（delivered code · D–G · vault §七点四十九）
 - [Audiobook Segment Delivery Style](./plans/audiobook-segment-delivery-style-plan.md)
 - [Audiobook Character Voice Differentiation](./plans/audiobook-character-voice-differentiation-plan.md)
 - [Audiobook Mimo TTS Multi Backend](./plans/audiobook-mimo-tts-multi-backend-plan.md)
