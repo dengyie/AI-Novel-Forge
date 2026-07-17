@@ -262,19 +262,47 @@ export default function PipelineTab(props: PipelineTabProps) {
               ) : null}
               <div className="space-y-2 text-xs">
                 {qualityDebtBoard.items
-                  .filter((item) => item.riskClassification === "blocking")
+                  .filter((item) => item.riskClassification === "blocking" || item.riskClassification === "non_blocking_quality_debt")
                   .slice(0, 12)
-                  .map((item) => (
-                    <div key={item.chapterId} className="flex items-center justify-between rounded-md border bg-background/70 px-3 py-2">
-                      <span>
-                        第{item.chapterOrder}章 {item.title || ""}
-                        <span className="ml-2 text-muted-foreground">{item.recommendedAction}/{item.rootCauseCode || "-"}</span>
-                      </span>
-                      <Badge variant="secondary">{item.riskClassification}</Badge>
-                    </div>
-                  ))}
-                {qualityDebtBoard.items.filter((item) => item.riskClassification === "blocking").length === 0 ? (
-                  <div className="text-muted-foreground">当前无 blocking 质量债条目。</div>
+                  .map((item) => {
+                    const gateBits = [
+                      item.literaryPass === false ? "文学未过" : item.literaryPass === true ? "文学过" : null,
+                      item.l0Clear === false ? "L0硬伤" : item.l0Clear === true ? "L0清" : null,
+                      item.styleClear === false ? "文风未过" : item.styleClear === true ? "文风过" : null,
+                      typeof item.residualRiskScore === "number" ? `residual=${item.residualRiskScore}` : null,
+                    ].filter(Boolean);
+                    const feedbackBits = item.latestFeedback
+                      ? [
+                          item.latestFeedback.rootCause,
+                          item.latestFeedback.severity,
+                          item.latestFeedback.avoidRetry ? "禁同路径重试" : null,
+                          item.latestFeedback.codes.slice(0, 3).join(","),
+                        ].filter(Boolean)
+                      : [];
+                    return (
+                      <div key={item.chapterId} className="flex items-start justify-between gap-2 rounded-md border bg-background/70 px-3 py-2">
+                        <div className="min-w-0 space-y-1">
+                          <div>
+                            第{item.chapterOrder}章 {item.title || ""}
+                            <span className="ml-2 text-muted-foreground">{item.recommendedAction}/{item.rootCauseCode || "-"}</span>
+                          </div>
+                          {gateBits.length > 0 ? (
+                            <div className="text-muted-foreground">门禁：{gateBits.join(" · ")}</div>
+                          ) : null}
+                          {feedbackBits.length > 0 ? (
+                            <div className="text-muted-foreground">QFP：{feedbackBits.join(" · ")}</div>
+                          ) : null}
+                        </div>
+                        <Badge variant={item.riskClassification === "blocking" ? "destructive" : "secondary"}>
+                          {item.riskClassification === "blocking" ? "blocking" : "债"}
+                        </Badge>
+                      </div>
+                    );
+                  })}
+                {qualityDebtBoard.items.filter((item) =>
+                  item.riskClassification === "blocking" || item.riskClassification === "non_blocking_quality_debt"
+                ).length === 0 ? (
+                  <div className="text-muted-foreground">当前无质量债条目。</div>
                 ) : null}
               </div>
             </>
