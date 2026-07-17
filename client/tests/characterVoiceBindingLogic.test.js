@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   buildCharacterTtsRefSaveFields,
+  buildCharacterVoiceModeSwitchPatches,
   canGenerateCharacterVoicePreview,
   canPreviewCharacterVoice,
   isCharacterVoiceFormDirty,
@@ -199,7 +200,7 @@ test("buildCharacterTtsRefSaveFields omits path for clone keep, nulls otherwise"
     }),
     { ttsRefAudioBase64: null, ttsVoiceAssetId: "va_approved01" },
   );
-  // base64 优先于 assetId
+  // base64 优先于 assetId；显式 null 与 server decideCharacterVoiceRefUpdate 对齐
   assert.deepEqual(
     buildCharacterTtsRefSaveFields({
       ttsMode: "clone",
@@ -208,6 +209,25 @@ test("buildCharacterTtsRefSaveFields omits path for clone keep, nulls otherwise"
     }),
     { ttsRefAudioBase64: "QQ==", ttsVoiceAssetId: null },
   );
+});
+
+test("buildCharacterVoiceModeSwitchPatches clears clone residue when leaving clone", () => {
+  assert.deepEqual(buildCharacterVoiceModeSwitchPatches("clone", "clone"), {});
+  assert.deepEqual(buildCharacterVoiceModeSwitchPatches("clone", "preset"), {
+    ttsMode: "clone",
+  });
+  assert.deepEqual(buildCharacterVoiceModeSwitchPatches("preset", "clone"), {
+    ttsMode: "preset",
+    ttsVoiceAssetId: "",
+    ttsRefAudioPath: "",
+    ttsRefAudioBase64: "",
+  });
+  assert.deepEqual(buildCharacterVoiceModeSwitchPatches("design", "clone"), {
+    ttsMode: "design",
+    ttsVoiceAssetId: "",
+    ttsRefAudioPath: "",
+    ttsRefAudioBase64: "",
+  });
 });
 
 test("isCharacterVoiceFormDirty detects mode/fields/base64 draft", () => {

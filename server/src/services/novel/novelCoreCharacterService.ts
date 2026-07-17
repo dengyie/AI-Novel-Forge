@@ -8,6 +8,7 @@ import { writeCharacterVoiceRefFromBase64 } from "../audiobook/audiobookPaths";
 import { voiceLibraryService } from "../audiobook/voiceLibraryService";
 import { parseSpeakerAliases } from "../audiobook/audiobookSpeakerAliases";
 import { ragServices } from "../rag";
+import { decideCharacterVoiceRefUpdate } from "./characterVoiceRefUpdate";
 import { queueRagDelete, queueRagUpsert } from "./novelCoreSupport";
 import { WorldContextGateway } from "./worldContext/WorldContextGateway";
 import {
@@ -158,13 +159,15 @@ export class NovelCoreCharacterService {
       nextData.ttsRefAudioPath = null;
     }
 
-    // library bind 优先于 base64；null 清空 asset 绑定
-    // 绑库后继续合并同请求其它字段，避免 early-return 丢更新
-    if (clientAssetId === null) {
-      nextData.ttsVoiceAssetId = null;
-    } else if (typeof clientAssetId === "string" && clientAssetId.trim()) {
+    // assetId 非空 → 绑库；否则 base64 写盘（含同请求 assetId:null）；否则仅 null 清 asset
+    // 不可先处理 assetId===null 再 else-if base64，否则会吞掉「上传覆盖库绑定」
+    const voiceRefDecision = decideCharacterVoiceRefUpdate({
+      ttsVoiceAssetId: clientAssetId,
+      ttsRefAudioBase64,
+    });
+    if (voiceRefDecision.action === "bind") {
       const { asset, absolutePath } = voiceLibraryService.assertBindableCloneRef(
-        clientAssetId.trim(),
+        voiceRefDecision.voiceAssetId,
       );
       nextData = {
         ...nextData,
@@ -174,12 +177,11 @@ export class NovelCoreCharacterService {
         ttsVoice: null,
         ttsDesignPrompt: null,
       };
-      // 绑库时忽略同请求 base64，避免覆盖库路径
-    } else if (ttsRefAudioBase64?.trim()) {
+    } else if (voiceRefDecision.action === "write_base64") {
       const refPath = writeCharacterVoiceRefFromBase64({
         novelId,
         characterId,
-        base64: ttsRefAudioBase64,
+        base64: voiceRefDecision.base64,
       });
       nextData = {
         ...nextData,
@@ -187,6 +189,8 @@ export class NovelCoreCharacterService {
         ttsMode: data.ttsMode ?? "clone",
         ttsVoiceAssetId: null,
       };
+    } else if (voiceRefDecision.action === "clear_asset") {
+      nextData.ttsVoiceAssetId = null;
     }
 
     const updated = await prisma.character.update({

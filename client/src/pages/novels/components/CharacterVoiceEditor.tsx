@@ -33,6 +33,7 @@ import {
 import { queryKeys } from "@/api/queryKeys";
 import {
   CHARACTER_VOICE_MODE_OPTIONS,
+  buildCharacterVoiceModeSwitchPatches,
   canGenerateCharacterVoicePreview,
   findMimoVoiceCatalogItem,
   isCharacterVoiceFormDirty,
@@ -170,12 +171,16 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
         kind: "clone_ref",
         limit: 200,
       });
-      return (response.data?.items ?? []) as VoiceAsset[];
+      return {
+        items: (response.data?.items ?? []) as VoiceAsset[],
+        total: response.data?.total ?? 0,
+      };
     },
     enabled: Boolean(novelId && characterId && mode === "clone"),
     staleTime: 60_000,
   });
-  const libraryItems = libraryQuery.data ?? [];
+  const libraryItems = libraryQuery.data?.items ?? [];
+  const libraryTotal = libraryQuery.data?.total ?? libraryItems.length;
   const selectedLibraryAsset = useMemo(
     () => libraryItems.find((item) => item.id === boundAssetId) ?? null,
     [libraryItems, boundAssetId],
@@ -520,6 +525,14 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
     reader.readAsDataURL(file);
   }
 
+  function applyVoiceMode(nextMode: CharacterVoiceMode) {
+    const patches = buildCharacterVoiceModeSwitchPatches(nextMode, form.ttsMode);
+    if (patches.ttsMode != null) onChange("ttsMode", patches.ttsMode);
+    if (patches.ttsVoiceAssetId != null) onChange("ttsVoiceAssetId", patches.ttsVoiceAssetId);
+    if (patches.ttsRefAudioPath != null) onChange("ttsRefAudioPath", patches.ttsRefAudioPath);
+    if (patches.ttsRefAudioBase64 != null) onChange("ttsRefAudioBase64", patches.ttsRefAudioBase64);
+  }
+
   const bindLibraryMutation = useMutation({
     mutationFn: async (voiceAssetId: string) => {
       const id = voiceAssetId.trim();
@@ -765,7 +778,7 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
                 key={option.value}
                 type="button"
                 className={`rounded-lg border px-3 py-2 text-left transition ${modeButtonClass(active)}`}
-                onClick={() => onChange("ttsMode", option.value as CharacterVoiceMode)}
+                onClick={() => applyVoiceMode(option.value)}
               >
                 <div className="text-sm font-medium text-foreground">{option.label}</div>
                 <div className="mt-0.5 text-[11px] leading-4 text-muted-foreground">{option.helper}</div>
@@ -821,7 +834,7 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
             <div className="space-y-2">
               <div className="text-xs font-medium text-foreground">从全站音色库绑定</div>
               <p className="text-xs leading-5 text-muted-foreground">
-                仅列出 approved 的 clone_ref。绑定由服务端写路径，客户端不提交参考音路径。
+                仅列出 approved 的 clone_ref。点选即写入角色（无需再点「保存音色」）；路径由服务端写，客户端不提交参考音路径。
                 {boundAssetId
                   ? ` 当前：${selectedLibraryAsset
                     ? `${selectedLibraryAsset.displayName}（${selectedLibraryAsset.slug}）`
@@ -842,6 +855,11 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
               {!libraryQuery.isLoading && !libraryQuery.isError && libraryItems.length === 0 ? (
                 <div className="text-xs text-muted-foreground">
                   暂无 approved 库音色。请先人耳批准 seed/import 资产后再绑库。
+                </div>
+              ) : null}
+              {!libraryQuery.isLoading && !libraryQuery.isError && libraryTotal > libraryItems.length ? (
+                <div className="text-xs text-amber-700 dark:text-amber-400">
+                  库共 {libraryTotal} 条，当前仅展示前 {libraryItems.length} 条。
                 </div>
               ) : null}
               {libraryItems.length > 0 ? (
