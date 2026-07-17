@@ -13,7 +13,6 @@ import {
   isFullBookAutopilotRunMode,
   type DirectorAutoExecutionState,
 } from "@ai-novel/shared/types/novelDirector";
-import { assessChapterExecutionContractShape } from "@ai-novel/shared/types/chapterTaskSheetQuality";
 import {
   buildQualityFeedbackWindowSummary,
   extractQualityFeedbackFromRiskFlags,
@@ -28,8 +27,10 @@ import {
 } from "./novelDirectorAutoExecution";
 import {
   applyExpandRangeBatchRoll,
+  collectNotExecutableOrdersInBatchWindow,
   type PrepareNextAutoExecutionBatchInput,
   type PrepareNextAutoExecutionBatchResult,
+  type WorkspaceChapterPlanSlice,
 } from "./novelDirectorAutoExecutionBatchRollRuntime";
 import {
   resolveStructuredOutlineRecoveryCursor,
@@ -82,6 +83,41 @@ function findMissingSelectedChapterOrders(
     }
   }
   return missing;
+}
+
+/**
+ * Flatten VolumePlanDocument chapter plans for prepare canEnter hard-gate merge.
+ * Boundary/contract fields live on workspace plan; execution truth on listChapters.
+ */
+function buildWorkspaceChapterPlanByOrder(
+  workspace: VolumePlanDocument,
+): Map<number, WorkspaceChapterPlanSlice> {
+  return new Map(
+    (workspace.volumes ?? []).flatMap((volume) =>
+      (volume.chapters ?? []).map((chapter) => [
+        chapter.chapterOrder,
+        {
+          chapterOrder: chapter.chapterOrder,
+          chapterId: chapter.chapterId,
+          id: chapter.id,
+          title: chapter.title,
+          summary: chapter.summary,
+          purpose: chapter.purpose,
+          exclusiveEvent: chapter.exclusiveEvent,
+          endingState: chapter.endingState,
+          nextChapterEntryState: chapter.nextChapterEntryState,
+          conflictLevel: chapter.conflictLevel,
+          revealLevel: chapter.revealLevel,
+          targetWordCount: chapter.targetWordCount,
+          mustAvoid: chapter.mustAvoid,
+          taskSheet: chapter.taskSheet,
+          sceneCards: chapter.sceneCards,
+          volumeId: chapter.volumeId ?? volume.id,
+          payoffRefs: chapter.payoffRefs,
+        } satisfies WorkspaceChapterPlanSlice,
+      ] as const),
+    ),
+  );
 }
 
 async function syncPreparedChapterExecutionContext(input: {
@@ -250,6 +286,7 @@ export async function prepareNextAutoExecutionBatch(
   };
 
   // full_book_autopilot: JIT — do not pre-generate chapter_detail; titles must already exist.
+  // Still hard-gate canEnterExecution (shared collect) so incomplete contracts cannot silent-expand.
   if (isFullBookAutopilotRunMode(request.runMode)) {
     if (!workspaceHasTitleInRange(baseWorkspace, nextRange)) {
       throw new Error(
@@ -261,6 +298,24 @@ export async function prepareNextAutoExecutionBatch(
       DIRECTOR_PROGRESS.chapterSync,
     );
     const chapters = await deps.novelContextService.listChapters(novelId);
+    const chapterByOrder = new Map(chapters.map((chapter) => [chapter.order, chapter] as const));
+    const workspaceChapterByOrder = buildWorkspaceChapterPlanByOrder(baseWorkspace);
+    const selectedChapterOrders: number[] = [];
+    for (let order = nextRange.startOrder; order <= nextRange.endOrder; order += 1) {
+      selectedChapterOrders.push(order);
+    }
+    const notExecutableOrders = collectNotExecutableOrdersInBatchWindow({
+      novelId,
+      selectedChapterOrders,
+      chapterByOrder,
+      workspaceChapterByOrder,
+      qualityMode: "full_book_autopilot",
+    });
+    if (notExecutableOrders.length > 0) {
+      throw new Error(
+        `批续窗懒规划第 ${nextRange.startOrder}-${nextRange.endOrder} 章合同不可执行（第 ${notExecutableOrders.slice(0, 5).join("、")} 章 canEnterExecution=false），不能静默 expand。`,
+      );
+    }
     return applyExpandRangeBatchRoll({
       previousState: withPriorWindowQualityDebtSummary({
         previousState,
@@ -493,50 +548,17 @@ export async function prepareNextAutoExecutionBatch(
     );
   }
 
-  // P2-2 hard gate: real assess canEnterExecution. Prisma Chapter rows lack purpose /
-  // exclusiveEvent / endingState / nextChapterEntryState — enrich from workspace
-  // VolumeChapterPlan (same pattern as Service resolveBatchRoll readiness).
-  const workspaceChapterByOrder = new Map(
-    (persistedOutlineWorkspace.volumes ?? []).flatMap((volume) =>
-      (volume.chapters ?? []).map((chapter) => [chapter.chapterOrder, chapter] as const),
-    ),
-  );
+  // Hard gate: shared collect (plan ⊕ exec merge) — same path as full_book lazy expand.
+  const workspaceChapterByOrder = buildWorkspaceChapterPlanByOrder(persistedOutlineWorkspace);
   const assessQualityMode = isFullBookAutopilotRunMode(request.runMode)
     ? "full_book_autopilot" as const
     : "ai_copilot" as const;
-  const notExecutableOrders = selectedChapterOrders.filter((order) => {
-    const execChapter = chapterByOrder.get(order);
-    const planChapter = workspaceChapterByOrder.get(order);
-    if (!execChapter) {
-      return true;
-    }
-    const sceneCards = execChapter.sceneCards
-      ?? (typeof planChapter?.sceneCards === "string"
-        ? planChapter.sceneCards
-        : (planChapter?.sceneCards ? JSON.stringify(planChapter.sceneCards) : null));
-    // DirectorAutoExecutionChapterRef has no title/summary/purpose/boundary —
-    // those live on VolumeChapterPlan; exec row only contributes synced fields.
-    return !assessChapterExecutionContractShape({
-      novelId,
-      volumeId: planChapter?.volumeId,
-      chapterId: execChapter.id,
-      chapterOrder: order,
-      title: planChapter?.title ?? "",
-      summary: planChapter?.summary ?? null,
-      purpose: planChapter?.purpose ?? null,
-      exclusiveEvent: planChapter?.exclusiveEvent ?? null,
-      endingState: planChapter?.endingState ?? null,
-      nextChapterEntryState: planChapter?.nextChapterEntryState ?? null,
-      conflictLevel: execChapter.conflictLevel ?? planChapter?.conflictLevel ?? null,
-      revealLevel: execChapter.revealLevel ?? planChapter?.revealLevel ?? null,
-      targetWordCount: execChapter.targetWordCount ?? planChapter?.targetWordCount ?? null,
-      mustAvoid: execChapter.mustAvoid ?? planChapter?.mustAvoid ?? null,
-      payoffRefs: planChapter?.payoffRefs,
-      taskSheet: execChapter.taskSheet ?? planChapter?.taskSheet ?? null,
-      sceneCards,
-    }, {
-      qualityMode: assessQualityMode,
-    }).canEnterExecution;
+  const notExecutableOrders = collectNotExecutableOrdersInBatchWindow({
+    novelId,
+    selectedChapterOrders,
+    chapterByOrder,
+    workspaceChapterByOrder,
+    qualityMode: assessQualityMode,
   });
   if (notExecutableOrders.length > 0) {
     throw new Error(

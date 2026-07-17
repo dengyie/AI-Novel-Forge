@@ -170,8 +170,8 @@ export class NovelDirectorService {
         readinessOptions,
       );
       // Enrich readiness + C3 volumeCompletion from one workspace load.
+      // supervisoryCloseable stays on projection/checkpoint only — not batch-roll decision input.
       let volumeCompletionKind: "legacy" | "setting_complete" | "prose_complete_only" | "forced" | null = null;
-      let supervisoryCloseable: boolean | null = null;
       try {
         const workspace = await this.volumeService.getVolumes(novelId);
         const workspaceChapters = (workspace.volumes ?? []).flatMap((volume) =>
@@ -220,7 +220,6 @@ export class NovelDirectorService {
             proseComplete: true,
           });
           volumeCompletionKind = projection.kind;
-          supervisoryCloseable = projection.supervisoryCloseable;
         }
       } catch {
         // workspace optional for expand-only decisions
@@ -235,7 +234,6 @@ export class NovelDirectorService {
         // Prepare injected below — reenter_structured_outline runs surgical detail+sync.
         canPrepareNextBatch: true,
         volumeCompletionKind,
-        supervisoryCloseable,
       });
     },
     prepareNextAutoExecutionBatch: (input) => prepareNextAutoExecutionBatch(

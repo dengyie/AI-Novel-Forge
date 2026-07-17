@@ -263,6 +263,69 @@ export function buildBatchRollReadinessFromChapters(
 }
 
 /**
+ * Prepare hard-gate: orders in the batch window that fail canEnterExecution.
+ * plan ⊕ exec via mergeWorkspaceChapterWithExecRow so lazy full_book and non-lazy
+ * share the same contract truth (no silent expand on title-only / incomplete boundary).
+ *
+ * Use real novelId (not the readiness sentinel "batch-roll").
+ */
+export function collectNotExecutableOrdersInBatchWindow(input: {
+  novelId: string;
+  selectedChapterOrders: number[];
+  chapterByOrder: Map<number, DirectorAutoExecutionChapterRef>;
+  workspaceChapterByOrder: Map<number, WorkspaceChapterPlanSlice>;
+  qualityMode: "full_book_autopilot" | "ai_copilot" | "manual";
+  settingQualityMode?: "off" | "advisory" | "enforce" | null;
+}): number[] {
+  return input.selectedChapterOrders.filter((order) => {
+    const execChapter = input.chapterByOrder.get(order);
+    if (!execChapter) {
+      return true;
+    }
+    const planChapter = input.workspaceChapterByOrder.get(order);
+    const merged = mergeWorkspaceChapterWithExecRow(
+      planChapter ?? {
+        chapterOrder: order,
+        chapterId: execChapter.id,
+        id: execChapter.id,
+        title: undefined,
+        taskSheet: execChapter.taskSheet,
+        sceneCards: execChapter.sceneCards,
+        conflictLevel: execChapter.conflictLevel,
+        revealLevel: execChapter.revealLevel,
+        targetWordCount: execChapter.targetWordCount,
+        mustAvoid: execChapter.mustAvoid,
+      },
+      execChapter,
+    );
+    return !assessChapterExecutionContractShape({
+      novelId: input.novelId,
+      volumeId: merged.volumeId ?? undefined,
+      chapterId: merged.id,
+      chapterOrder: order,
+      title: merged.title ?? "",
+      summary: merged.summary ?? null,
+      purpose: merged.purpose ?? null,
+      exclusiveEvent: merged.exclusiveEvent ?? null,
+      endingState: merged.endingState ?? null,
+      nextChapterEntryState: merged.nextChapterEntryState ?? null,
+      conflictLevel: merged.conflictLevel ?? null,
+      revealLevel: merged.revealLevel ?? null,
+      targetWordCount: merged.targetWordCount ?? null,
+      mustAvoid: merged.mustAvoid ?? null,
+      payoffRefs: Array.isArray(merged.payoffRefs)
+        ? merged.payoffRefs.map((item) => String(item ?? "").trim()).filter(Boolean)
+        : null,
+      taskSheet: merged.taskSheet ?? null,
+      sceneCards: merged.sceneCards ?? null,
+    }, {
+      qualityMode: input.qualityMode,
+      settingQualityMode: input.settingQualityMode ?? undefined,
+    }).canEnterExecution;
+  });
+}
+
+/**
  * Pure decision: what to do when the current auto-execution range has remaining=0.
  */
 export function resolveNextAutoExecutionBatchRoll(input: {
@@ -277,9 +340,9 @@ export function resolveNextAutoExecutionBatchRoll(input: {
    * C3：窗尽且无下一窗时，enforce 下 prose_complete_only（功能未 satisfied）
    * 不得静默 completed_scope → workflow_completed；应 halt_for_review。
    * mode=off/legacy 或不传 → 保持 completed_scope。
+   * 决策只读 volumeCompletionKind；supervisoryCloseable 仅 checkpoint/投影用，不进本决策输入。
    */
   volumeCompletionKind?: "legacy" | "setting_complete" | "prose_complete_only" | "forced" | null;
-  supervisoryCloseable?: boolean | null;
 }): BatchRollDecision {
   const maxRolls = input.maxConsecutiveBatchRolls ?? DEFAULT_MAX_CONSECUTIVE_BATCH_ROLLS;
   if (input.consecutiveBatchRolls >= maxRolls) {

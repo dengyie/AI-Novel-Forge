@@ -85,7 +85,6 @@ test("resolveNextAutoExecutionBatchRoll halts on prose_complete_only without nex
     autoExecution: { enabled: true, remainingChapterCount: 0, mode: "chapter_range" },
     consecutiveBatchRolls: 0,
     volumeCompletionKind: "prose_complete_only",
-    supervisoryCloseable: false,
   });
   assert.equal(decision.kind, "halt_for_review");
   assert.match(decision.reason, /prose_complete_only|功能验收/);
@@ -109,7 +108,6 @@ test("resolveNextAutoExecutionBatchRoll setting_complete remains completed_scope
     autoExecution: { enabled: true, remainingChapterCount: 0, mode: "chapter_range" },
     consecutiveBatchRolls: 0,
     volumeCompletionKind: "setting_complete",
-    supervisoryCloseable: true,
   });
   assert.equal(decision.kind, "completed_scope");
 });
