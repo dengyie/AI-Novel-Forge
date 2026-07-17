@@ -718,3 +718,52 @@ export interface AudiobookWorkspaceBootstrap {
   /** 路由组装的就绪摘要；工作台徽章 SoT */
   readiness?: AudiobookWorkspaceBootstrapReadiness;
 }
+
+/** POST /novels/audiobook/workspace-overview 请求体 */
+export interface AudiobookWorkspaceOverviewRequest {
+  novelIds: string[];
+}
+
+/**
+ * 列表级 readiness 摘要。
+ * 与工作台 assess 同源聚合字段，但 clone ref **不做磁盘 probe**。
+ */
+export interface AudiobookWorkspaceOverviewReadiness {
+  voiceOk: boolean;
+  voiceConfigured: number;
+  characterTotal: number;
+  previewReady: number;
+  previewMissing: number;
+  previewStale: number;
+  /** 仅作辅信息；列表主「可生成」看 voiceOk */
+  readyForWorkbench: boolean;
+  narratorValid: boolean;
+}
+
+export interface AudiobookWorkspaceOverviewLatestTask {
+  id: string;
+  status: AudiobookTaskStatus;
+  progress: number;
+  /** 仅当廉价可得时填充；overview 禁止 50× 磁盘 stat */
+  fullAudioReady?: boolean;
+  m4bStatus?: string | null;
+  updatedAt: string;
+}
+
+/** 选书页态势：一本小说的轻量摘要 */
+export interface AudiobookWorkspaceNovelOverview {
+  novelId: string;
+  readiness: AudiobookWorkspaceOverviewReadiness | null;
+  latestTask: AudiobookWorkspaceOverviewLatestTask | null;
+  /**
+   * 内存 readiness job 是否 active。best-effort：
+   * 进程重启 / 非本实例 → 可能 false，前端不得当错误。
+   */
+  activeReadinessJob: boolean;
+}
+
+export interface AudiobookWorkspaceOverviewResult {
+  items: AudiobookWorkspaceNovelOverview[];
+  /** novelIds 超过上限时截断前 50 */
+  truncated?: boolean;
+}

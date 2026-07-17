@@ -39,6 +39,12 @@ export const queryKeys = {
     snapshots: (id: string) => ["novels", "snapshots", id] as const,
     /** 有声书工作台轻量 bootstrap（无章节正文） */
     audiobookWorkspace: (id: string) => ["novels", "audiobook-workspace", id] as const,
+    /**
+     * 选书页 bulk 态势。page+keyword 稳定 key，避免 ids 顺序抖动双缓存。
+     * 项目页 create/cancel/就绪终态后可 invalidateQueries({ queryKey: ["novels","audiobook-workspace-overview"] }).
+     */
+    audiobookWorkspaceOverview: (page: number, keyword: string) =>
+      ["novels", "audiobook-workspace-overview", page, keyword] as const,
     audiobookTasks: (id: string) => ["novels", "audiobook-tasks", id] as const,
     /** 音色/试听就绪评估（工作台徽章 SoT） */
     audiobookVoiceReadiness: (id: string) => ["novels", "audiobook-voice-readiness", id] as const,

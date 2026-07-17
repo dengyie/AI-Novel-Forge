@@ -311,13 +311,25 @@ export class AudiobookVoiceReadinessService {
         | "ttsPreviewGeneratedAt"
       >
     >;
+    /**
+     * 列表态势：clone 有 path 时视为 ref 可用，**不**逐文件 probe。
+     * 项目页 assess 保持默认 false（精确态）。
+     */
+    skipRefAudioProbe?: boolean;
   }): AudiobookVoiceReadinessSummary {
+    const skipProbe = input.skipRefAudioProbe === true;
     const items = input.characters.map((character) => {
       const previewStatus = resolvePreviewStatusForRow(character);
       const mode = character.ttsMode?.trim() || "preset";
-      const refAudioOk = mode === "clone" && character.ttsRefAudioPath?.trim()
-        ? probeRefAudioOk(character.ttsRefAudioPath)
-        : null;
+      let refAudioOk: boolean | null = null;
+      if (mode === "clone") {
+        const hasPath = Boolean(character.ttsRefAudioPath?.trim());
+        if (skipProbe) {
+          refAudioOk = hasPath ? true : null;
+        } else if (hasPath) {
+          refAudioOk = probeRefAudioOk(character.ttsRefAudioPath);
+        }
+      }
       return buildCharacterReadinessItem({
         characterId: character.id,
         characterName: character.name,
