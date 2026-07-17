@@ -101,6 +101,8 @@ export interface RagSettingsStatus {
   workerMaxAttempts: number;
   workerRetryBaseMs: number;
   httpTimeoutMs: number;
+  retrievalTraceSampleRate: number;
+  retrievalTraceRetentionDays: number;
   suggestedCollectionName: string;
   reindexQueuedCount?: number;
   providers: RagProviderStatus[];
@@ -252,6 +254,8 @@ export async function saveRagSettings(payload: {
   workerMaxAttempts: number;
   workerRetryBaseMs: number;
   httpTimeoutMs: number;
+  retrievalTraceSampleRate: number;
+  retrievalTraceRetentionDays: number;
 }) {
   const { data } = await apiClient.put<
     ApiResponse<
@@ -284,6 +288,8 @@ export async function saveRagSettings(payload: {
         | "workerMaxAttempts"
         | "workerRetryBaseMs"
         | "httpTimeoutMs"
+        | "retrievalTraceSampleRate"
+        | "retrievalTraceRetentionDays"
         | "suggestedCollectionName"
         | "reindexQueuedCount"
       >

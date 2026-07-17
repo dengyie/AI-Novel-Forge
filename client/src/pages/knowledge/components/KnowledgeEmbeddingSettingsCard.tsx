@@ -39,6 +39,8 @@ export interface KnowledgeEmbeddingSettingsFormState {
   workerMaxAttempts: number;
   workerRetryBaseMs: number;
   httpTimeoutMs: number;
+  retrievalTraceSampleRate: number;
+  retrievalTraceRetentionDays: number;
 }
 
 interface KnowledgeEmbeddingSettingsCardProps {
@@ -634,6 +636,43 @@ export default function KnowledgeEmbeddingSettingsCard({
                         httpTimeoutMs: parseNumberInput(event.target.value, prev.httpTimeoutMs),
                       }))}
                   />
+                </div>
+
+                <div className="space-y-2">
+                  <div className="text-sm font-medium">检索追踪采样率</div>
+                  <Input
+                    type="number"
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    value={form.retrievalTraceSampleRate}
+                    onChange={(event) =>
+                      setForm((prev) => ({
+                        ...prev,
+                        retrievalTraceSampleRate: parseNumberInput(event.target.value, prev.retrievalTraceSampleRate),
+                      }))}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    0-1 之间，1=每次检索都记录追踪样本，0=关闭。默认 1（开发期全程留痕便于排查）。
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <div className="text-sm font-medium">检索追踪保留天数</div>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={365}
+                    value={form.retrievalTraceRetentionDays}
+                    onChange={(event) =>
+                      setForm((prev) => ({
+                        ...prev,
+                        retrievalTraceRetentionDays: parseNumberInput(event.target.value, prev.retrievalTraceRetentionDays),
+                      }))}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    检索追踪样本保留多少天后老化删除，1-365，默认 14。
+                  </p>
                 </div>
               </div>
             </section>

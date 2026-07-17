@@ -101,30 +101,44 @@ export const ragConfig = {
   embeddingProvider,
   embeddingModel: resolveEmbeddingModelFromEnv(embeddingProvider),
   embeddingVersion: asInt(process.env.EMBEDDING_VERSION, 1, 1, 100),
-  embeddingBatchSize: asInt(process.env.EMBEDDING_BATCH_SIZE, 64, 1, 256),
+  // 不允许 env 读取：通过知识库设置面板管理（RagEmbeddingSettings.embeddingBatchSize）
+  embeddingBatchSize: 64,
   // 不允许 env 读取：通过知识库设置面板管理（RagEmbeddingSettings.embeddingConcurrency）
   embeddingConcurrency: 4,
   embeddingTimeoutMs: asInt(process.env.RAG_EMBEDDING_TIMEOUT_MS ?? process.env.RAG_HTTP_TIMEOUT_MS, 30000, 5000, 300000),
-  embeddingMaxRetries: asInt(process.env.RAG_EMBEDDING_MAX_RETRIES, 2, 0, 8),
-  embeddingRetryBaseMs: asInt(process.env.RAG_EMBEDDING_RETRY_BASE_MS, 500, 100, 10000),
+  // 不允许 env 读取：通过知识库设置面板管理（RagEmbeddingSettings.embeddingMaxRetries）
+  embeddingMaxRetries: 2,
+  // 不允许 env 读取：通过知识库设置面板管理（RagEmbeddingSettings.embeddingRetryBaseMs）
+  embeddingRetryBaseMs: 500,
   qdrantUrl: (process.env.QDRANT_URL ?? "http://127.0.0.1:6333").replace(/\/+$/, ""),
   qdrantApiKey: process.env.QDRANT_API_KEY ?? "",
   qdrantCollection: process.env.QDRANT_COLLECTION ?? "ai_novel_chunks_v1",
   qdrantTimeoutMs: asInt(process.env.QDRANT_TIMEOUT_MS ?? process.env.RAG_HTTP_TIMEOUT_MS, 30000, 1000, 300000),
-  qdrantUpsertMaxBytes: asInt(process.env.QDRANT_UPSERT_MAX_BYTES, 24 * 1024 * 1024, 1024 * 1024, 64 * 1024 * 1024),
+  // 不允许 env 读取：通过知识库设置面板管理（RagRuntimeSettings.qdrantUpsertMaxBytes）
+  qdrantUpsertMaxBytes: 24 * 1024 * 1024,
   // 不允许 env 读取：通过知识库设置面板管理（RagRuntimeSettings.qdrantUpsertConcurrency）
   qdrantUpsertConcurrency: 3,
-  chunkSize: asInt(process.env.RAG_CHUNK_SIZE, 800, 200, 4000),
-  chunkOverlap: asInt(process.env.RAG_CHUNK_OVERLAP, 120, 0, 1000),
-  vectorCandidates: asInt(process.env.RAG_VECTOR_CANDIDATES, 40, 1, 200),
-  keywordCandidates: asInt(process.env.RAG_KEYWORD_CANDIDATES, 40, 1, 200),
-  finalTopK: asInt(process.env.RAG_FINAL_TOP_K, 8, 1, 50),
-  workerPollMs: asInt(process.env.RAG_WORKER_POLL_MS, 2500, 200, 60000),
-  workerMaxAttempts: asInt(process.env.RAG_WORKER_MAX_ATTEMPTS, 5, 1, 20),
-  workerRetryBaseMs: asInt(process.env.RAG_WORKER_RETRY_BASE_MS, 5000, 1000, 300000),
+  // 不允许 env 读取：通过知识库设置面板管理（RagRuntimeSettings.chunkSize）
+  chunkSize: 800,
+  // 不允许 env 读取：通过知识库设置面板管理（RagRuntimeSettings.chunkOverlap）
+  chunkOverlap: 120,
+  // 不允许 env 读取：通过知识库设置面板管理（RagRuntimeSettings.vectorCandidates）
+  vectorCandidates: 40,
+  // 不允许 env 读取：通过知识库设置面板管理（RagRuntimeSettings.keywordCandidates）
+  keywordCandidates: 40,
+  // 不允许 env 读取：通过知识库设置面板管理（RagRuntimeSettings.finalTopK）
+  finalTopK: 8,
+  // 不允许 env 读取：通过知识库设置面板管理（RagRuntimeSettings.workerPollMs）
+  workerPollMs: 2500,
+  // 不允许 env 读取：通过知识库设置面板管理（RagRuntimeSettings.workerMaxAttempts）
+  workerMaxAttempts: 5,
+  // 不允许 env 读取：通过知识库设置面板管理（RagRuntimeSettings.workerRetryBaseMs）
+  workerRetryBaseMs: 5000,
   httpTimeoutMs: asInt(process.env.RAG_HTTP_TIMEOUT_MS, 30000, 1000, 300000),
-  retrievalTraceSampleRate: asFloat(process.env.RAG_RETRIEVAL_TRACE_SAMPLE_RATE, 1, 0, 1),
-  retrievalTraceRetentionDays: asInt(process.env.RAG_RETRIEVAL_TRACE_RETENTION_DAYS, 14, 1, 365),
+  // 不允许 env 读取：通过知识库设置面板管理（RagRuntimeSettings.retrievalTraceSampleRate）
+  retrievalTraceSampleRate: 1,
+  // 不允许 env 读取：通过知识库设置面板管理（RagRuntimeSettings.retrievalTraceRetentionDays）
+  retrievalTraceRetentionDays: 14,
   retrievalTraceQueryPersistMode: asQueryPersistMode(process.env.RAG_RETRIEVAL_TRACE_QUERY_PERSIST_MODE),
   rerankerEnabled: isEnabled(process.env.RAG_RERANKER_ENABLED, false),
   rerankerEndpoint: normalizeOptionalUrl(process.env.RAG_RERANKER_ENDPOINT),

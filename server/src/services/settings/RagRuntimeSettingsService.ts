@@ -14,6 +14,8 @@ import {
   QDRANT_URL_KEY,
   RAG_ENABLED_KEY,
   RAG_RUNTIME_SETTING_KEYS,
+  RETRIEVAL_TRACE_RETENTION_DAYS_KEY,
+  RETRIEVAL_TRACE_SAMPLE_RATE_KEY,
   VECTOR_CANDIDATES_KEY,
   WORKER_MAX_ATTEMPTS_KEY,
   WORKER_POLL_MS_KEY,
@@ -36,6 +38,8 @@ const INITIAL_RAG_RUNTIME_DEFAULTS = {
   workerMaxAttempts: ragConfig.workerMaxAttempts,
   workerRetryBaseMs: ragConfig.workerRetryBaseMs,
   httpTimeoutMs: ragConfig.httpTimeoutMs,
+  retrievalTraceSampleRate: ragConfig.retrievalTraceSampleRate,
+  retrievalTraceRetentionDays: ragConfig.retrievalTraceRetentionDays,
 } as const;
 
 export interface RagRuntimeSettings {
@@ -54,6 +58,8 @@ export interface RagRuntimeSettings {
   workerMaxAttempts: number;
   workerRetryBaseMs: number;
   httpTimeoutMs: number;
+  retrievalTraceSampleRate: number;
+  retrievalTraceRetentionDays: number;
 }
 
 export interface RagRuntimeSettingsInput {
@@ -73,6 +79,8 @@ export interface RagRuntimeSettingsInput {
   workerMaxAttempts: number;
   workerRetryBaseMs: number;
   httpTimeoutMs: number;
+  retrievalTraceSampleRate: number;
+  retrievalTraceRetentionDays: number;
 }
 
 export interface SaveRagRuntimeSettingsResult {
@@ -102,6 +110,13 @@ function clampInt(value: number, fallback: number, min: number, max: number): nu
   return Math.max(min, Math.min(max, Math.floor(value)));
 }
 
+function clampFloat(value: number, fallback: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.max(min, Math.min(max, value));
+}
+
 function applyRagRuntimeSettings(
   settings: Omit<RagRuntimeSettings, "qdrantApiKeyConfigured">,
   qdrantApiKey: string,
@@ -121,6 +136,8 @@ function applyRagRuntimeSettings(
   ragConfig.workerMaxAttempts = settings.workerMaxAttempts;
   ragConfig.workerRetryBaseMs = settings.workerRetryBaseMs;
   ragConfig.httpTimeoutMs = settings.httpTimeoutMs;
+  ragConfig.retrievalTraceSampleRate = settings.retrievalTraceSampleRate;
+  ragConfig.retrievalTraceRetentionDays = settings.retrievalTraceRetentionDays;
 
   return {
     ...settings,
@@ -145,6 +162,8 @@ function getDefaultSettings(): RagRuntimeSettings {
     workerMaxAttempts: clampInt(INITIAL_RAG_RUNTIME_DEFAULTS.workerMaxAttempts, 5, 1, 20),
     workerRetryBaseMs: clampInt(INITIAL_RAG_RUNTIME_DEFAULTS.workerRetryBaseMs, 5000, 1000, 300000),
     httpTimeoutMs: clampInt(INITIAL_RAG_RUNTIME_DEFAULTS.httpTimeoutMs, 30000, 1000, 300000),
+    retrievalTraceSampleRate: clampFloat(INITIAL_RAG_RUNTIME_DEFAULTS.retrievalTraceSampleRate, 1, 0, 1),
+    retrievalTraceRetentionDays: clampInt(INITIAL_RAG_RUNTIME_DEFAULTS.retrievalTraceRetentionDays, 14, 1, 365),
   };
 }
 
@@ -202,6 +221,18 @@ export async function getRagRuntimeSettings(): Promise<RagRuntimeSettings> {
         300000,
       ),
       httpTimeoutMs: clampInt(Number(valueMap.get(HTTP_TIMEOUT_MS_KEY)), defaults.httpTimeoutMs, 1000, 300000),
+      retrievalTraceSampleRate: clampFloat(
+        Number(valueMap.get(RETRIEVAL_TRACE_SAMPLE_RATE_KEY)),
+        defaults.retrievalTraceSampleRate,
+        0,
+        1,
+      ),
+      retrievalTraceRetentionDays: clampInt(
+        Number(valueMap.get(RETRIEVAL_TRACE_RETENTION_DAYS_KEY)),
+        defaults.retrievalTraceRetentionDays,
+        1,
+        365,
+      ),
     }, qdrantApiKey);
   } catch (error) {
     if (isMissingTableError(error)) {
@@ -220,6 +251,8 @@ export async function getRagRuntimeSettings(): Promise<RagRuntimeSettings> {
         workerMaxAttempts: defaults.workerMaxAttempts,
         workerRetryBaseMs: defaults.workerRetryBaseMs,
         httpTimeoutMs: defaults.httpTimeoutMs,
+        retrievalTraceSampleRate: defaults.retrievalTraceSampleRate,
+        retrievalTraceRetentionDays: defaults.retrievalTraceRetentionDays,
       }, normalizeOptionalText(INITIAL_RAG_RUNTIME_DEFAULTS.qdrantApiKey) ?? "");
     }
     throw error;
@@ -265,6 +298,8 @@ export async function saveRagRuntimeSettings(
     workerMaxAttempts: clampInt(input.workerMaxAttempts, previous.workerMaxAttempts, 1, 20),
     workerRetryBaseMs: clampInt(input.workerRetryBaseMs, previous.workerRetryBaseMs, 1000, 300000),
     httpTimeoutMs: clampInt(input.httpTimeoutMs, previous.httpTimeoutMs, 1000, 300000),
+    retrievalTraceSampleRate: clampFloat(input.retrievalTraceSampleRate, previous.retrievalTraceSampleRate, 0, 1),
+    retrievalTraceRetentionDays: clampInt(input.retrievalTraceRetentionDays, previous.retrievalTraceRetentionDays, 1, 365),
   }, qdrantApiKey);
 
   const connectionChanged = previous.qdrantUrl !== settings.qdrantUrl;
@@ -341,6 +376,16 @@ export async function saveRagRuntimeSettings(
       where: { key: HTTP_TIMEOUT_MS_KEY },
       update: { value: String(settings.httpTimeoutMs) },
       create: { key: HTTP_TIMEOUT_MS_KEY, value: String(settings.httpTimeoutMs) },
+    }),
+    prisma.appSetting.upsert({
+      where: { key: RETRIEVAL_TRACE_SAMPLE_RATE_KEY },
+      update: { value: String(settings.retrievalTraceSampleRate) },
+      create: { key: RETRIEVAL_TRACE_SAMPLE_RATE_KEY, value: String(settings.retrievalTraceSampleRate) },
+    }),
+    prisma.appSetting.upsert({
+      where: { key: RETRIEVAL_TRACE_RETENTION_DAYS_KEY },
+      update: { value: String(settings.retrievalTraceRetentionDays) },
+      create: { key: RETRIEVAL_TRACE_RETENTION_DAYS_KEY, value: String(settings.retrievalTraceRetentionDays) },
     }),
   ];
 
