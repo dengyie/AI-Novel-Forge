@@ -226,3 +226,83 @@ test("detectProseQuality does not treat narrative without brackets as HUD", () =
   ].join("\n"));
   assert.equal(codes(report).includes("prose_system_hud"), false);
 });
+
+test("prose_pronoun_subject_stack: max consecutive 句首他 ≥4 → high/critical finding", () => {
+  const body = [
+    "他推开门。",
+    "他看见空位。",
+    "他没有坐。",
+    "他转身离开。",
+    "风从走廊尽头压过来。",
+  ].join("");
+  const report = detectProseQuality(body);
+  const hit = report.findings.find((f) => f.code === "prose_pronoun_subject_stack");
+  assert.ok(hit, "must flag subject stack");
+  assert.ok(hit.severity === "high" || hit.severity === "critical");
+  assert.equal(report.hasBlockingFindings, true);
+});
+
+test("prose_pronoun_density: high 句首他 ratio without long run still flags density", () => {
+  // ≥10 句，句首他占比 ≥0.45，中间插入打断使 maxRun < 4
+  const parts = [];
+  for (let i = 0; i < 10; i += 1) {
+    parts.push(i % 2 === 0 ? "他点了下头。" : "灯还亮着。");
+  }
+  const report = detectProseQuality(parts.join(""));
+  assert.ok(
+    report.findings.some((f) => f.code === "prose_pronoun_density"),
+    `codes=${codes(report).join(",")}`,
+  );
+  assert.equal(
+    report.findings.some((f) => f.code === "prose_pronoun_subject_stack"),
+    false,
+    "alternating starts must not fire subject stack",
+  );
+  assert.equal(report.hasBlockingFindings, true);
+});
+
+test("prose_pronoun_density_soft: soft band is medium and non-blocking alone", () => {
+  // 10 句里 4 句首他 → 0.40 soft 带；交替起句使 maxRun < 4
+  const parts = [];
+  for (let i = 0; i < 10; i += 1) {
+    parts.push(i % 2 === 0 && i < 8 ? "他收起刀。" : "雨还在下。");
+  }
+  // 他 雨 他 雨 他 雨 他 雨 雨 雨 → 4/10 density, maxRun=1
+  const report = detectProseQuality(parts.join(""));
+  assert.ok(
+    report.findings.some((f) => f.code === "prose_pronoun_density_soft"),
+    `codes=${codes(report).join(",")}`,
+  );
+  assert.equal(codes(report).includes("prose_pronoun_density"), false);
+  assert.equal(codes(report).includes("prose_pronoun_subject_stack"), false);
+  assert.ok(severitiesByCode(report, "prose_pronoun_density_soft").every((s) => s === "medium"));
+  assert.equal(report.hasBlockingFindings, false);
+});
+
+test("dialogue-leading 他 is not counted as narrative subject stack", () => {
+  const body = [
+    "「他不会来。」赵哥说。",
+    "「他凭什么。」黄助教冷笑。",
+    "「他算什么东西。」又有人接话。",
+    "「他滚了最好。」",
+  ].join("\n");
+  const report = detectProseQuality(body);
+  assert.equal(
+    report.findings.some((f) => f.code === "prose_pronoun_subject_stack"),
+    false,
+  );
+  assert.equal(
+    report.findings.some((f) => (
+      f.code === "prose_pronoun_density" || f.code === "prose_pronoun_density_soft"
+    )),
+    false,
+  );
+});
+
+test("ch1-like heatmap sample: 7× 句首他 run is blocking", () => {
+  const body = Array.from({ length: 7 }, () => "他没有反驳。").join("") + "沈晚把杯子放下。";
+  const report = detectProseQuality(body);
+  assert.ok(report.findings.some((f) => f.code === "prose_pronoun_subject_stack"));
+  assert.ok(severitiesByCode(report, "prose_pronoun_subject_stack").includes("critical"));
+  assert.equal(report.hasBlockingFindings, true);
+});

@@ -14,6 +14,9 @@ export type ProseQualityIssueCode =
   | "prose_placeholder_leak"
   | "prose_engineering_term_leak"
   | "prose_system_hud"
+  | "prose_pronoun_subject_stack"
+  | "prose_pronoun_density"
+  | "prose_pronoun_density_soft"
   | "sot_banned_term"
   | "sot_must_avoid_leak";
 
@@ -57,6 +60,20 @@ const MAX_TOTAL_FINDINGS = 40;
 export const PROSE_DASH_ELLIPSIS_DENSITY_SOFT_PER_1K = 3.5;
 /** 极稀疏时不记 finding，避免正常网文节奏被刷屏。 */
 export const PROSE_DASH_ELLIPSIS_DENSITY_IGNORE_BELOW_PER_1K = 1.2;
+
+/** 连续句首第三人称代词（他/她）达到该 run → high blocking L0。 */
+export const PROSE_PRONOUN_SUBJECT_STACK_RUN_HARD = 4;
+/** run ≥ 该值 → critical（ch1 热力 7× 句首他）。 */
+export const PROSE_PRONOUN_SUBJECT_STACK_RUN_CRITICAL = 6;
+/** 句首他/她 占比 ≥ 该值 → hard density（non-deferrable）。 */
+export const PROSE_PRONOUN_SENTENCE_START_DENSITY_HARD = 0.45;
+/** soft 带：≥ soft 且 < hard → medium `prose_pronoun_density_soft`（不进 non-deferrable）。 */
+export const PROSE_PRONOUN_SENTENCE_START_DENSITY_SOFT = 0.35;
+/** density 最少有效叙事句数，避免短样本误伤。 */
+export const PROSE_PRONOUN_DENSITY_MIN_SENTENCES = 8;
+
+const PRONOUN_FIX_SUGGESTION =
+  "改用专名、动作主语或环境起句打破句首他/她堆叠；禁止循环换称（主角/少年/男人）。";
 
 const TERMINAL_PUNCTUATION = /[。！？!?”"」』）)】》…]$/u;
 const NEGATIVE_FLIP_PATTERN = /(?:不是|并非|并不是|不算|不能说是|没有|不再是)[^。！？；;\n]{1,36}?[，,、]?\s*(?:而是|却是|反而是|更像是|只是)[^。！？；;\n]{1,36}/gu;
@@ -144,6 +161,9 @@ export function detectProseQuality(
   // SoT / mustAvoid：high，默认词表空不触发。
   scanTermListLeak(segments, normalizeTermList(options.bannedTerms), "sot_banned_term", addFinding);
   scanTermListLeak(segments, normalizeTermList(options.mustAvoidTerms), "sot_must_avoid_leak", addFinding);
+
+  // 指代 AI 味：句首他/她 连续堆叠 + 密度（对话行跳过）。
+  scanPronounSubjectStackAndDensity(segments, addFinding);
 
   return {
     findings,
@@ -658,6 +678,120 @@ function scanTruncation(
 
 function splitSentences(text: string): string[] {
   return Array.from(text.matchAll(/[^。！？!?]+[。！？!?]/gu)).map((match) => match[0]);
+}
+
+interface NarrativeSentenceStart {
+  sentence: string;
+  line: number;
+  isPronounStart: boolean;
+}
+
+/**
+ * 收集有效叙事句及是否句首他/她。
+ * 整段对话行跳过；句首引号主导的句子跳过。
+ * stack 与 density 共用同一序列，避免两套分句漂移。
+ */
+function collectNarrativeSentenceStarts(segments: TextSegment[]): NarrativeSentenceStart[] {
+  const out: NarrativeSentenceStart[] = [];
+  for (const segment of segments) {
+    if (lineLooksLikeDialogue(segment.text)) {
+      continue;
+    }
+    for (const sentence of splitSentences(segment.text)) {
+      const trimmed = sentence.trim();
+      if (!trimmed || lineLooksLikeDialogue(trimmed)) {
+        continue;
+      }
+      // 引号包住整句时不计入叙事主语堆叠。
+      if (/^[「『“"]/u.test(trimmed)) {
+        continue;
+      }
+      const isPronounStart = /^[他她]/u.test(trimmed);
+      out.push({
+        sentence: trimmed,
+        line: segment.line,
+        isPronounStart,
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * 句首他/她 连续 run ≥ HARD → prose_pronoun_subject_stack（high/critical）。
+ * 句首占比 ≥ HARD → prose_pronoun_density（high，non-deferrable）。
+ * soft 带 → prose_pronoun_density_soft（medium，不进 non-deferrable）。
+ */
+function scanPronounSubjectStackAndDensity(
+  segments: TextSegment[],
+  addFinding: (finding: ProseQualityFinding) => void,
+): void {
+  const sentences = collectNarrativeSentenceStarts(segments);
+  if (sentences.length === 0) {
+    return;
+  }
+
+  let maxRun = 0;
+  let maxRunStartIndex = 0;
+  let currentRun = 0;
+  let currentRunStart = 0;
+  for (let index = 0; index < sentences.length; index += 1) {
+    if (sentences[index].isPronounStart) {
+      if (currentRun === 0) {
+        currentRunStart = index;
+      }
+      currentRun += 1;
+      if (currentRun > maxRun) {
+        maxRun = currentRun;
+        maxRunStartIndex = currentRunStart;
+      }
+    } else {
+      currentRun = 0;
+    }
+  }
+
+  if (maxRun >= PROSE_PRONOUN_SUBJECT_STACK_RUN_HARD) {
+    const start = sentences[maxRunStartIndex];
+    const excerptSentences = sentences
+      .slice(maxRunStartIndex, maxRunStartIndex + maxRun)
+      .map((item) => item.sentence);
+    addFinding({
+      code: "prose_pronoun_subject_stack",
+      severity: maxRun >= PROSE_PRONOUN_SUBJECT_STACK_RUN_CRITICAL ? "critical" : "high",
+      line: start?.line ?? 1,
+      column: 1,
+      message: `正文连续 ${maxRun} 句以「他/她」起句，主语堆叠呈现明显 AI 味。`,
+      excerpt: formatExcerpt(excerptSentences.join("")),
+      fixSuggestion: PRONOUN_FIX_SUGGESTION,
+    });
+  }
+
+  if (sentences.length < PROSE_PRONOUN_DENSITY_MIN_SENTENCES) {
+    return;
+  }
+  const pronounStarts = sentences.filter((item) => item.isPronounStart).length;
+  const density = pronounStarts / sentences.length;
+  if (density >= PROSE_PRONOUN_SENTENCE_START_DENSITY_HARD) {
+    addFinding({
+      code: "prose_pronoun_density",
+      severity: "high",
+      line: sentences[0]?.line ?? 1,
+      column: 1,
+      message: `句首「他/她」占比 ${(density * 100).toFixed(0)}%（≥${Math.round(PROSE_PRONOUN_SENTENCE_START_DENSITY_HARD * 100)}%），指代过密。`,
+      excerpt: formatExcerpt(sentences.slice(0, 6).map((item) => item.sentence).join("")),
+      fixSuggestion: PRONOUN_FIX_SUGGESTION,
+    });
+  } else if (density >= PROSE_PRONOUN_SENTENCE_START_DENSITY_SOFT) {
+    addFinding({
+      code: "prose_pronoun_density_soft",
+      severity: "medium",
+      line: sentences[0]?.line ?? 1,
+      column: 1,
+      message: `句首「他/她」占比 ${(density * 100).toFixed(0)}%，接近过密阈值，建议改用专名或环境起句。`,
+      excerpt: formatExcerpt(sentences.slice(0, 6).map((item) => item.sentence).join("")),
+      fixSuggestion: PRONOUN_FIX_SUGGESTION,
+    });
+  }
 }
 
 function normalizeRepeatText(text: string): string {

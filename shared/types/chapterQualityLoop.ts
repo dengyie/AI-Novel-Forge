@@ -124,6 +124,9 @@ export const NON_DEFERRABLE_PROSE_OR_SOT_ISSUE_CODES = [
   "prose_verbatim_repeat",
   "prose_truncation",
   "prose_system_hud",
+  // 指代 AI 味硬门：仅 hard 码；soft density 用 prose_pronoun_density_soft 不入此表
+  "prose_pronoun_subject_stack",
+  "prose_pronoun_density",
 ] as const;
 
 const NON_DEFERRABLE_PROSE_OR_SOT_CODE_SET = new Set<string>(
