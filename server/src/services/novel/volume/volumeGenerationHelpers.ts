@@ -15,7 +15,10 @@ import {
   resolveChapterTypeTargetWordCount,
   serializeChapterScenePlan,
 } from "@ai-novel/shared/types/chapterLengthControl";
-import { inferChapterTaskSheetType } from "@ai-novel/shared/types/chapterTaskSheetQuality";
+import {
+  inferChapterTaskSheetType,
+  sanitizeChapterTaskSheetForPersistence,
+} from "@ai-novel/shared/types/chapterTaskSheetQuality";
 import { runStructuredPrompt } from "../../../prompting/core/promptRunner";
 import { volumeChapterExecutionContractPrompt } from "../../../prompting/prompts/novel/volume/chapterDetail.prompts";
 import { buildVolumeChapterDetailContextBlocks } from "../../../prompting/prompts/novel/volume/contextBlocks";
@@ -588,7 +591,9 @@ export function mergeChapterDetail(params: {
           payoffRefs: Array.isArray(generatedDetail.payoffRefs)
             ? generatedDetail.payoffRefs.filter((item): item is string => typeof item === "string")
             : chapter.payoffRefs,
-          taskSheet: typeof generatedDetail.taskSheet === "string" ? generatedDetail.taskSheet : chapter.taskSheet,
+          taskSheet: typeof generatedDetail.taskSheet === "string"
+            ? sanitizeChapterTaskSheetForPersistence(generatedDetail.taskSheet)
+            : sanitizeChapterTaskSheetForPersistence(chapter.taskSheet),
           sceneCards: typeof generatedDetail.sceneCards === "string" ? generatedDetail.sceneCards : chapter.sceneCards,
         };
       }),
@@ -661,6 +666,8 @@ export async function generateChapterTaskSheetDetail(params: {
       existingChapter.sceneCards,
       resolvedTarget,
     );
+    const preservedTaskSheet = sanitizeChapterTaskSheetForPersistence(existingChapter.taskSheet)
+      ?? existingChapter.taskSheet.trim();
     return {
       purpose: existingChapter.purpose?.trim() || existingChapter.summary.trim(),
       exclusiveEvent: existingChapter.exclusiveEvent?.trim() || existingChapter.summary.trim(),
@@ -671,7 +678,7 @@ export async function generateChapterTaskSheetDetail(params: {
       targetWordCount: resolvedTarget,
       mustAvoid: existingChapter.mustAvoid?.trim() || "避免偏离本章任务单和卷节奏。",
       payoffRefs: existingChapter.payoffRefs,
-      taskSheet: existingChapter.taskSheet.trim(),
+      taskSheet: preservedTaskSheet,
       sceneCards: serializeChapterScenePlan(scenePlan),
     };
   }
@@ -758,6 +765,8 @@ export async function generateChapterTaskSheetDetail(params: {
         entrypoint: params.options.entrypoint,
         signal: params.options.signal,
       });
+      const sanitizedTaskSheet = sanitizeChapterTaskSheetForPersistence(generated.output.taskSheet)
+        ?? generated.output.taskSheet.trim();
       return {
         purpose: generated.output.purpose.trim(),
         exclusiveEvent: generated.output.exclusiveEvent.trim(),
@@ -768,7 +777,9 @@ export async function generateChapterTaskSheetDetail(params: {
         targetWordCount: resolvedTarget,
         mustAvoid: generated.output.mustAvoid.trim(),
         payoffRefs: generated.output.payoffRefs,
-        taskSheet: generated.output.taskSheet.trim(),
+        // strip internal codes on write; empty residue still falls back to trimmed
+        // so quality gate can hard-fail empty sheets instead of silently nulling
+        taskSheet: sanitizedTaskSheet,
         sceneCards: serializeChapterScenePlan(scenePlan),
       };
     } catch (error) {

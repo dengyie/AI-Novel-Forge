@@ -5,6 +5,7 @@ import type {
   VolumeChapterPlan,
   VolumePlan,
 } from "@ai-novel/shared/types/novel";
+import { sanitizeChapterTaskSheetForPersistence } from "@ai-novel/shared/types/chapterTaskSheetQuality";
 export {
   hasPayoffLedgerRelevantPlanChanges,
   hasPayoffLedgerSourceSignals,
@@ -238,7 +239,7 @@ function sanitizeVolumeChapter(
     revealLevel: normalizeNullableNumber(chapter.revealLevel),
     targetWordCount: normalizeNullableNumber(chapter.targetWordCount),
     mustAvoid: normalizeText(chapter.mustAvoid),
-    taskSheet: normalizeText(chapter.taskSheet),
+    taskSheet: sanitizeChapterTaskSheetForPersistence(normalizeText(chapter.taskSheet)),
     sceneCards: normalizeText(chapter.sceneCards),
     styleContract: normalizeText(chapter.styleContract),
     payoffRefs: (chapter.payoffRefs ?? []).map((item) => item.trim()).filter(Boolean),
@@ -312,7 +313,9 @@ function normalizeLegacyChapter(raw: unknown, index: number): VolumeChapterPlan 
   const endingState = pickFirstString(raw, ["endingState", "ending_state", "chapterEndingState", "章末状态"]);
   const nextChapterEntryState = pickFirstString(raw, ["nextChapterEntryState", "next_chapter_entry_state", "nextEntryState", "下章起始状态"]);
   const mustAvoid = pickFirstString(raw, ["mustAvoid", "must_avoid", "forbidden"]);
-  const taskSheet = pickFirstString(raw, ["taskSheet", "task_sheet"]);
+  const taskSheet = sanitizeChapterTaskSheetForPersistence(
+    pickFirstString(raw, ["taskSheet", "task_sheet"]),
+  );
   const sceneCards = pickFirstString(raw, ["sceneCards", "scene_cards"]);
   const styleContract = pickFirstString(raw, ["styleContract", "style_contract"]);
   if (!title.trim() && !summary.trim()) {
@@ -524,7 +527,7 @@ function buildFallbackVolumeSkeleton(source: LegacyVolumeSource): VolumePlan[] {
         revealLevel: chapter.revealLevel ?? null,
         targetWordCount: chapter.targetWordCount ?? null,
         mustAvoid: chapter.mustAvoid ?? null,
-        taskSheet: chapter.taskSheet ?? null,
+        taskSheet: sanitizeChapterTaskSheetForPersistence(chapter.taskSheet),
         sceneCards: chapter.sceneCards ?? null,
         payoffRefs: [],
         createdAt: new Date(0).toISOString(),
