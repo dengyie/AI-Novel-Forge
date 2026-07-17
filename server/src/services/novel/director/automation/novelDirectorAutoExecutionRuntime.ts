@@ -11,6 +11,7 @@ import {
   buildDirectorAutoExecutionDeferredQualityState,
   buildDirectorAutoExecutionPipelineOptions,
   isDirectorAutoExecutionPipelineSkipEligibleChapter,
+  normalizeConsecutiveBatchRolls,
   resolveDirectorAutoExecutionRepairMode,
   resolveDirectorAutoExecutionWorkflowState,
   type DirectorAutoExecutionChapterRef,
@@ -49,7 +50,25 @@ import {
 import {
   applyExpandRangeBatchRoll,
   type BatchRollDecision,
+  type BatchRollHaltItemKey,
 } from "./novelDirectorAutoExecutionBatchRollRuntime";
+
+function withPersistedBatchRollCount(
+  autoExecution: DirectorAutoExecutionState,
+  consecutiveBatchRolls: number,
+): DirectorAutoExecutionState {
+  return {
+    ...autoExecution,
+    consecutiveBatchRolls: normalizeConsecutiveBatchRolls(consecutiveBatchRolls),
+  };
+}
+
+function resolveBatchRollHaltItemKey(
+  decision: BatchRollDecision,
+  fallback: BatchRollHaltItemKey = "batch_roll",
+): BatchRollHaltItemKey {
+  return decision.haltItemKey ?? fallback;
+}
 
 export class NovelDirectorAutoExecutionRuntime {
   constructor(private readonly deps: NovelDirectorAutoExecutionRuntimeDeps) {}
@@ -64,6 +83,8 @@ export class NovelDirectorAutoExecutionRuntime {
   /**
    * When remaining=0, optionally expand/reenter instead of workflow_completed.
    * Returns null if caller should recordCompletedCheckpoint; otherwise new range/state to continue loop.
+   * consecutiveBatchRolls is hydrated from state at runFromReady entry and persisted on every
+   * expand / reenter / halt path so resume cannot reset the MAX=8 fuse.
    */
   private async tryBatchRollOnRangeExhausted(input: {
     taskId: string;
@@ -95,14 +116,21 @@ export class NovelDirectorAutoExecutionRuntime {
     if (decision.kind === "completed_scope") {
       return null;
     }
+    const nextRolls = normalizeConsecutiveBatchRolls(input.consecutiveBatchRolls + 1);
     if (decision.kind === "halt_for_review") {
+      const haltItemKey = resolveBatchRollHaltItemKey(decision);
+      const haltedState = withPersistedBatchRollCount({
+        ...input.autoExecution,
+        pipelineJobId: null,
+        pipelineStatus: null,
+      }, nextRolls);
       await this.deps.workflowService.markTaskFailed(
         input.taskId,
         decision.reason,
         {
           // Batch-roll halt is execution/supervisor scope, not quality_repair ticket.
           stage: "chapter_execution",
-          itemKey: "batch_roll",
+          itemKey: haltItemKey,
           itemLabel: "批续窗暂停",
           checkpointType: "chapter_batch_ready",
           checkpointSummary: decision.reason,
@@ -115,19 +143,15 @@ export class NovelDirectorAutoExecutionRuntime {
         novelId: input.novelId,
         request: input.request,
         range: input.range,
-        autoExecution: {
-          ...input.autoExecution,
-          pipelineJobId: null,
-          pipelineStatus: null,
-        },
+        autoExecution: haltedState,
         isBackgroundRunning: false,
         resumeStage: "pipeline",
       });
       // Signal stop without completed checkpoint: throw a soft control via special decision
       return {
         range: input.range,
-        autoExecution: input.autoExecution,
-        consecutiveBatchRolls: input.consecutiveBatchRolls + 1,
+        autoExecution: haltedState,
+        consecutiveBatchRolls: nextRolls,
         decision,
       };
     }
@@ -145,6 +169,11 @@ export class NovelDirectorAutoExecutionRuntime {
           `下一可执行窗第 ${nextRange.startOrder}-${nextRange.endOrder} 章合同在大纲区已就绪，`
           + "但执行表尚无对应章节行，禁止空窗 expand。请先 sync 执行合同或走 reenter 细化。"
         );
+        const haltedState = withPersistedBatchRollCount({
+          ...input.autoExecution,
+          pipelineJobId: null,
+          pipelineStatus: null,
+        }, nextRolls);
         await this.deps.workflowService.markTaskFailed(
           input.taskId,
           emptyReason,
@@ -163,48 +192,51 @@ export class NovelDirectorAutoExecutionRuntime {
           novelId: input.novelId,
           request: input.request,
           range: input.range,
-          autoExecution: {
-            ...input.autoExecution,
-            pipelineJobId: null,
-            pipelineStatus: null,
-          },
+          autoExecution: haltedState,
           isBackgroundRunning: false,
           resumeStage: "pipeline",
         });
         return {
           range: input.range,
-          autoExecution: input.autoExecution,
-          consecutiveBatchRolls: input.consecutiveBatchRolls + 1,
+          autoExecution: haltedState,
+          consecutiveBatchRolls: nextRolls,
           decision: {
             kind: "halt_for_review",
+            haltItemKey: "batch_roll_empty_expand",
             reason: emptyReason,
             nextRange,
           },
         };
       }
       const expanded = applyExpandRangeBatchRoll({
-        previousState: input.autoExecution,
+        previousState: withPersistedBatchRollCount(input.autoExecution, nextRolls),
         nextRange,
         chapters,
       });
+      const expandedState = withPersistedBatchRollCount(expanded.autoExecution, nextRolls);
       await syncAutoExecutionTaskState(this.deps, {
         taskId: input.taskId,
         novelId: input.novelId,
         request: input.request,
         range: expanded.range,
-        autoExecution: expanded.autoExecution,
+        autoExecution: expandedState,
         isBackgroundRunning: true,
         resumeStage: "pipeline",
       });
       return {
         range: expanded.range,
-        autoExecution: expanded.autoExecution,
-        consecutiveBatchRolls: input.consecutiveBatchRolls + 1,
+        autoExecution: expandedState,
+        consecutiveBatchRolls: nextRolls,
         decision,
       };
     }
     if (decision.kind === "reenter_structured_outline" && decision.nextRange) {
       if (!this.deps.prepareNextAutoExecutionBatch) {
+        const haltedState = withPersistedBatchRollCount({
+          ...input.autoExecution,
+          pipelineJobId: null,
+          pipelineStatus: null,
+        }, nextRolls);
         await this.deps.workflowService.markTaskFailed(
           input.taskId,
           `批续窗需要细化第 ${decision.nextRange.startOrder}-${decision.nextRange.endOrder} 章，但未配置 prepareNextAutoExecutionBatch。`,
@@ -222,42 +254,43 @@ export class NovelDirectorAutoExecutionRuntime {
           novelId: input.novelId,
           request: input.request,
           range: input.range,
-          autoExecution: {
-            ...input.autoExecution,
-            pipelineJobId: null,
-            pipelineStatus: null,
-          },
+          autoExecution: haltedState,
           isBackgroundRunning: false,
           resumeStage: "pipeline",
         });
         return {
           range: input.range,
-          autoExecution: input.autoExecution,
-          consecutiveBatchRolls: input.consecutiveBatchRolls + 1,
-          decision: { ...decision, kind: "halt_for_review" },
+          autoExecution: haltedState,
+          consecutiveBatchRolls: nextRolls,
+          decision: {
+            ...decision,
+            kind: "halt_for_review",
+            haltItemKey: decision.haltItemKey ?? "batch_roll_outline",
+          },
         };
       }
       const prepared = await this.deps.prepareNextAutoExecutionBatch({
         novelId: input.novelId,
         taskId: input.taskId,
         decision,
-        previousState: input.autoExecution,
+        previousState: withPersistedBatchRollCount(input.autoExecution, nextRolls),
         previousRange: input.range,
         request: input.request,
       });
+      const preparedState = withPersistedBatchRollCount(prepared.autoExecution, nextRolls);
       await syncAutoExecutionTaskState(this.deps, {
         taskId: input.taskId,
         novelId: input.novelId,
         request: input.request,
         range: prepared.range,
-        autoExecution: prepared.autoExecution,
+        autoExecution: preparedState,
         isBackgroundRunning: true,
         resumeStage: "pipeline",
       });
       return {
         range: prepared.range,
-        autoExecution: prepared.autoExecution,
-        consecutiveBatchRolls: input.consecutiveBatchRolls + 1,
+        autoExecution: preparedState,
+        consecutiveBatchRolls: nextRolls,
         decision,
       };
     }
@@ -376,7 +409,8 @@ export class NovelDirectorAutoExecutionRuntime {
       // and consecutive defer-and-continue advances without any chapter succeeding.
       let consecutiveStartFailures = 0;
       let consecutiveDefers = 0;
-      let consecutiveBatchRolls = 0;
+      // Hydrate from persisted autoExecution so resume cannot reset MAX_CONSECUTIVE_BATCH_ROLLS.
+      let consecutiveBatchRolls = normalizeConsecutiveBatchRolls(autoExecution.consecutiveBatchRolls);
       const MAX_CONSECUTIVE_START_FAILURES = 3;
       const MAX_CONSECUTIVE_DEFERS = 5;
       // Independent safety net: the batch-roll cap lives inside the replaceable

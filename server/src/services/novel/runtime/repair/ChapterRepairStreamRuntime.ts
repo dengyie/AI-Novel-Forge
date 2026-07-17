@@ -41,8 +41,7 @@ import {
   projectStyleClear,
 } from "@ai-novel/shared/types/styleClearGate";
 import {
-  collectPronounStyleViolations,
-  computePronounRiskFloor,
+  computeDeterministicResidualRiskScore,
 } from "../../../styleEngine/StyleDetectionService";
 import {
   ChapterContextAssemblyError,
@@ -563,9 +562,9 @@ async function* createSingleChunkStream(content: string): AsyncIterable<BaseMess
 /**
  * repair 路径无完整 styleReview residual 时的 styleClear 投影。
  * - L0 hard pronoun（stack/density）→ false
- * - residual = 确定性 pronoun risk floor（不再 hardcode null）
+ * - residual = max(pronoun floor, non-pronoun high/critical prose floor)
  *   · 0 → 干净，开篇可通过
- *   · ≥40（pronoun floor）→ 开篇 residual 硬门挡 completed
+ *   · ≥40（HUD/AI 自指/工程词等高危）→ 开篇 residual 硬门挡 completed
  *   · 中盘仅 residual 高仍 true（债不挡；blocking pronoun 仍 false）
  */
 function projectStyleClearFromRepairReview(input: {
@@ -585,8 +584,8 @@ function projectStyleClearFromRepairReview(input: {
     ...issueCodes,
     ...proseCodes,
   ]);
-  // fail-closed residual：用 L0 pronoun floor 作可测 residual，禁止 null 在开篇假/真漂移
-  const residualRiskScore = computePronounRiskFloor(collectPronounStyleViolations(input.content));
+  // fail-closed residual：pronoun + 其它高危 prose 痕迹；禁止仅 pronoun 导致 AI 自指开篇假 true
+  const residualRiskScore = computeDeterministicResidualRiskScore(input.content);
   return projectStyleClear({
     residualRiskScore,
     hasBlockingPronounProse,
