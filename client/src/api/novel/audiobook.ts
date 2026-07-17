@@ -25,6 +25,8 @@ import type {
   AudiobookWorkspaceOverviewResult,
   CharacterVoicePreviewAsset,
   CharacterVoicePreviewGenerateInput,
+  CharacterVoicePreviewGenerateResult,
+  CharacterVoicePreviewAdoptCandidateInput,
   CreateAudiobookTaskInput,
 } from "@ai-novel/shared/types/audiobook";
 import { API_AUTH_TOKEN, API_BASE_URL } from "@/lib/constants";
@@ -137,8 +139,21 @@ export async function generateCharacterVoicePreview(
   characterId: string,
   payload: CharacterVoicePreviewGenerateInput = {},
 ) {
-  const { data } = await apiClient.post<ApiResponse<CharacterVoicePreviewAsset>>(
+  const { data } = await apiClient.post<ApiResponse<CharacterVoicePreviewGenerateResult>>(
     `/novels/${novelId}/characters/${characterId}/voice-preview/generate`,
+    payload,
+  );
+  return data;
+}
+
+/** 采用多抽试听候选为正式 preview。 */
+export async function adoptCharacterVoicePreviewCandidate(
+  novelId: string,
+  characterId: string,
+  payload: CharacterVoicePreviewAdoptCandidateInput,
+) {
+  const { data } = await apiClient.post<ApiResponse<CharacterVoicePreviewAsset>>(
+    `/novels/${novelId}/characters/${characterId}/voice-preview/adopt-candidate`,
     payload,
   );
   return data;

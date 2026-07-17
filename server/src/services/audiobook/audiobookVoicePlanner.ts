@@ -3,6 +3,7 @@ import {
   type AudiobookVoicePlanItem,
   type AudiobookVoicePlanStrategy,
   type MimoTtsPresetVoice,
+  isMimoTtsPresetVoice,
 } from "@ai-novel/shared/types/audiobook";
 import { pickDesignPromptArchetype } from "./designPromptArchetypes";
 
@@ -977,8 +978,9 @@ function neighborLabel(slot: VoiceSlot): string {
 /**
  * 纯函数：根据人物卡批量规划差异化音色。
  * - prefer_design：lead/cast → design + 槽位拉开；extra/narrator → 路人/旁白 preset 簇
- * - auto（保守）：importance≥70 且有 voiceTexture → design；重要 preset 位满 → design；其余 preset
+ * - auto（smart_fill）：lead/cast → design；extra/narrator → preset；未知簇 importance≥70 且有 texture → design
  * - preset_only：仅 preset 负载均衡（旁白/路人用分簇池）
+ * - reservedPresets：旁白等占用的预置，角色 preset 池剔除；池空则 lead/cast 强制 design
  * - clone+非空 ref 永不改写；无 ref 的 half-clone 可规划为 preset/design
  * - 覆盖语义由调用方 onlyMissing + apply.overwrite 处理（本函数不接收 overwrite）
  */
@@ -988,6 +990,8 @@ export function planCharacterVoices(input: {
   onlyMissing?: boolean;
   characterIds?: string[];
   maxImportantPerPreset?: number;
+  /** 旁白等占用的预置音色，角色池剔除 */
+  reservedPresets?: string[];
 }): {
   items: AudiobookVoicePlanItem[];
   skipped: Array<{ characterId: string; characterName: string; reason: string }>;
@@ -998,6 +1002,11 @@ export function planCharacterVoices(input: {
   const allowIds = input.characterIds?.length
     ? new Set(input.characterIds)
     : null;
+  const reservedSet = new Set(
+    (input.reservedPresets ?? [])
+      .map((v) => v.trim())
+      .filter((v): v is MimoTtsPresetVoice => Boolean(v) && isMimoTtsPresetVoice(v)),
+  );
 
   const skipped: Array<{ characterId: string; characterName: string; reason: string }> = [];
   const candidates: Array<
@@ -1016,6 +1025,11 @@ export function planCharacterVoices(input: {
   const occupiedSlotByKey = new Map<string, VoiceSlot>();
   /** lead 同性别已用 energy，规划时主动散开 */
   const leadEnergyByGender = new Map<VoiceGenderBucket, Set<VoiceEnergyBand>>();
+
+  // 旁白预置预 seed usage，降低角色再抢同声
+  for (const voice of reservedSet) {
+    usage.set(voice, (usage.get(voice) ?? 0) + 1);
+  }
 
   for (const character of input.characters) {
     if (allowIds && !allowIds.has(character.characterId)) {
@@ -1067,7 +1081,8 @@ export function planCharacterVoices(input: {
   const items: AudiobookVoicePlanItem[] = [];
 
   for (const character of candidates) {
-    const pool = presetPool(character.genderBucket, character.ageBucket, character.cluster);
+    const poolAll = presetPool(character.genderBucket, character.ageBucket, character.cluster);
+    const pool = poolAll.filter((v) => !reservedSet.has(v));
     let ttsMode: AudiobookTtsMode = "preset";
     let ttsVoice: string | null = null;
     let ttsDesignPrompt: string | null = null;
@@ -1077,18 +1092,25 @@ export function planCharacterVoices(input: {
 
     const hasTexture = Boolean(character.voiceTexture?.trim());
     const isLeadOrCast = character.cluster === "lead" || character.cluster === "cast";
-    // auto 保守：importance≥70 且有 texture → design（删除内层 ≥80 死区）
-    const autoDesignByTexture = strategy === "auto" && character.importance >= 70 && hasTexture;
-    // prefer_design：仅主角/主角团 design；路人/旁白强制 preset 簇（分配维，非听感证明）
+    // smart_fill (auto)：主配角默认 design，不再依赖 texture 门槛
+    const smartFillCore = strategy === "auto" && isLeadOrCast;
+    // auto 未知簇 / 非 lead-cast 高重要 + texture → design
+    const autoDesignByTexture =
+      strategy === "auto" && !isLeadOrCast && character.importance >= 70 && hasTexture;
+    // prefer_design：仅主角/主角团 design；路人/旁白强制 preset 簇
     const preferDesignCore =
       strategy === "prefer_design" && isLeadOrCast;
 
-    if (preferDesignCore || autoDesignByTexture) {
+    if (preferDesignCore || smartFillCore || autoDesignByTexture) {
       ttsMode = "design";
       if (preferDesignCore) {
         reason = character.cluster === "lead"
           ? "策略 prefer_design：主角簇 design，忌死气槽位。"
           : "策略 prefer_design：主角团 design，槽位拉开。";
+      } else if (smartFillCore) {
+        reason = character.cluster === "lead"
+          ? "策略 smart_fill(auto)：主角簇 design（分配维，非听感证明）。"
+          : "策略 smart_fill(auto)：主角团 design（分配维，非听感证明）。";
       } else {
         reason = "auto：高重要性且有 voiceTexture，用 design 拉开 prompt 维（非听感证明）。";
       }
@@ -1100,29 +1122,47 @@ export function planCharacterVoices(input: {
     }
 
     if (ttsMode === "preset") {
-      const voice = pickLeastUsedPreset(pool, usage);
-      const importantCount = importantUsage.get(voice) ?? 0;
-      const isImportant = character.importance >= 55;
-
-      if (
-        strategy !== "preset_only"
-        && strategy !== "prefer_design"
-        && isImportant
-        && importantCount >= maxImportantPerPreset
-      ) {
-        ttsMode = "design";
-        reason = `预置「${voice}」重要角色位已满，升 design 避免同 preset 复用（分配维，非听感证明）。`;
-      } else {
-        ttsMode = "preset";
-        ttsVoice = voice;
-        usage.set(voice, (usage.get(voice) ?? 0) + 1);
-        if (isImportant) {
-          importantUsage.set(voice, importantCount + 1);
-        }
-        if (!reason) {
-          reason = `按${character.cluster}/${character.genderBucket}/${character.ageBucket}分配预置「${voice}」，负载均衡。`;
+      if (pool.length === 0) {
+        // 预置池被 reserved 抽空：主配角强制 design；路人用全池兜底
+        if (isLeadOrCast || strategy !== "preset_only") {
+          ttsMode = "design";
+          reason = reservedSet.size > 0
+            ? "reservedPresets 抽空可用预置池，升 design 避免与旁白撞车。"
+            : "预置池为空，升 design。";
         } else {
-          reason = `${reason} 预置「${voice}」。`.trim();
+          const fallback = pickLeastUsedPreset(poolAll.length ? poolAll : [...UNKNOWN_POOL], usage);
+          ttsVoice = fallback;
+          usage.set(fallback, (usage.get(fallback) ?? 0) + 1);
+          reason = `预置池被 reserved 抽空，回退「${fallback}」。`;
+        }
+      } else {
+        const voice = pickLeastUsedPreset(pool, usage);
+        const importantCount = importantUsage.get(voice) ?? 0;
+        const isImportant = character.importance >= 55;
+
+        if (
+          strategy !== "preset_only"
+          && strategy !== "prefer_design"
+          && isImportant
+          && importantCount >= maxImportantPerPreset
+        ) {
+          ttsMode = "design";
+          reason = `预置「${voice}」重要角色位已满，升 design 避免同 preset 复用（分配维，非听感证明）。`;
+        } else {
+          ttsMode = "preset";
+          ttsVoice = voice;
+          usage.set(voice, (usage.get(voice) ?? 0) + 1);
+          if (isImportant) {
+            importantUsage.set(voice, importantCount + 1);
+          }
+          if (!reason) {
+            reason = `按${character.cluster}/${character.genderBucket}/${character.ageBucket}分配预置「${voice}」，负载均衡。`;
+          } else {
+            reason = `${reason} 预置「${voice}」。`.trim();
+          }
+          if (reservedSet.size > 0) {
+            reason = `${reason} reserved:filtered。`.trim();
+          }
         }
       }
     }
@@ -1206,7 +1246,7 @@ export function planCharacterVoices(input: {
         reason = `${reason} collision:soft`.trim();
       } else if (slotDiverged) {
         reason = `${reason} slot:override ${allocated.key}。`.trim();
-      } else if (!reason.includes("槽") && (strategy === "prefer_design" || minSeparation > 0)) {
+      } else if (!reason.includes("槽") && (strategy === "prefer_design" || strategy === "auto" || minSeparation > 0)) {
         reason = `${reason} 槽位 ${allocated.key}。`.trim();
       }
     }

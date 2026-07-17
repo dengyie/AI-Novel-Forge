@@ -4,9 +4,12 @@ import {
   DEFAULT_AUDIOBOOK_NARRATOR_STYLE,
   MIMO_TTS_VOICE_CATALOG,
   type CharacterVoicePreviewAsset,
+  type CharacterVoicePreviewCandidate,
+  type CharacterVoicePreviewGenerateResult,
   type CharacterVoicePreviewStatus,
 } from "@ai-novel/shared/types/audiobook";
 import {
+  adoptCharacterVoicePreviewCandidate,
   generateCharacterVoicePreview,
   getCharacterVoicePreview,
   issueCharacterVoicePreviewMediaUrl,
@@ -149,6 +152,8 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
   const [previewLabel, setPreviewLabel] = useState("");
   const [previewMessage, setPreviewMessage] = useState("");
   const [previewDurationSec, setPreviewDurationSec] = useState<number | null>(null);
+  const [candidates, setCandidates] = useState<CharacterVoicePreviewCandidate[]>([]);
+  const [suggestedCandidateId, setSuggestedCandidateId] = useState<string | null>(null);
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
   const previewUrlSlotRef = useRef(createObjectUrlSlot());
 
@@ -179,6 +184,8 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
     setPreviewLabel("");
     setPreviewMessage("");
     setPreviewDurationSec(null);
+    setCandidates([]);
+    setSuggestedCandidateId(null);
   }, [characterId]);
 
   useEffect(() => {
@@ -230,10 +237,77 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
       if (!gate.ok) {
         throw new Error(gate.reason);
       }
-      const response = await generateCharacterVoicePreview(novelId, characterId, {});
+      const response = await generateCharacterVoicePreview(novelId, characterId, {
+        candidates: 3,
+        autoAdoptWinner: false,
+      });
+      return response.data as CharacterVoicePreviewGenerateResult;
+    },
+    onSuccess: async (data) => {
+      setCandidates(data.candidates ?? []);
+      setSuggestedCandidateId(data.suggestedCandidateId ?? null);
+      if (data.adopted) {
+        queryClient.setQueryData(
+          queryKeys.novels.characterVoicePreview(novelId, characterId),
+          data.adopted,
+        );
+      }
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.novels.detail(novelId) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.novels.characters(novelId) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.novels.audiobookWorkspace(novelId) }),
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.novels.characterVoicePreview(novelId, characterId),
+        }),
+      ]);
+      try {
+        const playTarget = data.adopted
+          ?? (data.candidates[0]
+            ? {
+                characterId: data.characterId,
+                characterName: data.characterName,
+                status: "ready" as const,
+                ttsMode: data.ttsMode,
+                voice: data.voice ?? null,
+                sampleText: data.sampleText,
+                fingerprint: null,
+                currentFingerprint: "",
+                generatedAt: null,
+                audioUrl: data.candidates[0].audioUrl,
+                audioBase64: data.candidates[0].audioBase64 ?? null,
+                format: "wav" as const,
+              }
+            : null);
+        if (playTarget) {
+          await playFromAsset(playTarget);
+        }
+        const durationText =
+          data.candidates[0]?.durationMs
+            ? `约 ${(data.candidates[0].durationMs / 1000).toFixed(1)} 秒`
+            : "时长待解析";
+        setPreviewMessage(
+          data.adopted
+            ? `试听已写入角色卡（${durationText}），正在播放。`
+            : `已多抽 ${data.candidates.length} 条候选（${durationText}），请点选采用。`,
+        );
+      } catch (error) {
+        setPreviewMessage(error instanceof Error ? error.message : "试听已生成，但播放失败。");
+      }
+    },
+    onError: (error) => {
+      setPreviewMessage(error instanceof Error ? error.message : "生成试听失败。");
+    },
+  });
+
+  const adoptMutation = useMutation({
+    mutationFn: async (candidateId: string) => {
+      const response = await adoptCharacterVoicePreviewCandidate(novelId, characterId, {
+        candidateId,
+      });
       return response.data as CharacterVoicePreviewAsset;
     },
     onSuccess: async (data) => {
+      setCandidates((prev) => prev.map((c) => ({ ...c, selected: false })));
       queryClient.setQueryData(
         queryKeys.novels.characterVoicePreview(novelId, characterId),
         data,
@@ -245,20 +319,13 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
       ]);
       try {
         await playFromAsset(data);
-        const durationText = previewDurationSec != null
-          ? `约 ${previewDurationSec.toFixed(1)} 秒`
-          : "时长待解析";
-        setPreviewMessage(
-          data.status === "ready"
-            ? `试听已写入角色卡（${durationText}），正在播放。`
-            : `试听已生成（${durationText}）。`,
-        );
+        setPreviewMessage("已采用所选候选并写入角色卡。");
       } catch (error) {
-        setPreviewMessage(error instanceof Error ? error.message : "试听已生成，但播放失败。");
+        setPreviewMessage(error instanceof Error ? error.message : "已采用，但播放失败。");
       }
     },
     onError: (error) => {
-      setPreviewMessage(error instanceof Error ? error.message : "生成试听失败。");
+      setPreviewMessage(error instanceof Error ? error.message : "采用候选失败。");
     },
   });
 
@@ -350,7 +417,7 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
               size="sm"
               variant="default"
               disabled={generateMutation.isPending || !generateGate.ok}
-              title={generateGate.ok ? `为 ${characterName} 生成固定试听` : generateGate.reason}
+              title={generateGate.ok ? `为 ${characterName} 多抽 3 条试听` : generateGate.reason}
               onClick={() => generateMutation.mutate()}
             >
               {generateMutation.isPending
@@ -395,7 +462,57 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
               ? ` · 生成于 ${new Date(previewQuery.data.generatedAt).toLocaleString()}`
               : ""}
           </div>
-          <audio ref={previewAudioRef} controls preload="auto" src={previewAudioUrl} className="w-full" />
+          
+      {candidates.length > 1 ? (
+        <div className="space-y-2 rounded-lg border border-border/60 bg-background/60 p-2">
+          <div className="text-xs font-medium text-muted-foreground">
+            多抽候选（工程建议 {suggestedCandidateId || "—"}，请人耳选）
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {candidates.map((c) => (
+              <div key={c.id} className="flex items-center gap-1 rounded-md border border-border/50 px-2 py-1">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    if (c.audioBase64) {
+                      void playFromAsset({
+                        characterId,
+                        characterName,
+                        status: "ready",
+                        ttsMode: "preset",
+                        voice: null,
+                        sampleText: null,
+                        fingerprint: null,
+                        currentFingerprint: "",
+                        generatedAt: null,
+                        audioUrl: c.audioUrl,
+                        audioBase64: c.audioBase64,
+                        format: "wav",
+                      });
+                    }
+                  }}
+                >
+                  听 {c.id}
+                  {c.durationMs > 0 ? ` · ${(c.durationMs / 1000).toFixed(1)}s` : ""}
+                  {c.id === suggestedCandidateId ? " · 建议" : ""}
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={c.selected ? "default" : "secondary"}
+                  disabled={adoptMutation.isPending}
+                  onClick={() => adoptMutation.mutate(c.id)}
+                >
+                  采用
+                </Button>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+<audio ref={previewAudioRef} controls preload="auto" src={previewAudioUrl} className="w-full" />
         </div>
       ) : null}
 
