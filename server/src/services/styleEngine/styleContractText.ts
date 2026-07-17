@@ -101,11 +101,39 @@ export function buildStyleContractMetaText(contract: StyleContract | null | unde
   ].join("\n");
 }
 
-export function buildWriterStyleContractText(contract: StyleContract | null | undefined): string {
+/**
+ * 开篇（order ≤ 3）固定声线提示：禁止连续句首他/她，优先专名与动作起句。
+ * 只追加到 writer-facing style_contract 文本，不进 StyleContract schema，不在 service 内联长 prompt。
+ */
+export const OPEN_CHAPTER_PRONOUN_HINT = "开篇忌连续句首他/她；优先专名与动作起句";
+
+/** 与 styleClear 关键章上限对齐（DEFAULT_STYLE_GATE_MAX_ORDER）。 */
+export const OPEN_CHAPTER_STYLE_HINT_MAX_ORDER = 3;
+
+export type BuildWriterStyleContractTextOptions = {
+  /** 章节序号；1..OPEN_CHAPTER_STYLE_HINT_MAX_ORDER 时追加开篇声线提示。 */
+  chapterOrder?: number | null;
+};
+
+export function buildWriterStyleContractText(
+  contract: StyleContract | null | undefined,
+  options?: BuildWriterStyleContractTextOptions,
+): string {
   if (!contract) {
     return "";
   }
-  return buildFullStyleContractText(contract);
+  const base = buildFullStyleContractText(contract);
+  const order = options?.chapterOrder;
+  const isOpenChapter =
+    typeof order === "number"
+    && Number.isFinite(order)
+    && order > 0
+    && order <= OPEN_CHAPTER_STYLE_HINT_MAX_ORDER;
+  if (!isOpenChapter) {
+    return base;
+  }
+  const hintBlock = `【开篇声线】\n${OPEN_CHAPTER_PRONOUN_HINT}`;
+  return base ? `${base}\n\n${hintBlock}` : hintBlock;
 }
 
 export function inferStyleViolationSource(
