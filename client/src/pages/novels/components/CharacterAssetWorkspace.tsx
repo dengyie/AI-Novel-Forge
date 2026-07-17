@@ -467,6 +467,8 @@ export default function CharacterAssetWorkspace(props: CharacterAssetWorkspacePr
               novelId={novelId}
               characterId={selectedCharacter.id}
               characterName={selectedCharacter.name}
+              castRole={selectedCharacter.castRole}
+              role={selectedCharacter.role}
               form={{
                 ttsMode: characterForm.ttsMode,
                 ttsVoice: characterForm.ttsVoice,
