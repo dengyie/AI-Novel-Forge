@@ -40,6 +40,7 @@
 - [Assistant UI Plan](./plans/assistant-ui-plan.md)
 - [AI Comic Adaptation](./plans/ai-comic-adaptation-plan.md)
 - [AI Comic Product Design](./plans/ai-comic-product-design.md)
+- [Codebase Audit Remediation Plan](./plans/codebase-audit-remediation-plan.md)（C1 文件规模/C2 配置泄漏/C3 director 根收敛/C4 routes 迁移/C5-C7 文档失真 + 6 项合规防回归 + 待审）
 
 #### 有声书 / 音色库工作流（main 上活跃）
 
