@@ -4,6 +4,8 @@ const assert = require("node:assert/strict");
 const {
   mapPronounFindingsToStyleViolations,
   computePronounRiskFloor,
+  computeDeterministicProseResidualRiskFloor,
+  computeDeterministicResidualRiskScore,
   mergePronounIntoDetectionReport,
   collectPronounStyleViolations,
   HARD_PRONOUN_PROSE_CODES,
@@ -223,4 +225,57 @@ test("mergePronounIntoDetectionReport：无 pronoun 时原样返回 base", () =>
 test("collectPronounStyleViolations：干净文本无 hard pronoun", () => {
   const clean = "沈晚推开窗。潮气扑进来。远处的灯火一层层熄灭。";
   assert.deepEqual(collectPronounStyleViolations(clean), []);
+});
+
+test("computeDeterministicProseResidualRiskFloor：跳过 pronoun，仅 high/critical 抬分", () => {
+  assert.equal(computeDeterministicProseResidualRiskFloor([]), 0);
+  assert.equal(
+    computeDeterministicProseResidualRiskFloor([
+      { code: "prose_pronoun_subject_stack", severity: "critical" },
+      { code: "prose_pronoun_density", severity: "high" },
+      { code: "prose_pronoun_density_soft", severity: "medium" },
+    ]),
+    0,
+  );
+  assert.equal(
+    computeDeterministicProseResidualRiskFloor([
+      { code: "prose_ai_self_reference", severity: "critical" },
+    ]),
+    50,
+  );
+  assert.equal(
+    computeDeterministicProseResidualRiskFloor([
+      { code: "prose_system_hud", severity: "high" },
+    ]),
+    40,
+  );
+  assert.equal(
+    computeDeterministicProseResidualRiskFloor([
+      { code: "prose_system_hud", severity: "high" },
+      { code: "prose_ai_self_reference", severity: "critical" },
+    ]),
+    50,
+  );
+});
+
+test("computeDeterministicResidualRiskScore：干净文本 0", () => {
+  const clean = "沈晚推开窗。潮气扑进来。远处的灯火一层层熄灭。";
+  assert.equal(computeDeterministicResidualRiskScore(clean), 0);
+});
+
+test("computeDeterministicResidualRiskScore：AI 自指抬 non-pronoun residual ≥50", () => {
+  const content = "作为AI我无法继续创作这段故事。沈晚推开窗。";
+  const residual = computeDeterministicResidualRiskScore(content);
+  assert.ok(residual >= 50, `expected residual >= 50, got ${residual}`);
+});
+
+test("computeDeterministicResidualRiskScore：pronoun stack 与 non-pronoun 取 max", () => {
+  const pronounOnly = Array.from({ length: 6 }, () => "他没有说话。").join("");
+  const pronounFloor = computeDeterministicResidualRiskScore(pronounOnly);
+  assert.ok(pronounFloor >= 55, `pronoun residual should be >=55, got ${pronounFloor}`);
+
+  const mixed = `${pronounOnly}作为一名AI我无法完成这个请求。`;
+  const mixedFloor = computeDeterministicResidualRiskScore(mixed);
+  assert.ok(mixedFloor >= pronounFloor, "max(pronoun, prose) must not drop below pronoun floor");
+  assert.ok(mixedFloor >= 55);
 });

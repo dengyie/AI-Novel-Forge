@@ -11,6 +11,21 @@ import {
 
 export const DEFAULT_MAX_CONSECUTIVE_BATCH_ROLLS = 8;
 export const DEFAULT_BATCH_ROLL_WINDOW_SIZE = 10;
+/**
+ * 非阻塞质量债（qualityDebtChapterOrders 去重章数）硬停预算。
+ * 达到后 halt_for_review，禁止无限 expand/reenter 带着软债滚窗。
+ */
+export const DEFAULT_SOFT_QUALITY_DEBT_BUDGET = 5;
+
+/** markTaskFailed.itemKey 分型（监管/告警用） */
+export type BatchRollHaltItemKey =
+  | "batch_roll_max"
+  | "batch_roll_soft_debt_budget"
+  | "batch_roll_prose_complete_only"
+  | "batch_roll_empty_expand"
+  | "batch_roll_outline"
+  | "batch_roll_iteration_cap"
+  | "batch_roll";
 
 export type BatchRollDecisionKind =
   | "completed_scope"
@@ -27,6 +42,8 @@ export type BatchRollDecision = {
   kind: BatchRollDecisionKind;
   reason: string;
   nextRange?: BatchRollWindow;
+  /** halt_for_review 时的 itemKey 分型；expand/reenter/completed 忽略 */
+  haltItemKey?: BatchRollHaltItemKey;
 };
 
 export type BatchRollChapterReadiness = {
@@ -326,6 +343,18 @@ export function collectNotExecutableOrdersInBatchWindow(input: {
 }
 
 /**
+ * Unique soft-debt chapter orders from autoExecution (finite numbers only).
+ */
+export function countSoftQualityDebtChapters(
+  autoExecution: Pick<DirectorAutoExecutionState, "qualityDebtChapterOrders"> | null | undefined,
+): number {
+  const orders = autoExecution?.qualityDebtChapterOrders ?? [];
+  return new Set(
+    orders.filter((order): order is number => typeof order === "number" && Number.isFinite(order)),
+  ).size;
+}
+
+/**
  * Pure decision: what to do when the current auto-execution range has remaining=0.
  */
 export function resolveNextAutoExecutionBatchRoll(input: {
@@ -335,6 +364,11 @@ export function resolveNextAutoExecutionBatchRoll(input: {
   nextPreparedExecutableWindow?: BatchRollWindow | null;
   consecutiveBatchRolls: number;
   maxConsecutiveBatchRolls?: number;
+  /**
+   * Soft quality-debt unique-order budget. Default DEFAULT_SOFT_QUALITY_DEBT_BUDGET.
+   * Pass Infinity / very large to disable in tests.
+   */
+  softQualityDebtBudget?: number;
   canPrepareNextBatch?: boolean;
   /**
    * C3：窗尽且无下一窗时，enforce 下 prose_complete_only（功能未 satisfied）
@@ -348,11 +382,37 @@ export function resolveNextAutoExecutionBatchRoll(input: {
   if (input.consecutiveBatchRolls >= maxRolls) {
     return {
       kind: "halt_for_review",
+      haltItemKey: "batch_roll_max",
       reason: `连续批续窗已达上限 ${maxRolls}，停止自动推进以免死循环。`,
     };
   }
 
+  const softBudget = input.softQualityDebtBudget ?? DEFAULT_SOFT_QUALITY_DEBT_BUDGET;
+  const softDebtCount = countSoftQualityDebtChapters(input.autoExecution);
+  // Soft debt hard-stop before any expand/reenter so deferred debt cannot roll unboundedly.
+  // completed_scope / prose_complete_only still evaluated after (no next window cases).
   const prepared = input.nextPreparedExecutableWindow ?? null;
+  const unprepared = input.nextUnpreparedWindow ?? null;
+  const hasNextWindow = Boolean(
+    (prepared && prepared.startOrder > input.range.endOrder)
+    || (unprepared && unprepared.startOrder > input.range.endOrder),
+  );
+  if (
+    Number.isFinite(softBudget)
+    && softBudget >= 0
+    && softDebtCount >= softBudget
+    && hasNextWindow
+  ) {
+    return {
+      kind: "halt_for_review",
+      haltItemKey: "batch_roll_soft_debt_budget",
+      reason: (
+        `非阻塞质量债已累计 ${softDebtCount} 章（预算 ${softBudget}），`
+        + "停止批续窗自动推进。请先清理债板或显式 resume 后再 expand。"
+      ),
+    };
+  }
+
   if (prepared && prepared.startOrder > input.range.endOrder) {
     return {
       kind: "expand_range",
@@ -361,11 +421,11 @@ export function resolveNextAutoExecutionBatchRoll(input: {
     };
   }
 
-  const unprepared = input.nextUnpreparedWindow ?? null;
   if (unprepared && unprepared.startOrder > input.range.endOrder) {
     if (input.canPrepareNextBatch === false) {
       return {
         kind: "halt_for_review",
+        haltItemKey: "batch_roll_outline",
         reason: `当前窗已完成，下一窗 ${unprepared.startOrder}-${unprepared.endOrder} 尚未细化，且未注入 prepareNextAutoExecutionBatch。`,
         nextRange: unprepared,
       };
@@ -382,6 +442,7 @@ export function resolveNextAutoExecutionBatchRoll(input: {
   if (input.volumeCompletionKind === "prose_complete_only") {
     return {
       kind: "halt_for_review",
+      haltItemKey: "batch_roll_prose_complete_only",
       reason: `当前执行范围 ${input.range.startOrder}-${input.range.endOrder} 章面已写满，但功能验收未全部 satisfied（prose_complete_only）。监管默认不收工，需补兑付或 force_complete_volume。`,
     };
   }
@@ -469,6 +530,10 @@ export function applyExpandRangeBatchRoll(input: {
       ...autoExecution,
       pipelineJobId: null,
       pipelineStatus: "queued",
+      // Preserve cross-resume batch-roll counter (build already copies plan field; reaffirm).
+      consecutiveBatchRolls: autoExecution.consecutiveBatchRolls
+        ?? input.previousState.consecutiveBatchRolls
+        ?? 0,
       skippedChapterIds: uniqueNonEmptyStrings([
         ...(input.previousState.skippedChapterIds ?? []),
         ...(autoExecution.skippedChapterIds ?? []),
