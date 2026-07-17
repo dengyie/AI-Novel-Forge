@@ -46,11 +46,11 @@ export function chapterStatePairAfterPipelineApproval(): ChapterStatePairPatch {
 }
 
 /**
- * 质量过审门：仅 literaryPass=true 时允许 completed 成对状态；否则 needs_repair。
- * 供 review / repair 写路径与验收测共用，避免 !literaryPass 被标 completed。
+ * @deprecated 兼容/测试入口：内部固定 `styleClear: true`，**不能**单独用于生产写路径。
+ * 生产 review / repair / pipeline 必须用 {@link chapterStatePairAfterQualityGates}
+ * 并传入真实 `styleClear`（omit ≠ true，fail-closed）。
  *
- * 兼容入口：等价于 `chapterStatePairAfterQualityGates({ literaryPass, styleClear: true })`。
- * 需要同时拦文风门时请用 {@link chapterStatePairAfterQualityGates}。
+ * 行为：等价于 `chapterStatePairAfterQualityGates({ literaryPass, styleClear: true })`。
  */
 export function chapterStatePairAfterLiteraryQualityGate(literaryPass: boolean): ChapterStatePairPatch {
   return chapterStatePairAfterQualityGates({ literaryPass, styleClear: true });
