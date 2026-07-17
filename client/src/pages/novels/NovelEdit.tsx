@@ -88,7 +88,6 @@ import { canCancelDirectorTask, getCandidateSelectionLink } from "@/lib/novelWor
 import { syncAutoDirectorTaskCache } from "@/lib/taskQueryCache";
 import {
   buildContinueAutoExecutionActionLabel,
-  buildSkipQualityRepairActionLabel,
   buildTakeoverDescription,
   buildTakeoverTitle,
   formatTakeoverCheckpoint,
@@ -1505,19 +1504,17 @@ export default function NovelEdit() {
         variant: "default",
       });
     } else if (mode === "action_required" && task.checkpointType === "replan_required") {
-      actions.push({
-        label: buildSkipQualityRepairActionLabel(autoExecutionScopeLabel, continueAutoExecutionMutation.isPending),
-        onClick: () => continueAutoExecutionMutation.mutate({
-          directorTaskId: task.id,
-          continuationMode: "skip_quality_repair",
-        }),
-        variant: "default",
-        disabled: continueAutoExecutionMutation.isPending,
-      });
+      // 质量债主路径：先打开修复；禁止策略化 skip_quality_repair
       actions.push({
         label: "打开质量修复",
         onClick: () => openQualityRepair(task),
+        variant: "default",
+      });
+      actions.push({
+        label: continueAutoDirectorMutation.isPending ? "继续中..." : "继续自动导演",
+        onClick: () => continueAutoDirectorMutation.mutate({ directorTaskId: task.id }),
         variant: "outline",
+        disabled: continueAutoDirectorMutation.isPending,
       });
     } else if (mode === "waiting") {
       actions.push({
@@ -1778,20 +1775,17 @@ export default function NovelEdit() {
         variant: "default",
       });
     } else if (task.status === "waiting_approval" && task.checkpointType === "replan_required") {
-      const autoExecutionScopeLabel = resolveAutoExecutionScopeLabel(task);
-      actions.push({
-        label: buildSkipQualityRepairActionLabel(autoExecutionScopeLabel, continueAutoExecutionMutation.isPending),
-        onClick: () => continueAutoExecutionMutation.mutate({
-          directorTaskId: task.id,
-          continuationMode: "skip_quality_repair",
-        }),
-        variant: "default",
-        disabled: continueAutoExecutionMutation.isPending,
-      });
+      // 质量债主路径：先打开修复；禁止策略化 skip_quality_repair
       actions.push({
         label: "打开质量修复",
         onClick: () => openQualityRepair(task),
+        variant: "default",
+      });
+      actions.push({
+        label: continueAutoDirectorMutation.isPending ? "继续中..." : "继续自动导演",
+        onClick: () => continueAutoDirectorMutation.mutate({ directorTaskId: task.id }),
         variant: "outline",
+        disabled: continueAutoDirectorMutation.isPending,
       });
     } else if (
       task.status === "waiting_approval"

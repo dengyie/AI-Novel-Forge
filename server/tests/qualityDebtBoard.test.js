@@ -3,8 +3,10 @@ const assert = require("node:assert/strict");
 
 const {
   buildGenreBeatBoardSnapshot,
+  buildQualityDebtBoardItem,
   buildQualityDebtBoardResult,
   buildVolumeReplanQualityDebtGate,
+  extractResidualRiskScoreFromQualityLoop,
   getQualityLoopPersistFailOpenMetrics,
   isBlockingReplanQualityDebt,
   noteQualityLoopPersistFailOpen,
@@ -370,6 +372,111 @@ test("shouldPauseForGenreBeatShortfall only when complete window fails primary q
       process.env.GENRE_BEAT_PIPELINE_PAUSE = previous;
     }
   }
+});
+
+test("debt board projects literaryPass / l0Clear / styleClear / residual / latestFeedback", () => {
+  const feedbackPacket = {
+    version: 1,
+    chapterOrder: 2,
+    signature: "sig-prose-ban-1",
+    severity: "blocking",
+    rootCause: "prose_ban",
+    codes: ["prose_ai_self_reference", "prose_second_person"],
+    evidence: ["作为AI"],
+    mustFix: ["去掉自我指涉"],
+    planHints: [],
+    failedPatchCount: 1,
+    avoidRetry: true,
+    evaluatedAt: "2026-07-15T12:00:00.000Z",
+  };
+  const qualityLoop = {
+    chapterOrder: 2,
+    overallStatus: "invalid",
+    recommendedAction: "patch_repair",
+    rootCauseCode: "prose_ai_self_reference",
+    evaluatedAt: "2026-07-15T12:00:00.000Z",
+    signals: [
+      {
+        artifactType: "literary_score",
+        status: "valid",
+        issueCodes: [],
+      },
+      {
+        artifactType: "prose_quality",
+        status: "invalid",
+        issueCodes: ["prose_ai_self_reference"],
+      },
+      {
+        artifactType: "style_pronoun",
+        status: "invalid",
+        issueCodes: ["pronoun_you"],
+      },
+      {
+        artifactType: "style_residual",
+        status: "risk",
+        issueCodes: ["residual=42"],
+      },
+    ],
+    feedback: [feedbackPacket],
+  };
+
+  assert.equal(extractResidualRiskScoreFromQualityLoop(qualityLoop), 42);
+
+  const item = buildQualityDebtBoardItem({
+    id: "c-style",
+    order: 2,
+    title: "债投影",
+    generationState: "reviewed",
+    chapterStatus: "needs_repair",
+    riskFlags: riskFlags(qualityLoop),
+  });
+  assert.ok(item);
+  assert.equal(item.literaryPass, true);
+  assert.equal(item.l0Clear, false);
+  assert.equal(item.styleClear, false);
+  assert.equal(item.residualRiskScore, 42);
+  assert.ok(item.latestFeedback);
+  assert.equal(item.latestFeedback.rootCause, "prose_ban");
+  assert.equal(item.latestFeedback.severity, "blocking");
+  assert.equal(item.latestFeedback.avoidRetry, true);
+  assert.ok(item.latestFeedback.codes.includes("prose_ai_self_reference"));
+  assert.equal(item.latestFeedback.failedPatchCount, 1);
+});
+
+test("debt board residual missing when no style_residual code; mid-book residual-only can styleClear", () => {
+  const qualityLoop = {
+    chapterOrder: 20,
+    overallStatus: "risk",
+    recommendedAction: "patch_repair",
+    rootCauseCode: "style_residual_risk",
+    signals: [
+      {
+        artifactType: "literary_score",
+        status: "valid",
+        issueCodes: [],
+      },
+      {
+        artifactType: "style_residual",
+        status: "risk",
+        issueCodes: ["residual=40"],
+      },
+    ],
+  };
+  const item = buildQualityDebtBoardItem({
+    id: "c-mid",
+    order: 20,
+    title: "中盘债",
+    generationState: "reviewed",
+    chapterStatus: "pending_review",
+    riskFlags: riskFlags(qualityLoop),
+  });
+  assert.ok(item);
+  assert.equal(item.residualRiskScore, 40);
+  // mid-book residual-only is debt but not hard style block
+  assert.equal(item.styleClear, true);
+  assert.equal(item.literaryPass, true);
+  assert.equal(item.latestFeedback, null);
+  assert.equal(extractResidualRiskScoreFromQualityLoop({ signals: [] }), null);
 });
 
 test("qualityLoop persist fail-open metrics count blocking replan memory (P2-2)", () => {
