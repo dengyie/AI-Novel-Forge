@@ -6,6 +6,11 @@ import {
   DEFAULT_QUALITY_IS_PASS_THRESHOLD,
   isLiteraryQualityPass,
 } from "@ai-novel/shared/types/literaryQualityPass";
+import {
+  hasBlockingPronounProseFromIssueCodes,
+  projectResidualRiskScore,
+  projectStyleClear,
+} from "@ai-novel/shared/types/styleClearGate";
 import type { ChapterRuntimeRequestInput } from "./chapterRuntimeSchema";
 import { detectForbiddenStyleEntities } from "../../styleEngine/styleGenerationSanitizer";
 import {
@@ -164,7 +169,7 @@ interface RunPipelineChapterDeps {
   markChapterGenerationState: (
     chapterId: string,
     generationState: "reviewed" | "approved",
-    options?: { literaryPass?: boolean },
+    options?: { literaryPass?: boolean; styleClear?: boolean },
   ) => Promise<void>;
   markChapterNeedsRepair: (chapterId: string) => Promise<void>;
 }
@@ -310,8 +315,12 @@ export async function runPipelineChapterWithRuntime(
           syncArtifacts: false,
         });
       }
-      // A6：仅 isQualityPass（文学 isPass ∧ overall 门）才允许 completed
-      await deps.markChapterGenerationState(chapterId, "approved", { literaryPass: true });
+      // A6 + styleClear：文学 isPass ∧ 文风门皆过才允许 completed
+      const styleClear = projectStyleClearFromRuntimePackage(latestResult.runtimePackage);
+      await deps.markChapterGenerationState(chapterId, "approved", {
+        literaryPass: true,
+        styleClear,
+      });
       break;
     }
 
@@ -648,6 +657,22 @@ function extractIssueCodes(runtimePackage: ChapterRuntimePackage): string[] {
   return (runtimePackage.audit.openIssues ?? [])
     .map((issue) => issue.code)
     .filter((code): code is string => typeof code === "string" && code.trim().length > 0);
+}
+
+/**
+ * 从 runtime 包投影 styleClear：blocking pronoun L0 + residual risk（开篇硬门）。
+ * 与 qualityLoop projectStyleClearFromQualityLoop 同源规则，供 pipeline completed 双门使用。
+ */
+function projectStyleClearFromRuntimePackage(runtimePackage: ChapterRuntimePackage): boolean {
+  const openCodes = extractIssueCodes(runtimePackage);
+  const hasBlockingPronounProse = hasBlockingPronounProseFromIssueCodes(openCodes);
+  const residualRiskScore = projectResidualRiskScore(runtimePackage.styleReview ?? null);
+  const chapterOrder = runtimePackage.context?.chapter?.order ?? 0;
+  return projectStyleClear({
+    residualRiskScore,
+    hasBlockingPronounProse,
+    chapterOrder: typeof chapterOrder === "number" && Number.isFinite(chapterOrder) ? chapterOrder : 0,
+  });
 }
 
 const LENGTH_ISSUE_CODE_PREFIXES = ["LENGTH_", "length_"];

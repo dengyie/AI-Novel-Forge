@@ -995,7 +995,9 @@ export function buildChapterWriterContextBlocks(
         group: "style_contract",
         priority: 74,
         required: mode === "full",
-        content: buildWriterStyleContractText(writeContext.styleContract),
+        content: buildWriterStyleContractText(writeContext.styleContract, {
+          chapterOrder: writeContext.chapterMission.chapterOrder,
+        }),
       })
       : null,
     includeContinuationConstraints

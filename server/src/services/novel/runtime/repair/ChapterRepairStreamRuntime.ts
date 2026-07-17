@@ -18,7 +18,7 @@ import { auditService } from "../../../audit/AuditService";
 import { contentRevisionBumpData } from "../../chapterContentCas";
 import {
   chapterStatePairAfterDraftSave,
-  chapterStatePairAfterLiteraryQualityGate,
+  chapterStatePairAfterQualityGates,
 } from "../../chapterLifecycleState";
 import { ChapterPatchRepairFailedError } from "../../chapterPatchRepairService";
 import {
@@ -36,6 +36,10 @@ import {
   detectProseQuality,
   normalizeProseQualityTermList,
 } from "../proseQuality/ProseQualityDetector";
+import {
+  hasBlockingPronounProseFromIssueCodes,
+  projectStyleClear,
+} from "@ai-novel/shared/types/styleClearGate";
 import {
   ChapterContextAssemblyError,
   assembleChapterAuditContextPackage,
@@ -443,13 +447,20 @@ export class ChapterRepairStreamRuntime {
       return;
     }
 
-    // A6：仅文学 isPass 可质量过审/completed；!pass 写成 needs_repair，不得假 completed
+    // A6 + styleClear：文学 isPass ∧ 文风门皆过才 completed；!pass 写成 needs_repair
     const literaryPass = isPass(review.score);
+    // repair recheck 无 styleReview 包：用 L0 pronoun hard 投影；无 residual 信息时 residual=null
+    // → 中盘仍可 styleClear=true，开篇未知 residual 会挡 completed（与 projectStyleClear 一致）。
+    const styleClear = projectStyleClearFromRepairReview({
+      content: repairedContent,
+      issues: review.issues,
+      chapterOrder: baselineChapter.order,
+    });
     await prisma.chapter.update({
       where: { id: input.chapterId },
-      data: chapterStatePairAfterLiteraryQualityGate(literaryPass),
+      data: chapterStatePairAfterQualityGates({ literaryPass, styleClear }),
     });
-    if (literaryPass && input.options.auditIssueIds?.length) {
+    if (literaryPass && styleClear && input.options.auditIssueIds?.length) {
       const resolveAuditIssues = this.deps.resolveAuditIssues
         ?? ((novelId: string, issueIds: string[]) => auditService.resolveIssues(novelId, issueIds));
       await resolveAuditIssues(input.novelId, input.options.auditIssueIds).catch(() => null);
@@ -460,7 +471,7 @@ export class ChapterRepairStreamRuntime {
       runId,
       status: "succeeded",
       phase: "completed",
-      message: literaryPass
+      message: literaryPass && styleClear
         ? "修复候选已采纳，本章已达到可继续推进状态。"
         : "修复候选已采纳并保存，但仍有问题待继续处理。",
     });
@@ -483,7 +494,7 @@ export class ChapterRepairStreamRuntime {
     });
     await prisma.chapter.update({
       where: { id: input.chapterId },
-      data: chapterStatePairAfterLiteraryQualityGate(false),
+      data: chapterStatePairAfterQualityGates({ literaryPass: false, styleClear: false }),
     });
     input.helpers.writeFrame({
       type: "run_status",
@@ -544,4 +555,33 @@ export class ChapterRepairStreamRuntime {
 
 async function* createSingleChunkStream(content: string): AsyncIterable<BaseMessageChunk> {
   yield { content } as BaseMessageChunk;
+}
+
+/**
+ * repair 路径无完整 styleReview residual 时的 styleClear 投影。
+ * - L0 hard pronoun（stack/density）→ false
+ * - residual 未知：开篇挡 completed；中盘仅 pronoun 可过
+ */
+function projectStyleClearFromRepairReview(input: {
+  content: string;
+  issues: ReviewIssue[];
+  chapterOrder: number;
+}): boolean {
+  const issueCodes = input.issues
+    .map((issue) => {
+      const anyIssue = issue as ReviewIssue & { code?: string | null };
+      return anyIssue.code ?? null;
+    })
+    .filter((code): code is string => typeof code === "string" && code.length > 0);
+  // issues 上未必带 L0 code；用正文 L0 再扫一遍 hard pronoun
+  const proseCodes = blockingProseCodes(input.content);
+  const hasBlockingPronounProse = hasBlockingPronounProseFromIssueCodes([
+    ...issueCodes,
+    ...proseCodes,
+  ]);
+  return projectStyleClear({
+    residualRiskScore: null,
+    hasBlockingPronounProse,
+    chapterOrder: input.chapterOrder,
+  });
 }

@@ -7,6 +7,9 @@ export interface PostGenerationStyleReviewPolicy {
   secondRoundEnabled: boolean;
   // 二轮触发阈值：首轮改写产物的残留 riskScore 达到此值才进第二轮（默认 50，比首轮 35 高）。
   secondRoundThreshold: number;
+  // 热点段落 multi-candidate 改写（句首他/她堆叠）。默认 true；
+  // HUMANIZER_HOTSPOT_REWRITE_ENABLED=false 关闭。
+  hotspotRewriteEnabled: boolean;
 }
 
 export const DEFAULT_SECOND_ROUND_THRESHOLD = 50;
@@ -33,6 +36,14 @@ export function resolveSecondRoundThreshold(): number {
   return DEFAULT_SECOND_ROUND_THRESHOLD;
 }
 
+export function resolveHotspotRewriteEnabled(): boolean {
+  const raw = process.env.HUMANIZER_HOTSPOT_REWRITE_ENABLED;
+  if (raw == null || raw.trim() === "") {
+    return true;
+  }
+  return raw.trim().toLowerCase() !== "false" && raw.trim() !== "0";
+}
+
 export class PostGenerationStyleReviewPolicyResolver {
   async resolve(novelId: string): Promise<PostGenerationStyleReviewPolicy> {
     const novel = await prisma.novel.findUnique({
@@ -44,6 +55,7 @@ export class PostGenerationStyleReviewPolicyResolver {
       enabled: novel?.postGenerationStyleReviewEnabled ?? true,
       secondRoundEnabled: resolveSecondRoundEnabled(),
       secondRoundThreshold: resolveSecondRoundThreshold(),
+      hotspotRewriteEnabled: resolveHotspotRewriteEnabled(),
     };
   }
 }

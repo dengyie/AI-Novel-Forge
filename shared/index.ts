@@ -39,6 +39,7 @@ export * from "./types/novelWorkflow";
 export * from "./types/volumePlanning";
 export * from "./types/canonicalState";
 export * from "./types/literaryQualityPass";
+export * from "./types/styleClearGate";
 export * from "./types/repairAdoptDecision";
 export * from "./types/sotBannedTerms";
 export * from "./types/qualityFeedback";

@@ -37,10 +37,14 @@ test("buildChapterQualityLoopAssessment continues when quality signals are valid
   assert.equal(assessment.recommendedAction, "continue");
   assert.equal(assessment.patchFirstRequired, false);
   assert.equal(assessment.recheckRequired, false);
-  // retention + literary_score + continuity + prose + rolling_window
-  assert.equal(assessment.signals.length, 5);
+  // retention + literary_score + continuity + prose + rolling_window + style_pronoun + style_residual
+  assert.equal(assessment.signals.length, 7);
   const literary = assessment.signals.find((signal) => signal.artifactType === "literary_score");
   assert.equal(literary?.status, "valid");
+  const stylePronoun = assessment.signals.find((signal) => signal.artifactType === "style_pronoun");
+  const styleResidual = assessment.signals.find((signal) => signal.artifactType === "style_residual");
+  assert.equal(stylePronoun?.status, "valid");
+  assert.equal(styleResidual?.status, "valid");
 });
 
 test("buildChapterQualityLoopAssessment copies length riskTags into observabilityTags without changing action", () => {
@@ -650,6 +654,10 @@ test("isNonDeferrableProseOrSotIssueCode covers sot and critical prose only", ()
   assert.equal(isNonDeferrableProseOrSotIssueCode("sot_must_avoid_leak"), true);
   assert.equal(isNonDeferrableProseOrSotIssueCode("prose_ai_self_reference"), true);
   assert.equal(isNonDeferrableProseOrSotIssueCode("prose_system_hud"), true);
+  assert.equal(isNonDeferrableProseOrSotIssueCode("prose_pronoun_subject_stack"), true);
+  assert.equal(isNonDeferrableProseOrSotIssueCode("prose_pronoun_density"), true);
+  // soft density 可 defer，不得进硬门集合
+  assert.equal(isNonDeferrableProseOrSotIssueCode("prose_pronoun_density_soft"), false);
   assert.equal(isNonDeferrableProseOrSotIssueCode("prose_negative_flip"), false);
   assert.equal(isNonDeferrableProseOrSotIssueCode("prose_long_paragraph"), false);
   assert.equal(isNonDeferrableProseOrSotIssueCode("literary:engagement"), false);
