@@ -42,7 +42,9 @@ pnpm build              # shared + server + client 构建
 
 ## 四、当前推进中计划
 
-`docs/plans/`（11 份 ACTIVE，已落地计划已清理）：
+`docs/plans/`（已落地计划已清理，活跃计划分两组）：
+
+主线推进：
 
 - [Director Self-Cycle P0 Review Fix](./plans/director-self-cycle-p0-review-fix.md)
 - [Character System Upgrade](./plans/character-system-upgrade-plan.md)
@@ -55,6 +57,20 @@ pnpm build              # shared + server + client 构建
 - [Assistant UI Plan](./plans/assistant-ui-plan.md)
 - [AI Comic Adaptation](./plans/ai-comic-adaptation-plan.md)
 - [AI Comic Product Design](./plans/ai-comic-product-design.md)
+
+有声书 / 音色库工作流（main 上活跃，基线 `1b7078b`，Milestone A/B/C/Harden/D 已交付，E/F/G 在轨）：
+
+- [全站音色库 + AI 规划调研（SoT 摘要）](./plans/audiobook-sitewide-voice-library-research.md)
+- [音色库运营与 AI 规划 D–G](./plans/audiobook-voice-library-ops-and-ai-plan.md)（active · D 库管理台 · E 人耳 approve · F setStatus 门禁 · G LLM redesign）
+- [Audiobook Segment Delivery Style](./plans/audiobook-segment-delivery-style-plan.md)
+- [Audiobook Character Voice Differentiation](./plans/audiobook-character-voice-differentiation-plan.md)
+- [Audiobook Mimo TTS Multi Backend](./plans/audiobook-mimo-tts-multi-backend-plan.md)
+- [Audiobook Workbench UX Optimization](./plans/audiobook-workbench-ux-optimization-plan.md)
+- [Audiobook Workbench Voice Readiness](./plans/audiobook-workbench-voice-readiness-plan.md)
+- [Audiobook Voice-Diff Ops Hardening](./plans/audiobook-voice-diff-ops-hardening-plan.md)
+- [Audiobook Listen Usability P0](./plans/audiobook-listen-usability-p0-plan.md)
+- [Audiobook Design Prompt Quality](./plans/audiobook-design-prompt-quality-plan.md)
+- [Character Voice Preview Asset](./plans/character-voice-preview-asset-plan.md)
 
 ## 五、开发踩坑知识
 
@@ -87,13 +103,14 @@ pnpm build              # shared + server + client 构建
 
 横切工程约定：[`./architecture/testing.md`](./architecture/testing.md)
 
-## 八、已归档（过期 / 有声 / 历史）
+## 八、已归档（过期 / 历史）
 
 `docs/archive/`：
 
 - [Project Init Spec](./archive/project-init-spec.md) —— 2024 项目初始化方案（历史）
 - [Outdated Docs Index](./archive/outdated/README.md) —— 被当前发布事实取代的归档清单
-- [`./archive/audiobook/`](./archive/audiobook/) —— 已停的有声书/音色计划（9 份），保留备查
+
+> 有声书 / 音色库计划不在归档区，main 上为**活跃工作流**（Milestone A/B/C/Harden/D 已交付，E/F/G 在轨），见上方「四、当前推进中计划」。
 
 ## 九、运维边界（非本仓）
 
