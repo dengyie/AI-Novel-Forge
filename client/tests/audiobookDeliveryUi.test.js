@@ -18,7 +18,7 @@ test("NovelAudiobookPanel delivery uses media-access and progressive chapters", 
   assert.match(panel, /resource:\s*"full_m4b"/);
   assert.match(panel, /下载 m4b（推荐）|下载全书 WAV/);
   assert.match(panel, /不经 SSH|与小说导出一致/);
-  assert.match(panel, /TaskAudioControls novelId=\{novelId\} task=\{task\} chapters=\{sortedChapters\}/);
+  assert.match(panel, /TaskAudioControls novelId=\{novelId\} task=\{task\} chapters=\{(sortedChapters|chapters)\}/);
   // 禁止把远程主机路径当交付入口
   assert.doesNotMatch(panel, /ssh-/i);
   assert.doesNotMatch(panel, /\/personal\/pxed\//);

@@ -17,6 +17,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { toast } from "@/components/ui/toast";
 import {
   applyAudiobookVoicePlan,
   cancelAudiobookTask,
@@ -1007,7 +1008,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
   );
 
   const tasksQuery = useQuery({
-    queryKey: ["novel-audiobook-tasks", novelId],
+    queryKey: queryKeys.novels.audiobookTasks(novelId),
     queryFn: async () => {
       const response = await listAudiobookTasks(novelId);
       return response.data ?? [];
@@ -1018,6 +1019,13 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
     },
   });
 
+  const invalidateTasksAndOverview = useCallback(async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: queryKeys.novels.audiobookTasks(novelId) }),
+      queryClient.invalidateQueries({ queryKey: ["novels", "audiobook-workspace-overview"] }),
+    ]);
+  }, [novelId, queryClient]);
+
   const precheckMutation = useMutation({
     mutationFn: async () => {
       const payload = buildCreatePayload();
@@ -1026,6 +1034,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
     },
     onSuccess: (data) => {
       if (!data) {
+        toast.error("预检无结果。");
         setMessage("预检无结果。");
         return;
       }
@@ -1036,24 +1045,28 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
           }`
         : "";
       if (data.ok) {
-        setMessage(
-          [
-            `预检通过：${data.chapterCount} 章，角色音色 ${data.characterVoices.length} 个。`,
-            previewSoft,
-          ].filter(Boolean).join(" "),
-        );
+        const detail = [
+          `预检通过：${data.chapterCount} 章，角色音色 ${data.characterVoices.length} 个。`,
+          previewSoft,
+        ].filter(Boolean).join(" ");
+        toast.success("预检通过");
+        setMessage(detail);
       } else {
         const missing = data.missingVoices.map((item) => item.characterName).join("、");
         const blocking = data.blockingErrors.join("；");
-        setMessage([
+        const detail = [
           missing ? `缺音色：${missing}` : "",
           blocking || "",
           previewSoft,
-        ].filter(Boolean).join(" | ") || "预检未通过。");
+        ].filter(Boolean).join(" | ") || "预检未通过。";
+        toast.error(missing ? `预检未通过：缺音色` : "预检未通过");
+        setMessage(detail);
       }
     },
     onError: (error) => {
-      setMessage(error instanceof Error ? error.message : "预检失败。");
+      const text = error instanceof Error ? error.message : "预检失败。";
+      toast.error(text);
+      setMessage(text);
     },
   });
 
@@ -1064,11 +1077,14 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
       return response.data;
     },
     onSuccess: async (data) => {
-      setMessage(data ? `任务已创建：${data.title}` : "任务已创建。");
-      await queryClient.invalidateQueries({ queryKey: ["novel-audiobook-tasks", novelId] });
+      toast.success(data ? `任务已创建：${data.title}` : "任务已创建。");
+      setMessage("");
+      await invalidateTasksAndOverview();
     },
     onError: (error) => {
-      setMessage(error instanceof Error ? error.message : "创建任务失败。");
+      const text = error instanceof Error ? error.message : "创建任务失败。";
+      toast.error(text);
+      setMessage(text);
     },
   });
 
@@ -1078,11 +1094,14 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
       return response.data;
     },
     onSuccess: async () => {
-      setMessage("取消请求已提交。");
-      await queryClient.invalidateQueries({ queryKey: ["novel-audiobook-tasks", novelId] });
+      toast.success("取消请求已提交。");
+      setMessage("");
+      await invalidateTasksAndOverview();
     },
     onError: (error) => {
-      setMessage(error instanceof Error ? error.message : "取消失败。");
+      const text = error instanceof Error ? error.message : "取消失败。";
+      toast.error(text);
+      setMessage(text);
     },
   });
 
@@ -1102,28 +1121,30 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
       setVoicePlanItems(items);
       setExpandedPlanDesignIds({});
       if (!data || items.length === 0) {
-        setMessage(
-          data?.skipped?.length
-            ? `无需规划：${data.skipped.length} 个角色已绑定或已跳过。`
-            : "未生成音色规划（可能没有角色）。",
-        );
+        const text = data?.skipped?.length
+          ? `无需规划：${data.skipped.length} 个角色已绑定或已跳过。`
+          : "未生成音色规划（可能没有角色）。";
+        toast.success(text);
+        setMessage(text);
         return;
       }
       const obsBits = [
-          data.summary.slotOverrideCount ? `override ${data.summary.slotOverrideCount}` : "",
-          data.summary.softCollisionCount ? `soft ${data.summary.softCollisionCount}` : "",
-          data.summary.seedInferredCount ? `seed推断 ${data.summary.seedInferredCount}` : "",
-        ].filter(Boolean);
-        setMessage(
-        `${overwriteMode ? "重新差异化" : "补齐缺失"}规划 ${items.length} 项：preset ${data.summary.presetCount} / design ${data.summary.designCount}${
-          obsBits.length ? `（${obsBits.join(" / ")}）` : ""
-        }${
-          overwriteMode ? "（写入时将覆盖已绑定）" : ""
-        }。`,
-      );
+        data.summary.slotOverrideCount ? `override ${data.summary.slotOverrideCount}` : "",
+        data.summary.softCollisionCount ? `soft ${data.summary.softCollisionCount}` : "",
+        data.summary.seedInferredCount ? `seed推断 ${data.summary.seedInferredCount}` : "",
+      ].filter(Boolean);
+      const detail = `${overwriteMode ? "重新差异化" : "补齐缺失"}规划 ${items.length} 项：preset ${data.summary.presetCount} / design ${data.summary.designCount}${
+        obsBits.length ? `（${obsBits.join(" / ")}）` : ""
+      }${
+        overwriteMode ? "（写入时将覆盖已绑定）" : ""
+      }。`;
+      toast.success(`${overwriteMode ? "重新差异化" : "补齐缺失"}规划 ${items.length} 项`);
+      setMessage(detail);
     },
     onError: (error) => {
-      setMessage(error instanceof Error ? error.message : "音色规划失败。");
+      const text = error instanceof Error ? error.message : "音色规划失败。";
+      toast.error(text);
+      setMessage(text);
     },
   });
 
@@ -1146,11 +1167,11 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
       return response.data;
     },
     onSuccess: async (data) => {
-      setMessage(
-        data
-          ? `已写入 ${data.applied.length} 个角色音色，跳过 ${data.skipped.length}。角色卡缓存已刷新。`
-          : "音色已写入。",
-      );
+      const text = data
+        ? `已写入 ${data.applied.length} 个角色音色，跳过 ${data.skipped.length}。角色卡缓存已刷新。`
+        : "音色已写入。";
+      toast.success(text);
+      setMessage("");
       setVoicePlanItems([]);
       setExpandedPlanDesignIds({});
       setVoicePlanOverwrite(false);
@@ -1159,10 +1180,13 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
         queryClient.invalidateQueries({ queryKey: queryKeys.novels.characters(novelId) }),
         queryClient.invalidateQueries({ queryKey: queryKeys.novels.audiobookWorkspace(novelId) }),
         queryClient.invalidateQueries({ queryKey: queryKeys.novels.audiobookVoiceReadiness(novelId) }),
+        queryClient.invalidateQueries({ queryKey: ["novels", "audiobook-workspace-overview"] }),
       ]);
     },
     onError: (error) => {
-      setMessage(error instanceof Error ? error.message : "写入音色失败。");
+      const text = error instanceof Error ? error.message : "写入音色失败。";
+      toast.error(text);
+      setMessage(text);
     },
   });
 
@@ -1267,331 +1291,405 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
   }
 
   return (
-    <section className="space-y-4 border-t border-border/60 pt-4">
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-        <div className="min-w-0 space-y-1">
-          <div className="text-sm font-semibold text-foreground">生成有声书</div>
-          <div className="text-sm leading-6 text-muted-foreground">
-            多角色 TTS（CPA → MiMo）。本台可一键补齐音色与固定试听，再设旁白并生成。
-          </div>
-        </div>
-        <Badge
-          className="shrink-0"
-          variant={voiceGateBlocked ? "destructive" : "outline"}
-        >
-          {voiceGateBlocked
-            ? `${missingVoiceCharacters.length || readinessSummary?.voiceMissing || "?"} 个角色缺/无效音色`
-            : "角色音色齐全"}
-        </Badge>
-      </div>
-
-      {/* D18 SoT：就绪看板；一键就绪/单角色生成/播放 */}
-      <AudiobookVoiceReadinessSection
-        novelId={novelId}
-        bootstrapActiveJobId={bootstrapActiveJobId}
-        playPending={previewVoiceMutation.isPending}
-        onMessage={setMessage}
-        onReadinessChange={handleReadinessChange}
-        onPlayCharacter={({ characterId, characterName, previewStatus }) => {
-          const character = characters.find((item) => item.id === characterId);
-          if (!character) {
-            setMessage(`找不到角色：${characterName}`);
-            return;
-          }
-          // 以 readiness 状态覆盖 props 中可能滞后的 voicePreviewStatus
-          previewVoiceMutation.mutate({
-            kind: "character",
-            character: {
-              ...character,
-              voicePreviewStatus: previewStatus,
-            },
-          });
-        }}
-      />
-
-      <div className="space-y-3 rounded-xl border border-border/70 bg-muted/20 p-4">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div>
-            <div className="text-sm font-medium text-foreground">音色规划（可选）</div>
-            <div className="text-xs leading-5 text-muted-foreground">
-              一键就绪会按 auto 保守策略补缺失音色。「重新差异化」按分簇规划：主角/主角团 VoiceDesign（拉开槽位），路人/旁白走预置簇；特征只读角色卡、不读正文；写入后请一键就绪/生成试听。规划草稿临时试听不固化角色卡。
+    <div className="space-y-8">
+      {/* 1. 准备音色与试听 */}
+      <section id="ab-prepare" className="scroll-mt-20 space-y-4 rounded-xl border border-border/70 bg-muted/20 p-4">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div className="min-w-0 space-y-1">
+            <div className="text-sm font-semibold text-foreground">1. 准备音色与试听</div>
+            <div className="text-sm leading-6 text-muted-foreground">
+              多角色 TTS（CPA → MiMo）。一键补齐音色与固定试听；分簇重规划在下方高级区。
             </div>
           </div>
-          <div className="flex flex-wrap gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={suggestVoiceMutation.isPending || characters.length === 0}
-              onClick={() => suggestVoiceMutation.mutate("missing")}
-            >
-              {suggestVoiceMutation.isPending ? "规划中..." : "补齐缺失音色"}
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={suggestVoiceMutation.isPending || characters.length === 0}
-              onClick={() => suggestVoiceMutation.mutate("rebalance")}
-            >
-              重新差异化
-            </Button>
-            <Button
-              size="sm"
-              disabled={
-                applyVoiceMutation.isPending
-                || voicePlanItems.length === 0
+          <Badge
+            className="shrink-0"
+            variant={voiceGateBlocked ? "destructive" : "outline"}
+          >
+            {voiceGateBlocked
+              ? `${missingVoiceCharacters.length || readinessSummary?.voiceMissing || "?"} 个角色缺/无效音色`
+              : "角色音色齐全"}
+          </Badge>
+        </div>
+
+        <AudiobookVoiceReadinessSection
+          novelId={novelId}
+          bootstrapActiveJobId={bootstrapActiveJobId}
+          playPending={previewVoiceMutation.isPending}
+          onMessage={(text) => {
+            // 终态以 toast 为准；明细条仅保留失败类
+            if (/一键就绪完成|一键就绪失败|一键就绪已取消|就绪任务已丢失|已生成 .+ 的固定试听|已有进行中的就绪任务|启动一键就绪失败|已请求取消就绪任务|生成试听失败/.test(text)) {
+              if (/失败|丢失/.test(text)) {
+                toast.error(text.split("。")[0] || text);
+                setMessage(text);
+              } else {
+                toast.success(text.split("。")[0] || text);
+                setMessage("");
               }
-              onClick={() => applyVoiceMutation.mutate()}
-            >
-              {applyVoiceMutation.isPending
-                ? "写入中..."
-                : `写入规划（${voicePlanItems.length}${voicePlanOverwrite ? "·覆盖" : ""}）`}
-            </Button>
-          </div>
-        </div>
+              void queryClient.invalidateQueries({ queryKey: ["novels", "audiobook-workspace-overview"] });
+              return;
+            }
+            setMessage(text);
+          }}
+          onReadinessChange={handleReadinessChange}
+          onPlayCharacter={({ characterId, characterName, previewStatus }) => {
+            const character = characters.find((item) => item.id === characterId);
+            if (!character) {
+              setMessage(`找不到角色：${characterName}`);
+              return;
+            }
+            previewVoiceMutation.mutate({
+              kind: "character",
+              character: {
+                ...character,
+                voicePreviewStatus: previewStatus,
+              },
+            });
+          }}
+        />
 
-        {voicePlanItems.length > 0 ? (
-          <div className="max-h-56 space-y-2 overflow-y-auto rounded-lg border border-border/60 bg-background p-2">
-            <div className="px-2 py-1 text-xs font-medium text-muted-foreground">
-              待写入规划（{voicePlanItems.length}）{voicePlanOverwrite ? " · 将覆盖已绑定" : " · 仅补齐缺失"}
+        <details className="rounded-xl border border-border/70 bg-background/60 p-3">
+          <summary className="cursor-pointer list-none text-sm font-medium text-foreground [&::-webkit-details-marker]:hidden">
+            <span className="inline-flex items-center gap-2">
+              <ChevronDown className="h-4 w-4 text-muted-foreground" />
+              音色规划（高级）
+            </span>
+            <div className="mt-1 pl-6 text-xs font-normal leading-5 text-muted-foreground">
+              一键就绪已覆盖缺音色；分簇重规划时展开
             </div>
-            {voicePlanItems.map((item) => (
-              <div
-                key={item.characterId}
-                className="flex flex-wrap items-start justify-between gap-2 rounded-md px-2 py-1.5 text-sm"
+          </summary>
+          <div className="mt-3 space-y-3 border-t border-border/60 pt-3">
+            <div className="text-xs leading-5 text-muted-foreground">
+              「重新差异化」按分簇规划：主角/主角团 VoiceDesign（拉开槽位），路人/旁白走预置簇；特征只读角色卡、不读正文；写入后请一键就绪/生成试听。规划草稿临时试听不固化角色卡。
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={suggestVoiceMutation.isPending || characters.length === 0}
+                onClick={() => suggestVoiceMutation.mutate("missing")}
               >
-                <div className="min-w-0 flex-1">
-                  <div className="font-medium text-foreground">
-                    {item.characterName}
-                    <span className="ml-2 text-xs font-normal text-muted-foreground">
-                      {item.ttsMode}
-                      {item.ttsVoice ? ` · ${item.ttsVoice}` : ""}
-                      {` · 重要度 ${item.importance}`}
-                    </span>
-                  </div>
-                  <div className="text-xs leading-5 text-muted-foreground">
-                    {item.reason}
-                    {item.ttsMode === "design" && item.ttsDesignPrompt ? (
-                      <>
-                        {" · "}
-                        {expandedPlanDesignIds[item.characterId] || item.ttsDesignPrompt.length <= 100
-                          ? item.ttsDesignPrompt
-                          : `${item.ttsDesignPrompt.slice(0, 100)}…`}
-                        {item.ttsDesignPrompt.length > 100 ? (
-                          <button
-                            type="button"
-                            className="ml-1 text-[11px] text-primary underline-offset-2 hover:underline"
-                            onClick={() =>
-                              setExpandedPlanDesignIds((prev) => ({
-                                ...prev,
-                                [item.characterId]: !prev[item.characterId],
-                              }))
-                            }
-                          >
-                            {expandedPlanDesignIds[item.characterId] ? "收起" : "展开全文"}
-                          </button>
-                        ) : null}
-                      </>
-                    ) : null}
-                  </div>
-                  {item.ttsMode === "design"
-                    && (item.reason.includes("texture:card-dropped")
-                      || item.reason.includes("texture:card-partial")
-                      || item.reason.includes("slot:override")) ? (
-                    <div className="mt-0.5 text-[11px] leading-4 text-amber-800 dark:text-amber-200">
-                      {item.reason.includes("texture:card-dropped")
-                        ? "卡面声线与分配槽冲突，未能写入 design；试听后可手改角色卡。"
-                        : item.reason.includes("texture:card-partial")
-                          ? "卡面声线仅部分并入 design（已去掉与槽位对立的词）。"
-                          : "槽位已为防撞改写；有卡面声线时会尽量锁定质感维。"}
-                    </div>
-                  ) : null}
-                </div>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  disabled={previewVoiceMutation.isPending}
-                  onClick={() => previewVoiceMutation.mutate({ kind: "plan", item })}
-                >
-                  试听规划草稿
-                </Button>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div className="rounded-lg border border-dashed px-3 py-3 text-xs text-muted-foreground">
-            暂无待写入规划。常用路径：上方「一键就绪」；需要人工挑音色时再用本区规划。
-          </div>
-        )}
-        {previewAudioUrl ? (
-          <div className="space-y-1">
-            <div className="text-xs text-muted-foreground">
-              试听：{previewLabel}
-              {previewDurationSec != null ? ` · ${previewDurationSec.toFixed(1)}s` : ""}
+                {suggestVoiceMutation.isPending ? "规划中..." : "补齐缺失音色"}
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={suggestVoiceMutation.isPending || characters.length === 0}
+                onClick={() => suggestVoiceMutation.mutate("rebalance")}
+              >
+                重新差异化
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={
+                  applyVoiceMutation.isPending
+                  || voicePlanItems.length === 0
+                }
+                onClick={() => applyVoiceMutation.mutate()}
+              >
+                {applyVoiceMutation.isPending
+                  ? "写入中..."
+                  : `写入规划（${voicePlanItems.length}${voicePlanOverwrite ? "·覆盖" : ""}）`}
+              </Button>
             </div>
-            <audio ref={previewAudioRef} controls preload="auto" src={previewAudioUrl} className="w-full" />
-          </div>
-        ) : null}
-      </div>
 
-      <div className="grid gap-4 lg:grid-cols-2">
-        <div className="space-y-2 rounded-xl border border-border/70 bg-muted/20 p-4">
-          <div className="text-sm font-medium text-foreground">小说默认旁白</div>
-          <div className="text-xs leading-5 text-muted-foreground">保存后供后续任务默认继承。</div>
-          <SelectControl
-            className="w-full rounded-md border bg-background p-2 text-sm"
-            value={narratorVoice?.trim() || DEFAULT_AUDIOBOOK_NARRATOR_VOICE}
-            onChange={(event) => onNarratorChange?.({ audiobookNarratorVoice: event.target.value })}
-          >
-            {MIMO_TTS_VOICE_CATALOG.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.label}{item.description ? ` · ${item.description}` : ""}
-              </option>
-            ))}
-          </SelectControl>
-          <textarea
-            className="min-h-[72px] w-full rounded-md border bg-background p-2 text-sm leading-6"
-            value={narratorStyle ?? DEFAULT_AUDIOBOOK_NARRATOR_STYLE}
-            onChange={(event) => onNarratorChange?.({ audiobookNarratorStyle: event.target.value })}
-            placeholder="旁白 style（user 消息）"
-          />
-          {onSaveNarrator ? (
-            <Button size="sm" variant="outline" onClick={onSaveNarrator} disabled={isSavingNarrator}>
-              {isSavingNarrator ? "保存中..." : "保存旁白设置"}
-            </Button>
-          ) : null}
+            {voicePlanItems.length > 0 ? (
+              <div className="max-h-56 space-y-2 overflow-y-auto rounded-lg border border-border/60 bg-background p-2">
+                <div className="px-2 py-1 text-xs font-medium text-muted-foreground">
+                  待写入规划（{voicePlanItems.length}）{voicePlanOverwrite ? " · 将覆盖已绑定" : " · 仅补齐缺失"}
+                </div>
+                {voicePlanItems.map((item) => (
+                  <div
+                    key={item.characterId}
+                    className="flex flex-wrap items-start justify-between gap-2 rounded-md px-2 py-1.5 text-sm"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="font-medium text-foreground">
+                        {item.characterName}
+                        <span className="ml-2 text-xs font-normal text-muted-foreground">
+                          {item.ttsMode}
+                          {item.ttsVoice ? ` · ${item.ttsVoice}` : ""}
+                          {` · 重要度 ${item.importance}`}
+                        </span>
+                      </div>
+                      <div className="text-xs leading-5 text-muted-foreground">
+                        {item.reason}
+                        {item.ttsMode === "design" && item.ttsDesignPrompt ? (
+                          <>
+                            {" · "}
+                            {expandedPlanDesignIds[item.characterId] || item.ttsDesignPrompt.length <= 100
+                              ? item.ttsDesignPrompt
+                              : `${item.ttsDesignPrompt.slice(0, 100)}…`}
+                            {item.ttsDesignPrompt.length > 100 ? (
+                              <button
+                                type="button"
+                                className="ml-1 text-[11px] text-primary underline-offset-2 hover:underline"
+                                onClick={() =>
+                                  setExpandedPlanDesignIds((prev) => ({
+                                    ...prev,
+                                    [item.characterId]: !prev[item.characterId],
+                                  }))
+                                }
+                              >
+                                {expandedPlanDesignIds[item.characterId] ? "收起" : "展开全文"}
+                              </button>
+                            ) : null}
+                          </>
+                        ) : null}
+                      </div>
+                      {item.ttsMode === "design"
+                        && (item.reason.includes("texture:card-dropped")
+                          || item.reason.includes("texture:card-partial")
+                          || item.reason.includes("slot:override")) ? (
+                        <div className="mt-0.5 text-[11px] leading-4 text-amber-800 dark:text-amber-200">
+                          {item.reason.includes("texture:card-dropped")
+                            ? "卡面声线与分配槽冲突，未能写入 design；试听后可手改角色卡。"
+                            : item.reason.includes("texture:card-partial")
+                              ? "卡面声线仅部分并入 design（已去掉与槽位对立的词）。"
+                              : "槽位已为防撞改写；有卡面声线时会尽量锁定质感维。"}
+                        </div>
+                      ) : null}
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={previewVoiceMutation.isPending}
+                      onClick={() => previewVoiceMutation.mutate({ kind: "plan", item })}
+                    >
+                      试听规划草稿
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="rounded-lg border border-dashed px-3 py-3 text-xs text-muted-foreground">
+                暂无待写入规划。常用路径：上方「一键就绪」；需要人工挑音色时再用本区规划。
+              </div>
+            )}
+            {previewAudioUrl ? (
+              <div className="space-y-1">
+                <div className="text-xs text-muted-foreground">
+                  试听：{previewLabel}
+                  {previewDurationSec != null ? ` · ${previewDurationSec.toFixed(1)}s` : ""}
+                </div>
+                <audio ref={previewAudioRef} controls preload="auto" src={previewAudioUrl} className="w-full" />
+              </div>
+            ) : null}
+          </div>
+        </details>
+      </section>
+
+      {/* 2. 旁白与生成 */}
+      <section id="ab-create" className="scroll-mt-20 space-y-4 rounded-xl border border-border/70 bg-primary/5 p-4 pb-24 lg:pb-4">
+        <div className="space-y-1">
+          <div className="text-sm font-semibold text-foreground">2. 旁白与生成</div>
+          <div className="text-sm leading-6 text-muted-foreground">
+            设旁白、范围与表演模式后预检/生成。单章任务也需全书角色音色齐。
+          </div>
         </div>
 
-        <div className="space-y-2 rounded-xl border border-border/70 bg-muted/20 p-4">
-          <div className="text-sm font-medium text-foreground">任务范围</div>
-          <div className="text-xs leading-5 text-muted-foreground">选择单章、章节范围或全书后预检并创建任务。</div>
-          <SelectControl
-            className="w-full rounded-md border bg-background p-2 text-sm"
-            value={scopeMode}
-            onChange={(event) => setScopeMode(event.target.value as AudiobookScopeMode)}
-          >
-            <option value="chapter">单章</option>
-            <option value="range">章节范围</option>
-            <option value="full">全书</option>
-          </SelectControl>
-          {scopeMode === "chapter" ? (
+        <div className="grid gap-4 lg:grid-cols-2">
+          <div className="space-y-2 rounded-xl border border-border/70 bg-background/60 p-4">
+            <div className="text-sm font-medium text-foreground">小说默认旁白</div>
+            <div className="text-xs leading-5 text-muted-foreground">保存后供后续任务默认继承。</div>
             <SelectControl
               className="w-full rounded-md border bg-background p-2 text-sm"
-              value={chapterId}
-              onChange={(event) => setChapterId(event.target.value)}
+              value={narratorVoice?.trim() || DEFAULT_AUDIOBOOK_NARRATOR_VOICE}
+              onChange={(event) => onNarratorChange?.({ audiobookNarratorVoice: event.target.value })}
             >
-              {sortedChapters.map((chapter) => (
-                <option key={chapter.id} value={chapter.id}>
-                  {`第 ${chapter.order} 章 ${chapter.title}`}
+              {MIMO_TTS_VOICE_CATALOG.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.label}{item.description ? ` · ${item.description}` : ""}
                 </option>
               ))}
             </SelectControl>
-          ) : null}
-          {scopeMode === "range" ? (
-            <div className="flex gap-2">
-              <Input
-                type="number"
-                min={1}
-                value={startOrder}
-                onChange={(event) => setStartOrder(event.target.value)}
-                placeholder="起始 order"
-              />
-              <Input
-                type="number"
-                min={1}
-                value={endOrder}
-                onChange={(event) => setEndOrder(event.target.value)}
-                placeholder="结束 order"
-              />
-            </div>
-          ) : null}
-          <div className="text-xs leading-5 text-muted-foreground">本次任务旁白覆盖（可选）</div>
+            <textarea
+              className="min-h-[72px] w-full rounded-md border bg-background p-2 text-sm leading-6"
+              value={narratorStyle ?? DEFAULT_AUDIOBOOK_NARRATOR_STYLE}
+              onChange={(event) => onNarratorChange?.({ audiobookNarratorStyle: event.target.value })}
+              placeholder="旁白 style（user 消息）"
+            />
+            {onSaveNarrator ? (
+              <Button size="sm" variant="outline" onClick={onSaveNarrator} disabled={isSavingNarrator}>
+                {isSavingNarrator ? "保存中..." : "保存旁白设置"}
+              </Button>
+            ) : null}
+          </div>
+
+          <div className="space-y-2 rounded-xl border border-border/70 bg-background/60 p-4">
+            <div className="text-sm font-medium text-foreground">任务范围</div>
+            <div className="text-xs leading-5 text-muted-foreground">选择单章、章节范围或全书后预检并创建任务。</div>
+            <SelectControl
+              className="w-full rounded-md border bg-background p-2 text-sm"
+              value={scopeMode}
+              onChange={(event) => setScopeMode(event.target.value as AudiobookScopeMode)}
+            >
+              <option value="chapter">单章</option>
+              <option value="range">章节范围</option>
+              <option value="full">全书</option>
+            </SelectControl>
+            {scopeMode === "chapter" ? (
+              <SelectControl
+                className="w-full rounded-md border bg-background p-2 text-sm"
+                value={chapterId}
+                onChange={(event) => setChapterId(event.target.value)}
+              >
+                {sortedChapters.map((chapter) => (
+                  <option key={chapter.id} value={chapter.id}>
+                    {`第 ${chapter.order} 章 ${chapter.title}`}
+                  </option>
+                ))}
+              </SelectControl>
+            ) : null}
+            {scopeMode === "range" ? (
+              <div className="flex gap-2">
+                <Input
+                  type="number"
+                  min={1}
+                  value={startOrder}
+                  onChange={(event) => setStartOrder(event.target.value)}
+                  placeholder="起始 order"
+                />
+                <Input
+                  type="number"
+                  min={1}
+                  value={endOrder}
+                  onChange={(event) => setEndOrder(event.target.value)}
+                  placeholder="结束 order"
+                />
+              </div>
+            ) : null}
+            <div className="text-xs leading-5 text-muted-foreground">本次任务旁白覆盖（可选）</div>
+            <SelectControl
+              className="w-full rounded-md border bg-background p-2 text-sm"
+              value={overrideVoice}
+              onChange={(event) => setOverrideVoice(event.target.value)}
+            >
+              <option value="">使用小说默认旁白</option>
+              {MIMO_TTS_VOICE_CATALOG.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.label}{item.description ? ` · ${item.description}` : ""}
+                </option>
+              ))}
+            </SelectControl>
+          </div>
+        </div>
+
+        {voiceGateBlocked && missingVoiceCharacters.length > 0 ? (
+          <div className="rounded-xl border border-amber-200/80 bg-amber-50/70 p-3 text-sm leading-6 text-amber-900">
+            以下角色缺音色或配置无效，可用上方「一键就绪」或「音色规划」补齐：
+            {" "}
+            {missingVoiceCharacters.map((character) => character.name).join("、")}
+          </div>
+        ) : null}
+
+        <label className="flex cursor-pointer items-start gap-2 rounded-xl border border-border/70 bg-background/60 px-3 py-2 text-xs leading-5 text-muted-foreground">
+          <input
+            type="checkbox"
+            className="mt-0.5"
+            checked={requireReadyPreview}
+            onChange={(event) => setRequireReadyPreview(event.target.checked)}
+          />
+          <span>
+            <span className="font-medium text-foreground">要求全员固定试听 ready</span>
+            （可选硬门禁：create 时若试听有缺/过期则拒绝；默认只硬拦缺音色。
+            过期可播旧版，合成任务不强制 ready。）
+          </span>
+        </label>
+
+        <div className="space-y-2 rounded-xl border border-border/70 bg-background/60 px-3 py-2">
+          <div className="text-xs font-medium text-foreground">段级语境表演</div>
+          <div className="text-xs leading-5 text-muted-foreground">
+            默认「角色对白表演」：成书对白会带语境指令。固定试听/一键就绪只用角色基线声线，
+            <span className="font-medium text-foreground">不等于成书完整听感</span>
+            。关表演或改模式后需「重标+合成」才生效。
+          </div>
           <SelectControl
             className="w-full rounded-md border bg-background p-2 text-sm"
-            value={overrideVoice}
-            onChange={(event) => setOverrideVoice(event.target.value)}
+            value={deliveryStyleMode}
+            onChange={(event) => setDeliveryStyleMode(event.target.value as DeliveryStyleMode)}
           >
-            <option value="">使用小说默认旁白</option>
-            {MIMO_TTS_VOICE_CATALOG.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.label}{item.description ? ` · ${item.description}` : ""}
-              </option>
-            ))}
+            <option value="characters">角色对白表演（推荐）</option>
+            <option value="off">关闭（仅身份基线，像念字）</option>
+            <option value="all">角色 + 旁白轻量叙述</option>
           </SelectControl>
         </div>
-      </div>
 
-      {voiceGateBlocked && missingVoiceCharacters.length > 0 ? (
-        <div className="rounded-xl border border-amber-200/80 bg-amber-50/70 p-3 text-sm leading-6 text-amber-900">
-          以下角色缺音色或配置无效，可用上方「一键就绪」或「音色规划」补齐：
-          {" "}
-          {missingVoiceCharacters.map((character) => character.name).join("、")}
+        <div className="hidden flex-wrap gap-2 lg:flex">
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={precheckMutation.isPending || sortedChapters.length === 0}
+            onClick={() => precheckMutation.mutate()}
+          >
+            {precheckMutation.isPending ? "预检中..." : "预检"}
+          </Button>
+          <Button
+            size="sm"
+            disabled={
+              createMutation.isPending
+              || sortedChapters.length === 0
+              || voiceGateBlocked
+              || previewGateBlocked
+            }
+            onClick={() => createMutation.mutate()}
+          >
+            {createMutation.isPending ? "创建中..." : "生成有声书"}
+          </Button>
         </div>
-      ) : null}
 
-      <label className="flex cursor-pointer items-start gap-2 rounded-xl border border-border/70 bg-muted/10 px-3 py-2 text-xs leading-5 text-muted-foreground">
-        <input
-          type="checkbox"
-          className="mt-0.5"
-          checked={requireReadyPreview}
-          onChange={(event) => setRequireReadyPreview(event.target.checked)}
-        />
-        <span>
-          <span className="font-medium text-foreground">要求全员固定试听 ready</span>
-          （可选硬门禁：create 时若试听有缺/过期则拒绝；默认只硬拦缺音色。
-          过期可播旧版，合成任务不强制 ready。）
-        </span>
-      </label>
+        {message ? (
+          <div className="rounded-xl border border-border/70 bg-background/80 px-4 py-3 text-sm leading-6 text-muted-foreground">
+            {message}
+          </div>
+        ) : null}
 
-      <div className="space-y-2 rounded-xl border border-border/70 bg-muted/10 px-3 py-2">
-        <div className="text-xs font-medium text-foreground">段级语境表演</div>
-        <div className="text-xs leading-5 text-muted-foreground">
-          默认「角色对白表演」：成书对白会带语境指令。固定试听/一键就绪只用角色基线声线，
-          <span className="font-medium text-foreground">不等于成书完整听感</span>
-          。关表演或改模式后需「重标+合成」才生效。
+        {/* 移动 fixed 生成条：与 MobileSiteShell 底栏同款 offset；桌面不渲染 */}
+        <div
+          className="fixed inset-x-0 z-30 border-t border-border/70 bg-background/95 px-3 py-2 shadow-lg backdrop-blur supports-[backdrop-filter]:bg-background/90 lg:hidden"
+          style={{ bottom: "calc(4.25rem + env(safe-area-inset-bottom))" }}
+        >
+          <div className="mx-auto flex max-w-4xl flex-wrap items-center gap-2">
+            <Badge
+              className="shrink-0 text-[10px]"
+              variant={voiceGateBlocked ? "destructive" : previewGateBlocked ? "secondary" : "outline"}
+            >
+              {voiceGateBlocked
+                ? "缺音色"
+                : previewGateBlocked
+                  ? "试听未齐"
+                  : "可生成"}
+            </Badge>
+            <Button
+              size="sm"
+              variant="outline"
+              className="flex-1"
+              disabled={precheckMutation.isPending || sortedChapters.length === 0}
+              onClick={() => precheckMutation.mutate()}
+            >
+              {precheckMutation.isPending ? "预检中..." : "预检"}
+            </Button>
+            <Button
+              size="sm"
+              className="flex-1"
+              disabled={
+                createMutation.isPending
+                || sortedChapters.length === 0
+                || voiceGateBlocked
+                || previewGateBlocked
+              }
+              onClick={() => createMutation.mutate()}
+            >
+              {createMutation.isPending ? "创建中..." : "生成有声书"}
+            </Button>
+          </div>
         </div>
-        <SelectControl
-          className="w-full rounded-md border bg-background p-2 text-sm"
-          value={deliveryStyleMode}
-          onChange={(event) => setDeliveryStyleMode(event.target.value as DeliveryStyleMode)}
-        >
-          <option value="characters">角色对白表演（推荐）</option>
-          <option value="off">关闭（仅身份基线，像念字）</option>
-          <option value="all">角色 + 旁白轻量叙述</option>
-        </SelectControl>
-      </div>
+      </section>
 
-      <div className="flex flex-wrap gap-2">
-        <Button
-          size="sm"
-          variant="outline"
-          disabled={precheckMutation.isPending || sortedChapters.length === 0}
-          onClick={() => precheckMutation.mutate()}
-        >
-          {precheckMutation.isPending ? "预检中..." : "预检"}
-        </Button>
-        <Button
-          size="sm"
-          disabled={
-            createMutation.isPending
-            || sortedChapters.length === 0
-            || voiceGateBlocked
-            || previewGateBlocked
-          }
-          onClick={() => createMutation.mutate()}
-        >
-          {createMutation.isPending ? "创建中..." : "生成有声书"}
-        </Button>
-      </div>
-
-      {message ? (
-        <div className="rounded-xl border border-border/70 bg-muted/20 px-4 py-3 text-sm leading-6 text-muted-foreground">
-          {message}
-        </div>
-      ) : null}
-
-      <div className="space-y-3">
+      {/* 3. 任务与交付 */}
+      <section id="ab-tasks" className="scroll-mt-20 space-y-3 rounded-xl border border-border/70 bg-background p-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="text-sm font-medium text-foreground">最近任务</div>
+          <div className="text-sm font-semibold text-foreground">3. 任务与交付</div>
           {(tasksQuery.data ?? []).length > 0 ? (
             <div className="text-xs text-muted-foreground">
               仅最新运行中一条默认展开；无运行中时展开最新一条
@@ -1599,7 +1697,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
           ) : null}
         </div>
         {(tasksQuery.data ?? []).length === 0 ? (
-          <div className="rounded-xl border border-dashed border-border/70 bg-background p-4 text-sm leading-6 text-muted-foreground">
+          <div className="rounded-xl border border-dashed border-border/70 bg-muted/10 p-4 text-sm leading-6 text-muted-foreground">
             暂无有声书任务。完成音色配置后，可先预检再生成。
           </div>
         ) : (
@@ -1616,14 +1714,14 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
                 onMessage={setMessage}
                 onReprocessed={() => {
                   void queryClient.invalidateQueries({
-                    queryKey: ["novel-audiobook-tasks", novelId],
+                    queryKey: queryKeys.novels.audiobookTasks(novelId),
                   });
                 }}
               />
             ))}
           </div>
         )}
-      </div>
-    </section>
+      </section>
+    </div>
   );
 }
