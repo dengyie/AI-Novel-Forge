@@ -161,7 +161,23 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
     ? resolveLocalAudioSrc(form.ttsRefAudioBase64)
     : "";
   const boundAssetId = form.ttsVoiceAssetId?.trim() || "";
-  const libraryQueryKey = queryKeys.novels.voiceLibrary("approved-clone_ref");
+  const LIBRARY_PAGE = 50;
+  const [libraryKeyword, setLibraryKeyword] = useState("");
+  const [debouncedLibraryKeyword, setDebouncedLibraryKeyword] = useState("");
+  const [libraryPages, setLibraryPages] = useState(1);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedLibraryKeyword(libraryKeyword.trim());
+      setLibraryPages(1);
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [libraryKeyword]);
+
+  const libraryLimit = Math.min(500, LIBRARY_PAGE * libraryPages);
+  const libraryQueryKey = queryKeys.novels.voiceLibrary(
+    `approved-clone_ref:q=${debouncedLibraryKeyword}:limit=${libraryLimit}`,
+  );
 
   const libraryQuery = useQuery({
     queryKey: libraryQueryKey,
@@ -169,7 +185,9 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
       const response = await listVoiceLibrary({
         status: "approved",
         kind: "clone_ref",
-        limit: 200,
+        q: debouncedLibraryKeyword || undefined,
+        limit: libraryLimit,
+        offset: 0,
       });
       return {
         items: (response.data?.items ?? []) as VoiceAsset[],
@@ -841,6 +859,12 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
                     : boundAssetId}`
                   : " 当前未绑库。"}
               </p>
+              <Input
+                className="h-9 text-sm"
+                placeholder="检索库音色 slug / 名称 / tag…"
+                value={libraryKeyword}
+                onChange={(event) => setLibraryKeyword(event.target.value)}
+              />
               {libraryQuery.isLoading ? (
                 <div className="text-xs text-muted-foreground">加载库音色…</div>
               ) : null}
@@ -854,12 +878,14 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
               ) : null}
               {!libraryQuery.isLoading && !libraryQuery.isError && libraryItems.length === 0 ? (
                 <div className="text-xs text-muted-foreground">
-                  暂无 approved 库音色。请先人耳批准 seed/import 资产后再绑库。
+                  {debouncedLibraryKeyword
+                    ? "无匹配 approved 库音色。"
+                    : "暂无 approved 库音色。请先人耳批准 seed/import 资产后再绑库。"}
                 </div>
               ) : null}
-              {!libraryQuery.isLoading && !libraryQuery.isError && libraryTotal > libraryItems.length ? (
-                <div className="text-xs text-amber-700 dark:text-amber-400">
-                  库共 {libraryTotal} 条，当前仅展示前 {libraryItems.length} 条。
+              {!libraryQuery.isLoading && !libraryQuery.isError && libraryTotal > 0 ? (
+                <div className="text-[11px] text-muted-foreground">
+                  匹配 {libraryTotal} 条 · 已展示 {libraryItems.length}
                 </div>
               ) : null}
               {libraryItems.length > 0 ? (
@@ -891,6 +917,20 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
                     );
                   })}
                 </div>
+              ) : null}
+              {!libraryQuery.isLoading
+                && !libraryQuery.isError
+                && libraryTotal > libraryItems.length
+                && libraryLimit < 500 ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={libraryQuery.isFetching}
+                  onClick={() => setLibraryPages((pages) => pages + 1)}
+                >
+                  加载更多
+                </Button>
               ) : null}
               {bindLibraryMutation.isPending ? (
                 <div className="text-xs text-muted-foreground">正在绑定库音色…</div>

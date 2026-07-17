@@ -48,6 +48,34 @@ export type ListVoiceLibraryParams = {
   tag?: string;
   q?: string;
   limit?: number;
+  offset?: number;
+};
+
+export type ImportVoiceLibraryFileInput = {
+  sourcePath: string;
+  slug: string;
+  displayName: string;
+  kind?: VoiceAssetKind;
+  /** 禁止 approved；仅 draft/archived/deprecated */
+  status?: Exclude<VoiceAssetStatus, "approved">;
+  tags?: string[];
+  sampleText?: string | null;
+  designPrompt?: string | null;
+  license: {
+    source: string;
+    rights: string;
+    notes?: string | null;
+    url?: string | null;
+  };
+  packId?: string | null;
+  overwrite?: boolean;
+};
+
+export type ImportVoiceLibrarySeedPackInput = {
+  packRoot?: string;
+  /** 禁止 approved */
+  forceStatus?: Exclude<VoiceAssetStatus, "approved"> | null;
+  overwrite?: boolean;
 };
 
 function joinCsvParam(value?: string | string[]): string | undefined {
@@ -71,6 +99,7 @@ export async function listVoiceLibrary(params: ListVoiceLibraryParams = {}) {
         tag: params.tag?.trim() || undefined,
         q: params.q?.trim() || undefined,
         limit: params.limit,
+        offset: params.offset,
       },
     },
   );
@@ -94,6 +123,28 @@ export async function bindVoiceLibraryAsset(
     `/novels/${novelId}/characters/${characterId}/voice-library/bind`,
     { voiceAssetId },
   );
+  return data;
+}
+
+/** 服务端路径导入（allowlist）；不可 status=approved。 */
+export async function importVoiceLibraryFile(body: ImportVoiceLibraryFileInput) {
+  const { data } = await apiClient.post<ApiResponse<VoiceAsset>>(
+    "/novels/audiobook/voice-library/import-file",
+    body,
+  );
+  return data;
+}
+
+/** 种子包导入（默认 draft；禁 forceStatus=approved）。 */
+export async function importVoiceLibrarySeedPack(body: ImportVoiceLibrarySeedPackInput = {}) {
+  const { data } = await apiClient.post<
+    ApiResponse<{
+      packId: string;
+      imported: VoiceAsset[];
+      skipped: Array<{ slug: string; reason: string }>;
+      failed: Array<{ slug: string; reason: string }>;
+    }>
+  >("/novels/audiobook/voice-library/import-seed-pack", body);
   return data;
 }
 
