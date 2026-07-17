@@ -60,6 +60,8 @@ interface RewriteInput {
   styleProfileId?: string;
   novelId?: string;
   chapterId?: string;
+  /** 章节序号；开篇（≤3）时 style_contract 追加固定声线提示。 */
+  chapterOrder?: number | null;
   taskStyleProfileId?: string;
   previewAntiAiRuleIds?: string[];
   issues: Array<{
@@ -90,7 +92,9 @@ export class StyleRewriteService {
       `${index + 1}. ${issue.ruleName}\n片段：${issue.excerpt}\n修正建议：${issue.suggestion}`
     )).join("\n\n");
     const styleContractText = [
-      buildWriterStyleContractText(resolved.context.compiledBlocks?.contract ?? null),
+      buildWriterStyleContractText(resolved.context.compiledBlocks?.contract ?? null, {
+        chapterOrder: input.chapterOrder,
+      }),
       buildAntiAiRuleDirectiveText(extraPreviewRules),
     ].filter(Boolean).join("\n\n");
 

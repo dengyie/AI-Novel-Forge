@@ -79,8 +79,8 @@ export class ChapterPipelineRuntimeAdapter {
               runtimePackage: finalized.runtimePackage,
             };
           },
-          markChapterGenerationState: (targetChapterId, generationState) =>
-            this.markChapterGenerationState(targetChapterId, generationState),
+          markChapterGenerationState: (targetChapterId, generationState, options) =>
+            this.markChapterGenerationState(targetChapterId, generationState, options),
           markChapterNeedsRepair: (targetChapterId) =>
             this.deps.streamOrchestrator.markChapterStatus(targetChapterId, "needs_repair"),
         },
