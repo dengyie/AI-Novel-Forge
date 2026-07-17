@@ -282,6 +282,11 @@ export interface DirectorAutoExecutionState extends DirectorAutoExecutionPlan {
   pipelineStatus?: PipelineJobStatus | null;
   qualityRepairRisk?: DirectorQualityRepairRisk | null;
   circuitBreaker?: DirectorCircuitBreakerState | null;
+  /**
+   * 跨 resume / 进程边界累计的连续批续窗次数。
+   * 缺省 0；runFromReady 必须 hydrate，expand/halt 后写回，禁止每次入口重置。
+   */
+  consecutiveBatchRolls?: number;
 }
 
 export type DirectorQualityRepairRiskLevel =

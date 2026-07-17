@@ -137,6 +137,50 @@ export function computePronounRiskFloor(violations: StyleDetectionViolation[]): 
   return Math.max(0, Math.min(100, floor));
 }
 
+/** 非 pronoun 的 high/critical prose 痕迹抬 residual floor（开篇 dual-gate 用）。 */
+const PROSE_RESIDUAL_FLOOR_CRITICAL = 50;
+const PROSE_RESIDUAL_FLOOR_HIGH = 40;
+const HARD_PRONOUN_CODE_SET = new Set<string>(HARD_PRONOUN_PROSE_CODES);
+
+/**
+ * 从 prose findings 投影「非 pronoun」确定性 residual floor。
+ * 不含 pronoun（stack/density/soft）——那些走 computePronounRiskFloor。
+ * high → 40；critical → 50；无高危 → 0。
+ */
+export function computeDeterministicProseResidualRiskFloor(
+  findings: ReadonlyArray<{ code: string; severity: string }>,
+): number {
+  let floor = 0;
+  for (const finding of findings) {
+    if (
+      HARD_PRONOUN_CODE_SET.has(finding.code)
+      || finding.code === "prose_pronoun_density_soft"
+    ) {
+      continue;
+    }
+    if (finding.severity === "critical") {
+      floor = Math.max(floor, PROSE_RESIDUAL_FLOOR_CRITICAL);
+    } else if (finding.severity === "high") {
+      floor = Math.max(floor, PROSE_RESIDUAL_FLOOR_HIGH);
+    }
+  }
+  return Math.max(0, Math.min(100, floor));
+}
+
+/**
+ * repair / manual-review 路径的确定性 residual：
+ * max(pronounFloor, non-pronoun high/critical prose floor)。
+ * 不调 LLM；开篇 residual≥35 可挡 completed；中盘仅 residual 仍 styleClear true。
+ */
+export function computeDeterministicResidualRiskScore(content: string): number {
+  const report = detectProseQuality(content);
+  const pronounFloor = computePronounRiskFloor(
+    mapPronounFindingsToStyleViolations(report.findings),
+  );
+  const proseFloor = computeDeterministicProseResidualRiskFloor(report.findings);
+  return Math.max(pronounFloor, proseFloor);
+}
+
 /**
  * 把确定性 pronoun violations 合并进 detection report。
  * 覆盖 empty-contract / shouldSkipLlm 短路：无 LLM 时仍可产出 rewritable violations + 抬 risk。
