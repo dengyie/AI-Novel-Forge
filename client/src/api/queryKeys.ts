@@ -41,8 +41,9 @@ export const queryKeys = {
     audiobookWorkspace: (id: string) => ["novels", "audiobook-workspace", id] as const,
     /**
      * 选书页 bulk 态势。page+keyword 稳定 key，避免 ids 顺序抖动双缓存。
-     * 项目页 create/cancel/就绪终态后可 invalidateQueries({ queryKey: ["novels","audiobook-workspace-overview"] }).
+     * 项目页 create/cancel/就绪/reprocess 后用 audiobookWorkspaceOverviewPrefix invalidate。
      */
+    audiobookWorkspaceOverviewPrefix: ["novels", "audiobook-workspace-overview"] as const,
     audiobookWorkspaceOverview: (page: number, keyword: string) =>
       ["novels", "audiobook-workspace-overview", page, keyword] as const,
     audiobookTasks: (id: string) => ["novels", "audiobook-tasks", id] as const,

@@ -79,7 +79,7 @@ test("buildAudiobookWorkspaceOverview empty ids → items [] without db work", a
   assert.deepEqual(result.items, []);
 });
 
-test("overview source contract: bulk summary, no assess, skip probe, max 50", () => {
+test("overview source contract: bulk summary, no assess, skip probe, max 50, latest-task window", () => {
   const src = fs.readFileSync(
     path.join(serverRoot, "src/services/audiobook/audiobookWorkspaceOverview.ts"),
     "utf8",
@@ -89,6 +89,10 @@ test("overview source contract: bulk summary, no assess, skip probe, max 50", ()
   assert.match(src, /buildSummaryFromRows/);
   assert.doesNotMatch(src, /\.assess\s*\(/);
   assert.match(src, /findMany/);
+  // 每本 latest task：窗口函数，禁止无界 audiobookTask.findMany 全历史
+  assert.match(src, /ROW_NUMBER\(\)\s*OVER/);
+  assert.match(src, /loadLatestTasksByNovel/);
+  assert.doesNotMatch(src, /audiobookTask\.findMany/);
   // 禁止列表路径 full 音频磁盘 stat
   assert.doesNotMatch(src, /fullAudioReady:\s*true/);
   assert.doesNotMatch(src, /statSync|existsSync/);

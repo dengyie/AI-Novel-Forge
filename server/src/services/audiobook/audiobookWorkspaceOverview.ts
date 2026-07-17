@@ -5,6 +5,7 @@ import type {
   AudiobookWorkspaceOverviewReadiness,
   AudiobookWorkspaceOverviewResult,
 } from "@ai-novel/shared/types/audiobook";
+import { Prisma } from "@prisma/client";
 import { prisma } from "../../db/prisma";
 import { isMissingAudiobookTaskTableError } from "./audiobookErrors";
 import { audiobookVoiceReadinessService } from "./AudiobookVoiceReadinessService";
@@ -18,6 +19,15 @@ const TASK_STATUSES: ReadonlySet<string> = new Set([
   "failed",
   "cancelled",
 ]);
+
+type LatestTaskRow = {
+  id: string;
+  novelId: string;
+  status: string;
+  progress: number;
+  resultJson: string | null;
+  updatedAt: Date;
+};
 
 function asTaskStatus(raw: string): AudiobookTaskStatus {
   if (TASK_STATUSES.has(raw)) {
@@ -58,8 +68,66 @@ function toOverviewReadiness(
 }
 
 /**
- * 选书页 bulk 态势：一次 novels+characters 读库 + 一次 tasks 读库。
- * **禁止** per-id assess / 列表路径 probeRefAudio。
+ * 每本小说仅取 updatedAt/id 最新 1 条任务（ROW_NUMBER）。
+ * 禁止无界 findMany 全历史。
+ */
+async function loadLatestTasksByNovel(
+  novelIds: string[],
+): Promise<Map<string, AudiobookWorkspaceOverviewLatestTask>> {
+  const latestTaskByNovel = new Map<string, AudiobookWorkspaceOverviewLatestTask>();
+  if (novelIds.length === 0) {
+    return latestTaskByNovel;
+  }
+
+  let taskRows: LatestTaskRow[] = [];
+  try {
+    taskRows = await prisma.$queryRaw<LatestTaskRow[]>(Prisma.sql`
+      WITH ranked AS (
+        SELECT
+          id,
+          "novelId",
+          status,
+          progress,
+          "resultJson",
+          "updatedAt",
+          ROW_NUMBER() OVER (
+            PARTITION BY "novelId"
+            ORDER BY "updatedAt" DESC, id DESC
+          ) AS rn
+        FROM "AudiobookTask"
+        WHERE "novelId" IN (${Prisma.join(novelIds)})
+      )
+      SELECT id, "novelId", status, progress, "resultJson", "updatedAt"
+      FROM ranked
+      WHERE rn = 1
+    `);
+  } catch (error) {
+    if (!isMissingAudiobookTaskTableError(error)) {
+      throw error;
+    }
+    return latestTaskByNovel;
+  }
+
+  for (const row of taskRows) {
+    const updatedAt =
+      row.updatedAt instanceof Date
+        ? row.updatedAt.toISOString()
+        : new Date(row.updatedAt).toISOString();
+    latestTaskByNovel.set(row.novelId, {
+      id: row.id,
+      status: asTaskStatus(row.status),
+      progress: Number(row.progress) || 0,
+      // 不填 fullAudioReady：列表用 succeeded 弱提示（D 文档）
+      m4bStatus: parseM4bStatus(row.resultJson),
+      updatedAt,
+    });
+  }
+  return latestTaskByNovel;
+}
+
+/**
+ * 选书页 bulk 态势：一次 novels+characters 读库 + 每本 latest task（窗口函数）。
+ * **禁止** per-id assess / 列表路径 probeRefAudio / 无界 tasks 全历史。
  */
 export async function buildAudiobookWorkspaceOverview(
   novelIdsInput: string[],
@@ -109,50 +177,7 @@ export async function buildAudiobookWorkspaceOverview(
   });
 
   const novelById = new Map(novels.map((row) => [row.id, row]));
-
-  // 一次拉候选任务；应用层每本取 updatedAt 最新（禁止 toSummary 磁盘 stat）
-  let taskRows: Array<{
-    id: string;
-    novelId: string;
-    status: string;
-    progress: number;
-    resultJson: string | null;
-    updatedAt: Date;
-  }> = [];
-  try {
-    taskRows = await prisma.audiobookTask.findMany({
-      where: { novelId: { in: novelIds } },
-      select: {
-        id: true,
-        novelId: true,
-        status: true,
-        progress: true,
-        resultJson: true,
-        updatedAt: true,
-      },
-      orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
-    });
-  } catch (error) {
-    if (!isMissingAudiobookTaskTableError(error)) {
-      throw error;
-    }
-    taskRows = [];
-  }
-
-  const latestTaskByNovel = new Map<string, AudiobookWorkspaceOverviewLatestTask>();
-  for (const row of taskRows) {
-    if (latestTaskByNovel.has(row.novelId)) {
-      continue;
-    }
-    latestTaskByNovel.set(row.novelId, {
-      id: row.id,
-      status: asTaskStatus(row.status),
-      progress: row.progress,
-      // 不填 fullAudioReady：列表用 succeeded 弱提示（D 文档）
-      m4bStatus: parseM4bStatus(row.resultJson),
-      updatedAt: row.updatedAt.toISOString(),
-    });
-  }
+  const latestTaskByNovel = await loadLatestTasksByNovel(novelIds);
 
   const items: AudiobookWorkspaceNovelOverview[] = [];
   for (const novelId of novelIds) {

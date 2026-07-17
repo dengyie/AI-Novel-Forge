@@ -191,11 +191,40 @@ test("ReadinessSection native toast + overview invalidate; panel no dual toast b
   assert.match(readiness, /function reportReadinessTerminal/);
   assert.match(readiness, /toast\.success/);
   assert.match(readiness, /toast\.error/);
-  assert.match(readiness, /audiobook-workspace-overview/);
+  assert.match(readiness, /audiobookWorkspaceOverviewPrefix|audiobook-workspace-overview/);
   // panel readiness onMessage must not re-toast with regex dual path
   assert.doesNotMatch(
     panel,
     /onMessage=\{\(text\) => \{[\s\S]*?toast\.(success|error)/,
   );
   assert.match(panel, /ReadinessSection 终态已 toast/);
+});
+
+test("workspace page surfaces overview error and truncated banner", () => {
+  const page = readFileSync(
+    path.join(clientRoot, "src/pages/audiobook/AudiobookWorkspacePage.tsx"),
+    "utf8",
+  );
+  assert.match(page, /overviewQuery\.isError/);
+  assert.match(page, /重试态势/);
+  assert.match(page, /truncated/);
+  assert.match(page, /态势失败/);
+});
+
+test("panel reprocess invalidates overview; tasks pad for mobile fixed CTA", () => {
+  const panel = readFileSync(
+    path.join(clientRoot, "src/pages/novels/components/NovelAudiobookPanel.tsx"),
+    "utf8",
+  );
+  assert.match(panel, /onReprocessed=\{\(\) => \{[\s\S]*?audiobookWorkspaceOverviewPrefix/);
+  assert.match(panel, /id="ab-tasks"[\s\S]*?pb-28/);
+  assert.match(panel, /audiobookWorkspaceOverviewPrefix/);
+});
+
+test("queryKeys exposes audiobookWorkspaceOverviewPrefix", () => {
+  const keys = readFileSync(
+    path.join(clientRoot, "src/api/queryKeys.ts"),
+    "utf8",
+  );
+  assert.match(keys, /audiobookWorkspaceOverviewPrefix:\s*\[\"novels\",\s*\"audiobook-workspace-overview\"\]/);
 });
