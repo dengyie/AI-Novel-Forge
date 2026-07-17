@@ -140,7 +140,11 @@ function normalizeTags(tags: string[] | undefined | null): string[] {
 
 /**
  * 从 approved 库中为角色挑一个未占用的 clone_ref。
- * 匹配维：gender 标签 + cluster 标签（均可缺省）；同 slug/display 不参与语义 LLM。
+ * 匹配维：gender 标签 + cluster 标签；同 slug/display 不参与语义 LLM。
+ * 门禁：
+ * - lead/cast：必须 cluster 命中（禁止仅 gender 的泛 male/female 当英雄声）
+ * - narrator：必须 cluster 命中（禁止旁白吃 lead 向 gender-only 样本）
+ * - extra：允许 gender/open；无 tags 仍受 floor 拒绝
  * 返回 null 表示无合适资产，调用方回退 design/preset。
  */
 export function matchLibraryAsset(input: {
@@ -160,6 +164,7 @@ export function matchLibraryAsset(input: {
 
   let best: { asset: VoicePlannerLibraryAsset; score: number; reason: string } | null = null;
   const isLeadOrCast = input.cluster === "lead" || input.cluster === "cast";
+  const isNarrator = input.cluster === "narrator";
 
   for (const asset of available) {
     const tags = normalizeTags(asset.tags);
@@ -182,9 +187,12 @@ export function matchLibraryAsset(input: {
     const genderOpen = genderTags.length === 0 || genderTags.includes("unknown");
     const clusterOpen = clusterTags.length === 0;
 
-    // 主/配角禁止无信号乱塞：须 gender 命中或 cluster 命中至少一端
-    // （无 tags 的 approved 样本不能当男主/女主英雄声）
-    if (isLeadOrCast && !genderHit && !clusterHit) {
+    // 主/配角：必须命中 cluster 标签（仅 ["male"] 不能当男主/男配）
+    if (isLeadOrCast && !clusterHit) {
+      continue;
+    }
+    // 旁白：必须命中 narrator 标签（禁止 gender-only / lead 弱匹配）
+    if (isNarrator && !clusterHit) {
       continue;
     }
 
@@ -206,7 +214,7 @@ export function matchLibraryAsset(input: {
       score += 8;
       bits.push("cluster:open");
     } else {
-      // 有其它簇标签但不匹配：弱匹配（仅 extra/narrator 可达此分支）
+      // 有其它簇标签但不匹配：弱匹配（仅 extra 可达此分支）
       score += 2;
       bits.push("cluster:weak");
     }
@@ -216,7 +224,7 @@ export function matchLibraryAsset(input: {
       score += 10;
     }
 
-    // 无任何 gender/cluster 命中：提高门槛，避免空 tags 路人/旁白过松
+    // 无任何 gender/cluster 命中：提高门槛，避免空 tags 路人过松
     // base10+open5+open8=23；要求 ≥28 → 至少再有弱信号，或显式命中
     const floor = genderHit || clusterHit ? 20 : 28;
     if (score < floor) {
@@ -1121,6 +1129,7 @@ function neighborLabel(slot: VoiceSlot): string {
  * - prefer_design：lead/cast → design + 槽位拉开；extra/narrator → 路人/旁白 preset 簇
  * - auto（smart_fill）：lead/cast → design；extra/narrator → preset；未知簇 importance≥70 且有 texture → design
  *   若注入 approved libraryAssets，auto 对 lead/cast/narrator 先尝试 library clone
+ *   （lead/cast/narrator 匹配须 cluster 标签命中；见 matchLibraryAsset）
  * - prefer_library：凡可匹配 approved 库资产优先 clone；无匹配回退与 auto 相同
  * - preset_only：仅 preset 负载均衡（旁白/路人用分簇池）；不走 library
  * - reservedPresets：旁白等占用的预置，角色 preset 池剔除；池空则 lead/cast 强制 design

@@ -1241,3 +1241,113 @@ test("cluster-only tag can still match lead without gender tag", () => {
   assert.equal(hit.asset.id, "va_lead");
 });
 
+test("gender-only tag is rejected for lead/cast (requires cluster tag)", () => {
+  const hit = matchLibraryAsset({
+    genderBucket: "male",
+    cluster: "lead",
+    usedAssetIds: new Set(),
+    assets: [
+      {
+        id: "va_male_only",
+        slug: "male-only",
+        displayName: "male-only",
+        status: "approved",
+        kind: "clone_ref",
+        tags: ["male"],
+      },
+    ],
+  });
+  assert.equal(hit, null);
+
+  const castHit = matchLibraryAsset({
+    genderBucket: "male",
+    cluster: "cast",
+    usedAssetIds: new Set(),
+    assets: [
+      {
+        id: "va_male_only",
+        slug: "male-only",
+        displayName: "male-only",
+        status: "approved",
+        kind: "clone_ref",
+        tags: ["male"],
+      },
+    ],
+  });
+  assert.equal(castHit, null);
+});
+
+test("narrator rejects gender-only and lead-tagged assets; requires narrator tag", () => {
+  const genderOnly = matchLibraryAsset({
+    genderBucket: "male",
+    cluster: "narrator",
+    usedAssetIds: new Set(),
+    assets: [
+      {
+        id: "va_male",
+        slug: "male",
+        displayName: "male",
+        status: "approved",
+        kind: "clone_ref",
+        tags: ["male"],
+      },
+    ],
+  });
+  assert.equal(genderOnly, null);
+
+  const leadTagged = matchLibraryAsset({
+    genderBucket: "male",
+    cluster: "narrator",
+    usedAssetIds: new Set(),
+    assets: [
+      {
+        id: "va_lead",
+        slug: "lead",
+        displayName: "lead",
+        status: "approved",
+        kind: "clone_ref",
+        tags: ["male", "lead"],
+      },
+    ],
+  });
+  assert.equal(leadTagged, null);
+
+  const narratorOk = matchLibraryAsset({
+    genderBucket: "male",
+    cluster: "narrator",
+    usedAssetIds: new Set(),
+    assets: [
+      {
+        id: "va_n",
+        slug: "narrator-m",
+        displayName: "旁白男",
+        status: "approved",
+        kind: "clone_ref",
+        tags: ["male", "narrator"],
+      },
+    ],
+  });
+  assert.ok(narratorOk);
+  assert.equal(narratorOk.asset.id, "va_n");
+});
+
+test("extra may still match gender-only approved assets", () => {
+  const hit = matchLibraryAsset({
+    genderBucket: "male",
+    cluster: "extra",
+    usedAssetIds: new Set(),
+    assets: [
+      {
+        id: "va_male",
+        slug: "male",
+        displayName: "male",
+        status: "approved",
+        kind: "clone_ref",
+        tags: ["male"],
+      },
+    ],
+  });
+  assert.ok(hit);
+  assert.equal(hit.asset.id, "va_male");
+});
+
