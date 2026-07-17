@@ -941,7 +941,10 @@ export interface VoiceAssetListQuery {
   kind?: VoiceAssetKind | VoiceAssetKind[];
   tag?: string;
   q?: string;
+  /** 默认 200，硬顶 500；非有限数回落默认 */
   limit?: number;
+  /** 0-based；非有限数按 0 */
+  offset?: number;
 }
 
 export interface VoiceAssetListResult {

@@ -393,6 +393,11 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
         }
         return parts as T[];
       };
+      const parseFiniteInt = (raw: string | undefined): number | undefined => {
+        if (raw == null || !String(raw).trim()) return undefined;
+        const n = Number(raw);
+        return Number.isFinite(n) ? Math.floor(n) : undefined;
+      };
       const data = voiceLibraryService.list({
         status: parseEnumList(
           q.status,
@@ -406,7 +411,8 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
         ),
         tag: q.tag,
         q: q.q,
-        limit: q.limit ? Number(q.limit) : undefined,
+        limit: parseFiniteInt(q.limit),
+        offset: parseFiniteInt(q.offset),
       });
       res.json({ success: true, data } satisfies ApiResponse<typeof data>);
     } catch (error) {
@@ -422,7 +428,8 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
         slug: z.string().trim().min(1).max(80),
         displayName: z.string().trim().min(1).max(120),
         kind: z.enum(["clone_ref", "design_prompt", "preset_alias"]).optional(),
-        status: z.enum(["draft", "approved", "archived", "deprecated"]).optional(),
+        // 禁止 HTTP 直批 approved；人耳批准走 PATCH status
+        status: z.enum(["draft", "archived", "deprecated"]).optional(),
         tags: z.array(z.string().trim().min(1).max(40)).max(32).optional(),
         sampleText: z.string().trim().max(500).nullable().optional(),
         designPrompt: z.string().trim().max(2000).nullable().optional(),
@@ -452,7 +459,8 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
     validate({
       body: z.object({
         packRoot: z.string().trim().min(1).optional(),
-        forceStatus: z.enum(["draft", "approved", "archived", "deprecated"]).nullable().optional(),
+        // 禁止 forceStatus=approved（服务层亦拒绝）
+        forceStatus: z.enum(["draft", "archived", "deprecated"]).nullable().optional(),
         overwrite: z.boolean().optional(),
       }).optional(),
     }),
