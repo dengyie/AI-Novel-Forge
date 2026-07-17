@@ -212,10 +212,20 @@ test("A6: !literaryPass cannot quality-over-approve / completed", () => {
     generationState: "reviewed",
     chapterStatus: "needs_repair",
   });
-  assert.deepEqual(chapterStatePairAfterManualQualityReview(false), {
-    generationState: "reviewed",
-    chapterStatus: "needs_repair",
-  });
+  assert.deepEqual(
+    chapterStatePairAfterManualQualityReview({ literaryPass: false, styleClear: true }),
+    {
+      generationState: "reviewed",
+      chapterStatus: "needs_repair",
+    },
+  );
+  assert.deepEqual(
+    chapterStatePairAfterManualQualityReview({ literaryPass: true, styleClear: false }),
+    {
+      generationState: "reviewed",
+      chapterStatus: "needs_repair",
+    },
+  );
   assert.deepEqual(chapterStatePairAfterLiteraryQualityGate(true), {
     generationState: "approved",
     chapterStatus: "completed",
@@ -227,9 +237,18 @@ test("A6: !literaryPass cannot quality-over-approve / completed", () => {
       .mergeChapterPatchForGenerationStateBump({}, "approved"),
     { generationState: "approved" },
   );
+  // fail-closed：仅 literaryPass 不够；styleClear 省略 → needs_repair
   assert.deepEqual(
     require("../dist/services/novel/chapterLifecycleState.js")
       .mergeChapterPatchForGenerationStateBump({}, "approved", { literaryPass: true }),
+    { generationState: "reviewed", chapterStatus: "needs_repair" },
+  );
+  assert.deepEqual(
+    require("../dist/services/novel/chapterLifecycleState.js")
+      .mergeChapterPatchForGenerationStateBump({}, "approved", {
+        literaryPass: true,
+        styleClear: true,
+      }),
     { generationState: "approved", chapterStatus: "completed" },
   );
 
