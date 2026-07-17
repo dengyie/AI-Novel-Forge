@@ -33,7 +33,20 @@ export interface VoicePlannerCharacterInput {
   ttsStyle?: string | null;
   ttsDesignPrompt?: string | null;
   ttsRefAudioPath?: string | null;
+  /** 全站库绑定 id；与 ref 任一非空即视为 clone 已配置 */
+  ttsVoiceAssetId?: string | null;
   ttsSpeakerAliases?: string | string[] | null;
+}
+
+/** 规划侧可读的库资产摘要（纯数据，无 IO） */
+export interface VoicePlannerLibraryAsset {
+  id: string;
+  slug: string;
+  displayName: string;
+  /** 仅 approved clone_ref 应传入；调用方负责过滤 */
+  status: string;
+  kind: string;
+  tags: string[];
 }
 
 export interface VoiceSlot {
@@ -105,15 +118,103 @@ export function isCharacterVoiceConfigured(input: {
   ttsVoice?: string | null;
   ttsDesignPrompt?: string | null;
   ttsRefAudioPath?: string | null;
+  ttsVoiceAssetId?: string | null;
 }): boolean {
   const mode = (input.ttsMode?.trim() || "preset") as AudiobookTtsMode | string;
   if (mode === "design") {
     return Boolean(input.ttsDesignPrompt?.trim());
   }
   if (mode === "clone") {
-    return Boolean(input.ttsRefAudioPath?.trim());
+    return Boolean(input.ttsRefAudioPath?.trim() || input.ttsVoiceAssetId?.trim());
   }
   return Boolean(input.ttsVoice?.trim());
+}
+
+const GENDER_TAGS = new Set(["male", "female", "unknown"]);
+const CLUSTER_TAGS = new Set(["lead", "cast", "extra", "narrator"]);
+
+function normalizeTags(tags: string[] | undefined | null): string[] {
+  if (!Array.isArray(tags)) return [];
+  return tags.map((t) => t.trim().toLowerCase()).filter(Boolean);
+}
+
+/**
+ * 从 approved 库中为角色挑一个未占用的 clone_ref。
+ * 匹配维：gender 标签 + cluster 标签（均可缺省）；同 slug/display 不参与语义 LLM。
+ * 返回 null 表示无合适资产，调用方回退 design/preset。
+ */
+export function matchLibraryAsset(input: {
+  genderBucket: VoiceGenderBucket;
+  cluster: VoiceCluster;
+  assets: VoicePlannerLibraryAsset[];
+  usedAssetIds: Set<string>;
+}): { asset: VoicePlannerLibraryAsset; score: number; reason: string } | null {
+  const available = input.assets.filter((a) => {
+    if (!a?.id?.trim()) return false;
+    if (input.usedAssetIds.has(a.id)) return false;
+    if (a.kind !== "clone_ref") return false;
+    if (a.status !== "approved") return false;
+    return true;
+  });
+  if (!available.length) return null;
+
+  let best: { asset: VoicePlannerLibraryAsset; score: number; reason: string } | null = null;
+
+  for (const asset of available) {
+    const tags = normalizeTags(asset.tags);
+    const genderTags = tags.filter((t) => GENDER_TAGS.has(t));
+    const clusterTags = tags.filter((t) => CLUSTER_TAGS.has(t));
+
+    // 有明确 gender 标签且与角色冲突 → 跳过
+    if (
+      genderTags.length > 0
+      && input.genderBucket !== "unknown"
+      && !genderTags.includes("unknown")
+      && !genderTags.includes(input.genderBucket)
+    ) {
+      continue;
+    }
+
+    let score = 10; // 基础可用分
+    const bits: string[] = [];
+
+    if (input.genderBucket !== "unknown" && genderTags.includes(input.genderBucket)) {
+      score += 40;
+      bits.push(`gender:${input.genderBucket}`);
+    } else if (genderTags.length === 0 || genderTags.includes("unknown")) {
+      score += 5;
+      bits.push("gender:open");
+    }
+
+    if (clusterTags.includes(input.cluster)) {
+      score += 35;
+      bits.push(`cluster:${input.cluster}`);
+    } else if (clusterTags.length === 0) {
+      score += 8;
+      bits.push("cluster:open");
+    } else {
+      // 有其它簇标签但不匹配：仍可弱匹配（避免库太少时全灭）
+      score += 2;
+      bits.push("cluster:weak");
+    }
+
+    // lead 优先更精确匹配
+    if (input.cluster === "lead" && clusterTags.includes("lead")) {
+      score += 10;
+    }
+
+    if (!best || score > best.score) {
+      best = {
+        asset,
+        score,
+        reason: `library:${asset.slug || asset.id} ${bits.join("+") || "base"}`.trim(),
+      };
+    }
+  }
+
+  // 太弱的匹配不采用（避免任意一个 asset 乱塞）
+  if (!best || best.score < 20) return null;
+  return best;
 }
 
 export function inferGenderBucket(input: VoicePlannerCharacterInput): VoiceGenderBucket {
@@ -1000,9 +1101,11 @@ function neighborLabel(slot: VoiceSlot): string {
  * 纯函数：根据人物卡批量规划差异化音色。
  * - prefer_design：lead/cast → design + 槽位拉开；extra/narrator → 路人/旁白 preset 簇
  * - auto（smart_fill）：lead/cast → design；extra/narrator → preset；未知簇 importance≥70 且有 texture → design
- * - preset_only：仅 preset 负载均衡（旁白/路人用分簇池）
+ *   若注入 approved libraryAssets，auto 对 lead/cast/narrator 先尝试 library clone
+ * - prefer_library：凡可匹配 approved 库资产优先 clone；无匹配回退与 auto 相同
+ * - preset_only：仅 preset 负载均衡（旁白/路人用分簇池）；不走 library
  * - reservedPresets：旁白等占用的预置，角色 preset 池剔除；池空则 lead/cast 强制 design
- * - clone+非空 ref 永不改写；无 ref 的 half-clone 可规划为 preset/design
+ * - clone+（非空 ref 或 assetId）永不改写；half-clone 可规划
  * - 覆盖语义由调用方 onlyMissing + apply.overwrite 处理（本函数不接收 overwrite）
  */
 export function planCharacterVoices(input: {
@@ -1013,6 +1116,11 @@ export function planCharacterVoices(input: {
   maxImportantPerPreset?: number;
   /** 旁白等占用的预置音色，角色池剔除 */
   reservedPresets?: string[];
+  /**
+   * 已过滤的库资产（调用方应只传 approved clone_ref）。
+   * 纯函数不读盘；空/缺省 = 不推荐 clone。
+   */
+  libraryAssets?: VoicePlannerLibraryAsset[];
 }): {
   items: AudiobookVoicePlanItem[];
   skipped: Array<{ characterId: string; characterName: string; reason: string }>;
@@ -1028,6 +1136,15 @@ export function planCharacterVoices(input: {
       .map((v) => v.trim())
       .filter((v): v is MimoTtsPresetVoice => Boolean(v) && isMimoTtsPresetVoice(v)),
   );
+  const libraryAssets = Array.isArray(input.libraryAssets) ? input.libraryAssets : [];
+  const usedLibraryIds = new Set<string>();
+  // 已绑定 clone 的 asset 预占，避免推荐撞车
+  for (const character of input.characters) {
+    const id = character.ttsVoiceAssetId?.trim();
+    if (id && character.ttsMode?.trim() === "clone") {
+      usedLibraryIds.add(id);
+    }
+  }
 
   const skipped: Array<{ characterId: string; characterName: string; reason: string }> = [];
   const candidates: Array<
@@ -1058,12 +1175,17 @@ export function planCharacterVoices(input: {
     }
 
     const mode = character.ttsMode?.trim() || "preset";
-    // 仅「clone + 非空 ref」永久 skip；无 ref 的 half-clone 可规划为 preset/design（apply 可覆盖）
-    if (mode === "clone" && character.ttsRefAudioPath?.trim()) {
+    // 仅「clone + (ref 或 assetId)」永久 skip；half-clone 可规划
+    if (
+      mode === "clone"
+      && (character.ttsRefAudioPath?.trim() || character.ttsVoiceAssetId?.trim())
+    ) {
       skipped.push({
         characterId: character.characterId,
         characterName: character.characterName,
-        reason: "已配置 clone 参考音频。",
+        reason: character.ttsVoiceAssetId?.trim()
+          ? "已配置 clone 库资产。"
+          : "已配置 clone 参考音频。",
       });
       continue;
     }
@@ -1107,6 +1229,7 @@ export function planCharacterVoices(input: {
     let ttsMode: AudiobookTtsMode = "preset";
     let ttsVoice: string | null = null;
     let ttsDesignPrompt: string | null = null;
+    let ttsVoiceAssetId: string | null = null;
     let reason = "";
     let designSlot: VoiceSlot | null = null;
     let softCollision = false;
@@ -1121,25 +1244,63 @@ export function planCharacterVoices(input: {
     // prefer_design：仅主角/主角团 design；路人/旁白强制 preset 簇
     const preferDesignCore =
       strategy === "prefer_design" && isLeadOrCast;
+    // prefer_library：无库匹配时 lead/cast 回退 design
+    const preferLibraryDesignCore =
+      strategy === "prefer_library" && isLeadOrCast;
+    // library 优先：prefer_library 全簇；auto 对 lead/cast/narrator 尝试
+    const tryLibrary =
+      libraryAssets.length > 0
+      && strategy !== "preset_only"
+      && strategy !== "prefer_design"
+      && (
+        strategy === "prefer_library"
+        || (strategy === "auto" && (isLeadOrCast || character.cluster === "narrator"))
+      );
 
-    if (preferDesignCore || smartFillCore || autoDesignByTexture) {
-      ttsMode = "design";
-      if (preferDesignCore) {
-        reason = character.cluster === "lead"
-          ? "策略 prefer_design：主角簇 design，忌死气槽位。"
-          : "策略 prefer_design：主角团 design，槽位拉开。";
-      } else if (smartFillCore) {
-        reason = character.cluster === "lead"
-          ? "策略 smart_fill(auto)：主角簇 design（分配维，非听感证明）。"
-          : "策略 smart_fill(auto)：主角团 design（分配维，非听感证明）。";
-      } else {
-        reason = "auto：高重要性且有 voiceTexture，用 design 拉开 prompt 维（非听感证明）。";
+    if (tryLibrary) {
+      const matched = matchLibraryAsset({
+        genderBucket: character.genderBucket,
+        cluster: character.cluster,
+        assets: libraryAssets,
+        usedAssetIds: usedLibraryIds,
+      });
+      if (matched) {
+        ttsMode = "clone";
+        ttsVoiceAssetId = matched.asset.id;
+        usedLibraryIds.add(matched.asset.id);
+        reason =
+          strategy === "prefer_library"
+            ? `策略 prefer_library：匹配库「${matched.asset.displayName || matched.asset.slug}」（${matched.reason}）。`
+            : `策略 auto：库优先匹配「${matched.asset.displayName || matched.asset.slug}」（${matched.reason}）。`;
       }
-    } else if (strategy === "prefer_design" && !isLeadOrCast) {
-      ttsMode = "preset";
-      reason = character.cluster === "narrator"
-        ? "策略 prefer_design：旁白簇走预置，与角色 design 隔离。"
-        : "策略 prefer_design：路人簇走预置，与主角/主角团 design 隔离。";
+    }
+
+    if (ttsMode !== "clone") {
+      if (preferDesignCore || smartFillCore || preferLibraryDesignCore || autoDesignByTexture) {
+        ttsMode = "design";
+        if (preferDesignCore) {
+          reason = character.cluster === "lead"
+            ? "策略 prefer_design：主角簇 design，忌死气槽位。"
+            : "策略 prefer_design：主角团 design，槽位拉开。";
+        } else if (preferLibraryDesignCore) {
+          reason = "策略 prefer_library：无匹配库资产，回退 design。";
+        } else if (smartFillCore) {
+          reason = character.cluster === "lead"
+            ? "策略 smart_fill(auto)：主角簇 design（分配维，非听感证明）。"
+            : "策略 smart_fill(auto)：主角团 design（分配维，非听感证明）。";
+        } else {
+          reason = "auto：高重要性且有 voiceTexture，用 design 拉开 prompt 维（非听感证明）。";
+        }
+      } else if (strategy === "prefer_design" && !isLeadOrCast) {
+        ttsMode = "preset";
+        reason = character.cluster === "narrator"
+          ? "策略 prefer_design：旁白簇走预置，与角色 design 隔离。"
+          : "策略 prefer_design：路人簇走预置，与主角/主角团 design 隔离。";
+      } else if (strategy === "prefer_library" && !isLeadOrCast) {
+        // 无库匹配的 extra/narrator：旁白/路人走 preset
+        ttsMode = "preset";
+        reason = "策略 prefer_library：无匹配库资产，路人/旁白回退 preset。";
+      }
     }
 
     if (ttsMode === "preset") {
@@ -1164,6 +1325,7 @@ export function planCharacterVoices(input: {
         if (
           strategy !== "preset_only"
           && strategy !== "prefer_design"
+          && strategy !== "prefer_library"
           && isImportant
           && importantCount >= maxImportantPerPreset
         ) {
@@ -1267,7 +1429,7 @@ export function planCharacterVoices(input: {
         reason = `${reason} collision:soft`.trim();
       } else if (slotDiverged) {
         reason = `${reason} slot:override ${allocated.key}。`.trim();
-      } else if (!reason.includes("槽") && (strategy === "prefer_design" || strategy === "auto" || minSeparation > 0)) {
+      } else if (!reason.includes("槽") && (strategy === "prefer_design" || strategy === "auto" || strategy === "prefer_library" || minSeparation > 0)) {
         reason = `${reason} 槽位 ${allocated.key}。`.trim();
       }
     }
@@ -1283,6 +1445,7 @@ export function planCharacterVoices(input: {
         { preferSlot: ttsMode === "design" },
       ),
       ttsDesignPrompt,
+      ttsVoiceAssetId,
       speakerAliases: null,
       wouldOverwrite: character.configured,
       reason,
@@ -1294,6 +1457,7 @@ export function planCharacterVoices(input: {
         ttsMode: character.ttsMode ?? null,
         ttsVoice: character.ttsVoice ?? null,
         ttsDesignPrompt: character.ttsDesignPrompt ?? null,
+        ttsVoiceAssetId: character.ttsVoiceAssetId ?? null,
       },
     });
   }

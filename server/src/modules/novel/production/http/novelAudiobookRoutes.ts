@@ -287,7 +287,7 @@ const createAudiobookTaskSchema = z.object({
 const voicePlanSuggestSchema = z.object({
   onlyMissing: z.boolean().optional(),
   characterIds: z.array(z.string().trim().min(1)).max(200).optional(),
-  strategy: z.enum(["auto", "preset_only", "prefer_design"]).optional(),
+  strategy: z.enum(["auto", "preset_only", "prefer_design", "prefer_library"]).optional(),
   maxImportantPerPreset: z.number().int().min(1).max(8).optional(),
   reservedPresets: z.array(z.string().trim().min(1).max(64)).max(16).optional(),
 });
@@ -302,6 +302,8 @@ const voicePlanApplySchema = z.object({
         ttsVoice: z.string().trim().max(64).nullable().optional(),
         ttsStyle: z.string().trim().max(500).nullable().optional(),
         ttsDesignPrompt: z.string().trim().max(2000).nullable().optional(),
+        /** clone 时必填；服务端 assert approved 后 bind，禁止客户端 path */
+        ttsVoiceAssetId: z.string().trim().min(1).max(64).nullable().optional(),
         speakerAliases: z.array(z.string().trim().min(1).max(64)).max(24).nullable().optional(),
       }),
     )
@@ -354,7 +356,7 @@ const voiceReadinessPrepareSchema = z.object({
   fillMissingVoice: z.boolean().optional(),
   generatePreview: z.boolean().optional(),
   regenerateStale: z.boolean().optional(),
-  planStrategy: z.enum(["auto", "preset_only", "prefer_design"]).optional(),
+  planStrategy: z.enum(["auto", "preset_only", "prefer_design", "prefer_library"]).optional(),
   previewText: z.string().trim().max(200).optional(),
   candidatesPerCharacter: z.number().int().min(1).max(5).optional(),
 });
