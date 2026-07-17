@@ -50,6 +50,21 @@ import {
 
 外部模块优先依赖这些目录的门面或稳定入口，不应向 `director/` 根目录继续添加同前缀业务文件。
 
+### 根目录现存文件契约（受 `tests/directorDirectoryBoundary.test.js` 固定）
+
+根目录 `.ts` 文件集合固定为 7 个，分两类，新增根文件会被该测试拒绝：
+
+- 门面：`NovelDirectorService.ts`
+- 兼容桥接（re-export 1 行声明，主体在子目录）：
+  `DirectorStateStore.ts` / `DirectorStateReader.ts` / `DirectorStateCommitter.ts`
+  → 主体分别在 `state/DirectorStateStore.ts` 等。
+- 历史遗留根文件（主体仍在根，迁移到子目录需先与责任人协商并同步更新边界测试断言）：
+  `novelDirectorConfirmNodeAdapters.ts`（38 行，逻辑归属 `phases/`，仅类型导入、无内部同级依赖，迁移风险低，但与现有 node adapter 放置习惯并行，暂留根）；
+  `NovelDirectorIdeaInspirationService.ts`（82 行，独立 prompt 服务，逻辑归属 `commands/`，迁移涉及 `promptRunner` 等 `../../../` 深链补层级，暂留根）；
+  `novelDirectorPipelineRuntime.ts`（695 行，逻辑归属 `runtime/`，但主体有 10+ 处对 `./runtime`、`./recovery`、`../characterPrep`、`../storyMacro` 的同级深链，迁移的相对路径 rewire 属中风险，暂留根，后续若需收缩规模在拆分时一并归位）。
+
+保持根文件集合不变、不再新增同前缀根文件即为本子系统的目录边界合规要求。
+
 ## 数据模型
 
 系统当前只有一套活动后台命令队列：
