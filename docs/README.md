@@ -41,6 +41,22 @@
 - [AI Comic Adaptation](./plans/ai-comic-adaptation-plan.md)
 - [AI Comic Product Design](./plans/ai-comic-product-design.md)
 
+#### 有声书 / 音色库工作流（main 上活跃）
+
+基线 `1b7078b`，Milestone A/B/C/Harden/D 已交付，E/F/G 在轨。详见 [SoT 摘要](./plans/audiobook-sitewide-voice-library-research.md) 与 [运营与 AI 规划 D–G](./plans/audiobook-voice-library-ops-and-ai-plan.md)。
+
+- [全站音色库 + AI 规划调研（SoT 摘要）](./plans/audiobook-sitewide-voice-library-research.md)
+- [音色库运营与 AI 规划 D–G](./plans/audiobook-voice-library-ops-and-ai-plan.md)（active · D 库管理台 · E 人耳 approve · F setStatus 门禁 · G LLM redesign）
+- [Audiobook Segment Delivery Style](./plans/audiobook-segment-delivery-style-plan.md)
+- [Audiobook Character Voice Differentiation](./plans/audiobook-character-voice-differentiation-plan.md)
+- [Audiobook Mimo TTS Multi Backend](./plans/audiobook-mimo-tts-multi-backend-plan.md)
+- [Audiobook Workbench UX Optimization](./plans/audiobook-workbench-ux-optimization-plan.md)
+- [Audiobook Workbench Voice Readiness](./plans/audiobook-workbench-voice-readiness-plan.md)
+- [Audiobook Voice-Diff Ops Hardening](./plans/audiobook-voice-diff-ops-hardening-plan.md)
+- [Audiobook Listen Usability P0](./plans/audiobook-listen-usability-p0-plan.md)
+- [Audiobook Design Prompt Quality](./plans/audiobook-design-prompt-quality-plan.md)
+- [Character Voice Preview Asset](./plans/character-voice-preview-asset-plan.md)
+
 ### `docs/design`
 
 用于放系统设计、模块接口、产品机制和领域建模说明。
@@ -86,7 +102,6 @@ Wiki 不替代计划、检查点或发布说明：
 
 - [Project Init Spec](./archive/project-init-spec.md) —— 2024 项目初始化方案
 - [Outdated Docs Index](./archive/outdated/README.md) —— 被当前发布事实取代的归档清单
-- [`./archive/audiobook/`](./archive/audiobook/) —— 已停的有声书/音色计划（9 份）
 
 ### 其他目录（不纳入 docs 治理，保留备查）
 
