@@ -58,6 +58,7 @@ export default function AudiobookProjectPage() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: queryKeys.novels.audiobookWorkspace(id) }),
         queryClient.invalidateQueries({ queryKey: queryKeys.novels.audiobookVoiceReadiness(id) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.novels.audiobookWorkspaceOverviewPrefix }),
       ]);
     },
   });

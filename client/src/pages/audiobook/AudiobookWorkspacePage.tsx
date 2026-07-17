@@ -36,9 +36,11 @@ export default function AudiobookWorkspacePage() {
   const items = novelListQuery.data?.data?.items ?? [];
   const totalPages = novelListQuery.data?.data?.totalPages ?? 1;
   const novelIds = useMemo(() => items.map((item) => item.id), [items]);
+  /** 稳定 key：列表顺序即页内顺序，join 后进 queryKey，防同 page/keyword 换书仍吃旧 overview */
+  const novelIdsKey = useMemo(() => novelIds.join(","), [novelIds]);
 
   const overviewQuery = useQuery({
-    queryKey: queryKeys.novels.audiobookWorkspaceOverview(page, debouncedKeyword),
+    queryKey: queryKeys.novels.audiobookWorkspaceOverview(page, debouncedKeyword, novelIdsKey),
     queryFn: async () => {
       const response = await postAudiobookWorkspaceOverview({ novelIds });
       return response.data;

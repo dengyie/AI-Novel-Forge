@@ -162,6 +162,8 @@ test("workspace page wires overview + badge resolver", () => {
   assert.match(page, /postAudiobookWorkspaceOverview/);
   assert.match(page, /resolveAudiobookWorkspaceBadges/);
   assert.match(page, /audiobookWorkspaceOverview/);
+  assert.match(page, /novelIdsKey/);
+  assert.match(page, /novelIds\.join/);
 });
 
 test("project panel IA anchors + mobile fixed CTA + queryKeys tasks", () => {
@@ -227,4 +229,13 @@ test("queryKeys exposes audiobookWorkspaceOverviewPrefix", () => {
     "utf8",
   );
   assert.match(keys, /audiobookWorkspaceOverviewPrefix:\s*\[\"novels\",\s*\"audiobook-workspace-overview\"\]/);
+});
+
+test("project page narrator save invalidates overview prefix", () => {
+  const project = readFileSync(
+    path.join(clientRoot, "src/pages/audiobook/AudiobookProjectPage.tsx"),
+    "utf8",
+  );
+  assert.match(project, /audiobookWorkspaceOverviewPrefix/);
+  assert.match(project, /saveNarratorMutation/);
 });
