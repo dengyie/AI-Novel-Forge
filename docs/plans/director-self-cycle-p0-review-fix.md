@@ -751,6 +751,6 @@ EOF
 | 项 | 状态 |
 |---|---|
 | 用户下令「文档优化 + 落实代码」 | 已接受 · 2026-07-17 |
-| Task 1 Fix-1 merge + Service | 已完成（merge 纯函数 + Service 接线 + thrash 回归测绿） |
-| Task 2 Fix-2 lazy gate + 死参 | 待开工 |
+| Task 1 Fix-1 merge + Service | 已完成 · commit `9f78556`（merge 纯函数 + Service 接线 + thrash 回归） |
+| Task 2 Fix-2 lazy gate + 死参 | 已完成 · `collectNotExecutableOrdersInBatchWindow` + lazy/non-lazy 共用 + 删 decision 死参 `supervisoryCloseable` + T4/T5 测绿 |
 | 生产 resume / 下一 milestone | **禁止**（Manual-required 另令） |

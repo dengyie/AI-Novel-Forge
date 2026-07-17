@@ -80,20 +80,31 @@ function createTitleOnlyChapter(id, chapterOrder, volumeId = "volume-1") {
   };
 }
 
+function createFullBookReadyTaskSheet(chapterOrder) {
+  return [
+    `【本章独占事件】第${chapterOrder}章主角第一次确认资源危机来自内部。`,
+    "【在场人物】主角必须露脸；幕后主使故意 offscreen。",
+    "【人物选择】主角在公开对质与私下取证之间做有代价的选择，押上内部人脉。",
+    "【现场压力】雨夜仓库潮气与警报灯把身体与社会压力压到同一现场。",
+    "【禁止】不要提前揭示幕后主使，不要复写下一章核心事件。",
+  ].join("\n");
+}
+
 function createDetailedChapter(id, chapterOrder, volumeId = "volume-1") {
   return {
     id,
     volumeId,
     chapterOrder,
-    purpose: `chapter ${chapterOrder} purpose`,
-    exclusiveEvent: `chapter ${chapterOrder} exclusive event`,
-    endingState: `chapter ${chapterOrder} ending state`,
-    nextChapterEntryState: `chapter ${chapterOrder} next entry state`,
-    conflictLevel: 3,
-    revealLevel: 2,
+    purpose: `推进第${chapterOrder}章主线：从被动承压转为主动试探。`,
+    exclusiveEvent: `第${chapterOrder}章主角第一次确认资源危机来自内部。`,
+    endingState: `第${chapterOrder}章末主角拿到第一份证据。`,
+    nextChapterEntryState: `第${chapterOrder + 1}章入口：主角带着证据进入下一轮试探。`,
+    conflictLevel: 45,
+    revealLevel: 35,
     targetWordCount: 2500,
-    mustAvoid: `chapter ${chapterOrder} avoid`,
-    taskSheet: `chapter ${chapterOrder} task sheet 独占事件 在场人物 人物选择 现场压力 功能兑付 禁止事项`,
+    mustAvoid: `不要提前揭示幕后主使，不要复写下一章核心事件。`,
+    // Full template markers so full_book_autopilot elevate rules still canEnter.
+    taskSheet: createFullBookReadyTaskSheet(chapterOrder),
     payoffRefs: [],
     sceneCards: createSceneCards(chapterOrder),
     beatKey: "volume-1-beat",
@@ -102,6 +113,34 @@ function createDetailedChapter(id, chapterOrder, volumeId = "volume-1") {
     createdAt: new Date(0).toISOString(),
     updatedAt: new Date(0).toISOString(),
   };
+}
+
+function createWorkspaceWithDetailedChapters(orders) {
+  return buildVolumeWorkspaceDocument({
+    novelId: "novel-demo",
+    volumes: [
+      createVolume(
+        "volume-1",
+        1,
+        "第一卷",
+        orders.map((order) => createDetailedChapter(`chapter-${order}`, order)),
+      ),
+    ],
+    beatSheets: [
+      {
+        volumeId: "volume-1",
+        volumeSortOrder: 1,
+        status: "generated",
+        beats: [{
+          key: "volume-1-beat",
+          label: "卷一起势",
+          summary: "卷一起势摘要",
+          chapterSpanHint: `${orders[0]}-${orders[orders.length - 1]}章`,
+          mustDeliver: ["卷一起势"],
+        }],
+      },
+    ],
+  });
 }
 
 function createVolume(id, sortOrder, title, chapters) {
@@ -435,10 +474,72 @@ test("prepareNextAutoExecutionBatch throws when recovery cursor stalls", async (
   );
 });
 
-test("prepareNextAutoExecutionBatch autopilot expands without chapter_detail generation", async () => {
+// T4: full_book lazy titles-only must hard-fail canEnter (no silent expand).
+test("prepareNextAutoExecutionBatch autopilot titles-only throws canEnterExecution hard gate", async () => {
   const restorePrisma = installPrismaResetMocks();
   const generateCalls = [];
   const workspace = createWorkspaceWithTitlesOnly([31, 32]);
+
+  try {
+    await assert.rejects(
+      () => prepareNextAutoExecutionBatch({
+        volumeService: {
+          async getVolumes() {
+            return clone(workspace);
+          },
+          async generateVolumes(_novelId, options) {
+            generateCalls.push(options.scope);
+            return clone(options.draftWorkspace ?? workspace);
+          },
+          async updateVolumesWithOptions(_novelId, document) {
+            return clone(document);
+          },
+          async syncVolumeChaptersWithOptions() {
+            return { synced: true };
+          },
+        },
+        novelContextService: {
+          async listChapters() {
+            return [31, 32].map((order) => ({
+              id: `chapter-${order}`,
+              order,
+              title: `第${order}章`,
+              generationState: "planned",
+              chapterStatus: "unplanned",
+              content: "",
+            }));
+          },
+        },
+      }, {
+        novelId: "novel-demo",
+        taskId: "task-autopilot",
+        decision: {
+          kind: "reenter_structured_outline",
+          reason: "lazy title window",
+          nextRange: { startOrder: 31, endOrder: 32 },
+        },
+        previousState: buildPreviousState(21, 30),
+        previousRange: {
+          startOrder: 21,
+          endOrder: 30,
+          totalChapterCount: 10,
+          firstChapterId: "chapter-21",
+        },
+        request: buildRequest({ runMode: "full_book_autopilot" }),
+      }),
+      /canEnterExecution=false|合同不可执行/,
+    );
+    assert.deepEqual(generateCalls, [], "must not generate chapter_detail on titles-only fail path");
+  } finally {
+    restorePrisma();
+  }
+});
+
+// T5: full_book lazy contract-ready expands without chapter_detail generation.
+test("prepareNextAutoExecutionBatch autopilot contract-ready expands without chapter_detail generation", async () => {
+  const restorePrisma = installPrismaResetMocks();
+  const generateCalls = [];
+  const workspace = createWorkspaceWithDetailedChapters([31, 32]);
 
   try {
     const result = await prepareNextAutoExecutionBatch({
@@ -459,7 +560,7 @@ test("prepareNextAutoExecutionBatch autopilot expands without chapter_detail gen
       },
       novelContextService: {
         async listChapters() {
-          // Autopilot JIT: titles already listed as executable chapter rows.
+          // Exec rows may be bare; plan ⊕ merge must still pass canEnter from workspace contract.
           return [31, 32].map((order) => ({
             id: `chapter-${order}`,
             order,
@@ -472,10 +573,10 @@ test("prepareNextAutoExecutionBatch autopilot expands without chapter_detail gen
       },
     }, {
       novelId: "novel-demo",
-      taskId: "task-autopilot",
+      taskId: "task-autopilot-ready",
       decision: {
         kind: "reenter_structured_outline",
-        reason: "lazy title window",
+        reason: "lazy contract-ready window",
         nextRange: { startOrder: 31, endOrder: 32 },
       },
       previousState: buildPreviousState(21, 30),
@@ -490,7 +591,7 @@ test("prepareNextAutoExecutionBatch autopilot expands without chapter_detail gen
 
     assert.equal(result.range.startOrder, 31);
     assert.equal(result.range.endOrder, 32);
-    assert.deepEqual(generateCalls, []);
+    assert.deepEqual(generateCalls, [], "full_book JIT must not pre-generate chapter_detail");
     assert.equal(result.autoExecution.pipelineStatus, "queued");
   } finally {
     restorePrisma();
