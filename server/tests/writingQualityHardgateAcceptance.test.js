@@ -386,11 +386,27 @@ test("A-H10: no strategy-default skip_quality_repair; no writingQualityMode main
     "utf8",
   );
   assert.match(continueSrc, /function shouldSkipCurrentQualityRepair/);
-  assert.match(continueSrc, /return input\.continuationMode === "skip_quality_repair"/);
+  assert.match(continueSrc, /function resolveContinuationExecutionFlags/);
+  assert.match(continueSrc, /skipCurrentQualityRepair:\s*false/);
+  assert.doesNotMatch(
+    continueSrc,
+    /return input\.continuationMode === "skip_quality_repair"/,
+  );
+  assert.match(
+    continueSrc,
+    /continuationMode === "auto_execute_range"[\s\S]{0,80}continuationMode === "skip_quality_repair"/,
+  );
   assert.doesNotMatch(
     continueSrc,
     /continuationMode !== "auto_execute_range"[\s\S]{0,200}quality_repair/,
   );
+
+  const checkpointSrc = fs.readFileSync(
+    path.join(__dirname, "../src/services/novel/director/automation/novelDirectorAutoExecutionCheckpointRuntime.ts"),
+    "utf8",
+  );
+  assert.match(checkpointSrc, /const canSkipCurrentQualityRepair = false/);
+  assert.doesNotMatch(checkpointSrc, /source:\s*"review_skip"/);
 
   const roots = [
     path.join(__dirname, "../../shared/types"),

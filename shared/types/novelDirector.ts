@@ -240,6 +240,10 @@ export function buildFullBookAutopilotExecutionPlan(): DirectorAutoExecutionPlan
   };
 }
 
+/**
+ * skip_quality_repair 已废弃为质量旁路（保留枚举仅兼容旧客户端/脚本）。
+ * 服务端执行面：永不 skip 质量债；续跑语义按 auto_execute_range 处理。
+ */
 export type DirectorContinuationMode = "resume" | "auto_execute_range" | "skip_quality_repair";
 
 export function normalizeDirectorContinuationMode(

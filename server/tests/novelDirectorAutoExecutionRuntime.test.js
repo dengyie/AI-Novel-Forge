@@ -1178,6 +1178,148 @@ test("runFromReady cannot skip a replan hard-pause notice via skipCurrentQuality
   assert.equal(calls.some((call) => call[0] === "recordCheckpoint" && call[2] === "workflow_completed"), false);
 });
 
+test("runFromReady cannot auto-continue soft quality via skipCurrentQualityRepair (no review_skip debt)", async () => {
+  // Outside AI-driver + policy refuses auto-continue: skip flag must NOT open the old
+  // review_skip quality-debt bypass. Soft quality pauses at chapter_batch_ready.
+  const calls = [];
+  const completedOrders = new Set();
+  const runtime = new NovelDirectorAutoExecutionRuntime({
+    novelContextService: {
+      async listChapters() {
+        return [1, 2].map((order) => (
+          completedOrders.has(order)
+            ? { id: `chapter-${order}`, order, generationState: "approved", chapterStatus: "completed", content: `正文${order}` }
+            : withExecutionDetail({ id: `chapter-${order}`, order, generationState: "planned", chapterStatus: "unplanned", content: "" })
+        ));
+      },
+    },
+    novelService: {
+      async startPipelineJob(_novelId, options) {
+        calls.push(["startPipelineJob", options.startOrder, options.endOrder]);
+        return calls.filter((call) => call[0] === "startPipelineJob").length === 1
+          ? { id: "job-soft-quality", status: "queued" }
+          : { id: `job-after-skip-${options.startOrder}`, status: "queued" };
+      },
+      async findActivePipelineJobForRange() {
+        return null;
+      },
+      async getPipelineJobById(jobId) {
+        calls.push(["getPipelineJobById", jobId]);
+        if (jobId.startsWith("job-after-skip-")) {
+          const order = Number(jobId.replace("job-after-skip-", ""));
+          completedOrders.add(order);
+          return {
+            id: jobId,
+            status: "succeeded",
+            progress: 1,
+            startOrder: order,
+            endOrder: order,
+            currentStage: null,
+            currentItemLabel: null,
+            noticeSummary: null,
+            error: null,
+          };
+        }
+        completedOrders.add(1);
+        return {
+          id: "job-soft-quality",
+          status: "succeeded",
+          progress: 1,
+          startOrder: 1,
+          endOrder: 1,
+          currentStage: null,
+          currentItemLabel: null,
+          payload: JSON.stringify({
+            repairMode: "light_repair",
+            qualityAlertDetails: ["第 1 章自动修复后仍低于质量阈值"],
+          }),
+          noticeCode: "PIPELINE_QUALITY_REVIEW",
+          noticeSummary: "Some chapters finished below the configured quality threshold: 第 1 章自动修复后仍低于质量阈值",
+          error: null,
+        };
+      },
+      async cancelPipelineJob() {
+        calls.push(["cancelPipelineJob"]);
+      },
+    },
+    workflowService: {
+      async bootstrapTask(input) {
+        calls.push([
+          "bootstrapTask",
+          input.seedPayload.autoExecution?.qualityDebtSummaries ?? [],
+        ]);
+      },
+      async getTaskById() {
+        return { status: "running" };
+      },
+      async markTaskRunning() {
+        calls.push(["markTaskRunning"]);
+      },
+      async recordCheckpoint(taskId, input) {
+        calls.push([
+          "recordCheckpoint",
+          taskId,
+          input.checkpointType,
+          input.seedPayload?.autoExecution?.qualityDebtSummaries ?? [],
+        ]);
+      },
+      async markTaskFailed() {
+        calls.push(["markTaskFailed"]);
+      },
+    },
+    buildDirectorSeedPayload(_request, _novelId, extra) {
+      return extra ?? {};
+    },
+    shouldAutoContinueQualityRepair() {
+      calls.push(["shouldAutoContinueQualityRepair"]);
+      return false;
+    },
+    async recordAutoApproval(input) {
+      calls.push(["recordAutoApproval", input.checkpointType, input.qualityRepairRisk.riskLevel]);
+    },
+  });
+
+  await runtime.runFromReady({
+    taskId: "task-auto-exec",
+    novelId: "novel-1",
+    request: buildRequest({
+      runMode: "auto_to_ready",
+      autoApproval: {
+        enabled: false,
+        approvalPointCodes: [],
+      },
+    }),
+    existingState: {
+      enabled: true,
+      mode: "chapter_range",
+      firstChapterId: "chapter-1",
+      startOrder: 1,
+      endOrder: 2,
+      totalChapterCount: 2,
+      pipelineJobId: null,
+      pipelineStatus: null,
+    },
+    skipCurrentQualityRepair: true,
+  });
+
+  // Soft quality must pause; skipCurrentQualityRepair must not open review_skip auto_continue.
+  assert.deepEqual(calls.filter((call) => call[0] === "startPipelineJob").map((call) => call.slice(1)), [
+    [1, 1],
+  ]);
+  assert.ok(calls.some((call) => call[0] === "recordCheckpoint" && call[2] === "chapter_batch_ready"));
+  assert.equal(calls.some((call) => call[0] === "recordCheckpoint" && call[2] === "workflow_completed"), false);
+  assert.equal(calls.some((call) => call[0] === "recordAutoApproval"), false);
+
+  const debtFromCheckpoints = calls
+    .filter((call) => call[0] === "recordCheckpoint")
+    .flatMap((call) => Array.isArray(call[3]) ? call[3] : []);
+  assert.equal(
+    debtFromCheckpoints.some((entry) => entry && entry.source === "review_skip"),
+    false,
+    "skipCurrentQualityRepair must not mint review_skip quality debt",
+  );
+});
+
 test("auto-execution state drops blank chapters from skipped quality debt", () => {
   const state = buildDirectorAutoExecutionState({
     range: { startOrder: 1, endOrder: 3, totalChapterCount: 3, firstChapterId: "chapter-1" },
