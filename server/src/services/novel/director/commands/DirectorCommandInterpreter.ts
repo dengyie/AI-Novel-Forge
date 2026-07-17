@@ -65,6 +65,8 @@ export class DirectorCommandInterpreter {
       intent,
       payload,
       takeoverRequest: payload.takeoverRequest ?? null,
+      // Pipeline contract: these intents are force-resume (non-reuse of succeeded
+      // idempotent steps). Interpreting "continue" as soft reuse would re-open ghost noop.
       forceResume: intent === "continue" || intent === "resume_from_checkpoint" || intent === "retry" || intent === "approve_gate"
         ? true
         : Boolean(payload.forceResume),

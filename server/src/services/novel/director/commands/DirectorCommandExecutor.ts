@@ -208,6 +208,10 @@ export class DirectorCommandExecutor {
           });
           return this.resolveCommandOutcome(pipelineCommand.taskId);
         }
+        // Command-bus continue/resume/retry/approve_gate always forceResume so
+        // pipeline re-enters fact-completed modules with reuseCompletedStep:false
+        // (anti ghost-noop). Cost: may re-run planning LLM steps on every continue.
+        // Do not silently drop this without product sign-off on ghost risk.
         await this.directorService.executeContinueTask(pipelineCommand.taskId, {
           ...pipelineCommand.payload,
           continuationMode: pipelineCommand.intent === "approve_gate" ? "resume" : pipelineCommand.payload.continuationMode,
