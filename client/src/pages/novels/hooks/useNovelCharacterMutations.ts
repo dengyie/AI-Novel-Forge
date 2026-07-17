@@ -18,6 +18,7 @@ import {
 } from "@/api/novel";
 import { queryKeys } from "@/api/queryKeys";
 import { buildCharacterProfileFromWizard, type QuickCharacterCreatePayload } from "../components/characterPanel.utils";
+import { buildCharacterTtsRefSaveFields } from "../components/characterAssetWorkspace.helpers";
 import type {
   SupplementalCharacterCandidate,
   SupplementalCharacterGenerateInput,
@@ -253,13 +254,12 @@ export function useNovelCharacterMutations(input: UseNovelCharacterMutationsInpu
 
   const saveCharacterMutation = useMutation({
     mutationFn: () => {
-      // 安全契约：客户端不得写任意 ttsRefAudioPath 字符串（zod 仅允许 null 清空）。
-      // Design→Clone / 服务端 base64 落盘后的路径只展示；保存时非空路径一律省略。
-      const trimmedPath = characterForm.ttsRefAudioPath.trim();
-      const trimmedBase64 = characterForm.ttsRefAudioBase64.trim();
       const mode = (characterForm.ttsMode || "preset") as "preset" | "design" | "clone";
-      // clone + 已有路径：省略 path，保留服务端绑定；其它情况显式 null 清空，防半绑定/残留
-      const keepServerRef = mode === "clone" && Boolean(trimmedPath) && !trimmedBase64;
+      const refFields = buildCharacterTtsRefSaveFields({
+        ttsMode: mode,
+        ttsRefAudioPath: characterForm.ttsRefAudioPath,
+        ttsRefAudioBase64: characterForm.ttsRefAudioBase64,
+      });
       return updateNovelCharacter(id, selectedCharacterId, {
         name: characterForm.name,
         role: characterForm.role,
@@ -276,12 +276,7 @@ export function useNovelCharacterMutations(input: UseNovelCharacterMutationsInpu
         ttsVoice: characterForm.ttsVoice.trim() || null,
         ttsStyle: characterForm.ttsStyle.trim() || null,
         ttsDesignPrompt: characterForm.ttsDesignPrompt.trim() || null,
-        ...(trimmedBase64
-          ? { ttsRefAudioBase64: trimmedBase64 }
-          : {
-              ttsRefAudioBase64: null,
-              ...(keepServerRef ? {} : { ttsRefAudioPath: null as null }),
-            }),
+        ...refFields,
         ttsSpeakerAliases: characterForm.ttsSpeakerAliases.trim() || null,
         presenceImpression: characterForm.presenceImpression,
         currentState: characterForm.currentState,

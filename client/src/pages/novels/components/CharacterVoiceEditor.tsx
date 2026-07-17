@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import type { ApiResponse } from "@ai-novel/shared/types/api";
 import {
   DEFAULT_AUDIOBOOK_NARRATOR_STYLE,
   MIMO_TTS_VOICE_CATALOG,
@@ -15,6 +16,7 @@ import {
   getCharacterVoicePreview,
   issueCharacterVoicePreviewMediaUrl,
 } from "@/api/novel/audiobook";
+import type { NovelDetailResponse } from "@/api/novel/shared";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -388,7 +390,7 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
       return data;
     },
     onSuccess: async (data) => {
-      // 服务端已写 clone+ref；同步表单以免 dirty，且勿把路径当客户端可写字段再提交
+      // 服务端已写 clone+ref；同步表单 + novel detail 缓存，避免「未保存」假脏与错误清空 ref
       onChange("ttsMode", "clone");
       onChange("ttsRefAudioPath", data.ttsRefAudioPath || "");
       onChange("ttsRefAudioBase64", "");
@@ -398,6 +400,29 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
       queryClient.setQueryData(
         queryKeys.novels.characterVoicePreview(novelId, characterId),
         data.contrastPreview || data.preview,
+      );
+      queryClient.setQueryData<ApiResponse<NovelDetailResponse>>(
+        queryKeys.novels.detail(novelId),
+        (prev) => {
+          if (!prev?.data?.characters) return prev;
+          return {
+            ...prev,
+            data: {
+              ...prev.data,
+              characters: prev.data.characters.map((c) =>
+                c.id === characterId
+                  ? {
+                      ...c,
+                      ttsMode: "clone",
+                      ttsRefAudioPath: data.ttsRefAudioPath || null,
+                      ttsVoice: null,
+                      ttsDesignPrompt: data.retainedDesignPrompt ?? c.ttsDesignPrompt,
+                    }
+                  : c,
+              ),
+            },
+          };
+        },
       );
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: queryKeys.novels.detail(novelId) }),
