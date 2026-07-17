@@ -6,9 +6,15 @@ import { updateNovel } from "@/api/novel";
 import { getAudiobookWorkspace } from "@/api/novel/audiobook";
 import { queryKeys } from "@/api/queryKeys";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import NovelAudiobookPanel from "@/pages/novels/components/NovelAudiobookPanel";
+
+function scrollToAnchor(id: string) {
+  const el = document.getElementById(id);
+  if (el) {
+    el.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+}
 
 export default function AudiobookProjectPage() {
   const { id = "" } = useParams<{ id: string }>();
@@ -16,7 +22,6 @@ export default function AudiobookProjectPage() {
   const [narratorVoice, setNarratorVoice] = useState("");
   const [narratorStyle, setNarratorStyle] = useState("");
 
-  // 轻量 bootstrap：不含章节正文（getNovelDetail 对源世界 ~2MB）
   const workspaceQuery = useQuery({
     queryKey: queryKeys.novels.audiobookWorkspace(id),
     queryFn: async () => {
@@ -132,54 +137,79 @@ export default function AudiobookProjectPage() {
             <Badge variant="outline">{workspace.chapterCount} 章</Badge>
             <Badge variant="outline">{workspace.characterCount} 角色</Badge>
           </div>
+          <p className="max-w-2xl text-sm leading-6 text-muted-foreground">
+            先一键补齐音色与固定试听，再设旁白与范围并生成。单章任务也需全书角色音色齐（硬门禁）。
+            clone 参考音与单卡精修可在小说编辑 → 角色 Tab。
+          </p>
         </div>
         <Button asChild size="sm" variant="outline">
           <Link to={`/novels/${id}/edit`}>打开小说编辑</Link>
         </Button>
       </div>
 
-      <Card>
-        <CardHeader className="pb-2">
-          <CardTitle className="text-base">开发说明</CardTitle>
-          <CardDescription>
-            本台可一键补齐角色音色与固定试听，再设旁白并生成任务。
-            clone 参考音与单卡精修仍可在小说编辑 → 角色 Tab。
-            本页只拉目录与音色字段，不会加载全文章节正文。
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <NovelAudiobookPanel
-            novelId={id}
-            chapters={workspace.chapters}
-            characters={workspace.characters}
-            narratorVoice={narratorVoice}
-            narratorStyle={narratorStyle}
-            bootstrapActiveJobId={workspace.readiness?.activeReadinessJobId ?? null}
-            onNarratorChange={(patch) => {
-              saveNarratorMutation.reset();
-              if (patch.audiobookNarratorVoice !== undefined) {
-                setNarratorVoice(patch.audiobookNarratorVoice);
-              }
-              if (patch.audiobookNarratorStyle !== undefined) {
-                setNarratorStyle(patch.audiobookNarratorStyle);
-              }
-            }}
-            onSaveNarrator={() => saveNarratorMutation.mutate()}
-            isSavingNarrator={saveNarratorMutation.isPending}
-          />
-          {saveNarratorMutation.isError ? (
-            <div className="mt-3 text-xs text-destructive">
-              旁白保存失败：
-              {saveNarratorMutation.error instanceof Error
-                ? saveNarratorMutation.error.message
-                : "未知错误"}
-            </div>
-          ) : null}
-          {saveNarratorMutation.isSuccess ? (
-            <div className="mt-3 text-xs text-muted-foreground">旁白默认已保存。</div>
-          ) : null}
-        </CardContent>
-      </Card>
+      <nav
+        aria-label="有声书步骤"
+        className="flex flex-wrap items-center gap-2 rounded-xl border border-border/70 bg-muted/20 px-3 py-2 text-sm"
+      >
+        <button
+          type="button"
+          className="rounded-md px-2 py-1 font-medium text-foreground hover:bg-background"
+          onClick={() => scrollToAnchor("ab-prepare")}
+        >
+          准备
+        </button>
+        <span className="text-muted-foreground" aria-hidden>
+          —
+        </span>
+        <button
+          type="button"
+          className="rounded-md px-2 py-1 font-medium text-foreground hover:bg-background"
+          onClick={() => scrollToAnchor("ab-create")}
+        >
+          生成
+        </button>
+        <span className="text-muted-foreground" aria-hidden>
+          —
+        </span>
+        <button
+          type="button"
+          className="rounded-md px-2 py-1 font-medium text-foreground hover:bg-background"
+          onClick={() => scrollToAnchor("ab-tasks")}
+        >
+          任务
+        </button>
+      </nav>
+
+      <NovelAudiobookPanel
+        novelId={id}
+        chapters={workspace.chapters}
+        characters={workspace.characters}
+        narratorVoice={narratorVoice}
+        narratorStyle={narratorStyle}
+        bootstrapActiveJobId={workspace.readiness?.activeReadinessJobId ?? null}
+        onNarratorChange={(patch) => {
+          saveNarratorMutation.reset();
+          if (patch.audiobookNarratorVoice !== undefined) {
+            setNarratorVoice(patch.audiobookNarratorVoice);
+          }
+          if (patch.audiobookNarratorStyle !== undefined) {
+            setNarratorStyle(patch.audiobookNarratorStyle);
+          }
+        }}
+        onSaveNarrator={() => saveNarratorMutation.mutate()}
+        isSavingNarrator={saveNarratorMutation.isPending}
+      />
+      {saveNarratorMutation.isError ? (
+        <div className="text-xs text-destructive">
+          旁白保存失败：
+          {saveNarratorMutation.error instanceof Error
+            ? saveNarratorMutation.error.message
+            : "未知错误"}
+        </div>
+      ) : null}
+      {saveNarratorMutation.isSuccess ? (
+        <div className="text-xs text-muted-foreground">旁白默认已保存。</div>
+      ) : null}
     </div>
   );
 }
