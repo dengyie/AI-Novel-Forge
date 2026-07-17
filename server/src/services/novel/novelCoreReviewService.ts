@@ -35,8 +35,7 @@ import {
 } from "./runtime/repair/chapterAuditContext";
 import { persistChapterQualityScores } from "./quality/chapterQualityScorePersist";
 import {
-  collectPronounStyleViolations,
-  computePronounRiskFloor,
+  computeDeterministicResidualRiskScore,
 } from "../styleEngine/StyleDetectionService";
 import { detectProseQuality } from "./runtime/proseQuality/ProseQualityDetector";
 
@@ -381,7 +380,7 @@ export class NovelCoreReviewService {
 /**
  * 人工/API 审校路径的 styleClear 投影（同步、确定性，不调 LLM）。
  * - L0 hard pronoun（stack/density）→ false
- * - residual = L0 pronoun risk floor（0 或 ≥40）；开篇 residual≥35 挡 completed
+ * - residual = max(pronoun floor, non-pronoun high/critical prose floor)
  * - 中盘仅 residual 高仍可 true（债不挡 completed；blocking pronoun 仍 false）
  */
 export function projectStyleClearFromManualReview(input: {
@@ -400,8 +399,8 @@ export function projectStyleClearFromManualReview(input: {
     ...issueCodes,
     ...proseCodes,
   ]);
-  // 确定性 residual：pronoun floor 即可区分「干净」与「开篇硬门 residual」；不阻塞 LLM。
-  const residualRiskScore = computePronounRiskFloor(collectPronounStyleViolations(input.content));
+  // 确定性 residual：pronoun + 其它高危 prose 痕迹；对齐 repair 路径，禁止开篇 AI 自指假 true。
+  const residualRiskScore = computeDeterministicResidualRiskScore(input.content);
   return projectStyleClear({
     residualRiskScore,
     hasBlockingPronounProse,

@@ -61,6 +61,17 @@ export interface DirectorAutoExecutionChapterRef {
   riskFlags?: string | null;
 }
 
+/**
+ * Normalize persisted consecutiveBatchRolls for hydrate/preserve paths.
+ * Non-finite / negative → 0; fractional → floor.
+ */
+export function normalizeConsecutiveBatchRolls(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.max(0, Math.floor(value));
+}
+
 export function normalizeDirectorAutoExecutionPlan(
   plan: DirectorAutoExecutionPlan | null | undefined,
 ): DirectorAutoExecutionPlan {
@@ -482,6 +493,9 @@ export function buildDirectorAutoExecutionState(input: {
     qualityDebtSummaries,
     qualityLoopLedger: (input.plan as DirectorAutoExecutionState | null | undefined)?.qualityLoopLedger ?? null,
     circuitBreaker: (input.plan as DirectorAutoExecutionState | null | undefined)?.circuitBreaker ?? null,
+    consecutiveBatchRolls: normalizeConsecutiveBatchRolls(
+      (input.plan as DirectorAutoExecutionState | null | undefined)?.consecutiveBatchRolls,
+    ),
     firstChapterId: selected[0]?.id ?? input.range.firstChapterId,
     startOrder: input.range.startOrder,
     endOrder: input.range.endOrder,

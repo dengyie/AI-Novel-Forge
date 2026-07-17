@@ -9,11 +9,15 @@ const {
   applyExpandRangeBatchRoll,
   mergeWorkspaceChapterWithExecRow,
   buildBatchRollReadinessFromChapters,
+  countSoftQualityDebtChapters,
   DEFAULT_MAX_CONSECUTIVE_BATCH_ROLLS,
+  DEFAULT_SOFT_QUALITY_DEBT_BUDGET,
 } = require("../dist/services/novel/director/automation/novelDirectorAutoExecutionBatchRollRuntime.js");
 
 const {
   isDirectorAutoExecutionChapterProcessed,
+  normalizeConsecutiveBatchRolls,
+  buildDirectorAutoExecutionState,
 } = require("../dist/services/novel/director/automation/novelDirectorAutoExecution.js");
 
 test("resolveContiguousWindowFromOrders groups contiguous orders after cursor", () => {
@@ -120,6 +124,132 @@ test("resolveNextAutoExecutionBatchRoll halts after max consecutive rolls", () =
     nextPreparedExecutableWindow: { startOrder: 11, endOrder: 20 },
   });
   assert.equal(decision.kind, "halt_for_review");
+  assert.equal(decision.haltItemKey, "batch_roll_max");
+});
+
+test("countSoftQualityDebtChapters dedupes finite orders only", () => {
+  assert.equal(countSoftQualityDebtChapters(null), 0);
+  assert.equal(countSoftQualityDebtChapters({ qualityDebtChapterOrders: [1, 1, 2, Number.NaN, "x"] }), 2);
+  assert.equal(DEFAULT_SOFT_QUALITY_DEBT_BUDGET, 5);
+});
+
+test("resolveNextAutoExecutionBatchRoll soft debt budget hard-stops before expand", () => {
+  const debtOrders = [51, 52, 53, 54, 55];
+  const decision = resolveNextAutoExecutionBatchRoll({
+    range: { startOrder: 41, endOrder: 50, totalChapterCount: 10, firstChapterId: "c41" },
+    autoExecution: {
+      enabled: true,
+      remainingChapterCount: 0,
+      mode: "chapter_range",
+      qualityDebtChapterOrders: debtOrders,
+    },
+    consecutiveBatchRolls: 0,
+    nextPreparedExecutableWindow: { startOrder: 51, endOrder: 60 },
+  });
+  assert.equal(decision.kind, "halt_for_review");
+  assert.equal(decision.haltItemKey, "batch_roll_soft_debt_budget");
+  assert.match(decision.reason, /质量债|预算/);
+});
+
+test("resolveNextAutoExecutionBatchRoll soft debt does not block true completed_scope", () => {
+  const decision = resolveNextAutoExecutionBatchRoll({
+    range: { startOrder: 71, endOrder: 80, totalChapterCount: 10, firstChapterId: "c71" },
+    autoExecution: {
+      enabled: true,
+      remainingChapterCount: 0,
+      mode: "chapter_range",
+      qualityDebtChapterOrders: [71, 72, 73, 74, 75, 76],
+    },
+    consecutiveBatchRolls: 0,
+  });
+  assert.equal(decision.kind, "completed_scope");
+  assert.equal(decision.haltItemKey, undefined);
+});
+
+test("resolveNextAutoExecutionBatchRoll soft debt hard-stops reenter_structured_outline", () => {
+  const decision = resolveNextAutoExecutionBatchRoll({
+    range: { startOrder: 11, endOrder: 20, totalChapterCount: 10, firstChapterId: "c11" },
+    autoExecution: {
+      enabled: true,
+      remainingChapterCount: 0,
+      mode: "chapter_range",
+      qualityDebtChapterOrders: [11, 12, 13, 14, 15],
+    },
+    consecutiveBatchRolls: 0,
+    nextUnpreparedWindow: { startOrder: 21, endOrder: 30 },
+    canPrepareNextBatch: true,
+  });
+  assert.equal(decision.kind, "halt_for_review");
+  assert.equal(decision.haltItemKey, "batch_roll_soft_debt_budget");
+});
+
+test("resolveNextAutoExecutionBatchRoll under soft debt budget still expands", () => {
+  const decision = resolveNextAutoExecutionBatchRoll({
+    range: { startOrder: 11, endOrder: 20, totalChapterCount: 10, firstChapterId: "c11" },
+    autoExecution: {
+      enabled: true,
+      remainingChapterCount: 0,
+      mode: "chapter_range",
+      qualityDebtChapterOrders: [15, 16],
+    },
+    consecutiveBatchRolls: 0,
+    nextPreparedExecutableWindow: { startOrder: 21, endOrder: 30 },
+  });
+  assert.equal(decision.kind, "expand_range");
+});
+
+test("resolveNextAutoExecutionBatchRoll outline-missing prepare gets batch_roll_outline key", () => {
+  const decision = resolveNextAutoExecutionBatchRoll({
+    range: { startOrder: 11, endOrder: 20, totalChapterCount: 10, firstChapterId: "c11" },
+    autoExecution: { enabled: true, remainingChapterCount: 0, mode: "chapter_range" },
+    consecutiveBatchRolls: 0,
+    nextUnpreparedWindow: { startOrder: 21, endOrder: 30 },
+    canPrepareNextBatch: false,
+  });
+  assert.equal(decision.kind, "halt_for_review");
+  assert.equal(decision.haltItemKey, "batch_roll_outline");
+});
+
+test("resolveNextAutoExecutionBatchRoll prose_complete_only sets haltItemKey", () => {
+  const decision = resolveNextAutoExecutionBatchRoll({
+    range: { startOrder: 31, endOrder: 40, totalChapterCount: 10, firstChapterId: "c31" },
+    autoExecution: { enabled: true, remainingChapterCount: 0, mode: "chapter_range" },
+    consecutiveBatchRolls: 0,
+    volumeCompletionKind: "prose_complete_only",
+  });
+  assert.equal(decision.kind, "halt_for_review");
+  assert.equal(decision.haltItemKey, "batch_roll_prose_complete_only");
+});
+
+test("normalizeConsecutiveBatchRolls clamps non-finite / negative / fractional", () => {
+  assert.equal(normalizeConsecutiveBatchRolls(undefined), 0);
+  assert.equal(normalizeConsecutiveBatchRolls(null), 0);
+  assert.equal(normalizeConsecutiveBatchRolls("3"), 0);
+  assert.equal(normalizeConsecutiveBatchRolls(-2), 0);
+  assert.equal(normalizeConsecutiveBatchRolls(3.9), 3);
+  assert.equal(normalizeConsecutiveBatchRolls(8), 8);
+});
+
+test("buildDirectorAutoExecutionState preserves consecutiveBatchRolls from plan", () => {
+  const state = buildDirectorAutoExecutionState({
+    range: {
+      startOrder: 21,
+      endOrder: 22,
+      totalChapterCount: 2,
+      firstChapterId: "chapter-21",
+    },
+    chapters: [
+      { id: "chapter-21", order: 21, content: "", generationState: "planned" },
+      { id: "chapter-22", order: 22, content: "", generationState: "planned" },
+    ],
+    plan: {
+      mode: "chapter_range",
+      startOrder: 21,
+      endOrder: 22,
+      consecutiveBatchRolls: 4,
+    },
+  });
+  assert.equal(state.consecutiveBatchRolls, 4);
 });
 
 test("applyExpandRangeBatchRoll rebuilds state for next window and clears pipeline job", () => {
@@ -143,6 +273,7 @@ test("applyExpandRangeBatchRoll rebuilds state for next window and clears pipeli
     startOrder: 11,
     endOrder: 20,
     remainingChapterCount: 0,
+    consecutiveBatchRolls: 3,
     skippedChapterIds: ["chapter-15"],
     skippedChapterOrders: [15],
     qualityDebtChapterIds: [],
@@ -167,6 +298,8 @@ test("applyExpandRangeBatchRoll rebuilds state for next window and clears pipeli
   // Cross-window historical skips must survive expand (not only in-window canPreserve).
   assert.deepEqual(autoExecution.skippedChapterIds, ["chapter-15"]);
   assert.deepEqual(autoExecution.skippedChapterOrders, [15]);
+  // Cross-resume batch-roll counter must survive expand so MAX=8 fuse does not reset.
+  assert.equal(autoExecution.consecutiveBatchRolls, 3);
 });
 
 function buildValidSceneCards(targetWordCount = 2800) {
