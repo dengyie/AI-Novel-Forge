@@ -86,9 +86,9 @@ Wiki 记录稳定规则，计划和检查点保留历史语境。模块治理以
 ## 来源文档
 
 - [Docs 管理约定](../../README.md)
-- [自动导演执行面隔离与 API 保活计划](../../plans/auto-director-execution-plane-isolation-plan.md)
-- [导演模式模块化与状态治理改造清单](../../plans/director-mode-module-state-refactor-checklist.md)
 - [Novel Director 子系统](../../../server/src/services/novel/director/README.md)
 - [Novel 应用能力层边界](./novel-application-services.md)
 - [章节 Runtime 边界](./chapter-runtime-boundaries.md)
 - [事件副作用边界](./event-side-effect-boundaries.md)
+
+> 历史：本规则最初成文于 `auto-director-execution-plane-isolation-plan` 与 `director-mode-module-state-refactor-checklist`（见 git 历史 `7070ea0`），内容已并入本 wiki，原始 plan 在文档聚拢轮已清理。
