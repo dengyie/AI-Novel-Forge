@@ -564,6 +564,7 @@ test("continueTask resumes auto-director tasks that are still marked running aft
     assert.equal(pipelineRuns.length, 1);
     assert.equal(pipelineRuns[0].startPhase, "structured_outline");
     assert.equal(pipelineRuns[0].scope, "volume:volume_1");
+    assert.equal(pipelineRuns[0].forceResume, false);
   } finally {
     service.continueCandidateStageTask = originalContinueCandidateStageTask;
     service.workflowService.getTaskById = originalGetTaskById;
@@ -574,6 +575,87 @@ test("continueTask resumes auto-director tasks that are still marked running aft
     service.workflowService.markTaskRunning = originalMarkTaskRunning;
     service.scheduleBackgroundRun = originalScheduleBackgroundRun;
     service.runDirectorPipeline = originalRunDirectorPipeline;
+  }
+});
+
+test("continueTask forceResume passes forceResume into pipeline and records force_resume reason", async () => {
+  const service = new NovelDirectorService();
+  const originalContinueCandidateStageTask = service.continueCandidateStageTask;
+  const originalGetTaskById = service.workflowService.getTaskById;
+  const originalResolveAssetFirstRecovery = service.resolveAssetFirstRecovery;
+  const originalAssertHighMemoryDirectorStartAllowed = service.assertHighMemoryDirectorStartAllowed;
+  const originalGetVolumes = service.volumeService.getVolumes;
+  const originalBootstrapTask = service.workflowService.bootstrapTask;
+  const originalMarkTaskRunning = service.workflowService.markTaskRunning;
+  const originalScheduleBackgroundRun = service.scheduleBackgroundRun;
+  const originalRunDirectorPipeline = service.runDirectorPipeline;
+  const originalInitializeRun = service.directorRuntime.initializeRun;
+  const originalRecordRunResumed = service.directorRuntime.recordRunResumed;
+  const pipelineRuns = [];
+  const resumeRecords = [];
+
+  service.continueCandidateStageTask = async () => false;
+  service.resolveAssetFirstRecovery = async () => null;
+  service.assertHighMemoryDirectorStartAllowed = async () => undefined;
+  service.volumeService.getVolumes = async () => null;
+  service.directorRuntime.initializeRun = async () => undefined;
+  service.directorRuntime.recordRunResumed = async (input) => {
+    resumeRecords.push(input);
+  };
+  service.workflowService.getTaskById = async () => ({
+    id: "task_force_resume_pipeline",
+    lane: "auto_director",
+    status: "running",
+    pendingManualRecovery: false,
+    novelId: "novel_force_resume_pipeline",
+    checkpointType: null,
+    currentItemKey: "chapter_detail_bundle",
+    resumeTargetJson: JSON.stringify({
+      stage: "structured",
+      volumeId: "volume_1",
+    }),
+    seedPayloadJson: JSON.stringify({
+      directorInput: buildDirectorInput({
+        workflowTaskId: "task_force_resume_pipeline",
+      }),
+      directorSession: {
+        runMode: "auto_to_execution",
+        phase: "structured_outline",
+        isBackgroundRunning: true,
+        lockedScopes: ["basic", "story_macro", "character", "outline", "structured", "chapter", "pipeline"],
+        reviewScope: null,
+      },
+    }),
+  });
+  service.workflowService.bootstrapTask = async () => ({ id: "task_force_resume_pipeline" });
+  service.workflowService.markTaskRunning = async () => null;
+  service.scheduleBackgroundRun = (taskId, runner) => {
+    void runner();
+  };
+  service.runDirectorPipeline = async (input) => {
+    pipelineRuns.push(input);
+  };
+
+  try {
+    await service.continueTask("task_force_resume_pipeline", { forceResume: true });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(pipelineRuns.length, 1);
+    assert.equal(pipelineRuns[0].forceResume, true);
+    assert.equal(pipelineRuns[0].startPhase, "structured_outline");
+    assert.equal(resumeRecords.length, 1);
+    assert.equal(resumeRecords[0].reason, "force_resume");
+  } finally {
+    service.continueCandidateStageTask = originalContinueCandidateStageTask;
+    service.workflowService.getTaskById = originalGetTaskById;
+    service.resolveAssetFirstRecovery = originalResolveAssetFirstRecovery;
+    service.assertHighMemoryDirectorStartAllowed = originalAssertHighMemoryDirectorStartAllowed;
+    service.volumeService.getVolumes = originalGetVolumes;
+    service.workflowService.bootstrapTask = originalBootstrapTask;
+    service.workflowService.markTaskRunning = originalMarkTaskRunning;
+    service.scheduleBackgroundRun = originalScheduleBackgroundRun;
+    service.runDirectorPipeline = originalRunDirectorPipeline;
+    service.directorRuntime.initializeRun = originalInitializeRun;
+    service.directorRuntime.recordRunResumed = originalRecordRunResumed;
   }
 });
 
