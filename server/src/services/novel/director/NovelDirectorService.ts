@@ -55,6 +55,7 @@ import {
 import { NovelDirectorAutoExecutionRuntime } from "./automation/novelDirectorAutoExecutionRuntime";
 import {
   buildBatchRollReadinessFromChapters,
+  mergeWorkspaceChapterWithExecRow,
   resolveNextAutoExecutionBatchRoll,
   resolveNextPreparedExecutableWindow,
   resolveNextUnpreparedWindow,
@@ -174,30 +175,30 @@ export class NovelDirectorService {
       try {
         const workspace = await this.volumeService.getVolumes(novelId);
         const workspaceChapters = (workspace.volumes ?? []).flatMap((volume) =>
-          (volume.chapters ?? []).map((chapter) => {
-            const execRow = chapterByOrder.get(chapter.chapterOrder);
-            return {
-              id: chapter.chapterId ?? chapter.id,
-              order: chapter.chapterOrder,
-              title: chapter.title,
-              content: null,
-              purpose: chapter.purpose,
-              exclusiveEvent: chapter.exclusiveEvent,
-              endingState: chapter.endingState,
-              nextChapterEntryState: chapter.nextChapterEntryState,
-              conflictLevel: chapter.conflictLevel,
-              revealLevel: chapter.revealLevel,
-              targetWordCount: chapter.targetWordCount,
-              mustAvoid: chapter.mustAvoid,
-              taskSheet: chapter.taskSheet,
-              sceneCards: typeof chapter.sceneCards === "string"
-                ? chapter.sceneCards
-                : (chapter.sceneCards ? JSON.stringify(chapter.sceneCards) : null),
-              generationState: execRow?.generationState ?? null,
-              chapterStatus: execRow?.chapterStatus ?? null,
-              riskFlags: execRow?.riskFlags ?? null,
-            };
-          }),
+          (volume.chapters ?? []).map((chapter) =>
+            mergeWorkspaceChapterWithExecRow(
+              {
+                chapterOrder: chapter.chapterOrder,
+                chapterId: chapter.chapterId,
+                id: chapter.id,
+                title: chapter.title,
+                summary: chapter.summary,
+                purpose: chapter.purpose,
+                exclusiveEvent: chapter.exclusiveEvent,
+                endingState: chapter.endingState,
+                nextChapterEntryState: chapter.nextChapterEntryState,
+                conflictLevel: chapter.conflictLevel,
+                revealLevel: chapter.revealLevel,
+                targetWordCount: chapter.targetWordCount,
+                mustAvoid: chapter.mustAvoid,
+                taskSheet: chapter.taskSheet,
+                sceneCards: chapter.sceneCards,
+                volumeId: chapter.volumeId ?? volume.id,
+                payoffRefs: chapter.payoffRefs,
+              },
+              chapterByOrder.get(chapter.chapterOrder) ?? null,
+            ),
+          ),
         );
         if (workspaceChapters.length > 0) {
           readiness = buildBatchRollReadinessFromChapters(

@@ -138,6 +138,88 @@ export function resolveNextPreparedExecutableWindow(input: {
   return window;
 }
 
+/**
+ * Workspace plan slice for batch-roll readiness / prepare hard-gate merge.
+ * Contract boundary fields come from plan; execution truth from listChapters.
+ */
+export type WorkspaceChapterPlanSlice = {
+  chapterOrder: number;
+  chapterId?: string | null;
+  id?: string | null;
+  title?: string | null;
+  summary?: string | null;
+  purpose?: string | null;
+  exclusiveEvent?: string | null;
+  endingState?: string | null;
+  nextChapterEntryState?: string | null;
+  conflictLevel?: number | null;
+  revealLevel?: number | null;
+  targetWordCount?: number | null;
+  mustAvoid?: string | null;
+  taskSheet?: string | null;
+  sceneCards?: unknown;
+  volumeId?: string | null;
+  payoffRefs?: unknown;
+};
+
+export type MergedBatchRollChapter = DirectorAutoExecutionChapterRef & {
+  title?: string | null;
+  summary?: string | null;
+  purpose?: string | null;
+  exclusiveEvent?: string | null;
+  endingState?: string | null;
+  nextChapterEntryState?: string | null;
+  volumeId?: string | null;
+  payoffRefs?: unknown;
+};
+
+/**
+ * Merge plan ⊕ exec for batch-roll readiness and prepare canEnter hard gate.
+ *
+ * Execution truth only from execRow: content / generationState / chapterStatus /
+ * riskFlags / execution id. Plan boundary fields only from plan; scalar contract
+ * fields plan-first with exec fallback.
+ *
+ * Never invent `content: null` when listChapters already has prose — that made
+ * isDirectorAutoExecutionChapterProcessed always false and thrash-expand.
+ */
+export function mergeWorkspaceChapterWithExecRow(
+  plan: WorkspaceChapterPlanSlice,
+  execRow: DirectorAutoExecutionChapterRef | null | undefined,
+): MergedBatchRollChapter {
+  const sceneCards =
+    typeof plan.sceneCards === "string"
+      ? plan.sceneCards
+      : plan.sceneCards
+        ? JSON.stringify(plan.sceneCards)
+        : (execRow?.sceneCards ?? null);
+
+  return {
+    id: execRow?.id ?? plan.chapterId ?? plan.id ?? `order:${plan.chapterOrder}`,
+    order: plan.chapterOrder,
+    // 执行真值 — only from execRow (never hardcode content:null when exec has prose)
+    content: execRow?.content ?? null,
+    generationState: execRow?.generationState ?? null,
+    chapterStatus: execRow?.chapterStatus ?? null,
+    riskFlags: execRow?.riskFlags ?? null,
+    // 规划优先 + exec 回落
+    title: plan.title ?? "",
+    summary: plan.summary ?? null,
+    purpose: plan.purpose ?? null,
+    exclusiveEvent: plan.exclusiveEvent ?? null,
+    endingState: plan.endingState ?? null,
+    nextChapterEntryState: plan.nextChapterEntryState ?? null,
+    volumeId: plan.volumeId ?? null,
+    payoffRefs: plan.payoffRefs,
+    conflictLevel: plan.conflictLevel ?? execRow?.conflictLevel ?? null,
+    revealLevel: plan.revealLevel ?? execRow?.revealLevel ?? null,
+    targetWordCount: plan.targetWordCount ?? execRow?.targetWordCount ?? null,
+    mustAvoid: plan.mustAvoid ?? execRow?.mustAvoid ?? null,
+    taskSheet: plan.taskSheet ?? execRow?.taskSheet ?? null,
+    sceneCards,
+  };
+}
+
 export function buildBatchRollReadinessFromChapters(
   chapters: Array<DirectorAutoExecutionChapterRef & {
     title?: string | null;

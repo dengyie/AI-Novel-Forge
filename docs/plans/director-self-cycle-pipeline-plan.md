@@ -6,9 +6,10 @@
 > - [Auto Director Execution Plane Isolation Plan](./auto-director-execution-plane-isolation-plan.md)
 > - [Director Mode Module and State Refactor Checklist](./director-mode-module-state-refactor-checklist.md)
 > - [Auto Director Runtime Wiki](../wiki/workflows/auto-director-runtime.md)
+> - **[Review 后修复方案（完备）](./director-self-cycle-p0-review-fix.md)** — readiness `content:null` thrash、full_book 懒路径 canEnterExecution 等（设计定稿 · 待下令实现）
 > - 域：`shared/types/chapterTaskSheetQuality.ts`；编排：`server/src/services/novel/director/automation/*`
 > **生产背景**：《源世界》卷一 pxed 生产监管暴露批间停死、合同门禁、recovery 回卷等问题  
-> **更新日期**：2026-07-14
+> **更新日期**：2026-07-17（关联修复文档；功能 P0 实现仍以 2026-07-14 里程碑为准）
 
 ---
 
