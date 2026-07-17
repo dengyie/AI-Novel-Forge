@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  buildCharacterTtsRefSaveFields,
   canGenerateCharacterVoicePreview,
   canPreviewCharacterVoice,
   isCharacterVoiceFormDirty,
@@ -98,6 +99,49 @@ test("resolveCharacterVoicePreviewBadge labels", () => {
   assert.equal(resolveCharacterVoicePreviewBadge("stale").label, "试听过期");
   assert.equal(resolveCharacterVoicePreviewBadge("missing").label, "无试听");
   assert.equal(resolveCharacterVoicePreviewBadge(null).label, "无试听");
+});
+
+test("buildCharacterTtsRefSaveFields omits path for clone keep, nulls otherwise", () => {
+  assert.deepEqual(
+    buildCharacterTtsRefSaveFields({
+      ttsMode: "clone",
+      ttsRefAudioPath: "/data/voice-refs/n/c/ref.wav",
+      ttsRefAudioBase64: "",
+    }),
+    { ttsRefAudioBase64: null },
+  );
+  assert.deepEqual(
+    buildCharacterTtsRefSaveFields({
+      ttsMode: "clone",
+      ttsRefAudioPath: "/data/voice-refs/n/c/ref.wav",
+      ttsRefAudioBase64: "  AA==  ",
+    }),
+    { ttsRefAudioBase64: "AA==" },
+  );
+  assert.deepEqual(
+    buildCharacterTtsRefSaveFields({
+      ttsMode: "design",
+      ttsRefAudioPath: "/data/voice-refs/n/c/ref.wav",
+      ttsRefAudioBase64: "",
+    }),
+    { ttsRefAudioBase64: null, ttsRefAudioPath: null },
+  );
+  assert.deepEqual(
+    buildCharacterTtsRefSaveFields({
+      ttsMode: "preset",
+      ttsRefAudioPath: "",
+      ttsRefAudioBase64: null,
+    }),
+    { ttsRefAudioBase64: null, ttsRefAudioPath: null },
+  );
+  assert.deepEqual(
+    buildCharacterTtsRefSaveFields({
+      ttsMode: "clone",
+      ttsRefAudioPath: "   ",
+      ttsRefAudioBase64: "",
+    }),
+    { ttsRefAudioBase64: null, ttsRefAudioPath: null },
+  );
 });
 
 test("isCharacterVoiceFormDirty detects mode/fields/base64 draft", () => {

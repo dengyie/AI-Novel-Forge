@@ -62,6 +62,8 @@ type PreviewCandidatesMeta = {
     durationMs: number;
   }>;
   suggestedCandidateId: string | null;
+  /** 已采用写入 formal preview 的候选 id；未采用则为 null（多抽未选优时禁止锁克隆）。 */
+  adoptedCandidateId?: string | null;
 };
 
 function normalizeCandidatesCount(raw?: number | null): number {
@@ -117,6 +119,30 @@ function readCandidatesMeta(novelId: string, characterId: string): PreviewCandid
     return raw;
   } catch {
     return null;
+  }
+}
+
+/**
+ * 多抽会话未选优时禁止用旧 formal preview 升格 clone。
+ * meta 指纹与当前一致且 candidates>1 且未 adopted → 阻塞。
+ */
+export function assertMultiDrawAdoptedForCloneLock(
+  meta: PreviewCandidatesMeta | null,
+  currentFingerprint: string,
+): void {
+  if (!meta || !Array.isArray(meta.candidates) || meta.candidates.length <= 1) {
+    return;
+  }
+  if (meta.fingerprint && meta.fingerprint !== currentFingerprint) {
+    // 配置已变：走 ready/stale 主门禁即可
+    return;
+  }
+  const adopted = meta.adoptedCandidateId?.trim() || "";
+  if (!adopted) {
+    throw new AppError(
+      "当前存在未采用的多抽候选。请先采用一条候选写入正式试听，再锁定克隆身份。",
+      400,
+    );
   }
 }
 
@@ -698,6 +724,7 @@ export class AudiobookVoiceAssetService {
           durationMs: d.durationMs,
         })),
         suggestedCandidateId,
+        adoptedCandidateId: autoAdopt ? suggestedCandidateId : null,
       });
     }
 
@@ -829,6 +856,13 @@ export class AudiobookVoiceAssetService {
       },
     });
 
+    writeCandidatesMeta(novelId, characterId, {
+      ...meta,
+      sampleText,
+      fingerprint,
+      adoptedCandidateId: candidateId,
+    });
+
     const mode = resolvePreviewTtsMode(character.ttsMode);
     return {
       characterId: character.id,
@@ -919,6 +953,9 @@ export class AudiobookVoiceAssetService {
         400,
       );
     }
+
+    // 服务端强制：多抽未采用时禁止锁旧 formal（不依赖 UI pending 状态）
+    assertMultiDrawAdoptedForCloneLock(readCandidatesMeta(novelId, characterId), currentFingerprint);
 
     let refPath: string;
     try {

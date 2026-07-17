@@ -247,6 +247,33 @@ export function canGenerateCharacterVoicePreview(input: {
   return canPreviewCharacterVoice(input.saved ?? input.form);
 }
 
+/**
+ * 角色保存时的 ttsRef 请求片段（与 zod：path 仅 null / base64 上传 对齐）。
+ * - 有 base64 → 只传 base64，由服务端落盘写路径
+ * - clone 且已有服务端路径 → 省略 path，避免 400 且不误清
+ * - 其它情况 → path:null 清空，防半绑定残留
+ */
+export function buildCharacterTtsRefSaveFields(input: {
+  ttsMode?: string | null;
+  ttsRefAudioPath?: string | null;
+  ttsRefAudioBase64?: string | null;
+}): {
+  ttsRefAudioBase64?: string | null;
+  ttsRefAudioPath?: null;
+} {
+  const mode = resolveCharacterVoiceMode(input.ttsMode);
+  const trimmedPath = (input.ttsRefAudioPath ?? "").trim();
+  const trimmedBase64 = (input.ttsRefAudioBase64 ?? "").trim();
+  if (trimmedBase64) {
+    return { ttsRefAudioBase64: trimmedBase64 };
+  }
+  const keepServerRef = mode === "clone" && Boolean(trimmedPath);
+  if (keepServerRef) {
+    return { ttsRefAudioBase64: null };
+  }
+  return { ttsRefAudioBase64: null, ttsRefAudioPath: null };
+}
+
 export type CharacterVoicePreviewStatusLabel = "missing" | "ready" | "stale";
 
 export function resolveCharacterVoicePreviewBadge(status?: CharacterVoicePreviewStatusLabel | null): {

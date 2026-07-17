@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 
 const {
   pickMedianDurationCandidateIndex,
+  assertMultiDrawAdoptedForCloneLock,
   DEFAULT_PREVIEW_CANDIDATES,
   MAX_PREVIEW_CANDIDATES,
 } = require("../dist/services/audiobook/AudiobookVoiceAssetService.js");
@@ -52,4 +53,73 @@ test("adopt fingerprint uses same builder as multi-draw meta", () => {
   const b = buildCharacterVoicePreviewFingerprint(cfg, sample);
   assert.equal(a, b);
   assert.equal(a.length, 64);
+});
+
+test("assertMultiDrawAdoptedForCloneLock blocks unadopted multi-draw", () => {
+  const fp = "a".repeat(64);
+  assert.doesNotThrow(() => assertMultiDrawAdoptedForCloneLock(null, fp));
+  assert.doesNotThrow(() =>
+    assertMultiDrawAdoptedForCloneLock(
+      {
+        sampleText: "x",
+        fingerprint: fp,
+        createdAt: new Date().toISOString(),
+        candidates: [{ id: "c0", index: 0, path: "/tmp/c0.wav", durationMs: 1000 }],
+        suggestedCandidateId: "c0",
+        adoptedCandidateId: null,
+      },
+      fp,
+    ),
+  );
+  assert.throws(
+    () =>
+      assertMultiDrawAdoptedForCloneLock(
+        {
+          sampleText: "x",
+          fingerprint: fp,
+          createdAt: new Date().toISOString(),
+          candidates: [
+            { id: "c0", index: 0, path: "/tmp/c0.wav", durationMs: 1000 },
+            { id: "c1", index: 1, path: "/tmp/c1.wav", durationMs: 1100 },
+          ],
+          suggestedCandidateId: "c0",
+          adoptedCandidateId: null,
+        },
+        fp,
+      ),
+    /未采用的多抽候选/,
+  );
+  assert.doesNotThrow(() =>
+    assertMultiDrawAdoptedForCloneLock(
+      {
+        sampleText: "x",
+        fingerprint: fp,
+        createdAt: new Date().toISOString(),
+        candidates: [
+          { id: "c0", index: 0, path: "/tmp/c0.wav", durationMs: 1000 },
+          { id: "c1", index: 1, path: "/tmp/c1.wav", durationMs: 1100 },
+        ],
+        suggestedCandidateId: "c0",
+        adoptedCandidateId: "c1",
+      },
+      fp,
+    ),
+  );
+  // stale multi-draw meta (config changed) → defer to ready/stale gate
+  assert.doesNotThrow(() =>
+    assertMultiDrawAdoptedForCloneLock(
+      {
+        sampleText: "x",
+        fingerprint: "b".repeat(64),
+        createdAt: new Date().toISOString(),
+        candidates: [
+          { id: "c0", index: 0, path: "/tmp/c0.wav", durationMs: 1000 },
+          { id: "c1", index: 1, path: "/tmp/c1.wav", durationMs: 1100 },
+        ],
+        suggestedCandidateId: "c0",
+        adoptedCandidateId: null,
+      },
+      fp,
+    ),
+  );
 });
