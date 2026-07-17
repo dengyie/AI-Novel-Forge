@@ -132,6 +132,5 @@ pnpm build              # shared + server + client 构建
 
 | 项 | 现象 | 来源 |
 |---|---|---|
-| RAG ownerTypes 边界 | `wiki/rag/knowledge-and-context-assembly.md` 称 ownerTypes 为硬范围，但 `HybridRetrievalService.retrieve()` 在结果为空时回退到全局知识文档（软边界） | 判活对照 |
-| server.api → server.prompting 违规 | `wiki/architecture/module-boundaries.md` 规定 server.api 只应依赖 server.workflows/server.services，但 `server/src/api/routes/novels.ts` 直接 import `@/prompting/ContextBroker` | 判活对照 |
+| RAG ownerTypes 边界 | `wiki/rag/knowledge-and-context-assembly.md` 称 ownerTypes 为硬范围，已复核 `HybridRetrievalService.retrieve()` 在 ownerTypes 仅含 knowledge_document 时 `baseScope=null` 跳过非知识召回，仅查知识库文档（硬剪枝、不回退全局）——与 wiki 一致（`7070ea0` 复核） | 判活对照 |
 | chapter-editor-v2 进度 | `checkpoints/chapter-editor-v2-progress.md` Phase 3/4 进度数据需核实是否仍推进 | 节点审计 |
