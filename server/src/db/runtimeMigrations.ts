@@ -184,6 +184,12 @@ const REQUIRED_COLUMN_BACKFILLS = [
     columnName: "ttsPreviewGeneratedAt",
     columnDefinition: `"ttsPreviewGeneratedAt" DATETIME`,
   },
+  // 全站 VoiceAsset 库绑定（Milestone A；SQLite 幂等 ADD COLUMN）
+  {
+    tableName: "Character",
+    columnName: "ttsVoiceAssetId",
+    columnDefinition: `"ttsVoiceAssetId" TEXT`,
+  },
   {
     tableName: "Novel",
     columnName: "audiobookNarratorVoice",
