@@ -9,6 +9,7 @@ import type { SettingAlignmentAssessment } from "@ai-novel/shared/types/settingA
 import {
   buildQualityFeedbackPacket,
   extractQualityFeedbackFromRiskFlags,
+  mergeQualityFeedbackIntoRiskFlags,
   mergeQualityFeedbackList,
   type QualityFeedbackPacket,
   type QualityFeedbackRepairDecision,
@@ -38,8 +39,25 @@ interface RecordChapterQualityLoopInput {
   /**
    * A1/A2 QFP：repair 采纳决策。discard/plateau_stop 会抬 failedPatchCount 并 avoidRetry。
    * 缺省 = 仅按 assessment/归因合成 feedback。
+   * Prefer recordRepairFeedbackDecision for discard/plateau so assessment/status stay intact.
    */
   repairDecision?: QualityFeedbackRepairDecision | null;
+}
+
+/**
+ * Projection-only QFP write after repair discard/plateau.
+ * Merges feedback into riskFlags without rewriting qualityLoop assessment body,
+ * qualityDebtAttribution, settingAlignment, chapterStatus, or repairHistory.
+ */
+interface RecordRepairFeedbackDecisionInput {
+  novelId: string;
+  chapterId: string;
+  chapterOrder?: number | null;
+  score: QualityScore;
+  issues: ReviewIssue[];
+  repairDecision: Extract<QualityFeedbackRepairDecision, "discard" | "plateau_stop">;
+  qualityDebtAttribution?: QualityDebtAttribution | null;
+  runtimePackage?: ChapterRuntimePackage | null;
 }
 
 type ChapterQualityLoopChapter = {
@@ -234,6 +252,56 @@ export class ChapterQualityLoopService {
       assessment,
     }).catch(() => null);
     return assessment;
+  }
+
+  /**
+   * A2 projection-only path: after repair discard/plateau, bump failedPatchCount +
+   * avoidRetry on qualityLoop.feedback only. Does NOT rebuild assessment, change
+   * chapterStatus, or rewrite qualityDebtAttribution / settingAlignment.
+   */
+  async recordRepairFeedbackDecision(
+    input: RecordRepairFeedbackDecisionInput,
+  ): Promise<QualityFeedbackPacket | null> {
+    const chapter = await prisma.chapter.findFirst({
+      where: { id: input.chapterId, novelId: input.novelId },
+      select: {
+        id: true,
+        order: true,
+        riskFlags: true,
+        repairHistory: true,
+      },
+    });
+    if (!chapter) {
+      throw new Error("章节不存在，无法记录修复反馈决策。");
+    }
+
+    // Assessment is synthesized only as QFP input; it is not persisted as qualityLoop body.
+    const assessment = buildChapterQualityLoopAssessment({
+      chapterId: input.chapterId,
+      chapterOrder: input.chapterOrder ?? chapter.order,
+      score: input.score,
+      issues: input.issues,
+      runtimePackage: input.runtimePackage,
+      previousRepairHistory: chapter.repairHistory,
+    });
+
+    const previousFeedback = extractQualityFeedbackFromRiskFlags(chapter.riskFlags);
+    const nextPacket = buildQualityFeedbackPacket({
+      assessment,
+      qualityDebtAttribution: input.qualityDebtAttribution,
+      previousFeedback,
+      repairDecision: input.repairDecision,
+    });
+    if (!nextPacket) {
+      return null;
+    }
+    const feedback = mergeQualityFeedbackList(previousFeedback, nextPacket);
+    const nextRiskFlags = mergeQualityFeedbackIntoRiskFlags(chapter.riskFlags, feedback);
+    await prisma.chapter.update({
+      where: { id: input.chapterId },
+      data: { riskFlags: nextRiskFlags },
+    });
+    return nextPacket;
   }
 }
 

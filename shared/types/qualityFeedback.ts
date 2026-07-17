@@ -251,10 +251,11 @@ function resolveSeverity(input: {
   ) {
     return "replan";
   }
+  // patch_repair alone stays soft (literary / length soft path). Blocking only for
+  // hard codes, manual_gate, avoidRetry (discard/plateau/budget), or replan above.
   if (
     input.avoidRetry
     || input.recommendedAction === "manual_gate"
-    || input.recommendedAction === "patch_repair"
     || input.codes.some((code) => isProseBanCode(code) || isSotLeakCode(code) || code.includes("obligation"))
   ) {
     return "blocking";
@@ -296,7 +297,8 @@ export function buildMustFixAndPlanHints(input: {
           `正文禁止出现禁词/废弃术语族（命中：${terms}）；改用角色口语或动作表达同一意图，勿系统口令腔。`,
         ],
         planHints: [
-          "合同与杂讯/系统口令不得要求称重、用重称等废弃术语；改为可执行的行为目标。",
+          // Do not spell banned terms here — they would re-enter planner/writer context.
+          "合同与杂讯/系统口令不得要求机械度量或已废弃术语族（见 mustAvoid / prose ban codes）；改为可执行的行为目标。",
         ],
       };
     case "sot_leak":
@@ -488,6 +490,38 @@ export function extractQualityFeedbackFromRiskFlags(
   }
 }
 
+/**
+ * Projection-only merge: write/replace qualityLoop.feedback without rewriting
+ * assessment / source / qualityDebtAttribution / settingAlignment / status.
+ * Empty feedback removes the feedback key but keeps the rest of qualityLoop.
+ */
+export function mergeQualityFeedbackIntoRiskFlags(
+  previousRiskFlags: string | null | undefined,
+  feedback: QualityFeedbackPacket[],
+): string {
+  let parsed: Record<string, unknown> = {};
+  if (previousRiskFlags?.trim()) {
+    try {
+      const raw = JSON.parse(previousRiskFlags) as unknown;
+      if (isRecord(raw)) {
+        parsed = { ...raw };
+      }
+    } catch {
+      parsed = {};
+    }
+  }
+  const previousLoop = isRecord(parsed.qualityLoop) ? { ...parsed.qualityLoop } : {};
+  if (feedback.length > 0) {
+    previousLoop.feedback = feedback;
+  } else {
+    delete previousLoop.feedback;
+  }
+  return JSON.stringify({
+    ...parsed,
+    qualityLoop: previousLoop,
+  });
+}
+
 export function mergeQualityFeedbackList(
   previous: QualityFeedbackPacket[] | null | undefined,
   next: QualityFeedbackPacket,
@@ -567,6 +601,16 @@ export function buildQualityFeedbackPacket(
   };
 }
 
+/**
+ * Decide whether auto light-patch should be blocked.
+ *
+ * - With `signature`: only that signature's avoidRetry blocks (same-sign re-patch).
+ * - Without `signature` (repair entry): chapter-scope — any sticky avoidRetry forces
+ *   heavy rewrite (A2). Soft literary packets without avoidRetry never block.
+ *
+ * Single discard sets avoidRetry (plan A threshold); sticky until a later packet
+ * overwrites the signature with avoidRetry=false (not currently emitted on adopt).
+ */
 export function isAutoPatchAvoidedByFeedback(
   feedback: QualityFeedbackPacket[] | null | undefined,
   signature?: string | null,
@@ -581,13 +625,15 @@ export function isAutoPatchAvoidedByFeedback(
         reason: `同签名自动 patch 已 avoidRetry（signature=${hit.signature}，failedPatchCount=${hit.failedPatchCount}）。请 rewrite 或修订 taskSheet 后再试。`,
       };
     }
+    // Signature supplied but no match → do not widen to other root causes.
+    return { avoided: false, reason: "" };
   }
-  const anyAvoid = list.find((item) => item.avoidRetry && item.severity !== "soft");
-  if (anyAvoid && !signature) {
+  const anyAvoid = list.find((item) => item.avoidRetry);
+  if (anyAvoid) {
     return {
       avoided: true,
       packet: anyAvoid,
-      reason: `章节存在 avoidRetry 质量反馈（signature=${anyAvoid.signature}）。请 rewrite 或改合同，勿同路径连 patch。`,
+      reason: `章节存在 avoidRetry 质量反馈（signature=${anyAvoid.signature}，failedPatchCount=${anyAvoid.failedPatchCount}）。请 rewrite 或改合同，勿同路径连 patch。`,
     };
   }
   return { avoided: false, reason: "" };
