@@ -46,7 +46,8 @@
 - 工作台入口；角色卡 picker `q` + 加载更多
 - **无** auto-approve / 客户端写 path
 
-## 后续（见 ops-and-ai 计划）
-- **E** 种子人耳 approve（库级 preview + 单条 setStatus）
-- **F** setStatus 运维门禁（可选 `VOICE_LIBRARY_APPROVE_TOKEN`）
-- **G** 真 LLM design rewrite
+## Milestone E/F/G（已交付 · 见 ops-and-ai §3.7/4.7/5.7）
+- **E**：库级 media-access + audio 直播 ref.wav；管理台试听 / session 已听 / 单条+勾选 approve（仅已听）
+- **F**：可选 `VOICE_LIBRARY_APPROVE_TOKEN`；仅升 approved 要 header；audit 无 token 明文；未设 env 兼容
+- **G**：`POST .../voice-design/rewrite` 候选不落库；角色卡 design 预览→应用表单；mock + rule_fallback 单测
+- Manual：人耳 seed 批准；真 LLM redesign 听感；生产是否设 approve token

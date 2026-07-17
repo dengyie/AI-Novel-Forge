@@ -27,9 +27,16 @@ import { prisma } from "../../../../db/prisma";
 import {
   issueAudiobookMediaAccess,
   issueCharacterVoicePreviewAccess,
+  issueVoiceLibraryAssetAccess,
   verifyAudiobookMediaAccess,
   verifyCharacterVoicePreviewAccess,
+  verifyVoiceLibraryAssetAccess,
 } from "../../../../services/audiobook/audiobookMediaAccess";
+import {
+  assertVoiceLibraryApproveToken,
+  VOICE_LIBRARY_APPROVE_TOKEN_HEADER,
+} from "../../../../services/audiobook/voiceLibraryApproveGate";
+import { rewriteCharacterVoiceDesign } from "../../../../services/audiobook/voiceDesignRewriteService";
 import { audiobookTaskService } from "../../../../services/audiobook/AudiobookTaskService";
 import { audiobookVoiceAssetService } from "../../../../services/audiobook/AudiobookVoiceAssetService";
 import { audiobookVoiceReadinessService } from "../../../../services/audiobook/AudiobookVoiceReadinessService";
@@ -502,8 +509,106 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
     async (req, res, next) => {
       try {
         const { assetId } = req.params as { assetId: string };
+        const headerRaw =
+          req.header(VOICE_LIBRARY_APPROVE_TOKEN_HEADER)
+          ?? req.header("X-Voice-Library-Approve-Token");
+        assertVoiceLibraryApproveToken({
+          nextStatus: req.body.status,
+          headerToken: headerRaw,
+        });
         const data = voiceLibraryService.setStatus(assetId, req.body.status);
         res.json({ success: true, data } satisfies ApiResponse<typeof data>);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  /** 库级试听 media-access：clone_ref 直接播 ref.wav（draft 可听）。 */
+  router.post(
+    "/audiobook/voice-library/:assetId/media-access",
+    validate({ params: z.object({ assetId: z.string().trim().min(1) }) }),
+    async (req, res, next) => {
+      try {
+        const { assetId } = req.params as { assetId: string };
+        voiceLibraryService.resolveLibraryPreviewAudioPath(assetId);
+        const issued = issueVoiceLibraryAssetAccess({ assetId });
+        const pathSuffix = `/novels/audiobook/voice-library/${encodeURIComponent(assetId)}/audio`;
+        const data = issued
+          ? {
+              urlPath: `${pathSuffix}?access=${encodeURIComponent(issued.access)}`,
+              access: issued.access,
+              expiresAt: issued.expiresAt,
+            }
+          : {
+              urlPath: pathSuffix,
+              access: null as string | null,
+              expiresAt: null as number | null,
+            };
+        res.status(200).json({
+          success: true,
+          data,
+          message: "库资产试听媒体访问令牌已签发。",
+        } satisfies ApiResponse<typeof data>);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  router.get(
+    "/audiobook/voice-library/:assetId/audio",
+    validate({ params: z.object({ assetId: z.string().trim().min(1) }) }),
+    async (req, res, next) => {
+      try {
+        const { assetId } = req.params as { assetId: string };
+        const headerAuthorized = Boolean((req as RequestWithApiAuth).apiAuthViaHeader);
+        if (!headerAuthorized) {
+          const access = typeof req.query?.access === "string" ? req.query.access : null;
+          const mode = resolveAuthMode();
+          if (mode === "token") {
+            if (!verifyVoiceLibraryAssetAccess({ access, assetId })) {
+              res.status(401).json({
+                success: false,
+                error: "未授权：库试听媒体令牌无效或已过期。",
+              } satisfies ApiResponse<null>);
+              return;
+            }
+          }
+        }
+        const { absolutePath } = voiceLibraryService.resolveLibraryPreviewAudioPath(assetId);
+        streamWavFile(req, res, absolutePath, `voice-library-${assetId}.wav`);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  /** design rewrite：返回候选，不写角色卡。 */
+  router.post(
+    "/:id/characters/:charId/voice-design/rewrite",
+    validate({
+      params: characterParamsSchema,
+      body: z.object({
+        currentDesignPrompt: z.string().trim().max(2000).nullable().optional(),
+        notes: z.string().trim().max(400).nullable().optional(),
+        provider: z.string().trim().max(80).nullable().optional(),
+        model: z.string().trim().max(120).nullable().optional(),
+      }).optional(),
+    }),
+    async (req, res, next) => {
+      try {
+        const { id, charId } = req.params as z.infer<typeof characterParamsSchema>;
+        const data = await rewriteCharacterVoiceDesign({
+          novelId: id,
+          characterId: charId,
+          body: req.body ?? {},
+        });
+        res.status(200).json({
+          success: true,
+          data,
+          message: "design 候选已生成（未写入角色卡）。",
+        } satisfies ApiResponse<typeof data>);
       } catch (error) {
         next(error);
       }

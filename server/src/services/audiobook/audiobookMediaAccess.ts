@@ -11,7 +11,8 @@ export type AudiobookMediaResource =
   | { kind: "full" }
   | { kind: "full_m4b" }
   | { kind: "chapter"; chapterId: string }
-  | { kind: "character_preview"; characterId: string };
+  | { kind: "character_preview"; characterId: string }
+  | { kind: "voice_library_asset"; assetId: string };
 
 function resolveSigningSecret(): string | null {
   const dedicated = process.env.AUDIOBOOK_MEDIA_SIGNING_SECRET?.trim();
@@ -48,6 +49,9 @@ function resourceKey(resource: AudiobookMediaResource): string {
   }
   if (resource.kind === "character_preview") {
     return `character_preview:${resource.characterId}`;
+  }
+  if (resource.kind === "voice_library_asset") {
+    return `voice_library_asset:${resource.assetId}`;
   }
   return `chapter:${resource.chapterId}`;
 }
@@ -107,6 +111,33 @@ export function verifyCharacterVoicePreviewAccess(input: {
     novelId: input.novelId,
     taskId: input.characterId,
     resource: { kind: "character_preview", characterId: input.characterId },
+  });
+}
+
+/** 全站库资产试听：novelId/taskId 槽位均用 assetId。 */
+export function issueVoiceLibraryAssetAccess(input: {
+  assetId: string;
+  ttlSec?: number;
+}): { access: string; expiresAt: number } | null {
+  const assetId = input.assetId.trim();
+  return issueAudiobookMediaAccess({
+    novelId: assetId,
+    taskId: assetId,
+    resource: { kind: "voice_library_asset", assetId },
+    ttlSec: input.ttlSec,
+  });
+}
+
+export function verifyVoiceLibraryAssetAccess(input: {
+  access: string | null | undefined;
+  assetId: string;
+}): boolean {
+  const assetId = input.assetId.trim();
+  return verifyAudiobookMediaAccess({
+    access: input.access,
+    novelId: assetId,
+    taskId: assetId,
+    resource: { kind: "voice_library_asset", assetId },
   });
 }
 
