@@ -900,12 +900,13 @@ test("soft-target estimate uses real mutex tail not placeholder", () => {
     softCollision: false,
   });
   assert.ok(plain.length <= DESIGN_PROMPT_MAX);
-  // plain 无长 mutex 时应塞进 lead habit
-  assert.match(plain, /对白有角色重心/);
-  // soft 区间是目标不是 hard floor；habit 耗尽可低于 TARGET_MIN
+  // phase-2：最多 1 条癖好；可能是 texture/energy/lead 之一，不再强制 lead-center
+  assert.ok(parseSlotFromDesignPrompt(plain));
+  assert.match(plain, /音高中等|音高偏/);
+  // soft 区间是目标不是 hard floor；反灌水后可低于 TARGET_MIN
   assert.ok(
-    plain.length <= DESIGN_PROMPT_TARGET_MAX + 40,
-    `plain should stay near soft band, got ${plain.length}: ${plain}`,
+    plain.length <= DESIGN_PROMPT_MAX,
+    `plain should stay under hard max, got ${plain.length}: ${plain}`,
   );
   assert.ok(
     collisionPrompt.includes(longNeighbor),
