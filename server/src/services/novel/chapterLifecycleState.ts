@@ -19,13 +19,18 @@ export interface ChapterStatePairPatch {
 }
 
 /**
- * 审校结束时与 `novelCoreReviewService` 对齐：已通过则收尾为完成，否则待修复。
- * `pass` 必须来自文学 isPass（shared 80/75/75）；!pass 不得 completed（A6）。
+ * 人工/API 审校写路径：文学门 ∧ 文风门皆过才 `completed`，否则 `needs_repair`。
+ * generationState 统一为 `reviewed`（人工审校语义，与 pipeline `approved` 区分）。
+ *
+ * 调用方必须显式传入 `styleClear`（不得默认 true）；见 {@link chapterStatePairAfterQualityGates}。
  */
-export function chapterStatePairAfterManualQualityReview(pass: boolean): ChapterStatePairPatch {
+export function chapterStatePairAfterManualQualityReview(input: {
+  literaryPass: boolean;
+  styleClear: boolean;
+}): ChapterStatePairPatch {
   return {
     generationState: "reviewed",
-    chapterStatus: pass ? "completed" : "needs_repair",
+    chapterStatus: input.literaryPass && input.styleClear ? "completed" : "needs_repair",
   };
 }
 
@@ -93,10 +98,10 @@ export function chapterStatePairAfterPlannedReset(): ChapterStatePairPatch {
 /**
  * 将 `generationState` 升为 `approved` 时，顺带保证 `chapterStatus` 与用户可见「已完成」一致。
  *
- * **A6 + styleClear**：仅当调用方证明文学门与文风门均过时才允许 `completed`。
- * - `literaryPass === true` 且 `styleClear !== false` → approved + completed
- *   （`styleClear` 省略视为 true，兼容旧调用方；关键路径应显式传入）
- * - `literaryPass === false` 或 `styleClear === false` → reviewed + needs_repair
+ * **A6 + styleClear（fail-closed）**：仅当调用方**显式证明**文学门与文风门均过时才允许 `completed`。
+ * - `literaryPass === true` 且 `styleClear === true` → approved + completed
+ * - `literaryPass === true` 且 `styleClear` 省略或 false → reviewed + needs_repair（禁止 omit→true）
+ * - `literaryPass === false` → reviewed + needs_repair
  * - `literaryPass` 省略 → **不**自动 completed（只 bump generationState）
  */
 export function mergeChapterPatchForGenerationStateBump(
@@ -108,8 +113,8 @@ export function mergeChapterPatchForGenerationStateBump(
 
   if (nextGenerationState === "approved") {
     if (options?.literaryPass === true) {
-      // styleClear 显式 false 时拒绝 completed；省略则兼容旧路径视为 true
-      const styleClear = options.styleClear !== false;
+      // fail-closed：必须显式 styleClear === true；省略与 false 同等拦 completed
+      const styleClear = options.styleClear === true;
       return {
         ...base,
         ...chapterStatePairAfterQualityGates({ literaryPass: true, styleClear }),
