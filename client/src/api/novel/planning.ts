@@ -208,6 +208,17 @@ export type NovelQualityDebtGenreBeatSnapshot = {
   };
 };
 
+export type NovelQualityDebtBoardFeedbackSummary = {
+  severity: string;
+  rootCause: string;
+  signature: string;
+  avoidRetry: boolean;
+  failedPatchCount: number;
+  codes: string[];
+  mustFix: string[];
+  evaluatedAt: string;
+};
+
 export type NovelQualityDebtBoard = {
   novelId: string;
   items: Array<{
@@ -223,6 +234,16 @@ export type NovelQualityDebtBoard = {
     riskClassification: "none" | "blocking" | "non_blocking_quality_debt";
     evaluatedAt: string | null;
     pauseReason: string | null;
+    /** 文学 isPass；null=无 literary_score */
+    literaryPass: boolean | null;
+    /** L0 清净；null=不可解析 */
+    l0Clear: boolean | null;
+    /** 文风门；null=无 qualityLoop */
+    styleClear: boolean | null;
+    /** residual=N；null=未知 */
+    residualRiskScore: number | null;
+    /** 最新 QFP 摘要 */
+    latestFeedback: NovelQualityDebtBoardFeedbackSummary | null;
   }>;
   summary: {
     totalWithQualityLoop: number;
