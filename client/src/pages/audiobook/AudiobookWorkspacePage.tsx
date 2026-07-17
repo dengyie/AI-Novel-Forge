@@ -112,6 +112,33 @@ export default function AudiobookWorkspacePage() {
             </div>
           ) : null}
 
+          {overviewQuery.isError ? (
+            <div className="flex flex-col gap-2 rounded-xl border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive sm:flex-row sm:items-center sm:justify-between">
+              <span>
+                态势加载失败：
+                {overviewQuery.error instanceof Error
+                  ? overviewQuery.error.message
+                  : "未知错误"}
+                。列表仍可打开项目；徽章暂不可用。
+              </span>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="shrink-0"
+                onClick={() => void overviewQuery.refetch()}
+              >
+                重试态势
+              </Button>
+            </div>
+          ) : null}
+
+          {overviewQuery.data?.truncated ? (
+            <div className="rounded-xl border border-border/70 bg-muted/30 px-3 py-2 text-xs leading-5 text-muted-foreground">
+              本页请求超过服务端态势上限（50 本），仅展示前 50 本态势；请分页查看。
+            </div>
+          ) : null}
+
           <div className="space-y-3">
             {items.map((novel) => {
               const overview = overviewById.get(novel.id);
@@ -132,6 +159,10 @@ export default function AudiobookWorkspacePage() {
                       {badges.primary ? (
                         <Badge variant={badges.primary.variant} className="text-[10px]">
                           {badges.primary.label}
+                        </Badge>
+                      ) : overviewQuery.isError ? (
+                        <Badge variant="outline" className="text-[10px] text-muted-foreground">
+                          态势失败
                         </Badge>
                       ) : overviewQuery.isFetching && !overviewQuery.data ? (
                         <Badge variant="outline" className="text-[10px] text-muted-foreground">

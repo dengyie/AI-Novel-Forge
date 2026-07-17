@@ -16,6 +16,7 @@
 - Phase 1：`POST /novels/audiobook/workspace-overview` + `buildAudiobookWorkspaceOverview`（bulk、`skipRefAudioProbe`、max 50、静默省略）；Badge `resolveAudiobookWorkspaceBadges`；选书页接线
 - Phase 2：项目页三锚点；面板 `#ab-prepare/#ab-create/#ab-tasks`；规划默认折叠；移动 fixed CTA（`4.25rem+safe-area`）；toast 主路径；`queryKeys.novels.audiobookTasks` 统一 invalidate；**ReadinessSection 原生终态 toast**（§4.2.5），panel 仅 message 明细
 - Phase 3：server/client 单测 + shared/server/client typecheck 通过；阶段 checklist 勾选；**默认不 merge/deploy**
+- Review 修复：`loadLatestTasksByNovel` 用 `ROW_NUMBER` 每本 latest 1 条（禁无界 `audiobookTask.findMany`）；选书 overview error/truncated UI；`audiobookWorkspaceOverviewPrefix`；reprocess invalidate overview；`#ab-tasks` `pb-28 lg:pb-4`。PR 卫生：分支含 qfp `a6e849c`（≈ main `cea2c0c` 同内容不同 hash），merge 前建议 rebase onto main 以只保留 UX 提交
 
 ## 0. 执行契约（Codex）
 

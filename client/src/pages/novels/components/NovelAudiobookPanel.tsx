@@ -1022,7 +1022,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
   const invalidateTasksAndOverview = useCallback(async () => {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: queryKeys.novels.audiobookTasks(novelId) }),
-      queryClient.invalidateQueries({ queryKey: ["novels", "audiobook-workspace-overview"] }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.novels.audiobookWorkspaceOverviewPrefix }),
     ]);
   }, [novelId, queryClient]);
 
@@ -1180,7 +1180,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
         queryClient.invalidateQueries({ queryKey: queryKeys.novels.characters(novelId) }),
         queryClient.invalidateQueries({ queryKey: queryKeys.novels.audiobookWorkspace(novelId) }),
         queryClient.invalidateQueries({ queryKey: queryKeys.novels.audiobookVoiceReadiness(novelId) }),
-        queryClient.invalidateQueries({ queryKey: ["novels", "audiobook-workspace-overview"] }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.novels.audiobookWorkspaceOverviewPrefix }),
       ]);
     },
     onError: (error) => {
@@ -1676,7 +1676,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
       </section>
 
       {/* 3. 任务与交付 */}
-      <section id="ab-tasks" className="scroll-mt-20 space-y-3 rounded-xl border border-border/70 bg-background p-4">
+      <section id="ab-tasks" className="scroll-mt-20 space-y-3 rounded-xl border border-border/70 bg-background p-4 pb-28 lg:pb-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="text-sm font-semibold text-foreground">3. 任务与交付</div>
           {(tasksQuery.data ?? []).length > 0 ? (
@@ -1702,9 +1702,14 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
                 onCancel={(taskId) => cancelMutation.mutate(taskId)}
                 onMessage={setMessage}
                 onReprocessed={() => {
-                  void queryClient.invalidateQueries({
-                    queryKey: queryKeys.novels.audiobookTasks(novelId),
-                  });
+                  void Promise.all([
+                    queryClient.invalidateQueries({
+                      queryKey: queryKeys.novels.audiobookTasks(novelId),
+                    }),
+                    queryClient.invalidateQueries({
+                      queryKey: queryKeys.novels.audiobookWorkspaceOverviewPrefix,
+                    }),
+                  ]);
                 }}
               />
             ))}

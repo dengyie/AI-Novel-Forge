@@ -242,7 +242,7 @@ export default function AudiobookVoiceReadinessSection(props: AudiobookVoiceRead
       queryClient.invalidateQueries({ queryKey: queryKeys.novels.audiobookWorkspace(novelId) }),
       queryClient.invalidateQueries({ queryKey: queryKeys.novels.characters(novelId) }),
       queryClient.invalidateQueries({ queryKey: queryKeys.novels.detail(novelId) }),
-      queryClient.invalidateQueries({ queryKey: ["novels", "audiobook-workspace-overview"] }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.novels.audiobookWorkspaceOverviewPrefix }),
     ]);
     const summary = job.summary;
     const tail = summary
@@ -294,7 +294,7 @@ export default function AudiobookVoiceReadinessSection(props: AudiobookVoiceRead
         });
         // 进度短句：只进 message，不 toast 抢视
         onMessage?.("一键就绪已启动，正在串行补齐音色与试听…");
-        void queryClient.invalidateQueries({ queryKey: ["novels", "audiobook-workspace-overview"] });
+        void queryClient.invalidateQueries({ queryKey: queryKeys.novels.audiobookWorkspaceOverviewPrefix });
         return;
       }
       // 即时终态：不进 job 轮询，直接刷看板
@@ -303,7 +303,7 @@ export default function AudiobookVoiceReadinessSection(props: AudiobookVoiceRead
         queryClient.invalidateQueries({ queryKey: queryKeys.novels.audiobookVoiceReadiness(novelId) }),
         queryClient.invalidateQueries({ queryKey: queryKeys.novels.audiobookWorkspace(novelId) }),
         queryClient.invalidateQueries({ queryKey: queryKeys.novels.characters(novelId) }),
-        queryClient.invalidateQueries({ queryKey: ["novels", "audiobook-workspace-overview"] }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.novels.audiobookWorkspaceOverviewPrefix }),
       ]);
       const summary = job.summary;
       const tail = summary
@@ -399,7 +399,7 @@ export default function AudiobookVoiceReadinessSection(props: AudiobookVoiceRead
         queryClient.invalidateQueries({
           queryKey: queryKeys.novels.characterVoicePreview(novelId, item.characterId),
         }),
-        queryClient.invalidateQueries({ queryKey: ["novels", "audiobook-workspace-overview"] }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.novels.audiobookWorkspaceOverviewPrefix }),
       ]);
     },
     onError: (error) => {
