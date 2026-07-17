@@ -6,6 +6,7 @@ import {
   isMimoTtsPresetVoice,
 } from "@ai-novel/shared/types/audiobook";
 import { pickDesignPromptArchetype } from "./designPromptArchetypes";
+import { speechQuirkCandidates } from "./designPromptQuirks";
 
 export type VoiceGenderBucket = "male" | "female" | "unknown";
 export type VoiceAgeBucket = "youth" | "adult" | "elder" | "unknown";
@@ -544,19 +545,16 @@ function hasRoleSignal(character: VoicePlannerCharacterInput): boolean {
   );
 }
 
-/** 声线习惯短语：用于把 identity 填到软目标 120–160，不改三元。 */
-export function speechHabitCandidates(slot: VoiceSlot, cluster: VoiceCluster): string[] {
-  const habits: string[] = [];
-  if (slot.textureBand === "bright") habits.push("咬字偏亮但不刺耳");
-  if (slot.textureBand === "dark_raspy") habits.push("共鸣略靠后、不压喉");
-  if (slot.textureBand === "airy") habits.push("气声收住、不虚飘");
-  if (slot.textureBand === "neutral") habits.push("声线干净、无明显口音");
-  if (slot.energyBand === "heavy") habits.push("日常语速偏稳，激动也不尖");
-  if (slot.energyBand === "lively") habits.push("语速可略快，句尾轻扬");
-  if (slot.energyBand === "even") habits.push("语速中等，收尾干净");
-  if (cluster === "lead") habits.push("对白有角色重心，不演旁白");
-  else if (cluster === "cast") habits.push("与主角声线可辨，不抢戏");
-  return habits;
+/**
+ * 声线习惯短语（阶段 2）：最多 1 条兼容癖好，禁止多条灌 soft-target。
+ * 保留 export 以兼容旧单测 import 面。
+ */
+export function speechHabitCandidates(
+  slot: VoiceSlot,
+  cluster: VoiceCluster,
+  characterId?: string | null,
+): string[] {
+  return speechQuirkCandidates(slot, cluster, characterId);
 }
 
 export type DesignTextureFlavorStatus =
@@ -570,8 +568,9 @@ export type DesignTextureFlavorStatus =
  * Voice Design 身份文案（自然语言一段 + 可解析三元锚点）。
  * - 强制含：音高{PITCH_ZH} / 质感{TEXTURE_ZH} / 气息{ENERGY_ZH}（onlyMissing seed）
  * - 无【标签】主结构；默认不写角色专名
- * - softCollision 互斥首句 hard-keep；超长按优先级截断，硬顶 DESIGN_PROMPT_MAX
- * - 卡面 texture 与槽冲突时尽量保留非对立子串；软目标 120–160 用习惯短语填满
+ * - softCollision 互斥首句 hard-keep；超长按听感优先级截断，硬顶 DESIGN_PROMPT_MAX
+ * - 卡面 texture 与槽冲突时尽量保留非对立子串
+ * - v1.1：声学优先；最多 1 癖好；禁止为凑 TARGET_MIN 堆吐字/气质同义灌水
  */
 export function buildDesignPrompt(input: {
   character: VoicePlannerCharacterInput;
@@ -582,7 +581,7 @@ export function buildDesignPrompt(input: {
   softCollision?: boolean;
   neighborSlotLabel?: string | null;
   cluster?: VoiceCluster;
-  /** 弱卡 archetype 质感短语（阶段 2）；不得覆盖三元锚点 */
+  /** 弱卡 archetype 质感短语；不得覆盖三元锚点 */
   archetypeTexturePhrase?: string | null;
   archetypeUseCase?: string | null;
 }): string {
@@ -606,10 +605,11 @@ export function buildDesignPromptDetailed(input: {
   const preferred = input.preferredSlot ?? inferVoiceSlot(character);
   const slotDiverged = !slotsEqual(preferred, slot);
   const textureCore = character.voiceTexture?.trim() || "";
+  // 气质最多 16 字，避免长 personality 冲掉声学
   const personality = (character.personality || character.firstImpression || "")
     .trim()
     .replace(/\s+/g, "")
-    .slice(0, 36);
+    .slice(0, 16);
 
   const ageGender = `${ageLabelNatural(age)}${genderLabelNatural(gender)}`;
   const pitch = `音高${PITCH_ZH[slot.pitchBand]}`;
@@ -617,7 +617,8 @@ export function buildDesignPromptDetailed(input: {
   const energy = `气息${ENERGY_ZH[slot.energyBand]}`;
   const core = `${ageGender}，标准普通话，${pitch}，${texture}，${energy}`;
 
-  const flavorParts: string[] = [];
+  // 分层：声学辨识 > 吐字锚 > 气质；禁止先堆灌水再截断
+  let cardOrArch = "";
   let textureFlavor: DesignTextureFlavorStatus = "none";
 
   if (textureCore) {
@@ -627,13 +628,13 @@ export function buildDesignPromptDetailed(input: {
     if (fullOk) {
       const clipped = compressTextureSnippet(textureCore, 28);
       if (clipped && !core.includes(clipped)) {
-        flavorParts.push(clipped);
+        cardOrArch = clipped;
         textureFlavor = "card-full";
       }
     } else {
       const partial = extractCompatibleTextureSnippet(textureCore, slot.textureBand, 28);
       if (partial && !core.includes(partial)) {
-        flavorParts.push(partial);
+        cardOrArch = partial;
         textureFlavor = "card-partial";
       } else {
         textureFlavor = "card-dropped";
@@ -641,7 +642,7 @@ export function buildDesignPromptDetailed(input: {
     }
   }
 
-  if (textureFlavor === "none" || textureFlavor === "card-dropped") {
+  if (!cardOrArch && (textureFlavor === "none" || textureFlavor === "card-dropped")) {
     const archRaw = input.archetypeTexturePhrase?.trim() || "";
     if (archRaw) {
       const arch =
@@ -651,30 +652,32 @@ export function buildDesignPromptDetailed(input: {
             ? compressTextureSnippet(archRaw, 24)
             : ""
         );
-      if (arch && !core.includes(arch) && !flavorParts.includes(arch)) {
-        flavorParts.push(arch);
+      if (arch && !core.includes(arch)) {
+        cardOrArch = arch;
         if (textureFlavor === "none") textureFlavor = "archetype";
       }
     }
   }
 
+  // 最多 1 条声学癖好（表过滤 + 冲突剥离 + characterId 打散）
+  const habits = speechHabitCandidates(slot, cluster, character.characterId);
+  const acousticQuirk = habits[0] || "";
+
+  // 吐字：单条，按 cluster/energy 差异化（不再叠「气质克制坚定」垫片）
+  let articulation = "";
   if (cluster === "lead") {
-    flavorParts.push("吐字清楚有主心骨");
+    articulation = "吐字清楚有主心骨";
   } else if (slot.energyBand === "lively") {
-    flavorParts.push("吐字轻快");
+    articulation = "吐字轻快";
   } else if (slot.energyBand === "heavy") {
-    flavorParts.push("吐字沉稳");
+    articulation = "吐字沉稳";
   } else {
-    flavorParts.push("吐字清楚");
+    articulation = "吐字清楚";
   }
 
-  if (personality) {
-    flavorParts.push(`气质${personality}`);
-  } else if (cluster === "lead") {
-    flavorParts.push("气质克制坚定");
-  }
+  // 气质：仅卡面有实质描述时附加；弱卡 lead 不再默认灌「气质克制坚定」
+  const vibe = personality ? `气质${personality}` : "";
 
-  // 先解析 useCase + 真实 mutex tail，再估 soft-target（禁止「。尾。」假尾误估）
   const resolvedUseCase = resolveDesignUseCase(character, cluster, gender);
   const archUseCase = input.archetypeUseCase?.trim().slice(0, 24) || "";
   const useCase =
@@ -685,108 +688,126 @@ export function buildDesignPromptDetailed(input: {
   const mutexPrimary = input.softCollision && input.neighborSlotLabel
     ? `与「${input.neighborSlotLabel}」明显区分`
     : "";
+  // 次句可砍；互斥主句 hard-keep
   const mutexSecondary = cluster === "lead" || cluster === "cast"
     ? "避免播音腔、空壳标准声与死气平板播读"
     : "避免播音腔与无特征标准声";
-  const tailParts: string[] = [];
-  if (mutexPrimary) tailParts.push(mutexPrimary);
-  tailParts.push(mutexSecondary);
-  let tail = tailParts.join("；");
 
-  // 软目标：补声线习惯；估长与最终 `${body}。${tail}。` 同构
-  const habits = speechHabitCandidates(slot, cluster);
-  const estimatePromptLen = (midParts: string[]): number => {
-    const mid = midParts.filter(Boolean).join("，");
-    const bodyEst = mid ? `${core}，${mid}，适合${useCase}` : `${core}，适合${useCase}`;
-    return `${bodyEst}。${tail}。`.length;
+  const assemble = (parts: {
+    card: string;
+    quirk: string;
+    artic: string;
+    vibe: string;
+    use: string;
+    primary: string;
+    secondary: string;
+  }): string => {
+    const mid = [parts.card, parts.quirk, parts.artic, parts.vibe].filter(Boolean).join("，");
+    const body = mid
+      ? `${core}，${mid}，适合${parts.use}`
+      : `${core}，适合${parts.use}`;
+    const tailBits = [parts.primary, parts.secondary].filter(Boolean);
+    const tail = tailBits.join("；");
+    if (!tail) return `${body}。`;
+    return body.endsWith("。") ? `${body}${tail}。` : `${body}。${tail}。`;
   };
-  for (const habit of habits) {
-    if (flavorParts.includes(habit)) continue;
-    const trialParts = [...flavorParts, habit];
-    const trialLen = estimatePromptLen(trialParts);
-    if (trialLen > DESIGN_PROMPT_TARGET_MAX && flavorParts.length > 0) {
-      // 已有内容且会超软顶则停；仍低于 MIN 时允许冲到 MAX
-      const currentApprox = estimatePromptLen(flavorParts);
-      if (currentApprox >= DESIGN_PROMPT_TARGET_MIN) break;
-    }
-    if (trialLen > DESIGN_PROMPT_MAX) break;
-    flavorParts.push(habit);
-  }
 
-  const bodyMid = flavorParts.filter(Boolean).join("，");
-  let body = bodyMid
-    ? `${core}，${bodyMid}，适合${useCase}`
-    : `${core}，适合${useCase}`;
-
-  let prompt = `${body}。${tail}。`;
-  if (prompt.length <= DESIGN_PROMPT_MAX) {
-    // 仍短于软目标时再尝试塞剩余 habits（在 hard max 内）
-    if (prompt.length < DESIGN_PROMPT_TARGET_MIN) {
-      for (const habit of habits) {
-        if (flavorParts.includes(habit)) continue;
-        const nextMid = [...flavorParts, habit].join("，");
-        const nextBody = `${core}，${nextMid}，适合${useCase}`;
-        const next = `${nextBody}。${tail}。`;
-        if (next.length > DESIGN_PROMPT_MAX) break;
-        if (next.length > DESIGN_PROMPT_TARGET_MAX && prompt.length >= DESIGN_PROMPT_TARGET_MIN) break;
-        flavorParts.push(habit);
-        body = nextBody;
-        prompt = next;
-        if (prompt.length >= DESIGN_PROMPT_TARGET_MIN) break;
-      }
-    }
-    return { prompt, textureFlavor };
-  }
-
-  const dropSteps: Array<() => void> = [
-    () => {
-      // 先丢习惯短语（非吐字/气质/声线）
-      const coreFlavors = flavorParts.filter(
-        (p) =>
-          p.startsWith("吐字")
-          || p.startsWith("气质")
-          || p.includes("主心骨")
-          || habits.indexOf(p) < 0,
-      );
-      // 实际：丢掉 speech habits
-      const withoutHabits = flavorParts.filter((p) => !habits.includes(p));
-      const mid = withoutHabits.join("，");
-      body = mid ? `${core}，${mid}，适合${useCase}` : `${core}，适合${useCase}`;
-      void coreFlavors;
-    },
-    () => {
-      const withoutVibe = flavorParts
-        .filter((p) => !p.startsWith("气质") && !habits.includes(p));
-      const mid = withoutVibe.join("，");
-      body = mid ? `${core}，${mid}，适合${useCase}` : `${core}，适合${useCase}`;
-    },
-    () => {
-      const keep = flavorParts.filter(
-        (p) => p.startsWith("吐字") || p.includes("主心骨") || (!p.startsWith("气质") && !habits.includes(p) && p.length <= 28),
-      );
-      // 保吐字 + 卡面/arch 声线片段
-      const mid = keep.join("，") || "吐字清楚";
-      body = `${core}，${mid}，适合${useCase}`;
-    },
-    () => {
-      const keep = flavorParts.filter((p) => p.startsWith("吐字") || p.includes("主心骨"));
-      const mid = keep.join("，") || "吐字清楚";
-      body = `${core}，${mid}，适合${useCase}`;
-    },
-    () => {
-      body = `${core}，适合${shortenUseCase(useCase)}`;
-    },
-    () => {
-      body = core;
-    },
-    () => {
-      tail = mutexPrimary || mutexSecondary;
-    },
+  // 听感截断优先级（v1.1）：
+  // core > 卡面/arch > 1 癖好 > 吐字 > 气质 > useCase 全长 > mutex 主句 > 次句
+  // 禁止用多 habits 灌到 160
+  const dropLadder: Array<() => {
+    card: string;
+    quirk: string;
+    artic: string;
+    vibe: string;
+    use: string;
+    primary: string;
+    secondary: string;
+  }> = [
+    () => ({
+      card: cardOrArch,
+      quirk: acousticQuirk,
+      artic: articulation,
+      vibe,
+      use: useCase,
+      primary: mutexPrimary,
+      secondary: mutexSecondary,
+    }),
+    // 砍次句互斥
+    () => ({
+      card: cardOrArch,
+      quirk: acousticQuirk,
+      artic: articulation,
+      vibe,
+      use: useCase,
+      primary: mutexPrimary,
+      secondary: mutexPrimary ? "" : mutexSecondary,
+    }),
+    // 砍气质
+    () => ({
+      card: cardOrArch,
+      quirk: acousticQuirk,
+      artic: articulation,
+      vibe: "",
+      use: useCase,
+      primary: mutexPrimary,
+      secondary: mutexPrimary ? "" : mutexSecondary,
+    }),
+    // 砍吐字（保声学）
+    () => ({
+      card: cardOrArch,
+      quirk: acousticQuirk,
+      artic: "",
+      vibe: "",
+      use: useCase,
+      primary: mutexPrimary,
+      secondary: mutexPrimary ? "" : mutexSecondary,
+    }),
+    // 砍癖好（仍保卡面）
+    () => ({
+      card: cardOrArch,
+      quirk: "",
+      artic: articulation,
+      vibe: "",
+      use: useCase,
+      primary: mutexPrimary,
+      secondary: mutexPrimary ? "" : mutexSecondary,
+    }),
+    // 缩 useCase
+    () => ({
+      card: cardOrArch,
+      quirk: acousticQuirk || "",
+      artic: articulation,
+      vibe: "",
+      use: shortenUseCase(useCase),
+      primary: mutexPrimary,
+      secondary: "",
+    }),
+    // 仅 core + 卡面 + 互斥主句
+    () => ({
+      card: cardOrArch,
+      quirk: "",
+      artic: "",
+      vibe: "",
+      use: shortenUseCase(useCase),
+      primary: mutexPrimary,
+      secondary: mutexPrimary ? "" : mutexSecondary,
+    }),
+    // core + 互斥
+    () => ({
+      card: "",
+      quirk: "",
+      artic: "",
+      vibe: "",
+      use: shortenUseCase(useCase),
+      primary: mutexPrimary || mutexSecondary,
+      secondary: "",
+    }),
   ];
 
-  for (const step of dropSteps) {
-    step();
-    prompt = body.endsWith("。") ? `${body}${tail}。` : `${body}。${tail}。`;
+  for (const step of dropLadder) {
+    const parts = step();
+    const prompt = assemble(parts);
     if (prompt.length <= DESIGN_PROMPT_MAX) {
       return { prompt, textureFlavor };
     }
