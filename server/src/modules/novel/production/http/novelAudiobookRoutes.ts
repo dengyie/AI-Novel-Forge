@@ -659,10 +659,7 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
     async (req, res, next) => {
       try {
         const { id, charId } = req.params as z.infer<typeof characterParamsSchema>;
-        const rawTopN = req.query?.topN;
-        const topN = typeof rawTopN === "string" && rawTopN.trim()
-          ? Number(rawTopN)
-          : undefined;
+        const topN = req.query.topN;
         const data = await audiobookVoiceAssetService.listVoiceLibraryMatches(id, charId, {
           topN: typeof topN === "number" && Number.isFinite(topN) ? topN : undefined,
         });
