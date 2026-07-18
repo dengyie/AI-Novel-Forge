@@ -311,6 +311,47 @@ export function mergeCritiqueReport(document: VolumePlanDocument, critiqueReport
   });
 }
 
+export function shouldRegenerateSkeleton(report: VolumePlanDocument["critiqueReport"]): boolean {
+  if (!report) {
+    return false;
+  }
+  if (report.overallRisk === "high") {
+    return true;
+  }
+  return report.issues.some((issue) => issue.severity === "high");
+}
+
+export function formatSkeletonCritiqueFeedback(report: VolumePlanDocument["critiqueReport"]): string {
+  if (!report) {
+    return "";
+  }
+  const lines: string[] = [];
+  if (report.summary?.trim()) {
+    lines.push(`骨架审查总体结论: ${report.summary.trim()}`);
+  }
+  if (report.overallRisk) {
+    lines.push(`overallRisk=${report.overallRisk}`);
+  }
+  const highIssues = report.issues.filter((issue) => issue.severity === "high");
+  const mediumIssues = report.issues.filter((issue) => issue.severity === "medium");
+  if (highIssues.length > 0 || mediumIssues.length > 0) {
+    lines.push("需重点修正的 framing 问题:");
+    for (const issue of highIssues) {
+      lines.push(`- [high] ${issue.targetRef}: ${issue.title} — ${issue.detail}`);
+    }
+    for (const issue of mediumIssues) {
+      lines.push(`- [medium] ${issue.targetRef}: ${issue.title} — ${issue.detail}`);
+    }
+  }
+  if (report.recommendedActions.length > 0) {
+    lines.push("改写方向:");
+    for (const action of report.recommendedActions.slice(0, 8)) {
+      lines.push(`- ${action}`);
+    }
+  }
+  return lines.join("\n");
+}
+
 export function mergeSkeleton(document: VolumePlanDocument, generatedVolumes: Array<{
   title: string;
   summary?: string | null;
