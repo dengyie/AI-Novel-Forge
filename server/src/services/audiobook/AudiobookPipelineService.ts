@@ -734,16 +734,9 @@ export class AudiobookPipelineService {
         chapterAudioPaths: chapterAudioPaths.map((item) => ({ chapterId: item.chapterId, path: item.path })),
         qualityWarnings: collectQualityWarnings(annotations),
       });
-    }
 
-    // ── 合成 + 章合并 ──
-    for (let chapterIndex = 0; chapterIndex < orderedChapters.length; chapterIndex += 1) {
+      // ── 合成 + 章合并（逐章：标注完即合成该章，chapter.wav 提前落盘供前端逐章交付）──
       await throwIfCancelled(input.signal, input.isCancelRequested);
-      const chapter = orderedChapters[chapterIndex];
-      const annotation = annotations.find((item) => item.chapterId === chapter.id);
-      if (!annotation) {
-        throw new AppError(`缺少章节标注：${chapter.id}`, 500);
-      }
 
       const chapterWavPath = resolveChapterAudioPath(taskDir, chapter.id);
       // 合成侧对账：标注保留 speaker/text/delivery；绑定以当前角色卡为准
