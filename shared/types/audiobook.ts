@@ -1007,6 +1007,51 @@ export interface VoiceAssetSetStatusInput {
   status: VoiceAssetStatus;
 }
 
+// ---------------------------------------------------------------------------
+// 人物卡 ↔ VoiceAsset 对靠链路：单角色 top-N 候选
+// ---------------------------------------------------------------------------
+
+/** 对靠候选命中维（与 matchLibraryAssetsTopN 对齐，供 UI 展示打分理由） */
+export interface VoiceLibraryMatchDimensions {
+  /** 候选在该角色 gender 桶上的命中：hit/open/miss */
+  gender: "hit" | "open" | "miss";
+  /** cluster 命中：exact/soft/open/weak/none */
+  cluster: "exact" | "soft" | "open" | "weak" | "none";
+  /** scope 命中：hit/open/miss */
+  scope: "hit" | "open" | "miss";
+}
+
+/** 单条对靠候选；仅 approved clone_ref */
+export interface AudiobookVoiceLibraryMatchItem {
+  voiceAssetId: string;
+  slug: string;
+  displayName: string;
+  /** 打分（越高越靠前） */
+  score: number;
+  /** 中文可读打分理由（bits） */
+  reason: string;
+  dimensions: VoiceLibraryMatchDimensions;
+  /** 该资产是否已被本书其他角色绑定（assetId 或同 speaker） */
+  occupiedBy: string[] | null;
+  /**
+   * speaker/slot 已占但允许人工覆盖：false=未占可放心选；true=占用工具标注。
+   * 不作为硬门禁，仅 UI 提示。
+   */
+  speakerOccupied: boolean;
+}
+
+export interface AudiobookVoiceLibraryMatchesResult {
+  novelId: string;
+  characterId: string;
+  /** 推断 gender 桶（用于 UI 展示理由上下文） */
+  genderBucket: "male" | "female" | "unknown";
+  /** 推断分簇 */
+  cluster: "lead" | "cast" | "extra" | "narrator";
+  candidates: AudiobookVoiceLibraryMatchItem[];
+  /** 被门禁排除的候选计数（调试/提示用） */
+  excludedCount: number;
+}
+
 export interface VoiceDesignRewriteInput {
   /** 可选：覆盖当前角色卡草稿描述作为 rewrite 输入 */
   currentDesignPrompt?: string | null;
