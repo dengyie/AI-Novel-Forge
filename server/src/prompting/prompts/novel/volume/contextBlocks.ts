@@ -12,6 +12,7 @@ import {
   buildCommonNovelContext,
   buildConflictLevelCurveContext,
   buildCompactVolumeCard,
+  buildCompactVolumeContext,
   buildRecentChapterExecutionContext,
   buildVolumeCountGuidanceContext,
   buildSoftFutureVolumeSummary,
@@ -22,6 +23,7 @@ import {
   type VolumeChapterDetailPromptInput,
   type VolumeChapterListPromptInput,
   type VolumeRebalancePromptInput,
+  type VolumeSkeletonCritiquePromptInput,
   type VolumeSkeletonPromptInput,
   type VolumeStrategyCritiquePromptInput,
   type VolumeStrategyPromptInput,
@@ -144,6 +146,32 @@ export function buildVolumeSkeletonContextBlocks(input: VolumeSkeletonPromptInpu
       priority: 94,
       required: true,
       content: `Chapter budget: ${input.chapterBudget}`,
+    }),
+    guidanceBlock(input.guidance),
+  ].filter((block): block is PromptContextBlock => Boolean(block));
+}
+
+export function buildVolumeSkeletonCritiqueContextBlocks(input: VolumeSkeletonCritiquePromptInput): PromptContextBlock[] {
+  return [
+    createContextBlock({
+      id: "book_contract",
+      group: "book_contract",
+      priority: 100,
+      required: true,
+      content: `Novel contract:\n${buildCommonNovelContext(input.novel)}`,
+    }),
+    createContextBlock({
+      id: "skeleton_volumes",
+      group: "skeleton_volumes",
+      priority: 100,
+      required: true,
+      content: `Skeleton volumes (compact cards; focus on primaryPressureSource / escalationMode / midVolumeRisk / summary):\n${buildCompactVolumeContext(input.skeletonVolumes)}`,
+    }),
+    createContextBlock({
+      id: "strategy_context",
+      group: "strategy_context",
+      priority: 92,
+      content: `Strategy plan:\n${buildStrategyContext(input.strategyPlan)}`,
     }),
     guidanceBlock(input.guidance),
   ].filter((block): block is PromptContextBlock => Boolean(block));

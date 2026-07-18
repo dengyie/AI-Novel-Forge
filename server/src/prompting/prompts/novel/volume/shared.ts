@@ -29,6 +29,15 @@ export interface VolumeStrategyCritiquePromptInput {
   guidance?: string;
 }
 
+export interface VolumeSkeletonCritiquePromptInput {
+  novel: VolumeGenerationNovel;
+  workspace: VolumeWorkspace;
+  storyMacroPlan: StoryMacroPlan | null;
+  strategyPlan: VolumeStrategyPlan | null;
+  skeletonVolumes: VolumePlan[];
+  guidance?: string;
+}
+
 export interface VolumeSkeletonPromptInput {
   novel: VolumeGenerationNovel;
   workspace: VolumeWorkspace;

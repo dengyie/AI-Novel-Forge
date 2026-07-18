@@ -10,6 +10,7 @@ export const NOVEL_PROMPT_BUDGETS = {
   volumeStrategy: 1800,
   volumeStrategyCritique: 1800,
   volumeSkeleton: 2000,
+  volumeSkeletonCritique: 1800,
   volumeBeatSheet: 1600,
   volumeChapterList: 1600,
   volumeChapterDetail: 1600,
