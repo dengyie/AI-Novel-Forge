@@ -481,7 +481,8 @@ async function generateSkeleton(params: {
       novelId: document.novelId,
       scope: "skeleton",
       phase: "warn",
-      label: "卷骨架对手面审查未完全通过，已带风险落库；可在分卷面板查看 critique 报告后手动重生",
+      label:
+        "卷骨架对手面审查未完全通过，已带风险落库。该卷的 primaryPressureSource 仍偏向抽象集体（如「全班/全校/集体/人情秩序/全社会针对主角」）或带机械度量 framing，后续正文按此骨架生成可能出现「全世界针对主角」式读感。建议在分卷面板查看 critique 报告后手动重生卷骨架。",
       options,
     });
   }

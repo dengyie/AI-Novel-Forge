@@ -247,3 +247,73 @@ test("volumeChapterExecutionContractPrompt SystemMessage keeps opponent-focus on
   assert.match(systemText, /具名小圈层对手/);
   assert.match(systemText, /抽象群体压力/);
 });
+
+// --- Phase-2 传播面 prompt 软约束(coreGeneration + storyWorldSlice) ---
+
+const {
+  novelOutlinePrompt,
+} = require("../dist/prompting/prompts/novel/coreGeneration.prompts.js");
+const {
+  storyWorldSlicePrompt,
+} = require("../dist/prompting/prompts/storyWorldSlice/storyWorldSlice.prompts.js");
+
+function buildNovelOutlineInput() {
+  return {
+    title: "测试小说",
+    description: "测试简介",
+    charactersText: "主角甲, 对手乙",
+    worldContext: "世界设定",
+  };
+}
+
+function buildStoryWorldSliceInput() {
+  return {
+    novel: {
+      id: "novel-1",
+      title: "测试小说",
+      description: "测试简介",
+    },
+    structure: {
+      profile: { summary: "世界概要", identity: "identity", coreConflict: "核心冲突" },
+      rules: { axioms: [] },
+      forces: [],
+      locations: [],
+    },
+    bindingSupport: {
+      recommendedEntryPoints: [],
+      highPressureForces: [],
+      compatibleConflicts: [],
+      forbiddenCombinations: [],
+    },
+    storyInput: "",
+    overrides: {},
+    builderMode: "initial_outline",
+  };
+}
+
+test("novelOutlinePrompt SystemMessage 压力源落到「谁在场施压」，禁止抽象集体 framing", () => {
+  const systemText = renderSystemText(novelOutlinePrompt, buildNovelOutlineInput(), emptyContext());
+  // 软约束条款 5：压力来源落到具名对手/小圈层，禁抽象集体站队
+  assert.match(systemText, /谁在场施压/);
+  assert.match(systemText, /全社会\/集体\/人情秩序\/舆论全体\/全世界针对主角/);
+  assert.match(systemText, /抽象集体站队/);
+});
+
+test("novelOutlinePrompt SystemMessage 禁止机械度量隐喻概括压迫", () => {
+  const systemText = renderSystemText(novelOutlinePrompt, buildNovelOutlineInput(), emptyContext());
+  // 软约束条款 6：禁止「称重」族机械度量 framing
+  assert.match(systemText, /把人当物过秤/);
+  assert.match(systemText, /机械度量隐喻/);
+});
+
+test("storyWorldSlicePrompt SystemMessage pressureSources 必须具体写到谁在场施压，禁抽象集体", () => {
+  const systemText = renderSystemText(storyWorldSlicePrompt, buildStoryWorldSliceInput(), emptyContext());
+  assert.match(systemText, /谁在场施压/);
+  assert.match(systemText, /全社会\/集体\/人情秩序\/舆论全体\/全世界针对主角/);
+});
+
+test("storyWorldSlicePrompt SystemMessage 禁止机械度量隐喻概括压迫", () => {
+  const systemText = renderSystemText(storyWorldSlicePrompt, buildStoryWorldSliceInput(), emptyContext());
+  assert.match(systemText, /把人当物过秤/);
+  assert.match(systemText, /机械度量隐喻/);
+});
