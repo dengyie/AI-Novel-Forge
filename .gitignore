@@ -2,6 +2,11 @@ node_modules/
 dist/
 .turbo/
 .DS_Store
+# macOS AppleDouble resource-fork metadata (._*) created when files cross macOS <-> Linux via sync disks/zip/tar.
+# These pollute the tree (几百个 ._foo 文件) and would otherwise show as untracked git noise.
+._*
+**/._*
+
 .env
 .env.local
 dev.db
