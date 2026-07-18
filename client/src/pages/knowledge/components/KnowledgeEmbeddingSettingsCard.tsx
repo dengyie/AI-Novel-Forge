@@ -41,6 +41,8 @@ export interface KnowledgeEmbeddingSettingsFormState {
   httpTimeoutMs: number;
   retrievalTraceSampleRate: number;
   retrievalTraceRetentionDays: number;
+  contextualRetrievalConcurrency: number;
+  rerankerCandidateLimit: number;
 }
 
 interface KnowledgeEmbeddingSettingsCardProps {
@@ -672,6 +674,42 @@ export default function KnowledgeEmbeddingSettingsCard({
                   />
                   <p className="text-xs text-muted-foreground">
                     检索追踪样本保留多少天后老化删除，1-365，默认 14。
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <div className="text-sm font-medium">上下文检索并发数</div>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={8}
+                    value={form.contextualRetrievalConcurrency}
+                    onChange={(event) =>
+                      setForm((prev) => ({
+                        ...prev,
+                        contextualRetrievalConcurrency: parseNumberInput(event.target.value, prev.contextualRetrievalConcurrency),
+                      }))}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    上下文检索（contextual retrieval）为每个分块生成上下文时的并发请求数，1-8，默认 2。调高加快处理但要占用更多 LLM 额度。
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <div className="text-sm font-medium">重排序候选上限</div>
+                  <Input
+                    type="number"
+                    min={0}
+                    max={200}
+                    value={form.rerankerCandidateLimit}
+                    onChange={(event) =>
+                      setForm((prev) => ({
+                        ...prev,
+                        rerankerCandidateLimit: parseNumberInput(event.target.value, prev.rerankerCandidateLimit),
+                      }))}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    送入重排序模型的最大候选分块数，0-200，默认 0（不裁剪、全部参与重排）。调低节省重排算力，调高保召回。
                   </p>
                 </div>
               </div>

@@ -103,6 +103,8 @@ export interface RagSettingsStatus {
   httpTimeoutMs: number;
   retrievalTraceSampleRate: number;
   retrievalTraceRetentionDays: number;
+  contextualRetrievalConcurrency: number;
+  rerankerCandidateLimit: number;
   suggestedCollectionName: string;
   reindexQueuedCount?: number;
   providers: RagProviderStatus[];
@@ -256,6 +258,8 @@ export async function saveRagSettings(payload: {
   httpTimeoutMs: number;
   retrievalTraceSampleRate: number;
   retrievalTraceRetentionDays: number;
+  contextualRetrievalConcurrency: number;
+  rerankerCandidateLimit: number;
 }) {
   const { data } = await apiClient.put<
     ApiResponse<
@@ -290,6 +294,8 @@ export async function saveRagSettings(payload: {
         | "httpTimeoutMs"
         | "retrievalTraceSampleRate"
         | "retrievalTraceRetentionDays"
+        | "contextualRetrievalConcurrency"
+        | "rerankerCandidateLimit"
         | "suggestedCollectionName"
         | "reindexQueuedCount"
       >

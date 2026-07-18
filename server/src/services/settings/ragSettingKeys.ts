@@ -27,6 +27,8 @@ export const WORKER_RETRY_BASE_MS_KEY = "rag.workerRetryBaseMs";
 export const HTTP_TIMEOUT_MS_KEY = "rag.httpTimeoutMs";
 export const RETRIEVAL_TRACE_SAMPLE_RATE_KEY = "rag.retrievalTraceSampleRate";
 export const RETRIEVAL_TRACE_RETENTION_DAYS_KEY = "rag.retrievalTraceRetentionDays";
+export const CONTEXTUAL_RETRIEVAL_CONCURRENCY_KEY = "rag.contextualRetrievalConcurrency";
+export const RERANKER_CANDIDATE_LIMIT_KEY = "rag.rerankerCandidateLimit";
 export const DEFAULT_RAG_COLLECTION_NAME = "ai_novel_chunks_v1";
 
 export const RAG_EMBEDDING_SETTING_KEYS = [
@@ -61,6 +63,8 @@ export const RAG_RUNTIME_SETTING_KEYS = [
   HTTP_TIMEOUT_MS_KEY,
   RETRIEVAL_TRACE_SAMPLE_RATE_KEY,
   RETRIEVAL_TRACE_RETENTION_DAYS_KEY,
+  CONTEXTUAL_RETRIEVAL_CONCURRENCY_KEY,
+  RERANKER_CANDIDATE_LIMIT_KEY,
 ] as const;
 
 export const ALL_RAG_SETTING_KEYS = [
