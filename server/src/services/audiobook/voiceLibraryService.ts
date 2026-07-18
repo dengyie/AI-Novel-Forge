@@ -305,6 +305,37 @@ function assertLicense(license: VoiceAssetLicense | undefined | null): VoiceAsse
 }
 
 /** 将 registry 内 path（相对 voice-refs 或历史绝对路径）解析为绝对路径。 */
+/** 角色表 ttsRefAudioPath 历史 bind 存绝对路径；首次访问库根时惰性全表迁移为相对。 */
+let characterCloneRefMigrationDone = false;
+async function migrateCharacterCloneRefPathsRelativeOnce(): Promise<void> {
+  if (characterCloneRefMigrationDone) return;
+  characterCloneRefMigrationDone = true;
+  try {
+    const rows = await prisma.character.findMany({
+      where: {
+        ttsMode: "clone",
+        NOT: [{ ttsVoiceAssetId: null }],
+      },
+      select: { id: true, ttsRefAudioPath: true },
+    });
+    for (const row of rows) {
+      const raw = row.ttsRefAudioPath?.trim() || "";
+      if (!raw || !path.isAbsolute(raw)) continue;
+      try {
+        const rel = toVoiceRefRelativePath(raw);
+        await prisma.character.update({
+          where: { id: row.id },
+          data: { ttsRefAudioPath: rel },
+        });
+      } catch {
+        // 越界/无法解析：保留绝对值（合成仍能解析），勿阻断迁移
+      }
+    }
+  } catch {
+    // 缺表/DB 不可用：静默跳过，下次再试（标志已置位避免高频重试）
+  }
+}
+
 export function resolveVoiceAssetStoredPath(stored: string | null | undefined): string | null {
   const raw = stored?.trim() || "";
   if (!raw) return null;
@@ -431,7 +462,8 @@ export function resolveEffectiveCloneRefPath(input: {
     });
   }
   const legacy = input.ttsRefAudioPath?.trim();
-  return legacy || null;
+  // 相对路径（bind 后存相对）须解析到 voice-refs 根，避免相对 cwd 误判越界/缺失。
+  return legacy ? (resolveVoiceAssetStoredPath(legacy) ?? legacy) : null;
 }
 
 /**
@@ -456,6 +488,8 @@ export class VoiceLibraryService {
     if (!fs.existsSync(resolveGlobalVoiceRegistryPath())) {
       writeRegistry(emptyRegistry());
     }
+    // 惰性迁移历史绝对路径 ttRefAudioPath → 相对（fire-and-forget，不阻塞 import/bind）
+    void migrateCharacterCloneRefPathsRelativeOnce();
   }
 
   list(query: VoiceAssetListQuery = {}): VoiceAssetListResult {
@@ -865,11 +899,14 @@ export class VoiceLibraryService {
     if (!character) {
       throw new AppError("角色不存在。", 404);
     }
+    // 角色表存相对 voice-refs 路径，避免根目录/symlink 迁移后绑定集体失效；
+    // 合成时经 resolveEffectiveCloneRefPath → resolveVoiceAssetStoredPath 再解析绝对。
+    const relativePath = toVoiceRefRelativePath(absolutePath);
     await prisma.character.update({
       where: { id: characterId },
       data: {
         ttsMode: "clone",
-        ttsRefAudioPath: absolutePath,
+        ttsRefAudioPath: relativePath,
         ttsVoiceAssetId: asset.id,
         ttsVoice: null,
         ttsDesignPrompt: null,

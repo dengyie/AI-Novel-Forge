@@ -106,10 +106,30 @@ function buildCandidateAudioUrl(
   return `/novels/${encodeURIComponent(novelId)}/characters/${encodeURIComponent(characterId)}/voice-preview/candidates/${encodeURIComponent(candidateId)}/audio`;
 }
 
-function writeCandidatesMeta(novelId: string, characterId: string, meta: PreviewCandidatesMeta): void {
+function writeCandidatesMetaAtomic(
+  novelId: string,
+  characterId: string,
+  meta: PreviewCandidatesMeta,
+): void {
   const metaPath = resolveCharacterVoicePreviewCandidatesMetaPath(novelId, characterId);
   fs.mkdirSync(path.dirname(metaPath), { recursive: true });
-  fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), "utf8");
+  const tmp = `${metaPath}.${process.pid}.part`;
+  fs.writeFileSync(tmp, JSON.stringify(meta, null, 2), "utf8");
+  fs.renameSync(tmp, metaPath);
+}
+
+/** per-character in-flight preview generate 锁，防并发重复扣合成额度 + 文件竞争。 */
+export const activePreviewGenerateKeys = new Set<string>();
+export function acquirePreviewGenerateLock(novelId: string, characterId: string): string {
+  const key = `${novelId}:${characterId}`;
+  if (activePreviewGenerateKeys.has(key)) {
+    throw new AppError("该角色试听正在生成，请等待当前完成后再试。", 409);
+  }
+  activePreviewGenerateKeys.add(key);
+  return key;
+}
+export function releasePreviewGenerateLock(key: string): void {
+  activePreviewGenerateKeys.delete(key);
 }
 
 function readCandidatesMeta(novelId: string, characterId: string): PreviewCandidatesMeta | null {
@@ -745,6 +765,19 @@ export class AudiobookVoiceAssetService {
     characterId: string,
     input: CharacterVoicePreviewGenerateInput = {},
   ): Promise<CharacterVoicePreviewGenerateResult> {
+    const lockKey = acquirePreviewGenerateLock(novelId, characterId);
+    try {
+      return await this.runGenerateCharacterPreview(novelId, characterId, input);
+    } finally {
+      releasePreviewGenerateLock(lockKey);
+    }
+  }
+
+  private async runGenerateCharacterPreview(
+    novelId: string,
+    characterId: string,
+    input: CharacterVoicePreviewGenerateInput = {},
+  ): Promise<CharacterVoicePreviewGenerateResult> {
     const character = await prisma.character.findFirst({
       where: { id: characterId, novelId },
       select: {
@@ -843,7 +876,7 @@ export class AudiobookVoiceAssetService {
     const suggestedCandidateId = suggested.id;
 
     if (candidatesCount > 1 || !autoAdopt) {
-      writeCandidatesMeta(novelId, characterId, {
+      writeCandidatesMetaAtomic(novelId, characterId, {
         sampleText,
         fingerprint,
         createdAt: new Date().toISOString(),
@@ -987,7 +1020,7 @@ export class AudiobookVoiceAssetService {
       },
     });
 
-    writeCandidatesMeta(novelId, characterId, {
+    writeCandidatesMetaAtomic(novelId, characterId, {
       ...meta,
       sampleText,
       fingerprint,
