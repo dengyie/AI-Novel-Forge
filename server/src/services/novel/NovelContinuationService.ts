@@ -4,9 +4,9 @@ import { BOOK_ANALYSIS_STRUCTURED_FIELD_LABELS } from "@ai-novel/shared/types/bo
 import { prisma } from "../../db/prisma";
 import { runTextPrompt } from "../../prompting/core/promptRunner";
 import { novelContinuationRewritePrompt } from "../../prompting/prompts/novel/continuation.prompts";
+import { buildNGramSet, jaccardSimilarity } from "@ai-novel/shared/utils/textSimilarity";
 
 const CONTINUATION_SIMILARITY_THRESHOLD = 0.3;
-const CONTINUATION_NGRAM_SIZE = 5;
 const CONTINUATION_ANALYSIS_SECTION_KEYS: BookAnalysisSectionKey[] = [
   "overview",
   "plot_structure",
@@ -34,42 +34,6 @@ type ContinuationAnalysisPack = {
   documentVersionNumber: number;
   sections: ContinuationAnalysisSection[];
 };
-
-function normalizeForSimilarity(text: string): string {
-  return text
-    .replace(/\s+/g, "")
-    .replace(/[，。！？；：、“”‘’（）《》【】\[\]\(\)!?,.:;'"`~\-_/\\|@#$%^&*+=<>]/g, "")
-    .trim();
-}
-
-function buildNGramSet(source: string, n = CONTINUATION_NGRAM_SIZE): Set<string> {
-  const normalized = normalizeForSimilarity(source);
-  if (!normalized) {
-    return new Set<string>();
-  }
-  if (normalized.length <= n) {
-    return new Set<string>([normalized]);
-  }
-  const grams = new Set<string>();
-  for (let i = 0; i <= normalized.length - n; i += 1) {
-    grams.add(normalized.slice(i, i + n));
-  }
-  return grams;
-}
-
-function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
-  if (a.size === 0 || b.size === 0) {
-    return 0;
-  }
-  let intersection = 0;
-  for (const item of a) {
-    if (b.has(item)) {
-      intersection += 1;
-    }
-  }
-  const union = a.size + b.size - intersection;
-  return union === 0 ? 0 : intersection / union;
-}
 
 function dedupeNonEmpty(items: string[]): string[] {
   const result: string[] = [];

@@ -1,8 +1,13 @@
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
+import { buildNGramSet, jaccardSimilarity } from "@ai-novel/shared/utils/textSimilarity";
 import { prisma } from "../../../db/prisma";
 import { runTextPrompt } from "../../../prompting/core/promptRunner";
 import type { PromptAsset } from "../../../prompting/core/promptTypes";
+import {
+  getChapterWriterRuntimeSettings,
+  type ChapterWriterRuntimeSettings,
+} from "../../settings/ChapterWriterRuntimeSettingsService";
 
 /**
  * 章首多样性默认实现：防止连续 N 章开篇雷同（节奏/措辞重复）。
@@ -16,21 +21,28 @@ import type { PromptAsset } from "../../../prompting/core/promptTypes";
  * - 边界：order<=1（序章/第一章，无已生成前置章）直接 passthrough。
  *
  * 复用策略：
- * - n-gram / jaccard / normalizeForSimilarity 为 NovelContinuationService 同源算法的本地副本。
- *   两处独立维护成本低；若出现第三处同源需求，再抽到 shared，避免为单次供应链跨模块。
+ * - n-gram / jaccard / normalizeForSimilarity 抽自 shared/utils/textSimilarity（与
+ *   NovelContinuationService 续写 anti-copy 同源），不再本模块本地维护。
  * - 重写提示词为本模块专属 opening rewrite 资产（章首语义，区别于 continuation 的"避开原文桥段"）。
+ * - recentWindow / openingChars / similarityThreshold 已迁入 AppSetting（ChapterWriterRuntimeSettings），
+ *   每次调用现读库值以支持热调；显式 options 仍优先于库值，便于单测固定参数。
  *
  * 回滚定位：本模块由 ChapterRuntimeCoordinator.createDefaultChapterWritingGraph 作为
  * enforceOpeningDiversity 注入；任意annoymous-deps 消费方仍走 no-op（注入点显式覆写）。
  */
 
 export interface OpeningDiversityGuardOptions {
-  /** 参考集窗口大小：最近 N 章已生成前置章节（默认 5）。 */
+  /** 参考集窗口大小：最近 N 章已生成前置章节。省略则按调用时 AppSetting 值（出厂默认 5）。 */
   recentWindow?: number;
-  /** 章首相似比较的字数窗口（默认 300）。 */
+  /** 章首相似比较的字数窗口。省略则按调用时 AppSetting 值（出厂默认 300）。 */
   openingChars?: number;
-  /** 触发改写的相似度阈值（默认 0.3，同 continuationService）。 */
+  /** 触发改写的相似度阈值。省略则按调用时 AppSetting 值（出厂默认 0.3，同 continuationService）。 */
   similarityThreshold?: number;
+  /**
+   * 运行时设置加载器（默认读 AppSetting，热调生效）。仅测试注入用；
+   * 上面三个显式字段若给出则优先于 settings，便于单测固定参数。
+   */
+  loadSettings?: () => Promise<ChapterWriterRuntimeSettings>;
 }
 
 export interface OpeningDiversityGuardResult {
@@ -49,45 +61,8 @@ interface RewriteOptions {
 const DEFAULT_RECENT_WINDOW = 5;
 const DEFAULT_OPENING_CHARS = 300;
 const DEFAULT_SIMILARITY_THRESHOLD = 0.3;
-const OPENING_NGRAM_SIZE = 5;
 const MIN_CORPUS_SNIPPET_LEN = 24;
-
-/** 与 NovelContinuationService.normalizeForSimilarity 同源：去空白与标点后做 n-gram。 */
-function normalizeForSimilarity(text: string): string {
-  return text
-    .replace(/\s+/g, "")
-    .replace(/[，。！？；：、""''（）《》【】\[\]\(\)!?,.:;'"`~\-_/\\|@#$%^&*+=<>]/g, "")
-    .trim();
-}
-
-function buildNGramSet(source: string, n = OPENING_NGRAM_SIZE): Set<string> {
-  const normalized = normalizeForSimilarity(source);
-  if (!normalized) {
-    return new Set<string>();
-  }
-  if (normalized.length <= n) {
-    return new Set<string>([normalized]);
-  }
-  const grams = new Set<string>();
-  for (let i = 0; i <= normalized.length - n; i += 1) {
-    grams.add(normalized.slice(i, i + n));
-  }
-  return grams;
-}
-
-function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
-  if (a.size === 0 || b.size === 0) {
-    return 0;
-  }
-  let intersection = 0;
-  for (const item of a) {
-    if (b.has(item)) {
-      intersection += 1;
-    }
-  }
-  const union = a.size + b.size - intersection;
-  return union === 0 ? 0 : intersection / union;
-}
+const MIN_OPENING_CHARS = 32;
 
 function sliceOpening(content: string | null | undefined, openingChars: number): string {
   if (!content) {
@@ -180,16 +155,21 @@ export function createDefaultOpeningDiversityGuard(
   content: string,
   llmOptions: RewriteOptions,
 ) => Promise<OpeningDiversityGuardResult> {
-  const recentWindow = Math.max(1, options.recentWindow ?? DEFAULT_RECENT_WINDOW);
-  const openingChars = Math.max(32, options.openingChars ?? DEFAULT_OPENING_CHARS);
-  const similarityThreshold = options.similarityThreshold ?? DEFAULT_SIMILARITY_THRESHOLD;
+  const loadSettings = options.loadSettings ?? getChapterWriterRuntimeSettings;
 
   return async (_novelId, chapterOrder, chapterTitle, content, llmOptions) => {
     const targetText = content.trim();
     if (!targetText || chapterOrder <= 1) {
       // 无正文或序章/第一章：无前置已生成参考集，不参与开篇多样性判定。
+      // 在这里短路，避免对 passthrough 章节多做一次 AppSetting 读取。
       return { content, rewritten: false, maxSimilarity: 0 };
     }
+
+    // 按调用读 AppSetting：显式 options 优先（测试固定），否则取运行时设置，最后兜底 DEFAULT。
+    const settings = await loadSettings();
+    const recentWindow = Math.max(1, options.recentWindow ?? settings.openingDiversityRecentWindow ?? DEFAULT_RECENT_WINDOW);
+    const openingChars = Math.max(MIN_OPENING_CHARS, options.openingChars ?? settings.openingDiversityOpeningChars ?? DEFAULT_OPENING_CHARS);
+    const similarityThreshold = options.similarityThreshold ?? settings.openingDiversitySimilarityThreshold ?? DEFAULT_SIMILARITY_THRESHOLD;
 
     const recentChapters = await prisma.chapter.findMany({
       where: {

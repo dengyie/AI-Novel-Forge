@@ -27,6 +27,7 @@ import SettingsNavigationCards from "./components/SettingsNavigationCards";
 import SettingsReadinessCard, { buildSettingsReadinessItems } from "./components/SettingsReadinessCard";
 import SettingsSectionGroup from "./components/SettingsSectionGroup";
 import StyleEngineRuntimeSettingsCard from "./components/StyleEngineRuntimeSettingsCard";
+import ChapterWriterRuntimeSettingsCard from "./components/ChapterWriterRuntimeSettingsCard";
 import SettingsActionResult from "./SettingsActionResult";
 import { AUTO_DIRECTOR_MOBILE_CLASSES } from "@/mobile/autoDirector";
 
@@ -505,6 +506,7 @@ export default function SettingsPage() {
       >
         <SettingsNavigationCards mode="knowledge" />
         <StyleEngineRuntimeSettingsCard />
+        <ChapterWriterRuntimeSettingsCard />
       </SettingsSectionGroup>
 
       <SettingsSectionGroup
