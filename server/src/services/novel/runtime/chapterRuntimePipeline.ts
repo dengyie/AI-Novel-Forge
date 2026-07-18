@@ -304,10 +304,23 @@ export async function runPipelineChapterWithRuntime(
 
     const acceptanceStatus = latestResult.runtimePackage.meta?.acceptanceStatus;
     const continuePolicy = latestResult.runtimePackage.meta?.continuePolicy;
+    const acceptanceGateUnavailable = latestResult.runtimePackage.meta?.riskTags?.includes("acceptance_gate_unavailable") === true;
     const shouldPauseForAcceptance = continuePolicy === "pause" || acceptanceStatus === "needs_manual_review";
     const shouldRepairFromAcceptance = continuePolicy === "repair_once" || acceptanceStatus === "repairable";
+    // 接收闸门 LLM 判官失败走 buildFallbackAssessment（status=continue_with_risk +
+    // riskTag=acceptance_gate_unavailable + 中级 issue code=acceptance_gate_unavailable）：信号
+    // 可观测，但 hasBlockingIssues 仅按 high/critical 计，不会因此抬升，故若 score 与 timeline
+    // 均过关，pass 仍可能取 true → 误把「质量闸未真实跑过」的章节标 completed（literaryPass）。
+    // 不允许：闸门未真实判定即不写 completed。故双重护栏——
+    //   ① pass AND 增加 !acceptanceGateUnavailable 强制为 false；
+    //   ② 紧随其后的 acceptanceGateUnavailable 短路，直接 markChapterNeedsRepair + recoverableFailure
+    //      （信号 review_gate_unavailable）break 出循环，章节入 needs_repair / 待审 / 债板。
+    // 之所以不走 repairDraftContent 改写：judge 不可用时无可据以修补的真实 issue（fallback 的
+    // blockingIssues 仅是 acceptance_gate_unavailable 占位、repairDirectives 为空），改写属无效扰动。
+    // 与 wiki「不退化、硬伤真拦」口径一致。
     pass = !shouldPauseForAcceptance
       && !shouldRepairFromAcceptance
+      && !acceptanceGateUnavailable
       && !latestResult.runtimePackage.audit.hasBlockingIssues
       && latestResult.runtimePackage.timelineCheck?.status !== "failed"
       && isQualityPass(latestResult.runtimePackage.audit.score, qualityThreshold)
@@ -340,6 +353,24 @@ export async function runPipelineChapterWithRuntime(
       firstMissingObligationKinds = (latestResult.runtimePackage.obligationCoverage?.missing ?? [])
         .map((m) => String(m.kind))
         .filter((kind) => kind.trim().length > 0);
+    }
+
+    if (acceptanceGateUnavailable) {
+      // 接收闸门未真实判定 → 不进入正文修复改写。judge 不可用时没有可据以修补的真实 issue
+      // （fallback assessment 的 blockingIssues 仅含中级 acceptance_gate_unavailable 占位，
+      // repairDirectives 为空），让 repairDraftContent 跑文本改写属于无效扰动且可退化文本。
+      // 直接走与 NON_PATCHABLE_REVIEW_ISSUE_CODES 同名的 recoverableFailure 路径：
+      // markChapterNeedsRepair → needs_repair，downstream 视为带 review_gate_unavailable 信号的断裂，
+      // 进待审/债板，绝不写 completed。与「不退化、硬伤真拦」一致。
+      await deps.markChapterNeedsRepair(chapterId);
+      recoverableRepairFailure = {
+        chapterId,
+        message: "章节接收判断暂时不可用，正文已保留，后续需要重新审校或人工复查。",
+        repairMode: repairMode ?? "light_repair",
+        failureTypes: ["review_gate_unavailable"],
+        occurredAt: new Date().toISOString(),
+      };
+      break;
     }
 
     if (shouldPauseForAcceptance || !autoRepair || repairMode === "detect_only" || attempt >= effectiveMaxRetries) {
