@@ -72,6 +72,10 @@ const characterParamsSchema = z.object({
   charId: z.string().trim().min(1),
 });
 
+const voiceLibraryMatchesQuerySchema = z.object({
+  topN: z.coerce.number().int().min(1).max(32).optional(),
+});
+
 const characterVoicePreviewGenerateSchema = z.object({
   text: z.string().trim().max(200).optional(),
   candidates: z.number().int().min(1).max(5).optional(),
@@ -652,16 +656,16 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
     "/:id/characters/:charId/voice-library/matches",
     validate({
       params: characterParamsSchema,
-      query: z.object({
-        topN: z.coerce.number().int().min(1).max(32).optional(),
-      }),
+      query: voiceLibraryMatchesQuerySchema,
     }),
     async (req, res, next) => {
       try {
         const { id, charId } = req.params as z.infer<typeof characterParamsSchema>;
-        const topN = req.query.topN;
+        // Express 5 的 req.query 是只读 getter，validate 中间件无法回写 coerce 结果，
+        // 故在此重新 parse 取 number 化的 topN（与 novelBaseRoutes 分页同约定）。
+        const { topN } = voiceLibraryMatchesQuerySchema.parse(req.query);
         const data = await audiobookVoiceAssetService.listVoiceLibraryMatches(id, charId, {
-          topN: typeof topN === "number" && Number.isFinite(topN) ? topN : undefined,
+          topN,
         });
         res.json({ success: true, data } satisfies ApiResponse<typeof data>);
       } catch (error) {

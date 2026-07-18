@@ -15,9 +15,9 @@ export function validate(schema: ValidationSchema): RequestHandler {
         req.body = schema.body.parse(req.body);
       }
       if (schema.query) {
-        // 回写校验/强制转换后的结果，使 z.coerce.* 真正生效；与 params 同模式
-        // （req.query 为字典引用，用 Object.assign 原地更新而非替换引用）
-        Object.assign(req.query, schema.query.parse(req.query) as Record<string, unknown>);
+        // 仅校验：Express 5 的 req.query 是每次重新解析的只读 getter，
+        // Object.assign 回写会被丢弃（no-op）。coerce 结果由 handler 内 schema.parse(req.query) 取用。
+        schema.query.parse(req.query);
       }
       if (schema.params) {
         // 回写校验/强制转换后的结果，使 z.coerce.* 真正生效
