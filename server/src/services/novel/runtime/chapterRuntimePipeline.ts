@@ -20,6 +20,7 @@ import {
 } from "./chapterEmptyContentError";
 import { isTransientTransportError } from "../../../llm/transportRetry";
 import { runChapterRepairText } from "./repair/chapterRepairRuntime";
+import { getChapterWriterRuntimeSettings } from "../../settings/ChapterWriterRuntimeSettingsService";
 
 export interface PipelineRuntimeHooks {
   onCheckCancelled?: () => Promise<void>;
@@ -180,19 +181,12 @@ const EMPTY_CONTENT_GENERATION_RETRY_LIMIT = 1;
 /**
  * mid-stream / writer transport 瞬时失败整章重试上限（不含首次）。
  *
- * ⚠️ 已知 backlog 违规：此处仍直读 process.env，按 wiki
- * `docs/wiki/architecture/configuration-conventions.md:L55` retry 次数属「业务调优」
- * 禁止走 env。本轮（review-fix 阶段 1）按用户选定的「文档化 + 注释对齐」口径
- * 暂留 env 起步、显式标 backlog，不在本阶段新建 ChapterWriterRuntimeSettings 脏化领域；
- * 真正迁移（四步范式 + 章节运行时设置面板）待多实例热调场景落地后再做。
- * env 默认 2 仅启动期读一次，符合「启动期固定」语义，但不属于 wiki L48 `*_TIMEOUT_MS` 允许 env 的同类。
+ * 已迁入 AppSetting（ChapterWriterRuntimeSettings.transportRetryMaxAttempts），
+ * 每次流水线运行现读库值以支持热调，不再是 module-load 期读一次 env。
+ * 语义：0 = 仅首次、失败不重试；1 = 首次 + 1 次重试；2 = 首次 + 2 次重试（出厂默认）。
+ * 无 AppSetting 记录时向后兼容旧部署仍读 process.env
+ * CHAPTER_WRITER_TRANSPORT_RETRY_MAX_ATTEMPTS 起步，写入库后以库为准。
  */
-const WRITER_TRANSPORT_GENERATION_RETRY_LIMIT = Math.max(
-  0,
-  Number.parseInt(process.env.CHAPTER_WRITER_TRANSPORT_RETRY_MAX_ATTEMPTS ?? "2", 10) || 0,
-);
-// 取值语义：0 = 仅首次、失败不重试；1 = 首次 + 1 次重试；2 = 首次 + 2 次重试（出厂默认）。
-// || 0 兜底：NaN / 非数字 env 文本 → 0（保守不重试，避免把坏 env 当成默认 2 的"宽松"解读）。
 
 const AUDIT_CATEGORY_MAP: Record<"continuity" | "character" | "plot" | "mode_fit", ReviewIssue["category"]> = {
   continuity: "coherence",
@@ -223,6 +217,10 @@ export async function runPipelineChapterWithRuntime(
   await deps.ensureNovelCharacters(novelId, "run chapter pipeline");
 
   const assembled = await deps.assemble(novelId, chapterId, request);
+
+  // 每次流水线运行现读 AppSetting：transport retry 限额热调生效。
+  const chapterWriterSettings = await getChapterWriterRuntimeSettings();
+  const transportRetryMaxAttempts = chapterWriterSettings.transportRetryMaxAttempts;
   let content = assembled.chapter.content?.trim() ? assembled.chapter.content : "";
   let retryCountUsed = 0;
   let latestResult: FinalizedRuntimeResult | null = null;
@@ -249,6 +247,7 @@ export async function runPipelineChapterWithRuntime(
         assembled,
         hooks,
         signal: cancelSignal,
+        transportRetryMaxAttempts,
       });
       content = generatedDraft.content;
       latestLengthControl = generatedDraft.lengthControl;
@@ -456,6 +455,7 @@ async function generateNonEmptyDraftFromWriter(input: {
   assembled: AssembledRuntimeChapter;
   hooks: PipelineRuntimeHooks;
   signal?: AbortSignal;
+  transportRetryMaxAttempts: number;
 }): Promise<{
   content: string;
   lengthControl?: ChapterRuntimePackage["lengthControl"];
@@ -519,7 +519,7 @@ async function generateNonEmptyDraftFromWriter(input: {
         throw error;
       }
       transportAttempt += 1;
-      const willRetry = transportAttempt <= WRITER_TRANSPORT_GENERATION_RETRY_LIMIT;
+      const willRetry = transportAttempt <= input.transportRetryMaxAttempts;
       const message = error instanceof Error ? error.message : String(error);
       await input.hooks.onWriterTransportRetry?.({
         attempt: transportAttempt,
