@@ -43,6 +43,18 @@ import {
   MIN_STYLE_EXTRACTION_TIMEOUT_MS,
   saveStyleEngineRuntimeSettings,
 } from "../services/settings/StyleEngineRuntimeSettingsService";
+import {
+  getChapterWriterRuntimeSettings,
+  saveChapterWriterRuntimeSettings,
+  MAX_OPENING_DIVERSITY_OPENING_CHARS,
+  MAX_OPENING_DIVERSITY_RECENT_WINDOW,
+  MAX_OPENING_DIVERSITY_SIMILARITY_THRESHOLD,
+  MAX_TRANSPORT_RETRY_MAX_ATTEMPTS,
+  MIN_OPENING_DIVERSITY_OPENING_CHARS,
+  MIN_OPENING_DIVERSITY_RECENT_WINDOW,
+  MIN_OPENING_DIVERSITY_SIMILARITY_THRESHOLD,
+  MIN_TRANSPORT_RETRY_MAX_ATTEMPTS,
+} from "../services/settings/ChapterWriterRuntimeSettingsService";
 import { registerCustomProviderRoutes } from "./settings/customProviderRoutes";
 import { registerLLMSelectionRoutes } from "./settings/llmSelectionRoutes";
 
@@ -110,6 +122,28 @@ const styleEngineRuntimeSettingsSchema = z.object({
     .int()
     .min(MIN_STYLE_EXTRACTION_TIMEOUT_MS)
     .max(MAX_STYLE_EXTRACTION_TIMEOUT_MS),
+});
+
+const chapterWriterRuntimeSettingsSchema = z.object({
+  openingDiversityRecentWindow: z.coerce
+    .number()
+    .int()
+    .min(MIN_OPENING_DIVERSITY_RECENT_WINDOW)
+    .max(MAX_OPENING_DIVERSITY_RECENT_WINDOW),
+  openingDiversitySimilarityThreshold: z.coerce
+    .number()
+    .min(MIN_OPENING_DIVERSITY_SIMILARITY_THRESHOLD)
+    .max(MAX_OPENING_DIVERSITY_SIMILARITY_THRESHOLD),
+  openingDiversityOpeningChars: z.coerce
+    .number()
+    .int()
+    .min(MIN_OPENING_DIVERSITY_OPENING_CHARS)
+    .max(MAX_OPENING_DIVERSITY_OPENING_CHARS),
+  transportRetryMaxAttempts: z.coerce
+    .number()
+    .int()
+    .min(MIN_TRANSPORT_RETRY_MAX_ATTEMPTS)
+    .max(MAX_TRANSPORT_RETRY_MAX_ATTEMPTS),
 });
 
 type APIKeyRecordLike = {
@@ -303,6 +337,36 @@ router.put(
         success: true,
         data,
         message: "写法引擎运行设置保存成功。",
+      } satisfies ApiResponse<typeof data>);
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+router.get("/chapter-writer-runtime", async (_req, res, next) => {
+  try {
+    const data = await getChapterWriterRuntimeSettings();
+    res.status(200).json({
+      success: true,
+      data,
+      message: "章节写作运行设置读取成功。",
+    } satisfies ApiResponse<typeof data>);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.put(
+  "/chapter-writer-runtime",
+  validate({ body: chapterWriterRuntimeSettingsSchema }),
+  async (req, res, next) => {
+    try {
+      const data = await saveChapterWriterRuntimeSettings(req.body as z.infer<typeof chapterWriterRuntimeSettingsSchema>);
+      res.status(200).json({
+        success: true,
+        data,
+        message: "章节写作运行设置保存成功。",
       } satisfies ApiResponse<typeof data>);
     } catch (error) {
       next(error);

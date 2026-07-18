@@ -117,6 +117,13 @@ export interface StyleEngineRuntimeSettingsStatus {
   maxStyleExtractionTimeoutMs: number;
 }
 
+export interface ChapterWriterRuntimeSettingsStatus {
+  openingDiversityRecentWindow: number;
+  openingDiversitySimilarityThreshold: number;
+  openingDiversityOpeningChars: number;
+  transportRetryMaxAttempts: number;
+}
+
 export interface LLMSelectionSettings {
   provider: LLMProvider;
   model: string;
@@ -316,6 +323,13 @@ export async function getStyleEngineRuntimeSettings() {
   return data;
 }
 
+export async function getChapterWriterRuntimeSettings() {
+  const { data } = await apiClient.get<ApiResponse<ChapterWriterRuntimeSettingsStatus>>(
+    "/settings/chapter-writer-runtime",
+  );
+  return data;
+}
+
 export async function getLLMSelectionSetting() {
   const { data } = await apiClient.get<ApiResponse<LLMSelectionSettings | null>>("/settings/llm-selection");
   return data;
@@ -331,6 +345,16 @@ export async function saveStyleEngineRuntimeSettings(payload: {
 }) {
   const { data } = await apiClient.put<ApiResponse<StyleEngineRuntimeSettingsStatus>>(
     "/settings/style-engine-runtime",
+    payload,
+  );
+  return data;
+}
+
+export async function saveChapterWriterRuntimeSettings(
+  payload: ChapterWriterRuntimeSettingsStatus,
+) {
+  const { data } = await apiClient.put<ApiResponse<ChapterWriterRuntimeSettingsStatus>>(
+    "/settings/chapter-writer-runtime",
     payload,
   );
   return data;
