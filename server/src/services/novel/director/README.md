@@ -52,18 +52,18 @@ import {
 
 ### 根目录现存文件契约（受 `tests/directorDirectoryBoundary.test.js` 固定）
 
-根目录 `.ts` 文件集合固定为 7 个，分两类，新增根文件会被该测试拒绝：
+根目录 `.ts` 文件集合当前固定为 7 个，新增根文件会被该测试拒绝：
 
 - 门面：`NovelDirectorService.ts`
 - 兼容桥接（re-export 1 行声明，主体在子目录）：
   `DirectorStateStore.ts` / `DirectorStateReader.ts` / `DirectorStateCommitter.ts`
   → 主体分别在 `state/DirectorStateStore.ts` 等。
-- 历史遗留根文件（主体仍在根，迁移到子目录需先与责任人协商并同步更新边界测试断言）：
+- 历史遗留根文件（**对照 wiki `module-boundaries.md:L31` + `L20-21` 客观属违规，但当前受 `directorDirectoryBoundary.test.js` 精确文件名固定，故为「已设门延迟」而非合规**；迁移到子目录需先与责任人协商并同步更新该测试断言，再 `git mv`，顺序不可颠倒）：
   `novelDirectorConfirmNodeAdapters.ts`（38 行，逻辑归属 `phases/`，仅类型导入、无内部同级依赖，迁移风险低，但与现有 node adapter 放置习惯并行，暂留根）；
   `NovelDirectorIdeaInspirationService.ts`（82 行，独立 prompt 服务，逻辑归属 `commands/`，迁移涉及 `promptRunner` 等 `../../../` 深链补层级，暂留根）；
-  `novelDirectorPipelineRuntime.ts`（695 行，逻辑归属 `runtime/`，但主体有 10+ 处对 `./runtime`、`./recovery`、`../characterPrep`、`../storyMacro` 的同级深链，迁移的相对路径 rewire 属中风险，暂留根，后续若需收缩规模在拆分时一并归位）。
+  `novelDirectorPipelineRuntime.ts`（695 行，逻辑归属 `runtime/`，且单文件接近 wiki `L20-21` 的 700 行扩展前必拆阈值，但主体有 10+ 处对 `./runtime`、`./recovery`、`../characterPrep`、`../storyMacro` 的同级深链，相对路径 rewire 属中风险，暂留根，后续若需收缩规模在拆分时一并归位）。
 
-保持根文件集合不变、不再新增同前缀根文件即为本子系统的目录边界合规要求。
+「保持根文件集合不变、不再新增同前缀根文件」是该测试在当前阈值下守住的底线，**不代表这 3 个历史遗留根文件目录边界合规**；L31 收敛目标仍是把它们移入对应子目录，但每次迁移必须先更新边界测试断言。
 
 ## 数据模型
 

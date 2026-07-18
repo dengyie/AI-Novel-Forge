@@ -11,8 +11,9 @@
 |---|---|---|---|
 | 阶段 1 (C2) | ✅ 完成 | `eb185f7` | retrievalTrace 4 步迁完 + rag.ts 12 键 env 泄漏清零（见下方 C2 章节，超出原 14 键子集的纯常量清理由此一并落地）。typecheck + 5 项 RAG/boundary 测试绿。 |
 | 阶段 2 (C5+C6+C7) | ✅ 完成 | `b57b0b0` `ac7f348` | 三处文档失真微提交；C6 复核为「无违规 / wiki 已正确」，HybridRetrievalService 加意图注释锁定硬剪枝语义。 |
-| 阶段 3 (C3+C4) | ✅ 完成（实质合规 + 契约锁定） | `0f39825` | **未执行 `git mv`**：C3 三 shim 已符合 L31，3 个 historic 根文件受 `directorDirectoryBoundary.test.js` 精确文件名固定；C4 6 候选不在 wiki 强制迁移范围（styleEngine 等），均 <700 行预算内。改为 director/README.md + routes/README.md 契约锁定语义（含迁移前提：需同步更新测试断言）。 |
+| 阶段 3 (C3+C4) | ✅ 完成（契约锁定 + L31 违规如实标注） | `0f39825` | **未执行 `git mv`**：C3 三 shim 已符合 L31，3 个 historic 根文件对照 wiki `module-boundaries.md:L31` + `L20-21` 客观属违规，当前受 `directorDirectoryBoundary.test.js` 精确文件名固定故为「已设门延迟」而非合规（迁移须先更新测试断言再 `git mv`）；C4 6 候选不在 wiki 强制迁移范围（styleEngine 等），均 <700 行预算内。改为 director/README.md + routes/README.md 契约锁定语义（含迁移前提：需同步更新测试断言）。 |
 | 阶段 4 (C1) | ⏸️ 暂停 — Manual-required | — | **本阶段不开**：`novelAudiobookRoutes.ts` (1519 行) 与 `audiobookVoicePlanner.ts` (1494 行) 均在 audiobook E/F/G 在轨工作流（owner: dengyie，近 14 日 62 commits 横跨 phase-A/B/EFG/review）。按计划本节既定纪律（见下「关键纪律」与本阶段首句），拆分时点必须与 audiobook 责任人对齐，属 Manual-required。本会话不强行机械重构以免与在轨提交冲突。验证入口见下「C1 验证」。 |
+| 阶段 1 后续补审 (M1+M2+M3) | ✅ 完成 | `3321974` `4e110d4` + 本 commit | M3:`contextualRetrievalConcurrency`/`rerankerCandidateLimit` 按 retrievalTrace 4 步范式迁 AppSetting，补 C2 漏列的两键（并发/阈值，wiki L55 明列）；M1:`.env.example`(根+server) 加首启种子头部注释 + wiki L31/59/61 改述为 AppSetting 真源；M2:director/README.md + 本表 L14 状态列去掉「实质合规」措辞，如实标注 3 根文件对照 L31 客观属违规、受边界测试设门延迟。typecheck(server+client)+build ✅，目标测试 5 项绿，ragContextualChunk 直 require 失败经 stash 复核为既存 dist 循环依赖 load 产物(干净 main 同形态),非本次回归。 |
 
 
 ## 阶段拆分
