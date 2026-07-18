@@ -1,5 +1,6 @@
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
+import { buildNGramSet, jaccardSimilarity } from "@ai-novel/shared/utils/textSimilarity";
 import { prisma } from "../../../db/prisma";
 import { runTextPrompt } from "../../../prompting/core/promptRunner";
 import type { PromptAsset } from "../../../prompting/core/promptTypes";
@@ -16,8 +17,8 @@ import type { PromptAsset } from "../../../prompting/core/promptTypes";
  * - 边界：order<=1（序章/第一章，无已生成前置章）直接 passthrough。
  *
  * 复用策略：
- * - n-gram / jaccard / normalizeForSimilarity 为 NovelContinuationService 同源算法的本地副本。
- *   两处独立维护成本低；若出现第三处同源需求，再抽到 shared，避免为单次供应链跨模块。
+ * - n-gram / jaccard / normalizeForSimilarity 抽自 shared/utils/textSimilarity（与
+ *   NovelContinuationService 续写 anti-copy 同源），不再本模块本地维护。
  * - 重写提示词为本模块专属 opening rewrite 资产（章首语义，区别于 continuation 的"避开原文桥段"）。
  *
  * 回滚定位：本模块由 ChapterRuntimeCoordinator.createDefaultChapterWritingGraph 作为
@@ -49,45 +50,7 @@ interface RewriteOptions {
 const DEFAULT_RECENT_WINDOW = 5;
 const DEFAULT_OPENING_CHARS = 300;
 const DEFAULT_SIMILARITY_THRESHOLD = 0.3;
-const OPENING_NGRAM_SIZE = 5;
 const MIN_CORPUS_SNIPPET_LEN = 24;
-
-/** 与 NovelContinuationService.normalizeForSimilarity 同源：去空白与标点后做 n-gram。 */
-function normalizeForSimilarity(text: string): string {
-  return text
-    .replace(/\s+/g, "")
-    .replace(/[，。！？；：、""''（）《》【】\[\]\(\)!?,.:;'"`~\-_/\\|@#$%^&*+=<>]/g, "")
-    .trim();
-}
-
-function buildNGramSet(source: string, n = OPENING_NGRAM_SIZE): Set<string> {
-  const normalized = normalizeForSimilarity(source);
-  if (!normalized) {
-    return new Set<string>();
-  }
-  if (normalized.length <= n) {
-    return new Set<string>([normalized]);
-  }
-  const grams = new Set<string>();
-  for (let i = 0; i <= normalized.length - n; i += 1) {
-    grams.add(normalized.slice(i, i + n));
-  }
-  return grams;
-}
-
-function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
-  if (a.size === 0 || b.size === 0) {
-    return 0;
-  }
-  let intersection = 0;
-  for (const item of a) {
-    if (b.has(item)) {
-      intersection += 1;
-    }
-  }
-  const union = a.size + b.size - intersection;
-  return union === 0 ? 0 : intersection / union;
-}
 
 function sliceOpening(content: string | null | undefined, openingChars: number): string {
   if (!content) {
