@@ -193,7 +193,6 @@ const WRITER_TRANSPORT_GENERATION_RETRY_LIMIT = Math.max(
 );
 // 取值语义：0 = 仅首次、失败不重试；1 = 首次 + 1 次重试；2 = 首次 + 2 次重试（出厂默认）。
 // || 0 兜底：NaN / 非数字 env 文本 → 0（保守不重试，避免把坏 env 当成默认 2 的"宽松"解读）。
-const NON_PATCHABLE_REVIEW_ISSUE_CODES = new Set(["acceptance_gate_unavailable"]);
 
 const AUDIT_CATEGORY_MAP: Record<"continuity" | "character" | "plot" | "mode_fit", ReviewIssue["category"]> = {
   continuity: "coherence",
@@ -361,9 +360,11 @@ export async function runPipelineChapterWithRuntime(
       // 接收闸门未真实判定 → 不进入正文修复改写。judge 不可用时没有可据以修补的真实 issue
       // （fallback assessment 的 blockingIssues 仅含中级 acceptance_gate_unavailable 占位，
       // repairDirectives 为空），让 repairDraftContent 跑文本改写属于无效扰动且可退化文本。
-      // 直接走与 NON_PATCHABLE_REVIEW_ISSUE_CODES 同名的 recoverableFailure 路径：
-      // markChapterNeedsRepair → needs_repair，downstream 视为带 review_gate_unavailable 信号的断裂，
+      // 直接合成 recoverableFailure{review_gate_unavailable} 并 markChapterNeedsRepair：
+      // 章节入 needs_repair，downstream 视为带 review_gate_unavailable 信号的断裂，
       // 进待审/债板，绝不写 completed。与「不退化、硬伤真拦」一致。
+      // 本短路是 judge-unavailable 的唯一真源（riskTag 单一来源）；repairDraftContent 内
+      // 不再保留 shouldDeferNonPatchableReviewRisk 等防御文本启发分支（已去冗余）。
       await deps.markChapterNeedsRepair(chapterId);
       recoverableRepairFailure = {
         chapterId,
@@ -398,12 +399,8 @@ export async function runPipelineChapterWithRuntime(
       },
       forceFullRewrite: styleLeakageIssues.length > 0,
     });
-    if (repairResult.recoverableFailure) {
-      recoverableRepairFailure = repairResult.recoverableFailure;
-      repairEscalatedFromPatch = repairResult.escalatedFromPatch;
-      await deps.markChapterNeedsRepair(chapterId);
-      break;
-    }
+    // 注：repairDraftContent 不再返回 recoverableFailure（judge-unavailable 已由上方
+    // acceptanceGateUnavailable 短路先行处理；repairDraftContent 现在只会改写或抛）
     repairEscalatedFromPatch = repairResult.escalatedFromPatch;
     content = repairResult.content;
     retryCountUsed += 1;
@@ -634,21 +631,7 @@ async function repairDraftContent(input: {
 }): Promise<{
   content: string;
   escalatedFromPatch: boolean;
-  recoverableFailure?: PipelineRecoverableRepairFailure | null;
 }> {
-  if (!input.forceFullRewrite && shouldDeferNonPatchableReviewRisk(input.runtimePackage, input.issues)) {
-    return {
-      content: input.content,
-      escalatedFromPatch: false,
-      recoverableFailure: {
-        chapterId: input.runtimePackage.chapterId,
-        message: "章节接收判断暂时不可用，正文已保留，后续需要重新审校或人工复查。",
-        repairMode: input.options.repairMode ?? "light_repair",
-        failureTypes: ["review_gate_unavailable"],
-        occurredAt: new Date().toISOString(),
-      },
-    };
-  }
   const repaired = await runChapterRepairText({
     novelId: input.runtimePackage.novelId,
     chapterId: input.runtimePackage.chapterId,
@@ -668,30 +651,7 @@ async function repairDraftContent(input: {
   return {
     content: repaired.content.trim() || input.content,
     escalatedFromPatch: repaired.escalatedFromPatch,
-    recoverableFailure: null,
   };
-}
-
-function shouldDeferNonPatchableReviewRisk(
-  runtimePackage: ChapterRuntimePackage,
-  issues: ReviewIssue[],
-): boolean {
-  const openIssues = runtimePackage.audit.openIssues ?? [];
-  if (openIssues.length > 0) {
-    return openIssues.every((issue) => typeof issue.code === "string"
-      && NON_PATCHABLE_REVIEW_ISSUE_CODES.has(issue.code));
-  }
-  return issues.length > 0 && issues.every(issueLooksLikeNonPatchableReviewRisk);
-}
-
-function issueLooksLikeNonPatchableReviewRisk(issue: ReviewIssue): boolean {
-  const evidence = issue.evidence.toLowerCase();
-  const fixSuggestion = issue.fixSuggestion.toLowerCase();
-  const combined = `${evidence}\n${fixSuggestion}`;
-  return combined.includes("acceptance_gate_unavailable")
-    || combined.includes("接收闸门未返回可用结构化结果")
-    || combined.includes("章节接收判断不可用")
-    || combined.includes("结构化判断缺失");
 }
 
 /** 从 runtimePackage 提取 openIssues 的 code 列表（过滤空值） */
