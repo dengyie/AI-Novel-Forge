@@ -9,6 +9,7 @@ import { ChapterArtifactSyncService } from "./ChapterArtifactSyncService";
 import { GenerationContextAssembler } from "./GenerationContextAssembler";
 import { ChapterAcceptanceAssessmentService } from "./ChapterAcceptanceAssessmentService";
 import { ChapterRuntimeReadinessService } from "./ChapterRuntimeReadinessService";
+import { createDefaultOpeningDiversityGuard } from "./openingDiversity";
 import {
   chapterRuntimeRequestSchema,
   type ChapterRuntimeCallOptions,
@@ -160,11 +161,7 @@ export class ChapterRuntimeCoordinator {
     artifactSyncService: Pick<ChapterArtifactSyncService, "saveDraftAndArtifacts">,
   ): Pick<ChapterWritingGraph, "createChapterStream"> {
     return new ChapterWritingGraph({
-      enforceOpeningDiversity: async (_novelId, _chapterOrder, _chapterTitle, content) => ({
-        content,
-        rewritten: false,
-        maxSimilarity: 0,
-      }),
+      enforceOpeningDiversity: createDefaultOpeningDiversityGuard(),
       saveDraftAndArtifacts: (...args) => artifactSyncService.saveDraftAndArtifacts(...args),
       logInfo: (message, meta) => {
         if (meta) {
