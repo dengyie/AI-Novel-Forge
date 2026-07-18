@@ -191,6 +191,8 @@ const WRITER_TRANSPORT_GENERATION_RETRY_LIMIT = Math.max(
   0,
   Number.parseInt(process.env.CHAPTER_WRITER_TRANSPORT_RETRY_MAX_ATTEMPTS ?? "2", 10) || 0,
 );
+// 取值语义：0 = 仅首次、失败不重试；1 = 首次 + 1 次重试；2 = 首次 + 2 次重试（出厂默认）。
+// || 0 兜底：NaN / 非数字 env 文本 → 0（保守不重试，避免把坏 env 当成默认 2 的"宽松"解读）。
 const NON_PATCHABLE_REVIEW_ISSUE_CODES = new Set(["acceptance_gate_unavailable"]);
 
 const AUDIT_CATEGORY_MAP: Record<"continuity" | "character" | "plot" | "mode_fit", ReviewIssue["category"]> = {
