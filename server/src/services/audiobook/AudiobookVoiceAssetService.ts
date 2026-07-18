@@ -41,7 +41,6 @@ import {
   resolveVoiceCluster,
   inferVoiceSlot,
   speakerKeyFromTags,
-  matchLibraryAssetsTopN,
   collectLibraryAssetCandidates,
 } from "./audiobookVoicePlanner";
 import {
@@ -369,7 +368,8 @@ export class AudiobookVoiceAssetService {
 
   /**
    * 「人物卡 ↔ VoiceAsset 对靠」：为单角色返回 top-N 库候选（approved clone_ref）。
-   * - 复用 matchLibraryAssetsTopN 打分（gender/cluster/scope/speaker 去重/L2 轻加权）
+   * - 单次 collectLibraryAssetCandidates 打分（gender/cluster/scope/speaker 去重/L2 轻加权），
+   *   top-N slice 与 excludedCount 复用同一结果，不二次打分
    * - 全书 speaker 去重视角：本书其他角色已绑定的 asset/speaker 进 usedSpeakerKeys，
    *   候选保留并标 occupiedBy（不硬排除，供人工覆盖）
    * - 不读角色 ttsRefAudioPath 绝对路径；不落库；不做听感证明
@@ -447,17 +447,11 @@ export class AudiobookVoiceAssetService {
     const selfAsset = target.ttsVoiceAssetId?.trim();
     if (selfAsset && target.ttsMode?.trim() === "clone") usedAssetIds.add(selfAsset);
 
-    const ranked = matchLibraryAssetsTopN({
-      genderBucket,
-      cluster,
-      assets: libraryAssets,
-      usedAssetIds,
-      usedSpeakerKeys,
-      preferredSlot,
-      topN: opts.topN,
-    });
-
-    // 全量通过门禁+speaker 去重后的候选数（未截断），用于排除计数
+    // 单次 collect 拿完整去重排序候选：既供 top-N slice，又供 excludedCount，避免二次打分。
+    // want 归一化与 matchLibraryAssetsTopN 一致（默认 8 / 硬顶 32 / 非法回落默认）。
+    const want = Number.isFinite(opts.topN) && (opts.topN as number) > 0
+      ? Math.min(Math.floor(opts.topN as number), 32)
+      : 8;
     const allRanked = collectLibraryAssetCandidates({
       genderBucket,
       cluster,
@@ -465,8 +459,10 @@ export class AudiobookVoiceAssetService {
       usedAssetIds,
       usedSpeakerKeys,
       preferredSlot,
+      /** 对靠链路：保留已被本书其他角色占用的 speaker 候选并标注，不静默隐藏 */
       includeOccupiedSpeakers: true,
     });
+    const ranked = allRanked.slice(0, want);
 
     const candidates: AudiobookVoiceLibraryMatchItem[] = ranked.map((c) => {
       const byAsset = assetOccupants.get(c.asset.id) ?? [];
