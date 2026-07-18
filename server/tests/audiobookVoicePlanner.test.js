@@ -4,6 +4,8 @@ const assert = require("node:assert/strict");
 const {
   planCharacterVoices,
   matchLibraryAsset,
+  speakerKeyFromTags,
+  DEFAULT_LIBRARY_SCOPES,
   inferGenderBucket,
   inferAgeBucket,
   scoreImportance,
@@ -1349,5 +1351,201 @@ test("extra may still match gender-only approved assets", () => {
   });
   assert.ok(hit);
   assert.equal(hit.asset.id, "va_male");
+});
+
+test("speakerKeyFromTags prefers speaker: tag else asset:id", () => {
+  assert.equal(speakerKeyFromTags(["male", "speaker:sp-alice"], "va1"), "speaker:sp-alice");
+  assert.equal(speakerKeyFromTags(["male"], "va1"), "asset:va1");
+  assert.equal(speakerKeyFromTags([], null), "");
+  assert.deepEqual([...DEFAULT_LIBRARY_SCOPES], ["scope-zh"]);
+});
+
+test("matchLibraryAsset default scope-zh blocks scope-en only assets", () => {
+  const enOnly = matchLibraryAsset({
+    genderBucket: "male",
+    cluster: "extra",
+    usedAssetIds: new Set(),
+    assets: [
+      {
+        id: "va_en",
+        slug: "en-male",
+        displayName: "EN",
+        status: "approved",
+        kind: "clone_ref",
+        tags: ["male", "scope-en"],
+      },
+    ],
+  });
+  assert.equal(enOnly, null);
+
+  const openZh = matchLibraryAsset({
+    genderBucket: "male",
+    cluster: "extra",
+    usedAssetIds: new Set(),
+    assets: [
+      {
+        id: "va_open",
+        slug: "open-male",
+        displayName: "open",
+        status: "approved",
+        kind: "clone_ref",
+        tags: ["male"],
+      },
+      {
+        id: "va_zh",
+        slug: "zh-male",
+        displayName: "ZH",
+        status: "approved",
+        kind: "clone_ref",
+        tags: ["male", "scope-zh"],
+      },
+    ],
+  });
+  assert.ok(openZh);
+  // scope hit 优先于 open
+  assert.equal(openZh.asset.id, "va_zh");
+
+  const allowAll = matchLibraryAsset({
+    genderBucket: "male",
+    cluster: "extra",
+    usedAssetIds: new Set(),
+    preferredScopes: [],
+    assets: [
+      {
+        id: "va_en",
+        slug: "en-male",
+        displayName: "EN",
+        status: "approved",
+        kind: "clone_ref",
+        tags: ["male", "scope-en"],
+      },
+    ],
+  });
+  assert.ok(allowAll);
+  assert.equal(allowAll.asset.id, "va_en");
+});
+
+test("matchLibraryAsset speaker de-dupe blocks same speaker across clips", () => {
+  const assets = [
+    {
+      id: "va_a1",
+      slug: "alice-1",
+      displayName: "Alice1",
+      status: "approved",
+      kind: "clone_ref",
+      tags: ["female", "cast", "speaker:sp-alice"],
+    },
+    {
+      id: "va_a2",
+      slug: "alice-2",
+      displayName: "Alice2",
+      status: "approved",
+      kind: "clone_ref",
+      tags: ["female", "cast", "speaker:sp-alice"],
+    },
+    {
+      id: "va_b",
+      slug: "bob",
+      displayName: "Bob",
+      status: "approved",
+      kind: "clone_ref",
+      tags: ["female", "cast", "speaker:sp-bob"],
+    },
+  ];
+  const first = matchLibraryAsset({
+    genderBucket: "female",
+    cluster: "cast",
+    usedAssetIds: new Set(),
+    usedSpeakerKeys: new Set(),
+    assets,
+  });
+  assert.ok(first);
+  const usedSpeakers = new Set([speakerKeyFromTags(first.asset.tags, first.asset.id)]);
+  const usedIds = new Set([first.asset.id]);
+  const second = matchLibraryAsset({
+    genderBucket: "female",
+    cluster: "cast",
+    usedAssetIds: usedIds,
+    usedSpeakerKeys: usedSpeakers,
+    assets,
+  });
+  assert.ok(second);
+  assert.notEqual(speakerKeyFromTags(second.asset.tags, second.asset.id), usedSpeakers.values().next().value);
+  assert.equal(second.asset.id, "va_b");
+});
+
+test("lead soft-matches cast when no lead-tagged assets", () => {
+  const hit = matchLibraryAsset({
+    genderBucket: "male",
+    cluster: "lead",
+    usedAssetIds: new Set(),
+    assets: [
+      {
+        id: "va_cast",
+        slug: "cast-m",
+        displayName: "cast male",
+        status: "approved",
+        kind: "clone_ref",
+        tags: ["male", "cast", "scope-zh"],
+      },
+      {
+        id: "va_extra",
+        slug: "extra-m",
+        displayName: "extra male",
+        status: "approved",
+        kind: "clone_ref",
+        tags: ["male", "extra"],
+      },
+    ],
+  });
+  assert.ok(hit);
+  assert.equal(hit.asset.id, "va_cast");
+  assert.match(hit.reason, /cast_for_lead|cluster:cast/);
+});
+
+test("auto strategy tries library for extra and occupies speaker", () => {
+  const { items } = planCharacterVoices({
+    onlyMissing: true,
+    strategy: "auto",
+    libraryAssets: [
+      {
+        id: "va_e1",
+        slug: "extra-a",
+        displayName: "路人A",
+        status: "approved",
+        kind: "clone_ref",
+        tags: ["male", "extra", "speaker:sp-e1", "scope-zh"],
+      },
+      {
+        id: "va_e2",
+        slug: "extra-b",
+        displayName: "路人B",
+        status: "approved",
+        kind: "clone_ref",
+        tags: ["male", "extra", "speaker:sp-e1", "scope-zh"],
+      },
+      {
+        id: "va_e3",
+        slug: "extra-c",
+        displayName: "路人C",
+        status: "approved",
+        kind: "clone_ref",
+        tags: ["male", "extra", "speaker:sp-e3", "scope-zh"],
+      },
+    ],
+    characters: [
+      { characterId: "x1", characterName: "路人甲", gender: "male", role: "路人" },
+      { characterId: "x2", characterName: "路人乙", gender: "male", role: "路人" },
+    ],
+  });
+  const a = items.find((i) => i.characterId === "x1");
+  const b = items.find((i) => i.characterId === "x2");
+  assert.equal(a.ttsMode, "clone");
+  assert.equal(b.ttsMode, "clone");
+  assert.notEqual(a.ttsVoiceAssetId, b.ttsVoiceAssetId);
+  // same speaker clips must not both bind
+  const ids = new Set([a.ttsVoiceAssetId, b.ttsVoiceAssetId]);
+  assert.equal(ids.has("va_e1") && ids.has("va_e2"), false);
+  assert.ok(ids.has("va_e3"));
 });
 
