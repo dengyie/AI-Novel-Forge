@@ -59,6 +59,7 @@ export type VolumeGenerationScope =
   | "strategy"
   | "strategy_critique"
   | "skeleton"
+  | "skeleton_critique"
   | "function_table"
   | "beat_sheet"
   | "chapter_list"

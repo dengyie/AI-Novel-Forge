@@ -12,11 +12,13 @@ import {
   buildVolumeChapterDetailContextBlocks,
   buildVolumeRebalanceContextBlocks,
   buildVolumeSkeletonContextBlocks,
+  buildVolumeSkeletonCritiqueContextBlocks,
   buildVolumeStrategyContextBlocks,
   buildVolumeStrategyCritiqueContextBlocks,
 } from "../../../prompting/prompts/novel/volume/contextBlocks";
 import { volumeRebalancePrompt } from "../../../prompting/prompts/novel/volume/rebalance.prompts";
 import { createVolumeSkeletonPrompt } from "../../../prompting/prompts/novel/volume/skeleton.prompts";
+import { volumeSkeletonCritiquePrompt } from "../../../prompting/prompts/novel/volume/skeletonCritique.prompts";
 import {
   createVolumeStrategyPrompt,
   volumeStrategyCritiquePrompt,
@@ -43,6 +45,8 @@ import {
   mergeSkeleton,
   mergeStrategyPlan,
   normalizeScope,
+  shouldRegenerateSkeleton,
+  formatSkeletonCritiqueFeedback,
 } from "./volumeGenerationHelpers";
 import type {
   VolumeGenerateOptions,
@@ -280,6 +284,55 @@ async function generateStrategyCritique(params: {
   return mergeCritiqueReport(document, generated.output);
 }
 
+async function generateSkeletonCritique(params: {
+  document: VolumePlanDocument;
+  novel: VolumeGenerationNovel;
+  workspace: VolumeWorkspace;
+  storyMacroPlan: StoryMacroPlanResult;
+  options: VolumeGenerateOptions;
+}): Promise<VolumePlanDocument> {
+  const { document, novel, workspace, storyMacroPlan, options } = params;
+  await notifyVolumeGenerationPhase({
+    novelId: document.novelId,
+    scope: "skeleton_critique",
+    phase: "prompt",
+    label: "正在审查卷骨架对手面与 framing",
+    options,
+  });
+  const generated = await runStructuredPrompt({
+    asset: volumeSkeletonCritiquePrompt,
+    promptInput: {
+      novel,
+      workspace,
+      storyMacroPlan,
+      strategyPlan: document.strategyPlan,
+      skeletonVolumes: document.volumes,
+      guidance: options.guidance,
+    },
+    contextBlocks: buildVolumeSkeletonCritiqueContextBlocks({
+      novel,
+      workspace,
+      storyMacroPlan,
+      strategyPlan: document.strategyPlan,
+      skeletonVolumes: document.volumes,
+      guidance: options.guidance,
+    }),
+    options: {
+      provider: options.provider,
+      model: options.model,
+      temperature: options.temperature ?? 0.2,
+      novelId: document.novelId,
+      taskId: options.taskId,
+      stage: "volume_strategy",
+      itemKey: "volume_skeleton",
+      scope: "skeleton_critique",
+      entrypoint: options.entrypoint,
+      signal: options.signal,
+    },
+  });
+  return mergeCritiqueReport(document, generated.output);
+}
+
 async function generateSkeleton(params: {
   document: VolumePlanDocument;
   novel: VolumeGenerationNovel;
@@ -300,6 +353,11 @@ async function generateSkeleton(params: {
     maxVolumeCount: MAX_VOLUME_COUNT,
   });
   const targetVolumeCount = document.strategyPlan.recommendedVolumeCount;
+  const skeletonCritiqueGuidance = [
+    options.guidance?.trim(),
+    formatSkeletonCritiqueFeedback(document.critiqueReport),
+  ].filter(Boolean).join("\n");
+
   await notifyVolumeGenerationPhase({
     novelId: document.novelId,
     scope: "skeleton",
@@ -314,7 +372,7 @@ async function generateSkeleton(params: {
       workspace,
       storyMacroPlan,
       strategyPlan: document.strategyPlan,
-      guidance: options.guidance,
+      guidance: skeletonCritiqueGuidance,
       volumeCountGuidance,
       chapterBudget,
     },
@@ -323,7 +381,7 @@ async function generateSkeleton(params: {
       workspace,
       storyMacroPlan,
       strategyPlan: document.strategyPlan,
-      guidance: options.guidance,
+      guidance: skeletonCritiqueGuidance,
       volumeCountGuidance,
       chapterBudget,
     }),
@@ -340,10 +398,97 @@ async function generateSkeleton(params: {
       signal: options.signal,
     },
   });
-  return mergeSkeleton(document, generated.output.volumes);
+  let merged = mergeSkeleton(document, generated.output.volumes);
+
+  const MAX_SKELETON_GENERATIONS = 2;
+  let generations = 1;
+  while (generations < MAX_SKELETON_GENERATIONS) {
+    merged = await generateSkeletonCritique({
+      document: merged,
+      novel,
+      workspace,
+      storyMacroPlan,
+      options,
+    });
+    if (!shouldRegenerateSkeleton(merged.critiqueReport)) {
+      return merged;
+    }
+    generations += 1;
+
+    const retryGuidance = [
+      options.guidance?.trim(),
+      formatSkeletonCritiqueFeedback(merged.critiqueReport),
+    ].filter(Boolean).join("\n");
+
+    await notifyVolumeGenerationPhase({
+      novelId: document.novelId,
+      scope: "skeleton",
+      phase: "prompt",
+      label: `卷骨架对手面审查未通过，正在带反馈重生（第 ${generations} 次）`,
+      options,
+    });
+    const regenerated = await runStructuredPrompt({
+      asset: createVolumeSkeletonPrompt(targetVolumeCount),
+      promptInput: {
+        novel,
+        workspace,
+        storyMacroPlan,
+        strategyPlan: document.strategyPlan,
+        guidance: retryGuidance,
+        volumeCountGuidance,
+        chapterBudget,
+      },
+      contextBlocks: buildVolumeSkeletonContextBlocks({
+        novel,
+        workspace,
+        storyMacroPlan,
+        strategyPlan: document.strategyPlan,
+        guidance: retryGuidance,
+        volumeCountGuidance,
+        chapterBudget,
+      }),
+      options: {
+        provider: options.provider,
+        model: options.model,
+        // retry 收敛意图：带反馈重生应更贴近 critique 要求，温度不高于初生（0.2），
+        // 避免更高温度把对手面再次推向 abstract-societal framing。
+        temperature: options.temperature ?? 0.2,
+        novelId: document.novelId,
+        taskId: options.taskId,
+        stage: "volume_strategy",
+        itemKey: "volume_skeleton",
+        scope: "skeleton",
+        entrypoint: options.entrypoint,
+        signal: options.signal,
+      },
+    });
+    // 保留最新一轮 critique 报告，便于落库可观测。
+    const previousCritiqueReport = merged.critiqueReport;
+    merged = mergeSkeleton(merged, regenerated.output.volumes);
+    merged = mergeCritiqueReport(merged, previousCritiqueReport);
+  }
+
+  // 走到上限仍未通过：再跑一次 critique 拿到最终报告，带 warn 落库，不抛错。
+  merged = await generateSkeletonCritique({
+    document: merged,
+    novel,
+    workspace,
+    storyMacroPlan,
+    options,
+  });
+  if (shouldRegenerateSkeleton(merged.critiqueReport)) {
+    await notifyVolumeGenerationPhase({
+      novelId: document.novelId,
+      scope: "skeleton",
+      phase: "warn",
+      label: "卷骨架对手面审查未完全通过，已带风险落库；可在分卷面板查看 critique 报告后手动重生",
+      options,
+    });
+  }
+  return merged;
 }
 
-export { resolveBeatSheetTargetChapterCount };
+export { resolveBeatSheetTargetChapterCount, generateSkeleton, generateSkeletonCritique };
 
 async function generateRebalance(params: {
   document: VolumePlanDocument;

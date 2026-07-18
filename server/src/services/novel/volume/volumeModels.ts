@@ -19,7 +19,7 @@ import type { Prisma } from "@prisma/client";
 import { prisma } from "../../../db/prisma";
 
 export type ChapterDetailMode = "purpose" | "boundary" | "task_sheet";
-export type VolumeGenerationPhase = "load_context" | "prompt";
+export type VolumeGenerationPhase = "load_context" | "prompt" | "warn";
 
 export interface VolumeGenerationPhaseEvent {
   scope: VolumeGenerationScope;
