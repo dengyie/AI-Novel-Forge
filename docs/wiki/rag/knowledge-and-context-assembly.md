@@ -28,7 +28,7 @@
 - 下游需要按拆书维度精确召回时，应优先调用 `HybridRetrievalService.retrieveByFacet({ query, facets, ...scope })`，而不是在各业务服务里手写 `facetKeys` 过滤条件。facet 命中为空时，检索服务保留无 facet 回退，避免历史 chunk 因缺少 facet 而完全不可召回。
 - `HybridRetrievalService.retrieve({ facets })` 应同时把 facet 过滤传给向量检索和关键词检索。老 chunk 没有 facet 时，带 facet 的检索可能为空；此时必须回退到无 facet 过滤的召回，保证旧资料不会被完全屏蔽。
 - RAG 召回应按采样率写入 `RagRetrievalTrace`，用于后续诊断召回质量。trace 只保存 query digest、按配置截断的 query preview、检索范围、候选数量、最终 hits 摘要、各阶段耗时和 fallback / reranker 标记；hits 只能保存 chunkId、rank、score、owner，不保存 chunk 正文。
-- 召回 trace 的 query 持久化由 `RAG_RETRIEVAL_TRACE_QUERY_PERSIST_MODE` 控制，生产环境可切到 `digest_only` 降低原文泄露风险。采样率由 `RAG_RETRIEVAL_TRACE_SAMPLE_RATE` 控制，保留周期由 `RAG_RETRIEVAL_TRACE_RETENTION_DAYS` 控制，过期数据由 `RagRetrievalTraceRetention` 清理。
+- 召回 trace 的 query 持久化由 `RAG_RETRIEVAL_TRACE_QUERY_PERSIST_MODE` 控制，生产环境可切到 `digest_only` 降低原文泄露风险。采样率与保留周期以 AppSetting 为运行时唯一真源：`rag.retrievalTraceSampleRate`（0–1）与 `rag.retrievalTraceRetentionDays`（1–365），通过前端「知识库 → 设置」面板修改；同名 env 仅在首次启动时把旧部署值种子进 AppSetting，之后一般不再读取。过期数据由 `RagRetrievalTraceRetention` 清理。
 - Prompt 模板只声明需要哪些上下文；Context Broker / Resolver 负责读取、预算、过滤、摘要和组装。
 - RAG 与上下文组装的失败要在 preview 或 trace 中可解释，不能静默丢 required context。
 
@@ -56,9 +56,9 @@
 - 归档文档恢复后无法召回：检查恢复动作是否把索引状态置为 `queued`，以及对应重建任务是否成功完成。
 - facet 检索完全无结果：先检查发布时的 `preChunks` 是否进入 RAG job payload，再检查 `KnowledgeChunk.facetKeys` 和 Qdrant payload 是否都写入同一 facet 字段；如果是历史 chunk 没有 facet，应确认检索服务触发无 facet 回退。
 - 拆书发布后结构化结论召回不准：检查 `bookAnalysis.publish.facets` 的字段映射是否把结构化字段映射到正确 facet，不要在消费方临时发明新的 facet 名。
-- 召回质量难以复盘：检查 `RAG_RETRIEVAL_TRACE_SAMPLE_RATE` 是否为 0、`RagRetrievalTrace` 是否有近期记录、`timingsJson` 是否包含 vector / keyword / fusion / reranker / decay / total 六项，以及 facet 命中为空时 `fallbackTriggered` 是否写为 true。
+- 召回质量难以复盘：检查 AppSetting `rag.retrievalTraceSampleRate` 是否为 0、`RagRetrievalTrace` 是否有近期记录、`timingsJson` 是否包含 vector / keyword / fusion / reranker / decay / total 六项，以及 facet 命中为空时 `fallbackTriggered` 是否写为 true。
 - trace 中 `rerankerMs` 恒为 0、`rerankerUsed` 恒为 false：这是 reranker 阶段尚未接入前的预留语义，不代表 reranker 失败；接入交叉编码器重排后会回填。
-- 历史 trace 数据无限增长：检查服务启动时是否调用了 `ragRetrievalTraceRetention.start()`，以及 `RAG_RETRIEVAL_TRACE_RETENTION_DAYS` 是否设置合理。
+- 历史 trace 数据无限增长：检查服务启动时是否调用了 `ragRetrievalTraceRetention.start()`，以及 AppSetting `rag.retrievalTraceRetentionDays` 是否设置合理。
 
 ## 相关模块
 
