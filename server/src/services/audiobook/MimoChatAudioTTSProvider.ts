@@ -281,9 +281,18 @@ export function extractAudioBase64(payload: unknown): string | null {
     return audio.data.trim();
   }
 
-  // 部分网关可能把 base64 放在 content
+  // 部分网关可能把 base64 放在 content；仅当可解码为合法 PCM WAV 时采信，避免错误文本恰好以 UklGR 开头被误当音频
   if (typeof message.content === "string" && message.content.trim().startsWith("UklGR")) {
-    return message.content.trim();
+    const bare = message.content.trim();
+    try {
+      const buf = Buffer.from(bare, "base64");
+      const head4 = buf.subarray(0, 4).toString("ascii");
+      if (head4 === "RIFF" && buf.toString("ascii", 8, 12) === "WAVE") {
+        return bare;
+      }
+    } catch {
+      // 解码失败则不采信
+    }
   }
 
   return null;
