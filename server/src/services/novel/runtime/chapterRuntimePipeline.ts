@@ -177,7 +177,16 @@ interface RunPipelineChapterDeps {
 /** 分维固定阈；与 options.qualityThreshold（overall）合取，见 isQualityPass。与 shared isPass 同源。 */
 const QUALITY_THRESHOLD = DEFAULT_QUALITY_IS_PASS_THRESHOLD;
 const EMPTY_CONTENT_GENERATION_RETRY_LIMIT = 1;
-/** mid-stream / writer transport 瞬时失败整章重试上限（不含首次）。与 empty 重试独立计数。 */
+/**
+ * mid-stream / writer transport 瞬时失败整章重试上限（不含首次）。
+ *
+ * ⚠️ 已知 backlog 违规：此处仍直读 process.env，按 wiki
+ * `docs/wiki/architecture/configuration-conventions.md:L55` retry 次数属「业务调优」
+ * 禁止走 env。本轮（review-fix 阶段 1）按用户选定的「文档化 + 注释对齐」口径
+ * 暂留 env 起步、显式标 backlog，不在本阶段新建 ChapterWriterRuntimeSettings 脏化领域；
+ * 真正迁移（四步范式 + 章节运行时设置面板）待多实例热调场景落地后再做。
+ * env 默认 2 仅启动期读一次，符合「启动期固定」语义，但不属于 wiki L48 `*_TIMEOUT_MS` 允许 env 的同类。
+ */
 const WRITER_TRANSPORT_GENERATION_RETRY_LIMIT = Math.max(
   0,
   Number.parseInt(process.env.CHAPTER_WRITER_TRANSPORT_RETRY_MAX_ATTEMPTS ?? "2", 10) || 0,
