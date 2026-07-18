@@ -20,9 +20,14 @@ import {
   issueCharacterVoicePreviewMediaUrl,
   issueVoiceLibraryAssetMediaUrl,
   listVoiceLibrary,
+  listVoiceLibraryMatches,
   rewriteCharacterVoiceDesign,
 } from "@/api/novel/audiobook";
 import type { NovelDetailResponse } from "@/api/novel/shared";
+import type {
+  AudiobookVoiceLibraryMatchesResult,
+  AudiobookVoiceLibraryMatchItem,
+} from "@ai-novel/shared/types/audiobook";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -88,6 +93,76 @@ function presetChipClass(active: boolean): string {
   return active
     ? "border-primary bg-primary/15 text-foreground shadow-sm"
     : "border-border/70 bg-background hover:border-primary/40 hover:bg-muted/25";
+}
+
+const DIM_ZH = {
+  gender: { hit: "性别命中", open: "性别开放", miss: "性别未命中" },
+  cluster: {
+    exact: "角色簇精确",
+    soft: "角色簇软匹配",
+    open: "角色簇开放",
+    weak: "角色簇弱",
+    none: "角色簇未命中",
+  },
+  scope: { hit: "语种命中", open: "语种开放", miss: "语种未命中" },
+} as const;
+
+function MatchCandidateCard(props: {
+  match: AudiobookVoiceLibraryMatchItem;
+  active: boolean;
+  previewing: boolean;
+  previewingNow: boolean;
+  bindPending: boolean;
+  onPreview: () => void;
+  onBind: () => void;
+}) {
+  const { match, active, previewing, previewingNow, bindPending, onPreview, onBind } = props;
+  const occupied = match.occupiedBy && match.occupiedBy.length > 0 ? match.occupiedBy : null;
+  return (
+    <div
+      className={`rounded-lg border px-3 py-2 text-left transition ${presetChipClass(active)}`}
+      title={`${match.voiceAssetId} · ${match.slug}`}
+    >
+      <div className="flex items-center gap-2">
+        <span className="text-sm font-medium">{match.displayName}</span>
+        <Badge variant="outline" className="text-[10px]">{match.score}</Badge>
+        {active ? <Badge variant="secondary">已绑</Badge> : null}
+        {previewingNow ? <Badge variant="outline">试听中</Badge> : null}
+        {occupied ? (
+          <Badge variant="destructive" className="text-[10px]">
+            已被 {occupied.join("、")} 占用
+          </Badge>
+        ) : null}
+      </div>
+      <div className="mt-0.5 text-[11px] text-muted-foreground">{match.slug}</div>
+      <div className="mt-1 text-[11px] leading-5 text-muted-foreground">
+        {DIM_ZH.gender[match.dimensions.gender]} · {DIM_ZH.cluster[match.dimensions.cluster]} ·{" "}
+        {DIM_ZH.scope[match.dimensions.scope]}
+      </div>
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          className="h-7 px-2 text-[11px]"
+          disabled={previewing || bindPending}
+          onClick={onPreview}
+        >
+          {previewing ? "取链…" : "试听"}
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant={active ? "secondary" : "outline"}
+          className="h-7 px-2 text-[11px]"
+          disabled={active || bindPending}
+          onClick={onBind}
+        >
+          {active ? "已绑定" : "绑定"}
+        </Button>
+      </div>
+    </div>
+  );
 }
 
 function PresetVoiceGrid(props: {
@@ -177,6 +252,9 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
   const [libraryPreviewUrl, setLibraryPreviewUrl] = useState<string | null>(null);
   const [libraryPreviewId, setLibraryPreviewId] = useState<string | null>(null);
   const [libraryPreviewLoadingId, setLibraryPreviewLoadingId] = useState<string | null>(null);
+  const [matchesResult, setMatchesResult] = useState<AudiobookVoiceLibraryMatchesResult | null>(null);
+  const [matchesLoading, setMatchesLoading] = useState(false);
+  const [matchesError, setMatchesError] = useState<string | null>(null);
   const [rewriteNotes, setRewriteNotes] = useState("");
   const [rewriteCandidate, setRewriteCandidate] = useState<string | null>(null);
   const [rewriteMeta, setRewriteMeta] = useState<string>("");
@@ -644,6 +722,29 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
     }
   };
 
+  const loadMatches = async () => {
+    setMatchesLoading(true);
+    setMatchesError(null);
+    try {
+      const data = await listVoiceLibraryMatches(novelId, characterId, 8);
+      const payload = data.data;
+      if (!payload) {
+        throw new Error("对靠响应缺少数据。");
+      }
+      setMatchesResult(payload);
+      if (!payload.candidates.length) {
+        setPreviewMessage(
+          `对靠无候选：库内无符合该角色 gender/cluster/scope 门禁的 approved clone_ref（库 ${payload.excludedCount} 条被门禁排除）。`,
+        );
+      }
+    } catch (error) {
+      setMatchesError(error instanceof Error ? error.message : "未知错误");
+      setMatchesResult(null);
+    } finally {
+      setMatchesLoading(false);
+    }
+  };
+
   const bindLibraryMutation = useMutation({
     mutationFn: async (voiceAssetId: string) => {
       const id = voiceAssetId.trim();
@@ -1042,6 +1143,51 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
                   </Button>
                 </div>
               ) : null}
+              <div className="space-y-2 rounded border bg-muted/20 p-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-xs font-medium text-foreground">对靠推荐（按人物卡匹配库候选）</div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-7 px-2 text-[11px]"
+                    disabled={matchesLoading}
+                    onClick={() => void loadMatches()}
+                  >
+                    {matchesLoading ? "匹配中…" : matchesResult ? "重新推荐" : "推荐候选"}
+                  </Button>
+                </div>
+                {matchesError ? (
+                  <div className="text-xs text-destructive">对靠失败：{matchesError}</div>
+                ) : null}
+                {matchesResult && !matchesResult.candidates.length ? (
+                  <div className="text-[11px] text-muted-foreground">
+                    无符合角色 gender/cluster/scope 门禁的 approved 候选（库 {matchesResult.excludedCount} 条被门禁排除）。可在下方手动筛选库。
+                  </div>
+                ) : null}
+                {matchesResult && matchesResult.candidates.length > 0 ? (
+                  <div className="text-[11px] text-muted-foreground">
+                    推断 {matchesResult.genderBucket}/{matchesResult.cluster} · 候选 {matchesResult.candidates.length} ·
+                    门禁排除 {matchesResult.excludedCount}
+                  </div>
+                ) : null}
+                {matchesResult && matchesResult.candidates.length > 0 ? (
+                  <div className="grid max-h-56 gap-2 overflow-y-auto sm:grid-cols-2">
+                    {matchesResult.candidates.map((m) => (
+                      <MatchCandidateCard
+                        key={m.voiceAssetId}
+                        match={m}
+                        active={boundAssetId === m.voiceAssetId}
+                        previewing={libraryPreviewLoadingId === m.voiceAssetId}
+                        previewingNow={libraryPreviewId === m.voiceAssetId}
+                        bindPending={bindLibraryMutation.isPending}
+                        onPreview={() => void previewLibraryAsset(m.voiceAssetId)}
+                        onBind={() => bindLibraryMutation.mutate(m.voiceAssetId)}
+                      />
+                    ))}
+                  </div>
+                ) : null}
+              </div>
               <div className="flex flex-wrap gap-1.5">
                 {(
                   [
