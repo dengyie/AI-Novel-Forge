@@ -34,6 +34,7 @@
     "audit:director-recovery-samples": "node scripts/director-recovery-sample-audit.cjs",
     "backfill:director-draft-baselines": "node scripts/director-chapter-draft-baseline-backfill.cjs",
     "migrate:model-routes": "node scripts/migrate-model-routes-to-pro-chat.cjs",
+    "migrate:char-clone-ref-paths": "node scripts/migrate-character-clone-ref-paths.cjs",
     "prisma": "prisma",
     "prisma:generate": "prisma generate --config prisma.config.ts",
     "prisma:push": "prisma db push --config prisma.config.ts",

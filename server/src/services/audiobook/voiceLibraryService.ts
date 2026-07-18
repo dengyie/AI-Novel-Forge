@@ -304,38 +304,72 @@ function assertLicense(license: VoiceAssetLicense | undefined | null): VoiceAsse
   };
 }
 
-/** 将 registry 内 path（相对 voice-refs 或历史绝对路径）解析为绝对路径。 */
-/** 角色表 ttsRefAudioPath 历史 bind 存绝对路径；首次访问库根时惰性全表迁移为相对。 */
+/**
+ * 角色表 ttsRefAudioPath 历史 bind 存绝对路径；首次访问库根时惰性全表迁移为相对。
+ * 半迁移幂等：逐行 ifAbsolute→relative，崩溃后下次 ensureLibraryRoot 再扫剩余绝对行。
+ * 缺表/DB 不可用：复位标志，下次自动重试（不高频，因 ensureLibraryRoot 仅 import/bind 触发）。
+ */
 let characterCloneRefMigrationDone = false;
-async function migrateCharacterCloneRefPathsRelativeOnce(): Promise<void> {
-  if (characterCloneRefMigrationDone) return;
+function isMissingPrismaTableLikeError(error: unknown): boolean {
+  return Boolean(
+    error
+    && typeof error === "object"
+    && "code" in error
+    && ((error as { code?: string }).code === "P2021"),
+  );
+}
+
+export async function migrateCharacterCloneRefPathsRelativeOnce(): Promise<{
+  migrated: number;
+  skippedOutOfRoot: number;
+  attempted: number;
+}> {
+  if (characterCloneRefMigrationDone) {
+    return { migrated: 0, skippedOutOfRoot: 0, attempted: 0 };
+  }
   characterCloneRefMigrationDone = true;
+  let migrated = 0;
+  let skippedOutOfRoot = 0;
+  let attempted = 0;
   try {
     const rows = await prisma.character.findMany({
       where: {
         ttsMode: "clone",
-        NOT: [{ ttsVoiceAssetId: null }],
+        ttsRefAudioPath: { not: null },
       },
       select: { id: true, ttsRefAudioPath: true },
     });
     for (const row of rows) {
       const raw = row.ttsRefAudioPath?.trim() || "";
       if (!raw || !path.isAbsolute(raw)) continue;
+      attempted += 1;
       try {
         const rel = toVoiceRefRelativePath(raw);
         await prisma.character.update({
           where: { id: row.id },
           data: { ttsRefAudioPath: rel },
         });
+        migrated += 1;
       } catch {
         // 越界/无法解析：保留绝对值（合成仍能解析），勿阻断迁移
+        skippedOutOfRoot += 1;
       }
     }
-  } catch {
-    // 缺表/DB 不可用：静默跳过，下次再试（标志已置位避免高频重试）
+  } catch (error) {
+    // 缺表/DB 不可用：复位标志以便下次再试（非高频，无重试风暴风险）
+    if (isMissingPrismaTableLikeError(error)) {
+      characterCloneRefMigrationDone = false;
+    }
   }
+  return { migrated, skippedOutOfRoot, attempted };
 }
 
+/** @internal 测试复位惰性迁移标志，隔离用例。生产勿调。 */
+export function resetCharacterCloneRefMigrationForTests(): void {
+  characterCloneRefMigrationDone = false;
+}
+
+/** 将 registry 内 path（相对 voice-refs 或历史绝对路径）解析为绝对路径。 */
 export function resolveVoiceAssetStoredPath(stored: string | null | undefined): string | null {
   const raw = stored?.trim() || "";
   if (!raw) return null;

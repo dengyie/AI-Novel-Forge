@@ -333,16 +333,19 @@ export class AudiobookVoiceReadinessService {
           requireApproved: true,
         });
         const effectivePath = resolved || character.ttsRefAudioPath?.trim() || "";
+        const hasAssetId = Boolean(character.ttsVoiceAssetId?.trim());
         const hasPath = Boolean(effectivePath);
         if (skipProbe) {
           // 列表态势：不 probe 文件，但仍走库 resolve（requireApproved），
           // 避免 draft/archived/缺失 assetId 被盲信为 configured。
           if (resolved) {
-            refAudioOk = true;
-          } else if (character.ttsVoiceAssetId?.trim()) {
+            // 有 assetId 的 resolved 经 assertCloneRefUsable 全校验→真 ok；
+            // legacy（无 assetId）resolved 仅做了路径解析，补一次轻检防越界/缺失
+            refAudioOk = hasAssetId ? true : probeRefAudioOk(resolved);
+          } else if (hasAssetId) {
             refAudioOk = false;
           } else if (hasPath) {
-            refAudioOk = true;
+            refAudioOk = probeRefAudioOk(effectivePath);
           } else {
             refAudioOk = null;
           }
