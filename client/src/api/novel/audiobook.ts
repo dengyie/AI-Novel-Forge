@@ -14,6 +14,7 @@ import type {
   AudiobookVoicePlanSuggestResult,
   AudiobookVoicePreviewInput,
   AudiobookVoicePreviewResult,
+  AudiobookVoiceLibraryMatchesResult,
   AudiobookVoiceReadinessAssessInput,
   AudiobookVoiceReadinessJob,
   AudiobookVoiceReadinessJobActiveErrorData,
@@ -124,6 +125,19 @@ export async function bindVoiceLibraryAsset(
   const { data } = await apiClient.post<ApiResponse<VoiceAssetBindCharacterResult>>(
     `/novels/${novelId}/characters/${characterId}/voice-library/bind`,
     { voiceAssetId },
+  );
+  return data;
+}
+
+/** 人物卡 ↔ VoiceAsset 对靠：单角色 top-N 候选（approved clone_ref + 打分理由 + 占用标注）。 */
+export async function listVoiceLibraryMatches(
+  novelId: string,
+  characterId: string,
+  topN?: number,
+): Promise<ApiResponse<AudiobookVoiceLibraryMatchesResult>> {
+  const query = typeof topN === "number" && Number.isFinite(topN) ? `?topN=${topN}` : "";
+  const { data } = await apiClient.get<ApiResponse<AudiobookVoiceLibraryMatchesResult>>(
+    `/novels/${novelId}/characters/${characterId}/voice-library/matches${query}`,
   );
   return data;
 }
