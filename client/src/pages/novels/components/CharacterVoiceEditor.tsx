@@ -16,7 +16,9 @@ import {
   bindVoiceLibraryAsset,
   generateCharacterVoicePreview,
   getCharacterVoicePreview,
+  getVoiceLibraryAsset,
   issueCharacterVoicePreviewMediaUrl,
+  issueVoiceLibraryAssetMediaUrl,
   listVoiceLibrary,
   rewriteCharacterVoiceDesign,
 } from "@/api/novel/audiobook";
@@ -163,9 +165,18 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
     : "";
   const boundAssetId = form.ttsVoiceAssetId?.trim() || "";
   const LIBRARY_PAGE = 50;
+  type LibraryScopeFilter = "scope-zh" | "all" | "scope-en" | "scope-mixed";
+  type LibraryClusterFilter = "all" | "lead" | "cast" | "extra" | "narrator";
+  type LibraryGenderFilter = "all" | "male" | "female" | "unknown";
   const [libraryKeyword, setLibraryKeyword] = useState("");
   const [debouncedLibraryKeyword, setDebouncedLibraryKeyword] = useState("");
   const [libraryPages, setLibraryPages] = useState(1);
+  const [libraryScopeFilter, setLibraryScopeFilter] = useState<LibraryScopeFilter>("scope-zh");
+  const [libraryClusterFilter, setLibraryClusterFilter] = useState<LibraryClusterFilter>("all");
+  const [libraryGenderFilter, setLibraryGenderFilter] = useState<LibraryGenderFilter>("all");
+  const [libraryPreviewUrl, setLibraryPreviewUrl] = useState<string | null>(null);
+  const [libraryPreviewId, setLibraryPreviewId] = useState<string | null>(null);
+  const [libraryPreviewLoadingId, setLibraryPreviewLoadingId] = useState<string | null>(null);
   const [rewriteNotes, setRewriteNotes] = useState("");
   const [rewriteCandidate, setRewriteCandidate] = useState<string | null>(null);
   const [rewriteMeta, setRewriteMeta] = useState<string>("");
@@ -178,9 +189,28 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
     return () => window.clearTimeout(timer);
   }, [libraryKeyword]);
 
+  useEffect(() => {
+    setLibraryPages(1);
+  }, [libraryScopeFilter, libraryClusterFilter, libraryGenderFilter]);
+
+  useEffect(() => {
+    setLibraryPreviewUrl(null);
+    setLibraryPreviewId(null);
+    setLibraryPreviewLoadingId(null);
+  }, [characterId]);
+
   const libraryLimit = Math.min(500, LIBRARY_PAGE * libraryPages);
+  // 服务端 tag 仅单值；scope/cluster/gender 取其一作服务端 tag，其余客户端过滤
+  const libraryServerTag =
+    libraryClusterFilter !== "all"
+      ? libraryClusterFilter
+      : libraryGenderFilter !== "all"
+        ? libraryGenderFilter
+        : libraryScopeFilter !== "all"
+          ? libraryScopeFilter
+          : undefined;
   const libraryQueryKey = queryKeys.novels.voiceLibrary(
-    `approved-clone_ref:q=${debouncedLibraryKeyword}:limit=${libraryLimit}`,
+    `approved-clone_ref:q=${debouncedLibraryKeyword}:tag=${libraryServerTag || ""}:scope=${libraryScopeFilter}:cluster=${libraryClusterFilter}:gender=${libraryGenderFilter}:limit=${libraryLimit}`,
   );
 
   const libraryQuery = useQuery({
@@ -190,12 +220,37 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
         status: "approved",
         kind: "clone_ref",
         q: debouncedLibraryKeyword || undefined,
+        tag: libraryServerTag,
         limit: libraryLimit,
         offset: 0,
       });
+      let items = (response.data?.items ?? []) as VoiceAsset[];
+      // 客户端补齐多维过滤（服务端仅支持单 tag）
+      if (libraryScopeFilter !== "all") {
+        items = items.filter((a) => {
+          const tags = (a.tags || []).map((t) => t.toLowerCase());
+          if (tags.includes(libraryScopeFilter)) return true;
+          // 无 scope 标签视为 open（可进中文池）
+          if (libraryScopeFilter === "scope-zh" && !tags.some((t) => t.startsWith("scope-"))) {
+            return true;
+          }
+          return false;
+        });
+      }
+      if (libraryClusterFilter !== "all") {
+        items = items.filter((a) =>
+          (a.tags || []).map((t) => t.toLowerCase()).includes(libraryClusterFilter),
+        );
+      }
+      if (libraryGenderFilter !== "all") {
+        items = items.filter((a) =>
+          (a.tags || []).map((t) => t.toLowerCase()).includes(libraryGenderFilter),
+        );
+      }
       return {
-        items: (response.data?.items ?? []) as VoiceAsset[],
+        items,
         total: response.data?.total ?? 0,
+        filtered: items.length,
       };
     },
     enabled: Boolean(novelId && characterId && mode === "clone"),
@@ -203,10 +258,26 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
   });
   const libraryItems = libraryQuery.data?.items ?? [];
   const libraryTotal = libraryQuery.data?.total ?? libraryItems.length;
-  const selectedLibraryAsset = useMemo(
-    () => libraryItems.find((item) => item.id === boundAssetId) ?? null,
-    [libraryItems, boundAssetId],
-  );
+  const libraryFilteredCount = libraryQuery.data?.filtered ?? libraryItems.length;
+
+  const boundAssetQuery = useQuery({
+    queryKey: queryKeys.novels.voiceLibrary(`bound:${boundAssetId}`),
+    queryFn: async () => {
+      const response = await getVoiceLibraryAsset(boundAssetId);
+      return response.data as VoiceAsset;
+    },
+    enabled: Boolean(novelId && characterId && mode === "clone" && boundAssetId),
+    staleTime: 60_000,
+  });
+
+  const selectedLibraryAsset = useMemo(() => {
+    if (!boundAssetId) return null;
+    return (
+      libraryItems.find((item) => item.id === boundAssetId)
+      ?? boundAssetQuery.data
+      ?? null
+    );
+  }, [libraryItems, boundAssetId, boundAssetQuery.data]);
 
   const [previewAudioUrl, setPreviewAudioUrl] = useState<string | null>(null);
   const [previewLabel, setPreviewLabel] = useState("");
@@ -554,6 +625,24 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
     if (patches.ttsRefAudioPath != null) onChange("ttsRefAudioPath", patches.ttsRefAudioPath);
     if (patches.ttsRefAudioBase64 != null) onChange("ttsRefAudioBase64", patches.ttsRefAudioBase64);
   }
+
+  const previewLibraryAsset = async (assetId: string) => {
+    const id = assetId.trim();
+    if (!id) return;
+    setLibraryPreviewLoadingId(id);
+    try {
+      const url = await issueVoiceLibraryAssetMediaUrl(id);
+      setLibraryPreviewUrl(url);
+      setLibraryPreviewId(id);
+      setPreviewMessage(`库试听就绪：${id.slice(0, 12)}…`);
+    } catch (error) {
+      setPreviewMessage(
+        `库试听失败：${error instanceof Error ? error.message : "未知错误"}`,
+      );
+    } finally {
+      setLibraryPreviewLoadingId(null);
+    }
+  };
 
   const bindLibraryMutation = useMutation({
     mutationFn: async (voiceAssetId: string) => {
@@ -928,13 +1017,95 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
             <div className="space-y-2">
               <div className="text-xs font-medium text-foreground">从全站音色库绑定</div>
               <p className="text-xs leading-5 text-muted-foreground">
-                仅列出 approved 的 clone_ref。点选即写入角色（无需再点「保存音色」）；路径由服务端写，客户端不提交参考音路径。
+                仅列出 approved 的 clone_ref。默认中文池（scope-zh）；可先试听再绑定。路径由服务端写，客户端不提交参考音路径。
                 {boundAssetId
                   ? ` 当前：${selectedLibraryAsset
                     ? `${selectedLibraryAsset.displayName}（${selectedLibraryAsset.slug}）`
-                    : boundAssetId}`
+                    : boundAssetQuery.isLoading
+                      ? "加载中…"
+                      : boundAssetId}`
                   : " 当前未绑库。"}
               </p>
+              {selectedLibraryAsset && boundAssetId ? (
+                <div className="flex flex-wrap items-center gap-2 rounded border bg-muted/30 px-2 py-1.5 text-xs">
+                  <span className="font-medium">{selectedLibraryAsset.displayName}</span>
+                  <span className="text-muted-foreground">{selectedLibraryAsset.slug}</span>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    className="h-7 px-2"
+                    disabled={libraryPreviewLoadingId === boundAssetId}
+                    onClick={() => void previewLibraryAsset(boundAssetId)}
+                  >
+                    {libraryPreviewLoadingId === boundAssetId ? "取链…" : "试听已绑"}
+                  </Button>
+                </div>
+              ) : null}
+              <div className="flex flex-wrap gap-1.5">
+                {(
+                  [
+                    ["scope-zh", "中文池"],
+                    ["all", "全部语种"],
+                    ["scope-en", "英文"],
+                    ["scope-mixed", "混合"],
+                  ] as const
+                ).map(([value, label]) => (
+                  <Button
+                    key={value}
+                    type="button"
+                    size="sm"
+                    variant={libraryScopeFilter === value ? "default" : "outline"}
+                    className="h-7 px-2 text-[11px]"
+                    onClick={() => setLibraryScopeFilter(value)}
+                  >
+                    {label}
+                  </Button>
+                ))}
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {(
+                  [
+                    ["all", "全簇"],
+                    ["lead", "主角"],
+                    ["cast", "主角团"],
+                    ["extra", "路人"],
+                    ["narrator", "旁白"],
+                  ] as const
+                ).map(([value, label]) => (
+                  <Button
+                    key={value}
+                    type="button"
+                    size="sm"
+                    variant={libraryClusterFilter === value ? "default" : "outline"}
+                    className="h-7 px-2 text-[11px]"
+                    onClick={() => setLibraryClusterFilter(value)}
+                  >
+                    {label}
+                  </Button>
+                ))}
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {(
+                  [
+                    ["all", "全性别"],
+                    ["male", "男"],
+                    ["female", "女"],
+                    ["unknown", "未知"],
+                  ] as const
+                ).map(([value, label]) => (
+                  <Button
+                    key={value}
+                    type="button"
+                    size="sm"
+                    variant={libraryGenderFilter === value ? "default" : "outline"}
+                    className="h-7 px-2 text-[11px]"
+                    onClick={() => setLibraryGenderFilter(value)}
+                  >
+                    {label}
+                  </Button>
+                ))}
+              </div>
               <Input
                 className="h-9 text-sm"
                 placeholder="检索库音色 slug / 名称 / tag…"
@@ -955,48 +1126,89 @@ export default function CharacterVoiceEditor(props: CharacterVoiceEditorProps) {
               {!libraryQuery.isLoading && !libraryQuery.isError && libraryItems.length === 0 ? (
                 <div className="text-xs text-muted-foreground">
                   {debouncedLibraryKeyword
-                    ? "无匹配 approved 库音色。"
+                    || libraryScopeFilter !== "all"
+                    || libraryClusterFilter !== "all"
+                    || libraryGenderFilter !== "all"
+                    ? "无匹配 approved 库音色（可放宽筛选）。"
                     : "暂无 approved 库音色。请先人耳批准 seed/import 资产后再绑库。"}
                 </div>
               ) : null}
               {!libraryQuery.isLoading && !libraryQuery.isError && libraryTotal > 0 ? (
                 <div className="text-[11px] text-muted-foreground">
-                  匹配 {libraryTotal} 条 · 已展示 {libraryItems.length}
+                  服务端 {libraryTotal} 条 · 本页过滤后 {libraryFilteredCount} · 已展示{" "}
+                  {libraryItems.length}
+                </div>
+              ) : null}
+              {libraryPreviewUrl && libraryPreviewId ? (
+                <div className="space-y-1 rounded border bg-background p-2">
+                  <div className="text-[11px] text-muted-foreground">
+                    试听中：{libraryPreviewId.slice(0, 12)}…
+                  </div>
+                  <audio
+                    key={libraryPreviewUrl}
+                    controls
+                    preload="metadata"
+                    className="h-8 w-full"
+                    src={libraryPreviewUrl}
+                  />
                 </div>
               ) : null}
               {libraryItems.length > 0 ? (
-                <div className="grid max-h-48 gap-2 overflow-y-auto sm:grid-cols-2">
+                <div className="grid max-h-56 gap-2 overflow-y-auto sm:grid-cols-2">
                   {libraryItems.map((asset) => {
                     const active = boundAssetId === asset.id;
-                    const tags = asset.tags.slice(0, 4).join(" · ");
+                    const tags = (asset.tags || []).slice(0, 5).join(" · ");
+                    const previewing = libraryPreviewLoadingId === asset.id;
                     return (
-                      <button
+                      <div
                         key={asset.id}
-                        type="button"
-                        disabled={bindLibraryMutation.isPending}
                         className={`rounded-lg border px-3 py-2 text-left transition ${presetChipClass(active)}`}
                         title={`${asset.id} · ${asset.slug}`}
-                        onClick={() => {
-                          if (active) return;
-                          bindLibraryMutation.mutate(asset.id);
-                        }}
                       >
                         <div className="flex items-center gap-2">
                           <span className="text-sm font-medium">{asset.displayName}</span>
                           {active ? <Badge variant="secondary">已绑</Badge> : null}
+                          {libraryPreviewId === asset.id ? (
+                            <Badge variant="outline">试听中</Badge>
+                          ) : null}
                         </div>
                         <div className="mt-0.5 text-[11px] text-muted-foreground">
                           {asset.slug}
                           {tags ? ` · ${tags}` : ""}
                         </div>
-                      </button>
+                        <div className="mt-2 flex flex-wrap gap-1.5">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            className="h-7 px-2 text-[11px]"
+                            disabled={previewing || bindLibraryMutation.isPending}
+                            onClick={() => void previewLibraryAsset(asset.id)}
+                          >
+                            {previewing ? "取链…" : "试听"}
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant={active ? "secondary" : "outline"}
+                            className="h-7 px-2 text-[11px]"
+                            disabled={active || bindLibraryMutation.isPending}
+                            onClick={() => {
+                              if (active) return;
+                              bindLibraryMutation.mutate(asset.id);
+                            }}
+                          >
+                            {active ? "已绑定" : "绑定"}
+                          </Button>
+                        </div>
+                      </div>
                     );
                   })}
                 </div>
               ) : null}
               {!libraryQuery.isLoading
                 && !libraryQuery.isError
-                && libraryTotal > libraryItems.length
+                && libraryTotal > libraryLimit
                 && libraryLimit < 500 ? (
                 <Button
                   type="button"

@@ -1106,21 +1106,33 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
   });
 
   const suggestVoiceMutation = useMutation({
-    mutationFn: async (mode: "missing" | "rebalance") => {
-      const overwriteMode = mode === "rebalance";
+    mutationFn: async (mode: "missing" | "rebalance" | "prefer_library") => {
+      const overwriteMode = mode === "rebalance" || mode === "prefer_library";
       setVoicePlanOverwrite(overwriteMode);
-      // 补齐缺失：auto 在有 approved 库时对 lead/cast/narrator 可推荐 clone；
-      // 重新差异化：prefer_design 拉高身份音色区分度（不注入库）
+      // missing → auto（库+design 混合）；rebalance → prefer_design；
+      // prefer_library → 优先全站 approved 库，无匹配回退 design/preset
+      const strategy =
+        mode === "prefer_library"
+          ? "prefer_library"
+          : mode === "rebalance"
+            ? "prefer_design"
+            : "auto";
       const response = await suggestAudiobookVoicePlan(novelId, {
         onlyMissing: !overwriteMode,
-        strategy: overwriteMode ? "prefer_design" : "auto",
+        strategy,
       });
-      return { data: response.data, overwriteMode };
+      return { data: response.data, overwriteMode, mode };
     },
-    onSuccess: ({ data, overwriteMode }) => {
+    onSuccess: ({ data, overwriteMode, mode }) => {
       const items = data?.items ?? [];
       setVoicePlanItems(items);
       setExpandedPlanDesignIds({});
+      const modeLabel =
+        mode === "prefer_library"
+          ? "优先音色库"
+          : mode === "rebalance"
+            ? "重新差异化"
+            : "补齐缺失";
       if (!data || items.length === 0) {
         const text = data?.skipped?.length
           ? `无需规划：${data.skipped.length} 个角色已绑定或已跳过。`
@@ -1136,7 +1148,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
         data.summary.seedInferredCount ? `seed推断 ${data.summary.seedInferredCount}` : "",
         cloneCount ? `库clone ${cloneCount}` : "",
       ].filter(Boolean);
-      const detail = `${overwriteMode ? "重新差异化" : "补齐缺失"}规划 ${items.length} 项：preset ${data.summary.presetCount} / design ${data.summary.designCount} / clone ${cloneCount}${
+      const detail = `${modeLabel}规划 ${items.length} 项：preset ${data.summary.presetCount} / design ${data.summary.designCount} / clone ${cloneCount}${
         obsBits.length ? `（${obsBits.join(" / ")}）` : ""
       }${
         overwriteMode ? "（写入时将覆盖已绑定）" : ""
@@ -1144,7 +1156,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
         cloneCount > 0 ? "。clone 项将经服务端 bind 写库资产（需已批准）。" : "。"
       }`;
       toast.success(
-        `${overwriteMode ? "重新差异化" : "补齐缺失"}规划 ${items.length} 项（clone ${cloneCount}）`,
+        `${modeLabel}规划 ${items.length} 项（clone ${cloneCount}）`,
       );
       setMessage(detail);
     },
@@ -1373,7 +1385,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
           </summary>
           <div className="mt-3 space-y-3 border-t border-border/60 pt-3">
             <div className="text-xs leading-5 text-muted-foreground">
-              「重新差异化」按分簇规划：主角/主角团 VoiceDesign（拉开槽位），路人/旁白走预置簇；特征只读角色卡、不读正文；写入后请一键就绪/生成试听。规划草稿临时试听不固化角色卡。
+              「补齐缺失」auto：有库则全簇可荐 clone（默认中文池、说话人去重）。「优先音色库」覆盖重绑 approved 库。「重新差异化」prefer_design 拉高身份区分（不注入库）。写入后请一键就绪/生成试听。
             </div>
             <div className="flex flex-wrap gap-2">
               <Button
@@ -1383,6 +1395,14 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
                 onClick={() => suggestVoiceMutation.mutate("missing")}
               >
                 {suggestVoiceMutation.isPending ? "规划中..." : "补齐缺失音色"}
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={suggestVoiceMutation.isPending || characters.length === 0}
+                onClick={() => suggestVoiceMutation.mutate("prefer_library")}
+              >
+                优先音色库
               </Button>
               <Button
                 size="sm"

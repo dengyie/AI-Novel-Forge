@@ -132,19 +132,81 @@ export function isCharacterVoiceConfigured(input: {
 
 const GENDER_TAGS = new Set(["male", "female", "unknown"]);
 const CLUSTER_TAGS = new Set(["lead", "cast", "extra", "narrator"]);
+/** 中文书默认音色池；scope-en / scope-mixed 须显式放行 */
+export const DEFAULT_LIBRARY_SCOPES = ["scope-zh"] as const;
 
 function normalizeTags(tags: string[] | undefined | null): string[] {
   if (!Array.isArray(tags)) return [];
   return tags.map((t) => t.trim().toLowerCase()).filter(Boolean);
 }
 
+/** 同一说话人多 clip 归并键；无 speaker: 标签时退回 asset:id */
+export function speakerKeyFromTags(
+  tags: string[] | undefined | null,
+  assetId?: string | null,
+): string {
+  for (const t of normalizeTags(tags)) {
+    if (t.startsWith("speaker:")) return t;
+  }
+  const id = assetId?.trim();
+  return id ? `asset:${id}` : "";
+}
+
+function scopeTagsOf(tags: string[]): string[] {
+  return tags.filter((t) => t.startsWith("scope-"));
+}
+
+/**
+ * preferredScopes 空 = 不限 scope。
+ * 有 preferred 时：无 scope 标签视为 open；命中 preferred 通过；
+ * 仅 scope-en/mixed 等非 preferred → 拒绝（中文池默认挡英文/混合 demo）。
+ */
+function scopeAllows(tags: string[], preferredScopes: string[] | null): {
+  ok: boolean;
+  hit: boolean;
+  open: boolean;
+} {
+  if (!preferredScopes?.length) {
+    return { ok: true, hit: false, open: true };
+  }
+  const scopes = scopeTagsOf(tags);
+  if (!scopes.length) {
+    return { ok: true, hit: false, open: true };
+  }
+  const preferred = new Set(preferredScopes.map((s) => s.trim().toLowerCase()).filter(Boolean));
+  const hit = scopes.some((s) => preferred.has(s));
+  return { ok: hit, hit, open: false };
+}
+
+/** lead↔cast 软兼容：库无 lead 时主角仍可落到 cast 池（降权） */
+function clusterMatchScore(
+  cluster: VoiceCluster,
+  clusterTags: string[],
+): { hit: boolean; exact: boolean; soft: boolean; points: number; bit: string } {
+  if (clusterTags.includes(cluster)) {
+    return { hit: true, exact: true, soft: false, points: 35, bit: `cluster:${cluster}` };
+  }
+  if (cluster === "lead" && clusterTags.includes("cast")) {
+    return { hit: true, exact: false, soft: true, points: 22, bit: "cluster:cast_for_lead" };
+  }
+  if (cluster === "cast" && clusterTags.includes("lead")) {
+    return { hit: true, exact: false, soft: true, points: 28, bit: "cluster:lead_for_cast" };
+  }
+  if (clusterTags.length === 0) {
+    return { hit: false, exact: false, soft: false, points: 8, bit: "cluster:open" };
+  }
+  return { hit: false, exact: false, soft: false, points: 2, bit: "cluster:weak" };
+}
+
 /**
  * 从 approved 库中为角色挑一个未占用的 clone_ref。
- * 匹配维：gender 标签 + cluster 标签；同 slug/display 不参与语义 LLM。
+ * 匹配维：gender + cluster（lead↔cast 软兼容）+ scope + speaker 去重；
+ * 同分用 slug 稳定排序，可选 L2 pitch/texture/energy 轻加权。
  * 门禁：
- * - lead/cast：必须 cluster 命中（禁止仅 gender 的泛 male/female 当英雄声）
- * - narrator：必须 cluster 命中（禁止旁白吃 lead 向 gender-only 样本）
+ * - lead/cast：须 exact/soft cluster 命中（禁止仅 gender）
+ * - narrator：须 exact narrator
  * - extra：允许 gender/open；无 tags 仍受 floor 拒绝
+ * - preferredScopes 默认 scope-zh（调用方传入）
  * 返回 null 表示无合适资产，调用方回退 design/preset。
  */
 export function matchLibraryAsset(input: {
@@ -152,12 +214,29 @@ export function matchLibraryAsset(input: {
   cluster: VoiceCluster;
   assets: VoicePlannerLibraryAsset[];
   usedAssetIds: Set<string>;
+  /** 已占用说话人（speaker:… 或 asset:id）；与 usedAssetIds 同时生效 */
+  usedSpeakerKeys?: Set<string>;
+  /**
+   * 语言池，如 ["scope-zh"]。空/undefined：默认 DEFAULT_LIBRARY_SCOPES；
+   * 传 [] 表示不限 scope。
+   */
+  preferredScopes?: string[] | null;
+  /** 角色偏好声线槽，仅作轻加权（非硬门禁） */
+  preferredSlot?: VoiceSlot | null;
 }): { asset: VoicePlannerLibraryAsset; score: number; reason: string } | null {
+  const usedSpeakers = input.usedSpeakerKeys ?? new Set<string>();
+  const preferredScopes =
+    input.preferredScopes === undefined
+      ? [...DEFAULT_LIBRARY_SCOPES]
+      : input.preferredScopes;
+
   const available = input.assets.filter((a) => {
     if (!a?.id?.trim()) return false;
     if (input.usedAssetIds.has(a.id)) return false;
     if (a.kind !== "clone_ref") return false;
     if (a.status !== "approved") return false;
+    const sp = speakerKeyFromTags(a.tags, a.id);
+    if (sp && usedSpeakers.has(sp)) return false;
     return true;
   });
   if (!available.length) return null;
@@ -170,6 +249,10 @@ export function matchLibraryAsset(input: {
     const tags = normalizeTags(asset.tags);
     const genderTags = tags.filter((t) => GENDER_TAGS.has(t));
     const clusterTags = tags.filter((t) => CLUSTER_TAGS.has(t));
+    const scopeGate = scopeAllows(tags, preferredScopes);
+    if (!scopeGate.ok) {
+      continue;
+    }
 
     // 有明确 gender 标签且与角色冲突 → 跳过
     if (
@@ -183,16 +266,17 @@ export function matchLibraryAsset(input: {
 
     const genderHit =
       input.genderBucket !== "unknown" && genderTags.includes(input.genderBucket);
-    const clusterHit = clusterTags.includes(input.cluster);
     const genderOpen = genderTags.length === 0 || genderTags.includes("unknown");
+    const clusterEval = clusterMatchScore(input.cluster, clusterTags);
+    const clusterHit = clusterEval.hit;
     const clusterOpen = clusterTags.length === 0;
 
-    // 主/配角：必须命中 cluster 标签（仅 ["male"] 不能当男主/男配）
+    // 主/配角：必须 exact/soft cluster 命中（仅 ["male"] 不能当男主/男配）
     if (isLeadOrCast && !clusterHit) {
       continue;
     }
-    // 旁白：必须命中 narrator 标签（禁止 gender-only / lead 弱匹配）
-    if (isNarrator && !clusterHit) {
+    // 旁白：必须 exact narrator（禁止 soft / gender-only）
+    if (isNarrator && !clusterTags.includes("narrator")) {
       continue;
     }
 
@@ -207,36 +291,54 @@ export function matchLibraryAsset(input: {
       bits.push("gender:open");
     }
 
-    if (clusterHit) {
-      score += 35;
-      bits.push(`cluster:${input.cluster}`);
-    } else if (clusterOpen) {
-      score += 8;
-      bits.push("cluster:open");
-    } else {
-      // 有其它簇标签但不匹配：弱匹配（仅 extra 可达此分支）
-      score += 2;
-      bits.push("cluster:weak");
-    }
+    score += clusterEval.points;
+    bits.push(clusterEval.bit);
 
-    // lead 优先更精确匹配
-    if (input.cluster === "lead" && clusterHit) {
+    if (input.cluster === "lead" && clusterEval.exact) {
       score += 10;
     }
 
+    if (scopeGate.hit) {
+      score += 12;
+      bits.push("scope:hit");
+    } else if (scopeGate.open) {
+      score += 3;
+      bits.push("scope:open");
+    }
+
+    // L2 声学标签轻加权（labeled-v2）；无则跳过
+    const slot = input.preferredSlot;
+    if (slot) {
+      if (tags.includes(`pitch-${slot.pitchBand}`)) {
+        score += 4;
+        bits.push(`pitch:${slot.pitchBand}`);
+      }
+      if (tags.includes(`texture-${slot.textureBand}`)) {
+        score += 3;
+        bits.push(`texture:${slot.textureBand}`);
+      }
+      if (tags.includes(`energy-${slot.energyBand}`)) {
+        score += 3;
+        bits.push(`energy:${slot.energyBand}`);
+      }
+    }
+
     // 无任何 gender/cluster 命中：提高门槛，避免空 tags 路人过松
-    // base10+open5+open8=23；要求 ≥28 → 至少再有弱信号，或显式命中
     const floor = genderHit || clusterHit ? 20 : 28;
     if (score < floor) {
       continue;
     }
 
-    if (!best || score > best.score) {
-      best = {
-        asset,
-        score,
-        reason: `library:${asset.slug || asset.id} ${bits.join("+") || "base"}`.trim(),
-      };
+    const reason = `library:${asset.slug || asset.id} ${bits.join("+") || "base"}`.trim();
+    if (
+      !best
+      || score > best.score
+      || (
+        score === best.score
+        && (asset.slug || asset.id).localeCompare(best.asset.slug || best.asset.id) < 0
+      )
+    ) {
+      best = { asset, score, reason };
     }
   }
 
@@ -1128,12 +1230,13 @@ function neighborLabel(slot: VoiceSlot): string {
  * 纯函数：根据人物卡批量规划差异化音色。
  * - prefer_design：lead/cast → design + 槽位拉开；extra/narrator → 路人/旁白 preset 簇
  * - auto（smart_fill）：lead/cast → design；extra/narrator → preset；未知簇 importance≥70 且有 texture → design
- *   若注入 approved libraryAssets，auto 对 lead/cast/narrator 先尝试 library clone
- *   （lead/cast/narrator 匹配须 cluster 标签命中；见 matchLibraryAsset）
+ *   若注入 approved libraryAssets，auto 对 **全簇**（含 extra）先尝试 library clone
+ *   （lead/cast 须 cluster exact/soft；narrator 须 exact；见 matchLibraryAsset）
  * - prefer_library：凡可匹配 approved 库资产优先 clone；无匹配回退与 auto 相同
  * - preset_only：仅 preset 负载均衡（旁白/路人用分簇池）；不走 library
  * - reservedPresets：旁白等占用的预置，角色 preset 池剔除；池空则 lead/cast 强制 design
  * - clone+（非空 ref 或 assetId）永不改写；half-clone 可规划
+ * - 库匹配默认 preferredScopes=scope-zh；speaker: 去重
  * - 覆盖语义由调用方 onlyMissing + apply.overwrite 处理（本函数不接收 overwrite）
  */
 export function planCharacterVoices(input: {
@@ -1149,6 +1252,10 @@ export function planCharacterVoices(input: {
    * 纯函数不读盘；空/缺省 = 不推荐 clone。
    */
   libraryAssets?: VoicePlannerLibraryAsset[];
+  /**
+   * 库语言池；undefined = scope-zh；[] = 不限。
+   */
+  preferredScopes?: string[] | null;
 }): {
   items: AudiobookVoicePlanItem[];
   skipped: Array<{ characterId: string; characterName: string; reason: string }>;
@@ -1165,12 +1272,21 @@ export function planCharacterVoices(input: {
       .filter((v): v is MimoTtsPresetVoice => Boolean(v) && isMimoTtsPresetVoice(v)),
   );
   const libraryAssets = Array.isArray(input.libraryAssets) ? input.libraryAssets : [];
+  const preferredScopes =
+    input.preferredScopes === undefined
+      ? [...DEFAULT_LIBRARY_SCOPES]
+      : input.preferredScopes;
   const usedLibraryIds = new Set<string>();
-  // 已绑定 clone 的 asset 预占，避免推荐撞车
+  const usedSpeakerKeys = new Set<string>();
+  const assetById = new Map(libraryAssets.map((a) => [a.id, a]));
+  // 已绑定 clone 的 asset / speaker 预占，避免推荐撞车
   for (const character of input.characters) {
     const id = character.ttsVoiceAssetId?.trim();
     if (id && character.ttsMode?.trim() === "clone") {
       usedLibraryIds.add(id);
+      const bound = assetById.get(id);
+      const sp = speakerKeyFromTags(bound?.tags, id);
+      if (sp) usedSpeakerKeys.add(sp);
     }
   }
 
@@ -1275,15 +1391,12 @@ export function planCharacterVoices(input: {
     // prefer_library：无库匹配时 lead/cast 回退 design
     const preferLibraryDesignCore =
       strategy === "prefer_library" && isLeadOrCast;
-    // library 优先：prefer_library 全簇；auto 对 lead/cast/narrator 尝试
+    // library 优先：prefer_library 与 auto 均对全簇（含 extra）尝试
     const tryLibrary =
       libraryAssets.length > 0
       && strategy !== "preset_only"
       && strategy !== "prefer_design"
-      && (
-        strategy === "prefer_library"
-        || (strategy === "auto" && (isLeadOrCast || character.cluster === "narrator"))
-      );
+      && (strategy === "prefer_library" || strategy === "auto");
 
     if (tryLibrary) {
       const matched = matchLibraryAsset({
@@ -1291,11 +1404,16 @@ export function planCharacterVoices(input: {
         cluster: character.cluster,
         assets: libraryAssets,
         usedAssetIds: usedLibraryIds,
+        usedSpeakerKeys,
+        preferredScopes,
+        preferredSlot: character.preferredSlot,
       });
       if (matched) {
         ttsMode = "clone";
         ttsVoiceAssetId = matched.asset.id;
         usedLibraryIds.add(matched.asset.id);
+        const sp = speakerKeyFromTags(matched.asset.tags, matched.asset.id);
+        if (sp) usedSpeakerKeys.add(sp);
         reason =
           strategy === "prefer_library"
             ? `策略 prefer_library：匹配库「${matched.asset.displayName || matched.asset.slug}」（${matched.reason}）。`

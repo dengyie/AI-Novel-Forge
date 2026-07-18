@@ -229,24 +229,39 @@ function toPlannerInput(row: {
 }
 
 function loadApprovedLibraryAssets(): VoicePlannerLibraryAsset[] {
-  const listed = voiceLibraryService.list({
-    status: "approved",
-    kind: "clone_ref",
-    limit: 500,
-  });
-  if (listed.total > listed.items.length) {
-    console.warn(
-      `[voice-plan] approved clone_ref library truncated for planner: total=${listed.total} injected=${listed.items.length} limit=500`,
-    );
+  // 分页拉全量 approved，避免 LIST_MAX_LIMIT 截断导致规划漏库
+  const pageSize = 500;
+  const items: VoicePlannerLibraryAsset[] = [];
+  let offset = 0;
+  let total = Infinity;
+  while (offset < total) {
+    const listed = voiceLibraryService.list({
+      status: "approved",
+      kind: "clone_ref",
+      limit: pageSize,
+      offset,
+    });
+    total = listed.total;
+    for (const a of listed.items) {
+      items.push({
+        id: a.id,
+        slug: a.slug,
+        displayName: a.displayName,
+        status: a.status,
+        kind: a.kind,
+        tags: a.tags ?? [],
+      });
+    }
+    if (!listed.items.length) break;
+    offset += listed.items.length;
+    if (offset > 50_000) {
+      console.warn(
+        `[voice-plan] approved clone_ref library page loop safety stop: injected=${items.length} total=${total}`,
+      );
+      break;
+    }
   }
-  return listed.items.map((a) => ({
-    id: a.id,
-    slug: a.slug,
-    displayName: a.displayName,
-    status: a.status,
-    kind: a.kind,
-    tags: a.tags ?? [],
-  }));
+  return items;
 }
 
 export class AudiobookVoiceAssetService {
