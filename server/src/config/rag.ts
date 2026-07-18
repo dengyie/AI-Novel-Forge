@@ -145,10 +145,12 @@ export const ragConfig = {
   rerankerApiKey: process.env.RAG_RERANKER_API_KEY ?? "",
   rerankerModel: normalizeOptionalText(process.env.RAG_RERANKER_MODEL) ?? "bge-reranker-v2-m3",
   rerankerTimeoutMs: asInt(process.env.RAG_RERANKER_TIMEOUT_MS ?? "10000", 10000, 1000, 120000),
-  rerankerCandidateLimit: asInt(process.env.RAG_RERANKER_CANDIDATE_LIMIT ?? "0", 0, 0, 200),
+  // 不允许 env 读取：通过知识库设置面板管理（RagRuntimeSettings.rerankerCandidateLimit）
+  rerankerCandidateLimit: 0,
   contextualRetrievalEnabled: isEnabled(process.env.RAG_CONTEXTUAL_RETRIEVAL_ENABLED, false),
   contextualRetrievalVersion: asInt(process.env.RAG_CONTEXTUAL_RETRIEVAL_VERSION ?? "1", 1, 1, 100),
   contextualRetrievalTimeoutMs: asInt(process.env.RAG_CONTEXTUAL_RETRIEVAL_TIMEOUT_MS ?? "15000", 15000, 1000, 120000),
-  contextualRetrievalConcurrency: asInt(process.env.RAG_CONTEXTUAL_RETRIEVAL_CONCURRENCY ?? "2", 2, 1, 8),
+  // 不允许 env 读取：通过知识库设置面板管理（RagRuntimeSettings.contextualRetrievalConcurrency）
+  contextualRetrievalConcurrency: 2,
   providerPriority: [...LLM_PROVIDERS] as EmbeddingProvider[],
 };

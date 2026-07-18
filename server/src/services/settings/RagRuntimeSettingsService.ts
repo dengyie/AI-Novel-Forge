@@ -4,6 +4,7 @@ import { isMissingTableError, normalizeOptionalText } from "./ragLegacyCompatibi
 import {
   CHUNK_OVERLAP_KEY,
   CHUNK_SIZE_KEY,
+  CONTEXTUAL_RETRIEVAL_CONCURRENCY_KEY,
   FINAL_TOP_K_KEY,
   HTTP_TIMEOUT_MS_KEY,
   KEYWORD_CANDIDATES_KEY,
@@ -14,6 +15,7 @@ import {
   QDRANT_URL_KEY,
   RAG_ENABLED_KEY,
   RAG_RUNTIME_SETTING_KEYS,
+  RERANKER_CANDIDATE_LIMIT_KEY,
   RETRIEVAL_TRACE_RETENTION_DAYS_KEY,
   RETRIEVAL_TRACE_SAMPLE_RATE_KEY,
   VECTOR_CANDIDATES_KEY,
@@ -40,6 +42,8 @@ const INITIAL_RAG_RUNTIME_DEFAULTS = {
   httpTimeoutMs: ragConfig.httpTimeoutMs,
   retrievalTraceSampleRate: ragConfig.retrievalTraceSampleRate,
   retrievalTraceRetentionDays: ragConfig.retrievalTraceRetentionDays,
+  contextualRetrievalConcurrency: ragConfig.contextualRetrievalConcurrency,
+  rerankerCandidateLimit: ragConfig.rerankerCandidateLimit,
 } as const;
 
 export interface RagRuntimeSettings {
@@ -60,6 +64,8 @@ export interface RagRuntimeSettings {
   httpTimeoutMs: number;
   retrievalTraceSampleRate: number;
   retrievalTraceRetentionDays: number;
+  contextualRetrievalConcurrency: number;
+  rerankerCandidateLimit: number;
 }
 
 export interface RagRuntimeSettingsInput {
@@ -81,6 +87,8 @@ export interface RagRuntimeSettingsInput {
   httpTimeoutMs: number;
   retrievalTraceSampleRate: number;
   retrievalTraceRetentionDays: number;
+  contextualRetrievalConcurrency: number;
+  rerankerCandidateLimit: number;
 }
 
 export interface SaveRagRuntimeSettingsResult {
@@ -138,6 +146,8 @@ function applyRagRuntimeSettings(
   ragConfig.httpTimeoutMs = settings.httpTimeoutMs;
   ragConfig.retrievalTraceSampleRate = settings.retrievalTraceSampleRate;
   ragConfig.retrievalTraceRetentionDays = settings.retrievalTraceRetentionDays;
+  ragConfig.contextualRetrievalConcurrency = settings.contextualRetrievalConcurrency;
+  ragConfig.rerankerCandidateLimit = settings.rerankerCandidateLimit;
 
   return {
     ...settings,
@@ -164,6 +174,8 @@ function getDefaultSettings(): RagRuntimeSettings {
     httpTimeoutMs: clampInt(INITIAL_RAG_RUNTIME_DEFAULTS.httpTimeoutMs, 30000, 1000, 300000),
     retrievalTraceSampleRate: clampFloat(INITIAL_RAG_RUNTIME_DEFAULTS.retrievalTraceSampleRate, 1, 0, 1),
     retrievalTraceRetentionDays: clampInt(INITIAL_RAG_RUNTIME_DEFAULTS.retrievalTraceRetentionDays, 14, 1, 365),
+    contextualRetrievalConcurrency: clampInt(INITIAL_RAG_RUNTIME_DEFAULTS.contextualRetrievalConcurrency, 2, 1, 8),
+    rerankerCandidateLimit: clampInt(INITIAL_RAG_RUNTIME_DEFAULTS.rerankerCandidateLimit, 0, 0, 200),
   };
 }
 
@@ -233,6 +245,18 @@ export async function getRagRuntimeSettings(): Promise<RagRuntimeSettings> {
         1,
         365,
       ),
+      contextualRetrievalConcurrency: clampInt(
+        Number(valueMap.get(CONTEXTUAL_RETRIEVAL_CONCURRENCY_KEY)),
+        defaults.contextualRetrievalConcurrency,
+        1,
+        8,
+      ),
+      rerankerCandidateLimit: clampInt(
+        Number(valueMap.get(RERANKER_CANDIDATE_LIMIT_KEY)),
+        defaults.rerankerCandidateLimit,
+        0,
+        200,
+      ),
     }, qdrantApiKey);
   } catch (error) {
     if (isMissingTableError(error)) {
@@ -253,6 +277,8 @@ export async function getRagRuntimeSettings(): Promise<RagRuntimeSettings> {
         httpTimeoutMs: defaults.httpTimeoutMs,
         retrievalTraceSampleRate: defaults.retrievalTraceSampleRate,
         retrievalTraceRetentionDays: defaults.retrievalTraceRetentionDays,
+        contextualRetrievalConcurrency: defaults.contextualRetrievalConcurrency,
+        rerankerCandidateLimit: defaults.rerankerCandidateLimit,
       }, normalizeOptionalText(INITIAL_RAG_RUNTIME_DEFAULTS.qdrantApiKey) ?? "");
     }
     throw error;
@@ -300,6 +326,8 @@ export async function saveRagRuntimeSettings(
     httpTimeoutMs: clampInt(input.httpTimeoutMs, previous.httpTimeoutMs, 1000, 300000),
     retrievalTraceSampleRate: clampFloat(input.retrievalTraceSampleRate, previous.retrievalTraceSampleRate, 0, 1),
     retrievalTraceRetentionDays: clampInt(input.retrievalTraceRetentionDays, previous.retrievalTraceRetentionDays, 1, 365),
+    contextualRetrievalConcurrency: clampInt(input.contextualRetrievalConcurrency, previous.contextualRetrievalConcurrency, 1, 8),
+    rerankerCandidateLimit: clampInt(input.rerankerCandidateLimit, previous.rerankerCandidateLimit, 0, 200),
   }, qdrantApiKey);
 
   const connectionChanged = previous.qdrantUrl !== settings.qdrantUrl;
@@ -386,6 +414,16 @@ export async function saveRagRuntimeSettings(
       where: { key: RETRIEVAL_TRACE_RETENTION_DAYS_KEY },
       update: { value: String(settings.retrievalTraceRetentionDays) },
       create: { key: RETRIEVAL_TRACE_RETENTION_DAYS_KEY, value: String(settings.retrievalTraceRetentionDays) },
+    }),
+    prisma.appSetting.upsert({
+      where: { key: CONTEXTUAL_RETRIEVAL_CONCURRENCY_KEY },
+      update: { value: String(settings.contextualRetrievalConcurrency) },
+      create: { key: CONTEXTUAL_RETRIEVAL_CONCURRENCY_KEY, value: String(settings.contextualRetrievalConcurrency) },
+    }),
+    prisma.appSetting.upsert({
+      where: { key: RERANKER_CANDIDATE_LIMIT_KEY },
+      update: { value: String(settings.rerankerCandidateLimit) },
+      create: { key: RERANKER_CANDIDATE_LIMIT_KEY, value: String(settings.rerankerCandidateLimit) },
     }),
   ];
 

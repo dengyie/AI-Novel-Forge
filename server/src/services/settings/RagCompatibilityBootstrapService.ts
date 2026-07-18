@@ -40,6 +40,8 @@ import {
   HTTP_TIMEOUT_MS_KEY,
   RETRIEVAL_TRACE_SAMPLE_RATE_KEY,
   RETRIEVAL_TRACE_RETENTION_DAYS_KEY,
+  CONTEXTUAL_RETRIEVAL_CONCURRENCY_KEY,
+  RERANKER_CANDIDATE_LIMIT_KEY,
 } from "./ragSettingKeys";
 
 interface RagCompatibilityBootstrapReport {
@@ -165,6 +167,14 @@ function buildRagSettingImportCandidates(): RagSettingImportCandidate[] {
     {
       key: RETRIEVAL_TRACE_RETENTION_DAYS_KEY,
       value: process.env.RAG_RETRIEVAL_TRACE_RETENTION_DAYS,
+    },
+    {
+      key: CONTEXTUAL_RETRIEVAL_CONCURRENCY_KEY,
+      value: process.env.RAG_CONTEXTUAL_RETRIEVAL_CONCURRENCY,
+    },
+    {
+      key: RERANKER_CANDIDATE_LIMIT_KEY,
+      value: process.env.RAG_RERANKER_CANDIDATE_LIMIT,
     },
   ];
 }

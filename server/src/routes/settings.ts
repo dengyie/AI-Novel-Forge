@@ -100,6 +100,8 @@ const ragSettingsSchema = z.object({
   httpTimeoutMs: z.coerce.number().int().min(1000).max(300000),
   retrievalTraceSampleRate: z.coerce.number().min(0).max(1),
   retrievalTraceRetentionDays: z.coerce.number().int().min(1).max(365),
+  contextualRetrievalConcurrency: z.coerce.number().int().min(1).max(8),
+  rerankerCandidateLimit: z.coerce.number().int().min(0).max(200),
 });
 
 const styleEngineRuntimeSettingsSchema = z.object({
@@ -369,6 +371,8 @@ router.put(
           httpTimeoutMs: body.httpTimeoutMs,
           retrievalTraceSampleRate: body.retrievalTraceSampleRate,
           retrievalTraceRetentionDays: body.retrievalTraceRetentionDays,
+          contextualRetrievalConcurrency: body.contextualRetrievalConcurrency,
+          rerankerCandidateLimit: body.rerankerCandidateLimit,
         }),
       ]);
 
