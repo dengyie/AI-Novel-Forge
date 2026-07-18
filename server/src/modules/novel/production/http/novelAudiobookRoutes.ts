@@ -648,6 +648,31 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
     },
   );
 
+  router.get(
+    "/:id/characters/:charId/voice-library/matches",
+    validate({
+      params: characterParamsSchema,
+      query: z.object({
+        topN: z.coerce.number().int().min(1).max(32).optional(),
+      }),
+    }),
+    async (req, res, next) => {
+      try {
+        const { id, charId } = req.params as z.infer<typeof characterParamsSchema>;
+        const rawTopN = req.query?.topN;
+        const topN = typeof rawTopN === "string" && rawTopN.trim()
+          ? Number(rawTopN)
+          : undefined;
+        const data = await audiobookVoiceAssetService.listVoiceLibraryMatches(id, charId, {
+          topN: typeof topN === "number" && Number.isFinite(topN) ? topN : undefined,
+        });
+        res.json({ success: true, data } satisfies ApiResponse<typeof data>);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
   router.get("/audiobook/voices", async (_req, res, next) => {
     try {
       res.status(200).json({

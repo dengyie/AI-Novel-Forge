@@ -209,141 +209,297 @@ function clusterMatchScore(
  * - preferredScopes 默认 scope-zh（调用方传入）
  * 返回 null 表示无合适资产，调用方回退 design/preset。
  */
+/** 单候选打分结果（命中且过 floor 才进入候选池；其余作为排除原因） */
+export interface VoiceLibraryAssetScore {
+  asset: VoicePlannerLibraryAsset;
+  score: number;
+  reason: string;
+  /** 说话人去重键（speaker:xxx 或 asset:id）；空表示无标签且无 id */
+  speakerKey: string;
+  /** 该 speakerKey 是否在 usedSpeakerKeys 中（被本书其他角色占用）；对靠链路用于标注 */
+  speakerOccupied: boolean;
+  /** gender 命中情况：hit/open/miss */
+  gender: "hit" | "open" | "miss";
+  /** cluster 命中：exact/soft/open/weak/none */
+  cluster: "exact" | "soft" | "open" | "weak" | "none";
+  scope: "hit" | "open" | "miss";
+}
+
+interface ScoreContext {
+  genderBucket: VoiceGenderBucket;
+  cluster: VoiceCluster;
+  usedAssetIds: Set<string>;
+  usedSpeakers: Set<string>;
+  preferredScopes: string[] | null;
+  preferredSlot: VoiceSlot | null;
+}
+
+interface ScoreOutcome {
+  ok: boolean;
+  /** ok=false 时的中文短排除原因（门禁/floor）；ok=true 时为命中理由 bits */
+  reason: string;
+  score?: number;
+  speakerKey?: string;
+  gender?: "hit" | "open" | "miss";
+  cluster?: "exact" | "soft" | "open" | "weak" | "none";
+  scope?: "hit" | "open" | "miss";
+}
+
+/** 预过滤：id 非空、未被 usedAssetIds 占、kind=clone_ref、status=approved。
+ *  speaker 占用处理分两层：
+ *  - includeOccupiedSpeakers=false（默认，批量 plan 单选语义）：speaker 已占直接排除
+ *  - includeOccupiedSpeakers=true（对靠链路）：保留，候选内同 speaker 仍只留最高分一条做去重，
+ *    交由调用方按本书其他角色绑定补 occupiedBy 标注，而非静默隐藏 */
+function filterAvailableAssets(
+  assets: VoicePlannerLibraryAsset[],
+  ctx: ScoreContext,
+  includeOccupiedSpeakers: boolean,
+): { asset: VoicePlannerLibraryAsset; speakerKey: string; speakerOccupied: boolean }[] {
+  const out: { asset: VoicePlannerLibraryAsset; speakerKey: string; speakerOccupied: boolean }[] = [];
+  for (const a of assets) {
+    if (!a?.id?.trim()) continue;
+    if (ctx.usedAssetIds.has(a.id)) continue;
+    if (a.kind !== "clone_ref") continue;
+    if (a.status !== "approved") continue;
+    const sp = speakerKeyFromTags(a.tags, a.id);
+    const occupied = Boolean(sp) && ctx.usedSpeakers.has(sp);
+    if (!includeOccupiedSpeakers && occupied) continue;
+    out.push({ asset: a, speakerKey: sp, speakerOccupied: occupied });
+  }
+  return out;
+}
+
+/** 对单个候选打分；返回 ok=false 表示触门禁/floor 被排除并附原因 */
+function scoreLibraryAsset(
+  entry: { asset: VoicePlannerLibraryAsset; speakerKey: string },
+  ctx: ScoreContext,
+): ScoreOutcome {
+  const tags = normalizeTags(entry.asset.tags);
+  const genderTags = tags.filter((t) => GENDER_TAGS.has(t));
+  const clusterTags = tags.filter((t) => CLUSTER_TAGS.has(t));
+  const scopeGate = scopeAllows(tags, ctx.preferredScopes);
+  if (!scopeGate.ok) {
+    return { ok: false, reason: "scope:miss" };
+  }
+
+  if (
+    genderTags.length > 0
+    && ctx.genderBucket !== "unknown"
+    && !genderTags.includes("unknown")
+    && !genderTags.includes(ctx.genderBucket)
+  ) {
+    return { ok: false, reason: "gender:miss" };
+  }
+
+  const genderHit = ctx.genderBucket !== "unknown" && genderTags.includes(ctx.genderBucket);
+  const genderOpen = genderTags.length === 0 || genderTags.includes("unknown");
+  const clusterEval = clusterMatchScore(ctx.cluster, clusterTags);
+  const clusterHit = clusterEval.hit;
+  const isLeadOrCast = ctx.cluster === "lead" || ctx.cluster === "cast";
+  const isNarrator = ctx.cluster === "narrator";
+
+  if (isLeadOrCast && !clusterHit) {
+    return { ok: false, reason: "cluster:miss_for_lead_cast" };
+  }
+  if (isNarrator && !clusterTags.includes("narrator")) {
+    return { ok: false, reason: "cluster:miss_for_narrator" };
+  }
+
+  let score = 10;
+  const bits: string[] = [];
+  if (genderHit) {
+    score += 40;
+    bits.push(`gender:${ctx.genderBucket}`);
+  } else if (genderOpen) {
+    score += 5;
+    bits.push("gender:open");
+  }
+
+  score += clusterEval.points;
+  bits.push(clusterEval.bit);
+
+  if (ctx.cluster === "lead" && clusterEval.exact) {
+    score += 10;
+  }
+
+  if (scopeGate.hit) {
+    score += 12;
+    bits.push("scope:hit");
+  } else if (scopeGate.open) {
+    score += 3;
+    bits.push("scope:open");
+  }
+
+  const slot = ctx.preferredSlot;
+  if (slot) {
+    if (tags.includes(`pitch-${slot.pitchBand}`)) {
+      score += 4;
+      bits.push(`pitch:${slot.pitchBand}`);
+    }
+    if (tags.includes(`texture-${slot.textureBand}`)) {
+      score += 3;
+      bits.push(`texture:${slot.textureBand}`);
+    }
+    if (tags.includes(`energy-${slot.energyBand}`)) {
+      score += 3;
+      bits.push(`energy:${slot.energyBand}`);
+    }
+  }
+
+  const floor = genderHit || clusterHit ? 20 : 28;
+  if (score < floor) {
+    return { ok: false, reason: "floor:low_signal" };
+  }
+
+  const reason = `library:${entry.asset.slug || entry.asset.id} ${bits.join("+") || "base"}`.trim();
+  const genderBit: "hit" | "open" | "miss" = genderHit ? "hit" : genderOpen ? "open" : "miss";
+  const clusterBit: "exact" | "soft" | "open" | "weak" | "none" = clusterEval.exact
+    ? "exact"
+    : clusterEval.soft
+      ? "soft"
+      : clusterTags.length === 0
+        ? "open"
+        : clusterEval.points > 2
+          ? "weak"
+          : "none";
+  const scopeBit: "hit" | "open" | "miss" = scopeGate.hit ? "hit" : scopeGate.open ? "open" : "miss";
+  return {
+    ok: true,
+    reason,
+    score,
+    speakerKey: entry.speakerKey,
+    gender: genderBit,
+    cluster: clusterBit,
+    scope: scopeBit,
+  };
+}
+
+/** 稳定排序：score 降序，同分按 slug/id 升序 */
+function sortCandidates(a: VoiceLibraryAssetScore, b: VoiceLibraryAssetScore): number {
+  if (b.score !== a.score) return b.score - a.score;
+  return (a.asset.slug || a.asset.id).localeCompare(b.asset.slug || b.asset.id);
+}
+
+/**
+ * 收集所有通过门禁/floor 的候选并按打分稳定排序。
+ * 与 matchLibraryAsset 同一门禁/打分；返回数组而非单条，供 top-N「对靠」链路与单选共用。
+ * usedSpeakers 在此只用于「该角色视角下候选的 speaker 去重」——同一 speaker 多 clip 仅保留最高分一条，
+ * 避免候选列表被同一说话人的多个 clip 刷屏。
+ */
+export function collectLibraryAssetCandidates(
+  input: {
+    genderBucket: VoiceGenderBucket;
+    cluster: VoiceCluster;
+    assets: VoicePlannerLibraryAsset[];
+    usedAssetIds?: Set<string>;
+    usedSpeakerKeys?: Set<string>;
+    preferredScopes?: string[] | null;
+    preferredSlot?: VoiceSlot | null;
+    /** true=保留 speaker 已占候选（对靠链路，附 speakerOccupied 标注）；false=预过滤排除（批量单选语义，默认） */
+    includeOccupiedSpeakers?: boolean;
+  },
+): VoiceLibraryAssetScore[] {
+  const ctx: ScoreContext = {
+    genderBucket: input.genderBucket,
+    cluster: input.cluster,
+    usedAssetIds: input.usedAssetIds ?? new Set<string>(),
+    usedSpeakers: input.usedSpeakerKeys ?? new Set<string>(),
+    preferredScopes:
+      input.preferredScopes === undefined ? [...DEFAULT_LIBRARY_SCOPES] : input.preferredScopes,
+    preferredSlot: input.preferredSlot ?? null,
+  };
+
+  const available = filterAvailableAssets(input.assets, ctx, input.includeOccupiedSpeakers ?? false);
+  const passed: VoiceLibraryAssetScore[] = [];
+  for (const entry of available) {
+    const out = scoreLibraryAsset(entry, ctx);
+    if (!out.ok || out.score == null) continue;
+    passed.push({
+      asset: entry.asset,
+      score: out.score,
+      reason: out.reason,
+      speakerKey: out.speakerKey ?? entry.speakerKey,
+      speakerOccupied: entry.speakerOccupied,
+      gender: out.gender ?? "miss",
+      cluster: out.cluster ?? "none",
+      scope: out.scope ?? "miss",
+    });
+  }
+
+  passed.sort(sortCandidates);
+
+  // 同 speaker 去重：保留最高分（排序后即首个）。对靠链路也走此去重，避免同一说话人
+  // 多 clip 刷屏；占用与否的真实标注以 speakerOccupied 字段为准，与去重无关。
+  const seenSpeaker = new Set<string>();
+  const deduped: VoiceLibraryAssetScore[] = [];
+  for (const c of passed) {
+    if (c.speakerKey && seenSpeaker.has(c.speakerKey)) continue;
+    if (c.speakerKey) seenSpeaker.add(c.speakerKey);
+    deduped.push(c);
+  }
+  return deduped;
+}
+
+/**
+ * 从 approved 库中为角色挑一个未占用的 clone_ref（单条 best）。
+ * 语义：collectLibraryAssetCandidates 的第一条；保留为批量 plan→apply 的稳定单选入口。
+ * 门禁与 collectLibraryAssetCandidates 完全一致：详见上方函数注释。
+ * 返回 null 表示无合适资产，调用方回退 design/preset。
+ */
 export function matchLibraryAsset(input: {
   genderBucket: VoiceGenderBucket;
   cluster: VoiceCluster;
   assets: VoicePlannerLibraryAsset[];
   usedAssetIds: Set<string>;
-  /** 已占用说话人（speaker:… 或 asset:id）；与 usedAssetIds 同时生效 */
   usedSpeakerKeys?: Set<string>;
-  /**
-   * 语言池，如 ["scope-zh"]。空/undefined：默认 DEFAULT_LIBRARY_SCOPES；
-   * 传 [] 表示不限 scope。
-   */
   preferredScopes?: string[] | null;
-  /** 角色偏好声线槽，仅作轻加权（非硬门禁） */
   preferredSlot?: VoiceSlot | null;
 }): { asset: VoicePlannerLibraryAsset; score: number; reason: string } | null {
-  const usedSpeakers = input.usedSpeakerKeys ?? new Set<string>();
-  const preferredScopes =
-    input.preferredScopes === undefined
-      ? [...DEFAULT_LIBRARY_SCOPES]
-      : input.preferredScopes;
-
-  const available = input.assets.filter((a) => {
-    if (!a?.id?.trim()) return false;
-    if (input.usedAssetIds.has(a.id)) return false;
-    if (a.kind !== "clone_ref") return false;
-    if (a.status !== "approved") return false;
-    const sp = speakerKeyFromTags(a.tags, a.id);
-    if (sp && usedSpeakers.has(sp)) return false;
-    return true;
+  const ranked = collectLibraryAssetCandidates({
+    genderBucket: input.genderBucket,
+    cluster: input.cluster,
+    assets: input.assets,
+    usedAssetIds: input.usedAssetIds,
+    usedSpeakerKeys: input.usedSpeakerKeys,
+    preferredScopes: input.preferredScopes,
+    preferredSlot: input.preferredSlot,
   });
-  if (!available.length) return null;
+  if (!ranked.length) return null;
+  const top = ranked[0];
+  return { asset: top.asset, score: top.score, reason: top.reason };
+}
 
-  let best: { asset: VoicePlannerLibraryAsset; score: number; reason: string } | null = null;
-  const isLeadOrCast = input.cluster === "lead" || input.cluster === "cast";
-  const isNarrator = input.cluster === "narrator";
-
-  for (const asset of available) {
-    const tags = normalizeTags(asset.tags);
-    const genderTags = tags.filter((t) => GENDER_TAGS.has(t));
-    const clusterTags = tags.filter((t) => CLUSTER_TAGS.has(t));
-    const scopeGate = scopeAllows(tags, preferredScopes);
-    if (!scopeGate.ok) {
-      continue;
-    }
-
-    // 有明确 gender 标签且与角色冲突 → 跳过
-    if (
-      genderTags.length > 0
-      && input.genderBucket !== "unknown"
-      && !genderTags.includes("unknown")
-      && !genderTags.includes(input.genderBucket)
-    ) {
-      continue;
-    }
-
-    const genderHit =
-      input.genderBucket !== "unknown" && genderTags.includes(input.genderBucket);
-    const genderOpen = genderTags.length === 0 || genderTags.includes("unknown");
-    const clusterEval = clusterMatchScore(input.cluster, clusterTags);
-    const clusterHit = clusterEval.hit;
-    const clusterOpen = clusterTags.length === 0;
-
-    // 主/配角：必须 exact/soft cluster 命中（仅 ["male"] 不能当男主/男配）
-    if (isLeadOrCast && !clusterHit) {
-      continue;
-    }
-    // 旁白：必须 exact narrator（禁止 soft / gender-only）
-    if (isNarrator && !clusterTags.includes("narrator")) {
-      continue;
-    }
-
-    let score = 10; // 基础可用分
-    const bits: string[] = [];
-
-    if (genderHit) {
-      score += 40;
-      bits.push(`gender:${input.genderBucket}`);
-    } else if (genderOpen) {
-      score += 5;
-      bits.push("gender:open");
-    }
-
-    score += clusterEval.points;
-    bits.push(clusterEval.bit);
-
-    if (input.cluster === "lead" && clusterEval.exact) {
-      score += 10;
-    }
-
-    if (scopeGate.hit) {
-      score += 12;
-      bits.push("scope:hit");
-    } else if (scopeGate.open) {
-      score += 3;
-      bits.push("scope:open");
-    }
-
-    // L2 声学标签轻加权（labeled-v2）；无则跳过
-    const slot = input.preferredSlot;
-    if (slot) {
-      if (tags.includes(`pitch-${slot.pitchBand}`)) {
-        score += 4;
-        bits.push(`pitch:${slot.pitchBand}`);
-      }
-      if (tags.includes(`texture-${slot.textureBand}`)) {
-        score += 3;
-        bits.push(`texture:${slot.textureBand}`);
-      }
-      if (tags.includes(`energy-${slot.energyBand}`)) {
-        score += 3;
-        bits.push(`energy:${slot.energyBand}`);
-      }
-    }
-
-    // 无任何 gender/cluster 命中：提高门槛，避免空 tags 路人过松
-    const floor = genderHit || clusterHit ? 20 : 28;
-    if (score < floor) {
-      continue;
-    }
-
-    const reason = `library:${asset.slug || asset.id} ${bits.join("+") || "base"}`.trim();
-    if (
-      !best
-      || score > best.score
-      || (
-        score === best.score
-        && (asset.slug || asset.id).localeCompare(best.asset.slug || best.asset.id) < 0
-      )
-    ) {
-      best = { asset, score, reason };
-    }
-  }
-
-  if (!best) return null;
-  return best;
+/**
+ * 「对靠」top-N 候选：返回前 N 条排序候选。
+ * usedSpeakerKeys 用于候选自身 speaker 去重 + 占用标注（includeOccupiedSpeakers=true）；
+ * 占用详情由调用方按本书其他角色绑定补 occupiedBy，本函数保持纯打分。
+ */
+export function matchLibraryAssetsTopN(input: {
+  genderBucket: VoiceGenderBucket;
+  cluster: VoiceCluster;
+  assets: VoicePlannerLibraryAsset[];
+  usedAssetIds?: Set<string>;
+  usedSpeakerKeys?: Set<string>;
+  preferredScopes?: string[] | null;
+  preferredSlot?: VoiceSlot | null;
+  /** 默认 8；硬顶 32；非法回落默认 */
+  topN?: number;
+}): VoiceLibraryAssetScore[] {
+  const want = Number.isFinite(input.topN) && (input.topN as number) > 0
+    ? Math.min(Math.floor(input.topN as number), 32)
+    : 8;
+  const ranked = collectLibraryAssetCandidates({
+    genderBucket: input.genderBucket,
+    cluster: input.cluster,
+    assets: input.assets,
+    usedAssetIds: input.usedAssetIds,
+    usedSpeakerKeys: input.usedSpeakerKeys,
+    preferredScopes: input.preferredScopes,
+    preferredSlot: input.preferredSlot,
+    /** 对靠链路：保留已被本书其他角色占用的 speaker 候选并标注，不静默隐藏 */
+    includeOccupiedSpeakers: true,
+  });
+  return ranked.slice(0, want);
 }
 
 export function inferGenderBucket(input: VoicePlannerCharacterInput): VoiceGenderBucket {

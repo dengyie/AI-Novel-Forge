@@ -7,6 +7,8 @@ import {
   type AudiobookVoicePlanSuggestResult,
   type AudiobookVoicePreviewInput,
   type AudiobookVoicePreviewResult,
+  type AudiobookVoiceLibraryMatchesResult,
+  type AudiobookVoiceLibraryMatchItem,
   type AudiobookWorkspaceBootstrap,
   type CharacterVoiceAdoptPreviewAsCloneInput,
   type CharacterVoiceAdoptPreviewAsCloneResult,
@@ -35,6 +37,12 @@ import {
   planCharacterVoices,
   type VoicePlannerCharacterInput,
   type VoicePlannerLibraryAsset,
+  inferGenderBucket,
+  resolveVoiceCluster,
+  inferVoiceSlot,
+  speakerKeyFromTags,
+  matchLibraryAssetsTopN,
+  collectLibraryAssetCandidates,
 } from "./audiobookVoicePlanner";
 import {
   assertCharacterVoiceReadyForPreview,
@@ -356,6 +364,142 @@ export class AudiobookVoiceAssetService {
       }),
       chapterCount: novel.chapters.length,
       characterCount: novel.characters.length,
+    };
+  }
+
+  /**
+   * 「人物卡 ↔ VoiceAsset 对靠」：为单角色返回 top-N 库候选（approved clone_ref）。
+   * - 复用 matchLibraryAssetsTopN 打分（gender/cluster/scope/speaker 去重/L2 轻加权）
+   * - 全书 speaker 去重视角：本书其他角色已绑定的 asset/speaker 进 usedSpeakerKeys，
+   *   候选保留并标 occupiedBy（不硬排除，供人工覆盖）
+   * - 不读角色 ttsRefAudioPath 绝对路径；不落库；不做听感证明
+   * 安全：仅 approved clone_ref 可入候选；试听入口由前端走库 media-access 端点
+   */
+  async listVoiceLibraryMatches(
+    novelId: string,
+    characterId: string,
+    opts: { topN?: number } = {},
+  ): Promise<AudiobookVoiceLibraryMatchesResult> {
+    const novel = await prisma.novel.findUnique({
+      where: { id: novelId },
+      select: {
+        id: true,
+        characters: {
+          select: {
+            id: true,
+            name: true,
+            gender: true,
+            castRole: true,
+            role: true,
+            personality: true,
+            voiceTexture: true,
+            appearance: true,
+            background: true,
+            storyFunction: true,
+            firstImpression: true,
+            ttsMode: true,
+            ttsVoice: true,
+            ttsStyle: true,
+            ttsDesignPrompt: true,
+            ttsRefAudioPath: true,
+            ttsVoiceAssetId: true,
+            ttsSpeakerAliases: true,
+          },
+          orderBy: { createdAt: "asc" },
+        },
+      },
+    });
+    if (!novel) {
+      throw new AppError("小说不存在。", 404);
+    }
+    const target = novel.characters.find((c) => c.id === characterId);
+    if (!target) {
+      throw new AppError("角色不存在。", 404);
+    }
+
+    const plannerInput = toPlannerInput(target);
+    const genderBucket = inferGenderBucket(plannerInput);
+    const cluster = resolveVoiceCluster(plannerInput);
+    const preferredSlot = inferVoiceSlot(plannerInput);
+
+    // 本书其他角色已绑定 clone → assetId / speaker 预占：建 assetId→names、speaker→names 映射
+    const assetOccupants = new Map<string, string[]>();
+    const speakerOccupants = new Map<string, string[]>();
+    const usedSpeakerKeys = new Set<string>();
+    const libraryAssets = loadApprovedLibraryAssets();
+    const assetById = new Map(libraryAssets.map((a) => [a.id, a]));
+    for (const c of novel.characters) {
+      if (c.id === characterId) continue;
+      const id = c.ttsVoiceAssetId?.trim();
+      if (!id || c.ttsMode?.trim() !== "clone") continue;
+      const name = c.name?.trim() || c.id;
+      assetOccupants.set(id, [...(assetOccupants.get(id) ?? []), name]);
+      const bound = assetById.get(id);
+      const sp = speakerKeyFromTags(bound?.tags, id);
+      if (sp) {
+        usedSpeakerKeys.add(sp);
+        speakerOccupants.set(sp, [...(speakerOccupants.get(sp) ?? []), name]);
+      }
+    }
+
+    // 自身已绑 asset 不进候选（usedAssetIds 排除）
+    const usedAssetIds = new Set<string>();
+    const selfAsset = target.ttsVoiceAssetId?.trim();
+    if (selfAsset && target.ttsMode?.trim() === "clone") usedAssetIds.add(selfAsset);
+
+    const ranked = matchLibraryAssetsTopN({
+      genderBucket,
+      cluster,
+      assets: libraryAssets,
+      usedAssetIds,
+      usedSpeakerKeys,
+      preferredSlot,
+      topN: opts.topN,
+    });
+
+    // 全量通过门禁+speaker 去重后的候选数（未截断），用于排除计数
+    const allRanked = collectLibraryAssetCandidates({
+      genderBucket,
+      cluster,
+      assets: libraryAssets,
+      usedAssetIds,
+      usedSpeakerKeys,
+      preferredSlot,
+      includeOccupiedSpeakers: true,
+    });
+
+    const candidates: AudiobookVoiceLibraryMatchItem[] = ranked.map((c) => {
+      const byAsset = assetOccupants.get(c.asset.id) ?? [];
+      const bySpeaker = c.speakerKey ? (speakerOccupants.get(c.speakerKey) ?? []) : [];
+      const occupiedBy = Array.from(new Set([...byAsset, ...bySpeaker]));
+      return {
+        voiceAssetId: c.asset.id,
+        slug: c.asset.slug,
+        displayName: c.asset.displayName,
+        score: c.score,
+        reason: c.reason,
+        dimensions: {
+          gender: c.gender,
+          cluster: c.cluster,
+          scope: c.scope,
+        },
+        occupiedBy: occupiedBy.length ? occupiedBy : null,
+        speakerOccupied: c.speakerOccupied,
+      };
+    });
+
+    // excludedCount：库 approved 总数 - 全量通过门禁候选数（同 speaker 去重后）。
+    // 观测「库很大但严门禁」；不阻断。
+    const totalApproved = libraryAssets.length;
+    const excludedCount = Math.max(0, totalApproved - allRanked.length);
+
+    return {
+      novelId,
+      characterId,
+      genderBucket,
+      cluster,
+      candidates,
+      excludedCount,
     };
   }
 
