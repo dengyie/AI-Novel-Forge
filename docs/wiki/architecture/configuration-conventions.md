@@ -103,6 +103,10 @@ embeddingConcurrency: asInt(process.env.EMBEDDING_CONCURRENCY, 4, 1, 16),
 - **症状**：长跑 dev server 行为与 `.env` 不一致。
   - **常见原因**：启动 shell 当时的 env 与现在不同；解决办法是禁止业务参数走 env，让用户改面板生效。
 
+### 已知 backlog 违规（暂留 env 起步）
+
+- `CHAPTER_WRITER_TRANSPORT_RETRY_MAX_ATTEMPTS`（writer mid-stream / establish 瞬时 transport 失败整章重试上限，`server/src/services/novel/runtime/chapterRuntimePipeline.ts:181-189`）：retry 次数属于本文件 L55 明确禁止走 env 的「业务调优」类，但当前仍直读 `process.env`。已显式标注为 backlog，暂不迁是为：该参数仅启动期读一次、当前无多实例热调诉求；真正迁移需新建 `ChapterWriterRuntimeSettings` + 章节运行时设置面板（四步范式 + 客户端三处），属新领域而非纯收尾。读者遇到该 env 时，不应视为本规范的合法先例或 L48 允许 env 的同类。
+
 ## 相关模块
 
 - `server/src/config/rag.ts`
