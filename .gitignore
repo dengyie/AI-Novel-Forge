@@ -13,6 +13,10 @@ server/dev.db
 server/dev.db-shm
 server/dev.db-wal
 server/tmp_*.js
+# server/tmp 是指向 /tmp/mnt/ainovel/tmp 的 symlink（运行时 HOT 区），整目录 ignore，
+# 避免 git reset/pull 把 symlink 还原成普通目录（已发生多次）。
+# 历史遗留的 db-backups/migration-history 等 tracked 文件已在同次提交从索引移除。
+server/tmp/
 server/tmp/**/*.db
 server/tmp/**/*.db*
 server/tmp/**/*.db-*
