@@ -55,3 +55,8 @@ console-errors
 current-page
 network-requests
 page-*.png
+
+# 2026-07-20: 防止生产 env 备份误提交(CPA key 曾泄露)
+deploy/env/server.env
+deploy/env/*.env
+!deploy/env/.env.example
