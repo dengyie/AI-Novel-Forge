@@ -194,6 +194,51 @@ test("E1: mergeQualityFeedbackList does not drop sticky avoidRetry packet throug
   assert.ok(merged.length <= QUALITY_FEEDBACK_ROLLING_MAX + 1, "total capped near MAX");
 });
 
+test("E1 (tight): capRollingFeedback trims to exactly MAX when overcrowded, tail = latest next", () => {
+  // 断言收紧到 equal MAX：list.length > MAX 时，capRollingFeedback 必返回恰好 MAX 个元素
+  // （next 永远保留，其余 slotsForRest=MAX-1 个按 sticky 优先 + 时序末尾优先填满）。
+  // 这条断言比 `<= MAX+1` 严：任何把 sticky 也计入 overflow 而多留一个的回归会被抓出。
+  const sticky1 = buildQualityFeedbackPacket({
+    assessment: assessment({ chapterOrder: 100, chapterId: "ch-sticky-1", rootCauseCode: "length_drift" }),
+    repairDecision: "discard",
+  });
+  const sticky2 = buildQualityFeedbackPacket({
+    assessment: assessment({ chapterOrder: 101, chapterId: "ch-sticky-2", rootCauseCode: "length_drift" }),
+    repairDecision: "discard",
+  });
+  assert.ok(sticky1 && sticky2);
+  assert.equal(sticky1.avoidRetry, true);
+  assert.equal(sticky2.avoidRetry, true);
+  let merged = mergeQualityFeedbackList([], sticky1);
+  merged = mergeQualityFeedbackList(merged, sticky2);
+  // 压入 MAX+2 个非 sticky soft（patch_repair，avoidRetry=false），制造 overflow
+  for (let i = 0; i < QUALITY_FEEDBACK_ROLLING_MAX + 2; i += 1) {
+    const soft = buildQualityFeedbackPacket({
+      assessment: assessment({
+        chapterOrder: 200 + i,
+        chapterId: `ch-soft-${i}`,
+        rootCauseCode: "length_drift",
+        recommendedAction: "patch_repair",
+        signals: [{
+          artifactType: "literary_score",
+          status: "invalid",
+          issueCodes: ["length_short"],
+          reason: "略短",
+        }],
+      }),
+    });
+    assert.ok(soft);
+    assert.equal(soft.avoidRetry, false);
+    merged = mergeQualityFeedbackList(merged, soft);
+  }
+  // 收紧：overflow 时长度必须 === MAX（不是 <= MAX+1）。
+  assert.equal(merged.length, QUALITY_FEEDBACK_ROLLING_MAX, "overflow 被 cap 到恰好 MAX");
+  // 两个 sticky 都应在结果里（restSticky.length>=slotsForRest=MAX-1 分支，保留最近 MAX-1 个 sticky）。
+  assert.ok(merged.some((f) => f.signature === sticky2.signature), "最近 sticky2 必须保留");
+  // 末尾必是最后一个 soft（即 next，最新发生）。
+  assert.equal(merged[merged.length - 1].avoidRetry, false, "末尾是最新发生的非 sticky next");
+});
+
 test("isAutoPatchAvoidedByRiskFlags reads qualityLoop.feedback projection", () => {
   const packet = buildQualityFeedbackPacket({
     assessment: assessment(),
