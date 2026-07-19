@@ -7,12 +7,13 @@
 完整 seed（含 wav）在私有资产仓，**不**进开源 monorepo：
 
 - **https://github.com/dengyie/AI-Novel-Forge-Assets** → `voice-library/`
+  - `packs/05-yuanworld-seed-from-mimo` · 3 silent PCM pipeline seeds
   - `packs/06-external-expand-20260718` · 51 clips · ~21 speakers
   - `packs/07-zh-pilot-20260718` · 408 clips · 115 speakers
 
 克隆后把 `voice-library/packs/*` 同步到本目录或部署机 `docs/voice-packs/`，再走 import API。
 
-> 旧公开仓 `dengyie/ainovel-voice-library-assets` 已并入上述统一资产仓，不再作为权威源。
+> 旧公开仓 `dengyie/ainovel-voice-library-assets` 已并入统一资产仓并**删除**（2026-07-20）。
 
 ## 本仓目录
 
