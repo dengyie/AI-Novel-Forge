@@ -57,7 +57,7 @@
 
 ### 桌面版与介绍站
 
-- Windows 桌面安装包 / portable：见 [Releases](https://github.com/dengyie/AI-Novel-Writing-Assistant/releases)
+- Windows 桌面安装包 / portable：见 [Releases](https://github.com/dengyie/AI-Novel-Forge/releases)
 - 公开介绍站源码：`site/`（可部署到 GitHub Pages）
 
 ---
@@ -65,7 +65,7 @@
 ## 仓库结构
 
 ```text
-AI-Novel-Writing-Assistant/
+AI-Novel-Forge/
 ├── client/     # Web 前端（React + Vite）
 ├── server/     # API / 导演 / 生产链 / 有声书（Express + Prisma）
 ├── shared/     # 共享类型与工具
@@ -145,7 +145,7 @@ pnpm dev                      # shared + server + client
 
 ## 维护
 
-- 仓库：https://github.com/dengyie/AI-Novel-Writing-Assistant  
+- 仓库：https://github.com/dengyie/AI-Novel-Forge  
 - 维护者：dengyie  
 - 问题与讨论：GitHub Issues  
 

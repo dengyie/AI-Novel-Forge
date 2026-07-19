@@ -75,7 +75,7 @@
   "description": "AI Novel Forge — 以小说为题的 AI 创作平台",
   "repository": {
     "type": "git",
-    "url": "https://github.com/dengyie/AI-Novel-Writing-Assistant.git"
+    "url": "https://github.com/dengyie/AI-Novel-Forge.git"
   },
-  "homepage": "https://github.com/dengyie/AI-Novel-Writing-Assistant"
+  "homepage": "https://github.com/dengyie/AI-Novel-Forge"
 }
