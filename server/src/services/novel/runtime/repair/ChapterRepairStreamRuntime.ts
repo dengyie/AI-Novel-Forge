@@ -10,7 +10,7 @@ import {
   formatRepairAdoptHistoryLine,
 } from "@ai-novel/shared/types/repairAdoptDecision";
 import { extractSotBannedTermsFromNovel } from "@ai-novel/shared/types/sotBannedTerms";
-import type { StreamDoneHelpers } from "../../../../llm/streaming";
+import type { StreamDoneHelpers, WritableSSEFrame } from "../../../../llm/streaming";
 import { prisma } from "../../../../db/prisma";
 import { streamTextPrompt } from "../../../../prompting/core/promptRunner";
 import { withChapterRepairContext } from "../../../../prompting/prompts/novel/chapterLayeredContext";
@@ -154,6 +154,32 @@ function scoreFromChapterColumns(chapter: {
     voice: chapter.characterScore,
     engagement: overall,
     overall,
+  };
+}
+
+/**
+ * F9：构造 chapter repair run_status SSE 帧，纯函数、无 DB，便于双分支专门回归测试。
+ *
+ * 两条分支：
+ *  - adopt-recheck（adopt 完成 → recheck 判 literaryPass && styleClear）→ succeeded/failed
+ *  - post-adopt-failure（adopt 写正文后副作用失败 → 强制 needs_repair）→ 必 failed
+ *
+ * F9 原根因：旧实现把 adopt-recheck 未过门也 / 副作用失败也 误报 status:"succeeded"，
+ * 监管 poller 据此把章节当"已过审"跳过。这里把两条分支的 status 收敛在单点，
+ * 配合 buildRepairRunStatusFrame 专门回归测，防止再次被折叠回 succeeded。
+ */
+export function buildRepairRunStatusFrame(input: {
+  chapterId: string;
+  status: "succeeded" | "failed" | "running";
+  phase: "streaming" | "finalizing" | "completed";
+  message: string;
+}): WritableSSEFrame {
+  return {
+    type: "run_status",
+    runId: `chapter-repair:${input.chapterId}`,
+    status: input.status,
+    phase: input.phase,
+    message: input.message,
   };
 }
 
@@ -329,14 +355,12 @@ export class ChapterRepairStreamRuntime {
     content: string;
     helpers: StreamDoneHelpers;
   }): Promise<void> {
-    const runId = `chapter-repair:${input.chapterId}`;
-    input.helpers.writeFrame({
-      type: "run_status",
-      runId,
+    input.helpers.writeFrame(buildRepairRunStatusFrame({
+      chapterId: input.chapterId,
       status: "running",
       phase: "finalizing",
       message: "修复稿已生成，正在评估是否采纳（evaluate → adopt|discard）。",
-    });
+    }));
 
     const repairedContent = input.content.trim();
     if (!repairedContent) {
@@ -457,15 +481,14 @@ export class ChapterRepairStreamRuntime {
         });
       });
 
-      input.helpers.writeFrame({
-        type: "run_status",
-        runId,
+      input.helpers.writeFrame(buildRepairRunStatusFrame({
+        chapterId: input.chapterId,
         status: "succeeded",
         phase: "completed",
         message: adoptDecision.decision === "plateau_stop"
           ? `修复候选未采纳（plateau）：${adoptDecision.reason} 正文保持 baseline。`
           : `修复候选未采纳（discard）：${adoptDecision.reason} 正文保持 baseline。`,
-      });
+      }));
       return;
     }
 
@@ -496,7 +519,6 @@ export class ChapterRepairStreamRuntime {
       await this.markPostAdoptNeedsRepair({
         novelId: input.novelId,
         chapterId: input.chapterId,
-        runId,
         helpers: input.helpers,
         logMessage: "Artifact sync failed after repair adopt; content kept, marking needs_repair.",
         userMessage: "修复候选已采纳，但 artifacts 同步失败，已标 needs_repair。",
@@ -518,7 +540,6 @@ export class ChapterRepairStreamRuntime {
       await this.markPostAdoptNeedsRepair({
         novelId: input.novelId,
         chapterId: input.chapterId,
-        runId,
         helpers: input.helpers,
         logMessage: "Post-adopt recheck failed; content kept, marking needs_repair.",
         userMessage: "修复候选已采纳，但正式 recheck 失败，已标 needs_repair。",
@@ -545,9 +566,8 @@ export class ChapterRepairStreamRuntime {
       await resolveAuditIssues(input.novelId, input.options.auditIssueIds).catch(() => null);
     }
 
-    input.helpers.writeFrame({
-      type: "run_status",
-      runId,
+    input.helpers.writeFrame(buildRepairRunStatusFrame({
+      chapterId: input.chapterId,
       // F9: adopt 流程结束但未达质量门（!literaryPass||!styleClear → needs_repair），
       // 发 failed 以免监管 poller 把 succeeded 当"章已过审"跳过该章。adopt 成功且
       // 全过才发 succeeded。
@@ -556,14 +576,13 @@ export class ChapterRepairStreamRuntime {
       message: literaryPass && styleClear
         ? "修复候选已采纳，本章已达到可继续推进状态。"
         : "修复候选已采纳并保存，但仍有问题待继续处理。",
-    });
+    }));
   }
 
   /** adopt 后副作用失败：正文已写，强制 needs_repair，禁止假 completed。 */
   private async markPostAdoptNeedsRepair(input: {
     novelId: string;
     chapterId: string;
-    runId: string;
     helpers: StreamDoneHelpers;
     logMessage: string;
     userMessage: string;
@@ -578,15 +597,14 @@ export class ChapterRepairStreamRuntime {
       where: { id: input.chapterId },
       data: chapterStatePairAfterQualityGates({ literaryPass: false, styleClear: false }),
     });
-    input.helpers.writeFrame({
-      type: "run_status",
-      runId: input.runId,
+    input.helpers.writeFrame(buildRepairRunStatusFrame({
+      chapterId: input.chapterId,
       // F9: adopt 后副作用失败时章节实际 needs_repair（literaryPass=false,
       // styleClear=false），不得发 status:succeeded 误导监管 poller 跳过该章。
       status: "failed",
       phase: "completed",
       message: input.userMessage,
-    });
+    }));
   }
 
   /**
