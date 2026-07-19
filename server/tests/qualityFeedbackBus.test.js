@@ -234,9 +234,71 @@ test("E1 (tight): capRollingFeedback trims to exactly MAX when overcrowded, tail
   // 收紧：overflow 时长度必须 === MAX（不是 <= MAX+1）。
   assert.equal(merged.length, QUALITY_FEEDBACK_ROLLING_MAX, "overflow 被 cap 到恰好 MAX");
   // 两个 sticky 都应在结果里（restSticky.length>=slotsForRest=MAX-1 分支，保留最近 MAX-1 个 sticky）。
+  // P2-1：具象化 sticky1 存活断言。RMAX=3 + 输入 2 sticky，slotsForRest=2=sticky 数，
+  // 走 `restSticky.length>=slotsForRest` 分支 `slice(-2)` → [sticky1, sticky2, next]，
+  // 两 sticky 全活。若有人误把 `slice(-slotsForRest)` 改 `slice(0, slotsForRest)`，sticky2 丢
+  // 而 sticky1 留，仅断 sticky2 会漏放——故补 sticky1 断言锁两条分支方向。
   assert.ok(merged.some((f) => f.signature === sticky2.signature), "最近 sticky2 必须保留");
+  assert.ok(merged.some((f) => f.signature === sticky1.signature), "sticky1 也必须存活（两 sticky 全活）");
   // 末尾必是最后一个 soft（即 next，最新发生）。
   assert.equal(merged[merged.length - 1].avoidRetry, false, "末尾是最新发生的非 sticky next");
+});
+
+test("E1 (overflow): 4 sticky > slotsForRest 时仅留最近 2 sticky 丢前 2, 长 === MAX", () => {
+  // P2-2：sticky overflow 分支专测。RMAX=3, slotsForRest=2。输入 4 sticky + 1 soft,
+  // restSticky.length(4) >= slotsForRest(2) → 走 `[...restSticky.slice(-2), next]`
+  // = [sticky2, sticky3, soft],sticky0/sticky1 被丢,长度 3 === MAX。
+  // 此分支 strict 测(2 sticky)未触达,补它锁"保留最近 MAX-1 个 sticky"的"最近"语义。
+  const sticky0 = buildQualityFeedbackPacket({
+    assessment: assessment({ chapterOrder: 100, chapterId: "ch-ov-stk-0", rootCauseCode: "length_drift" }),
+    repairDecision: "discard",
+  });
+  const sticky1 = buildQualityFeedbackPacket({
+    assessment: assessment({ chapterOrder: 101, chapterId: "ch-ov-stk-1", rootCauseCode: "length_drift" }),
+    repairDecision: "discard",
+  });
+  const sticky2 = buildQualityFeedbackPacket({
+    assessment: assessment({ chapterOrder: 102, chapterId: "ch-ov-stk-2", rootCauseCode: "length_drift" }),
+    repairDecision: "discard",
+  });
+  const sticky3 = buildQualityFeedbackPacket({
+    assessment: assessment({ chapterOrder: 103, chapterId: "ch-ov-stk-3", rootCauseCode: "length_drift" }),
+    repairDecision: "discard",
+  });
+  assert.ok(sticky0 && sticky1 && sticky2 && sticky3);
+  assert.equal([sticky0, sticky1, sticky2, sticky3].every((p) => p.avoidRetry), true);
+  let merged = mergeQualityFeedbackList([], sticky0);
+  merged = mergeQualityFeedbackList(merged, sticky1);
+  merged = mergeQualityFeedbackList(merged, sticky2);
+  merged = mergeQualityFeedbackList(merged, sticky3);
+  // tail = 最新 soft (avoidRetry=false)
+  const soft = buildQualityFeedbackPacket({
+    assessment: assessment({
+      chapterOrder: 200,
+      chapterId: "ch-ov-soft",
+      rootCauseCode: "length_drift",
+      recommendedAction: "patch_repair",
+      signals: [{
+        artifactType: "literary_score",
+        status: "invalid",
+        issueCodes: ["length_short"],
+        reason: "略短",
+      }],
+    }),
+  });
+  assert.equal(soft.avoidRetry, false);
+  merged = mergeQualityFeedbackList(merged, soft);
+  // 长度收敛到恰好 MAX
+  assert.equal(merged.length, QUALITY_FEEDBACK_ROLLING_MAX, "4 sticky overflow cap 到 MAX");
+  // 最近 2 sticky 存活（slice(-2) = [sticky2, sticky3]）
+  assert.ok(merged.some((f) => f.signature === sticky2.signature), "sticky2(倒数第 3)存活");
+  assert.ok(merged.some((f) => f.signature === sticky3.signature), "sticky3(倒数第 2)存活");
+  // 前 2 sticky 被丢
+  assert.equal(merged.some((f) => f.signature === sticky0.signature), false, "sticky0 被丢");
+  assert.equal(merged.some((f) => f.signature === sticky1.signature), false, "sticky1 被丢");
+  // 末尾是最新 soft (next)
+  assert.equal(merged[merged.length - 1].signature, soft.signature, "末尾是最新 soft next");
+  assert.equal(merged[merged.length - 1].avoidRetry, false, "末尾非 sticky");
 });
 
 test("isAutoPatchAvoidedByRiskFlags reads qualityLoop.feedback projection", () => {
