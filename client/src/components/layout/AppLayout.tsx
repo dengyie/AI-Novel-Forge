@@ -113,7 +113,7 @@ export default function AppLayout() {
           workspaceNavMode={isNovelWorkspace ? workspaceNavMode : undefined}
           onWorkspaceNavModeChange={isNovelWorkspace ? setWorkspaceNavMode : undefined}
         />
-        <div className="flex min-h-[calc(100vh-4rem)]">
+        <div className="flex h-[calc(100vh-4rem)]">
           <div className={useMobileFullWidthContent ? "hidden md:block" : "shrink-0"}>
             {isNovelWorkspace && workspaceNavMode === "workspace" && workspaceRoute ? (
               <NovelWorkspaceRail
