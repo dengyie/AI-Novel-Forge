@@ -45,6 +45,12 @@ export interface StepExecutionContext {
   targetId?: string | null;
   targetChapterId?: string | null;
   stepInput?: unknown;
+  /**
+   * F6：HTTP/SSE 调用方可注入的中断信号，供流式 step（如 chapter_repair）感知
+   * 客户端断连后及时让 LLM/captureStreamOutput settle、释放 in-process 锁。
+   * 非 SSE / 非流式 step 无需设置，忽略即可。
+   */
+  signal?: AbortSignal;
 }
 
 export interface DirectorStepContext extends StepExecutionContext {
@@ -75,6 +81,8 @@ export interface LegacyWorkflowStepExecutionContext {
   policyMode?: DirectorPolicyMode | null;
   artifacts?: DirectorArtifactRef[];
   projectionHints?: Record<string, unknown>;
+  /** F6：与 StepExecutionContext.signal 同义，union 协调需两侧都声明；legacy/auto 路径不设。 */
+  signal?: AbortSignal;
 }
 
 export type WorkflowStepExecutionContext =

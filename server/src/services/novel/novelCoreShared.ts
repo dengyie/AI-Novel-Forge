@@ -173,6 +173,12 @@ export interface LLMGenerateOptions {
   model?: string;
   temperature?: number;
   maxTokens?: number;
+  /**
+   * 调用方可注入的中断信号；当前由 chapter_repair 的 SSE 路径在 `res.on('close')`
+   * 时触发，传到 streamTextPrompt → captureStreamOutput，感知客户端断连让流式生成尽快
+   * settle/reject，避免 in-process 章节锁长时间挂住。非流式调用方无需设置。
+   */
+  signal?: AbortSignal;
 }
 
 export interface OutlineGenerateOptions extends LLMGenerateOptions {

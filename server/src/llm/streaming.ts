@@ -78,13 +78,16 @@ export async function streamToSSE(
     fullContent: string,
     helpers: StreamDoneHelpers,
   ) => void | StreamDonePayload | Promise<void | StreamDonePayload>,
+  options?: { signal?: AbortSignal },
 ): Promise<void> {
   const disposeHeartbeat = initSSE(res);
   let fullContent = "";
 
   try {
     for await (const chunk of stream) {
-      if (res.writableEnded) {
+      // F6：客户端断连 → 调用方 signal 已 abort，或 res 已关闭，停止从上游拉取，
+      // 让 onDone 内部的 `await streamed.complete` 因同 signal 尽快 reject 释放锁。
+      if (res.writableEnded || options?.signal?.aborted) {
         break;
       }
       const text = normalizeChunkContent(chunk.content);
@@ -98,6 +101,11 @@ export async function streamToSSE(
     const donePayload = await onDone?.(fullContent, {
       writeFrame: (payload) => writeSSEFrame(res, payload),
     });
+    if (options?.signal?.aborted) {
+      // F6：已 abort 时不再写任何后续 frame（客户端已走）。onDone 内部已据 signal
+      // settle/reject 并释放锁（finally），跳过 done/error 帧写回，避免向已关闭 res 再写。
+      return;
+    }
     if (donePayload?.frames?.length) {
       for (const frame of donePayload.frames) {
         writeSSEFrame(res, frame);
@@ -108,6 +116,10 @@ export async function streamToSSE(
     }
     writeSSEFrame(res, { type: "done", fullContent });
   } catch (error) {
+    // F6：onDone 因 abort reject 抛到这里时若客户端已断连，不再向死写 error 帧。
+    if (options?.signal?.aborted) {
+      return;
+    }
     writeSSEFrame(res, {
       type: "error",
       error: error instanceof Error ? error.message : "流式输出失败。",
