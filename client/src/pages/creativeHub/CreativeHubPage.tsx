@@ -423,7 +423,7 @@ function CreativeHubPageContent() {
         </div>
       </div>
 
-      <div className="grid min-h-[72vh] gap-4 lg:h-[calc(100vh-11rem)] lg:grid-cols-[240px_minmax(0,1fr)_320px]">
+      <div className="grid min-h-[72vh] items-start gap-4 lg:grid-cols-[240px_minmax(0,1fr)_320px]">
         <div className="min-h-0">
           <CreativeHubThreadList
             threads={threads}
