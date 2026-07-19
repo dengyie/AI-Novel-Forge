@@ -297,12 +297,23 @@ export function mergeStrategyPlan(document: VolumePlanDocument, strategyPlan: Vo
   });
 }
 
-export function mergeCritiqueReport(document: VolumePlanDocument, critiqueReport: VolumePlanDocument["critiqueReport"]): VolumePlanDocument {
+/**
+ * F11：合并 critique 报告；可选 `kind` 显式标记来源（strategy / skeleton），
+ * 默认按调用点选择合适的 kind。旧调用点若不传 kind 将保留原来的字段值。
+ */
+export function mergeCritiqueReport(
+  document: VolumePlanDocument,
+  critiqueReport: VolumePlanDocument["critiqueReport"],
+  kind?: "strategy" | "skeleton",
+): VolumePlanDocument {
+  const tagged = critiqueReport && kind
+    ? { ...critiqueReport, kind }
+    : critiqueReport;
   return buildVolumeWorkspaceDocument({
     novelId: document.novelId,
     volumes: document.volumes,
     strategyPlan: document.strategyPlan,
-    critiqueReport,
+    critiqueReport: tagged,
     beatSheets: document.beatSheets,
     rebalanceDecisions: document.rebalanceDecisions,
     functionAcceptanceTables: document.functionAcceptanceTables,
@@ -311,8 +322,15 @@ export function mergeCritiqueReport(document: VolumePlanDocument, critiqueReport
   });
 }
 
+/**
+ * F11：只有骨架评论触发骨架重生；战略评论（kind === "strategy"）不触发。
+ * 旧数据缺 kind 时视为骨架（保留旧行为，旧代码只把骨架评论落到该字段）。
+ */
 export function shouldRegenerateSkeleton(report: VolumePlanDocument["critiqueReport"]): boolean {
   if (!report) {
+    return false;
+  }
+  if (report.kind === "strategy") {
     return false;
   }
   if (report.overallRisk === "high") {
@@ -321,8 +339,14 @@ export function shouldRegenerateSkeleton(report: VolumePlanDocument["critiqueRep
   return report.issues.some((issue) => issue.severity === "high");
 }
 
+/**
+ * F11：只格式化骨架评论；战略评论不喂进骨架 prompt，避免误导框架。
+ */
 export function formatSkeletonCritiqueFeedback(report: VolumePlanDocument["critiqueReport"]): string {
   if (!report) {
+    return "";
+  }
+  if (report.kind === "strategy") {
     return "";
   }
   const lines: string[] = [];
@@ -368,10 +392,24 @@ export function mergeSkeleton(document: VolumePlanDocument, generatedVolumes: Ar
   resetPoint?: string | null;
   openPayoffs: string[];
 }>): VolumePlanDocument {
+  // F10：先按 title 匹配已有卷；未匹配的 slot 不继承 chapters/id/status，
+  // 避免骨架重生（标题或卷数改变）时把上一版本的章节挂到新卷上。
+  // 首次生成时 document.volumes 通常为空或都无 chapters，行为与旧位置匹配一致。
+  const normalizeTitle = (title: string): string => title.trim().toLowerCase();
+  const existingByTitle = new Map<string, VolumePlan>();
+  for (const existing of document.volumes) {
+    const key = normalizeTitle(existing.title ?? "");
+    if (key && !existingByTitle.has(key)) {
+      existingByTitle.set(key, existing);
+    }
+  }
+
   const mergedVolumes = generatedVolumes.map((volume, index) => {
-    const existing = document.volumes[index];
+    const titleKey = normalizeTitle(volume.title ?? "");
+    const matched = titleKey ? existingByTitle.get(titleKey) : undefined;
+    // 命中同名旧卷：沿用其 id/status/chapters/时间戳；未命中：视为新卷（chapters 清空）。
     return {
-      id: existing?.id,
+      id: matched?.id,
       novelId: document.novelId,
       sortOrder: index + 1,
       title: volume.title,
@@ -388,17 +426,19 @@ export function mergeSkeleton(document: VolumePlanDocument, generatedVolumes: Ar
       nextVolumeHook: volume.nextVolumeHook,
       resetPoint: volume.resetPoint ?? null,
       openPayoffs: volume.openPayoffs,
-      status: existing?.status ?? "active",
-      sourceVersionId: existing?.sourceVersionId ?? null,
-      chapters: existing?.chapters ?? [],
-      createdAt: existing?.createdAt ?? new Date(0).toISOString(),
-      updatedAt: existing?.updatedAt ?? new Date(0).toISOString(),
+      status: matched?.status ?? "active",
+      sourceVersionId: matched?.sourceVersionId ?? null,
+      chapters: matched?.chapters ?? [],
+      createdAt: matched?.createdAt ?? new Date(0).toISOString(),
+      updatedAt: matched?.updatedAt ?? new Date(0).toISOString(),
     };
   });
 
+  // 未命中的新卷 id 缺失，交由 buildVolumeWorkspaceDocument 内部的
+  // normalizeVolumeDraftInput 走 createLocalId 兜底生成，保持既有约束。
   return buildVolumeWorkspaceDocument({
     novelId: document.novelId,
-    volumes: mergedVolumes,
+    volumes: mergedVolumes as VolumePlan[],
     strategyPlan: document.strategyPlan,
     critiqueReport: document.critiqueReport,
     beatSheets: [],
