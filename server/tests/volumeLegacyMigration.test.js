@@ -270,3 +270,74 @@ test("volumeGenerationHelpers generate/preserve must not fall back to unsanitize
     "preserve path should skip codes-only sheets and regenerate",
   );
 });
+
+test("F10-norm: normalizeVolumeDraftInput backfills a non-empty volume id when id is missing/undefined (createLocalId fallback)", () => {
+  // F10-backlog 改了 DraftableVolume 类型(id?: string|null)收 cast,但没补 normalize 反填单测。
+  // 此测锁第 259 行 `volume.id?.trim() || createLocalId(...)`:缺 id 键/undefined 输入必反填
+  // 非空 id(`<novelId>-volume-<uuid>`),防未来有人改坏反填顺序(如丢 createLocalId 兜底或
+  // 先用 index 派生导致多卷冲突)。
+  //
+  // 取证真实契约:volumeInputSchema.id = z.string().trim().min(1).optional()——`.optional()` 只
+  // 放行"缺键/undefined",**不**放行空白串/null(trim 后 min(1) 失败)。故 normalize 第 259 行的
+  // `|| createLocalId` 兜底**只在 id 缺失/undefined** 时触发;空白/null 在 schema parse 阶被拦,
+  // 不到反填。下方第 3 段 assert.throws 锁这一层界;第 1/2 段锁反填正路。
+  const baseVolume = {
+    title: "测试卷",
+    mainPromise: "主线承诺",
+    escalationMode: "起势",
+    protagonistChange: "主角转变",
+    climax: "卷末高潮",
+    nextVolumeHook: "下卷钩子",
+    chapters: [
+      { chapterOrder: 1, title: "第1章", summary: "章摘要" },
+    ],
+  };
+
+  // 1) 缺 id 键 → 反填非空字符串,形如 <novelId>-volume-<uuid>。
+  const volumesMissing = normalizeVolumeDraftInput("novel-x", [{ ...baseVolume }]);
+  assert.equal(volumesMissing.length, 1);
+  assert.equal(typeof volumesMissing[0].id, "string");
+  assert.ok(volumesMissing[0].id.length > 0, "缺 id 必反填非空字符串");
+  assert.ok(volumesMissing[0].id.startsWith("novel-x-volume-"), "反填 id 用 <novelId>-volume- 前缀 + uuid");
+
+  // 2) 显式 undefined（同缺键）→ 同样反填。
+  const volumesUndefined = normalizeVolumeDraftInput("novel-x", [{ ...baseVolume, id: undefined }]);
+  assert.ok(volumesUndefined[0].id.length > 0, "undefined id 必反填非空");
+  assert.ok(volumesUndefined[0].id.startsWith("novel-x-volume-"), "undefined id 反填用 createLocalId");
+
+  // 3) createLocalId 用 randomUUID,两次缺 id 输入得不同 id（唯一性,防 index/counter 派生
+  //    导致跨调用偶发冲突污染 VolumePlan 主键）。
+  assert.notEqual(volumesMissing[0].id, volumesUndefined[0].id, "两次反填必唯一(createLocalId=uuid)");
+
+  // 4) 空白串 / null 不达反填——schema.parse 阶即被 `.trim().min(1).optional()` 拦。
+  //    锁层界:有人若宽 schema(把 `.optional()` 改 `.nullable().optional()` 或去 min(1))放行
+  //    空白,null/空就会流入 normalize 主体,届时反填需兜住——此 throws 在 schema 拦截有效时
+  //    绿;schema 被放宽而反填未同步加固时,本断言会提醒补反填空白分支。
+  assert.throws(
+    () => normalizeVolumeDraftInput("novel-x", [{ ...baseVolume, id: "   " }]),
+    /id|Too small|min/i,
+    "空白串 id 在 schema 阶被拦,不到反填(契约:optional 不放行 min<1)",
+  );
+  assert.throws(
+    () => normalizeVolumeDraftInput("novel-x", [{ ...baseVolume, id: null }]),
+    /id|expected/i,
+    "null id 在 schema 阶被拦(契约:optional 不放行 null)",
+  );
+});
+
+test("F10-norm: presence of an explicit non-empty id disables createLocalId backfill (negative control)", () => {
+  // 负控:有 id 时不走 createLocalId,反填被跳过——确保 `|| createLocalId` 短路语义不被
+  // 改成"无条件 createLocalId 覆盖既有 id"（那会破坏持久化卷的稳定 id 链）。
+  const volumes = normalizeVolumeDraftInput("novel-x", [{
+    title: "测试卷",
+    mainPromise: "主线承诺",
+    escalationMode: "起势",
+    protagonistChange: "主角转变",
+    climax: "卷末高潮",
+    nextVolumeHook: "下卷钩子",
+    id: "v-stable-id",
+    chapters: [{ chapterOrder: 1, title: "第1章", summary: "章摘要" }],
+  }]);
+  assert.equal(volumes[0].id, "v-stable-id");
+  assert.ok(!volumes[0].id.startsWith("novel-x-volume-"), "显式 id 必保留不被 createLocalId 覆盖");
+});
