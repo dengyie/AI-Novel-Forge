@@ -123,11 +123,11 @@ function parseRoute(hash: string): { page: "home" } | { page: "docs"; docId?: st
 function SiteNav() {
   return (
     <nav className="site-nav" aria-label="主导航">
-      <a className="brand" href="#/" aria-label="AI 小说创作工作台首页">
+      <a className="brand" href="#/" aria-label="AI Novel Forge 首页">
         <span className="brand-mark">
           <BookOpenText size={20} strokeWidth={2.1} />
         </span>
-        <span>AI 小说创作工作台</span>
+        <span>AI Novel Forge</span>
       </a>
       <div className="nav-links">
         <a href="#/docs">文档</a>
@@ -151,10 +151,10 @@ function HomePage() {
       >
         <div className="hero-scrim" />
         <div className="hero-content">
-          <p className="eyebrow">AI native novel production workspace</p>
+          <p className="eyebrow">AI Novel Forge · 以小说为题的 AI 创作平台</p>
           <h1>从一句灵感，到一整本小说</h1>
           <p className="hero-copy">
-            自动导演、世界观、角色、拆章、章节执行和质量修复串成一条长篇生产链，帮助新手把想法推进到可持续写作。
+            自动导演、世界观、角色、拆章、章节执行、有声书和质量修复串成一条创作生产链，帮助新手把想法推进到可持续写作。
           </p>
           <div className="hero-actions">
             <a className="button primary" href={releaseUrl}>

@@ -314,7 +314,7 @@ export default function NovelWorkspaceRail(props: NovelWorkspaceRailProps) {
 
   const completedStepCount = stepStates.filter((item) => item.isDone).length;
   const workflowProgressCount = workflowIndex >= 0 ? workflowIndex + 1 : completedStepCount;
-  const novelTitle = novelDetail?.title?.trim() || "小说创作工作台";
+  const novelTitle = novelDetail?.title?.trim() || "AI Novel Forge";
   const runtimeActionSummary = runtimeProjection?.nextActionLabel
     ? `下一步：${runtimeProjection.nextActionLabel}`
     : null;

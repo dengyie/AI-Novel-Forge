@@ -332,7 +332,7 @@ function validateImportSource(sourcePath: string, currentDatabasePath: string): 
   }
 
   if (!hasKnownApplicationTables(normalizedSourcePath)) {
-    throw new Error("The selected database does not look like an AI Novel Writing Assistant local database.");
+    throw new Error("The selected database does not look like an AI Novel Forge local database.");
   }
 
   return normalizedSourcePath;
