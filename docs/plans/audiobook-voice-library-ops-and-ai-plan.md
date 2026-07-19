@@ -1,10 +1,10 @@
 # 全站音色库运营与 AI 规划 — 开发计划（D–G）
 
 > **status: delivered (code)** · 2026-07-18  
-> **生产 tip**：pxed / `origin/main` 代码 **`0b776e6`**（A–G + review harden + heardSha 绑定）；docs 可叠在其后  
+> **生产 tip**：production / `origin/main` 代码 **`0b776e6`**（A–G + review harden + heardSha 绑定）；docs 可叠在其后  
 > **前置 SoT**：`docs/plans/audiobook-sitewide-voice-library-research.md`  
 > **产品**：Obsidian `ainovel 小说转有声书 产品形态` · 调研 `ainovel 全站音色库与AI规划-调研`  
-> **运维 cutover**：vault `pxed ai-novel 部署与运维` **§七点四十九**（heardSha + approve token live）/ §七点四十八 / §七点四十七 / §七点四十五（harden）/ §七点四十四（ABC）  
+> **运维 cutover**：vault `production ai-novel 部署与运维` **§七点四十九**（heardSha + approve token live）/ §七点四十八 / §七点四十七 / §七点四十五（harden）/ §七点四十四（ABC）  
 > **原则**：里程碑驱动；每里程碑 ≤3 阶段；禁 auto-approve seeds；禁客户端裸 `ttsRefAudioPath`；生产 `AUTH_ALLOW_OPEN` 下能力限制必须在 **service/HTTP**；approve 另叠 env token + heardSha。
 
 ---
@@ -25,7 +25,7 @@
 | E 人耳 | 库级试听；`review.heardAt` + **`heardSha256`**；approve 须 heard 且 sha≡primaryFile |
 | F token | 生产 **已设** `VOICE_LIBRARY_APPROVE_TOKEN`；升 approved 须 `X-Voice-Library-Approve-Token` |
 | G rewrite | `POST .../voice-design/rewrite` 候选 `applied:false`；`source=llm` / `rule_fallback` + `fallbackReason` |
-| 生产 | pxed **`0b776e6`**；approve token live；E2E API 绿；库可有 draft/archived 测试项 |
+| 生产 | production **`0b776e6`**；approve token live；E2E API 绿；库可有 draft/archived 测试项 |
 
 ### 本计划 P0/P1 缺口
 
@@ -210,7 +210,7 @@ G 不阻塞 E/F 生产可用。
 | F2 管理台 sessionStorage token 输入；403 文案 | ✅ |
 | F3 audit 日志 `voice_library_status … ok=`（无 token 明文） | ✅ |
 | 未设 env 与现网兼容 | ✅ |
-| **生产 F3 live**：pxed `server/.env` **已设** token（不进 git）；无/错 token → **403**；正确 token + heardSha → approved | ✅ |
+| **生产 F3 live**：production `server/.env` **已设** token（不进 git）；无/错 token → **403**；正确 token + heardSha → approved | ✅ |
 
 ---
 
@@ -297,7 +297,7 @@ Cutover 惯例不变：Mac pack **`client/dist`+`server/dist`** → scp → `git
 
 ### 7.1 管理台 Manual 路径（浏览器）
 
-1. 打开 `https://ainovel.mangoq.ccwu.cc/audiobook/voice-library`  
+1. 打开 `https://example.com/audiobook/voice-library`  
 2. 若生产已设 approve token：在管理台输入框粘贴 token（**sessionStorage**，不进 git）  
 3. 对 draft `clone_ref`：**真人点播放** → 等 GET audio 完成 → 再 Approve  
 4. 预期：未听 / sha 失配 → 拒绝；无 token → 403；齐备 → approved 进 picker  

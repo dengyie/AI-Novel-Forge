@@ -10,8 +10,6 @@
 ![AI](https://img.shields.io/badge/AI-LangChain%20%2B%20LangGraph-7C3AED)
 ![Database](https://img.shields.io/badge/Database-SQLite%20%2B%20Prisma-111827)
 
-生产站点（示例）：[ainovel.mangoq.ccwu.cc](https://ainovel.mangoq.ccwu.cc)
-
 ---
 
 ## 它解决什么问题

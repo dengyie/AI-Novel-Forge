@@ -1,6 +1,6 @@
 # 全站音色库 + AI 规划调研（SoT 摘要）
 
-> **生产 tip**：pxed / 代码 **`0b776e6`**（2026-07-18 · A–G + heardSha + approve token live）  
+> **生产 tip**：production / 代码 **`0b776e6`**（2026-07-18 · A–G + heardSha + approve token live）  
 > **运营计划（已交付代码）**：[`audiobook-voice-library-ops-and-ai-plan.md`](./audiobook-voice-library-ops-and-ai-plan.md)（D–G · cutover vault §七点四十九）
 
 ## Milestone A（已交付）
@@ -32,7 +32,7 @@
 - registry 损坏 quarantine 备份后 500；`mutateRegistry` 文件锁
 - list `limit` 非有限回落 + `offset` 分页
 - 列表 skipProbe 仍 `tryResolve(requireApproved)`，幽灵 assetId → invalid
-- pxed cutover §七点四十五
+- production cutover §七点四十五
 
 ## 安全（不变量）
 - ttsRefAudioPath 仅 null 或服务端写

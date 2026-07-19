@@ -2,10 +2,10 @@
 
 > 状态：开发文档定稿 **v1.1**（已实现 · 待交付/merge · Readiness 终态 toast 原生）· 2026-07-17  
 > 修订：v1.1 吸收文档深度 review——overview 查询模型与禁 N 次 assess、Badge 优先级栈、A2 必做锚点、移动 fixed 生成条参照系、A-lite 降级、queryKeys 接线事实、缓存/鉴权/toast 冻结。  
-> 来源：生产 tip `main/pxed@17d83151` 后的全栈流程 + 工作台 + UI 统一性 review  
+> 来源：生产 tip `main/production@17d83151` 后的全栈流程 + 工作台 + UI 统一性 review  
 > 前置已交付：voice readiness、design-prompt soft-target、listen-usability P0、segment delivery（UI 默认 `characters`）、任务折叠交付、角色分簇规划、固定试听资产（preview 指纹）  
 > 产品 SoT：Obsidian `ainovel 小说转有声书 产品形态` · 边界：`docs/wiki/workflows/novel-audiobook-boundary.md`  
-> 生产：pxed + `ainovel.mangoq.ccwu.cc`（本 milestone **默认不 merge/deploy**，用户另令）
+> 生产：production + `example.com`（本 milestone **默认不 merge/deploy**，用户另令）
 
 ---
 
@@ -46,7 +46,7 @@ P0/P1 范围：
   - IntersectionObserver 高亮步骤（P2，不挡 A2）
   - 桌面 sticky 生成条（P2）
   - clone 自动、旁白 design/clone、响度 loudnorm、发音词典
-  - 自动 merge / pxed cutover / Obsidian 运维大改（交付时另令）
+  - 自动 merge / production cutover / Obsidian 运维大改（交付时另令）
   - 改 bootstrap 契约（overview 独立接口，不扩展 workspace bootstrap 载荷）
 
 Manual-required：
@@ -108,7 +108,7 @@ Manual-required：
 | D8 | **移动生成条 = fixed + 底栏 offset** | 与 `MobileSiteShell` 同款 `bottom-[calc(4.25rem+env(safe-area-inset-bottom))]` 思路；**不**依赖 window scroll sticky。桌面可不做生成条 |
 | D9 | **面板可抽子组件，禁止无关重构** | 允许按 section 拆文件；行为契约不变 |
 | D10 | **全书 voice 门禁不本轮改** | 文案可提示「单章也需全书角色音色齐」 |
-| D11 | **默认不部署** | merge/pxed 需用户明确交付指令 |
+| D11 | **默认不部署** | merge/production 需用户明确交付指令 |
 | D12 | **Overview 禁止 N 次 `assess()`** | 单次（或固定次数）批量读库 + `buildSummaryFromRows` / `aggregateVoiceReadinessSummary`；列表路径 **不** `probeRefAudioOk` 逐文件 |
 | D13 | **可生成语义 = `voiceOk`** | 列表「可点进生成」跟 voice 硬门禁对齐；**不要**用 `readyForWorkbench`（含 preview）当主「可生成」 |
 | D14 | **不扩展 workspace bootstrap** | overview 独立 `POST .../workspace-overview`；不把批量态势塞进 `GET .../workspace` |

@@ -445,7 +445,7 @@ function ensureSchemaColumnBackfills(database: Database.Database): void {
 }
 
 export async function ensureRuntimeDatabaseReady(): Promise<void> {
-  // Desktop + web SQLite both self-migrate so production (pxed) does not depend on
+  // Desktop + web SQLite both self-migrate so production hosts do not depend on
   // hand-run SQL after every schema change. PostgreSQL is a no-op here.
   // Opt out: AI_NOVEL_SKIP_RUNTIME_MIGRATIONS=true
   //

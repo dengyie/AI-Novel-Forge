@@ -8,7 +8,7 @@ test("deepseek-v4-pro via openai+CPA baseURL forces non-thinking structured prof
   const profile = resolveStructuredOutputProfile({
     provider: "openai",
     model: "deepseek-v4-pro",
-    baseURL: "https://cpa.mangoq.ccwu.cc/v1",
+    baseURL: "https://proxy.example.com/v1",
     executionMode: "structured",
   });
   assert.equal(profile.family, "deepseek");
@@ -21,7 +21,7 @@ test("deepseek provider slot still works for v4-pro", () => {
   const profile = resolveStructuredOutputProfile({
     provider: "deepseek",
     model: "deepseek-v4-pro",
-    baseURL: "https://cpa.mangoq.ccwu.cc/v1",
+    baseURL: "https://proxy.example.com/v1",
     executionMode: "structured",
   });
   assert.equal(profile.family, "deepseek");

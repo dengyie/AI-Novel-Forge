@@ -11,7 +11,7 @@
  *   - 默认 dry-run；VOICEREF_MIGRATE_WRITE=1 才写库
  *   - 复用 voiceLibraryService.migrateCharacterCloneRefPathsRelativeOnce（同源逻辑）
  *
- * Usage (on pxed, novel-server host):
+ * Usage (on production, novel-server host):
  *   node server/scripts/migrate-character-clone-ref-paths.cjs            # dry-run + audit
  *   VOICEREF_MIGRATE_WRITE=1 node server/scripts/migrate-character-clone-ref-paths.cjs
  */

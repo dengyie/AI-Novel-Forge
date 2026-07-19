@@ -21,7 +21,7 @@ test("NovelAudiobookPanel delivery uses media-access and progressive chapters", 
   assert.match(panel, /TaskAudioControls novelId=\{novelId\} task=\{task\} chapters=\{(sortedChapters|chapters)\}/);
   // 禁止把远程主机路径当交付入口
   assert.doesNotMatch(panel, /ssh-/i);
-  assert.doesNotMatch(panel, /\/personal\/pxed\//);
+  assert.doesNotMatch(panel, /\/personal\/production\//);
 });
 
 test("NovelAudiobookPanel keeps stable media URL cache (no updatedAt reissue)", () => {

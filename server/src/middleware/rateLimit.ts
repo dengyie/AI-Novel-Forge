@@ -18,7 +18,7 @@ export interface RateLimitOptions {
 
 /**
  * Lightweight in-process fixed-window rate limiter (no external deps).
- * Sufficient for single-node pxed; not a distributed limiter.
+ * Sufficient for single-node deployments; not a distributed limiter.
  */
 export function createRateLimitMiddleware(options: RateLimitOptions) {
   const buckets = new Map<string, Bucket>();
