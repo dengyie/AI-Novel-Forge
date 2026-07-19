@@ -3,9 +3,9 @@
   "version": "0.4.3",
   "private": true,
   "license": "AGPL-3.0-only",
-  "author": "AI Novel Writing Assistant Team",
-  "description": "Windows desktop runtime for AI Novel Writing Assistant v2",
-  "productName": "AI Novel Writing Assistant v2",
+  "author": "AI Novel Forge Team",
+  "description": "Windows desktop runtime for AI Novel Forge",
+  "productName": "AI Novel Forge",
   "main": "dist/main.js",
   "files": [
     "dist"

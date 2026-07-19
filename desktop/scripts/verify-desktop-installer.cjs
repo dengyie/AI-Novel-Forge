@@ -8,7 +8,7 @@ const smokeRoot = path.join(repoRoot, "desktop", "build", "installer-smoke");
 const installDir = path.join(smokeRoot, "install");
 const dataDir = path.join(smokeRoot, "data");
 const markerFile = path.join(dataDir, "retained-marker.txt");
-const expectedExeName = "AI Novel Writing Assistant v2.exe";
+const expectedExeName = "AI Novel Forge.exe";
 const desktopShortcutDir = path.join(process.env.USERPROFILE || "", "Desktop");
 const startMenuProgramsDir = path.join(
   process.env.APPDATA || "",
@@ -183,8 +183,8 @@ async function main() {
   console.log(`[verify:desktop:installer] using installer ${installerPath}`);
 
   await installSilently(installerPath);
-  const desktopShortcut = findShortcut(desktopShortcutDir, "AI Novel Writing Assistant");
-  const startMenuShortcut = findShortcut(startMenuProgramsDir, "AI Novel Writing Assistant");
+  const desktopShortcut = findShortcut(desktopShortcutDir, "AI Novel Forge");
+  const startMenuShortcut = findShortcut(startMenuProgramsDir, "AI Novel Forge");
 
   if (!desktopShortcut) {
     throw new Error("Desktop shortcut was not created by the NSIS installer.");

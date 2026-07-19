@@ -300,7 +300,8 @@ export default function DesktopBootstrapShell({ snapshot, overlay = false }: Des
                     {resolveStageLabel(snapshot)}
                   </Badge>
                 </div>
-                <h1 className="text-3xl font-semibold tracking-tight">AI 小说创作工作台</h1>
+                <h1 className="text-3xl font-semibold tracking-tight">AI Novel Forge</h1>
+                <p className="text-sm text-slate-400">以小说为题的 AI 创作平台</p>
               </div>
             </div>
 

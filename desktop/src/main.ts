@@ -228,7 +228,7 @@ function createSplashHtml(): string {
         http-equiv="Content-Security-Policy"
         content="default-src 'none'; style-src 'unsafe-inline'; img-src data:"
       />
-      <title>AI 小说创作工作台</title>
+      <title>AI Novel Forge</title>
       <style>
         :root {
           color-scheme: dark;
@@ -301,8 +301,8 @@ function createSplashHtml(): string {
     <body>
       <main class="panel">
         ${brandMark}
-        <div class="title">AI 小说创作工作台</div>
-        <p class="subtitle">正在准备桌面启动壳和打包后的本地写作引擎。</p>
+        <div class="title">AI Novel Forge</div>
+        <p class="subtitle">以小说为题的 AI 创作平台 · 正在准备桌面启动壳和本地写作引擎。</p>
         <div class="meter"><span></span></div>
       </main>
     </body>
@@ -321,7 +321,7 @@ function createSplashWindow(): BrowserWindow {
     fullscreenable: false,
     frame: false,
     alwaysOnTop: true,
-    title: "AI Novel Writing Assistant v2",
+    title: "AI Novel Forge",
     backgroundColor: MAIN_WINDOW_BACKGROUND,
     icon: windowIcon,
   });
@@ -403,7 +403,7 @@ async function showBootstrapFailureDialog(error: unknown): Promise<void> {
   const errorMessage = error instanceof Error ? error.message : String(error);
   const result = await dialog.showMessageBox({
     type: "error",
-    title: "AI 小说创作工作台启动失败",
+    title: "AI Novel Forge 启动失败",
     message: "桌面应用未能完成初始化。",
     detail: `${errorMessage}\n\n日志目录:\n${logDir}\n\n日志文件:\n${logFilePath}`,
     buttons: ["打开日志目录", "复制日志路径", "退出"],

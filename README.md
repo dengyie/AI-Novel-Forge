@@ -1,8 +1,9 @@
-﻿# AI 小说创作工作台 / AI Novel Production Engine
+﻿# AI Novel Forge
 
+以小说为题的 AI 创作平台。
 
 > 本仓库为 dengyie fork（桌面版本 `0.4.3`，对齐 GitHub Releases `v0.4.3*` 线），保留 humanizer 去 AI 味、GenerationJob lease、promptRunner 墙钟超时、Reference fail-loud、SPA 根路径托管、小说有声书等本地生产差异。
-一个面向长篇小说创作的 AI Native 开源项目。
+一个以小说为底子、覆盖长篇写作与衍生创作（有声书等）的 AI Native 开源项目。
 
 当前开发主线：
 `Creative Hub + 自动导演开书 + 本书世界上下文 + 整本生产主链 + 写法引擎`
