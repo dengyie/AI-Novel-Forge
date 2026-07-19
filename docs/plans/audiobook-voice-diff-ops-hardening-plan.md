@@ -367,7 +367,7 @@ POST .../adopt-preview-clone
 | prepare 走多抽初选 | 源世界/样书 gen 后可并排听 |
 
 **提交建议：** `feat(phase-1): smart_fill, reserved presets, multi-draw preview corpus`  
-**本阶段结束前必须：** 至少 1 次真网 design 多抽（可本地/pxed），留下 wav 路径供阶段 2 对照——**禁止空跑 mock 宣称阶段 1 听感完成**。
+**本阶段结束前必须：** 至少 1 次真网 design 多抽（可本地/production），留下 wav 路径供阶段 2 对照——**禁止空跑 mock 宣称阶段 1 听感完成**。
 
 ### 阶段 2 — design 文案声学规约
 

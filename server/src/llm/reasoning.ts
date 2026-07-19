@@ -147,7 +147,7 @@ export function isDeepSeekThinkingModeProvider(
   if (normalizedBaseURL && DEEPSEEK_HOST_PATTERN.test(normalizedBaseURL)) {
     return true;
   }
-  // Any non-empty OpenAI-compatible base URL serving these model ids (e.g. cpa.mangoq.ccwu.cc).
+  // Any non-empty OpenAI-compatible base URL serving these model ids (including private proxies).
   return Boolean(normalizedBaseURL);
 }
 

@@ -47,11 +47,11 @@ test("deepseek thinking mode is detected by model id on OpenAI-compatible proxie
 
   // Critical production case: provider slot is openai, baseURL is CPA, model is deepseek-v4-pro.
   assert.equal(
-    isDeepSeekThinkingModeProvider("openai", "https://cpa.mangoq.ccwu.cc/v1", "deepseek-v4-pro"),
+    isDeepSeekThinkingModeProvider("openai", "https://proxy.example.com/v1", "deepseek-v4-pro"),
     true,
   );
   assert.equal(
-    isDeepSeekThinkingModeProvider("openai", "https://cpa.mangoq.ccwu.cc/v1", "deepseek-ai/deepseek-v4-pro"),
+    isDeepSeekThinkingModeProvider("openai", "https://proxy.example.com/v1", "deepseek-ai/deepseek-v4-pro"),
     true,
   );
   assert.equal(
@@ -74,7 +74,7 @@ test("deepseek thinking mode is detected by model id on OpenAI-compatible proxie
 test("CPA openai+deepseek-v4-pro forces thinking disabled kwargs when reasoningEnabled=false", () => {
   const behavior = resolveProviderReasoningBehavior({
     provider: "openai",
-    baseURL: "https://cpa.mangoq.ccwu.cc/v1",
+    baseURL: "https://proxy.example.com/v1",
     model: "deepseek-v4-pro",
     reasoningEnabled: false,
   });

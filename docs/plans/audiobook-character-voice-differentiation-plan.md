@@ -6,7 +6,7 @@
 > P2 收口：seed:inferred；reason 去「保证」；summary soft/override/seedInferred；Mimo 契约独立测。  
 > P2 再收口：仅 clone+ref 永久 skip（half-clone 可重规划）；auto 位满升 design reason 非听感口径；UI 展示 seedInferred。  
 > 范围：在 **不换 TTS 供应商、不新建 Voice 表、不通读全书正文、不碰写文管线** 的前提下，把「多角色身份音色可区分」做成 **可用、可维护、可回归** 的有声书能力。  
-> 生产：pxed + `ainovel.mangoq.ccwu.cc`；TTS：**CPA → MiMo chat-audio** 三模态。  
+> 生产：production + `example.com`；TTS：**CPA → MiMo chat-audio** 三模态。  
 > 产品 SoT：Obsidian `ainovel 小说转有声书 产品形态` · 协议：`ainovel 小说转有声书 TTS 经验` · 控制面：`docs/plans/audiobook-workbench-voice-readiness-plan.md` · 固定试听：`docs/plans/character-voice-preview-asset-plan.md` · 段级表演：`docs/plans/audiobook-segment-delivery-style-plan.md`（**正交**）。  
 > 审查基线：v1.0 深度审查 **有条件通过**；本文 = 解除阻塞后的实施 SoT。
 
@@ -501,7 +501,7 @@ summary: {
 |----|------|
 | 代码 | 回退 planner + UI strategy 即可；无 migration |
 | 数据 | 已写 tts 字段不自动回滚；可用 `preset_only` 再规划（非 clone） |
-| 发布 | 含 client：Mac dist + scp（pxed 易 OOM）；纯 server 可机上 tsc |
+| 发布 | 含 client：Mac dist + scp（production 易 OOM）；纯 server 可机上 tsc |
 | Cutover | 运维手册新小节；索引 tip；**听感结论不写进 cutover 当已验证** |
 
 ---

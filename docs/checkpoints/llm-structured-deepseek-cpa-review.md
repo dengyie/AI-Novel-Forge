@@ -34,7 +34,7 @@ toText(result.content) → 空 / "null"         ← 解析层
 repair 循环 → fallback pro → 300s abort      ← 级联层
 ```
 
-旁证（pxed 实测）：
+旁证（production 实测）：
 
 | 调用 | 结果 |
 |---|---|
@@ -93,7 +93,7 @@ repair 循环 → fallback pro → 300s abort      ← 级联层
 
 ## 5. 生产热修
 
-- pxed `dist/llm/*` 已同步本分支编译产物
+- production `dist/llm/*` 已同步本分支编译产物
 - `AppSetting` chain 已改为 deepseek → flash → grok-4.5
 - `novel-server` 已重启
 
@@ -111,6 +111,6 @@ repair 循环 → fallback pro → 300s abort      ← 级联层
 - [x] unit：profile requiresNonThinking  
 - [x] unit：coerce openai+deepseek → deepseek  
 - [x] unit：null content → reasoning JSON  
-- [x] pxed dist 部署 + DB 配置  
+- [x] production dist 部署 + DB 配置  
 - [x] health 恢复  
 - [ ] 导演全链路到章节 pipeline（监管任务继续）

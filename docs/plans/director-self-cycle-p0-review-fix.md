@@ -10,7 +10,7 @@
 >
 > **For agentic workers：**  
 > REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development`（推荐）或 `superpowers:executing-plans` 按 Task 执行。  
-> 本轮范围冻结：Fix-1 merge + Fix-2 lazy gate + 死参清理 + 测绿；**禁止** resume pxed / 开下一 milestone。
+> 本轮范围冻结：Fix-1 merge + Fix-2 lazy gate + 死参清理 + 测绿；**禁止** resume production / 开下一 milestone。
 
 **Goal:** 消除批续决策输入与执行表真相分裂（expand thrash），并给 full_book 懒批续补上与非懒路径同构的合同可执行门，辅以 strip 演进与死参清理。
 
@@ -21,10 +21,10 @@
 ## Global Constraints
 
 - **禁止** `skip_quality_repair` 策略化；禁止盲批 / 代写 PUT 当 rewrite worker  
-- **禁止** 本修复 milestone 自动恢复 pxed 写书、自动开下一功能 milestone  
+- **禁止** 本修复 milestone 自动恢复 production 写书、自动开下一功能 milestone  
 - **禁止** 在 argv / 仓库 / vault 拼 Bearer；生产 curl 仅 `-H @.curl_auth_header`  
 - **禁止** planHints / 文案拼写「称重」  
-- 生产主机仅 **Bohrium pxed + `ainovel.mangoq.ccwu.cc`**（Manual-required 部署）  
+- 生产主机仅 **self-hosted production + `example.com`**（Manual-required 部署）  
 - 不重写整个 auto-execution 调度器；不新增 DB 表；不自动砍 overload 义务条  
 - 不把全部 review-block 改成 non-skippable（产品语义另案）  
 - residual 57/71/74 无单独订单不 rewrite  
@@ -40,7 +40,7 @@ P0：readiness content/exec 合并正确，消灭假 isProcessed → expand thra
 P1：full_book 懒 prepare 与非懒 hard gate 同构；thrash / lazy-gate 测绿
 P2：strip 名单演进测；supervisoryCloseable 死参清理（可同提交）
 不做的 P2/P3：skippable 全收紧、overload LLM 收束、前端 takeover、历史 migration UI、生产 resume
-Manual-required：发版 pxed；continue/forceResume；residual rewrite
+Manual-required：发版 production；continue/forceResume；residual rewrite
 阶段上限：2
 阶段拆分：
   1) Fix-1 merge 纯函数 + Service 接线 + thrash 测
@@ -664,7 +664,7 @@ EOF
 )"
 ```
 
-- [ ] **Step 7:** 审查 → 《阶段总结》→ **Milestone 交付总结** → **停止**（不 resume pxed）
+- [ ] **Step 7:** 审查 → 《阶段总结》→ **Milestone 交付总结** → **停止**（不 resume production）
 
 ---
 
@@ -711,7 +711,7 @@ EOF
 | overload 义务 LLM 收束 | 原 P0 非目标 |
 | 历史 taskSheet migration UI | P2/P3 |
 | 执行面进程隔离 | 另案 |
-| pxed 发版 + continue/forceResume | Manual-required |
+| production 发版 + continue/forceResume | Manual-required |
 | residual 57/71/74 rewrite | 需单独订单 |
 | 重写整个 director 调度器 | 范围爆炸 |
 
@@ -719,7 +719,7 @@ EOF
 
 ## 11. Manual-required（修复发版后，非本代码闭环）
 
-1. 合并 main → 部署 **pxed**  
+1. 合并 main → 部署 **production**  
 2. 生产 task：`continue` + `forceResume` + 观察 **不回卷**、**不 thrash halt**  
 3. 更新 vault 监管笔记（走 `obsidian-doc-router` / `AI-DOC-ROUTER`）  
 4. residual 章另单处理  

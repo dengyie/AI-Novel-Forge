@@ -3,17 +3,15 @@
 本文件是开发文档的**导航门面**：从这进入，快速到达任意模块的权威文档。
 详细治理约定见 [`./README.md`](./README.md)；模块架构总入口见 [`./wiki/README.md`](./wiki/README.md)。
 
-> **本仓 `docs/` 只覆盖工程开发**。运维与生产部署权威在 Obsidian vault，入口 `00.MOC/AI-DOC-ROUTER.md`，canonical 部署文档为 `Note/Infra/pxed ai-novel 部署与运维.md`。生产事实以 vault 为准，不以仓库内文档为准。
+> **本仓 `docs/` 只覆盖工程开发**。私有运维与生产拓扑不在本开源仓库维护。
 
 ---
 
-## 一、项目定位与生产拓扑
+## 一、项目定位
 
-- **形态**：pnpm monorepo（`ai-novel-writing-assistant-v2`，AGPL-3.0，Node ≥20.19，pnpm 10.6）
+- **形态**：pnpm monorepo（`@ai-novel/*`，AGPL-3.0，Node ≥20.19，pnpm 10.6）
 - **职责**：长篇小说自动化生产平台 —— 书级方向 → 卷战略 → 拆章 → 章节生成 → 质量门 → 修复 → 审核，跑成可监管的导演（director）流水线
-- **生产**：Bohrium **pxed** 平台，应用 `/personal/pxed/ai-novel`，公网 `https://ainovel.mangoq.ccwu.cc`
-- **当前监管**：《源世界》卷二 41–80 章（novelId `cmriiu3u300006m9k2jo45w93`），monitor-only 模式
-- **环境拓扑/部署/备份**：见 vault 部署运维文档（仓库内不复制，避免漂移）
+- **部署**：自托管；通过 `.env` 配置 LLM `*_BASE_URL` / API Key、数据库与存储路径
 
 ## 二、快速上手
 

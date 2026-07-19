@@ -6,11 +6,11 @@
 - 现有 `qualityFeedback` projection（`server/src/services/novel/quality/qualityDebtBoard.ts` · `ChapterQualityLoopService.ts` · `avoidRetry`/`terminalAction` 语义已上线）
 - 现有 `ChapterRepairStreamRuntime` · `PlannerService` · `ReplanWindowDecisionService`
 - 现有卷骨架 worldview-guard（`cc4cf51` merged）→ 生产 HEAD `f13954b`
-- 卷二源世界监管（task `cmrnm5kaq0kev0k9ki820qlpr` **succeeded**，pxed `ab5f345e` cutover · vault §七点三十九）
+- 卷二源世界监管（task `cmrnm5kaq0kev0k9ki820qlpr` **succeeded**，production `ab5f345e` cutover · vault §七点三十九）
 
 **不做**：
 - 不改任何生产代码（本 milestone 只落 plan）
-- 不动 pxed / cutover / dist
+- 不动 production / cutover / dist
 - 不设计具体 DB 迁移（列为 P2）
 - 不做 SLO / 用量估算（P2）
 - 不做「机械节奏控制」— 节奏归 Novel 项目 AI（`feedback_novel-no-mechanical-pacing`）
@@ -173,7 +173,7 @@ Writer prompt 组装侧新增「反例摘要块」— 只塞入 3-5 条最近事
 | Nova 自审 | Novel 项目 AI 自主 | 不变 · 事件化便于 Novel 自审读回放 |
 | 监管 agent | poll + 控制面 only | 不变 · 事件化让 poll 面变宽 |
 | 机械节奏控制 | **不做**（`feedback_novel-no-mechanical-pacing`） | 仍不做 · QFP 不塞节奏字段 |
-| pxed 生产 | `f13954b` RUNNING | 不动 · 本 plan 落文档 · cutover 另令 |
+| production 生产 | `f13954b` RUNNING | 不动 · 本 plan 落文档 · cutover 另令 |
 
 ## 8. 阶段（未来 milestone · 参考）
 
@@ -197,7 +197,7 @@ Writer prompt 组装侧新增「反例摘要块」— 只塞入 3-5 条最近事
 ## 10. Manual-required
 
 - 卷二 ch57/71/74 blocking / ch77「称重」/ ch75「黄振」/ patch adopt — **Novel 项目 AI 自审自修**，代理不代写
-- 未来若开代码 milestone，`prisma migrate` / cutover 另令；pxed 需先建 `appSetting` 表（vault §七点二十六）
+- 未来若开代码 milestone，`prisma migrate` / cutover 另令；production 需先建 `appSetting` 表（vault §七点二十六）
 - 生产 HEAD `f13954b` 不因本 plan 动
 
 ## 11. 关键决策

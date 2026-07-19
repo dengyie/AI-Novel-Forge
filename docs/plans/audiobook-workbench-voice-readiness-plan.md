@@ -4,9 +4,9 @@
 > 修订：v2 吸收文档自审（依赖方向、stale 可播、门禁范围、action 纯函数、job 状态机、阶段边界）；v2.1 补 workspace 单次读库、pure 入参、job items 初始化与终态唯一规则；**v2.2** 锁定 UI badge SoT、voice→preview item 状态机、apply id 映射、409 类型与 progress 伪代码对齐。  
 > 范围：把「音色补齐 + 固定试听生成」收口到有声书工作台前置逻辑；成文/角色台不再是日常有声书准备的主路径。  
 > 前置已交付：`docs/plans/character-voice-preview-asset-plan.md`（固定试听资产 `preview.wav` + 指纹；播放零 TTS）。  
-> 生产：pxed + `ainovel.mangoq.ccwu.cc`；blob 仍在 `server/storage/voice-refs/...`（archive 挂载）。  
+> 生产：production + `example.com`；blob 仍在 `server/storage/voice-refs/...`（archive 挂载）。  
 > 产品 SoT 同步：Obsidian `ainovel 小说转有声书 产品形态`。  
-> **运行假设（本 milestone）**：有声书 API **单进程**（pxed supervisord 一个 `novel-server`）。内存 job 不做跨实例粘滞。
+> **运行假设（本 milestone）**：有声书 API **单进程**（production supervisord 一个 `novel-server`）。内存 job 不做跨实例粘滞。
 
 ---
 
