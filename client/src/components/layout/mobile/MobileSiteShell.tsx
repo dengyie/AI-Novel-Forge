@@ -169,6 +169,7 @@ export default function MobileSiteShell({ children }: MobileSiteShellProps) {
           // F5：软键盘弹起时隐藏，避免遮挡输入框且防止 iOS 悬浮抖动
           keyboardOpen && "hidden",
         )}
+      >
         <div className="grid grid-cols-5 gap-1">
           {primaryNavItems.map((item) => {
             const Icon = primaryIcons[item.key as MobilePrimaryNavKey];
