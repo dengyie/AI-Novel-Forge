@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   BookOpenText,
   ChevronRight,
@@ -42,10 +42,34 @@ export default function MobileSiteShell({ children }: MobileSiteShellProps) {
   const location = useLocation();
   const navigate = useNavigate();
   const [moreOpen, setMoreOpen] = useState(false);
+  // F5：软键盘弹起时隐藏底部固定 nav。iOS Safari 会让 fixed-bottom 浮在键盘上遮挡输入框，
+  // Android 会顶起 layout viewport 让 nav 直接消失但残留占位 padding。检测 visualViewport
+  // 与 window.innerHeight 的差值，>150px 视为键盘弹起。
+  const [keyboardOpen, setKeyboardOpen] = useState(false);
   const activeGroup = getMobileNavGroupForPath(location.pathname);
   const pageTitle = getMobilePageTitle(location.pathname);
   const primaryNavItems = getMobilePrimaryNavItems();
   const moreNavGroups = getMobileMoreNavGroups();
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.visualViewport) {
+      return;
+    }
+    const vv = window.visualViewport;
+    const onViewport = () => {
+      // 键盘弹起时 visualViewport.height < layout viewport（window.innerHeight）。
+      // 150px 阈值避开 iOS Safari 顶栏收起（~44px）与旋转 jitter。
+      const diff = window.innerHeight - vv.height;
+      setKeyboardOpen(diff > 150);
+    };
+    vv.addEventListener("resize", onViewport);
+    vv.addEventListener("scroll", onViewport);
+    onViewport();
+    return () => {
+      vv.removeEventListener("resize", onViewport);
+      vv.removeEventListener("scroll", onViewport);
+    };
+  }, []);
 
   const openPrimaryItem = (key: MobilePrimaryNavKey, to: string) => {
     if (key === "more") {
@@ -139,7 +163,12 @@ export default function MobileSiteShell({ children }: MobileSiteShellProps) {
         </div>
       ) : null}
 
-      <nav className="fixed inset-x-0 bottom-0 z-40 border-t bg-background/95 px-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] pt-2 backdrop-blur supports-[backdrop-filter]:bg-background/82">
+      <nav
+        className={cn(
+          "fixed inset-x-0 bottom-0 z-40 border-t bg-background/95 px-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] pt-2 backdrop-blur supports-[backdrop-filter]:bg-background/82",
+          // F5：软键盘弹起时隐藏，避免遮挡输入框且防止 iOS 悬浮抖动
+          keyboardOpen && "hidden",
+        )}
         <div className="grid grid-cols-5 gap-1">
           {primaryNavItems.map((item) => {
             const Icon = primaryIcons[item.key as MobilePrimaryNavKey];
