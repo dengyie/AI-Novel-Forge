@@ -2,15 +2,17 @@
 
 应用侧全站音色素材目录（seed pack：`SEED_MANIFEST.json` + `wavs/`）。
 
-## 公共资产（GitHub public）
+## 统一资产仓（GitHub private）
 
-完整可再分发 seed（含 wav）在公开仓，**不**依赖本 monorepo 是否 private：
+完整 seed（含 wav）在私有资产仓，**不**进开源 monorepo：
 
-- **https://github.com/dengyie/ainovel-voice-library-assets**
+- **https://github.com/dengyie/AI-Novel-Forge-Assets** → `voice-library/`
   - `packs/06-external-expand-20260718` · 51 clips · ~21 speakers
   - `packs/07-zh-pilot-20260718` · 408 clips · 115 speakers
 
-克隆后可把 `packs/*` 同步到本目录或部署机 `docs/voice-packs/`，再走 import API。
+克隆后把 `voice-library/packs/*` 同步到本目录或部署机 `docs/voice-packs/`，再走 import API。
+
+> 旧公开仓 `dengyie/ainovel-voice-library-assets` 已并入上述统一资产仓，不再作为权威源。
 
 ## 本仓目录
 
@@ -18,7 +20,7 @@
 |---|---|
 | `00-manifest` | 包索引 |
 | `05-yuanworld-seed-from-mimo` | Milestone A 静音 PCM 链路验证种子 |
-| `06-external-expand-20260718` | 外部扩充（可与公开仓同步；体积大时以公开仓为准） |
+| `06-external-expand-20260718` | 外部扩充（体积大时以资产仓为准） |
 | `07-zh-pilot-20260718` | 中文 115 角色 pilot（同上） |
 
 ## 导入与升权
@@ -30,4 +32,4 @@
 
 ## 许可
 
-manifest 内默认 `internal-test-only; license-review-pending`。公开仓 [NOTICE](https://github.com/dengyie/ainovel-voice-library-assets/blob/main/NOTICE) 列上游；商用前须法务复核。
+manifest 内默认 `internal-test-only; license-review-pending`。上游说明见资产仓 `voice-library/NOTICE`；商用前须法务复核。
