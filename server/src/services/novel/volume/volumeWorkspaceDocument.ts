@@ -20,6 +20,13 @@ import {
   normalizeVolumeDraftInput,
 } from "./volumePlanUtils";
 
+/**
+ * F10：草稿卷的入参类型。与落库 `VolumePlan` 的唯一差别是 `id` 可选可空——
+ * mergeSkeleton 中未命中同名旧卷的新卷 id 为 undefined，调用方不应被迫用
+ * `as VolumePlan[]` 掩盖这一事实。`normalizeVolumeDraftInput` 会兜底补齐 id。
+ */
+export type DraftableVolume = Omit<VolumePlan, "id"> & { id?: string | null };
+
 type JsonRecord = Record<string, unknown>;
 
 function isRecord(value: unknown): value is JsonRecord {
@@ -406,7 +413,13 @@ export function buildVolumePlanningReadiness(input: {
 
 export function buildVolumeWorkspaceDocument(params: {
   novelId: string;
-  volumes: VolumePlan[];
+  /**
+   * F10：草稿卷可缺少 `id`（mergeSkeleton 中未命中同名旧卷的新卷 id 为 undefined）。
+   * 内部 `normalizeVolumeDraftInput` 会用 createLocalId 兜底补齐，所以入参类型比
+   * 落库 `VolumePlan` 宽——`id` 可选可空。收紧此类型后调用方不再需 `as VolumePlan[]`
+   * 掩盖缺失 id 的事实。
+   */
+  volumes: Array<DraftableVolume>;
   strategyPlan?: VolumeStrategyPlan | null;
   critiqueReport?: VolumeCritiqueReport | null;
   beatSheets?: VolumeBeatSheet[];

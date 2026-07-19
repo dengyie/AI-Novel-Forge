@@ -434,11 +434,12 @@ export function mergeSkeleton(document: VolumePlanDocument, generatedVolumes: Ar
     };
   });
 
-  // 未命中的新卷 id 缺失，交由 buildVolumeWorkspaceDocument 内部的
-  // normalizeVolumeDraftInput 走 createLocalId 兜底生成，保持既有约束。
+  // 未命中的新卷 id 缺失（undefined），由 buildVolumeWorkspaceDocument →
+  // normalizeVolumeDraftInput 走 createLocalId 兜底生成。F10：参数类型已收紧为
+  // DraftableVolume（id?: string | null），不再需要 `as VolumePlan[]` 掩盖缺失 id。
   return buildVolumeWorkspaceDocument({
     novelId: document.novelId,
-    volumes: mergedVolumes as VolumePlan[],
+    volumes: mergedVolumes,
     strategyPlan: document.strategyPlan,
     critiqueReport: document.critiqueReport,
     beatSheets: [],
