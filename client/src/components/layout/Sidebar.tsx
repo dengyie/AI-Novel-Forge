@@ -208,7 +208,7 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
   return (
     <aside
       className={cn(
-        "border-r bg-muted/20 p-3 transition-[width] duration-200",
+        "h-full overflow-y-auto border-r bg-muted/20 p-3 transition-[width] duration-200",
         collapsed ? "w-[72px]" : "w-64",
       )}
     >

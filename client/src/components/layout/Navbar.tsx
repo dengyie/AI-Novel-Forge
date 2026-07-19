@@ -22,7 +22,7 @@ export default function Navbar(props: NavbarProps) {
   const useMobileAutoDirectorShell = shouldUseAutoDirectorMobileFullWidthContent(location.pathname);
 
   return (
-    <header className="flex h-16 min-w-0 items-center justify-between gap-3 border-b bg-background px-4 sm:px-6">
+    <header className="flex h-16 min-w-0 shrink-0 items-center justify-between gap-3 border-b bg-background px-4 sm:px-6">
       <div className="flex min-w-0 items-center gap-2">
         <DesktopBrandMark className="h-8 w-8 shrink-0 drop-shadow-none" />
         <div className="flex min-w-0 flex-col leading-tight">

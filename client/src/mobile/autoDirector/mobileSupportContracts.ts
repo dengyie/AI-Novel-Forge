@@ -14,7 +14,7 @@ export function shouldUseAutoDirectorMobileFullWidthContent(pathname: string): b
 
 export const AUTO_DIRECTOR_MOBILE_CLASSES = {
   actionRow: "flex flex-col gap-2 sm:flex-row sm:justify-end",
-  appMain: "h-[calc(100vh-4rem)] min-w-0 flex-1 overflow-y-auto p-4 md:p-6",
+  appMain: "min-h-0 min-w-0 flex-1 overflow-y-auto p-4 md:p-6",
   approvalStrategyGrid: "mt-3 grid gap-3 sm:grid-cols-2",
   channelSettingsActionRow: "grid grid-cols-1 gap-2 sm:flex sm:items-center sm:justify-end",
   dialogBody: "min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-4 pb-5 pt-4 sm:px-6 sm:pb-6",
