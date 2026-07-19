@@ -281,7 +281,8 @@ async function generateStrategyCritique(params: {
       signal: options.signal,
     },
   });
-  return mergeCritiqueReport(document, generated.output);
+  // F11：打标为战略评论，避免下游 shouldRegenerateSkeleton 把战略评论误当成骨架评论。
+  return mergeCritiqueReport(document, generated.output, "strategy");
 }
 
 async function generateSkeletonCritique(params: {
@@ -330,7 +331,8 @@ async function generateSkeletonCritique(params: {
       signal: options.signal,
     },
   });
-  return mergeCritiqueReport(document, generated.output);
+  // F11：打标为骨架评论，shouldRegenerateSkeleton / formatSkeletonCritiqueFeedback 才会响应。
+  return mergeCritiqueReport(document, generated.output, "skeleton");
 }
 
 async function generateSkeleton(params: {

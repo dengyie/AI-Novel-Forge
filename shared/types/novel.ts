@@ -858,7 +858,19 @@ export interface VolumeCritiqueIssue {
   detail: string;
 }
 
+/**
+ * F11：区分战略层评论与骨架层评论。
+ * `strategy` = volumeStrategyCritiquePrompt 的输出，评的是战略建议；
+ * `skeleton` = volumeSkeletonCritiquePrompt 的输出，评的是骨架 framing/对手面。
+ * 两者写入同一个 `critiqueReport` 字段，但 `shouldRegenerateSkeleton`
+ * 与骨架反馈格式化只应对 kind === "skeleton" 的报告生效，避免战略评论触发骨架重生。
+ * 兼容旧数据（缺 kind）：normalize 阶段按上下文补齐，默认 fallback 为 "skeleton"
+ * 以保留旧行为（旧数据只在骨架审查后写入 critiqueReport）。
+ */
+export type VolumeCritiqueKind = "strategy" | "skeleton";
+
 export interface VolumeCritiqueReport {
+  kind?: VolumeCritiqueKind;
   overallRisk: VolumeCritiqueRiskLevel;
   summary: string;
   issues: VolumeCritiqueIssue[];

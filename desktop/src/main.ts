@@ -568,29 +568,31 @@ app.setAppUserModelId(APP_USER_MODEL_ID);
 registerDesktopIpcHandlers();
 registerStoreBroadcasts();
 
+// F2：单实例锁获取失败 → 直接退出，不再走后续 event 注册与 whenReady bootstrap，
+// 避免第二实例误注册 IPC/后端进程与主实例竞争（会导致端口冲突、DB 双写等）。
 if (!app.requestSingleInstanceLock()) {
   app.quit();
-}
-
-app.on("second-instance", () => {
-  focusExistingWindow();
-});
-
-app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") {
-    app.quit();
-  }
-});
-
-app.on("before-quit", () => {
-  if (stopServer) {
-    void stopServer();
-  }
-});
-
-app.whenReady()
-  .then(() => bootstrapDesktopApp())
-  .catch(async (error) => {
-    console.error("[desktop] bootstrap failed.", error);
-    await handleBootstrapFailure(error);
+} else {
+  app.on("second-instance", () => {
+    focusExistingWindow();
   });
+
+  app.on("window-all-closed", () => {
+    if (process.platform !== "darwin") {
+      app.quit();
+    }
+  });
+
+  app.on("before-quit", () => {
+    if (stopServer) {
+      void stopServer();
+    }
+  });
+
+  app.whenReady()
+    .then(() => bootstrapDesktopApp())
+    .catch(async (error) => {
+      console.error("[desktop] bootstrap failed.", error);
+      await handleBootstrapFailure(error);
+    });
+}
