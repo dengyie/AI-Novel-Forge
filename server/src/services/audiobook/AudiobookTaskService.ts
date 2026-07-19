@@ -66,6 +66,73 @@ function parseProgressJson(json: string | null | undefined): Record<string, unkn
   }
 }
 
+type ChapterProgressEntry = {
+  chapterId: string;
+  status: "pending" | "annotating" | "synthesizing" | "merging" | "ready" | "failed";
+  completedChunks: number;
+  totalChunks: number;
+  detail?: string;
+};
+
+/**
+ * 逐章进度：以管线实时 emit 的 chapterProgress 为底，磁盘 chapter.wav 在盘的章强制 ready
+ * （覆盖 cache-hit skip / empty-chapter / resume 崩溃恢复三种漂移）；chapterIds 中数组
+ * 缺失的章补 pending 占位。纯展示，与 progress/completedChapterCount 不重复计数。
+ */
+export function deriveChapterProgress(
+  progressJson: string | null | undefined,
+  chapterIds: string[],
+  readyChapterIds: string[],
+): ChapterProgressEntry[] | undefined {
+  const parsed = parseProgressJson(progressJson);
+  const raw = parsed.chapterProgress;
+  let entries: ChapterProgressEntry[] = [];
+  if (Array.isArray(raw)) {
+    entries = raw
+      .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+      .map((item) => ({
+        chapterId: typeof item.chapterId === "string" ? item.chapterId : "",
+        status: normalizeChapterStatus(item.status),
+        completedChunks: typeof item.completedChunks === "number" ? item.completedChunks : 0,
+        totalChunks: typeof item.totalChunks === "number" ? item.totalChunks : 0,
+        detail: typeof item.detail === "string" ? item.detail : undefined,
+      }))
+      .filter((item) => item.chapterId);
+  }
+  if (chapterIds.length === 0 && entries.length === 0) return undefined;
+
+  const byId = new Map(entries.map((e) => [e.chapterId, e] as const));
+  const readySet = new Set(readyChapterIds);
+  return chapterIds.map((chapterId) => {
+    const onDisk = readySet.has(chapterId);
+    const base = byId.get(chapterId) ?? {
+      chapterId,
+      status: "pending" as const,
+      completedChunks: 0,
+      totalChunks: 0,
+      detail: undefined,
+    };
+    if (onDisk) {
+      // 磁盘在 → ready（终态以盘为准）
+      return { ...base, status: "ready" as const, completedChunks: base.totalChunks || base.completedChunks };
+    }
+    // 磁盘不在：若数组残留 ready（如 wav 被删/失败后回退），降级 synthesizing，避免假「已可播」
+    if (base.status === "ready") {
+      return { ...base, status: "synthesizing" as const, completedChunks: Math.max(0, base.completedChunks) };
+    }
+    return base;
+  });
+}
+
+function normalizeChapterStatus(
+  raw: unknown,
+): ChapterProgressEntry["status"] {
+  if (raw === "pending" || raw === "annotating" || raw === "synthesizing" || raw === "merging" || raw === "ready" || raw === "failed") {
+    return raw;
+  }
+  return "pending";
+}
+
 function readDeliveryStyleModeFromTask(row: {
   progressJson?: string | null;
 }): DeliveryStyleMode {
@@ -246,6 +313,8 @@ function toSummary(row: AudiobookTaskRow): AudiobookTaskSummary {
     fullAudioReady = false;
   }
 
+  const chapterProgress = deriveChapterProgress(row.progressJson, chapterIds, readyChapterIds);
+
   return {
     id: row.id,
     novelId: row.novelId,
@@ -263,6 +332,7 @@ function toSummary(row: AudiobookTaskRow): AudiobookTaskSummary {
     chapterCount: row.chapterCount,
     completedChapterCount: row.completedChapterCount,
     readyChapterIds,
+    chapterProgress,
     outputDir: row.outputDir,
     fullAudioPath: row.fullAudioPath,
     fullAudioReady,
@@ -1013,6 +1083,7 @@ export class AudiobookTaskService {
                 chapterAudioCount: progress.chapterAudioPaths.length,
                 fullAudioReady: Boolean(progress.fullAudioPath),
                 qualityWarnings: progress.qualityWarnings ?? [],
+                chapterProgress: progress.chapterProgress ?? [],
               }),
             },
           });

@@ -328,6 +328,18 @@ export interface AudiobookTaskSummary {
    * 顺序与任务 chapterIds 一致子集。
    */
   readyChapterIds?: string[];
+  /**
+   * 逐章生成进度（顺序与 chapterIds 一致；ready 以磁盘 chapter.wav 为准并 reconcile，
+   * 其余以管线实时 emit 为准）。totalChunks=0 表示该章尚未标注，前端显示「等待中」。
+   * 纯展示增量，与 progress/completedChapterCount/readyChapterIds 不重复计数。
+   */
+  chapterProgress?: Array<{
+    chapterId: string;
+    status: "pending" | "annotating" | "synthesizing" | "merging" | "ready" | "failed";
+    completedChunks: number;
+    totalChunks: number;
+    detail?: string;
+  }>;
   outputDir?: string | null;
   fullAudioPath?: string | null;
   /** 全书 WAV 是否可交付（磁盘 full-book.wav 存在）。 */
