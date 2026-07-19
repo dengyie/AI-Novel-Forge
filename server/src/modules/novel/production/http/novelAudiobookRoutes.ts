@@ -51,6 +51,8 @@ import {
 } from "../../../../services/audiobook/audiobookPaths";
 import { isPathInside } from "../../../../services/audiobook/voiceRefPath";
 import { voiceLibraryService } from "../../../../services/audiobook/voiceLibraryService";
+import { opsRunService } from "../../../../services/audiobook/ops/OpsRunService";
+import type { OpsOverrideInput, OpsOverrideResult } from "@ai-novel/shared/types/audiobookOps";
 
 const novelParamsSchema = z.object({
   id: z.string().trim().min(1),
@@ -1537,6 +1539,141 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
           // m4b 默认 attachment；显式 download=1 时同样 attachment
           "attachment",
         );
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  // ---------- 有声书 AI Ops Agents（H 计划）----------
+  // 字面前缀 /audiobook/ops/* 在 /:id 之前（由 novelRouteRegistration 保证顺序），
+  // 避免被当成 novelId。客户端只触发 command，approve token 不入客户端。
+
+  router.post(
+    "/audiobook/ops/runs",
+    validate({
+      body: z.object({
+        profile: z.enum(["full", "library_only", "patrol_only"]),
+        novelId: z.string().trim().min(1).max(120).optional(),
+        packRoots: z.array(z.string().trim().min(1).max(512)).max(16).optional(),
+        assetIds: z.array(z.string().trim().min(1).max(120)).max(256).optional(),
+        autoFix: z.boolean().optional(),
+        dryRun: z.boolean().optional(),
+      }),
+    }),
+    async (req, res, next) => {
+      try {
+        const body = req.body as {
+          profile: "full" | "library_only" | "patrol_only";
+          novelId?: string;
+          packRoots?: string[];
+          assetIds?: string[];
+          autoFix?: boolean;
+          dryRun?: boolean;
+        };
+        const created = opsRunService.createRun({
+          profile: body.profile,
+          novelId: body.novelId ?? null,
+          packRoots: body.packRoots ?? null,
+          assetIds: body.assetIds ?? null,
+          autoFix: body.autoFix === true,
+          dryRun: body.dryRun === true,
+        });
+        res.json({ success: true, data: created } satisfies ApiResponse<typeof created>);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  router.get("/audiobook/ops/runs", async (_req, res, next) => {
+    try {
+      const data = opsRunService.listRuns(50);
+      res.json({ success: true, data } satisfies ApiResponse<typeof data>);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get(
+    "/audiobook/ops/runs/:runId",
+    validate({ params: z.object({ runId: z.string().trim().min(1).max(120) }) }),
+    async (req, res, next) => {
+      try {
+        const { runId } = req.params as { runId: string };
+        const data = opsRunService.getRun(runId);
+        if (!data) {
+          throw new AppError("Ops Run 不存在。", 404);
+        }
+        res.json({ success: true, data } satisfies ApiResponse<typeof data>);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  router.post(
+    "/audiobook/ops/runs/:runId/cancel",
+    validate({ params: z.object({ runId: z.string().trim().min(1).max(120) }) }),
+    async (req, res, next) => {
+      try {
+        const { runId } = req.params as { runId: string };
+        const data = opsRunService.cancel(runId);
+        res.json({ success: true, data } satisfies ApiResponse<typeof data>);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  router.get(
+    "/audiobook/ops/runs/:runId/report",
+    validate({ params: z.object({ runId: z.string().trim().min(1).max(120) }) }),
+    async (req, res, next) => {
+      try {
+        const { runId } = req.params as { runId: string };
+        const run = opsRunService.getRun(runId);
+        if (!run) {
+          throw new AppError("Ops Run 不存在。", 404);
+        }
+        const data = opsRunService.getReport(runId);
+        if (!data) {
+          throw new AppError("报告尚未生成（run 可能还在运行）。", 404);
+        }
+        res.json({ success: true, data } satisfies ApiResponse<typeof data>);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  router.post(
+    "/audiobook/ops/overrides",
+    validate({
+      body: z.object({
+        action: z.enum(["forceKeepDraft", "forceReject", "forceBind"]),
+        assetId: z.string().trim().min(1).max(120).optional(),
+        novelId: z.string().trim().min(1).max(120).optional(),
+        characterId: z.string().trim().min(1).max(120).optional(),
+        voiceAssetId: z.string().trim().min(1).max(120).optional(),
+        reason: z.string().trim().max(500).optional(),
+      }),
+    }),
+    async (req, res, next) => {
+      try {
+        const body = req.body as OpsOverrideInput;
+        if (body.action !== "forceBind" && !body.assetId) {
+          throw new AppError("forceKeepDraft/forceReject 需 assetId。", 400);
+        }
+        if (body.action === "forceKeepDraft" || body.action === "forceReject") {
+          opsRunService.registerOverride({ action: body.action, assetId: body.assetId! });
+        }
+        const result: OpsOverrideResult = {
+          action: body.action,
+          applied: true,
+          reason: body.reason ?? null,
+        };
+        res.json({ success: true, data: result } satisfies ApiResponse<typeof result>);
       } catch (error) {
         next(error);
       }

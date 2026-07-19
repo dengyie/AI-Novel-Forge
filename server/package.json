@@ -44,7 +44,8 @@
     "db:seed": "prisma db seed --config prisma.config.ts",
     "db:studio": "prisma studio --config prisma.config.ts",
     "db:restore": "node scripts/restore-dev-data.cjs",
-    "db:prune-snapshots": "node scripts/prune-snapshots.cjs"
+    "db:prune-snapshots": "node scripts/prune-snapshots.cjs",
+    "audiobook:ops": "node scripts/audiobookOps.cjs"
   },
   "dependencies": {
     "@ai-novel/shared": "workspace:*",
