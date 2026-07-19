@@ -18,7 +18,8 @@ import {
 
 const SIDEBAR_COLLAPSED_STORAGE_KEY = "ai-novel.sidebar.collapsed";
 const WORKSPACE_RAIL_COLLAPSED_STORAGE_KEY = "ai-novel.workspace-rail.collapsed";
-const DEFAULT_APP_MAIN_CLASS_NAME = "h-[calc(100vh-4rem)] min-w-0 flex-1 overflow-y-auto p-6";
+// min-h-0 才能让 overflow-y-auto 生效，否则 flex 子项被内容撑开、body 冒底部白板
+const DEFAULT_APP_MAIN_CLASS_NAME = "min-h-0 min-w-0 flex-1 overflow-y-auto p-6";
 
 export default function AppLayout() {
   const location = useLocation();
@@ -106,15 +107,15 @@ export default function AppLayout() {
 
   return (
     <TaskRecoveryProvider>
-      <div className="min-h-screen bg-background">
+      <div className="flex h-dvh max-h-dvh flex-col overflow-hidden bg-background">
         <AutoDirectorPauseNotificationWatcher />
         <LLMSelectionBootstrap />
         <Navbar
           workspaceNavMode={isNovelWorkspace ? workspaceNavMode : undefined}
           onWorkspaceNavModeChange={isNovelWorkspace ? setWorkspaceNavMode : undefined}
         />
-        <div className="flex h-[calc(100vh-4rem)]">
-          <div className={useMobileFullWidthContent ? "hidden md:block" : "shrink-0"}>
+        <div className="flex min-h-0 flex-1 overflow-hidden">
+          <div className={useMobileFullWidthContent ? "hidden h-full md:block" : "h-full shrink-0 overflow-y-auto"}>
             {isNovelWorkspace && workspaceNavMode === "workspace" && workspaceRoute ? (
               <NovelWorkspaceRail
                 novelId={workspaceRoute.novelId}
