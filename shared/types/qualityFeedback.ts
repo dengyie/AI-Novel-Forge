@@ -527,13 +527,46 @@ export function mergeQualityFeedbackList(
   next: QualityFeedbackPacket,
 ): QualityFeedbackPacket[] {
   const list = [...(previous ?? [])];
+  // F3: 命中已有 signature 时移到末尾（末尾即最新，projectLatestFeedbackSummary
+  // 与 isAutoPatchAvoidedByFeedback 都依赖"最新在末尾"的契约），而非原地覆盖。
   const index = list.findIndex((item) => item.signature === next.signature);
   if (index >= 0) {
-    list[index] = next;
-  } else {
-    list.push(next);
+    list.splice(index, 1);
   }
-  return list.slice(-QUALITY_FEEDBACK_ROLLING_MAX);
+  list.push(next);
+  return capRollingFeedback(list);
+}
+
+/**
+ * Rolling cap：保持 feedback 数组不无限增长，同时不挤丢含 avoidRetry=true 的 sticky 包。
+ *
+ * E1 根因：原 slice(-QUALITY_FEEDBACK_ROLLING_MAX) 会挤掉最老的 packet；当一个
+ * signature 被废弃（avoidRetry=true、failedPatchCount>=1）后又被 rolling 挤丢，
+ * 下次 buildQualityFeedbackPacket 的 previousFeedback.find(sig===) 找不到它 →
+ * failedPatchCount 归零、avoidRetry 重置为 false，isAutoPatchAvoidedByFeedback
+ * 不再拦截同 signature 的 auto-patch，plan A 硬门被绕过。
+ *
+ * 策略：优先保留所有 avoidRetry=true 的包（即使数量本身超过 MAX），其余按末尾
+ * 最近优先截断。avoidRetry=true 的包数量本身也被上限保护为 MAX，防止恶意/异常
+ * 累积导致 feedback 数组无限增长。
+ */
+function capRollingFeedback(
+  list: QualityFeedbackPacket[],
+): QualityFeedbackPacket[] {
+  if (list.length <= QUALITY_FEEDBACK_ROLLING_MAX) {
+    return list;
+  }
+  // 末尾即 next（最新发生），永远保留；其余按 sticky 优先、其次时序末尾优先。
+  const next = list[list.length - 1];
+  const rest = list.slice(0, -1);
+  const restSticky = rest.filter((item) => item.avoidRetry);
+  const restNonSticky = rest.filter((item) => !item.avoidRetry);
+  const slotsForRest = QUALITY_FEEDBACK_ROLLING_MAX - 1;
+  if (restSticky.length >= slotsForRest) {
+    return [...restSticky.slice(-slotsForRest), next];
+  }
+  const keepNonSticky = slotsForRest - restSticky.length;
+  return [...restNonSticky.slice(-keepNonSticky), ...restSticky, next];
 }
 
 export function buildQualityFeedbackPacket(

@@ -848,6 +848,12 @@ export class AudiobookPipelineService {
         continue;
       }
 
+      // F1：在 chunk 合成前先落布局指纹。否则合成中途崩溃 resume 时 prevFp 为空，
+      // 上面的 wipe 分支会清掉已完成的 chunk，续跑逻辑（listExistingChunkPaths）失效。
+      // 指纹已在 wipe/ensureChapterAudioDir 后写入，chapter.wav 尚不存在时不会被上面的
+      // skip 分支误跳过（isValidPcmWavFile 为 false），仅保留 chunk 续跑。
+      writeChunkLayoutFingerprint(taskDir, chapter.id, layoutFp);
+
       const existing = listExistingChunkPaths(taskDir, chapter.id, chunkJobs.length);
       const nextChunkIndex = existing.length;
 
@@ -932,7 +938,7 @@ export class AudiobookPipelineService {
       });
 
       const merged = concatWavFiles(allChunkPaths, chapterWavPath, chunkGapMs);
-      writeChunkLayoutFingerprint(taskDir, chapter.id, layoutFp);
+      // F1：布局指纹已在 chunk 合成前写入，此处无需重复；保留注释以明确原子化边界。
       completedChunks += chunkJobs.length;
       chapterAudioPaths.push({
         chapterId: chapter.id,

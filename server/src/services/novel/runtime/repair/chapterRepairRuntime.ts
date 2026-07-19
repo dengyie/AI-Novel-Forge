@@ -15,6 +15,8 @@ export interface ChapterRepairExecutionOptions {
   model?: string;
   temperature?: number;
   repairMode?: PatchRepairMode;
+  /** F6：调用方（SSE 路由）注入的客户端断连中断信号，透传到 heavy prompt options.signal。 */
+  signal?: AbortSignal;
 }
 
 export interface PrepareChapterRepairExecutionInput {
@@ -50,6 +52,8 @@ export interface ChapterHeavyRepairPromptRequest {
     chapterId: string;
     stage: "chapter_repair";
     triggerReason: PatchRepairMode;
+    /** F6：透传到 streamTextPrompt 的 PromptExecutionOptions.signal，客户端断连即 abort。 */
+    signal?: AbortSignal;
   };
   fallbackContent: string;
 }
@@ -306,6 +310,7 @@ export async function prepareChapterRepairExecution(
             chapterId: input.chapterId,
             stage: "chapter_repair",
             triggerReason: activeRepairMode,
+            signal: input.options.signal,
           },
           fallbackContent: input.content,
         },
@@ -341,6 +346,7 @@ export async function prepareChapterRepairExecution(
         chapterId: input.chapterId,
         stage: "chapter_repair",
         triggerReason: activeRepairMode,
+        signal: input.options.signal,
       },
       fallbackContent: input.content,
     },

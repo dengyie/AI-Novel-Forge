@@ -171,6 +171,11 @@ export function registerNovelReviewRoutes(input: RegisterNovelReviewRoutesInput)
     async (req, res, next) => {
       try {
         const { id, chapterId } = req.params as z.infer<typeof chapterParamsSchema>;
+        // F6：客户端断连时触发 abort，传到 chapter_repair step 的 SSE 中断信号，
+        // 让 streamTextPrompt 的 captureStreamOutput 尽快 settle/reject，避免
+        // `await streamed.complete` 长时间挂住 → onDone finally 释放章节 in-process 锁。
+        const controller = new AbortController();
+        res.on("close", () => controller.abort(new Error("client disconnected")));
         const { stream, onDone } = await stepModuleRunner.runStep<RepairStreamResult>(
           DIRECTOR_EXECUTION_STEP_IDS.chapter_repair,
           {
@@ -179,9 +184,10 @@ export function registerNovelReviewRoutes(input: RegisterNovelReviewRoutesInput)
             targetType: "chapter",
             targetChapterId: chapterId,
             stepInput: req.body,
+            signal: controller.signal,
           },
         );
-        await streamToSSE(res, stream, onDone);
+        await streamToSSE(res, stream, onDone, { signal: controller.signal });
       } catch (error) {
         next(error);
       }

@@ -52,9 +52,55 @@ import {
   prepareChapterRepairExecution,
 } from "./chapterRepairRuntime";
 
+/**
+ * F4: 章节级并发 repair 互斥锁。
+ *
+ * 同 chapterId 的并发 createRepairStream 会导致 lost-update：两路各自读取同一
+ * baseline.repairHistory / content，后完成者的 chapter.update 覆盖前者，repairHistory
+ * attempt 计数丢失、avoidRetry sticky 被抹；更严重的是第二路读到旧 riskFlags 快照 →
+ * 绕过 heavy_rewrite 走 patch。
+ *
+ * 以 chapterId 为键的 in-process 互斥锁串行化同章节 repair 的"读 baseline → 生成 →
+ * finalize 落库"整段生命周期。novel-server 单进程跑 director worker，同章并发只来自
+ * 同一 event loop，in-process 锁足够；跨进程不是本里程碑范围。
+ */
+const chapterRepairLocks = new Map<string, Promise<unknown>>();
+
+/**
+ * F4: 以 chapterId 为键的 in-process 互斥锁，FIFO 排队。返回 release 函数，调用方
+ * 必须在 stream lifecycle 结束（onDone 完成 / 出错 / 创建失败）时调用 release 否则锁泄漏。
+ *
+ * 锁覆盖整段"读 baseline → prepare → 流式生成 → finalize 落库"生命周期，确保
+ * 同 chapterId 并发 repair 串行化（后到者 await 前者完整生命周期），杜绝
+ * finalize 阶段 lost-update 与 baseline 快照过期导致的 avoidRetry 绕过。锁释放后
+ * 若本 chapterId 无后续排队者则清理 Map 项，防止长期累积。novel-server 单进程跑
+ * director worker，in-process 锁足够；跨进程不在本里程碑范围。
+ */
+async function acquireChapterRepairLock(chapterId: string): Promise<() => void> {
+  const previous = chapterRepairLocks.get(chapterId) ?? Promise.resolve();
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const chain = previous.then(() => held, () => held);
+  chapterRepairLocks.set(chapterId, chain);
+  await previous;
+  return () => {
+    release();
+    if (chapterRepairLocks.get(chapterId) === chain) {
+      chapterRepairLocks.delete(chapterId);
+    }
+  };
+}
+
 interface RepairReviewResult {
   score: QualityScore;
   issues: ReviewIssue[];
+  /**
+   * F7：evaluateOnly 失败回退到 columns/ruleScore 时置 true。
+   * 此时 issues=[] 是"未知"而非"零 issue"，adopt 判定必须避免用空集做 L1 增量减法误 discard 候选。
+   */
+  degraded?: boolean;
 }
 
 export interface ChapterRepairStreamRuntimeDeps {
@@ -122,98 +168,122 @@ export class ChapterRepairStreamRuntime {
     stream: AsyncIterable<BaseMessageChunk>;
     onDone: (fullContent: string, helpers: StreamDoneHelpers) => Promise<void>;
   }> {
-    const [novel, chapter, bible] = await Promise.all([
-      prisma.novel.findUnique({ where: { id: novelId } }),
-      prisma.chapter.findFirst({ where: { id: chapterId, novelId } }),
-      prisma.novelBible.findUnique({ where: { novelId } }),
-    ]);
-    if (!novel || !chapter) {
-      throw new Error("小说或章节不存在");
-    }
+    // F4: 章节级互斥锁，串行化同 chapterId 并发 repair 整段 lifecycle，杜绝
+    // finalize 阶段 lost-update。锁在 onDone 完成 / 出错 / 创建失败时释放。
+    const releaseRepairLock = await acquireChapterRepairLock(chapterId);
+    try {
+      const [novel, chapter, bible] = await Promise.all([
+        prisma.novel.findUnique({ where: { id: novelId } }),
+        prisma.chapter.findFirst({ where: { id: chapterId, novelId } }),
+        prisma.novelBible.findUnique({ where: { novelId } }),
+      ]);
+      if (!novel || !chapter) {
+        throw new Error("小说或章节不存在");
+      }
 
-    const issues = await this.resolveRepairIssues(novelId, chapterId, options);
-    const assembledContextPackage = await assembleChapterAuditContextPackage({
-      assembler: this.deps.assembler,
-      novelId,
-      chapterId,
-      options,
-      operation: "repair",
-    });
-    const repairContextPackage = withChapterRepairContext(assembledContextPackage, issues);
-    if (!repairContextPackage.chapterRepairContext) {
-      const error = new Error("chapterRepairContext missing after successful context assembly");
-      logPipelineError("Failed to derive repair context from assembled chapter context package.", {
+      const issues = await this.resolveRepairIssues(novelId, chapterId, options);
+      const assembledContextPackage = await assembleChapterAuditContextPackage({
+        assembler: this.deps.assembler,
         novelId,
         chapterId,
+        options,
         operation: "repair",
-        provider: options.provider ?? null,
-        model: options.model ?? null,
-        error: error.message,
       });
-      throw new ChapterContextAssemblyError(novelId, chapterId, "repair", error);
-    }
-
-    // A2 QFP：avoidRetry 时强制 heavy rewrite，禁止同路径自动 light patch（从不 skip_quality）。
-    const patchAvoid = isAutoPatchAvoidedByRiskFlags(chapter.riskFlags);
-    if (patchAvoid.avoided) {
-      logPipelineInfo("QFP avoidRetry: forcing full rewrite instead of auto patch.", {
-        novelId,
-        chapterId,
-        operation: "repair",
-        provider: options.provider ?? null,
-        model: options.model ?? null,
-        reason: patchAvoid.reason,
-      });
-    }
-
-    const prepared = await prepareChapterRepairExecution({
-      novelId,
-      chapterId,
-      novelTitle: novel.title,
-      chapterTitle: chapter.title,
-      content: chapter.content ?? "",
-      issues,
-      repairContext: repairContextPackage.chapterRepairContext,
-      bibleContent: bible?.rawContent ?? "",
-      forceFullRewrite: patchAvoid.avoided,
-      options: {
-        provider: options.provider,
-        model: options.model,
-        temperature: options.temperature,
-        // avoidRetry 时即便调用方传 light_repair 也走 heavy 路径（prepare 内再抬级）
-        repairMode: patchAvoid.avoided ? "heavy_repair" : options.repairMode,
-      },
-    });
-
-    if (prepared.kind === "patched") {
-      return {
-        stream: createSingleChunkStream(prepared.content),
-        onDone: async (fullContent: string, helpers: StreamDoneHelpers) => {
-          await this.finalizeRepairResult({
-            novelId,
-            chapterId,
-            options,
-            content: prepared.content.trim() || fullContent,
-            helpers,
-          });
-        },
-      };
-    }
-
-    const streamed = await streamTextPrompt(createHeavyRepairPromptExecution(prepared));
-    return {
-      stream: streamed.stream as AsyncIterable<BaseMessageChunk>,
-      onDone: async (fullContent: string, helpers: StreamDoneHelpers) => {
-        const completed = await streamed.complete;
-        await this.finalizeRepairResult({
+      const repairContextPackage = withChapterRepairContext(assembledContextPackage, issues);
+      if (!repairContextPackage.chapterRepairContext) {
+        const error = new Error("chapterRepairContext missing after successful context assembly");
+        logPipelineError("Failed to derive repair context from assembled chapter context package.", {
           novelId,
           chapterId,
-          options,
-          content: completed.output.trim() || fullContent,
-          helpers,
+          operation: "repair",
+          provider: options.provider ?? null,
+          model: options.model ?? null,
+          error: error.message,
         });
-      },
-    };
+        throw new ChapterContextAssemblyError(novelId, chapterId, "repair", error);
+      }
+
+      // A2 QFP：avoidRetry 时强制 heavy rewrite，禁止同路径自动 light patch（从不 skip_quality）。
+      const patchAvoid = isAutoPatchAvoidedByRiskFlags(chapter.riskFlags);
+      if (patchAvoid.avoided) {
+        logPipelineInfo("QFP avoidRetry: forcing full rewrite instead of auto patch.", {
+          novelId,
+          chapterId,
+          operation: "repair",
+          provider: options.provider ?? null,
+          model: options.model ?? null,
+          reason: patchAvoid.reason,
+        });
+      }
+
+      const prepared = await prepareChapterRepairExecution({
+        novelId,
+        chapterId,
+        novelTitle: novel.title,
+        chapterTitle: chapter.title,
+        content: chapter.content ?? "",
+        issues,
+        repairContext: repairContextPackage.chapterRepairContext,
+        bibleContent: bible?.rawContent ?? "",
+        forceFullRewrite: patchAvoid.avoided,
+        options: {
+          provider: options.provider,
+          model: options.model,
+          temperature: options.temperature,
+          // avoidRetry 时即便调用方传 light_repair 也走 heavy 路径（prepare 内再抬级）
+          repairMode: patchAvoid.avoided ? "heavy_repair" : options.repairMode,
+          // F6：透传 SSE 调用方的中断信号到 heavy prompt options.signal
+          signal: options.signal,
+        },
+      });
+
+      if (prepared.kind === "patched") {
+        return {
+          stream: createSingleChunkStream(prepared.content),
+          onDone: async (fullContent: string, helpers: StreamDoneHelpers) => {
+            try {
+              // F8: prepared.content 已过 applyPromptPostValidate；若 postValidate
+              // 清洗非法段后返回空串，禁止回退到未清洗的原始 fullContent（会绕过
+              // SoT banned-term / structured 校验写进 chapter.content）。空 = 失败，
+              // finalize 内部的空检查会抛 ChapterPatchRepairFailedError。
+              await this.finalizeRepairResult({
+                novelId,
+                chapterId,
+                options,
+                content: prepared.content,
+                helpers,
+              });
+            } finally {
+              releaseRepairLock();
+            }
+          },
+        };
+      }
+
+      const streamed = await streamTextPrompt(createHeavyRepairPromptExecution(prepared));
+      return {
+        stream: streamed.stream as AsyncIterable<BaseMessageChunk>,
+        onDone: async (fullContent: string, helpers: StreamDoneHelpers) => {
+          try {
+            // F8: completed.output 已过 applyPromptPostValidate；trim 后为空即代表
+            // postValidate 拒绝了候选，禁止回退到未清洗的 fullContent（绕过校验）。
+            const completed = await streamed.complete;
+            await this.finalizeRepairResult({
+              novelId,
+              chapterId,
+              options,
+              content: completed.output,
+              helpers,
+            });
+          } finally {
+            releaseRepairLock();
+          }
+        },
+      };
+    } catch (error) {
+      releaseRepairLock();
+      throw error;
+    }
   }
 
   private async resolveRepairIssues(
@@ -320,7 +390,11 @@ export class ChapterRepairStreamRuntime {
       options: input.options,
     });
     const baselineScore = baselineReview.score;
-    const baselineBlockingL1Codes = fingerprintReviewIssuesAsL1BlockingCodes(baselineReview.issues);
+    // F7：evaluateOnly 失败回退时 issues 未知，L1 指纹无意义；下游 adopt 判定必须知晓以跳过 L1 diff
+    const baselineL1Degraded = baselineReview.degraded === true;
+    const baselineBlockingL1Codes = baselineL1Degraded
+      ? []
+      : fingerprintReviewIssuesAsL1BlockingCodes(baselineReview.issues);
 
     const candidateReview = await this.deps.reviewChapterAfterRepair(input.novelId, input.chapterId, {
       provider: input.options.provider,
@@ -340,6 +414,9 @@ export class ChapterRepairStreamRuntime {
       baselineBlockingL1Codes,
       candidateBlockingL1Codes,
       consecutiveNoImprove,
+      // F7：baseline 走 columns/ruleScore 时 issues 未知；skipL1Check 让 decideRepairContentAdoption
+      // 不再拿"空集"当 baseline L1 去减 candidate L1，避免把候选自带 L1 全部误当"新增硬伤"discard。
+      skipL1Check: baselineL1Degraded,
     });
 
     const historyLine = formatRepairAdoptHistoryLine({
@@ -471,7 +548,10 @@ export class ChapterRepairStreamRuntime {
     input.helpers.writeFrame({
       type: "run_status",
       runId,
-      status: "succeeded",
+      // F9: adopt 流程结束但未达质量门（!literaryPass||!styleClear → needs_repair），
+      // 发 failed 以免监管 poller 把 succeeded 当"章已过审"跳过该章。adopt 成功且
+      // 全过才发 succeeded。
+      status: literaryPass && styleClear ? "succeeded" : "failed",
       phase: "completed",
       message: literaryPass && styleClear
         ? "修复候选已采纳，本章已达到可继续推进状态。"
@@ -501,7 +581,9 @@ export class ChapterRepairStreamRuntime {
     input.helpers.writeFrame({
       type: "run_status",
       runId: input.runId,
-      status: "succeeded",
+      // F9: adopt 后副作用失败时章节实际 needs_repair（literaryPass=false,
+      // styleClear=false），不得发 status:succeeded 误导监管 poller 跳过该章。
+      status: "failed",
       phase: "completed",
       message: input.userMessage,
     });
@@ -547,11 +629,12 @@ export class ChapterRepairStreamRuntime {
       });
     }
 
+    // F7：evaluateOnly 失败 → issues 未知 → degraded=true，后续 adopt 判定跳过 L1 增量比较
     const fromColumns = scoreFromChapterColumns(input.chapter);
     if (fromColumns) {
-      return { score: fromColumns, issues: [] };
+      return { score: fromColumns, issues: [], degraded: true };
     }
-    return { score: ruleScore(input.baselineContent), issues: [] };
+    return { score: ruleScore(input.baselineContent), issues: [], degraded: true };
   }
 }
 
