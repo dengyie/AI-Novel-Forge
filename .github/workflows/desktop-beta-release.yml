@@ -15,7 +15,7 @@ jobs:
     env:
       AI_NOVEL_RELEASE_CHANNEL: beta
       AI_NOVEL_GITHUB_OWNER: dengyie
-      AI_NOVEL_GITHUB_REPO: AI-Novel-Writing-Assistant
+      AI_NOVEL_GITHUB_REPO: AI-Novel-Forge
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
       CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
