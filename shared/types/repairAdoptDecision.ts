@@ -27,6 +27,12 @@ export interface RepairContentAdoptInput {
   /** overall 允许下降量，默认 0（不得低于 baseline） */
   overallDelta?: number;
   isPassThreshold?: QualityIsPassThreshold;
+  /**
+   * 调用方无法可靠拿到 baseline L1 指纹时置 true（如 evaluateOnly 失败回退到 columns/ruleScore）。
+   * 置 true 时跳过 "候选相对 baseline 新增 L1" 的检查，避免用空集减法把候选自带 L1 全误判为回归。
+   * L0 blocking 检查仍生效（L0 走独立探测，不依赖 review issues）。
+   */
+  skipL1Check?: boolean;
 }
 
 export interface RepairContentAdoptResult {
@@ -106,7 +112,7 @@ export function decideRepairContentAdoption(
     );
   }
 
-  if (introducedBlockingL1Codes.length > 0) {
+  if (!input.skipL1Check && introducedBlockingL1Codes.length > 0) {
     return fail(
       `候选引入新的 L1 义务/审校硬伤：${introducedBlockingL1Codes.slice(0, 6).join(",")}`,
     );

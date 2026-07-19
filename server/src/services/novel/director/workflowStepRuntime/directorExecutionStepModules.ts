@@ -667,7 +667,12 @@ export const DIRECTOR_EXECUTION_STEP_MODULES: Record<
       return getDirectorCoreStepRuntime().executeManualChapterRepairStep({
         novelId,
         chapterId,
-        options: getWorkflowStepInput<RepairOptions>(context),
+        // F6：把 SSE 调用方的中断信号并进 RepairOptions，传到 heavy prompt options.signal
+        // → captureStreamOutput 感知 abort → streamed.complete 即 reject → onDone finally 释放章节锁。
+        options: {
+          ...getWorkflowStepInput<RepairOptions>(context),
+          signal: context.signal,
+        },
       });
     },
     inspectFacts: async (context) => {
