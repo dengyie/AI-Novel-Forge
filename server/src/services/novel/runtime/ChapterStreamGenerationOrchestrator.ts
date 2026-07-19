@@ -19,6 +19,7 @@ import {
   type FinalizeChapterContentResult,
 } from "./ChapterContentFinalizationService";
 import { persistChapterQualityScores } from "../quality/chapterQualityScorePersist";
+import { buildChapterRunStatusFrame } from "./chapterRunStatusFrame";
 
 export interface ChapterStreamGenerationAgentRuntime {
   createChapterGenRun: (novelId: string, chapterId: string, chapterOrder: number) => Promise<string>;
@@ -89,13 +90,12 @@ export class ChapterStreamGenerationOrchestrator {
       onDone: async (fullContent: string, helpers: StreamDoneHelpers) => {
         throwIfChapterGenerationAborted(cancelSignal);
         const runStatusId = traceRunId ?? `chapter-runtime:${chapterId}`;
-        this.emitRunStatus(helpers, {
-          type: "run_status",
+        this.emitRunStatus(helpers, buildChapterRunStatusFrame({
           runId: runStatusId,
           status: "running",
           phase: "finalizing",
           message: "正文已生成，正在整理章节文本并保存草稿。",
-        });
+        }));
         const normalized = await this.resolveWriterResultWithEmptyRetry({
           novelId,
           chapterId,
@@ -106,13 +106,12 @@ export class ChapterStreamGenerationOrchestrator {
           signal: cancelSignal,
         });
         const generatedContent = normalized.finalContent;
-        this.emitRunStatus(helpers, {
-          type: "run_status",
+        this.emitRunStatus(helpers, buildChapterRunStatusFrame({
           runId: runStatusId,
           status: "running",
           phase: "finalizing",
           message: "正在完成正文接收检查并同步章节状态。",
-        });
+        }));
         const finalized = await this.finalizeChapterContent({
           novelId,
           chapterId,
@@ -141,15 +140,19 @@ export class ChapterStreamGenerationOrchestrator {
             error: error instanceof Error ? error.message : String(error),
           });
         }
-        this.emitRunStatus(helpers, {
-          type: "run_status",
+        this.emitRunStatus(helpers, buildChapterRunStatusFrame({
           runId: runStatusId,
-          status: "succeeded",
+          // P1-1：对齐 F9 repair 流契约（ChapterRepairStreamRuntime:569）——audit 检出
+          // blocking issue 时章节将落 needs_repair，run_status 必发 failed（与文案"待修复"一致）。
+          // 取证：监管 poller（ChapterExecutionProgressInspector）从 DB chapter row + audit flags
+          // 重推 needs_repair，不读此 SSE status 字段，故非 poller 漏网风险；此处仅统一跨运行时
+          // run_status 契约 + 客户端 UI 文案，防返回 succeeded-only 误导手工审校把待修章当已过审。
+          status: finalized.runtimePackage.audit.hasBlockingIssues ? "failed" : "succeeded",
           phase: "completed",
           message: finalized.runtimePackage.audit.hasBlockingIssues
             ? "章节已保存，但检测到待修复问题。"
             : "章节已保存，可继续审校。",
-        });
+        }));
 
         return {
           fullContent: finalized.finalContent,
