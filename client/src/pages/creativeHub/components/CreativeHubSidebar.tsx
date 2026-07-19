@@ -245,11 +245,11 @@ export default function CreativeHubSidebar({
   const blockerActionPrompt = blocker.actionPrompt ?? "";
 
   return (
-    <Card className="flex h-full min-h-0 flex-col">
+    <Card className="flex flex-col">
       <CardHeader className="pb-4">
         <CardTitle className="text-base">创作工作区</CardTitle>
       </CardHeader>
-      <CardContent className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1 text-sm">
+      <CardContent className="space-y-3 pr-1 text-sm">
         <div className="rounded-2xl border border-slate-200 bg-gradient-to-br from-white via-slate-50 to-slate-100 p-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
