@@ -153,7 +153,6 @@ function buildProgressSink(gate, reached, chapterIdGate) {
 }
 
 test("逐章交付：第 1 章合成完落盘时第 2 章尚未开始合成", async () => {
-  // 确保重新加载 pipeline 后再 patch
   delete require.cache[pipelinePath];
   require(pipelinePath);
   patchMimoProvider();
@@ -225,6 +224,87 @@ test("逐章交付：第 1 章合成完落盘时第 2 章尚未开始合成", as
 
     // 合成发生次数：每章 1 chunk × 3 = 3 次合成调用（TTS 真发）
     assert.equal(synthCount, 3, "逐章交付下每章应合成 1 chunk");
+  } finally {
+    restorePrisma();
+    restorePaths();
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test("逐章进度列表：chapterProgress 随 chunk 推进、终态全 ready、磁盘 reconcile 为真", async () => {
+  delete require.cache[pipelinePath];
+  require(pipelinePath);
+  patchMimoProvider();
+  patchAnnotationService();
+
+  const { AudiobookPipelineService } = require(pipelinePath);
+  const pipeline = new AudiobookPipelineService();
+
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "audiobook-prog2-"));
+  const novelId = "novel-prog-test2";
+  const taskId = "task-prog-2";
+  const restorePaths = patchTaskDirPaths(tmpRoot);
+  const fakeChaptersWithNovel = buildChapters(2).map((c) => ({ ...c, novelId }));
+  const restorePrisma = patchPrisma(fakeChaptersWithNovel, null);
+
+  const emits = [];
+  try {
+    const chapters = buildChapters(2);
+    const chapterIds = chapters.map((c) => c.id);
+
+    const runPromise = pipeline.run({
+      taskId,
+      novelId,
+      chapterIds,
+      narrator: { voice: "茉莉", style: "知性旁白" },
+      characterVoices: [],
+      deliveryStyleMode: "off",
+      isCancelRequested: async () => false,
+      onProgress: async (progress) => {
+        emits.push(progress);
+      },
+    });
+    await runPromise;
+
+    // 1) ch1 合成中 emit：chapterProgress[0].status=synthesizing、completedChunks=0、totalChunks=1
+    //    （每章 mock 返回 1 段 → 1 chunk；i=0 时已合成完成前那只 emit）
+    const ch1Synth = emits.find(
+      (e) => e.chapterId === "ch1" && e.phase === "synthesizing" && /合成第 1 章 chunk 1\/1/.test(e.message),
+    );
+    assert.ok(ch1Synth, "应捕获 ch1 chunk 合成 emit");
+    assert.ok(Array.isArray(ch1Synth.chapterProgress), "合成 emit 必须带 chapterProgress 数组");
+    assert.equal(ch1Synth.chapterProgress[0].chapterId, "ch1");
+    assert.equal(ch1Synth.chapterProgress[0].status, "synthesizing");
+    assert.equal(ch1Synth.chapterProgress[0].completedChunks, 0);
+    assert.equal(ch1Synth.chapterProgress[0].totalChunks, 1);
+    assert.equal(ch1Synth.chapterProgress[1].status, "pending", "ch2 此时尚未开始");
+
+    // 2) ch1 完成后 ch2 开始前：终态所有章 status=ready
+    const finalEmit = emits[emits.length - 1];
+    assert.ok(finalEmit.chapterProgress.every((e) => e.status === "ready"),
+      `终态全章应 ready，实际：${JSON.stringify(finalEmit.chapterProgress.map((e) => e.status))}`);
+    assert.equal(finalEmit.chapterProgress.length, 2);
+    assert.equal(finalEmit.chapterProgress[0].completedChunks, 1);
+    assert.equal(finalEmit.chapterProgress[0].totalChunks, 1);
+
+    // 3) 磁盘是真理：删 ch1 chapter.wav 后 deriveChapterProgress 不再强制其 ready
+    const { deriveChapterProgress } = require(
+      "../dist/services/audiobook/AudiobookTaskService.js",
+    );
+    const progressJsonSnapshot = JSON.stringify({
+      deliveryStyleMode: "off",
+      chapterProgress: finalEmit.chapterProgress,
+    });
+    // ch1 在盘 → 强制 ready
+    const beforeDelete = deriveChapterProgress(progressJsonSnapshot, chapterIds, ["ch1", "ch2"]);
+    assert.equal(beforeDelete[0].status, "ready");
+    // 删 ch1 chapter.wav（listReadyChapterAudioIds 会拒识）→ 该章不被强制 ready，维持原数组值
+    const ch1Wav = resolveChapterAudioPath(path.join(tmpRoot, novelId, taskId), "ch1");
+    fs.unlinkSync(ch1Wav);
+    const afterDelete = deriveChapterProgress(progressJsonSnapshot, chapterIds, ["ch2"]);
+    assert.notEqual(afterDelete[0].status, "ready",
+      `删 ch1 wav 后该章不应显示 ready，实际：${afterDelete[0].status}`);
+    assert.equal(afterDelete[1].status, "ready", "ch2 在盘仍 ready");
   } finally {
     restorePrisma();
     restorePaths();

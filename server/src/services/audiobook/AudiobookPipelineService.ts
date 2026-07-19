@@ -283,6 +283,14 @@ export interface AudiobookPipelineProgress {
   fullAudioPath?: string | null;
   /** 旁白回退等质量警告（聚合） */
   qualityWarnings?: string[];
+  /** 逐章生成进度快照（顺序与 chapterIds 一致）；纯展示，调用方写 progressJson 供前端逐章列表。 */
+  chapterProgress?: Array<{
+    chapterId: string;
+    status: "pending" | "annotating" | "synthesizing" | "merging" | "ready" | "failed";
+    completedChunks: number;
+    totalChunks: number;
+    detail?: string;
+  }>;
 }
 
 export interface RunAudiobookPipelineInput {
@@ -658,6 +666,16 @@ export class AudiobookPipelineService {
     const chapterAudioPaths: Array<{ chapterId: string; path: string; bytes: number }> = [];
     let completedChunks = 0;
     let totalChunksEstimate = 0;
+    const chapterProgress = orderedChapters.map((chapter) => ({
+      chapterId: chapter.id,
+      status: "pending" as "pending" | "annotating" | "synthesizing" | "merging" | "ready" | "failed",
+      completedChunks: 0,
+      totalChunks: 0,
+      detail: undefined as string | undefined,
+    }));
+    // 快照副本（深拷 entry，避免后续就地 mutate 污染已发出的历史快照）
+    const snapshotChapterProgress = (): typeof chapterProgress =>
+      chapterProgress.map((entry) => ({ ...entry }));
 
     // ── 标注阶段 ──
     for (let chapterIndex = 0; chapterIndex < orderedChapters.length; chapterIndex += 1) {
@@ -675,6 +693,7 @@ export class AudiobookPipelineService {
         if (annotation && annotation.segments.length > 0) {
           wipeChapterAudioArtifacts(taskDir, chapter.id);
         }
+        chapterProgress[chapterIndex].status = "annotating";
         await input.onProgress({
           phase: "annotating",
           chapterIndex,
@@ -688,6 +707,7 @@ export class AudiobookPipelineService {
             ? `标注缓存失效，重标第 ${chapter.order} 章：${chapter.title}`
             : `标注第 ${chapter.order} 章：${chapter.title}`,
           chapterAudioPaths: chapterAudioPaths.map((item) => ({ chapterId: item.chapterId, path: item.path })),
+          chapterProgress: snapshotChapterProgress(),
         });
 
         annotation = await audiobookAnnotationService.annotateChapter({
@@ -718,6 +738,8 @@ export class AudiobookPipelineService {
         deliveryStyleMode,
       });
       totalChunksEstimate += expandSegmentsToChunkJobs(estimateReconcile.segments).length;
+      chapterProgress[chapterIndex].status = "annotating";
+      chapterProgress[chapterIndex].totalChunks = expandSegmentsToChunkJobs(estimateReconcile.segments).length;
 
       await input.onProgress({
         phase: "annotating",
@@ -733,6 +755,7 @@ export class AudiobookPipelineService {
         annotations: [...annotations],
         chapterAudioPaths: chapterAudioPaths.map((item) => ({ chapterId: item.chapterId, path: item.path })),
         qualityWarnings: collectQualityWarnings(annotations),
+        chapterProgress: snapshotChapterProgress(),
       });
 
       // ── 合成 + 章合并（逐章：标注完即合成该章，chapter.wav 提前落盘供前端逐章交付）──
@@ -781,6 +804,9 @@ export class AudiobookPipelineService {
           path: chapterWavPath,
           bytes: fs.statSync(chapterWavPath).size,
         });
+        chapterProgress[chapterIndex].status = "ready";
+        chapterProgress[chapterIndex].completedChunks = chunkJobsPreview.length;
+        chapterProgress[chapterIndex].totalChunks = chunkJobsPreview.length;
         await input.onProgress({
           phase: "synthesizing",
           chapterIndex,
@@ -793,6 +819,7 @@ export class AudiobookPipelineService {
           message: `跳过已完成第 ${chapter.order} 章音频`,
           chapterAudioPaths: chapterAudioPaths.map((item) => ({ chapterId: item.chapterId, path: item.path })),
           qualityWarnings: collectQualityWarnings(annotations),
+          chapterProgress: snapshotChapterProgress(),
         });
         continue;
       }
@@ -815,6 +842,9 @@ export class AudiobookPipelineService {
         // 空作业也写布局指纹，避免 resume 反复 wipe 静音章
         writeChunkLayoutFingerprint(taskDir, chapter.id, layoutFp);
         chapterAudioPaths.push({ chapterId: chapter.id, path: chapterWavPath, bytes: silent.length });
+        chapterProgress[chapterIndex].status = "ready";
+        chapterProgress[chapterIndex].completedChunks = 0;
+        chapterProgress[chapterIndex].totalChunks = 0;
         continue;
       }
 
@@ -824,6 +854,10 @@ export class AudiobookPipelineService {
       for (let i = nextChunkIndex; i < chunkJobs.length; i += 1) {
         await throwIfCancelled(input.signal, input.isCancelRequested);
         const job = chunkJobs[i];
+        chapterProgress[chapterIndex].status = "synthesizing";
+        chapterProgress[chapterIndex].completedChunks = i;
+        chapterProgress[chapterIndex].totalChunks = chunkJobs.length;
+        chapterProgress[chapterIndex].detail = `${job.segment.speakerLabel} ${nextChunkIndex > 0 ? `续跑 ${nextChunkIndex}/` : ""}${i + 1}/${chunkJobs.length}`;
         await input.onProgress({
           phase: "synthesizing",
           chapterIndex,
@@ -835,6 +869,7 @@ export class AudiobookPipelineService {
           totalChunksEstimate,
           message: `合成第 ${chapter.order} 章 chunk ${i + 1}/${chunkJobs.length}（${job.segment.speakerLabel}）`,
           chapterAudioPaths: chapterAudioPaths.map((item) => ({ chapterId: item.chapterId, path: item.path })),
+          chapterProgress: snapshotChapterProgress(),
         });
 
         const synth = resolveChunkSynthesizeFields(job.segment);
@@ -889,6 +924,11 @@ export class AudiobookPipelineService {
         totalChunksEstimate,
         message: `合并第 ${chapter.order} 章 WAV`,
         chapterAudioPaths: chapterAudioPaths.map((item) => ({ chapterId: item.chapterId, path: item.path })),
+        chapterProgress: (() => {
+          chapterProgress[chapterIndex].status = "merging";
+          chapterProgress[chapterIndex].completedChunks = chunkJobs.length;
+          return snapshotChapterProgress();
+        })(),
       });
 
       const merged = concatWavFiles(allChunkPaths, chapterWavPath, chunkGapMs);
@@ -911,6 +951,13 @@ export class AudiobookPipelineService {
         totalChunksEstimate,
         message: `第 ${chapter.order} 章完成`,
         chapterAudioPaths: chapterAudioPaths.map((item) => ({ chapterId: item.chapterId, path: item.path })),
+        chapterProgress: (() => {
+          chapterProgress[chapterIndex].status = "ready";
+          chapterProgress[chapterIndex].completedChunks = chunkJobs.length;
+          chapterProgress[chapterIndex].totalChunks = chunkJobs.length;
+          chapterProgress[chapterIndex].detail = undefined;
+          return snapshotChapterProgress();
+        })(),
       });
     }
 
@@ -936,6 +983,7 @@ export class AudiobookPipelineService {
       totalChunksEstimate,
       message: "合并全书 WAV",
       chapterAudioPaths: chapterAudioPaths.map((item) => ({ chapterId: item.chapterId, path: item.path })),
+      chapterProgress: snapshotChapterProgress(),
     });
 
     const betweenChapterGaps = chapterPathsOrdered.length > 1
@@ -958,6 +1006,7 @@ export class AudiobookPipelineService {
       chapterAudioPaths: chapterAudioPaths.map((item) => ({ chapterId: item.chapterId, path: item.path })),
       fullAudioPath,
       qualityWarnings,
+      chapterProgress: snapshotChapterProgress(),
     });
 
     const m4b = await encodeFullBookM4b({
@@ -993,6 +1042,7 @@ export class AudiobookPipelineService {
       chapterAudioPaths: chapterAudioPaths.map((item) => ({ chapterId: item.chapterId, path: item.path })),
       fullAudioPath,
       qualityWarnings,
+      chapterProgress: snapshotChapterProgress(),
     });
 
     return {

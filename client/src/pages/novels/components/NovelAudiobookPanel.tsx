@@ -661,6 +661,41 @@ function RecentAudiobookTaskCard(props: {
             <div className="text-xs leading-5 text-muted-foreground">
               {taskSummaryMeta(task)}
             </div>
+            {task.chapterProgress?.length && (task.status === "running" || task.status === "failed") ? (
+              <ul className="mt-1 flex flex-col gap-1">
+                {task.chapterProgress.map((cp) => {
+                  const chapter = chapters.find((c) => c.id === cp.chapterId);
+                  const label = chapter ? `第 ${chapter.order} 章 ${chapter.title}` : cp.chapterId;
+                  const pct = cp.totalChunks > 0
+                    ? Math.round((cp.completedChunks / cp.totalChunks) * 100)
+                    : 0;
+                  return (
+                    <li key={cp.chapterId} className="flex items-center gap-2 text-xs leading-5">
+                      <span className="shrink-0 truncate text-foreground/80" title={label}>{label}</span>
+                      {cp.status === "ready" ? (
+                        <span className="text-emerald-600">✓ 已可播</span>
+                      ) : cp.status === "pending" ? (
+                        <span className="text-muted-foreground">等待中</span>
+                      ) : cp.status === "failed" ? (
+                        <span className="text-destructive">失败</span>
+                      ) : (
+                        <>
+                          <span className="relative inline-block h-1.5 w-24 overflow-hidden rounded-full bg-muted align-middle">
+                            <span
+                              className="absolute inset-y-0 left-0 rounded-full bg-primary"
+                              style={{ width: `${pct}%` }}
+                            />
+                          </span>
+                          <span className="text-muted-foreground">
+                            {pct}% {cp.status === "annotating" ? "标注中" : cp.status === "merging" ? "合并中" : "合成中"}{cp.detail ? `（${cp.detail}）` : ""}
+                          </span>
+                        </>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            ) : null}
             {task.lastError ? (
               <div className="line-clamp-2 text-sm text-destructive" title={task.lastError}>
                 {task.lastError}
