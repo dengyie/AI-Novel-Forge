@@ -136,6 +136,8 @@ const volumeCritiqueIssueSchema = z.object({
 });
 
 const volumeCritiqueReportSchema = z.object({
+  // F11：kind 用于区分战略评论与骨架评论；旧数据没有该字段，允许 optional。
+  kind: z.enum(["strategy", "skeleton"]).optional(),
   overallRisk: z.enum(["low", "medium", "high"]),
   summary: z.string().trim().min(1),
   issues: z.array(volumeCritiqueIssueSchema).max(MAX_VOLUME_COUNT).default([]),

@@ -267,7 +267,10 @@ function normalizeCritiqueReport(raw: unknown): VolumeCritiqueReport | null {
     return null;
   }
   const overallRisk = raw.overallRisk === "low" || raw.overallRisk === "high" ? raw.overallRisk : "medium";
+  // F11：保留 kind，若旧数据缺失则不填（下游读侧兜底为 skeleton 以维持旧行为）。
+  const kind = raw.kind === "strategy" || raw.kind === "skeleton" ? raw.kind : undefined;
   return {
+    ...(kind ? { kind } : {}),
     overallRisk,
     summary,
     issues: Array.isArray(raw.issues)
