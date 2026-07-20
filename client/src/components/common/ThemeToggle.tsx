@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Check, ChevronDown, Monitor, Moon, Sun } from "lucide-react";
+import { Check, Monitor, Moon, Sun } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useThemeStore, type ThemeMode } from "@/store/themeStore";
 import { cn } from "@/lib/utils";
@@ -20,13 +20,12 @@ const MODE_OPTIONS: Array<{
 
 export default function ThemeToggle({ className }: ThemeToggleProps) {
   const theme = useThemeStore((state) => state.theme);
-  const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
   const setTheme = useThemeStore((state) => state.setTheme);
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
-  // 触发按钮图标跟随当前实际生效主题（自适应时也反映日/夜）
-  const TriggerIcon = resolvedTheme === "dark" ? Moon : Sun;
+  // 触发按钮图标跟随所选模式：白天=太阳 / 夜间=月亮 / 自适应=显示器
+  const TriggerIcon = MODE_OPTIONS.find((option) => option.value === theme)?.icon ?? Sun;
 
   useEffect(() => {
     if (!open) {
@@ -55,7 +54,8 @@ export default function ThemeToggle({ className }: ThemeToggleProps) {
       <Button
         type="button"
         variant="outline"
-        className="h-8 gap-1 px-2"
+        size="icon"
+        className="h-8 w-8"
         onClick={() => setOpen((current) => !current)}
         aria-haspopup="menu"
         aria-expanded={open}
@@ -63,7 +63,6 @@ export default function ThemeToggle({ className }: ThemeToggleProps) {
         title="切换界面主题"
       >
         <TriggerIcon className="h-4 w-4" />
-        <ChevronDown className="h-3 w-3 text-muted-foreground" />
       </Button>
       {open ? (
         <div
