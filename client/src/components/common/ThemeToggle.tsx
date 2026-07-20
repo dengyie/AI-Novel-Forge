@@ -1,28 +1,102 @@
-import { Moon, Sun } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Check, ChevronDown, Monitor, Moon, Sun } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { useThemeStore } from "@/store/themeStore";
+import { useThemeStore, type ThemeMode } from "@/store/themeStore";
 import { cn } from "@/lib/utils";
 
 interface ThemeToggleProps {
   className?: string;
 }
 
+const MODE_OPTIONS: Array<{
+  value: ThemeMode;
+  label: string;
+  icon: typeof Sun;
+}> = [
+  { value: "light", label: "白天", icon: Sun },
+  { value: "dark", label: "夜间", icon: Moon },
+  { value: "system", label: "自适应", icon: Monitor },
+];
+
 export default function ThemeToggle({ className }: ThemeToggleProps) {
+  const theme = useThemeStore((state) => state.theme);
   const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
-  const toggleTheme = useThemeStore((state) => state.toggleTheme);
-  const isDark = resolvedTheme === "dark";
+  const setTheme = useThemeStore((state) => state.setTheme);
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  // 触发按钮图标跟随当前实际生效主题（自适应时也反映日/夜）
+  const TriggerIcon = resolvedTheme === "dark" ? Moon : Sun;
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    const onPointerDown = (event: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onEscape);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onEscape);
+    };
+  }, [open]);
 
   return (
-    <Button
-      type="button"
-      variant="outline"
-      size="icon"
-      className={cn("h-8 w-8", className)}
-      onClick={toggleTheme}
-      aria-label={isDark ? "切换到白天模式" : "切换到夜间模式"}
-      title={isDark ? "切换到白天模式" : "切换到夜间模式"}
-    >
-      {isDark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-    </Button>
+    <div ref={rootRef} className={cn("relative", className)}>
+      <Button
+        type="button"
+        variant="outline"
+        className="h-8 gap-1 px-2"
+        onClick={() => setOpen((current) => !current)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label="切换界面主题"
+        title="切换界面主题"
+      >
+        <TriggerIcon className="h-4 w-4" />
+        <ChevronDown className="h-3 w-3 text-muted-foreground" />
+      </Button>
+      {open ? (
+        <div
+          role="menu"
+          aria-label="界面主题"
+          className="absolute right-0 top-full z-50 mt-1.5 w-36 overflow-hidden rounded-xl border bg-popover p-1 text-popover-foreground shadow-md"
+        >
+          {MODE_OPTIONS.map((option) => {
+            const Icon = option.icon;
+            const active = theme === option.value;
+            return (
+              <button
+                key={option.value}
+                type="button"
+                role="menuitemradio"
+                aria-checked={active}
+                onClick={() => {
+                  setTheme(option.value);
+                  setOpen(false);
+                }}
+                className={cn(
+                  "flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-sm transition hover:bg-accent hover:text-accent-foreground",
+                  active && "font-semibold",
+                )}
+              >
+                <Icon className="h-4 w-4 shrink-0" />
+                <span className="flex-1 text-left">{option.label}</span>
+                {active ? <Check className="h-4 w-4 shrink-0 text-primary" /> : null}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
   );
 }
