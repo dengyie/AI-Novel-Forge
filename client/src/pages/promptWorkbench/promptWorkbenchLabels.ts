@@ -33,7 +33,7 @@ export const CONTEXT_GROUP_LABELS: Record<string, string> = {
   incremental_round_context: "增量生成轮次",
   local_state: "当前局面",
   narrative_progress_hint: "叙事进度提示",
-  obligation_contract: "戏核职责",
+  obligation_contract: "本章戏核职责",
   open_conflicts: "开放冲突",
   opening_constraints: "开篇约束",
   participant_subset: "参与角色",

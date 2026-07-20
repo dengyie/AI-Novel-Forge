@@ -509,10 +509,35 @@ export function buildChapterDetailDraft(
   ].join("\n");
 }
 
+/** 把 mustHappen / 验收句收成「可怎么演」短 hint；优先语义截断，禁止工程键名泄漏。 */
+function dramatizeFunctionSceneHint(raw: string, title: string, maxLen = 72): string {
+  const cleaned = String(raw ?? "")
+    .replace(/mustHappen\s*=\s*/gi, "")
+    .replace(/checks?\s*=\s*/gi, "")
+    .replace(/^(应|须|必须|需要|应当|应该)/, "")
+    .trim();
+  if (!cleaned) {
+    return `让「${title}」在一场戏里通过动作/对话/代价成立`;
+  }
+  if (cleaned.length <= maxLen) {
+    return cleaned;
+  }
+  const slice = cleaned.slice(0, maxLen);
+  const cut = Math.max(
+    slice.lastIndexOf("，"),
+    slice.lastIndexOf("。"),
+    slice.lastIndexOf("；"),
+    slice.lastIndexOf("、"),
+    slice.lastIndexOf(" "),
+  );
+  return (cut >= Math.floor(maxLen * 0.5) ? slice.slice(0, cut) : slice).trim();
+}
+
 /**
  * B4：把章 functionIds 解析为功能兑付短列表（给 taskSheet 生成/合同上下文用）。
- * 输出可戏剧化场景 hint，禁止把 acceptanceChecks / mustHappen 工程串塞进 writer 链。
- * 无表时返回 null，避免 off 模式塞噪声。
+ * 输出可戏剧化场景 hint：优先 mustHappen，其次 acceptanceChecks；
+ * 禁止把 acceptanceChecks / mustHappen 工程串（mustHappen= / checks=）塞进 writer 链。
+ * 无 functionIds 时返回 null，避免 off 模式塞噪声。
  */
 export function buildChapterFunctionPayoffContext(
   chapter: VolumePlan["chapters"][number],
@@ -537,11 +562,10 @@ export function buildChapterFunctionPayoffContext(
   }
   const lines = items.slice(0, 6).map((item) => {
     const title = String(item.title ?? "").trim() || item.id;
+    const mustHappen = String(item.mustHappen ?? "").trim();
     const firstCheck = String((item.acceptanceChecks ?? [])[0] ?? "").trim();
-    // 把验收句收成「可怎么演」短 hint，不 dump mustHappen/checks 工程串。
-    const sceneHint = firstCheck
-      ? firstCheck.replace(/^(应|须|必须|需要)?/, "").slice(0, 48)
-      : `让「${title}」在一场戏里通过动作/对话/代价成立`;
+    // 优先 mustHappen（真正「要发生什么」），否则才用验收句收成戏剧 hint。
+    const sceneHint = dramatizeFunctionSceneHint(mustHappen || firstCheck, title);
     return `- ${item.id}「${title}」→ 本章可怎么演：${sceneHint}`;
   });
   return [

@@ -467,6 +467,69 @@ test("B4: function payoff short list formats from ids/hints", () => {
   assert.equal(formatFunctionPayoffShortListForTaskSheet({ functionIds: [] }), "");
 });
 
+test("B4: buildChapterFunctionPayoffContext prefers mustHappen dramatization without engineering dump", () => {
+  const {
+    buildChapterFunctionPayoffContext,
+  } = require("../dist/prompting/prompts/novel/volume/shared.js");
+
+  assert.equal(buildChapterFunctionPayoffContext({ functionIds: [] }, []), null);
+
+  const idsOnly = buildChapterFunctionPayoffContext(
+    { functionIds: ["fn-orphan"] },
+    [],
+  );
+  assert.match(String(idsOnly), /fn-orphan/);
+  assert.match(String(idsOnly), /dramatizable on-page scenes/i);
+  assert.equal(/mustHappen=/.test(String(idsOnly)), false);
+  assert.equal(/checks=/.test(String(idsOnly)), false);
+
+  const resolved = buildChapterFunctionPayoffContext(
+    { functionIds: ["fn-trust"] },
+    [{
+      volumeId: "v1",
+      schemaVersion: 1,
+      source: "generated",
+      items: [{
+        id: "fn-trust",
+        order: 1,
+        title: "托付落地",
+        mustHappen: "主角在雨夜把账本交给女二并确认她会藏起来",
+        acceptanceChecks: [
+          "正文应出现账本交接与确认对话",
+          "应写出女二收下后的反应",
+        ],
+        status: "planned",
+      }],
+    }],
+  );
+  assert.match(String(resolved), /本章可怎么演/);
+  assert.match(String(resolved), /雨夜|账本|女二/);
+  // mustHappen 优先：不应用验收句「正文应出现…」当 hint 主体
+  assert.equal(String(resolved).includes("正文应出现"), false);
+  assert.equal(/mustHappen=/.test(String(resolved)), false);
+  assert.equal(/checks=/.test(String(resolved)), false);
+
+  const checkFallback = buildChapterFunctionPayoffContext(
+    { functionIds: ["fn-check"] },
+    [{
+      volumeId: "v1",
+      schemaVersion: 1,
+      source: "generated",
+      items: [{
+        id: "fn-check",
+        order: 1,
+        title: "桥接在场",
+        mustHappen: "",
+        acceptanceChecks: ["须让承接人当面接过钥匙并离开"],
+        status: "planned",
+      }],
+    }],
+  );
+  assert.match(String(checkFallback), /本章可怎么演/);
+  assert.match(String(checkFallback), /承接人|钥匙/);
+  assert.equal(/mustHappen=/.test(String(checkFallback)), false);
+});
+
 test("B4: chapter detail task_sheet prompt includes template contract sections", () => {
   const {
     volumeChapterTaskSheetPrompt,
