@@ -133,7 +133,13 @@ test("design resolve puts performance into designPrompt user channel", () => {
   assert.match(resolved.designPrompt || "", /表演指令：/);
 });
 
-test("fingerprint changes when style/designPrompt change", () => {
+// SoT 校准（2ced268「close SoT fingerprint gap」之后口径变更，与 authoritative
+// audiobookSynthSotFingerprint.test.js 对齐）：
+//  - chunkLayoutFingerprint 走 resolveChunkSynthesizeFields：编译标记 `本句表演：` 在无 delivery
+//    时被 peel，因此往 style 追加 compiled marker 不改变语义 → 指纹不变。
+//  - 真正改变语义基线文本（survives peel）才改变指纹。
+// 旧版本断言「compiled marker 改变指纹」与 SoT 冲突，已在本轮校正。
+test("fingerprint changes when semantic base style changes (compiled marker without delivery is peeled)", () => {
   const jobsA = [
     {
       text: "你把责任说清楚。",
@@ -149,7 +155,8 @@ test("fingerprint changes when style/designPrompt change", () => {
       },
     },
   ];
-  const jobsB = [
+  // 往相同基线追加 compiled `本句表演：` 标记：无 delivery → 被 peel → 语义未变 → 指纹不变
+  const jobsMarkerOnly = [
     {
       text: "你把责任说清楚。",
       segment: {
@@ -158,14 +165,33 @@ test("fingerprint changes when style/designPrompt change", () => {
       },
     },
   ];
+  // 改变基线正文（survives peel）→ 语义变化 → 指纹变化
+  const jobsDifferentBase = [
+    {
+      text: "你把责任说清楚。",
+      segment: {
+        ...jobsA[0].segment,
+        style: "另一条完全不同的声线基线",
+      },
+    },
+  ];
   const fpA = chunkLayoutFingerprint(jobsA);
-  const fpB = chunkLayoutFingerprint(jobsB);
+  const fpMarker = chunkLayoutFingerprint(jobsMarkerOnly);
+  const fpDiffBase = chunkLayoutFingerprint(jobsDifferentBase);
   assert.equal(typeof fpA, "string");
   assert.equal(fpA.length, 16);
-  assert.notEqual(fpA, fpB);
+  // compiled marker 无 delivery 被 peel → 语义不变 → 指纹稳定
+  assert.equal(fpA, fpMarker);
+  // 语义基线正文改变 → 指纹改变
+  assert.notEqual(fpA, fpDiffBase);
 });
 
-test("fingerprint stable when only unrelated fields change", () => {
+// SoT 校准（同上）：delivery 在 resolveChunkSynthesizeFields 内会经 applyDeliveryToSegment /
+// resolveSynthesizeInput 重新编译进 style 的 `本句表演：` 行，因此 delivery 内容 DOES 进指纹
+// （2ced268「fingerprint/reconcile/synth SoT align」明确把不同 delivery 视为会改变合成结果，
+// 需 invalidate 缓存）。
+// 故「unrelated 字段」需选用真正不进指纹的字段。speakerLabel / index 不进 hash，改它们应稳定。
+test("fingerprint stable when only unrelated fields change (delivery now DOES enter fingerprint)", () => {
   const base = {
     text: "别回头。",
     segment: {
@@ -181,17 +207,34 @@ test("fingerprint stable when only unrelated fields change", () => {
       delivery: normalizeDelivery(GOOD),
     },
   };
+  // 换真正不进指纹的字段：speakerLabel + index 不在 chunkLayoutFingerprint hash 输入中
   const fp1 = chunkLayoutFingerprint([base]);
   const fp2 = chunkLayoutFingerprint([
     {
       ...base,
       segment: {
         ...base.segment,
-        delivery: normalizeDelivery(TENDER), // delivery 对象本身不进指纹；style 未变
+        speakerLabel: "小何",
+        index: 99,
       },
     },
   ]);
   assert.equal(fp1, fp2);
+
+  // 防回归旁证：delivery 内容变化会通过重编 `本句表演：` 行进指纹 → 不同（SoT 明确语义）
+  const fpGood = chunkLayoutFingerprint([
+    {
+      ...base,
+      segment: { ...base.segment, style: "基线", delivery: normalizeDelivery(GOOD) },
+    },
+  ]);
+  const fpTender = chunkLayoutFingerprint([
+    {
+      ...base,
+      segment: { ...base.segment, style: "基线", delivery: normalizeDelivery(TENDER) },
+    },
+  ]);
+  assert.notEqual(fpGood, fpTender);
 });
 
 test("expand chunk jobs respect mergeKey buckets", () => {

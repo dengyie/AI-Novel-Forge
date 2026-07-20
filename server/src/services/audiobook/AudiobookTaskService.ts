@@ -908,14 +908,22 @@ export class AudiobookTaskService {
   private async cancelChildContinueTasks(parentTaskId: string): Promise<void> {
     let children: Array<{ id: string; status: string; progressJson: string | null }> = [];
     try {
+      // 全局 task 队列串行（processQueue while-await + this.processing guard），queued+running 同时刻上限很小；
+      // 2000 为足够留余量的扫描窗口，覆盖异常堆积。若真触顶说明队列失控，需告警排查，不能静默漏取消。
       children = await prisma.audiobookTask.findMany({
         where: { status: { in: ["queued", "running"] } },
         select: { id: true, status: true, progressJson: true },
-        take: 200,
+        take: 2000,
       }) as typeof children;
     } catch (error) {
       if (isMissingAudiobookTaskTableError(error)) return;
       throw error;
+    }
+    if (children.length >= 2000) {
+      console.warn(
+        "[audiobook] cancelChildContinueTasks 触顶 2000，可能存在子任务堆积未完成取消，请排查队列状态。parentTaskId=",
+        parentTaskId,
+      );
     }
     const mine = children.filter(
       (row) => readParentTaskIdFromProgress(row.progressJson) === parentTaskId,
