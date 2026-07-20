@@ -316,12 +316,18 @@ export interface RunAudiobookPipelineInput {
    * 传入则优先使用，跳过 `ensureAudiobookTaskDir(novelId, taskId)` 派生。
    * 续生成子任务传入父目录，章 wav 落父目录，父 reconcile 才能看见。 */
   outputDir?: string | null;
+  /** 续生成子任务标记。为 true 时输出目录是**父任务共享目录**，
+   * 跳过 finalize 全书 wav 合并 / m4b：子任务 chapterIds 是父章集子集，
+   * 用 subset concat 覆写父 full-book.wav 会造成静默数据损坏（全书只剩子集章）。
+   * 父任务在所有章 ready 后由 reconcileParent 重拼全书。 */
+  isContinueChild?: boolean;
 }
 
 export interface RunAudiobookPipelineResult {
   annotations: AudiobookChapterAnnotation[];
   chapterAudioPaths: Array<{ chapterId: string; path: string; bytes: number }>;
-  fullAudioPath: string;
+  /** 全书 wav 路径；续生成子任务跳过全书合并，为 null（子不可覆写父 full-book）。 */
+  fullAudioPath: string | null;
   completedChapterCount: number;
   completedChunks: number;
   outputDir: string;
@@ -988,6 +994,40 @@ export class AudiobookPipelineService {
 
     await throwIfCancelled(input.signal, input.isCancelRequested);
 
+    // 续生成子任务：输出目录是父任务共享目录，chapterIds 是父章集子集。
+    // 跳过全书合并/m4b：用 subset concat 覆写父 full-book.wav 是静默数据损坏
+    // （全书只剩子集章）。父全章 ready 后由 reconcileParent 重拼全书。
+    const isContinueChild = Boolean(input.isContinueChild);
+    const qualityWarnings = collectQualityWarnings(annotations);
+    if (isContinueChild) {
+      await input.onProgress({
+        phase: "finalizing",
+        chapterIndex: orderedChapters.length - 1,
+        chapterCount: orderedChapters.length,
+        chapterId: orderedChapters[orderedChapters.length - 1].id,
+        chapterTitle: orderedChapters[orderedChapters.length - 1].title,
+        completedChapters: orderedChapters.length,
+        completedChunks,
+        totalChunksEstimate,
+        message: "续生成章完成，全书合并由父任务接管",
+        annotations,
+        chapterAudioPaths: chapterAudioPaths.map((item) => ({ chapterId: item.chapterId, path: item.path })),
+        fullAudioPath: undefined,
+        qualityWarnings,
+        chapterProgress: snapshotChapterProgress(),
+      });
+      return {
+        annotations,
+        chapterAudioPaths,
+        fullAudioPath: null,
+        completedChapterCount: orderedChapters.length,
+        completedChunks,
+        outputDir: taskDir,
+        qualityWarnings,
+        m4b: { status: "skipped", path: null, relativePath: null, reason: "continue-child" },
+      };
+    }
+
     const fullAudioPath = resolveFullBookAudioPath(taskDir);
     const chapterPathsOrdered = orderedChapters.map((chapter) => {
       const found = chapterAudioPaths.find((item) => item.chapterId === chapter.id);
@@ -1015,7 +1055,6 @@ export class AudiobookPipelineService {
       ? Array.from({ length: chapterPathsOrdered.length - 1 }, () => resolveBetweenChapterGapMs())
       : [];
     concatWavFiles(chapterPathsOrdered, fullAudioPath, betweenChapterGaps);
-    const qualityWarnings = collectQualityWarnings(annotations);
 
     await throwIfCancelled(input.signal, input.isCancelRequested);
     await input.onProgress({

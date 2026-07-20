@@ -27,9 +27,15 @@ import {
   listReadyChapterAudioIds,
   pruneChunkWavArtifacts,
   resolveAudiobookTaskDir,
+  resolveChapterAudioPath,
+  resolveFullBookAudioPath,
+  resolveFullBookM4bPath,
+  safeUnlink,
   wipeChapterAnnotationArtifact,
   wipeChapterAudioArtifacts,
 } from "./audiobookPaths";
+import { resolveBetweenChapterGapMs } from "./audiobookGap";
+import { concatWavFiles } from "./audiobookWav";
 import { resolveDeliveryStyleMode } from "./deliveryStyle";
 import { checkVoiceRefAudioPath } from "./voiceRefPath";
 import { resolveEffectiveCloneRefPath, tryResolveEffectiveCloneRefPath } from "./voiceLibraryService";
@@ -854,6 +860,26 @@ export class AudiobookTaskService {
     };
 
     const allReady = readyChapterIds.length === chapterIds.length;
+    // 全就绪但 full-book.wav 不在/失效（续生成子曾按「章变则全书必须重拼」清掉）→
+    // 用已就绪的 per-chapter.wav 就地重拼全书。全局任务队列串行，无其它写入发生。
+    // m4b 不在此重做（重编码 20min 级、ffmpeg 子进程），父如需 m4b 走自己的路径；全书 wav 即可播。
+    if (allReady && !fullAudioReady) {
+      try {
+        const chapterPaths = chapterIds.map((id) => resolveChapterAudioPath(taskDir, id));
+        const gaps = chapterPaths.length > 1
+          ? Array.from({ length: chapterPaths.length - 1 }, () => resolveBetweenChapterGapMs())
+          : [];
+        concatWavFiles(chapterPaths, resolveFullBookAudioPath(taskDir), gaps);
+        fullAudioReady = isFullBookAudioReady(taskDir);
+      } catch (restitchError) {
+        console.warn(
+          "[audiobook] reconcileParent 重拼全书失败（章可逐章播，全书播放暂缺）",
+          parent.id,
+          restitchError instanceof Error ? restitchError.message : restitchError,
+        );
+        fullAudioReady = false;
+      }
+    }
     // 续生成期间父 progress 反映 ready/total（避免旧终态 100 与 running 矛盾）；全 ready 翻 100
     const parentProgress = allReady
       ? 100
@@ -861,6 +887,7 @@ export class AudiobookTaskService {
 
     if (allReady) {
       // 全部就绪：父翻 succeeded，currentStage 收尾
+      // error:null —— 前次续生成失败留下的 error 文本必须清，否则父 succeeded 仍带旧红字
       await prisma.audiobookTask.update({
         where: { id: parent.id },
         data: {
@@ -871,6 +898,7 @@ export class AudiobookTaskService {
           status: "succeeded",
           currentStage: "finalizing",
           currentItemLabel: "有声书生成完成",
+          error: null,
           finishedAt: new Date(),
         },
       });
@@ -892,7 +920,8 @@ export class AudiobookTaskService {
         progressJson: JSON.stringify(nextProgress),
         progress: parentProgress,
         completedChapterCount: readyChapterIds.length,
-        fullAudioPath: parent.fullAudioPath,
+        // 磁盘 full-book.wav 不在/失效时清空 fullAudioPath，避免父行仍声称全书可播（子终态后失效场景）。
+        fullAudioPath: fullAudioReady ? "full-book.wav" : null,
         status: "failed",
         currentStage: "failed",
         currentItemLabel: failureLabel,
@@ -1346,6 +1375,7 @@ export class AudiobookTaskService {
       });
 
       const deliveryStyleMode = readDeliveryStyleModeFromTask(task);
+      const isContinueChild = Boolean(readParentTaskIdFromProgress(task.progressJson));
       const result = await audiobookPipelineService.run({
         taskId,
         novelId: task.novelId,
@@ -1364,6 +1394,8 @@ export class AudiobookTaskService {
         isCancelRequested: () => this.isCancelRequested(taskId),
         // 续生成子任务：用父 outputDir（落章 wav 进父目录，父 reconcile 可见）；否则 null → 默认新建任务目录。
         outputDir: task.outputDir?.trim() || null,
+        // 续生成子任务跳过全书合并/m4b，父 full-book 由 reconcileParent 重拼。
+        isContinueChild,
         onProgress: async (progress) => {
           if (await this.isCancelRequested(taskId)) {
             return;
@@ -1460,6 +1492,16 @@ export class AudiobookTaskService {
         );
       }
 
+      // 续生成子任务：章集变化（父范围的新增/重合成章落盘）→ 父 full-book.wav/m4b
+      // 已过期且不可再用；按「章变则全书必须重拼」设计意图删掉，避免父 reconcile 把
+      // stale full-book 当作有效全书写回 fullAudioPath。全章 ready 后 reconcileParent 重拼。
+      if (isContinueChild) {
+        safeUnlink(resolveFullBookAudioPath(result.outputDir));
+        safeUnlink(`${resolveFullBookAudioPath(result.outputDir)}.part`);
+        safeUnlink(resolveFullBookM4bPath(result.outputDir));
+        safeUnlink(`${resolveFullBookM4bPath(result.outputDir)}.part`);
+      }
+
       await prisma.audiobookTask.updateMany({
         where: {
           id: taskId,
@@ -1475,8 +1517,8 @@ export class AudiobookTaskService {
           heartbeatAt: new Date(),
           completedChapterCount: result.completedChapterCount,
           outputDir: result.outputDir,
-          // 存相对逻辑名，避免 DATA_ROOT 迁移后绝对路径失效
-          fullAudioPath: "full-book.wav",
+          // 续生成子任务跳过全书写入；存相对逻辑名，避免 DATA_ROOT 迁移后绝对路径失效
+          fullAudioPath: isContinueChild ? null : "full-book.wav",
           annotationsJson: JSON.stringify(result.annotations),
           resultJson: JSON.stringify({
             chapterIds: chapterIdsForPrune,
