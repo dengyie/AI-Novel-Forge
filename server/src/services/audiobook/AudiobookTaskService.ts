@@ -1075,6 +1075,18 @@ export class AudiobookTaskService {
     if (!task) {
       return;
     }
+    // 续生成子任务 envelope（parentTaskId/hidden）不能被 onProgress 重写丢失。
+    // onProgress 每次 progressJson 整串写时展开此 envelope，listByNovel/finalizeContinueChild 才能持续识别父子关系。
+    const continueEnvelope = ((): Record<string, unknown> => {
+      const pid = readParentTaskIdFromProgress(task.progressJson);
+      const progress = parseProgressJson(task.progressJson);
+      if (!pid) return {};
+      return {
+        ...(progress.hidden === true ? { hidden: true } : {}),
+        parentTaskId: pid,
+        ...(typeof progress.mode === "string" ? { mode: progress.mode } : {}),
+      };
+    })();
     if ((task.status !== "queued" && task.status !== "running") || task.pendingManualRecovery) {
       return;
     }
@@ -1337,6 +1349,7 @@ export class AudiobookTaskService {
                 ? { annotationsJson: JSON.stringify(progress.annotations) }
                 : {}),
               progressJson: JSON.stringify({
+                ...continueEnvelope,
                 deliveryStyleMode,
                 phase: progress.phase,
                 chapterIndex: progress.chapterIndex,
