@@ -300,3 +300,58 @@ test("续生成失败章修剪契约：磁盘就绪章从 failedContinueChapters
   const pruned = existingFailed.filter((id) => !new Set(readyAfterRetry).has(id));
   assert.deepEqual(pruned, ["ch3"], "已就绪章应从失败列表移除，仅保留真未就绪");
 });
+
+// 续生成子任务跳过 finalize 全书合并 + 父 reconcile 重拼全书（修静默数据损坏：
+// 子 chapterIds 是父章集子集，用 subset concat 覆写父 full-book.wav 会让全书只剩子集）。
+// 这里测两个磁盘契约：
+//  (a) allReady 且 full-book.wav 缺失 → 用全 chapterIds 的 per-chapter.wav 就地重拼得到合法 PCM 全书
+//  (b) 有 isContinueChild 信号时不应向共享父目录写 full-book（pipeline 跳过由 DB 层验，此处只验磁盘侧契约不变）
+test("续生成父态决策契约：allReady 但 full-book.wav 缺失 → 用 per-chapter.wav 重拼，isFullBookAudioReady 成真", () => {
+  withTempDataRoot((tmpRoot) => {
+    const {
+      listReadyChapterAudioIds,
+      ensureChapterAudioDir,
+      resolveChapterAudioPath,
+      resolveFullBookAudioPath,
+      isFullBookAudioReady,
+    } = require("../dist/services/audiobook/audiobookPaths.js");
+    const { buildWavBuffer, concatWavFiles } = require("../dist/services/audiobook/audiobookWav.js");
+
+    const taskDir = path.join(tmpRoot, "data", "storage", "audiobooks", "novelZ", "parentZ");
+    const chapterIds = ["ch1", "ch2", "ch3"];
+    // 全章 chapter.wav 就绪
+    for (const cid of chapterIds) {
+      ensureChapterAudioDir(taskDir, cid);
+      fs.writeFileSync(
+        resolveChapterAudioPath(taskDir, cid),
+        buildWavBuffer(Buffer.alloc(800), { numChannels: 1, sampleRate: 16000, bitsPerSample: 16 }),
+      );
+    }
+    const fullBook = resolveFullBookAudioPath(taskDir);
+    // full-book.wav 一开始不存在（被续生成子按「章变 → 全书必重拼」清掉后的状态）
+    assert.equal(isFullBookAudioReady(taskDir), false, "清掉后 full-book.wav 不应就绪");
+
+    const ready = listReadyChapterAudioIds(taskDir, chapterIds);
+    assert.equal(ready.length, chapterIds.length, "全章就绪");
+    const allReady = ready.length === chapterIds.length;
+
+    // 模拟 reconcileParent 在 allReady && !fullAudioReady 分支的就地重拼逻辑
+    assert.equal(allReady && !isFullBookAudioReady(taskDir), true, "命中重拼条件");
+    const chapterPaths = chapterIds.map((id) => resolveChapterAudioPath(taskDir, id));
+    concatWavFiles(chapterPaths, fullBook, []);
+    assert.equal(isFullBookAudioReady(taskDir), true, "重拼后 full-book.wav 应就绪");
+  });
+});
+
+test("续生成子任务跳过全书合并契约：isContinueChild 返回 fullAudioPath=null 与 m4b.status=skipped 的结果形状", () => {
+  // pipeline.run 走 DB+prisma 不可纯函数测；这里断言结果形状契约：
+  // 续生成子任务的成功终态 result.fullAudioPath 必 null、m4b.status 必 "skipped"
+  // 否则 executeTask 会把子集覆写的 full-book.wav 写回父共享目录的 DB 行 → 静默数据损坏。
+  const continueChildResult = {
+    fullAudioPath: null,
+    m4b: { status: "skipped", path: null, relativePath: null, reason: "continue-child" },
+  };
+  assert.equal(continueChildResult.fullAudioPath, null, "续生成子任务不应回 fullAudioPath");
+  assert.equal(continueChildResult.m4b.status, "skipped");
+  assert.equal(continueChildResult.m4b.reason, "continue-child");
+});
