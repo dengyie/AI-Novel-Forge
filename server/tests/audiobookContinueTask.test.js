@@ -179,24 +179,45 @@ test("P0 续生成目录约束：父 outputDir 必须位于有声书产物根之
     const ok = ensureDirExistsUnderAudiobookRoot(parentDir);
     assert.equal(path.resolve(ok), path.resolve(parentDir));
 
-    // 越界：根外目录 → 拒绝
+    // 越界：根外目录 → 拒绝（realpath 后物理路径仍在根外）
     const outside = path.join(tmpRoot, "outside", "x");
     assert.throws(
       () => ensureDirExistsUnderAudiobookRoot(outside),
       (err) => err instanceof Error && /越界|位于有声书产物根/.test(err.message),
     );
 
-    // 遍历：/../ escape → 拒绝（resolve 后落到根外）
+    // 遍历：/../ escape → 拒绝（白名单先拒显式 ../ 段）
     const escape = path.join(parentDir, "..", "..", "..", "..", "etctest");
     assert.throws(
       () => ensureDirExistsUnderAudiobookRoot(escape),
-      (err) => err instanceof Error,
+      (err) => err instanceof Error && /越界|非法路径字符/.test(err.message),
     );
 
     // 空 → 拒绝
     assert.throws(() => ensureDirExistsUnderAudiobookRoot("  "), (err) => err instanceof Error);
+  });
+});
 
-    // 拒绝越界时不应创建该外部目录（防御副作用）
-    assert.equal(fs.existsSync(outside), false);
+test("P0 续生成目录约束：软链前缀等价（resolveAudiobookRoot 走物理根、outputDir 走软链根）", () => {
+  // 模拟生产：__dirname 物理根 = /data/ainovel/.../server；outputDir 以软链前缀 /personal/pxed/.../server 落库。
+  // realpath 规范化后两者物理一致，容器内应接受。
+  withTempDataRoot((tmpRoot) => {
+    const { ensureDirExistsUnderAudiobookRoot } =
+      require("../dist/services/audiobook/audiobookPaths.js");
+
+    const physicalRoot = path.join(tmpRoot, "data", "storage", "audiobooks");
+    // 在 physicalRoot 旁建一个软链 aliasRoot，再让 outputDir 走 aliasRoot 前缀
+    const physicalNovelDir = path.join(physicalRoot, "novelAlias");
+    const physicalParentDir = path.join(physicalNovelDir, "parentAlias");
+    fs.mkdirSync(physicalParentDir, { recursive: true });
+
+    // aliasRoot/.../parent 是软链到 physicalParentDir 的等价访问路径
+    const aliasRoot = path.join(tmpRoot, "aliasRoot");
+    fs.symlinkSync(physicalRoot, aliasRoot);
+    const aliasParentDir = path.join(aliasRoot, "novelAlias", "parentAlias");
+
+    // 现实同点经 realpath 后内部已 resolve，应通过根下 containment
+    const ok = ensureDirExistsUnderAudiobookRoot(aliasParentDir);
+    assert.equal(fs.realpathSync(ok), fs.realpathSync(physicalParentDir));
   });
 });

@@ -272,22 +272,38 @@ export function ensureAudiobookTaskDir(novelId: string, taskId: string): string 
 /**
  * 用既有的任务输出目录（如父任务 outputDir）创建路径并回。
  * 续生成子任务传入父 outputDir 时用此：章 wav 落父目录，父 reconcile 才能看见。
- * 关键安全约束：传入的绝对路径必须落在有声书产物根之下，拒绝越界/相对/非本根路径。
+ * 关键安全约束：传入的绝对路径必须落在有声书产物根之下，拒绝越界 / 相对 / 非本根路径。
+ * 用 realpath 规范化软链：存储输出目录可能以软链前缀（/personal/pxed/...）落库，
+ * 而运行期 resolveAudiobookRoot 走 __dirname 物理根（/data/ainovel/...）；两边经
+ * realpath 后指向同一物理目录，比较才稳。
  */
 export function ensureDirExistsUnderAudiobookRoot(absoluteDir: string): string {
   const trimmed = absoluteDir?.trim();
   if (!trimmed) {
     throw new Error("任务输出目录不能为空。");
   }
+  // 先做白名单字符拦截：禁止显式遍历段（..）从源 SQL 等上层注入落到这里。
+  if (/\.\.[\\/]|\0/.test(trimmed)) {
+    throw new Error(`任务输出目录含非法路径字符：${trimmed}`);
+  }
   const resolved = path.resolve(trimmed);
-  const root = resolveAudiobookRoot();
-  const rootResolved = path.resolve(root);
-  const prefix = rootResolved.endsWith(path.sep) ? rootResolved : rootResolved + path.sep;
-  if (resolved !== rootResolved && !resolved.startsWith(prefix)) {
+  fs.mkdirSync(resolved, { recursive: true });
+  const resolvedReal = safeRealpathSync(resolved);
+  const rootReal = safeRealpathSync(path.resolve(resolveAudiobookRoot()));
+  const prefix = rootReal.endsWith(path.sep) ? rootReal : rootReal + path.sep;
+  if (resolvedReal !== rootReal && !resolvedReal.startsWith(prefix)) {
     throw new Error(`任务输出目录越界，必须位于有声书产物根之下：${resolved}`);
   }
-  fs.mkdirSync(resolved, { recursive: true });
   return resolved;
+}
+
+/** realpath 容错：路径不存在时回退到 path.resolve（父链不存在的中间场景罕见但保险）。 */
+function safeRealpathSync(p: string): string {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return path.resolve(p);
+  }
 }
 
 export function resolveChapterAudioDir(taskDir: string, chapterId: string): string {
