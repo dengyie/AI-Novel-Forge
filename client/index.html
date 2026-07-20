@@ -10,7 +10,13 @@
     <script>
       (function () {
         try {
-          if (window.localStorage.getItem("ai-novel-theme") === "dark") {
+          var mode = window.localStorage.getItem("ai-novel-theme") || "system";
+          var dark =
+            mode === "dark" ||
+            (mode !== "light" &&
+              typeof window.matchMedia === "function" &&
+              window.matchMedia("(prefers-color-scheme: dark)").matches);
+          if (dark) {
             document.documentElement.classList.add("dark");
           }
         } catch (e) {

@@ -1,4 +1,4 @@
-import { Moon, Sun } from "lucide-react";
+import { Monitor, Moon, Sun } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import { useThemeStore, type ThemeMode } from "@/store/themeStore";
@@ -21,20 +21,30 @@ const THEME_OPTIONS: Array<{
     description: "暗色界面，适合弱光环境下长时间写作。",
     icon: Moon,
   },
+  {
+    value: "system",
+    label: "跟随系统",
+    description: "根据系统的白天/夜间外观自动切换。",
+    icon: Monitor,
+  },
 ];
 
 export default function AppearanceSettingsCard() {
   const theme = useThemeStore((state) => state.theme);
+  const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
   const setTheme = useThemeStore((state) => state.setTheme);
 
   return (
     <Card>
       <CardHeader>
         <CardTitle className="text-base">界面外观</CardTitle>
-        <CardDescription>在白天与夜间主题之间切换，选择会自动保存并在下次打开时生效。</CardDescription>
+        <CardDescription>
+          在白天、夜间或跟随系统之间切换，选择会自动保存并在下次打开时生效。
+          {theme === "system" ? ` 当前系统为${resolvedTheme === "dark" ? "夜间" : "白天"}，已应用对应主题。` : ""}
+        </CardDescription>
       </CardHeader>
       <CardContent>
-        <div className="grid grid-cols-2 gap-3 sm:max-w-md">
+        <div className="grid grid-cols-3 gap-3 sm:max-w-lg">
           {THEME_OPTIONS.map((option) => {
             const Icon = option.icon;
             const active = theme === option.value;
