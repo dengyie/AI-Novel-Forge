@@ -35,6 +35,7 @@ import {
   wipeChapterAudioArtifacts,
 } from "./audiobookPaths";
 import { resolveBetweenChapterGapMs } from "./audiobookGap";
+import { encodeFullBookM4b } from "./audiobookM4b";
 import { concatWavFiles } from "./audiobookWav";
 import { resolveDeliveryStyleMode } from "./deliveryStyle";
 import { checkVoiceRefAudioPath } from "./voiceRefPath";
@@ -46,6 +47,20 @@ const AUDIOBOOK_HEARTBEAT_INTERVAL_MS = Math.max(
 );
 
 const DEFAULT_MAX_RETRIES = 1;
+
+/** listByNovel 可见条数上限（API take 钳制后）。 */
+const LIST_BY_NOVEL_VISIBLE_MAX = 100;
+/** listByNovel 过取上限：隐闭子占窗口时仍尽量凑满可见父行。 */
+const LIST_BY_NOVEL_FETCH_MAX = 500;
+
+/**
+ * 先过取再滤隐闭子：visibleLimit 为调用方想要的父任务条数。
+ * fetchTake ≥ visibleLimit，且预留子任务占位，避免 take 后 filter 把可见父挤出。
+ */
+export function listByNovelFetchTake(visibleLimit: number): number {
+  const limit = Math.max(1, Math.min(LIST_BY_NOVEL_VISIBLE_MAX, Math.floor(visibleLimit) || 1));
+  return Math.min(LIST_BY_NOVEL_FETCH_MAX, Math.max(limit * 5, limit + 50));
+}
 
 function parseChapterIds(json: string | null | undefined): string[] {
   if (!json?.trim()) {
@@ -517,16 +532,18 @@ export class AudiobookTaskService {
 
   async listByNovel(novelId: string, take = 50): Promise<AudiobookTaskSummary[]> {
     try {
+      const visibleLimit = Math.max(1, Math.min(LIST_BY_NOVEL_VISIBLE_MAX, take));
+      // 过取再滤：隐闭子 updatedAt 更近时会占满 take 窗口，导致可见父被挤出
       const rows = await prisma.audiobookTask.findMany({
         where: { novelId },
         include: { novel: { select: { id: true, title: true } } },
         orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
-        take: Math.max(1, Math.min(100, take)),
+        take: listByNovelFetchTake(visibleLimit),
       });
       // 隐闭续生成子任务不进列表：进度合入父，前端只见父行
-      const visible = rows.filter(
-        (row) => !readParentTaskIdFromProgress((row as AudiobookTaskRow).progressJson),
-      );
+      const visible = rows
+        .filter((row) => !readParentTaskIdFromProgress((row as AudiobookTaskRow).progressJson))
+        .slice(0, visibleLimit);
       return visible.map((row) => toSummary(row as AudiobookTaskRow));
     } catch (error) {
       if (isMissingAudiobookTaskTableError(error)) {
@@ -545,9 +562,48 @@ export class AudiobookTaskService {
       throw new AppError("仅排队中或运行中的有声书任务可取消。", 400);
     }
 
+    const isContinueChild = Boolean(readParentTaskIdFromProgress(task.progressJson));
+    const isContinuingParent = !isContinueChild && task.currentStage === "continuing";
+
     // 级联取消挂在本父上的隐闭续生成子任务（queued/running），避免父停子续在父目录产 wav
-    if (!readParentTaskIdFromProgress(task.progressJson)) {
+    if (!isContinueChild) {
       await this.cancelChildContinueTasks(taskId);
+    }
+
+    // continuing 父无自身 pipeline：不能只靠 cancelRequestedAt 等执行钩子，必须立刻落终态
+    if (isContinuingParent) {
+      this.removeFromQueue(taskId);
+      this.activeControllers.get(taskId)?.abort();
+      try {
+        await this.reconcileParent(taskId);
+      } catch (error) {
+        console.warn(
+          "[audiobook] cancelTask reconcileParent failed for continuing parent",
+          taskId,
+          error instanceof Error ? error.message : error,
+        );
+      }
+      // reconcile 按磁盘翻 failed/succeeded；若仍非终态（空章等边角）则强制 cancelled
+      await prisma.audiobookTask.updateMany({
+        where: { id: taskId, status: { in: ["running", "queued"] } },
+        data: {
+          status: "cancelled",
+          currentStage: "cancelled",
+          currentItemLabel: "已取消",
+          finishedAt: new Date(),
+          cancelRequestedAt: null,
+          heartbeatAt: new Date(),
+        },
+      });
+      await prisma.audiobookTask.updateMany({
+        where: { id: taskId },
+        data: { cancelRequestedAt: null, heartbeatAt: new Date() },
+      });
+      const detail = await this.getTask(taskId);
+      if (!detail) {
+        throw new AppError("有声书任务不存在。", 404);
+      }
+      return detail;
     }
 
     // 无论 queued/running：先从内存队列剔除，并写 cancelRequestedAt + abort
@@ -766,6 +822,26 @@ export class AudiobookTaskService {
     }
 
     const parentOutputDir = parent.outputDir?.trim() || resolveAudiobookTaskDir(parent.novelId, parent.id);
+    // mode=resynthesize：强制 wipe 目标章音频 + 全书，避免 layout fingerprint cache-hit 跳过
+    if (input.mode === "resynthesize") {
+      for (const chapterId of requestedIds) {
+        try {
+          wipeChapterAudioArtifacts(parentOutputDir, chapterId);
+        } catch (wipeError) {
+          console.warn(
+            "[audiobook] continueParentTask resynthesize wipe 失败",
+            parent.id,
+            chapterId,
+            wipeError instanceof Error ? wipeError.message : wipeError,
+          );
+        }
+      }
+      // wipeChapterAudioArtifacts 已清 full-book；再保险清 m4b part
+      safeUnlink(resolveFullBookAudioPath(parentOutputDir));
+      safeUnlink(`${resolveFullBookAudioPath(parentOutputDir)}.part`);
+      safeUnlink(resolveFullBookM4bPath(parentOutputDir));
+      safeUnlink(`${resolveFullBookM4bPath(parentOutputDir)}.part`);
+    }
     const title = `${parent.title}（续生成 ${requestedIds.length} 章）`;
     const parentDeliveryMode = readDeliveryStyleModeFromTask(parent as AudiobookTaskRow);
     // 续生成起点 progress：父当前已就绪章占比（开始后随子完成 reconcile 推进）
@@ -862,7 +938,6 @@ export class AudiobookTaskService {
     const allReady = readyChapterIds.length === chapterIds.length;
     // 全就绪但 full-book.wav 不在/失效（续生成子曾按「章变则全书必须重拼」清掉）→
     // 用已就绪的 per-chapter.wav 就地重拼全书。全局任务队列串行，无其它写入发生。
-    // m4b 不在此重做（重编码 20min 级、ffmpeg 子进程），父如需 m4b 走自己的路径；全书 wav 即可播。
     if (allReady && !fullAudioReady) {
       try {
         const chapterPaths = chapterIds.map((id) => resolveChapterAudioPath(taskDir, id));
@@ -878,6 +953,53 @@ export class AudiobookTaskService {
           restitchError instanceof Error ? restitchError.message : restitchError,
         );
         fullAudioReady = false;
+      }
+    }
+    // 全就绪且全书 wav 在：异步重拼 m4b（子曾 unlink 父 m4b；失败仅 warn，不挡 succeeded）
+    let m4bReady = false;
+    let m4bLabelSuffix = "";
+    if (allReady && fullAudioReady) {
+      try {
+        const chapterMeta = await prisma.chapter.findMany({
+          where: { novelId: parent.novelId, id: { in: chapterIds } },
+          select: { id: true, title: true, order: true },
+        });
+        const orderById = new Map(chapterMeta.map((c) => [c.id, c]));
+        const novel = await prisma.novel.findUnique({
+          where: { id: parent.novelId },
+          select: { title: true },
+        });
+        const gapMs = resolveBetweenChapterGapMs();
+        const m4b = await encodeFullBookM4b({
+          taskDir,
+          bookTitle: novel?.title?.trim() || parent.title || "有声书",
+          sourceWavPath: resolveFullBookAudioPath(taskDir),
+          betweenChapterGapMs: gapMs,
+          chapters: chapterIds.map((id, index) => {
+            const meta = orderById.get(id);
+            return {
+              chapterId: id,
+              chapterTitle: meta?.title ?? `第 ${index + 1} 章`,
+              chapterOrder: meta?.order ?? index + 1,
+              wavPath: resolveChapterAudioPath(taskDir, id),
+            };
+          }),
+        });
+        m4bReady = m4b.status === "ready";
+        if (m4b.status === "ready") {
+          m4bLabelSuffix = "（含 m4b）";
+        } else if (m4b.status === "skipped") {
+          m4bLabelSuffix = m4b.reason ? `；m4b 未生成（${m4b.reason}）` : "；m4b 未生成";
+        } else if (m4b.status === "failed") {
+          m4bLabelSuffix = m4b.reason ? `；m4b 失败（${m4b.reason}）` : "；m4b 失败";
+          console.warn("[audiobook] reconcileParent m4b 重拼失败", parent.id, m4b.reason);
+        }
+      } catch (m4bError) {
+        console.warn(
+          "[audiobook] reconcileParent m4b 重拼异常",
+          parent.id,
+          m4bError instanceof Error ? m4bError.message : m4bError,
+        );
       }
     }
     // 续生成期间父 progress 反映 ready/total（避免旧终态 100 与 running 矛盾）；全 ready 翻 100
@@ -897,7 +1019,9 @@ export class AudiobookTaskService {
           fullAudioPath: fullAudioReady ? "full-book.wav" : parent.fullAudioPath,
           status: "succeeded",
           currentStage: "finalizing",
-          currentItemLabel: "有声书生成完成",
+          currentItemLabel: m4bReady
+            ? "有声书生成完成（含 m4b）"
+            : `有声书生成完成${m4bLabelSuffix}`,
           error: null,
           finishedAt: new Date(),
         },
@@ -1454,7 +1578,10 @@ export class AudiobookTaskService {
       });
 
       if (controller.signal.aborted || (await this.isCancelRequested(taskId))) {
+        // pipeline 已返回后的取消竞态：子章可能已落父目录，必须 finalize 父，
+        // 否则父卡 running/continuing（与 5d71171 要消灭的 orphan class 同类）
         await this.markCancelledIfActive(taskId, 95, ["running"]);
+        await this.finalizeContinueChild(taskId, true);
         return;
       }
 

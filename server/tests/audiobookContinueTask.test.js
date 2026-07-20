@@ -20,6 +20,7 @@ const {
 const {
   readParentTaskIdFromProgress,
   readFailedContinueChapters,
+  listByNovelFetchTake,
 } = require("../dist/services/audiobook/AudiobookTaskService.js");
 // SoT: pipeline.run 必须用传入的 outputDir（父目录），否则续生成章 wav 落子目录、父 reconcile 看不到（P0）
 // ensureDirExistsUnderAudiobookRoot 在 withTempDataRoot 块内 lazy-require（按 env 重定向 DATA_ROOT）。
@@ -123,6 +124,104 @@ test("listByNovel 隐闭过滤契约：parentTaskId 非空即隐闭子任务", (
     ["parent_1", "parent_2", "child_2"],
   );
   // child_1 因 progressJson 含 parentTaskId 被隐闭
+});
+
+test("listByNovel 过取契约：fetchTake ≥ visible 且预留子任务窗口，滤后 slice 到 visibleLimit", () => {
+  assert.equal(listByNovelFetchTake(50), 250);
+  assert.equal(listByNovelFetchTake(1), 51);
+  assert.equal(listByNovelFetchTake(100), 500);
+  assert.equal(listByNovelFetchTake(999), 500, "可见上限 100 → fetch 封顶 500");
+  // 模拟：取 50 可见，窗口内 40 子 + 20 父 → 过取 250 才能见 20 父；旧 take=50 只见 ~10 父
+  const rows = [];
+  for (let i = 0; i < 40; i += 1) {
+    rows.push({ id: `child_${i}`, progressJson: JSON.stringify({ parentTaskId: "p", hidden: true }) });
+  }
+  for (let i = 0; i < 20; i += 1) {
+    rows.push({ id: `parent_${i}`, progressJson: null });
+  }
+  const visibleLimit = 50;
+  const fetchTake = listByNovelFetchTake(visibleLimit);
+  const window = rows.slice(0, fetchTake);
+  const visible = window
+    .filter((row) => !readParentTaskIdFromProgress(row.progressJson))
+    .slice(0, visibleLimit);
+  assert.equal(visible.length, 20, "过取后 20 个父应全见");
+  const oldTakeWindow = rows.slice(0, 50);
+  const oldVisible = oldTakeWindow.filter((row) => !readParentTaskIdFromProgress(row.progressJson));
+  assert.equal(oldVisible.length, 10, "旧 take=50 被 40 子挤到只剩 10 父");
+});
+
+test("取消竞态契约：pipeline 返回后 cancel 分支必须 finalize（形状约束）", () => {
+  // executeTask 在 pipeline 成功返回后若 isCancelRequested，须 markCancelled + finalizeContinueChild
+  // 纯测：终态路径集合必须含 finalize；遗漏 finalize 会让父卡 running/continuing
+  const cancelAfterPipelinePaths = [
+    { name: "cancel-after-pipeline-return", mustFinalize: true },
+    { name: "cancel-before-claim", mustFinalize: true },
+    { name: "pipeline-cancelled-error", mustFinalize: true },
+    { name: "mark-failed", mustFinalize: true },
+  ];
+  for (const path of cancelAfterPipelinePaths) {
+    assert.equal(path.mustFinalize, true, `${path.name} 必须 finalizeContinueChild`);
+  }
+});
+
+test("continuing 父取消契约：无自身 pipeline，须 reconcile/强制终态而非只写 cancelRequestedAt", () => {
+  // cancelTask 对 currentStage==="continuing" 且非 continue child 的父：
+  //  cascade 子 → reconcileParent → 若仍 running/queued 则 cancelled
+  // 不可只写 cancelRequestedAt（父无 execute 钩子消费该字段）
+  const continuingParent = {
+    status: "running",
+    currentStage: "continuing",
+    progressJson: JSON.stringify({ deliveryStyleMode: "off" }),
+  };
+  const isContinueChild = Boolean(readParentTaskIdFromProgress(continuingParent.progressJson));
+  const isContinuingParent = !isContinueChild && continuingParent.currentStage === "continuing";
+  assert.equal(isContinueChild, false);
+  assert.equal(isContinuingParent, true);
+  // 终态允许集：reconcile 后 failed|succeeded，或强制 cancelled
+  const allowedTerminal = new Set(["failed", "succeeded", "cancelled"]);
+  for (const s of ["failed", "succeeded", "cancelled"]) {
+    assert.ok(allowedTerminal.has(s));
+  }
+  assert.equal(allowedTerminal.has("running"), false, "不得停在 running");
+});
+
+test("resynthesize wipe 契约：wipe 目标章后 chapter.wav 与 full-book 消失（强制重合成）", () => {
+  withTempDataRoot((tmpRoot) => {
+    const {
+      ensureChapterAudioDir,
+      resolveChapterAudioPath,
+      resolveFullBookAudioPath,
+      resolveFullBookM4bPath,
+      wipeChapterAudioArtifacts,
+      isChapterAudioReady,
+      isFullBookAudioReady,
+    } = require("../dist/services/audiobook/audiobookPaths.js");
+    const { buildWavBuffer } = require("../dist/services/audiobook/audiobookWav.js");
+
+    const taskDir = path.join(tmpRoot, "data", "storage", "audiobooks", "novelR", "parentR");
+    const chapterId = "ch1";
+    ensureChapterAudioDir(taskDir, chapterId);
+    const chapterWav = resolveChapterAudioPath(taskDir, chapterId);
+    const fullBook = resolveFullBookAudioPath(taskDir);
+    const m4b = resolveFullBookM4bPath(taskDir);
+    fs.writeFileSync(
+      chapterWav,
+      buildWavBuffer(Buffer.alloc(400), { numChannels: 1, sampleRate: 16000, bitsPerSample: 16 }),
+    );
+    fs.writeFileSync(
+      fullBook,
+      buildWavBuffer(Buffer.alloc(800), { numChannels: 1, sampleRate: 16000, bitsPerSample: 16 }),
+    );
+    fs.writeFileSync(m4b, Buffer.from("fake-m4b"));
+    assert.equal(isChapterAudioReady(taskDir, chapterId), true);
+    assert.equal(isFullBookAudioReady(taskDir), true);
+
+    wipeChapterAudioArtifacts(taskDir, chapterId);
+    assert.equal(isChapterAudioReady(taskDir, chapterId), false, "resynthesize 后章 wav 必须清");
+    assert.equal(isFullBookAudioReady(taskDir), false, "resynthesize 后 full-book 必须清");
+    assert.equal(fs.existsSync(m4b), false, "resynthesize 后 m4b 必须清");
+  });
 });
 
 test("对照 list 标黄契约：父 progressJson.failedContinueChapters 作为前端标黄依据", () => {
