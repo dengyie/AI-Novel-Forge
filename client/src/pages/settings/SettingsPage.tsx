@@ -20,6 +20,7 @@ import {
 } from "@/api/settings";
 import { queryKeys } from "@/api/queryKeys";
 import AutoDirectorSettingsSection from "./AutoDirectorSettingsSection";
+import AppearanceSettingsCard from "./components/AppearanceSettingsCard";
 import ProviderConfigDialog, { type ProviderFormState } from "./components/ProviderConfigDialog";
 import ProviderSettingsSection from "./components/ProviderSettingsSection";
 import SettingsMaintenanceSection from "./components/SettingsMaintenanceSection";
@@ -515,6 +516,14 @@ export default function SettingsPage() {
         status="advanced"
       >
         <AutoDirectorSettingsSection onActionResult={setActionResult} />
+      </SettingsSectionGroup>
+
+      <SettingsSectionGroup
+        title="界面外观"
+        description="在白天与夜间主题之间切换，选择会自动保存。"
+        status="appearance"
+      >
+        <AppearanceSettingsCard />
       </SettingsSectionGroup>
 
       <SettingsSectionGroup

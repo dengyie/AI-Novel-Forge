@@ -2,12 +2,13 @@ import type { ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
 import { AUTO_DIRECTOR_MOBILE_CLASSES } from "@/mobile/autoDirector";
 
-export type SettingsSectionStatus = "required" | "enhancement" | "advanced" | "maintenance";
+export type SettingsSectionStatus = "required" | "enhancement" | "advanced" | "appearance" | "maintenance";
 
 const STATUS_LABELS: Record<SettingsSectionStatus, string> = {
   required: "开始创作必需",
   enhancement: "写作质量增强",
   advanced: "自动导演高级",
+  appearance: "界面外观",
   maintenance: "系统维护",
 };
 

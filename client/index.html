@@ -7,6 +7,17 @@
     <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
     <link rel="apple-touch-icon" sizes="128x128" href="/apple-touch-icon.png" />
     <title>AI Novel Forge | 以小说为题的 AI 创作平台</title>
+    <script>
+      (function () {
+        try {
+          if (window.localStorage.getItem("ai-novel-theme") === "dark") {
+            document.documentElement.classList.add("dark");
+          }
+        } catch (e) {
+          /* localStorage 不可用时保持默认亮色 */
+        }
+      })();
+    </script>
     <style>
       :root {
         color: #0f172a;
@@ -14,9 +25,27 @@
         font-family: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
       }
 
+      :root.dark {
+        color: #f1f5f9;
+        background: #0b1120;
+      }
+
       body {
         margin: 0;
         background: #ffffff;
+      }
+
+      :root.dark body {
+        background: #0b1120;
+      }
+
+      :root.dark .app-startup-spinner {
+        border-color: #334155;
+        border-top-color: #f1f5f9;
+      }
+
+      :root.dark .app-startup-copy {
+        color: #94a3b8;
       }
 
       .app-startup-shell {

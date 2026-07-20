@@ -1,5 +1,6 @@
 import { useLocation } from "react-router-dom";
 import LLMSelector from "@/components/common/LLMSelector";
+import ThemeToggle from "@/components/common/ThemeToggle";
 import AppVersionBadge from "@/components/layout/AppVersionBadge";
 import DesktopBrandMark from "@/components/layout/DesktopBrandMark";
 import ProjectGithubLink from "@/components/layout/ProjectGithubLink";
@@ -46,6 +47,7 @@ export default function Navbar(props: NavbarProps) {
             {workspaceNavMode === "workspace" ? "项目导航" : "创作导航"}
           </Button>
         ) : null}
+        <ThemeToggle />
         <div className={useMobileAutoDirectorShell ? AUTO_DIRECTOR_MOBILE_CLASSES.navbarModelSelector : undefined}>
           <LLMSelector compact showBadge={false} showHelperText={false} />
         </div>

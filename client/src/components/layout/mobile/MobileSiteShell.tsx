@@ -12,6 +12,7 @@ import {
   X,
 } from "lucide-react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
+import ThemeToggle from "@/components/common/ThemeToggle";
 import AppVersionBadge from "../AppVersionBadge";
 import DesktopBrandMark from "../DesktopBrandMark";
 import ProjectGithubLink from "../ProjectGithubLink";
@@ -98,6 +99,7 @@ export default function MobileSiteShell({ children }: MobileSiteShellProps) {
             <ProjectGithubLink />
           </div>
           <div className="flex items-center gap-2">
+            <ThemeToggle />
             <Button asChild size="sm" className="h-8 px-3">
               <Link to="/novels/auto-director" onClick={() => setMoreOpen(false)}>
                 <Plus className="h-3.5 w-3.5" />
