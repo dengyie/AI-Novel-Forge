@@ -762,6 +762,16 @@ export class AudiobookTaskService {
     const parentOutputDir = parent.outputDir?.trim() || resolveAudiobookTaskDir(parent.novelId, parent.id);
     const title = `${parent.title}（续生成 ${requestedIds.length} 章）`;
     const parentDeliveryMode = readDeliveryStyleModeFromTask(parent as AudiobookTaskRow);
+    // 续生成起点 progress：父当前已就绪章占比（开始后随子完成 reconcile 推进）
+    let parentReadyBaseline = 0;
+    try {
+      parentReadyBaseline = listReadyChapterAudioIds(parentOutputDir, parentChapterIds).length;
+    } catch {
+      parentReadyBaseline = 0;
+    }
+    const parentProgressBaseline = parentChapterIds.length > 0
+      ? Math.max(2, Math.min(95, Math.round((parentReadyBaseline / parentChapterIds.length) * 100)))
+      : 2;
 
     const child = await prisma.audiobookTask.create({
       data: {
@@ -799,6 +809,7 @@ export class AudiobookTaskService {
         status: "running",
         currentStage: "continuing",
         currentItemLabel: `续生成 ${precheck.chapterCount} 章`,
+        progress: parentProgressBaseline,
         fullAudioPath: null,
         resultJson: null,
       },
@@ -843,10 +854,15 @@ export class AudiobookTaskService {
     };
 
     const allReady = readyChapterIds.length === chapterIds.length;
+    // 续生成期间父 progress 反映 ready/total（避免旧终态 100 与 running 矛盾）；全 ready 翻 100
+    const parentProgress = allReady
+      ? 100
+      : Math.max(2, Math.min(99, Math.round((readyChapterIds.length / Math.max(1, chapterIds.length)) * 100)));
     await prisma.audiobookTask.update({
       where: { id: parent.id },
       data: {
         progressJson: JSON.stringify(nextProgress),
+        progress: parentProgress,
         completedChapterCount: readyChapterIds.length,
         fullAudioPath: fullAudioReady ? "full-book.wav" : parent.fullAudioPath,
         status: allReady ? "succeeded" : parent.status,
