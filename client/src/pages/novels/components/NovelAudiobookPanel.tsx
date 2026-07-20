@@ -21,6 +21,7 @@ import { toast } from "@/components/ui/toast";
 import {
   applyAudiobookVoicePlan,
   cancelAudiobookTask,
+  continueAudiobookTask,
   createAudiobookTask,
   getAudiobookAnnotations,
   issueAudiobookMediaUrl,
@@ -597,6 +598,7 @@ function RecentAudiobookTaskCard(props: {
   onCancel: (taskId: string) => void;
   onMessage: (text: string) => void;
   onReprocessed: () => void;
+  onContinueChapters: (taskId: string, chapterIds: string[]) => Promise<void>;
 }) {
   const {
     novelId,
@@ -607,6 +609,7 @@ function RecentAudiobookTaskCard(props: {
     onCancel,
     onMessage,
     onReprocessed,
+    onContinueChapters,
   } = props;
   const [open, setOpen] = useState(defaultOpen);
   const active = isActiveAudiobookTask(task.status);
@@ -616,6 +619,42 @@ function RecentAudiobookTaskCard(props: {
    * 未展开过的卡片不预挂载，避免多任务同时签发。
    */
   const [deliveryMounted, setDeliveryMounted] = useState(defaultOpen);
+  const [continueBusyIds, setContinueBusyIds] = useState<Set<string>>(new Set());
+  const [continueAllPending, setContinueAllPending] = useState(false);
+
+  const failedContinueSet = new Set(task.failedContinueChapters ?? []);
+  const continueable = task.status === "succeeded" || task.status === "failed";
+  const notReadyChapterIds = (task.chapterProgress ?? [])
+    .filter((cp) => cp.status !== "ready")
+    .map((cp) => cp.chapterId);
+
+  async function handleContinueOne(chapterId: string) {
+    if (continueBusyIds.has(chapterId) || continueAllPending) return;
+    setContinueBusyIds((prev) => new Set(prev).add(chapterId));
+    try {
+      await onContinueChapters(task.id, [chapterId]);
+    } catch {
+      // onMessage 已在父层报错
+    } finally {
+      setContinueBusyIds((prev) => {
+        const next = new Set(prev);
+        next.delete(chapterId);
+        return next;
+      });
+    }
+  }
+
+  async function handleContinueAll() {
+    if (continueAllPending || notReadyChapterIds.length === 0) return;
+    setContinueAllPending(true);
+    try {
+      await onContinueChapters(task.id, notReadyChapterIds);
+    } catch {
+      // onMessage 已在父层报错
+    } finally {
+      setContinueAllPending(false);
+    }
+  }
 
   useEffect(() => {
     if (defaultOpen) {
@@ -661,40 +700,80 @@ function RecentAudiobookTaskCard(props: {
             <div className="text-xs leading-5 text-muted-foreground">
               {taskSummaryMeta(task)}
             </div>
-            {task.chapterProgress?.length && (task.status === "running" || task.status === "failed") ? (
-              <ul className="mt-1 flex flex-col gap-1">
-                {task.chapterProgress.map((cp) => {
-                  const chapter = chapters.find((c) => c.id === cp.chapterId);
-                  const label = chapter ? `第 ${chapter.order} 章 ${chapter.title}` : cp.chapterId;
-                  const pct = cp.totalChunks > 0
-                    ? Math.round((cp.completedChunks / cp.totalChunks) * 100)
-                    : 0;
-                  return (
-                    <li key={cp.chapterId} className="flex items-center gap-2 text-xs leading-5">
-                      <span className="shrink-0 truncate text-foreground/80" title={label}>{label}</span>
-                      {cp.status === "ready" ? (
-                        <span className="text-emerald-600">✓ 已可播</span>
-                      ) : cp.status === "pending" ? (
-                        <span className="text-muted-foreground">等待中</span>
-                      ) : cp.status === "failed" ? (
-                        <span className="text-destructive">失败</span>
-                      ) : (
-                        <>
-                          <span className="relative inline-block h-1.5 w-24 overflow-hidden rounded-full bg-muted align-middle">
-                            <span
-                              className="absolute inset-y-0 left-0 rounded-full bg-primary"
-                              style={{ width: `${pct}%` }}
-                            />
+            {task.chapterProgress?.length
+              && (task.status === "running" || task.status === "failed" || task.status === "succeeded") ? (
+              <div className="mt-1 space-y-1">
+                {continueable && notReadyChapterIds.length > 0 ? (
+                  <div className="flex items-center gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7"
+                      disabled={continueAllPending || active}
+                      onClick={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        void handleContinueAll();
+                      }}
+                    >
+                      {continueAllPending ? "排队中…" : `补全全部未生成章（${notReadyChapterIds.length}）`}
+                    </Button>
+                  </div>
+                ) : null}
+                <ul className="flex flex-col gap-1">
+                  {task.chapterProgress.map((cp) => {
+                    const chapter = chapters.find((c) => c.id === cp.chapterId);
+                    const label = chapter ? `第 ${chapter.order} 章 ${chapter.title}` : cp.chapterId;
+                    const pct = cp.totalChunks > 0
+                      ? Math.round((cp.completedChunks / cp.totalChunks) * 100)
+                      : 0;
+                    const continueFailed = failedContinueSet.has(cp.chapterId);
+                    const canContinue = continueable && cp.status !== "ready";
+                    return (
+                      <li key={cp.chapterId} className="flex flex-wrap items-center gap-2 text-xs leading-5">
+                        <span className="shrink-0 truncate text-foreground/80" title={continueFailed ? `${label}（上次续生成失败）` : label}>{label}</span>
+                        {cp.status === "ready" ? (
+                          <span className="text-emerald-600">✓ 已可播</span>
+                        ) : cp.status === "pending" ? (
+                          <span className={continueFailed ? "text-amber-700" : "text-muted-foreground"} title={continueFailed ? "上次续生成失败，可再点生成重试" : undefined}>
+                            {continueFailed ? "上次续生成失败" : "等待中"}
                           </span>
-                          <span className="text-muted-foreground">
-                            {pct}% {cp.status === "annotating" ? "标注中" : cp.status === "merging" ? "合并中" : "合成中"}{cp.detail ? `（${cp.detail}）` : ""}
-                          </span>
-                        </>
-                      )}
-                    </li>
-                  );
-                })}
-              </ul>
+                        ) : cp.status === "failed" ? (
+                          <span className="text-destructive">失败</span>
+                        ) : (
+                          <>
+                            <span className="relative inline-block h-1.5 w-24 overflow-hidden rounded-full bg-muted align-middle">
+                              <span
+                                className="absolute inset-y-0 left-0 rounded-full bg-primary"
+                                style={{ width: `${pct}%` }}
+                              />
+                            </span>
+                            <span className="text-muted-foreground">
+                              {pct}% {cp.status === "annotating" ? "标注中" : cp.status === "merging" ? "合并中" : "合成中"}{cp.detail ? `（${cp.detail}）` : ""}
+                            </span>
+                          </>
+                        )}
+                        {canContinue ? (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-6"
+                            disabled={continueBusyIds.has(cp.chapterId) || continueAllPending || active}
+                            title={continueFailed ? "再点重试续生成" : "续生成该章"}
+                            onClick={(event) => {
+                              event.preventDefault();
+                              event.stopPropagation();
+                              void handleContinueOne(cp.chapterId);
+                            }}
+                          >
+                            {continueBusyIds.has(cp.chapterId) ? "排队中…" : "生成"}
+                          </Button>
+                        ) : null}
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
             ) : null}
             {task.lastError ? (
               <div className="line-clamp-2 text-sm text-destructive" title={task.lastError}>
@@ -1139,6 +1218,23 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
       setMessage(text);
     },
   });
+
+  const handleContinueChapters = useCallback(
+    async (taskId: string, chapterIds: string[]) => {
+      try {
+        await continueAudiobookTask(novelId, taskId, { chapterIds });
+        toast.success(`已排队：续生成 ${chapterIds.length} 章。`);
+        setMessage("");
+        await invalidateTasksAndOverview();
+      } catch (error) {
+        const text = error instanceof Error ? error.message : "续生成失败。";
+        toast.error(text);
+        setMessage(text);
+        throw error;
+      }
+    },
+    [novelId, invalidateTasksAndOverview],
+  );
 
   const suggestVoiceMutation = useMutation({
     mutationFn: async (mode: "missing" | "rebalance" | "prefer_library") => {
@@ -1793,6 +1889,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
                 cancelPending={cancelMutation.isPending}
                 onCancel={(taskId) => cancelMutation.mutate(taskId)}
                 onMessage={setMessage}
+                onContinueChapters={handleContinueChapters}
                 onReprocessed={() => {
                   void Promise.all([
                     queryClient.invalidateQueries({

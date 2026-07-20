@@ -303,6 +303,11 @@ export class AudiobookPrecheckService {
     scopeMode: AudiobookScopeMode,
     input: CreateAudiobookTaskInput,
   ): Array<{ id: string; order: number; title: string }> {
+    // 续生成路径：显式 chapterIds 子集，跳过 scopeMode 派生
+    if (Array.isArray(input.explicitChapterIds) && input.explicitChapterIds.length > 0) {
+      return resolveExplicitChapterIds(chapters, input.explicitChapterIds);
+    }
+
     if (scopeMode === "full") {
       return chapters;
     }
@@ -341,3 +346,41 @@ export class AudiobookPrecheckService {
 }
 
 export const audiobookPrecheckService = new AudiobookPrecheckService();
+
+/**
+ * 续生成路径的纯解析：按显式 chapterIds 子集从已有章节解析、去重、按 order 排序。
+ * - 空集（trim 后） → 400
+ * - 任一 id 不在该小说章内 → 404（列出缺失 id）
+ * 返回 resolved 数组顺序固定为 order 升序（与父 chapterIds 子集一致）。
+ */
+export function resolveExplicitChapterIds(
+  chapters: Array<{ id: string; order: number; title: string }>,
+  requestedIds: string[] | undefined | null,
+): Array<{ id: string; order: number; title: string }> {
+  const requested = Array.from(
+    new Set(
+      (requestedIds ?? [])
+        .map((id) => id?.trim())
+        .filter((id): id is string => Boolean(id)),
+    ),
+  );
+  if (requested.length === 0) {
+    throw new AppError("explicitChapterIds 不能为空。", 400);
+  }
+  const byId = new Map(chapters.map((c) => [c.id, c] as const));
+  const resolved: Array<{ id: string; order: number; title: string }> = [];
+  const missing: string[] = [];
+  for (const id of requested) {
+    const found = byId.get(id);
+    if (!found) {
+      missing.push(id);
+      continue;
+    }
+    resolved.push(found);
+  }
+  if (missing.length > 0) {
+    throw new AppError(`章节不在该小说范围内：${missing.join(", ")}。`, 404);
+  }
+  resolved.sort((a, b) => a.order - b.order);
+  return resolved;
+}

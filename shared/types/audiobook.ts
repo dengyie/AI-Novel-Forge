@@ -265,6 +265,22 @@ export interface CreateAudiobookTaskInput {
    * 工作台 UI 会显式传 characters（与 API 默认不同）。固定试听/readiness 不走本字段。
    */
   deliveryStyleMode?: DeliveryStyleMode;
+  /**
+   * 续生成路径专用：显式指定要纳入任务的章节 id 子集。
+   * schemaMode 三选一仍需填（仅作合法性占位），precheck 命中本字段时直接按 id 子集解析，
+   * 跳过 chapterId/range 派生。前端建任务表单不暴露本字段。
+   */
+  explicitChapterIds?: string[];
+}
+
+/**
+ * 在已交付父任务上续跑一个隐闭子任务，补齐缺失章。
+ * chapterIds 必须是父任务 chapterIdsJson 内当前未就绪的章；超出会被拒。
+ */
+export interface ContinueAudiobookTaskInput {
+  parentTaskId: string;
+  chapterIds: string[];
+  mode?: "resynthesize";
 }
 
 export interface AudiobookPrecheckMissingVoice {
@@ -348,6 +364,16 @@ export interface AudiobookTaskSummary {
   m4bStatus?: "ready" | "skipped" | "failed" | null;
   /** 成功后是否已清理 chunk-*.wav（章 wav / 全书仍保留）。 */
   chunksPruned?: boolean;
+  /**
+   * 续生成失败章 id：子任务执行失败时写入父 progressJson，前端对照 list 据此标黄
+   * 「上次续生成失败」+ 仍可再点「生成」重试。空或缺失=无续生成失败记录。
+   */
+  failedContinueChapters?: string[];
+  /**
+   * 续生成子任务回写的父 id；父任务的 summary 上该字段保持空。
+   * listByNovel 应用端据此过滤隐闭子任务，前端列表只看见父行。
+   */
+  parentTaskId?: string;
   createdAt: string;
   updatedAt: string;
   startedAt?: string | null;

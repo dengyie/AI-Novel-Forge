@@ -305,6 +305,11 @@ const voicePlanSuggestSchema = z.object({
   reservedPresets: z.array(z.string().trim().min(1).max(64)).max(16).optional(),
 });
 
+const continueAudiobookTaskSchema = z.object({
+  chapterIds: z.array(z.string().trim().min(1).max(64)).min(1).max(500),
+  mode: z.enum(["resynthesize"]).optional(),
+});
+
 const voicePlanApplySchema = z.object({
   overwrite: z.boolean().optional(),
   items: z
@@ -1251,6 +1256,37 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
           success: true,
           data,
           message: "有声书任务取消请求已提交。",
+        } satisfies ApiResponse<typeof data>);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  router.post(
+    "/:id/audiobook/tasks/:taskId/continue",
+    validate({ params: taskParamsSchema, body: continueAudiobookTaskSchema }),
+    async (req, res, next) => {
+      try {
+        const { id, taskId } = req.params as z.infer<typeof taskParamsSchema>;
+        const body = req.body as z.infer<typeof continueAudiobookTaskSchema>;
+        const existing = await audiobookTaskService.getTask(taskId);
+        if (!existing || existing.novelId !== id) {
+          res.status(404).json({
+            success: false,
+            error: "有声书任务不存在。",
+          } satisfies ApiResponse<null>);
+          return;
+        }
+        const data = await audiobookTaskService.continueParentTask({
+          parentTaskId: taskId,
+          chapterIds: body.chapterIds,
+          mode: body.mode,
+        });
+        res.status(201).json({
+          success: true,
+          data,
+          message: `已排队：续生成 ${body.chapterIds.length} 章。`,
         } satisfies ApiResponse<typeof data>);
       } catch (error) {
         next(error);

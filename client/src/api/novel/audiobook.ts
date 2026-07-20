@@ -453,6 +453,18 @@ export async function reprocessAudiobookChapter(
   return data;
 }
 
+export async function continueAudiobookTask(
+  novelId: string,
+  taskId: string,
+  payload: { chapterIds: string[]; mode?: "resynthesize" },
+) {
+  const { data } = await apiClient.post<ApiResponse<AudiobookTaskDetail>>(
+    `/novels/${novelId}/audiobook/tasks/${taskId}/continue`,
+    payload,
+  );
+  return data;
+}
+
 export interface AudiobookMediaAccessResult {
   urlPath: string;
   access: string | null;
