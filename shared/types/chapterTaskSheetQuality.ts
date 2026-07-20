@@ -257,6 +257,47 @@ export function containsInternalQualityCodes(text: string | null | undefined): b
 }
 
 /**
+ * 对手面 0 约束违规词（vault §2 锁定）。
+ *
+ * 规划层 taskSheet / mustAvoid 文本里出现「全班 / 全校 / 全年级 / 集体站队 / 舆论全体」
+ * 这类「抽象化整面」写法，即对手面 0 约束违规——压迫应来自具名小圈层（如『黄振 / 某个
+ * 邻班学生』），绝大多数人中立不参与。taskSheet 在规划阶段就写出「全班集体站队」式
+ * 表述，本身就是规划漏洞，命中是预期。
+ *
+ * 「读者应理解」/「主题是」是钉认知句（作者直接对读者下结论），属规划层说教违规。
+ * 「人情秩序」「秩序说教」是抽象人情秩序说教（违反「禁说明书开篇与抽象人情秩序说教」）。
+ *
+ * 词表精准命中（indexOf 子串），不做模糊匹配——「三个同学」「一个班」「黄振一人压制」
+ * 这类具体对手表述不命中。
+ */
+export const OPPONENT_LINE_VIOLATION_TERMS = [
+  "全班",
+  "全校",
+  "全年级",
+  "集体站队",
+  "舆论全体",
+  "人情秩序",
+  "秩序说教",
+  "读者应理解",
+  "主题是",
+] as const;
+
+export function detectOpponentLineViolation(
+  text: string | null | undefined,
+): { violated: boolean; matched: string[] } {
+  if (!text) {
+    return { violated: false, matched: [] };
+  }
+  const matched: string[] = [];
+  for (const term of OPPONENT_LINE_VIOLATION_TERMS) {
+    if (text.includes(term)) {
+      matched.push(term);
+    }
+  }
+  return { violated: matched.length > 0, matched };
+}
+
+/**
  * Persist-path sanitize: strip internal quality/failure codes and collapse empty noise.
  * Does not rewrite narrative obligations (no overload bullet pruning).
  */
@@ -661,6 +702,22 @@ export function assessChapterExecutionContractShape(
           ? "情感章优先 1-2 个关系/情绪兑现点，把系统义务与战斗目标拆到邻章。"
           : "按章型收束必达项：保留本章独占事件与收尾钩子，其余 payoff/角色转折拆到邻章。",
         "medium",
+      ));
+    }
+    // 对手面 0 约束冷检（vault §2）：taskSheet / mustAvoid 里若出现全班/全校/集体站队/
+    // 舆论全体/人情秩序/读者应理解/主题是 等抽象化整面 / 钉认知句写法，即规划层对手面漏洞。
+    // 命中 high → 进现有 retry 闭环（assessChapterExecutionContractShape blocking 收集 →
+    // canEnterExecution=false → assertCanEnterExecution 抛错 → volumeGenerationHelpers 重试）。
+    const opponentHit = detectOpponentLineViolation(
+      `${taskSheetText || rawTaskSheet}\n${candidate.mustAvoid ?? ""}`,
+    );
+    if (opponentHit.violated) {
+      issues.push(createQualityIssue(
+        "opponent_line_violation",
+        "task_sheet",
+        `任务单存在对手面 0 约束违规词：${opponentHit.matched.join("、")}。`,
+        "改写为具体对手个体（如『黄振 / 某个邻班学生』）的对抗，禁用全班/全校/舆论全体等抽象化整面写法；钉认知句（读者应理解/主题是）改为现场具体感受。",
+        "high",
       ));
     }
   }

@@ -15,6 +15,7 @@ import {
   type ChapterRuntimePlannerPort,
 } from "./chapterRuntimePackageBuilders";
 import { extractSotBannedTermsFromNovel } from "@ai-novel/shared/types/sotBannedTerms";
+import { extractBannedTermsFromStyleToneSafe } from "@ai-novel/shared/types/styleToneBannedTerms";
 import {
   buildProseQualityAuditReport,
   detectProseQuality,
@@ -126,8 +127,9 @@ export class ChapterContentFinalizationService {
     const mustAvoidTerms = normalizeProseQualityTermList(
       input.contextPackage?.chapter?.mustAvoid ?? null,
     );
-    // D2：书级 SoT 禁词从 storyWorldSlice(Overrides)Json.sotBannedTerms 读取；默认空
-    const bannedTerms = await this.loadNovelSotBannedTerms(input.novelId);
+    // 书级禁词：sotBannedTerms（结构化通道） + Novel.styleTone（C 方案自然语言通道）并集，
+    // 命中即走已有 sot_banned_term (high) → needs_repair 闭环。
+    const bannedTerms = await this.loadNovelBannedTerms(input.novelId);
     const proseQualityReport = detectProseQuality(finalContent, {
       mustAvoidTerms,
       bannedTerms,
@@ -357,19 +359,35 @@ export class ChapterContentFinalizationService {
     });
   }
 
-  /** D2：从 novel.storyWorldSlice(Overrides)Json 读 sotBannedTerms，失败/空 → []。 */
-  private async loadNovelSotBannedTerms(novelId: string): Promise<string[]> {
+  /**
+   * 书级禁词：D2 sotBannedTerms（storyWorldSlice(Overrides)Json 结构化通道）
+   * + C 方案 Novel.styleTone 自然语言通道（源世界系：称重/过秤/放上秤/称人斤两/货架标签
+   * 机械度量隐喻族 + styleTone 内显式「禁『X』」声明抽取）。两者并集，
+   * 命中即走已有 sot_banned_term (high) → needs_repair 闭环，不新造信号。
+   */
+  private async loadNovelBannedTerms(novelId: string): Promise<string[]> {
     try {
       const novel = await prisma.novel.findUnique({
         where: { id: novelId },
         select: {
           storyWorldSliceJson: true,
           storyWorldSliceOverridesJson: true,
+          styleTone: true,
         },
       });
-      return extractSotBannedTermsFromNovel(novel);
+      const sotTerms = extractSotBannedTermsFromNovel(novel);
+      const styleToneTerms = extractBannedTermsFromStyleToneSafe(novel);
+      const seen = new Set<string>();
+      const merged: string[] = [];
+      for (const term of [...sotTerms, ...styleToneTerms]) {
+        if (!seen.has(term)) {
+          seen.add(term);
+          merged.push(term);
+        }
+      }
+      return merged;
     } catch (error) {
-      console.warn("[chapter-runtime] load sotBannedTerms failed; treating as empty", {
+      console.warn("[chapter-runtime] load novel banned terms failed; treating as empty", {
         novelId,
         error: error instanceof Error ? error.message : String(error),
       });
