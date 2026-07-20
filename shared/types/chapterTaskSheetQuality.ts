@@ -298,6 +298,44 @@ export function detectOpponentLineViolation(
 }
 
 /**
+ * 否定式声明引导词：taskSheet 里【禁止】段或「禁止X / 禁X / 勿X / 不要X / 不写X /
+ * 不得X / 避免X / 杜绝X」这类否定声明会复述禁词（如「禁止全班/全校/集体站队」）——
+ * 这是「声明禁词」而非「违规范文」。对手面冷检只应扫「实际写成的内容」（陈述式），
+ * 若把否定声明里的禁词也当命中，守卫会对任何正确复述自身禁项的 taskSheet 自我触发，
+ * 形成 retry 死循环。本函数把否定引导词到下一个句子/段落边界之间的内容剥掉，再交给冷检。
+ *
+ * 边界：换行或中文句末标点（。！？；）或下一个段标记（【）或字串末。
+ */
+export function stripNegatedOpponentDeclarations(
+  text: string | null | undefined,
+): string {
+  if (!text) {
+    return "";
+  }
+  let out = text;
+  // 1) 【禁止】/【禁止 X】整段：从「【禁止」标记起剥到下一个「【」标记或字串末
+  //    （覆盖最常见 markdown 化的禁项段；段后接下个【X】段或文末）
+  out = out.replace(/【禁止】[^【]*?(?=【|$)/g, "");
+  out = out.replace(/【禁止[^\]】\s]*】[^【]*?(?=【|$)/g, "");
+  // 2) 行内否定引导词 + 到最近边界（句末标点 / 换行 / 段标记 / 字串末）的内容清空。
+  //    长引导词在前、短词在后，避免「禁」先吃掉「禁止」前缀导致「禁止」规则漏命；
+  //    「勿/禁」单字放最后兜底。函数式 replace 避开全局正则 lastIndex 陷阱
+  //    （对齐 stripInternalQualityCodes 的 reset 风格）。
+  for (const leader of [
+    "严禁", "禁止",
+    "切勿", "不要", "不写", "不得", "切忌",
+    "避免", "杜绝",
+    "勿", "禁",
+  ]) {
+    const esc = leader.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(`${esc}[^。！？；\n【]*`, "g");
+    out = out.replace(re, (m) => (m.startsWith(leader) ? "" : m));
+  }
+  // 收一下残留空白/空行，便于后续冷检与可读性
+  return out.replace(/[ \t]{2,}/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/**
  * Persist-path sanitize: strip internal quality/failure codes and collapse empty noise.
  * Does not rewrite narrative obligations (no overload bullet pruning).
  */
@@ -704,13 +742,19 @@ export function assessChapterExecutionContractShape(
         "medium",
       ));
     }
-    // 对手面 0 约束冷检（vault §2）：taskSheet / mustAvoid 里若出现全班/全校/集体站队/
+    // 对手面 0 约束冷检（vault §2）：taskSheet 正文里若「实际写出」全班/全校/集体站队/
     // 舆论全体/人情秩序/读者应理解/主题是 等抽象化整面 / 钉认知句写法，即规划层对手面漏洞。
     // 命中 high → 进现有 retry 闭环（assessChapterExecutionContractShape blocking 收集 →
     // canEnterExecution=false → assertCanEnterExecution 抛错 → volumeGenerationHelpers 重试）。
-    const opponentHit = detectOpponentLineViolation(
-      `${taskSheetText || rawTaskSheet}\n${candidate.mustAvoid ?? ""}`,
-    );
+    //
+    // 关键：只扫「正文实际写成的内容」（陈述式），不扫「否定声明区」——
+    // taskSheet【禁止】段("禁止全班/全校/集体站队")与行内「禁止X / 不要X / 勿X」是「声明禁词」
+    // 而非「违规范文」，全部正确复述自身禁项的 taskSheet 都会在否定声明里复述禁词，
+    // 若一并不分就自我触发 retry 死循环（生产 cmrr9kpa3 ch1 即被此 false-positive 死锁）。
+    // 故扫前先 stripNegatedOpponentDeclarations 剥掉否定声明区，且只扫 taskSheetText、
+    // 不再合并 candidate.mustAvoid（mustAvoid 整段均是否定声明域，并入即必然误命）。
+    const opponentScanInput = stripNegatedOpponentDeclarations(taskSheetText || rawTaskSheet);
+    const opponentHit = detectOpponentLineViolation(opponentScanInput);
     if (opponentHit.violated) {
       issues.push(createQualityIssue(
         "opponent_line_violation",
