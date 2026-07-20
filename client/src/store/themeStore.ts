@@ -93,9 +93,8 @@ export const useThemeStore = create<ThemeStoreState>((set) => {
     },
     toggleTheme: () =>
       set((state) => {
-        // 在 白天 → 夜间 → 跟随系统 之间循环
-        const next: ThemeMode =
-          state.theme === "light" ? "dark" : state.theme === "dark" ? "system" : "light";
+        // 一键只在 白天 ↔ 夜间 切换（跟随系统时按当前生效主题取反）
+        const next: ThemeMode = state.resolvedTheme === "dark" ? "light" : "dark";
         const resolvedTheme = resolveTheme(next);
         applyThemeClass(resolvedTheme);
         persistMode(next);
