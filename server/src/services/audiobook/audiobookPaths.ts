@@ -405,6 +405,17 @@ export function isFullBookAudioReady(taskDir: string): boolean {
   }
 }
 
+/** 全书 m4b 已落盘且体积正常（与 encodeFullBookM4b 64 字节门禁对齐）。 */
+export function isFullBookM4bReady(taskDir: string): boolean {
+  try {
+    const p = resolveFullBookM4bPath(taskDir);
+    if (!fs.existsSync(p)) return false;
+    return fs.statSync(p).size >= 64;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * 全书合成成功后删除 chunk-*.wav，保留 chapter.wav / full-book.* / annotations。
  * 重合成走 wipeChapterAudioArtifacts，不依赖 chunk 续跑。

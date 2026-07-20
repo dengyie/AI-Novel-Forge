@@ -21,6 +21,7 @@ const {
   readParentTaskIdFromProgress,
   readFailedContinueChapters,
   listByNovelFetchTake,
+  accumulateVisibleParents,
 } = require("../dist/services/audiobook/AudiobookTaskService.js");
 // SoT: pipeline.run 必须用传入的 outputDir（父目录），否则续生成章 wav 落子目录、父 reconcile 看不到（P0）
 // ensureDirExistsUnderAudiobookRoot 在 withTempDataRoot 块内 lazy-require（按 env 重定向 DATA_ROOT）。
@@ -126,49 +127,73 @@ test("listByNovel 隐闭过滤契约：parentTaskId 非空即隐闭子任务", (
   // child_1 因 progressJson 含 parentTaskId 被隐闭
 });
 
-test("listByNovel 过取契约：fetchTake ≥ visible 且预留子任务窗口，滤后 slice 到 visibleLimit", () => {
-  assert.equal(listByNovelFetchTake(50), 250);
+test("listByNovel 过取契约：pageSize 钳制 + 多页凑满可见父（不靠单次 500 封顶）", () => {
+  assert.equal(listByNovelFetchTake(50), 200, "pageSize 封顶 200");
   assert.equal(listByNovelFetchTake(1), 51);
-  assert.equal(listByNovelFetchTake(100), 500);
-  assert.equal(listByNovelFetchTake(999), 500, "可见上限 100 → fetch 封顶 500");
-  // 模拟：取 50 可见，窗口内 40 子 + 20 父 → 过取 250 才能见 20 父；旧 take=50 只见 ~10 父
-  const rows = [];
-  for (let i = 0; i < 40; i += 1) {
-    rows.push({ id: `child_${i}`, progressJson: JSON.stringify({ parentTaskId: "p", hidden: true }) });
+  assert.equal(listByNovelFetchTake(100), 200);
+  assert.equal(listByNovelFetchTake(999), 200, "可见上限 100 → page 封顶 200");
+  // 页1：200 全是隐闭子；页2：20 父 → 迭代后应见 20 父（旧单 take=50/500 会漏）
+  const page1 = [];
+  for (let i = 0; i < 200; i += 1) {
+    page1.push({ id: `child_${i}`, progressJson: JSON.stringify({ parentTaskId: "p", hidden: true }) });
   }
+  const page2 = [];
   for (let i = 0; i < 20; i += 1) {
-    rows.push({ id: `parent_${i}`, progressJson: null });
+    page2.push({ id: `parent_${i}`, progressJson: null });
   }
-  const visibleLimit = 50;
-  const fetchTake = listByNovelFetchTake(visibleLimit);
-  const window = rows.slice(0, fetchTake);
-  const visible = window
-    .filter((row) => !readParentTaskIdFromProgress(row.progressJson))
-    .slice(0, visibleLimit);
-  assert.equal(visible.length, 20, "过取后 20 个父应全见");
-  const oldTakeWindow = rows.slice(0, 50);
-  const oldVisible = oldTakeWindow.filter((row) => !readParentTaskIdFromProgress(row.progressJson));
-  assert.equal(oldVisible.length, 10, "旧 take=50 被 40 子挤到只剩 10 父");
+  const visible = accumulateVisibleParents([page1, page2], 50);
+  assert.equal(visible.length, 20, "多页扫描后 20 个父应全见");
+  assert.equal(visible[0].id, "parent_0");
+  // 旧单页 take=50：只见 0 父
+  const oldVisible = page1.slice(0, 50).filter((row) => !readParentTaskIdFromProgress(row.progressJson));
+  assert.equal(oldVisible.length, 0, "旧单页被 200 子挤到 0 父");
 });
 
-test("取消竞态契约：pipeline 返回后 cancel 分支必须 finalize（形状约束）", () => {
-  // executeTask 在 pipeline 成功返回后若 isCancelRequested，须 markCancelled + finalizeContinueChild
-  // 纯测：终态路径集合必须含 finalize；遗漏 finalize 会让父卡 running/continuing
-  const cancelAfterPipelinePaths = [
-    { name: "cancel-after-pipeline-return", mustFinalize: true },
-    { name: "cancel-before-claim", mustFinalize: true },
-    { name: "pipeline-cancelled-error", mustFinalize: true },
-    { name: "mark-failed", mustFinalize: true },
-  ];
-  for (const path of cancelAfterPipelinePaths) {
-    assert.equal(path.mustFinalize, true, `${path.name} 必须 finalizeContinueChild`);
-  }
+test("取消竞态契约：源码 pipeline 返回后 cancel 必须 markCancelled + finalizeContinueChild", () => {
+  const src = fs.readFileSync(
+    path.join(__dirname, "../src/services/audiobook/AudiobookTaskService.ts"),
+    "utf8",
+  );
+  // 定位 pipeline.run 之后的 cancel 竞态块（注释锚点 + 两行 await）
+  assert.match(
+    src,
+    /pipeline 已返回后的取消竞态[\s\S]{0,400}?markCancelledIfActive\([\s\S]{0,120}?finalizeContinueChild\(taskId,\s*true\)/,
+    "pipeline 返回后 cancel 必须 finalize",
+  );
+  // catch 取消/失败路径同样 finalize，避免 orphan 父
+  assert.match(
+    src,
+    /PipelineCancelledError[\s\S]{0,400}?finalizeContinueChild\(taskId,\s*true\)/,
+    "PipelineCancelledError 路径必须 finalize",
+  );
+  assert.match(
+    src,
+    /markFailedIfRunning\([\s\S]{0,200}?finalizeContinueChild\(taskId,\s*true\)/,
+    "markFailed 后必须 finalize",
+  );
 });
 
-test("continuing 父取消契约：无自身 pipeline，须 reconcile/强制终态而非只写 cancelRequestedAt", () => {
-  // cancelTask 对 currentStage==="continuing" 且非 continue child 的父：
-  //  cascade 子 → reconcileParent → 若仍 running/queued 则 cancelled
-  // 不可只写 cancelRequestedAt（父无 execute 钩子消费该字段）
+test("continuing 父取消契约：源码须 cascade + reconcile + 强制 cancelled 终态", () => {
+  const src = fs.readFileSync(
+    path.join(__dirname, "../src/services/audiobook/AudiobookTaskService.ts"),
+    "utf8",
+  );
+  assert.match(
+    src,
+    /isContinuingParent\s*=\s*!isContinueChild\s*&&\s*task\.currentStage\s*===\s*"continuing"/,
+    "须识别 continuing 父",
+  );
+  assert.match(
+    src,
+    /if\s*\(isContinuingParent\)\s*\{[\s\S]{0,800}?cancelChildContinueTasks|if\s*\(isContinuingParent\)\s*\{[\s\S]{0,800}?reconcileParent/,
+    "continuing 父取消须 reconcile",
+  );
+  // 强制 cancelled 的 CAS：仅 status 仍 running/queued 时写入
+  assert.match(
+    src,
+    /isContinuingParent[\s\S]{0,1200}?status:\s*\{\s*in:\s*\["running",\s*"queued"\]\s*\}[\s\S]{0,200}?status:\s*"cancelled"/,
+    "仍非终态须强制 cancelled",
+  );
   const continuingParent = {
     status: "running",
     currentStage: "continuing",
@@ -178,12 +203,6 @@ test("continuing 父取消契约：无自身 pipeline，须 reconcile/强制终�
   const isContinuingParent = !isContinueChild && continuingParent.currentStage === "continuing";
   assert.equal(isContinueChild, false);
   assert.equal(isContinuingParent, true);
-  // 终态允许集：reconcile 后 failed|succeeded，或强制 cancelled
-  const allowedTerminal = new Set(["failed", "succeeded", "cancelled"]);
-  for (const s of ["failed", "succeeded", "cancelled"]) {
-    assert.ok(allowedTerminal.has(s));
-  }
-  assert.equal(allowedTerminal.has("running"), false, "不得停在 running");
 });
 
 test("resynthesize wipe 契约：wipe 目标章后 chapter.wav 与 full-book 消失（强制重合成）", () => {
@@ -196,6 +215,7 @@ test("resynthesize wipe 契约：wipe 目标章后 chapter.wav 与 full-book 消
       wipeChapterAudioArtifacts,
       isChapterAudioReady,
       isFullBookAudioReady,
+      isFullBookM4bReady,
     } = require("../dist/services/audiobook/audiobookPaths.js");
     const { buildWavBuffer } = require("../dist/services/audiobook/audiobookWav.js");
 
@@ -213,15 +233,45 @@ test("resynthesize wipe 契约：wipe 目标章后 chapter.wav 与 full-book 消
       fullBook,
       buildWavBuffer(Buffer.alloc(800), { numChannels: 1, sampleRate: 16000, bitsPerSample: 16 }),
     );
-    fs.writeFileSync(m4b, Buffer.from("fake-m4b"));
+    fs.writeFileSync(m4b, Buffer.alloc(128, 1));
     assert.equal(isChapterAudioReady(taskDir, chapterId), true);
     assert.equal(isFullBookAudioReady(taskDir), true);
+    assert.equal(isFullBookM4bReady(taskDir), true, "≥64 字节 m4b 视为 ready");
 
     wipeChapterAudioArtifacts(taskDir, chapterId);
     assert.equal(isChapterAudioReady(taskDir, chapterId), false, "resynthesize 后章 wav 必须清");
     assert.equal(isFullBookAudioReady(taskDir), false, "resynthesize 后 full-book 必须清");
     assert.equal(fs.existsSync(m4b), false, "resynthesize 后 m4b 必须清");
+    assert.equal(isFullBookM4bReady(taskDir), false);
   });
+});
+
+test("m4b 后台封装契约：reconcile 不 await encode；已 ready 则 skip；缺则 scheduleBackground", () => {
+  const src = fs.readFileSync(
+    path.join(__dirname, "../src/services/audiobook/AudiobookTaskService.ts"),
+    "utf8",
+  );
+  assert.match(src, /scheduleBackgroundM4bEncode/, "须有后台 m4b 调度");
+  assert.match(src, /isFullBookM4bReady\(taskDir\)/, "allReady 路径须先查 m4b ready");
+  // allReady 成功分支不得在 update 前 await encodeFullBookM4b（避免堵队列）
+  const reconcileStart = src.indexOf("async reconcileParent(");
+  assert.ok(reconcileStart > 0);
+  const reconcileBody = src.slice(reconcileStart, reconcileStart + 4500);
+  assert.match(reconcileBody, /m4bAlreadyReady/, "须 short-circuit 已有 m4b");
+  assert.match(
+    reconcileBody,
+    /scheduleBackgroundM4bEncode\(/,
+    "缺 m4b 时后台调度",
+  );
+  // 在 succeeded update 之后才 schedule，不是 update 前 await
+  const updateIdx = reconcileBody.indexOf('status: "succeeded"');
+  const scheduleIdx = reconcileBody.indexOf("scheduleBackgroundM4bEncode");
+  assert.ok(updateIdx > 0 && scheduleIdx > updateIdx, "先落 succeeded 再 schedule m4b");
+  assert.equal(
+    /await encodeFullBookM4b/.test(reconcileBody),
+    false,
+    "reconcileParent 主路径不得 await encodeFullBookM4b",
+  );
 });
 
 test("对照 list 标黄契约：父 progressJson.failedContinueChapters 作为前端标黄依据", () => {

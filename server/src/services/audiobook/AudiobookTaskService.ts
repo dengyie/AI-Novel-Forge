@@ -24,6 +24,7 @@ import {
 import {
   ensureAudiobookTaskDir,
   isFullBookAudioReady,
+  isFullBookM4bReady,
   listReadyChapterAudioIds,
   pruneChunkWavArtifacts,
   resolveAudiobookTaskDir,
@@ -50,16 +51,41 @@ const DEFAULT_MAX_RETRIES = 1;
 
 /** listByNovel 可见条数上限（API take 钳制后）。 */
 const LIST_BY_NOVEL_VISIBLE_MAX = 100;
-/** listByNovel 过取上限：隐闭子占窗口时仍尽量凑满可见父行。 */
-const LIST_BY_NOVEL_FETCH_MAX = 500;
+/** 单页扫描条数：迭代分页直到凑满 visible 或扫尽。 */
+const LIST_BY_NOVEL_PAGE_SIZE = 200;
+/** 单次 listByNovel 最多扫描行数（防失控扫库）。 */
+const LIST_BY_NOVEL_SCAN_CAP = 5000;
 
 /**
- * 先过取再滤隐闭子：visibleLimit 为调用方想要的父任务条数。
- * fetchTake ≥ visibleLimit，且预留子任务占位，避免 take 后 filter 把可见父挤出。
+ * 单页扫描条数（可见 limit 的预取窗口）。
+ * 真正凑满靠 listByNovel 游标迭代，不再用单次 500 封顶赌密度。
  */
 export function listByNovelFetchTake(visibleLimit: number): number {
   const limit = Math.max(1, Math.min(LIST_BY_NOVEL_VISIBLE_MAX, Math.floor(visibleLimit) || 1));
-  return Math.min(LIST_BY_NOVEL_FETCH_MAX, Math.max(limit * 5, limit + 50));
+  return Math.min(LIST_BY_NOVEL_PAGE_SIZE, Math.max(limit * 5, limit + 50));
+}
+
+/**
+ * 从按 updatedAt/id 降序的行流中滤隐闭子，凑满 visibleLimit。
+ * 纯函数便于单测；调用方负责分页推进 cursor。
+ */
+export function accumulateVisibleParents<T extends { progressJson?: string | null }>(
+  pages: T[][],
+  visibleLimit: number,
+): T[] {
+  const limit = Math.max(1, Math.min(LIST_BY_NOVEL_VISIBLE_MAX, Math.floor(visibleLimit) || 1));
+  const out: T[] = [];
+  const seen = new Set<T>();
+  for (const page of pages) {
+    for (const row of page) {
+      if (readParentTaskIdFromProgress(row.progressJson ?? null)) continue;
+      if (seen.has(row)) continue;
+      seen.add(row);
+      out.push(row);
+      if (out.length >= limit) return out;
+    }
+  }
+  return out;
 }
 
 function parseChapterIds(json: string | null | undefined): string[] {
@@ -533,18 +559,39 @@ export class AudiobookTaskService {
   async listByNovel(novelId: string, take = 50): Promise<AudiobookTaskSummary[]> {
     try {
       const visibleLimit = Math.max(1, Math.min(LIST_BY_NOVEL_VISIBLE_MAX, take));
-      // 过取再滤：隐闭子 updatedAt 更近时会占满 take 窗口，导致可见父被挤出
-      const rows = await prisma.audiobookTask.findMany({
-        where: { novelId },
-        include: { novel: { select: { id: true, title: true } } },
-        orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
-        take: listByNovelFetchTake(visibleLimit),
-      });
-      // 隐闭续生成子任务不进列表：进度合入父，前端只见父行
-      const visible = rows
-        .filter((row) => !readParentTaskIdFromProgress((row as AudiobookTaskRow).progressJson))
-        .slice(0, visibleLimit);
-      return visible.map((row) => toSummary(row as AudiobookTaskRow));
+      const pageSize = listByNovelFetchTake(visibleLimit);
+      // 游标迭代：隐闭子占窗口时继续往后扫，直到凑满 visible 或触扫尽/扫顶
+      type ListRow = AudiobookTaskRow & { novel: { id: string; title: string } };
+      const visible: ListRow[] = [];
+      let scanned = 0;
+      let cursor: { updatedAt: Date; id: string } | null = null;
+      while (visible.length < visibleLimit && scanned < LIST_BY_NOVEL_SCAN_CAP) {
+        const rows = await prisma.audiobookTask.findMany({
+          where: cursor
+            ? {
+                novelId,
+                OR: [
+                  { updatedAt: { lt: cursor.updatedAt } },
+                  { updatedAt: cursor.updatedAt, id: { lt: cursor.id } },
+                ],
+              }
+            : { novelId },
+          include: { novel: { select: { id: true, title: true } } },
+          orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+          take: pageSize,
+        });
+        if (rows.length === 0) break;
+        scanned += rows.length;
+        for (const row of rows as ListRow[]) {
+          if (readParentTaskIdFromProgress(row.progressJson)) continue;
+          visible.push(row);
+          if (visible.length >= visibleLimit) break;
+        }
+        const last = rows[rows.length - 1] as ListRow;
+        cursor = { updatedAt: last.updatedAt, id: last.id };
+        if (rows.length < pageSize) break;
+      }
+      return visible.map((row) => toSummary(row));
     } catch (error) {
       if (isMissingAudiobookTaskTableError(error)) {
         return [];
@@ -955,53 +1002,8 @@ export class AudiobookTaskService {
         fullAudioReady = false;
       }
     }
-    // 全就绪且全书 wav 在：异步重拼 m4b（子曾 unlink 父 m4b；失败仅 warn，不挡 succeeded）
-    let m4bReady = false;
-    let m4bLabelSuffix = "";
-    if (allReady && fullAudioReady) {
-      try {
-        const chapterMeta = await prisma.chapter.findMany({
-          where: { novelId: parent.novelId, id: { in: chapterIds } },
-          select: { id: true, title: true, order: true },
-        });
-        const orderById = new Map(chapterMeta.map((c) => [c.id, c]));
-        const novel = await prisma.novel.findUnique({
-          where: { id: parent.novelId },
-          select: { title: true },
-        });
-        const gapMs = resolveBetweenChapterGapMs();
-        const m4b = await encodeFullBookM4b({
-          taskDir,
-          bookTitle: novel?.title?.trim() || parent.title || "有声书",
-          sourceWavPath: resolveFullBookAudioPath(taskDir),
-          betweenChapterGapMs: gapMs,
-          chapters: chapterIds.map((id, index) => {
-            const meta = orderById.get(id);
-            return {
-              chapterId: id,
-              chapterTitle: meta?.title ?? `第 ${index + 1} 章`,
-              chapterOrder: meta?.order ?? index + 1,
-              wavPath: resolveChapterAudioPath(taskDir, id),
-            };
-          }),
-        });
-        m4bReady = m4b.status === "ready";
-        if (m4b.status === "ready") {
-          m4bLabelSuffix = "（含 m4b）";
-        } else if (m4b.status === "skipped") {
-          m4bLabelSuffix = m4b.reason ? `；m4b 未生成（${m4b.reason}）` : "；m4b 未生成";
-        } else if (m4b.status === "failed") {
-          m4bLabelSuffix = m4b.reason ? `；m4b 失败（${m4b.reason}）` : "；m4b 失败";
-          console.warn("[audiobook] reconcileParent m4b 重拼失败", parent.id, m4b.reason);
-        }
-      } catch (m4bError) {
-        console.warn(
-          "[audiobook] reconcileParent m4b 重拼异常",
-          parent.id,
-          m4bError instanceof Error ? m4bError.message : m4bError,
-        );
-      }
-    }
+    // m4b：已存在则 skip；缺则先落父 succeeded，再后台 encode（不 await，避免占全局串行队列）
+    const m4bAlreadyReady = allReady && fullAudioReady && isFullBookM4bReady(taskDir);
     // 续生成期间父 progress 反映 ready/total（避免旧终态 100 与 running 矛盾）；全 ready 翻 100
     const parentProgress = allReady
       ? 100
@@ -1010,6 +1012,12 @@ export class AudiobookTaskService {
     if (allReady) {
       // 全部就绪：父翻 succeeded，currentStage 收尾
       // error:null —— 前次续生成失败留下的 error 文本必须清，否则父 succeeded 仍带旧红字
+      // m4b 不在此 await：大书 ffmpeg 可 20min 级，会堵 processQueue；后台补标 label
+      const successLabel = m4bAlreadyReady
+        ? "有声书生成完成（含 m4b）"
+        : fullAudioReady
+          ? "有声书生成完成（m4b 后台封装中）"
+          : "有声书生成完成";
       await prisma.audiobookTask.update({
         where: { id: parent.id },
         data: {
@@ -1019,13 +1027,20 @@ export class AudiobookTaskService {
           fullAudioPath: fullAudioReady ? "full-book.wav" : parent.fullAudioPath,
           status: "succeeded",
           currentStage: "finalizing",
-          currentItemLabel: m4bReady
-            ? "有声书生成完成（含 m4b）"
-            : `有声书生成完成${m4bLabelSuffix}`,
+          currentItemLabel: successLabel,
           error: null,
           finishedAt: new Date(),
         },
       });
+      if (fullAudioReady && !m4bAlreadyReady) {
+        this.scheduleBackgroundM4bEncode({
+          parentTaskId: parent.id,
+          novelId: parent.novelId,
+          parentTitle: parent.title,
+          taskDir,
+          chapterIds,
+        });
+      }
       return;
     }
 
@@ -1053,6 +1068,86 @@ export class AudiobookTaskService {
         finishedAt: new Date(),
       },
     });
+  }
+
+  /**
+   * 父已 succeeded 后后台封装 m4b：不 await、不占 processQueue。
+   * 成功后 CAS 更新 label（仅当仍 succeeded 且文案仍是后台中）；失败只 warn。
+   */
+  private scheduleBackgroundM4bEncode(input: {
+    parentTaskId: string;
+    novelId: string;
+    parentTitle: string;
+    taskDir: string;
+    chapterIds: string[];
+  }): void {
+    const { parentTaskId, novelId, parentTitle, taskDir, chapterIds } = input;
+    void (async () => {
+      try {
+        if (isFullBookM4bReady(taskDir)) return;
+        if (!isFullBookAudioReady(taskDir)) return;
+        const chapterMeta = await prisma.chapter.findMany({
+          where: { novelId, id: { in: chapterIds } },
+          select: { id: true, title: true, order: true },
+        });
+        const orderById = new Map(chapterMeta.map((c) => [c.id, c]));
+        const novel = await prisma.novel.findUnique({
+          where: { id: novelId },
+          select: { title: true },
+        });
+        const gapMs = resolveBetweenChapterGapMs();
+        const m4b = await encodeFullBookM4b({
+          taskDir,
+          bookTitle: novel?.title?.trim() || parentTitle || "有声书",
+          sourceWavPath: resolveFullBookAudioPath(taskDir),
+          betweenChapterGapMs: gapMs,
+          chapters: chapterIds.map((id, index) => {
+            const meta = orderById.get(id);
+            return {
+              chapterId: id,
+              chapterTitle: meta?.title ?? `第 ${index + 1} 章`,
+              chapterOrder: meta?.order ?? index + 1,
+              wavPath: resolveChapterAudioPath(taskDir, id),
+            };
+          }),
+        });
+        if (m4b.status === "ready") {
+          await prisma.audiobookTask.updateMany({
+            where: {
+              id: parentTaskId,
+              status: "succeeded",
+              currentItemLabel: "有声书生成完成（m4b 后台封装中）",
+            },
+            data: {
+              currentItemLabel: "有声书生成完成（含 m4b）",
+              heartbeatAt: new Date(),
+            },
+          });
+          return;
+        }
+        const reason = m4b.reason ?? m4b.status;
+        console.warn("[audiobook] background m4b encode not ready", parentTaskId, reason);
+        await prisma.audiobookTask.updateMany({
+          where: {
+            id: parentTaskId,
+            status: "succeeded",
+            currentItemLabel: "有声书生成完成（m4b 后台封装中）",
+          },
+          data: {
+            currentItemLabel: m4b.status === "skipped"
+              ? `有声书生成完成；m4b 未生成（${reason}）`
+              : `有声书生成完成；m4b 失败（${reason}）`,
+            heartbeatAt: new Date(),
+          },
+        });
+      } catch (error) {
+        console.warn(
+          "[audiobook] background m4b encode exception",
+          parentTaskId,
+          error instanceof Error ? error.message : error,
+        );
+      }
+    })();
   }
 
   /**
