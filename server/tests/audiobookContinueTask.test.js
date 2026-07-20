@@ -21,6 +21,11 @@ const {
   readParentTaskIdFromProgress,
   readFailedContinueChapters,
 } = require("../dist/services/audiobook/AudiobookTaskService.js");
+// SoT: pipeline.run 必须用传入的 outputDir（父目录），否则续生成章 wav 落子目录、父 reconcile 看不到（P0）
+// ensureDirExistsUnderAudiobookRoot 在 withTempDataRoot 块内 lazy-require（按 env 重定向 DATA_ROOT）。
+const fs = require("node:fs");
+const path = require("node:path");
+const os = require("node:os");
 
 function makeChapter(order, id) {
   return { id, order, title: `第 ${order} 章` };
@@ -138,4 +143,60 @@ test("子任务终态后失败章合并契约：appendFailedContinueChapters 去
   const newlyFailed = ["ch4", "ch9"];
   const merged = Array.from(new Set([...existing, ...newlyFailed]));
   assert.deepEqual(merged, ["ch4", "ch7", "ch9"]);
+});
+
+// resolveDataRoot 在 desktop runtime 下走 AI_NOVEL_APP_DATA_DIR；web runtime 走工程根（忽略 env）。
+// 测试内临时切到 desktop + tmpDir，避免污染真实路径；测后还原。
+function withTempDataRoot(fn) {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "abk-root-"));
+  const prevRuntime = process.env.AI_NOVEL_RUNTIME;
+  const prevData = process.env.AI_NOVEL_APP_DATA_DIR;
+  process.env.AI_NOVEL_RUNTIME = "desktop";
+  process.env.AI_NOVEL_APP_DATA_DIR = tmpRoot;
+  try {
+    fn(tmpRoot);
+  } finally {
+    if (prevRuntime === undefined) delete process.env.AI_NOVEL_RUNTIME;
+    else process.env.AI_NOVEL_RUNTIME = prevRuntime;
+    if (prevData === undefined) delete process.env.AI_NOVEL_APP_DATA_DIR;
+    else process.env.AI_NOVEL_APP_DATA_DIR = prevData;
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  }
+}
+
+test("P0 续生成目录约束：父 outputDir 必须位于有声书产物根之下（拒绝越界 / 遍历）", () => {
+  withTempDataRoot((tmpRoot) => {
+    const { ensureDirExistsUnderAudiobookRoot } =
+      require("../dist/services/audiobook/audiobookPaths.js");
+
+    // desktop runtime 下 resolveAudiobookRoot = tmpRoot/data/storage/audiobooks
+    const root = path.join(tmpRoot, "data", "storage", "audiobooks");
+    const novelDir = path.join(root, "novelA");
+    const parentDir = path.join(novelDir, "parentTaskA");
+    fs.mkdirSync(parentDir, { recursive: true });
+
+    // 合法：父 outputDir 在根下 → 创建并回绝对等价路径
+    const ok = ensureDirExistsUnderAudiobookRoot(parentDir);
+    assert.equal(path.resolve(ok), path.resolve(parentDir));
+
+    // 越界：根外目录 → 拒绝
+    const outside = path.join(tmpRoot, "outside", "x");
+    assert.throws(
+      () => ensureDirExistsUnderAudiobookRoot(outside),
+      (err) => err instanceof Error && /越界|位于有声书产物根/.test(err.message),
+    );
+
+    // 遍历：/../ escape → 拒绝（resolve 后落到根外）
+    const escape = path.join(parentDir, "..", "..", "..", "..", "etctest");
+    assert.throws(
+      () => ensureDirExistsUnderAudiobookRoot(escape),
+      (err) => err instanceof Error,
+    );
+
+    // 空 → 拒绝
+    assert.throws(() => ensureDirExistsUnderAudiobookRoot("  "), (err) => err instanceof Error);
+
+    // 拒绝越界时不应创建该外部目录（防御副作用）
+    assert.equal(fs.existsSync(outside), false);
+  });
 });

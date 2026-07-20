@@ -1325,6 +1325,8 @@ export class AudiobookTaskService {
         deliveryStyleMode,
         signal: controller.signal,
         isCancelRequested: () => this.isCancelRequested(taskId),
+        // 续生成子任务：用父 outputDir（落章 wav 进父目录，父 reconcile 可见）；否则 null → 默认新建任务目录。
+        outputDir: task.outputDir?.trim() || null,
         onProgress: async (progress) => {
           if (await this.isCancelRequested(taskId)) {
             return;

@@ -23,6 +23,7 @@ import {
 } from "./audiobookGap";
 import {
   ensureAudiobookTaskDir,
+  ensureDirExistsUnderAudiobookRoot,
   ensureChapterAudioDir,
   resolveChapterAudioPath,
   resolveChunkAudioPath,
@@ -311,6 +312,10 @@ export interface RunAudiobookPipelineInput {
   signal?: AbortSignal;
   isCancelRequested: AudiobookCancelChecker;
   onProgress: (progress: AudiobookPipelineProgress) => Promise<void> | void;
+  /** 已有的任务输出目录绝对路径（如父任务 outputDir）。
+   * 传入则优先使用，跳过 `ensureAudiobookTaskDir(novelId, taskId)` 派生。
+   * 续生成子任务传入父目录，章 wav 落父目录，父 reconcile 才能看见。 */
+  outputDir?: string | null;
 }
 
 export interface RunAudiobookPipelineResult {
@@ -627,7 +632,21 @@ export async function synthesizeChunkWithRetry(input: {
 
 export class AudiobookPipelineService {
   async run(input: RunAudiobookPipelineInput): Promise<RunAudiobookPipelineResult> {
-    const taskDir = ensureAudiobookTaskDir(input.novelId, input.taskId);
+    const inheritedDir = input.outputDir?.trim();
+    let taskDir: string;
+    try {
+      taskDir = inheritedDir
+        ? ensureDirExistsUnderAudiobookRoot(inheritedDir)
+        : ensureAudiobookTaskDir(input.novelId, input.taskId);
+    } catch (error) {
+      // 不做 fail-open：无法写入给定的父目录属硬性环境错误，应中断。
+      if (error instanceof Error) {
+        throw new Error(
+          `有声书任务输出目录无法创建：${error.message}`,
+        );
+      }
+      throw error;
+    }
     const chapters = await prisma.chapter.findMany({
       where: {
         novelId: input.novelId,

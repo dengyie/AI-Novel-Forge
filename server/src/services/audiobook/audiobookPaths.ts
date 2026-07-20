@@ -269,6 +269,27 @@ export function ensureAudiobookTaskDir(novelId: string, taskId: string): string 
   return dir;
 }
 
+/**
+ * 用既有的任务输出目录（如父任务 outputDir）创建路径并回。
+ * 续生成子任务传入父 outputDir 时用此：章 wav 落父目录，父 reconcile 才能看见。
+ * 关键安全约束：传入的绝对路径必须落在有声书产物根之下，拒绝越界/相对/非本根路径。
+ */
+export function ensureDirExistsUnderAudiobookRoot(absoluteDir: string): string {
+  const trimmed = absoluteDir?.trim();
+  if (!trimmed) {
+    throw new Error("任务输出目录不能为空。");
+  }
+  const resolved = path.resolve(trimmed);
+  const root = resolveAudiobookRoot();
+  const rootResolved = path.resolve(root);
+  const prefix = rootResolved.endsWith(path.sep) ? rootResolved : rootResolved + path.sep;
+  if (resolved !== rootResolved && !resolved.startsWith(prefix)) {
+    throw new Error(`任务输出目录越界，必须位于有声书产物根之下：${resolved}`);
+  }
+  fs.mkdirSync(resolved, { recursive: true });
+  return resolved;
+}
+
 export function resolveChapterAudioDir(taskDir: string, chapterId: string): string {
   const safeChapterId = assertSafePathSegment(chapterId, "chapterId");
   return path.join(taskDir, "chapters", safeChapterId);
