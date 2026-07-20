@@ -331,6 +331,81 @@ test("chapter_range is resolved as chapter range 1-10 even when it spans volumes
   assert.deepEqual(cursor.selectedChapters.map((chapter) => chapter.chapterOrder), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
 });
 
+// 死锁场景回归：mode:"book" + 卷一已拆章(含节奏板) + 卷二未拆章(0 章 + 无节奏板)。
+// 修复前 cursor 卡在 beat_sheet(volumeId=volume-2) → validateOutput 永远判未完成 →
+// continue 复用 seed mode:"book" 重入同门 → 无限失败循环。修复后卷二作为「后卫未规划卷」
+// 跳过其节奏板推断，cursor 顺利推进到已拆章卷一(卷一拆章已完成)的 chapter_sync。
+function createPartiallyStagedBookWorkspace() {
+  return buildVolumeWorkspaceDocument({
+    novelId: "novel-demo",
+    volumes: [
+      createVolume("volume-1", 1, "残渣", Array.from({ length: 6 }, (_, index) => (
+        createDetailedChapter(`chapter-${index + 1}`, index + 1, {
+          volumeId: "volume-1",
+          beatKey: "volume-1-beat",
+        })
+      ))),
+      createVolume("volume-2", 2, "半棋子", []),
+    ],
+    beatSheets: [
+      {
+        volumeId: "volume-1",
+        volumeSortOrder: 1,
+        status: "generated",
+        beats: [{
+          key: "volume-1-beat",
+          label: "残渣起势",
+          summary: "残渣起势摘要",
+          chapterSpanHint: "1-6章",
+          mustDeliver: ["残渣起势"],
+        }],
+      },
+    ],
+    strategyPlan: null,
+    critiqueReport: null,
+    rebalanceDecisions: [],
+    source: "volume",
+    activeVersionId: null,
+  });
+}
+
+test("mode book skips trailing zero-chapter volume without beat sheet (deadlock escape)", () => {
+  const cursor = resolveStructuredOutlineRecoveryCursor({
+    workspace: createPartiallyStagedBookWorkspace(),
+    plan: { mode: "book" },
+  });
+
+  assert.notEqual(cursor.step, "beat_sheet");
+  assert.notEqual(cursor.volumeId, "volume-2");
+  // 卷一拆章已完成 → chapter_sync / completed；不会再因卷二无节奏板卡 beat_sheet。
+  assert.ok(cursor.step === "chapter_sync" || cursor.step === "completed", `unexpected step: ${cursor.step}`);
+  assert.deepEqual(cursor.preparedVolumeIds, ["volume-1"]);
+});
+
+test("mode book with no staged volume at all still demands beat_sheet for first volume (keeps original behavior)", () => {
+  const workspace = buildVolumeWorkspaceDocument({
+    novelId: "novel-demo",
+    volumes: [
+      createVolume("volume-1", 1, "第一卷", []),
+      createVolume("volume-2", 2, "第二卷", []),
+    ],
+    beatSheets: [],
+    strategyPlan: null,
+    critiqueReport: null,
+    rebalanceDecisions: [],
+    source: "volume",
+    activeVersionId: null,
+  });
+  const cursor = resolveStructuredOutlineRecoveryCursor({
+    workspace,
+    plan: { mode: "book" },
+  });
+
+  // 全空书：没有任何已拆章卷，仍应回到首卷节奏板建立，不退化成 completed。
+  assert.equal(cursor.step, "beat_sheet");
+  assert.equal(cursor.volumeId, "volume-1");
+});
+
 test("healStaleAutoDirectorStructuredOutlineProgress advances stale chapter list status to next incomplete chapter", async () => {
   const originals = {
     findUnique: prisma.novelWorkflowTask.findUnique,

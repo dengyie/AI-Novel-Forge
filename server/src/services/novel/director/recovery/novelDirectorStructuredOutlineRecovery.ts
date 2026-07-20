@@ -174,6 +174,27 @@ function resolveRequiredVolumes(
   return requiredVolumes;
 }
 
+/**
+ * 找出「已拆章卷之后、章数为 0」的后卫卷 id —— 这些卷被视为尚未规划、不在当前批范围的
+ * 后续卷。mode:"book" 时跳过它们的节奏板推断，防止与 continue 复用 seed plan 叠加形成
+ * 死锁。没有已拆章卷(book 全空)时返回空，保持「全空书应当先建首卷节奏板」的原有行为。
+ */
+function resolveTrailingZeroChapterVolumeIds(volumes: VolumePlan[]): string[] {
+  if (volumes.length === 0) {
+    return [];
+  }
+  const stagedSortOrders = volumes
+    .filter((volume) => volume.chapters.length > 0)
+    .map((volume) => volume.sortOrder);
+  if (stagedSortOrders.length === 0) {
+    return [];
+  }
+  const lastStagedSortOrder = Math.max(...stagedSortOrders);
+  return volumes
+    .filter((volume) => volume.chapters.length === 0 && volume.sortOrder > lastStagedSortOrder)
+    .map((volume) => volume.id);
+}
+
 function selectPreparedOutlineChapters(
   workspace: VolumePlanDocument,
   plan: DirectorAutoExecutionPlan | null | undefined,
@@ -249,8 +270,23 @@ export function resolveStructuredOutlineRecoveryCursor(input: {
   const requiredVolumes = resolveRequiredVolumes(input.workspace, normalizedPlan);
   const preparedVolumeIds: string[] = [];
 
+  // mode:"book" 时若整书已存在「已拆章的卷」，则其后卫卷(0 章 + 无节奏板)视为「尚未规划、
+  // 不在本轮范围内」跳过 —— 否则把未拆章的后续卷当成必须先补节奏板的阻塞门，会与 continue
+  // 复用 seed plan 叠加形成无限失败循环(死锁)：validateOutput 永远判 beat_sheet 未完成 →
+  // 任务 failed → continue 用同 seed 的 mode:"book" 重入 → 同一阻塞门。卷一旦拆了章，
+  // 节奏板缺失才视为真正需要补。mode:"volume"/"chapter_range" 不变(各自有显式范围)。
+  const trailingUnstagedVolumeIds = normalizedPlan.mode === "book"
+    ? new Set(resolveTrailingZeroChapterVolumeIds(requiredVolumes))
+    : new Set<string>();
+
   for (const volume of requiredVolumes) {
     const beatSheet = getBeatSheet(input.workspace, volume.id);
+    if (
+      trailingUnstagedVolumeIds.has(volume.id)
+      && (!beatSheet || beatSheet.beats.length === 0)
+    ) {
+      continue;
+    }
     if (!beatSheet || beatSheet.beats.length === 0) {
       return {
         step: "beat_sheet",
