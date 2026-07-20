@@ -858,17 +858,46 @@ export class AudiobookTaskService {
     const parentProgress = allReady
       ? 100
       : Math.max(2, Math.min(99, Math.round((readyChapterIds.length / Math.max(1, chapterIds.length)) * 100)));
+
+    if (allReady) {
+      // 全部就绪：父翻 succeeded，currentStage 收尾
+      await prisma.audiobookTask.update({
+        where: { id: parent.id },
+        data: {
+          progressJson: JSON.stringify(nextProgress),
+          progress: 100,
+          completedChapterCount: readyChapterIds.length,
+          fullAudioPath: fullAudioReady ? "full-book.wav" : parent.fullAudioPath,
+          status: "succeeded",
+          currentStage: "finalizing",
+          currentItemLabel: "有声书生成完成",
+          finishedAt: new Date(),
+        },
+      });
+      return;
+    }
+
+    // 非全就绪：子已终态，父必须离开 running/continuing，否则
+    //  - continueParentTask 拒绝重试（409 父仍 running）
+    //  - resumePendingTasks 因 currentStage=="continuing" 跳过父，重启不 pull-back
+    //  - 前端 continueable=false，"补全/逐章生成"按钮禁用，对照 list 标黄章不能再点
+    // 有记录失败章 → 翻 failed（保留既有就绪比例 + failedContinueChapters 供前端标黄重试）；
+    // 无失败章（纯取消/部分成功的子终态）→ 翻 failed 也让父回到 front-end continueable 终态。
+    const failureLabel = prunedFailed.length > 0
+      ? `续生成后有 ${prunedFailed.length} 章失败，可在对照 list 逐章重试`
+      : `续生成未完成，已就绪 ${readyChapterIds.length}/${chapterIds.length} 章`;
     await prisma.audiobookTask.update({
       where: { id: parent.id },
       data: {
         progressJson: JSON.stringify(nextProgress),
         progress: parentProgress,
         completedChapterCount: readyChapterIds.length,
-        fullAudioPath: fullAudioReady ? "full-book.wav" : parent.fullAudioPath,
-        status: allReady ? "succeeded" : parent.status,
-        currentStage: allReady ? "finalizing" : parent.currentStage,
-        currentItemLabel: allReady ? "有声书生成完成" : parent.currentItemLabel,
-        finishedAt: allReady ? new Date() : parent.finishedAt,
+        fullAudioPath: parent.fullAudioPath,
+        status: "failed",
+        currentStage: "failed",
+        currentItemLabel: failureLabel,
+        error: failureLabel,
+        finishedAt: new Date(),
       },
     });
   }
