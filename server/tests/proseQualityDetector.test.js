@@ -66,6 +66,17 @@ test("detectProseQuality keeps common false positives out of blocking findings",
   assert.equal(report.hasBlockingFindings, false);
 });
 
+test("detectProseQuality flags obligation/function-payoff control-plane jargon in prose", () => {
+  const report = detectProseQuality([
+    "他走进走廊，门在身后合上。",
+    "本章义务合同要求功能兑付必须命中，必达项写在验收检查里。",
+    "夜色压低，街灯一盏盏亮起。",
+  ].join("\n"));
+  const codeSet = new Set(codes(report));
+  assert.ok(codeSet.has("prose_engineering_term_leak"), "should flag control-plane jargon dump");
+  assert.ok(report.hasBlockingFindings);
+});
+
 
 test("sparse Chinese dash and ellipsis density is ignored or non-blocking", () => {
   // 少量合法 ——/……：密度低于 ignore 阈值时可不记 finding；即使记也不得 hard-block。

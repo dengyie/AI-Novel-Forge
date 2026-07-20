@@ -258,13 +258,13 @@ const CHAPTER_ACCEPTANCE_EXAMPLE: ChapterAcceptanceAssessmentOutput = {
   missingObligations: [
     {
       kind: "must_hit_now",
-      summary: "本章必须让主角发现敌方试探，但正文只写了日常过渡。",
-      evidence: "正文没有出现敌方试探或主角识破的可见行动。",
+      summary: "本章须让主角发现敌方试探，但情节仍停在日常过渡，未见该结果成立。",
+      evidence: "情节中未见敌方试探或主角识破的场面与反应。",
     },
     {
       kind: "character_appearance",
-      summary: "关键角色春桃必须出场并执行观察任务。",
-      evidence: "正文未出现春桃，也没有替代执行者。",
+      summary: "关键角色春桃须在场并执行观察任务。",
+      evidence: "情节中未见春桃露面或行动，也没有替代执行者。",
     },
   ],
   repairability: "patchable_obligation_gap",
@@ -330,7 +330,8 @@ export const chapterAcceptanceAssessmentPrompt: PromptAsset<
       "3. 可通过局部补丁解决的问题使用 repairable，并给出 repairDirectives。",
       "4. 章节可以继续但存在后续风险时使用 continue_with_risk，并用 riskTags 说明风险。",
       "5. blockingIssues 保留最关键的 0-5 条，每条必须有明确证据和可执行修复建议。",
-      "6. obligation contract 是本章硬合同。must hit now 与 forbidden crossing 缺口必须写入 missingObligations；可后续承接的 payoff、角色露面或目标变化缺口，只有会影响下一章入口时才写入 missingObligations，否则放入 riskTags。",
+      "5.1 义务缺口看剧情结果是否在正文中成立，不要求出现与 obligation/taskSheet 相同的措辞；场面已完成功能、仅缺标签式点题或说明书总结时，不要记入 missingObligations；evidence 须指向可观察情节，而非「未出现某某提纲句」。",
+      "6. obligation contract 是本章语义层契约（结果须成立）。must hit now 与 forbidden crossing 缺口必须写入 missingObligations；可后续承接的 payoff、角色露面或目标变化缺口，只有会影响下一章入口时才写入 missingObligations，否则放入 riskTags。",
       "6.1 角色出场：仅「must_on_page / 本章计划出场 / 核心角色连续高风险缺席」的 character_appearance 记为必须补齐；标注可延后、offscreen、他章计划的角色缺席不得升为 high，summary 中写明「可延后出场/offscreen」。",
       "7. repairability 只能用 none、patchable_obligation_gap、rewrite_needed、plan_misalignment。局部漏写但不阻断下一章时优先 continue_with_risk；只有需要当前章节立刻补齐时才用 patchable_obligation_gap。",
       "8. style_contract 或反 AI 要求属于强约束；发现明显来源实体泄露、模板腔、总结腔时归入 voice。",

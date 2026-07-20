@@ -269,7 +269,7 @@ test("prompt preview prefers selected novel chapter context over audit sample co
       novelTitle: "当代码开始杀人",
       chapterTitle: "第 3 章 异常提交",
       requestedTypes: ["plot", "character", "continuity"],
-      storyModeContext: "使用所选小说的章节任务、章节边界和结构义务进行本书预览。",
+      storyModeContext: "使用所选小说的章节任务、章节边界和结构职责进行本书预览。",
       content: "林序看见测试分支上的提交信息变成了死亡预告，而监控里的受害者正走向同一间机房。",
       ragContext: "无额外检索补充。",
     },

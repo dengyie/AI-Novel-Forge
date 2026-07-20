@@ -118,7 +118,7 @@ export function buildObligationCoverage(input: {
     return {
       status: "satisfied",
       missing: [],
-      summary: "章节义务已满足。",
+      summary: "本章核心结果已在情节中落地；章节义务已满足。",
     };
   }
   const hardCount = Array.isArray(input.hardMissingObligations)
@@ -132,8 +132,8 @@ export function buildObligationCoverage(input: {
     status: unmet ? "unmet" : "partial",
     missing: input.missingObligations,
     summary: unmet
-      ? `仍有 ${input.missingObligations.length} 项章节义务未满足。`
-      : `仍有 ${input.missingObligations.length} 项章节义务需要后续回收。`,
+      ? `仍有 ${input.missingObligations.length} 项章节义务未在情节中落地。`
+      : `仍有 ${input.missingObligations.length} 项章节义务（含可延后/软义务）需要后续回收。`,
   };
 }
 
@@ -163,7 +163,7 @@ export function buildFailureClassification(input: {
   if (hardMissing.length > 0) {
     return {
       code: "draft_obligation_unmet",
-      summary: "正文已生成，但仍有本章必达义务没有兑现。",
+      summary: "正文已生成，但仍有本章必须成立的结果未在情节中落地。",
       decisionReason: input.acceptance.decisionReason,
       blockingObligations: hardMissing,
     };

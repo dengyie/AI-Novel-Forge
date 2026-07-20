@@ -121,7 +121,7 @@ function buildPreviewPromptInput(
         : "示例章节",
       requestedTypes: ["plot", "character", "continuity"],
       storyModeContext: previewNovel
-        ? "使用所选小说的章节任务、章节边界和结构义务进行本书预览。"
+        ? "使用所选小说的章节任务、章节边界和结构职责进行本书预览。"
         : "本书偏连载网文节奏，章节需要持续推进冲突并保留章末钩子。",
       content: chapterContent,
       ragContext: "无额外检索补充。",

@@ -66,7 +66,7 @@ function createSystemPrompt(mode: ChapterTaskSheetQualityPromptInput["mode"]): s
     "- cognitive_nailing：读者应理解/主题是/让读者明白等钉认知句 → repair",
     "- missing_choice_pressure：缺有代价的人物选择",
     "- missing_scene_anchor：缺可拍的现场压力/独占事件锚",
-    "好的 taskSheet 应落在人物选择+现场压力；功能兑付只写可验证短列表，不写说明书讲规则。",
+    "好的 taskSheet 应落在人物选择+现场压力；功能兑付只写可戏剧化场景短提示（动作/对话/代价），不写说明书讲规则、不贴验收检查清单。",
     "还要判断本章是否被塞入过多彼此争夺篇幅的必达义务；如果任务单显示当前章职责已经过载，loadRisk=overloaded，recommendedHandling=replan_window。",
     "如果问题仍可在本章合同内收口，recommendedHandling=repair_contract；只有合同已经足够稳时才用 use_as_is。",
     "如果存在问题，给出面向自动修复器的具体 repairGuidance（自然语言，不要回写内部 code）。",

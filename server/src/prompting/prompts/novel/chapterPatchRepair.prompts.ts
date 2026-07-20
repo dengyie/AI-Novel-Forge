@@ -65,7 +65,8 @@ export const chapterPatchRepairPrompt: PromptAsset<
       "7. targetExcerpt 必须是正文里的完整短句或段落，不得是单个词语、称谓、标点或过短短语。",
       "8. 如果找不到至少 6 个字符且在正文中唯一出现的原文片段，不要输出 patch；requiresFullRewrite 设为 true，并说明 escalationReason。",
       "9. 如果确实无法用局部补丁安全修复，requiresFullRewrite 设为 true，并说明 escalationReason。",
-      input.modeHint ? `10. 修复重点：${input.modeHint}` : "",
+      "10. 补义务/结果缺口时，让兑付发生在情节里（动作、对话、局面变化），禁止补一段总结说明或任务单点题句。",
+      input.modeHint ? `11. 修复重点：${input.modeHint}` : "",
     ].join("\n")),
     new HumanMessage([
       `小说：${input.novelTitle}`,

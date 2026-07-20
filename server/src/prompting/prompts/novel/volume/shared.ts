@@ -511,6 +511,7 @@ export function buildChapterDetailDraft(
 
 /**
  * B4：把章 functionIds 解析为功能兑付短列表（给 taskSheet 生成/合同上下文用）。
+ * 输出可戏剧化场景 hint，禁止把 acceptanceChecks / mustHappen 工程串塞进 writer 链。
  * 无表时返回 null，避免 off 模式塞噪声。
  */
 export function buildChapterFunctionPayoffContext(
@@ -529,18 +530,23 @@ export function buildChapterFunctionPayoffContext(
     .filter((item) => idSet.has(item.id));
   if (items.length === 0) {
     return [
-      "Function payoff short list (ids only; no table rows resolved):",
+      "Function payoff scene hints (ids only; no table rows resolved):",
       ...ids.slice(0, 6).map((id) => `- ${id}`),
-      "Write 【功能兑付】 as verifiable on-page actions; do not lecture rules.",
+      "Write 【功能兑付】 as dramatizable on-page scenes (action/dialogue/cost); do not lecture rules or paste acceptance checklists.",
     ].join("\n");
   }
   const lines = items.slice(0, 6).map((item) => {
-    const checks = (item.acceptanceChecks ?? []).slice(0, 3).join("；");
-    return `- ${item.id}「${item.title}」mustHappen=${item.mustHappen}${checks ? ` | checks=${checks}` : ""}`;
+    const title = String(item.title ?? "").trim() || item.id;
+    const firstCheck = String((item.acceptanceChecks ?? [])[0] ?? "").trim();
+    // 把验收句收成「可怎么演」短 hint，不 dump mustHappen/checks 工程串。
+    const sceneHint = firstCheck
+      ? firstCheck.replace(/^(应|须|必须|需要)?/, "").slice(0, 48)
+      : `让「${title}」在一场戏里通过动作/对话/代价成立`;
+    return `- ${item.id}「${title}」→ 本章可怎么演：${sceneHint}`;
   });
   return [
-    "Function payoff short list for this chapter (put under 【功能兑付】 in taskSheet):",
+    "Function payoff scene hints for this chapter (put under 【功能兑付】 in taskSheet):",
     ...lines,
-    "Write choice + scene pressure; ban cognitive nailing and rule-manual lectures.",
+    "Write choice + scene pressure; dramatize results in scenes; ban cognitive nailing and rule-manual lectures.",
   ].join("\n");
 }
