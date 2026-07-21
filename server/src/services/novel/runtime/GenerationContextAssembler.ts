@@ -320,6 +320,8 @@ export class GenerationContextAssembler {
           novelId,
           order: { lt: chapter.order },
           content: { not: null },
+          // 排除 needs_repair：不合格章的尾段不应作为下一章「必须直接承接」的锚点
+          chapterStatus: { not: "needs_repair" },
         },
         orderBy: { order: "desc" },
         take: QUALITY_FEEDBACK_PRIOR_LOOKBACK,
