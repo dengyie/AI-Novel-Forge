@@ -4,6 +4,30 @@
 
 ## 更新历史
 
+## v0.5.0（2026-07-21 发布）
+
+本次版本把有声书音色匹配推进到「全 AI 耳 + 库规划」主路径，并加固写章上下文与质量链路。产品版本号仍以 `desktop/package.json` 为准；Web 界面角标随前端构建读取同一版本源。
+
+### 有声书与音色库
+
+- AI 耳（EarAgent）默认仅 **hard 过线** 才写入 heard 并升权 `approved`；禁止 import 直批；`heardSha` 校验保留。
+- LabelAgent / MatrixReport：现库可 AI 重标与空洞矩阵报告，便于补洞而不依赖人工听。
+- VoiceBrief + LibraryPick：规划器加载书级设定与 Brief；`prefer_library_ai` 可走结构化选库；Ready 无 clone 时可回退 design/preset。
+- 工作台与 ops 一键 profile（`ear_auto` / `library_ai_fill`）与既有 approve token 门禁兼容。
+
+### 写章质量与运行时
+
+- 上下文 broker：仅 **required** 组解析失败时 fail-fast；可选组错误可观测但不误杀写章。
+- 近邻章过滤 `needs_repair` 后扩大 lookback，避免连续待修章导致承接尾段为空；质量反馈仍只取最近 PRIOR 条。
+- 知识库：目标无启用 binding 时保持空 RAG（不 fail-open 全租户），并打可观测告警。
+- 续写复读裁剪、状态快照 carry-over、摘要滞后可见化、长度欠账 riskFlags、SSE 断流提示与编辑器回流等质量批修复随 main 一并纳入本版。
+
+### 升级提示
+
+- 源码用户：`pnpm install` 后按既有流程 `pnpm build`；无 Prisma 迁移。
+- 桌面发布：正式 tag 须为 `v0.5.0` 且与 `desktop/package.json` 一致。
+- 生产部署仍以运维侧 dist cutover 为准；应用内版本角标在重新构建 client 后显示 `v0.5.0`。
+
 ### 2026-07-09（自动导演候选恢复更稳定）
 
 恢复到已经生成书级方向候选的自动导演任务时，候选页会保留起始想法，可以直接选择方案、继续生成新一轮，或按意见修正方向。
