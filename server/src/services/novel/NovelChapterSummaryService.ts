@@ -145,6 +145,26 @@ export class NovelChapterSummaryService {
           characterStates: characterStates || null,
         },
       });
+      // 摘要已重生成：清除 manual 保存时打的 chapterSummaryStale 滞后标记
+      const chapterRow = await tx.chapter.findUnique({
+        where: { id: chapterId },
+        select: { riskFlags: true },
+      });
+      if (chapterRow?.riskFlags?.includes("chapterSummaryStale")) {
+        try {
+          const parsed = JSON.parse(chapterRow.riskFlags) as unknown;
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            const next = { ...(parsed as Record<string, unknown>) };
+            delete next.chapterSummaryStale;
+            await tx.chapter.update({
+              where: { id: chapterId },
+              data: { riskFlags: JSON.stringify(next) },
+            });
+          }
+        } catch {
+          // 标记清理失败不阻断摘要主流程
+        }
+      }
     });
 
     // 桥接 Fact Ledger：将正文即兴产生的硬事实写入事实账本，

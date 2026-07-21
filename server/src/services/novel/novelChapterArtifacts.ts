@@ -134,6 +134,45 @@ export async function syncChapterArtifacts(novelId: string, chapterId: string, c
   await syncCharacterTimelineForChapter(novelId, chapterId, content);
   chapterArtifactBackgroundSyncService.scheduleChapterSync(novelId, chapterId, content);
 
+  // 人工正文保存后，既有非空摘要（多为 LLM 摘要）已与正文脱节，且无自动重生成路径。
+  // 写 riskFlags.chapterSummaryStale 让债板/UI 可见，用户可一键重生成（生成时清标）。
+  // best-effort：失败只告警，不阻断保存主路径。
+  try {
+    const existing = await prisma.chapter.findFirst({
+      where: { id: chapterId, novelId },
+      select: { riskFlags: true },
+    });
+    let parsed: Record<string, unknown> = {};
+    if (existing?.riskFlags?.trim()) {
+      try {
+        const value = JSON.parse(existing.riskFlags) as unknown;
+        if (value && typeof value === "object" && !Array.isArray(value)) {
+          parsed = value as Record<string, unknown>;
+        }
+      } catch {
+        parsed = {};
+      }
+    }
+    await prisma.chapter.update({
+      where: { id: chapterId },
+      data: {
+        riskFlags: JSON.stringify({
+          ...parsed,
+          chapterSummaryStale: {
+            at: new Date().toISOString(),
+            reason: "manual_content_saved",
+          },
+        }),
+      },
+    });
+  } catch (error) {
+    console.warn("[novel-artifacts] persist summary-stale riskFlag failed", {
+      novelId,
+      chapterId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+
   queueRagUpsert("chapter", chapterId);
   queueRagUpsert("chapter_summary", chapterId);
   queueRagUpsert("novel", novelId);
