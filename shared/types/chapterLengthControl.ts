@@ -1,5 +1,12 @@
 import { z } from "zod";
 import { sanitizeCreativeMustAdvanceItems } from "./chapterCreativeContract.js";
+import {
+  generatedReaderExperienceContractSchema,
+  normalizeReaderExperienceContract,
+  readerExperienceContractSchema,
+  type ReaderExperienceContract,
+  hasReaderExperienceContractValue,
+} from "./novel/readerExperience.js";
 
 export const SCENE_COUNT_MIN = 3;
 export const SCENE_COUNT_MAX = 8;
@@ -21,12 +28,24 @@ export const chapterSceneCardSchema = z.object({
   exitState: z.string().trim().min(1),
   forbiddenExpansion: z.array(z.string().trim().min(1)).default([]),
   targetWordCount: z.number().int().positive(),
+  /** Optional per-scene reader experience (R-MVP, compatible read). */
+  resistance: z.string().trim().optional().default(""),
+  turn: z.string().trim().optional().default(""),
+  emotionalShift: z.string().trim().optional().default(""),
+  readerValue: z.string().trim().optional().default(""),
 });
 
 export const chapterScenePlanSchema = z.object({
   targetWordCount: z.number().int().positive(),
   lengthBudget: lengthBudgetContractSchema,
+  /** Chapter-level reader experience contract; optional for legacy plans. */
+  readerExperience: readerExperienceContractSchema.optional(),
   scenes: z.array(chapterSceneCardSchema).min(SCENE_COUNT_MIN).max(SCENE_COUNT_MAX),
+});
+
+/** Strict generation schema: readerExperience required with non-empty core fields. */
+export const chapterScenePlanStrictSchema = chapterScenePlanSchema.extend({
+  readerExperience: generatedReaderExperienceContractSchema,
 });
 
 export type LengthBudgetContract = z.infer<typeof lengthBudgetContractSchema>;
@@ -159,6 +178,10 @@ function normalizeSceneCardInput(raw: unknown, index: number): ChapterSceneCard 
       "forbidden",
     ])),
     targetWordCount,
+    resistance: normalizeText(readAlias(raw, ["resistance", "primaryResistance"])) ?? "",
+    turn: normalizeText(readAlias(raw, ["turn", "keyTurn"])) ?? "",
+    emotionalShift: normalizeText(readAlias(raw, ["emotionalShift", "emotionShift"])) ?? "",
+    readerValue: normalizeText(readAlias(raw, ["readerValue", "readerReward", "value"])) ?? "",
   });
 }
 
@@ -374,9 +397,14 @@ export function normalizeChapterScenePlan(
   }
 
   const boundedScenes = normalizedScenes.slice(0, SCENE_COUNT_MAX);
+  const readerRaw = record
+    ? (record.readerExperience ?? record.reader_experience ?? record.readerContract)
+    : undefined;
+  const readerExperience = normalizeReaderExperienceContract(readerRaw);
   return chapterScenePlanSchema.parse({
     targetWordCount: budget.targetWordCount,
     lengthBudget: budget,
+    readerExperience: hasReaderExperienceContractValue(readerExperience) ? readerExperience : undefined,
     scenes: rescaleSceneTargets(budget.targetWordCount, boundedScenes),
   });
 }

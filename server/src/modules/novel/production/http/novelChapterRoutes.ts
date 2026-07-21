@@ -89,7 +89,12 @@ export function registerNovelChapterRoutes(input: RegisterNovelChapterRoutesInpu
   router.delete("/:id/chapters/:chapterId", validate({ params: chapterParamsSchema }), async (req, res, next) => {
     try {
       const { id, chapterId } = req.params as z.infer<typeof chapterParamsSchema>;
-      await novelService.deleteChapter(id, chapterId);
+      const confirmRaw = req.query.confirmBlank;
+      const confirmBlank = confirmRaw === "1"
+        || confirmRaw === "true"
+        || confirmRaw === "yes"
+        || (Array.isArray(confirmRaw) && confirmRaw.some((item) => item === "1" || item === "true"));
+      await novelService.deleteChapter(id, chapterId, { confirmBlank });
       res.status(200).json({
         success: true,
         message: "Chapter deleted.",

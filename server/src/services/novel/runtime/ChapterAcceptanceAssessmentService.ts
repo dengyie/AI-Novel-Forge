@@ -14,6 +14,10 @@ import {
   type ChapterAcceptanceAssessmentOutput,
 } from "../../../prompting/prompts/novel/chapterAcceptance.prompts";
 import { evaluateLengthBudget } from "@ai-novel/shared/types/chapterLengthControl";
+import {
+  hasReaderExperienceContractValue,
+  normalizeReaderExperienceContract,
+} from "@ai-novel/shared/types/novel/readerExperience";
 import { openConflictService } from "../../state/OpenConflictService";
 import { normalizeScore, ruleScore } from "../novelP0Utils";
 import {
@@ -39,6 +43,12 @@ export interface ChapterAcceptanceAssessmentInput {
 export interface NormalizeAssessmentOptions {
   /** 义务合同中的必须出场角色标签（含 must_on_page 标注）。 */
   requiredCharacterAppearances?: string[] | null;
+  /**
+   * R soft observability: when plan layer claimed a reader-experience contract
+   * but it is empty after normalize, tag only (never hard-block).
+   */
+  expectReaderExperience?: boolean;
+  readerExperience?: unknown;
 }
 
 export interface ChapterAcceptanceAssessmentResult {
@@ -369,12 +379,20 @@ export function normalizeAssessment(
       : status === "continue_with_risk" && reconciled.continuePolicy === "pause"
         ? "continue"
         : reconciled.continuePolicy;
+  const riskTags = Array.from(new Set(reconciled.riskTags.map((item) => item.trim()).filter(Boolean)));
+  // R soft: plan-layer reader experience missing is observable only; never raises hard repair.
+  if (options.expectReaderExperience) {
+    const reader = normalizeReaderExperienceContract(options.readerExperience);
+    if (!hasReaderExperienceContractValue(reader) && !riskTags.includes("reader_experience_missing")) {
+      riskTags.push("reader_experience_missing");
+    }
+  }
   return {
     ...reconciled,
     status,
     score,
     continuePolicy,
-    riskTags: Array.from(new Set(reconciled.riskTags.map((item) => item.trim()).filter(Boolean))),
+    riskTags,
     blockingIssues: reconciled.blockingIssues.slice(0, 5),
     repairDirectives: reconciled.repairDirectives.slice(0, 4),
     missingObligations: missingObligations.slice(0, 8),
@@ -412,7 +430,17 @@ export class ChapterAcceptanceAssessmentService {
   async assess(input: ChapterAcceptanceAssessmentInput): Promise<ChapterAcceptanceAssessmentResult> {
     const assessment = await this.invokeAssessment(input).catch(() => buildFallbackAssessment(input.content));
     const requiredCharacterAppearances = resolveRequiredCharacterAppearances(input.contextPackage);
-    const normalizeOptions: NormalizeAssessmentOptions = { requiredCharacterAppearances };
+    const scenePlan = input.contextPackage.chapterWriteContext?.scenePlan
+      ?? input.contextPackage.chapterReviewContext?.scenePlan
+      ?? null;
+    const readerExperience = scenePlan?.readerExperience;
+    // Soft tag only when scene plan exists (plan layer ran) but reader contract is empty.
+    const expectReaderExperience = Boolean(scenePlan);
+    const normalizeOptions: NormalizeAssessmentOptions = {
+      requiredCharacterAppearances,
+      expectReaderExperience,
+      readerExperience,
+    };
     const normalized = normalizeAssessment(
       assessment,
       input.content,

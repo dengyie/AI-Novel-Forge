@@ -1,6 +1,10 @@
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
 import type { AuditReport, OpenConflict, PayoffLedgerResponse } from "@ai-novel/shared/types/novel";
-import type { PayoffLedgerItem } from "@ai-novel/shared/types/payoffLedger";
+import type {
+  PayoffLedgerItem,
+  PayoffLedgerSourceRef,
+  PayoffLedgerStatus,
+} from "@ai-novel/shared/types/payoffLedger";
 import { prisma } from "../../db/prisma";
 import { runStructuredPrompt } from "../../prompting/core/promptRunner";
 import { payoffLedgerSyncPrompt } from "../../prompting/prompts/payoff/payoffLedgerSync.prompts";
@@ -19,6 +23,13 @@ import {
   sanitizePayoffLedgerSyncItem,
   serializeLedgerJson,
 } from "./payoffLedgerShared";
+import {
+  attachFixedBookContractRefIds,
+  buildActiveBookContractRefIds,
+  buildSourceSupersededRiskSignal,
+  projectBookContractMajorPayoffsText,
+  resolveSupersededBookContractLedgerKeys,
+} from "./payoffLedgerSourceLifecycle";
 import {
   createNovelChapterReferenceLookup,
   normalizePayoffLedgerPromptChapterRefs,
@@ -94,14 +105,28 @@ function normalizeConflict(row: {
   };
 }
 
-function formatMajorPayoffs(rawPlanJson: string | null | undefined): string {
+function formatMajorPayoffs(
+  rawPlanJson: string | null | undefined,
+  bookContractText?: string | null,
+): string {
   const parsed = safeParseJson<{ major_payoffs?: unknown }>(rawPlanJson, {});
   const majorPayoffs = Array.isArray(parsed.major_payoffs)
     ? parsed.major_payoffs.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
     : [];
-  return majorPayoffs.length > 0
+  const macroText = majorPayoffs.length > 0
     ? majorPayoffs.map((item, index) => `${index + 1}. ${item}`).join("\n")
-    : "无";
+    : "";
+  const contractText = String(bookContractText ?? "").trim();
+  if (macroText && contractText) {
+    return `${macroText}\n\n${contractText}`;
+  }
+  if (macroText) {
+    return macroText;
+  }
+  if (contractText) {
+    return contractText;
+  }
+  return "无";
 }
 
 export class PayoffLedgerSyncService {
@@ -192,7 +217,7 @@ export class PayoffLedgerSyncService {
 
   private async buildSyncPromptInput(novelId: string, options: PayoffLedgerSyncOptions) {
     const chapterOrder = await this.getResolvedChapterOrder(novelId, options);
-    const [novel, volumeRows, snapshot, openConflicts, recentAuditReports] = await Promise.all([
+    const [novel, volumeRows, snapshot, openConflicts, recentAuditReports, bookContract] = await Promise.all([
       prisma.novel.findUnique({
         where: { id: novelId },
         select: {
@@ -254,11 +279,23 @@ export class PayoffLedgerSyncService {
           },
         },
       }),
+      prisma.bookContract.findUnique({
+        where: { novelId },
+        select: {
+          chapter3Payoff: true,
+          chapter10Payoff: true,
+          chapter30Payoff: true,
+        },
+      }),
     ]);
 
     if (!novel) {
       throw new Error("小说不存在。");
     }
+
+    const bookContractFields = bookContract ?? null;
+    const activeBookContractRefIds = buildActiveBookContractRefIds(bookContractFields);
+    const bookContractMajorPayoffsText = projectBookContractMajorPayoffsText(bookContractFields);
 
     const activeVolume = typeof chapterOrder === "number"
       ? volumeRows.find((volume) => volume.chapters.some((chapter) => chapter.chapterOrder === chapterOrder))
@@ -333,11 +370,16 @@ export class PayoffLedgerSyncService {
     return {
       chapterOrder,
       latestSnapshotId: snapshot?.id ?? null,
+      bookContractFields,
+      activeBookContractRefIds,
       promptInput: {
         novelTitle: novel.title,
         activeVolumeSummary,
         latestChapterContext,
-        majorPayoffsText: formatMajorPayoffs(novel.storyMacroPlan?.decompositionJson),
+        majorPayoffsText: formatMajorPayoffs(
+          novel.storyMacroPlan?.decompositionJson,
+          bookContractMajorPayoffsText,
+        ),
         openPayoffsText,
         chapterPayoffRefsText,
         foreshadowStatesText,
@@ -425,7 +467,13 @@ export class PayoffLedgerSyncService {
   async syncLedger(novelId: string, options: PayoffLedgerSyncOptions = {}): Promise<PayoffLedgerResponse> {
     const existingRows = await this.loadLedgerRows(novelId);
     try {
-      const { promptInput, chapterOrder, latestSnapshotId } = await this.buildSyncPromptInput(novelId, options);
+      const {
+        promptInput,
+        chapterOrder,
+        latestSnapshotId,
+        bookContractFields,
+        activeBookContractRefIds,
+      } = await this.buildSyncPromptInput(novelId, options);
       const result = await runStructuredPrompt({
         asset: payoffLedgerSyncPrompt,
         promptInput,
@@ -454,7 +502,11 @@ export class PayoffLedgerSyncService {
           ledgerKey,
         });
       }
-      const resolvedItems = Array.from(resolvedItemsByKey.values());
+      // P2a：AI 输出缺 refId 时，按文案命中活跃 Book Contract 字段补齐固定 ref。
+      const resolvedItems = attachFixedBookContractRefIds(
+        Array.from(resolvedItemsByKey.values()),
+        bookContractFields,
+      );
       const outputByKey = new Map(resolvedItems.map((item) => [item.ledgerKey, item]));
       const chapterLookup = createNovelChapterReferenceLookup(await prisma.chapter.findMany({
         where: { novelId },
@@ -463,6 +515,21 @@ export class PayoffLedgerSyncService {
           order: true,
         },
       }));
+
+      // P2：在 AI 对账结果之上计算应退役的纯 book_contract 来源义务。
+      const existingSourceBoundItems = existingRows.map((row) => ({
+        ledgerKey: row.ledgerKey,
+        currentStatus: row.currentStatus as PayoffLedgerStatus,
+        sourceRefs: safeParseJson(row.sourceRefsJson, [] as PayoffLedgerSourceRef[]),
+      }));
+      const supersededKeys = resolveSupersededBookContractLedgerKeys({
+        existingItems: existingSourceBoundItems,
+        resolvedItems: resolvedItems.map((item) => ({
+          ledgerKey: item.ledgerKey,
+          sourceRefs: item.sourceRefs ?? [],
+        })),
+        activeBookContractRefIds,
+      });
 
       await prisma.$transaction(async (tx) => {
         for (const item of resolvedItems) {
@@ -554,10 +621,42 @@ export class PayoffLedgerSyncService {
           });
         }
 
+        // P2 lifecycle：纯 book_contract 来源义务退役为 failed + source_superseded。
+        for (const row of existingRows) {
+          if (!supersededKeys.has(row.ledgerKey)) {
+            continue;
+          }
+          const previousSignals = safeParseJson(row.riskSignalsJson, [] as Array<{
+            code: string;
+            severity: "low" | "medium" | "high" | "critical";
+            summary: string;
+            stale?: boolean;
+          }>);
+          const nextSignals = clearStaleRiskSignal(dedupeRiskSignals([
+            ...previousSignals.filter((signal) => signal.code !== "source_superseded"),
+            buildSourceSupersededRiskSignal(),
+          ]));
+          await tx.payoffLedgerItem.update({
+            where: { id: row.id },
+            data: {
+              currentStatus: "failed",
+              riskSignalsJson: serializeLedgerJson(nextSignals),
+              statusReason: row.statusReason?.trim()
+                || "Book Contract 固定来源已退役，义务退出当前正文跟踪。",
+              updatedAt: now,
+            },
+          });
+        }
+
         for (const row of existingRows) {
           // 终态行（paid_off/failed）豁免 stale-marking：终态只能由显式人工/系统动作
           // 改变（与上面的终态守卫同一模型），不该因为本轮未被 LLM 命中就刷新风险信号。
-          if (outputByKey.has(row.ledgerKey) || isTerminalPayoffStatus(row.currentStatus)) {
+          // P2 退役项本轮已写 failed，亦经 isTerminal 跳过。
+          if (
+            outputByKey.has(row.ledgerKey)
+            || isTerminalPayoffStatus(row.currentStatus)
+            || supersededKeys.has(row.ledgerKey)
+          ) {
             continue;
           }
           // 已存在的伪 ledger 项（审计问题回灌生成）直接删除，不再标 stale 残留。

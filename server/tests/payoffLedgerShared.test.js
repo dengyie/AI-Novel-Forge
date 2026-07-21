@@ -856,3 +856,21 @@ test("resolvePayoffLedgerSyncLedgerKey degenerate match rejects too-short normal
   assert.equal(resolvedKey, "wei_卧_explosion");
 });
 
+
+test("buildPayoffLedgerSummary excludes source_superseded failed from failedCount", () => {
+  const response = buildPayoffLedgerResponse([
+    createLedgerItem({
+      ledgerKey: "narrative-fail",
+      currentStatus: "failed",
+      title: "真失败",
+      riskSignals: [{ code: "payoff_failed", severity: "high", summary: "叙事失败" }],
+    }),
+    createLedgerItem({
+      ledgerKey: "retired-contract",
+      currentStatus: "failed",
+      title: "合同退役",
+      riskSignals: [{ code: "source_superseded", severity: "medium", summary: "来源退役" }],
+    }),
+  ], 10);
+  assert.equal(response.summary.failedCount, 1);
+});

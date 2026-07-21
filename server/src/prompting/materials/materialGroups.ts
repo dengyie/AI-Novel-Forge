@@ -26,6 +26,14 @@ export const NOVEL_MATERIAL_GROUPS: NovelMaterialGroupDefinition[] = [
     aliases: ["scene_plan", "structure_obligations"],
   },
   {
+    group: "reader_experience",
+    title: "读者体验合同",
+    required: false,
+    importance: "medium",
+    sourceType: "chapter",
+    requiresChapterId: true,
+  },
+  {
     group: "current_chapter",
     title: "当前章节",
     required: true,

@@ -153,52 +153,26 @@ function buildTaskSheetSemanticText(output: {
   ].join("\n"));
 }
 
-function validateAdjacentChapterBoundary(
-  output: {
-    taskSheet: string;
-    sceneCards: Array<{
-      title: string;
-      purpose: string;
-      entryState: string;
-      exitState: string;
-      mustAdvance: string[];
-      forbiddenExpansion: string[];
-    }>;
-  },
-  input: VolumeChapterDetailPromptInput,
-): {
+function validateAdjacentChapterBoundary<T extends {
   taskSheet: string;
   sceneCards: Array<{
-    key: string;
     title: string;
     purpose: string;
-    mustAdvance: string[];
-    mustPreserve: string[];
     entryState: string;
     exitState: string;
+    mustAdvance: string[];
     forbiddenExpansion: string[];
-    targetWordCount: number;
   }>;
-} {
+}>(
+  output: T,
+  input: VolumeChapterDetailPromptInput,
+): T {
   const sortedChapters = input.targetVolume.chapters
     .slice()
     .sort((left, right) => left.chapterOrder - right.chapterOrder);
   const targetIndex = sortedChapters.findIndex((chapter) => chapter.id === input.targetChapter.id);
   if (targetIndex < 0) {
-    return output as {
-      taskSheet: string;
-      sceneCards: Array<{
-        key: string;
-        title: string;
-        purpose: string;
-        mustAdvance: string[];
-        mustPreserve: string[];
-        entryState: string;
-        exitState: string;
-        forbiddenExpansion: string[];
-        targetWordCount: number;
-      }>;
-    };
+    return output;
   }
 
   const currentContractText = buildCurrentChapterContractText(input);
@@ -222,20 +196,7 @@ function validateAdjacentChapterBoundary(
     }
   }
 
-  return output as {
-    taskSheet: string;
-    sceneCards: Array<{
-      key: string;
-      title: string;
-      purpose: string;
-      mustAdvance: string[];
-      mustPreserve: string[];
-      entryState: string;
-      exitState: string;
-      forbiddenExpansion: string[];
-      targetWordCount: number;
-    }>;
-  };
+  return output;
 }
 
 function createVolumeDetailSystemPrompt(detailMode: VolumeChapterDetailPromptInput["detailMode"]): string {
@@ -263,7 +224,7 @@ function createVolumeDetailSystemPrompt(detailMode: VolumeChapterDetailPromptInp
   return [
     "你是资深网文章节编辑。",
     "当前任务是生成可直接交给正文生成器的章节执行合同。",
-    "只输出严格 JSON，且只包含 taskSheet、sceneCards 两个字段。",
+    "只输出严格 JSON，且只包含 taskSheet、sceneCards、readerExperience 三个字段。",
     "taskSheet 是给正文写作器的执行指令，优先人物选择与现场压力，禁止钉死认知。",
     "taskSheet 推荐结构（可合并为短段落，但语义必须覆盖）：",
     "【本章独占事件】一句话，可拍成现场",
@@ -275,7 +236,8 @@ function createVolumeDetailSystemPrompt(detailMode: VolumeChapterDetailPromptInp
     "降权并尽量不要写：「读者应理解…」「主题是…」「让读者明白…」等钉认知句。",
     "先判断本章叙事分型（emotion / combat / explore / transition）：情感章义务更少，优先关系与情绪兑现；战斗章可容纳更多对抗目标；探索章偏线索与发现；过渡章短促有力。",
     "taskSheet 必须是自然语言，禁止写入内部质量/失败 code（例如 payoff_missing_progress、draft_obligation_unmet、replan_required、prose_*、must_hit_now、rootCauseCode）。",
-    "sceneCards 必须是 3-8 个场景卡数组，每个场景卡都必须包含 key、title、purpose、mustAdvance、mustPreserve、entryState、exitState、forbiddenExpansion、targetWordCount。",
+    "sceneCards 必须是 3-8 个场景卡数组，每个场景卡都必须包含 key、title、purpose、mustAdvance、mustPreserve、entryState、exitState、forbiddenExpansion、targetWordCount；可选 resistance、turn、emotionalShift、readerValue。",
+    "同时输出 readerExperience 对象：readerQuestion、promisedReward、rewardLevel(setup|partial|major)、protagonistWant、primaryResistance、keyTurn、emotionalShift、informationReveal、netChange、inheritedHookResponsibilities[]、endingHook；字段均用中文短句，不可空。",
     "sceneCards 必须完整覆盖整章推进和结尾 hook，不要把整章压成一个场景。",
     "当前章节的 title、summary、purpose、exclusiveEvent、endingState、nextChapterEntryState、conflictLevel、revealLevel、mustAvoid、payoffRefs 共同组成了本章硬边界合同。taskSheet 和 sceneCards 只能执行当前章合同，不能改写或覆盖它。",
     "你必须把 chapter_neighbors 视为相邻章边界提示：上一章已经完成的关键首次事件不能在本章重写一次，下一章标题或摘要中的关键首次事件也不能提前写进本章。",
@@ -307,7 +269,7 @@ function createExecutionContractSystemPrompt(): string {
   return [
     "你是资深网文章节编辑。",
     "当前任务是一次性生成可直接交给写作器的章节执行合同。",
-    "只输出严格 JSON，必须同时包含 purpose、exclusiveEvent、endingState、nextChapterEntryState、conflictLevel、revealLevel、targetWordCount、mustAvoid、payoffRefs、taskSheet、sceneCards。",
+    "只输出严格 JSON，必须同时包含 purpose、exclusiveEvent、endingState、nextChapterEntryState、conflictLevel、revealLevel、targetWordCount、mustAvoid、payoffRefs、taskSheet、sceneCards、readerExperience。",
     "purpose 用一句话说明本章到底要推进什么，不要写成摘要复述。",
     "exclusiveEvent / endingState / nextChapterEntryState 等字段不可缺失，它们是章节的硬边界合同。",
     "taskSheet 是给正文写作器的执行指令，sceneCards 是 3-8 个场景卡的执行拆解。",

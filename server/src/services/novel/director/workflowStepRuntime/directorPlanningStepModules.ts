@@ -244,7 +244,8 @@ async function prepareDirectorNovelWorld(input: {
       getDirectorCoreStepRuntime().getBookContract(input.novelId),
     ]);
     await gateway.generateWorldFromNovelTheme(input.novelId, {
-      saveToLibrary: false,
+      // Upstream UX: auto world_setup always saves to library + binds novel.
+      saveToLibrary: true,
       provider: input.request.provider,
       model: input.request.model,
       temperature: input.request.temperature,

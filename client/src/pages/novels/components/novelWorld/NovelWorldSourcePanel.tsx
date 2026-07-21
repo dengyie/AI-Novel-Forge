@@ -61,7 +61,7 @@ function WorldSetupChoice({
 export default function NovelWorldSourcePanel(props: NovelWorldSourcePanelProps) {
   const [selectedImportWorldId, setSelectedImportWorldId] = useState(props.selectedWorldId);
   const [syncEnabled, setSyncEnabled] = useState(false);
-  const [saveGeneratedToLibrary, setSaveGeneratedToLibrary] = useState(false);
+  const [saveGeneratedToLibrary, setSaveGeneratedToLibrary] = useState(true);
   const [manualWorldTitle, setManualWorldTitle] = useState("");
   const [manualWorldSummary, setManualWorldSummary] = useState("");
   const [worldSetupMode, setWorldSetupMode] = useState<WorldSetupMode>("generate");
@@ -159,7 +159,7 @@ export default function NovelWorldSourcePanel(props: NovelWorldSourcePanelProps)
                 checked={saveGeneratedToLibrary}
                 onChange={(event) => setSaveGeneratedToLibrary(event.target.checked)}
               />
-              <span>生成后保存到世界库，方便其他小说复用。</span>
+              <span>将同时保存到世界库并与本书关联，方便其他小说复用（可取消勾选）。</span>
             </label>
             <Button
               type="button"

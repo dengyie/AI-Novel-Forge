@@ -91,8 +91,12 @@ export class NovelCoreService {
     return this.crudService.updateChapter(novelId, chapterId, input);
   }
 
-  async deleteChapter(novelId: string, chapterId: string) {
-    return this.crudService.deleteChapter(novelId, chapterId);
+  async deleteChapter(
+    novelId: string,
+    chapterId: string,
+    options?: { confirmBlank?: boolean },
+  ) {
+    return this.crudService.deleteChapter(novelId, chapterId, options);
   }
 
   async listCharacters(novelId: string) {

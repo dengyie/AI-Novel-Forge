@@ -82,8 +82,14 @@ export async function updateNovelChapter(
   return data;
 }
 
-export async function deleteNovelChapter(id: string, chapterId: string) {
-  const { data } = await apiClient.delete<ApiResponse<null>>(`/novels/${id}/chapters/${chapterId}`);
+export async function deleteNovelChapter(
+  id: string,
+  chapterId: string,
+  options?: { confirmBlank?: boolean },
+) {
+  const { data } = await apiClient.delete<ApiResponse<null>>(`/novels/${id}/chapters/${chapterId}`, {
+    params: options?.confirmBlank ? { confirmBlank: "1" } : undefined,
+  });
   return data;
 }
 

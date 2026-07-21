@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { chapterSceneCardSchema, SCENE_COUNT_MIN } from "@ai-novel/shared/types/chapterLengthControl";
+import { generatedReaderExperienceContractSchema } from "@ai-novel/shared/types/novel/readerExperience";
 import type { VolumeCountRange } from "@ai-novel/shared/types/novel";
 import { MAX_VOLUME_COUNT } from "@ai-novel/shared/types/volumePlanning";
 
@@ -370,6 +371,7 @@ function normalizeScenePlanPayload(raw: unknown): unknown {
   const normalized = normalizeObjectAlias(raw, {
     taskSheet: ["任务单", "task_sheet", "writingTask", "执行任务单"],
     sceneCards: ["scenePlan", "scenes", "scene_cards", "sceneCardList"],
+    readerExperience: ["reader_experience", "readerContract", "读者体验", "读者合同"],
   });
   if (!normalized || typeof normalized !== "object" || Array.isArray(normalized)) {
     return normalized;
@@ -666,6 +668,8 @@ export function createChapterTaskSheetSchema() {
   return z.preprocess(normalizeScenePlanPayload, z.object({
     taskSheet: z.string().trim().min(1),
     sceneCards: z.array(z.preprocess(normalizeSceneCardPayload, chapterSceneCardSchema)).min(SCENE_COUNT_MIN),
+    // 新生成严格要求读者体验合同；读旧章仍走 shared normalize 兼容路径。
+    readerExperience: generatedReaderExperienceContractSchema,
   }));
 }
 
@@ -689,6 +693,7 @@ export function createChapterExecutionContractSchema() {
       payoffRefs: z.array(z.string().trim().min(1)).default([]),
       taskSheet: z.string().trim().min(1),
       sceneCards: z.array(z.preprocess(normalizeSceneCardPayload, chapterSceneCardSchema)).min(SCENE_COUNT_MIN),
+      readerExperience: generatedReaderExperienceContractSchema,
     }),
   );
 }

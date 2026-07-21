@@ -14,6 +14,10 @@ import {
   parseChapterScenePlan,
   resolveLengthBudgetContract,
 } from "@ai-novel/shared/types/chapterLengthControl";
+import {
+  hasReaderExperienceContractValue,
+  normalizeReaderExperienceContract,
+} from "@ai-novel/shared/types/novel/readerExperience";
 import { sanitizeCreativeMustAdvanceItems } from "@ai-novel/shared/types/chapterCreativeContract";
 import { sanitizeWriterFacingTaskSheet } from "@ai-novel/shared/types/chapterTaskSheetQuality";
 import type { ReviewIssue } from "@ai-novel/shared/types/novel";
@@ -800,6 +804,33 @@ export function buildChapterWriterContextBlocks(
         writeContext.chapterMission.hookTarget ? `章末钩子：${writeContext.chapterMission.hookTarget}` : "",
       ].filter(Boolean).join("\n"),
     }),
+    (() => {
+      const reader = normalizeReaderExperienceContract(writeContext.scenePlan?.readerExperience);
+      if (!hasReaderExperienceContractValue(reader)) return null;
+      return createContextBlock({
+        id: "reader_experience",
+        group: "reader_experience",
+        priority: 97,
+        required: false,
+        allowSummary: true,
+        content: [
+          "【读者体验合同】（计划层：读者本章应得什么；用场面完成，勿点题复述）",
+          reader.readerQuestion ? `读者问题：${reader.readerQuestion}` : "",
+          reader.promisedReward ? `承诺回报：${reader.promisedReward}` : "",
+          `回报强度：${reader.rewardLevel}`,
+          reader.protagonistWant ? `主角想要：${reader.protagonistWant}` : "",
+          reader.primaryResistance ? `主要阻力：${reader.primaryResistance}` : "",
+          reader.keyTurn ? `关键转折：${reader.keyTurn}` : "",
+          reader.emotionalShift ? `情绪位移：${reader.emotionalShift}` : "",
+          reader.informationReveal ? `信息揭示：${reader.informationReveal}` : "",
+          reader.netChange ? `净变化：${reader.netChange}` : "",
+          reader.inheritedHookResponsibilities.length
+            ? `承接钩子：${reader.inheritedHookResponsibilities.join("；")}`
+            : "",
+          reader.endingHook ? `章末钩子：${reader.endingHook}` : "",
+        ].filter(Boolean).join("\n"),
+      });
+    })(),
     writeContext.previousChapterTail
       ? createContextBlock({
         id: "previous_chapter_tail",

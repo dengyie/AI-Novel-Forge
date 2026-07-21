@@ -238,3 +238,62 @@ test("evaluateLengthBudget reports under_hard band below target × 0.6", () => {
   assert.equal(underHard?.hardMinWordCount, 1680);
   assert.ok(underHard.actualWordCount < underHard.hardMinWordCount);
 });
+
+test("normalizeChapterScenePlan preserves readerExperience when present", () => {
+  const plan = normalizeChapterScenePlan({
+    targetWordCount: 3000,
+    readerExperience: {
+      readerQuestion: "主角能否翻盘？",
+      promisedReward: "小胜一次",
+      rewardLevel: "partial",
+      protagonistWant: "证明自己",
+      primaryResistance: "对手打压",
+      keyTurn: "当众反驳",
+      emotionalShift: "憋屈→痛快",
+      informationReveal: "关键证据",
+      netChange: "地位回升",
+      inheritedHookResponsibilities: [],
+      endingHook: "更大势力出手",
+    },
+    scenes: [
+      {
+        key: "s1",
+        title: "开场",
+        purpose: "铺垫",
+        entryState: "被压",
+        exitState: "试探",
+        targetWordCount: 1000,
+        mustAdvance: ["出场"],
+        mustPreserve: [],
+        forbiddenExpansion: [],
+      },
+      {
+        key: "s2",
+        title: "冲突",
+        purpose: "对抗",
+        entryState: "试探",
+        exitState: "交锋",
+        targetWordCount: 1000,
+        mustAdvance: ["冲突升级"],
+        mustPreserve: [],
+        forbiddenExpansion: [],
+      },
+      {
+        key: "s3",
+        title: "收束",
+        purpose: "兑现",
+        entryState: "交锋",
+        exitState: "小胜",
+        targetWordCount: 1000,
+        mustAdvance: ["兑现"],
+        mustPreserve: [],
+        forbiddenExpansion: [],
+      },
+    ],
+  }, 3000);
+  assert.ok(plan.readerExperience);
+  assert.equal(plan.readerExperience.readerQuestion, "主角能否翻盘？");
+  const raw = serializeChapterScenePlan(plan);
+  const again = normalizeChapterScenePlan(JSON.parse(raw), 3000);
+  assert.equal(again.readerExperience?.promisedReward, "小胜一次");
+});

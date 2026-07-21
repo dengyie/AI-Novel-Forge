@@ -820,10 +820,16 @@ export async function generateChapterTaskSheetDetail(params: {
         chapterType,
         explicitTargetWordCount: generated.output.targetWordCount,
       }) ?? baseWordCount;
-      const scenePlan = normalizeChapterScenePlan(
+      let scenePlan = normalizeChapterScenePlan(
         generated.output.sceneCards,
         resolvedTarget,
       );
+      if ((generated.output as { readerExperience?: unknown }).readerExperience) {
+        scenePlan = {
+          ...scenePlan,
+          readerExperience: (generated.output as { readerExperience?: typeof scenePlan.readerExperience }).readerExperience,
+        };
+      }
       await qualityGate.assertCanEnterExecution({
         novelId: promptInput.workspace.novelId,
         volumeId: promptInput.targetVolume.id,

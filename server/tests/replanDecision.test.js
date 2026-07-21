@@ -84,14 +84,14 @@ test("buildReplanDecision anchors overdue payoff windows around the canonical pa
     protectedSecrets: ["幕后黑手身份"],
   });
 
-  assert.equal(decision.recommended, true);
-  assert.equal(decision.action, "stop_for_replan");
+  assert.equal(decision.recommended, false);
+  assert.equal(decision.action, "continue_with_warning");
   assert.equal(decision.signal, "overdue_payoff");
   assert.equal(decision.anchorChapterOrder, 5);
-  assert.deepEqual(decision.affectedChapterOrders, [4, 5, 6]);
+  assert.deepEqual(decision.affectedChapterOrders, []);
   assert.match(decision.triggerReason, /payoff 已逾期/);
-  assert.match(decision.windowReason, /第5章为锚点/);
-  assert.match(decision.whyTheseChapters, /第4章、第5章、第6章/);
+  assert.match(decision.triggerReason, /不自动全局停机/);
+  assert.match(decision.reason, /payoff 已逾期/);
   assert.deepEqual(decision.blockingLedgerKeys, ["ledger:black-market"]);
 });
 
@@ -324,7 +324,7 @@ test("buildReplanDecision does not hard-stop overdue payoff without explicit win
   assert.deepEqual(decision.affectedChapterOrders, []);
 });
 
-test("buildReplanDecision still hard-stops overdue payoff with explicit distant deadline", () => {
+test("buildReplanDecision keeps severe distant overdue as warning-only (no hard stop)", () => {
   const decision = buildReplanDecision({
     availableChapterOrders: [48, 49, 50],
     requestedWindowSize: 3,
@@ -357,11 +357,12 @@ test("buildReplanDecision still hard-stops overdue payoff with explicit distant 
   });
 
   assert.equal(decision.signal, "overdue_payoff");
-  assert.equal(decision.recommended, true);
-  assert.equal(decision.action, "stop_for_replan");
+  assert.equal(decision.recommended, false);
+  assert.equal(decision.action, "continue_with_warning");
+  assert.deepEqual(decision.affectedChapterOrders, []);
 });
 
-test("buildReplanDecision still hard-stops overdue payoff explicitly targeted by current chapter", () => {
+test("buildReplanDecision keeps current-chapter-targeted overdue as warning-only (no hard stop)", () => {
   const decision = buildReplanDecision({
     availableChapterOrders: [48, 49, 50],
     requestedWindowSize: 3,
@@ -403,9 +404,116 @@ test("buildReplanDecision still hard-stops overdue payoff explicitly targeted by
   });
 
   assert.equal(decision.signal, "overdue_payoff");
-  assert.equal(decision.recommended, true);
-  assert.equal(decision.action, "stop_for_replan");
+  assert.equal(decision.recommended, false);
+  assert.equal(decision.action, "continue_with_warning");
   assert.equal(decision.anchorChapterOrder, 49);
+  assert.deepEqual(decision.affectedChapterOrders, []);
+});
+
+test("buildReplanDecision blocking_audit outranks overdue keys (local_patch, not swallowed)", () => {
+  const decision = buildReplanDecision({
+    availableChapterOrders: [8, 9, 10, 11],
+    requestedWindowSize: 3,
+    targetChapterOrder: 10,
+    blockingLedgerKeys: ["ledger:overdue-key"],
+    auditReports: [{
+      id: "report-blocking",
+      novelId: "novel-1",
+      chapterId: "chapter-10",
+      auditType: "plot",
+      issues: [{
+        id: "issue-high-1",
+        reportId: "report-blocking",
+        auditType: "plot",
+        severity: "high",
+        code: "plot_break",
+        description: "关键情节断裂",
+        evidence: "第10章",
+        fixSuggestion: "局部补丁",
+        status: "open",
+        createdAt: "2026-04-16T00:00:00.000Z",
+        updatedAt: "2026-04-16T00:00:00.000Z",
+      }],
+      createdAt: "2026-04-16T00:00:00.000Z",
+      updatedAt: "2026-04-16T00:00:00.000Z",
+    }],
+    snapshot: createSnapshot({
+      narrative: {
+        currentChapterOrder: 10,
+        overduePayoffs: [{
+          id: "payoff-1",
+          ledgerKey: "ledger:overdue-key",
+          title: "逾期义务",
+          summary: "仍在账本",
+          currentStatus: "overdue",
+          targetStartChapterOrder: 5,
+          targetEndChapterOrder: 7,
+          firstSeenChapterOrder: 1,
+          lastTouchedChapterOrder: 7,
+        }],
+      },
+    }),
+    ledgerSummary: {
+      totalCount: 1,
+      pendingCount: 0,
+      urgentCount: 0,
+      overdueCount: 1,
+      paidOffCount: 0,
+      failedCount: 0,
+      updatedAt: null,
+    },
+  });
+
+  assert.equal(decision.signal, "blocking_audit");
+  assert.equal(decision.action, "local_patch_plan");
+  assert.equal(decision.recommended, true);
+  assert.ok(decision.affectedChapterOrders.length > 0);
+});
+
+test("buildReplanDecision REPLAN_OVERDUE_HARD_STOP restores legacy overdue hard-stop", () => {
+  const previous = process.env.REPLAN_OVERDUE_HARD_STOP;
+  process.env.REPLAN_OVERDUE_HARD_STOP = "1";
+  try {
+    const decision = buildReplanDecision({
+      availableChapterOrders: [48, 49, 50],
+      requestedWindowSize: 3,
+      targetChapterOrder: 49,
+      snapshot: createSnapshot({
+        narrative: {
+          currentChapterOrder: 49,
+          overduePayoffs: [{
+            id: "payoff-deadline",
+            ledgerKey: "first_small_success",
+            title: "第一次小成功：复习完一门课并测试通过",
+            summary: "有明确截止章且已经严重逾期。",
+            currentStatus: "overdue",
+            targetStartChapterOrder: 12,
+            targetEndChapterOrder: 15,
+            firstSeenChapterOrder: 1,
+            lastTouchedChapterOrder: 15,
+          }],
+        },
+      }),
+      ledgerSummary: {
+        totalCount: 1,
+        pendingCount: 0,
+        urgentCount: 0,
+        overdueCount: 1,
+        paidOffCount: 0,
+        failedCount: 0,
+        updatedAt: null,
+      },
+    });
+    assert.equal(decision.signal, "overdue_payoff");
+    assert.equal(decision.recommended, true);
+    assert.equal(decision.action, "stop_for_replan");
+  } finally {
+    if (previous === undefined) {
+      delete process.env.REPLAN_OVERDUE_HARD_STOP;
+    } else {
+      process.env.REPLAN_OVERDUE_HARD_STOP = previous;
+    }
+  }
 });
 
 test("sanitizeAiReplanWindowDecision filters AI-selected windows to available chapters", () => {

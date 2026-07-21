@@ -5,6 +5,7 @@ import AppVersionBadge from "@/components/layout/AppVersionBadge";
 import DesktopBrandMark from "@/components/layout/DesktopBrandMark";
 import ProjectGithubLink from "@/components/layout/ProjectGithubLink";
 import { Button } from "@/components/ui/button";
+import LiveExecutionDialog from "@/components/liveExecution/LiveExecutionDialog";
 import {
   AUTO_DIRECTOR_MOBILE_CLASSES,
   shouldUseAutoDirectorMobileFullWidthContent,
@@ -47,6 +48,7 @@ export default function Navbar(props: NavbarProps) {
             {workspaceNavMode === "workspace" ? "项目导航" : "创作导航"}
           </Button>
         ) : null}
+        <LiveExecutionDialog compact />
         <ThemeToggle />
         <div className={useMobileAutoDirectorShell ? AUTO_DIRECTOR_MOBILE_CLASSES.navbarModelSelector : undefined}>
           <LLMSelector compact showBadge={false} showHelperText={false} />

@@ -118,7 +118,21 @@ export function pushQualityFoundationArtifacts(
       targetId: target.targetId,
       contentRef: { table: "PayoffLedgerItem", id: item.id },
       updatedAt: item.updatedAt,
-      status: item.currentStatus === "failed" ? "stale" : "active",
+      // source_superseded 合同退役：标记 superseded，勿当叙事失败 stale
+      status: (() => {
+        if (item.currentStatus !== "failed") return "active";
+        try {
+          const signals = typeof item.riskSignalsJson === "string" && item.riskSignalsJson.trim()
+            ? JSON.parse(item.riskSignalsJson) as Array<{ code?: string }>
+            : [];
+          if (Array.isArray(signals) && signals.some((s) => s?.code === "source_superseded")) {
+            return "superseded";
+          }
+        } catch {
+          // fall through
+        }
+        return "stale";
+      })(),
       contentHash: stableDirectorContentHash(compactHashParts([
         item.currentStatus,
         item.lastTouchedChapterId,

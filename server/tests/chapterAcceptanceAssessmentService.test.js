@@ -362,3 +362,28 @@ test("normalizeAssessment does not drop under-length issue when content is sever
     "under-length issue must survive when content is severely short",
   );
 });
+
+test("normalizeAssessment soft-tags missing reader experience when plan expected it", () => {
+  const content = "字".repeat(3000);
+  const normalized = normalizeAssessment(createAssessment({
+    status: "accepted",
+    continuePolicy: "continue",
+  }), content, 3000, {
+    expectReaderExperience: true,
+    readerExperience: null,
+  });
+  assert.ok(normalized.riskTags.includes("reader_experience_missing"));
+  assert.equal(normalized.status, "accepted");
+  assert.equal(normalized.blockingIssues.length, 0);
+});
+
+test("normalizeAssessment does not soft-tag reader experience when not expected", () => {
+  const content = "字".repeat(3000);
+  const normalized = normalizeAssessment(createAssessment({
+    status: "accepted",
+    continuePolicy: "continue",
+  }), content, 3000, {
+    expectReaderExperience: false,
+  });
+  assert.ok(!normalized.riskTags.includes("reader_experience_missing"));
+});

@@ -20,6 +20,13 @@ type ReplanSignal =
 
 type WindowMode = "forward" | "surrounding";
 type ReplanAction = "continue_with_warning" | "local_patch_plan" | "stop_for_replan";
+
+/** Opt-in legacy: overdue distance/current-chapter can escalate to stop_for_replan. Default off. */
+function overdueHardStopEnabled(): boolean {
+  const raw = String(process.env.REPLAN_OVERDUE_HARD_STOP ?? "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+
 const OVERDUE_PAYOFF_STOP_WINDOW = 3;
 
 export interface ReplanDecisionInput {
@@ -132,16 +139,17 @@ function resolveAnchorChapterOrder(signal: ReplanSignal, input: ReplanDecisionIn
 }
 
 function pickSignal(input: ReplanDecisionInput, blockingIssues: AuditIssue[], blockingLedgerKeys: string[]): ReplanSignal {
-  if (blockingLedgerKeys.length > 0) {
-    return "overdue_payoff";
-  }
+  // Priority: explicit replan / high audit outrank pure overdue.
+  // Overdue alone is warning-only (no hard stop); must not swallow blocking_audit → local_patch.
   if (input.nextAction === "replan") {
     return "next_action_replan";
   }
   if (blockingIssues.length > 0) {
     return "blocking_audit";
   }
-  // Urgent payoff state is a generation obligation; only overdue or audited failure should interrupt with replan.
+  if (blockingLedgerKeys.length > 0) {
+    return "overdue_payoff";
+  }
   if (input.forceRecommended) {
     return "manual_request";
   }
@@ -180,14 +188,23 @@ function resolveReplanAction(signal: ReplanSignal, input: ReplanDecisionInput): 
     return "stop_for_replan";
   }
   if (signal === "blocking_audit") {
-    const blockingKeys = collectBlockingLedgerKeys(input.blockingLedgerKeys, input.snapshot);
-    if (blockingKeys.length > 0 && (overduePayoffAffectsCurrentChapter(input) || maxOverdueDistance(input) >= OVERDUE_PAYOFF_STOP_WINDOW)) {
+    // Phase-three safety: high-priority audit stays local_patch only.
+    // Optional legacy: escalate when overdue is severe and REPLAN_OVERDUE_HARD_STOP is on.
+    if (
+      overdueHardStopEnabled()
+      && collectBlockingLedgerKeys(input.blockingLedgerKeys, input.snapshot).length > 0
+      && (overduePayoffAffectsCurrentChapter(input) || maxOverdueDistance(input) >= OVERDUE_PAYOFF_STOP_WINDOW)
+    ) {
       return "stop_for_replan";
     }
     return "local_patch_plan";
   }
   if (signal === "overdue_payoff") {
-    if (overduePayoffAffectsCurrentChapter(input) || maxOverdueDistance(input) >= OVERDUE_PAYOFF_STOP_WINDOW) {
+    // Default: overdue is warning-only (never global stop). Hard-stop only via env opt-in.
+    if (
+      overdueHardStopEnabled()
+      && (overduePayoffAffectsCurrentChapter(input) || maxOverdueDistance(input) >= OVERDUE_PAYOFF_STOP_WINDOW)
+    ) {
       return "stop_for_replan";
     }
     return "continue_with_warning";
@@ -196,9 +213,7 @@ function resolveReplanAction(signal: ReplanSignal, input: ReplanDecisionInput): 
 }
 
 function resolveWindowMode(signal: ReplanSignal, action: ReplanAction): WindowMode {
-  // When a blocking audit escalates to a full stop because a severe overdue payoff
-  // also needs handling, the overdue payoff drives the window shape: it needs
-  // surrounding context (setup + payoff + aftermath), not a forward-only patch.
+  // Legacy hard-stop path may still escalate blocking_audit+overdue to stop; use surrounding window then.
   if (signal === "blocking_audit" && action === "stop_for_replan") {
     return "surrounding";
   }
@@ -297,8 +312,8 @@ function buildTriggerReason(signal: ReplanSignal, input: ReplanDecisionInput, bl
   if (signal === "overdue_payoff") {
     const titles = uniqueStrings((input.snapshot?.narrative.overduePayoffs ?? []).map((item) => item.title)).slice(0, 2);
     return titles.length > 0
-      ? `canonical 状态显示 payoff 已逾期：${titles.join("；")}。`
-      : `canonical 状态显示存在逾期 payoff，需要重排后续章节。`;
+      ? `canonical 状态显示 payoff 已逾期：${titles.join("；")}。记录警告并继续执行，不自动全局停机。`
+      : `canonical 状态显示存在逾期 payoff。记录警告并继续执行，不自动全局停机。`;
   }
   if (signal === "next_action_replan") {
     return `状态驱动决策已切到 replan，说明当前章节目标与现有计划窗口失配。`;
@@ -370,12 +385,14 @@ export function buildReplanDecision(input: ReplanDecisionInput): ReplanDecision 
   const blockingLedgerKeys = collectBlockingLedgerKeys(input.blockingLedgerKeys, input.snapshot);
   const signal = pickSignal(input, blockingIssues, blockingLedgerKeys);
   const action = resolveReplanAction(signal, input);
+  // recommended = enter replan action chain (local_patch or stop). Pure overdue warning is NOT recommended.
   const recommended = action !== "continue_with_warning"
     && (
       input.forceRecommended
-      || signal === "overdue_payoff"
       || signal === "next_action_replan"
       || signal === "blocking_audit"
+      || signal === "manual_request"
+      || (signal === "overdue_payoff" && action === "stop_for_replan")
     );
   const anchorChapterOrder = resolveAnchorChapterOrder(signal, input);
   const requestedWindowSize = input.requestedWindowSize ?? resolveDefaultWindowSize();
@@ -396,7 +413,10 @@ export function buildReplanDecision(input: ReplanDecisionInput): ReplanDecision 
   );
   return {
     recommended,
-    reason: recommended ? triggerReason : "当前没有阻塞性状态信号，无需重规划后续章节。",
+    // Overdue warning-only still surfaces triggerReason so UI/logs show the debt without hard-stop.
+    reason: recommended || signal === "overdue_payoff"
+      ? triggerReason
+      : "当前没有阻塞性状态信号，无需重规划后续章节。",
     blockingIssueIds,
     blockingLedgerKeys,
     affectedChapterOrders,

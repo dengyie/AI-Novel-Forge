@@ -6,6 +6,7 @@ import type {
   PayoffLedgerStatus,
   PayoffLedgerSummary,
 } from "@ai-novel/shared/types/payoffLedger";
+import { isSourceSupersededFailedItem } from "./payoffLedgerSourceLifecycle";
 
 type PayoffLedgerRowLike = {
   id: string;
@@ -596,7 +597,10 @@ export function buildPayoffLedgerSummary(
     urgentCount: classified.urgentItems.length,
     overdueCount: classified.overdueItems.length,
     paidOffCount: classified.paidOffItems.length,
-    failedCount: items.filter((item) => item.currentStatus === "failed").length,
+    // source_superseded 退役项不计入叙事/质量 failedCount
+    failedCount: items.filter((item) => (
+      item.currentStatus === "failed" && !isSourceSupersededFailedItem(item)
+    )).length,
     setupCount: items.filter((item) => item.currentStatus === "setup").length,
     hintedCount: items.filter((item) => item.currentStatus === "hinted").length,
     pendingPayoffCount: items.filter((item) => item.currentStatus === "pending_payoff").length,
