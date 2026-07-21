@@ -176,15 +176,61 @@ export function buildDynamicCharacterGuidance(
   };
 }
 
+const MAX_PARTICIPANTS = 6;
+
+export interface ParticipantsSelection {
+  participants: GenerationContextPackage["characterRoster"];
+  /** true 表示结果来自「与本章相关」的选择链；false 表示盲兜底（roster 前4），不可当作在场信号。 */
+  isRelevanceBased: boolean;
+}
+
 export function buildParticipants(
   contextPackage: GenerationContextPackage,
   characterBehaviorGuides: ChapterWriteContext["characterBehaviorGuides"] = [],
+  requiredCharacterIds: ReadonlySet<string> = new Set(),
 ): GenerationContextPackage["characterRoster"] {
+  return selectParticipants(contextPackage, characterBehaviorGuides, requiredCharacterIds).participants;
+}
+
+export function selectParticipants(
+  contextPackage: GenerationContextPackage,
+  characterBehaviorGuides: ChapterWriteContext["characterBehaviorGuides"] = [],
+  requiredCharacterIds: ReadonlySet<string> = new Set(),
+): ParticipantsSelection {
   const rosterById = new Map(contextPackage.characterRoster.map((character) => [character.id, character]));
   const participantNames = new Set(contextPackage.plan?.participants ?? []);
   const conflictCharacterIds = new Set(
     contextPackage.openConflicts.flatMap((conflict) => conflict.affectedCharacterIds ?? []),
   );
+  // 必须出场（must_on_page）角色不被 slice(0,6) 截断：先收集 required，
+  // 再用其余选中项填满剩余名额。required 超过 6 人时全部保留（义务优先于窗口）。
+  const selectWithRequired = (
+    ordered: Array<GenerationContextPackage["characterRoster"][number] | undefined>,
+  ): GenerationContextPackage["characterRoster"] => {
+    const deduped: GenerationContextPackage["characterRoster"] = [];
+    const seen = new Set<string>();
+    for (const character of ordered) {
+      if (!character || seen.has(character.id)) {
+        continue;
+      }
+      seen.add(character.id);
+      deduped.push(character);
+    }
+    const required = deduped.filter((character) => requiredCharacterIds.has(character.id));
+    const optional = deduped.filter((character) => !requiredCharacterIds.has(character.id));
+    // required 之外 roster 里若还有 required 角色（guide 过滤未选中但义务要求出场），也要补上
+    for (const id of requiredCharacterIds) {
+      if (seen.has(id)) {
+        continue;
+      }
+      const character = rosterById.get(id);
+      if (character) {
+        seen.add(id);
+        required.push(character);
+      }
+    }
+    return [...required, ...optional.slice(0, Math.max(0, MAX_PARTICIPANTS - required.length))];
+  };
   if (characterBehaviorGuides.length > 0) {
     const selected = characterBehaviorGuides
       .filter((guide) => (
@@ -193,19 +239,23 @@ export function buildParticipants(
         || guide.relationStageLabels.length > 0
         || participantNames.has(guide.name)
         || conflictCharacterIds.has(guide.characterId)
+        || requiredCharacterIds.has(guide.characterId)
       ))
-      .map((guide) => rosterById.get(guide.characterId))
-      .filter((character): character is NonNullable<typeof character> => Boolean(character));
-    if (selected.length > 0) {
-      return selected.slice(0, 6);
+      .map((guide) => rosterById.get(guide.characterId));
+    if (selected.some(Boolean) || requiredCharacterIds.size > 0) {
+      return { participants: selectWithRequired(selected), isRelevanceBased: true };
     }
   }
 
   const selected = contextPackage.characterRoster.filter((character) => (
-    participantNames.has(character.name) || conflictCharacterIds.has(character.id)
+    participantNames.has(character.name)
+    || conflictCharacterIds.has(character.id)
+    || requiredCharacterIds.has(character.id)
   ));
-  if (selected.length > 0) {
-    return selected.slice(0, 6);
+  if (selected.length > 0 || requiredCharacterIds.size > 0) {
+    return { participants: selectWithRequired(selected), isRelevanceBased: true };
   }
-  return contextPackage.characterRoster.slice(0, 4);
+  // 盲兜底：roster 前4仅供 participant_subset 展示，不代表本章在场，
+  // 调用方不得据此把对应硬事实当作「在场角色硬事实」注入。
+  return { participants: contextPackage.characterRoster.slice(0, 4), isRelevanceBased: false };
 }

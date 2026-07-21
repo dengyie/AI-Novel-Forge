@@ -21,7 +21,7 @@ import type { StoryMacroPlan } from "@ai-novel/shared/types/storyMacro";
 import { createContextBlock } from "../../core/contextBudget";
 import type { PromptContextBlock } from "../../core/promptTypes";
 import { buildWriterStyleContractText } from "../../../services/styleEngine/styleContractText";
-import { buildDynamicCharacterGuidance, buildParticipants } from "./chapterLayeredContextCharacters";
+import { buildDynamicCharacterGuidance, selectParticipants } from "./chapterLayeredContextCharacters";
 import {
   buildCharacterGuidanceText,
   buildLedgerItemLine,
@@ -43,11 +43,13 @@ import {
   toListBlock,
 } from "./chapterLayeredContextShared";
 import {
+  isMustOnPageCharacter,
   selectMustOnPageAppearanceLabels,
   selectOffscreenDeferLabels,
 } from "./characterAppearanceObligation";
 import { RUNTIME_PROMPT_BUDGET_PROFILES } from "./promptBudgetProfiles";
 import { timelinePromptAdapter } from "../../../modules/timeline/timeline-prompt-adapter";
+import { clipPreviousChapterSummary } from "../../../services/novel/runtime/runtimeContextBlocks";
 
 export const WRITER_FORBIDDEN_GROUPS = [
   "full_outline",
@@ -270,11 +272,30 @@ export function buildChapterWriteContext(input: {
   contextPackage: GenerationContextPackage;
 }): ChapterWriteContext {
   const dynamicCharacterGuidance = buildDynamicCharacterGuidance(input.contextPackage);
-  const participants = buildParticipants(input.contextPackage, dynamicCharacterGuidance.characterBehaviorGuides);
+  // must_on_page 义务角色集：participants 与 hard facts 两条链共用，
+  // 保证义务角色不被任一 slice 截断。
+  const requiredCharacterIds = new Set(
+    dynamicCharacterGuidance.characterBehaviorGuides
+      .filter((guide) => isMustOnPageCharacter(guide, input.contextPackage.chapter.order))
+      .map((guide) => guide.characterId),
+  );
+  const participantsSelection = selectParticipants(
+    input.contextPackage,
+    dynamicCharacterGuidance.characterBehaviorGuides,
+    requiredCharacterIds,
+  );
+  const participants = participantsSelection.participants;
   const characterHardFacts = selectCharacterHardFactsForWriter({
     hardFacts: input.contextPackage.characterHardFacts ?? [],
-    participants,
+    // 盲兜底（roster 前4）不是在场信号：此时 participants 仅供 participant_subset 展示，
+    // 硬事实必选集只保留 must_on_page required（通常也为空 → 渲染「无相关硬事实」）。
+    participants: participantsSelection.isRelevanceBased ? participants : [],
     characterBehaviorGuides: dynamicCharacterGuidance.characterBehaviorGuides,
+    requiredCharacterIds,
+    planParticipantNames: new Set(input.contextPackage.plan?.participants ?? []),
+    conflictCharacterIds: new Set(
+      input.contextPackage.openConflicts.flatMap((conflict) => conflict.affectedCharacterIds ?? []),
+    ),
     currentChapterOrder: input.contextPackage.chapter.order,
   });
   const scenePlan = parseChapterScenePlan(input.contextPackage.chapter.sceneCards, {
@@ -316,7 +337,12 @@ export function buildChapterWriteContext(input: {
     ledgerSummary: input.contextPackage.ledgerSummary ?? null,
     timelineContext: input.contextPackage.timelineContext ?? null,
     characterResourceContext: input.contextPackage.characterResourceContext ?? null,
-    recentChapterSummaries: takeUnique(input.contextPackage.previousChaptersSummary.slice(0, 3), 3),
+    // 单条章节摘要做字符截断（240）：入口 buildPreviousChaptersSummary 已截断一次，
+    // 这里再截一次兜底（writeContext 也可由不经过该入口的 contextPackage 构建）。
+    recentChapterSummaries: takeUnique(
+      input.contextPackage.previousChaptersSummary.slice(0, 3).map(clipPreviousChapterSummary),
+      3,
+    ),
     previousChapterTail: compactText(input.contextPackage.previousChapterTail) || null,
     priorQualityFeedback: Array.isArray(input.contextPackage.priorQualityFeedback)
       ? input.contextPackage.priorQualityFeedback
@@ -420,21 +446,15 @@ export function buildChapterReviewContext(
   writeContext = normalizeChapterWriteContext(writeContext);
   return {
     ...writeContext,
+    // 仅保留 writer blocks 未覆盖的增量条目：mustAdvance/mustPreserve、obligationContract
+    // 各项、payoffDirectives、boundary doNotCross、hookTarget、resource 明细均已在
+    // chapter_mission / obligation_contract / payoff_directives / chapter_boundary /
+    // character_resource_context block 中原样渲染，这里不再重复（review prompt token 预算）。
+    // 保留：ledger 三项（payoff_ledger block 仅 full 模式注入，review 看不到）、
+    // state targetConflicts 与 volumeMission 的审核视角重述。
     structureObligations: takeUnique([
-      ...writeContext.chapterMission.mustAdvance,
-      ...writeContext.chapterMission.mustPreserve,
-      ...writeContext.obligationContract.mustHitNow.map((item) => `本章核心结果（须在戏里成立）: ${item}`),
-      ...writeContext.obligationContract.requiredCharacterAppearances.map((item) => `须在场上的角色: ${item}`),
-      ...writeContext.obligationContract.requiredGoalChanges.map((item) => `本章目标变化: ${item}`),
-      ...writeContext.payoffDirectives.map((item) => `payoff directive: ${item.operation} ${item.title}${item.forbiddenReveal ? ` / protected: ${item.forbiddenReveal}` : ""}`),
       ...(writeContext.chapterStateGoal?.targetConflicts ?? []).map((item) => `state conflict: ${item}`),
-      ...(writeContext.chapterBoundary?.doNotCross ?? []).map((item) => `boundary do-not-cross: ${item}`),
-      writeContext.chapterMission.hookTarget ? `hook target: ${writeContext.chapterMission.hookTarget}` : "",
       writeContext.volumeWindow?.missionSummary ? `volume mission: ${writeContext.volumeWindow.missionSummary}` : "",
-      ...(writeContext.characterResourceContext?.setupNeededItems ?? []).map((item) => `resource setup needed: ${item.name} / ${item.summary}`),
-      ...(writeContext.characterResourceContext?.blockedItems ?? []).map((item) => `resource unavailable: ${item.name} is ${item.status}; do not use it without repair setup`),
-      ...(writeContext.characterResourceContext?.highRiskCommittedItems ?? []).map((item) => `committed high-risk resource: ${item.name} / ${item.summary}; use cautiously`),
-      ...(writeContext.characterResourceContext?.pendingProposalItems ?? []).map((item) => `unconfirmed resource proposal: ${item.summary}; do not treat as committed fact`),
       ...writeContext.ledgerPendingItems.map((item) => buildLedgerItemLine(item, "pending payoff")),
       ...writeContext.ledgerUrgentItems.map((item) => buildLedgerItemLine(item, "urgent payoff")),
       ...writeContext.ledgerOverdueItems.map((item) => buildLedgerItemLine(item, "overdue payoff")),
@@ -458,20 +478,14 @@ export function buildChapterRepairContext(input: {
       evidence: compactText(issue.evidence),
       fixSuggestion: compactText(issue.fixSuggestion),
     })),
+    // 同 review：仅保留 writer blocks 未覆盖的增量（ledger 三项 + state targetConflicts
+    // + volumeMission 重述）；mustAdvance/obligationContract/payoffDirectives/boundary/
+    // resource 明细已由 repair 模式的 writer blocks 原样渲染，不再重复。
     structureObligations: takeUnique([
-      ...writeContext.chapterMission.mustAdvance,
-      ...writeContext.chapterMission.mustPreserve,
-      ...writeContext.obligationContract.mustHitNow.map((item) => `本章核心结果（须在戏里成立）: ${item}`),
-      ...writeContext.obligationContract.requiredCharacterAppearances.map((item) => `须在场上的角色: ${item}`),
-      ...writeContext.obligationContract.requiredGoalChanges.map((item) => `本章目标变化: ${item}`),
-      ...writeContext.payoffDirectives.map((item) => `payoff directive: ${item.operation} ${item.title}${item.forbiddenReveal ? ` / protected: ${item.forbiddenReveal}` : ""}`),
       ...(writeContext.chapterStateGoal?.targetConflicts ?? []).map((item) => `state conflict: ${item}`),
-      ...(writeContext.chapterBoundary?.doNotCross ?? []).map((item) => `boundary do-not-cross: ${item}`),
       writeContext.volumeWindow?.missionSummary
         ? `volume mission: ${writeContext.volumeWindow.missionSummary}`
         : "",
-      ...(writeContext.characterResourceContext?.setupNeededItems ?? []).map((item) => `resource setup needed: ${item.name} / ${item.summary}`),
-      ...(writeContext.characterResourceContext?.blockedItems ?? []).map((item) => `resource unavailable: ${item.name} is ${item.status}; patch locally before use`),
       ...writeContext.ledgerPendingItems.map((item) => buildLedgerItemLine(item, "pending payoff")),
       ...writeContext.ledgerUrgentItems.map((item) => buildLedgerItemLine(item, "urgent payoff")),
       ...writeContext.ledgerOverdueItems.map((item) => buildLedgerItemLine(item, "overdue payoff")),
@@ -540,13 +554,33 @@ function hasCharacterResourcePressure(writeContext: ChapterWriteContext): boolea
     || context.riskSignals.length > 0;
 }
 
+const MAX_CHARACTER_HARD_FACTS = 8;
+
 function selectCharacterHardFactsForWriter(input: {
   hardFacts: ChapterWriteContext["characterHardFacts"];
   participants: ChapterWriteContext["participants"];
   characterBehaviorGuides: ChapterWriteContext["characterBehaviorGuides"];
+  requiredCharacterIds: ReadonlySet<string>;
+  planParticipantNames: ReadonlySet<string>;
+  conflictCharacterIds: ReadonlySet<string>;
   currentChapterOrder: number;
 }): ChapterWriteContext["characterHardFacts"] {
-  const selectedIds = new Set(input.participants.map((character) => character.id));
+  // 必选集 = must_on_page(required) ∪ 本章在场 participants：不截断。
+  // 之前 participants(6) 与 hardFacts(8) 两条链独立截断，一章涉及 >6 个有硬事实的
+  // 在场角色时，后半角色的硬事实会被静默裁掉。
+  const mustIncludeIds = new Set(input.participants.map((character) => character.id));
+  for (const id of input.requiredCharacterIds) {
+    mustIncludeIds.add(id);
+  }
+  const mustInclude = input.hardFacts.filter((fact) => mustIncludeIds.has(fact.characterId));
+  if (mustInclude.length >= MAX_CHARACTER_HARD_FACTS) {
+    return mustInclude;
+  }
+  // 剩余名额按 guide 打分序（characterBehaviorGuides 已按分数降序）填充；
+  // 准入口径与 participants 相关链对齐：plan 在场 / 冲突涉及的角色优先于纯简介角色，
+  // 避免 6 人窗口外的 plan 在场角色硬事实被无关角色挤掉。
+  const guideRank = new Map(input.characterBehaviorGuides.map((guide, index) => [guide.characterId, index]));
+  const selectedIds = new Set<string>();
   for (const guide of input.characterBehaviorGuides) {
     if (
       guide.shouldPreferAppearance
@@ -554,12 +588,23 @@ function selectCharacterHardFactsForWriter(input: {
       || guide.absenceRisk === "high"
       || guide.absenceRisk === "warn"
       || guide.relationStageLabels.length > 0
+      || input.planParticipantNames.has(guide.name)
+      || input.conflictCharacterIds.has(guide.characterId)
     ) {
       selectedIds.add(guide.characterId);
     }
   }
-  const selected = input.hardFacts.filter((fact) => selectedIds.has(fact.characterId));
-  return selected.length > 0 ? selected.slice(0, 8) : input.hardFacts.slice(0, 4);
+  const fillers = input.hardFacts
+    .filter((fact) => !mustIncludeIds.has(fact.characterId) && selectedIds.has(fact.characterId))
+    .sort((left, right) => {
+      const leftRank = guideRank.get(left.characterId) ?? Number.MAX_SAFE_INTEGER;
+      const rightRank = guideRank.get(right.characterId) ?? Number.MAX_SAFE_INTEGER;
+      return leftRank - rightRank;
+    });
+  const selected = [...mustInclude, ...fillers.slice(0, MAX_CHARACTER_HARD_FACTS - mustInclude.length)];
+  // guides 全不命中且必选集为空时返回空：渲染层输出「无相关硬事实」，
+  // 不再 fallback 注入与本章无关的 roster 前4条。
+  return selected;
 }
 
 function buildCharacterHardFactsText(writeContext: ChapterWriteContext): string {
@@ -567,7 +612,7 @@ function buildCharacterHardFactsText(writeContext: ChapterWriteContext): string 
   if (hardFacts.length === 0) {
     return [
       "【角色硬事实】",
-      "当前没有已登记的角色硬事实；不得凭空改写角色阵营、身份、境界、所在地或行动可用性。",
+      "本章无相关角色硬事实（未登记或与本章在场角色无关）；不得凭空改写角色阵营、身份、境界、所在地或行动可用性。",
       "如章节任务没有明确要求，不要新增不可逆角色状态。",
     ].join("\n");
   }
@@ -579,7 +624,9 @@ function buildCharacterHardFactsText(writeContext: ChapterWriteContext): string 
     hasPendingReviewFields
       ? "标记为待确认的当前状态/当前目标只作参考；如与最新剧情冲突，可按合理逻辑调整。"
       : "",
-    ...hardFacts.slice(0, 8).map((fact) => {
+    // 选择层已按「必选不截 + 名额按 guide 打分填充」定稿，渲染层不再二次 slice，
+    // 避免 must_on_page ∪ participants 并集超过 8 人时义务角色硬事实被静默裁掉。
+    ...hardFacts.map((fact) => {
       const pendingReviewFields = new Set(fact.pendingReviewFields ?? []);
       const parts = takeUnique([
         fact.role ? `角色定位=${fact.role}` : "",

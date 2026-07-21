@@ -10,6 +10,9 @@ const {
   buildChapterReviewContextBlocks,
   buildChapterRepairContextBlocks,
 } = require("../dist/prompting/prompts/novel/chapterLayeredContext.js");
+const {
+  buildPreviousChaptersSummary,
+} = require("../dist/services/novel/runtime/runtimeContextBlocks.js");
 
 function createContextPackage() {
   const now = new Date().toISOString();
@@ -693,14 +696,17 @@ test("chapter layered contexts carry volume mission, character duties and repair
   assert.equal(writeContext.payoffDirectives[0].operation, "pressure");
   assert.ok(writeContext.chapterBoundary.protectedReveals.includes("Hidden mastermind identity"));
   assert.ok(writeContext.chapterBoundary.doNotCross.some((item) => item.includes("不要提前揭露幕后黑手")));
+  // structure_obligations 仅保留 writer blocks 未覆盖的增量（ledger 三项 + state conflict + volume mission）；
+  // payoff directive / resource 明细 / mustAdvance / obligationContract 各项已由
+  // payoff_directives / character_resource_context / chapter_mission / obligation_contract block 渲染，不再重复。
   assert.ok(reviewContext.structureObligations.includes("volume mission: 建立压迫源并完成第一次反压"));
-  assert.ok(reviewContext.structureObligations.some((item) => item.includes("payoff directive: pressure First payoff")));
   assert.ok(reviewContext.structureObligations.some((item) => item.includes("pending payoff: 女二情报钥匙")));
   assert.ok(reviewContext.structureObligations.some((item) => item.includes("urgent payoff: 黑市账户异常")));
   assert.ok(reviewContext.structureObligations.some((item) => item.includes("overdue payoff: 第一次反压收益")));
-  assert.ok(reviewContext.structureObligations.some((item) => item.includes("resource setup needed: 女二暗账副本")));
-  assert.ok(reviewContext.structureObligations.some((item) => item.includes("resource unavailable: 旧通行证")));
-  assert.ok(reviewContext.structureObligations.some((item) => item.includes("unconfirmed resource proposal: 女二暗账副本可能已经交给主角")));
+  assert.ok(!reviewContext.structureObligations.some((item) => item.includes("payoff directive: pressure First payoff")));
+  assert.ok(!reviewContext.structureObligations.some((item) => item.includes("resource setup needed: 女二暗账副本")));
+  assert.ok(!reviewContext.structureObligations.some((item) => item.includes("resource unavailable: 旧通行证")));
+  assert.ok(!reviewContext.structureObligations.some((item) => item.includes("unconfirmed resource proposal: 女二暗账副本可能已经交给主角")));
   assert.ok(!reviewContext.structureObligations.some((item) => item.includes("resource needs confirmation")));
   assert.ok(repairContext.allowedEditBoundaries.some((item) => item.includes("Pending character candidates remain read-only")));
   assert.ok(repairContext.allowedEditBoundaries.some((item) => item.includes("女二")));
@@ -720,7 +726,7 @@ test("chapter layered contexts carry volume mission, character duties and repair
   )));
   assert.ok(writerBlocks.some((block) => (
     block.id === "chapter_mission"
-    && /原始任务单/.test(block.content)
+    && /章节任务单/.test(block.content)
     && /维修通道钥匙/.test(block.content)
   )));
   assert.ok(writerBlocks.some((block) => (
@@ -1035,4 +1041,126 @@ test("mid-book style_contract does not append open-chapter pronoun hint when ord
   assert.match(styleBlock.content, /保持高压反压的叙事手感/);
   assert.doesNotMatch(styleBlock.content, /【开篇声线】/);
   assert.doesNotMatch(styleBlock.content, /开篇忌连续句首他\/她/);
+});
+
+test("chapter hard facts keep must-on-page + participants beyond slice windows", () => {
+  const contextPackage = createContextPackage();
+  // 扩编：roster 加到 8 人且都有硬事实，其中 char-2(女二) 为 must_on_page；
+  // 其余 7 人通过 plan.participants 占位，验证 required+participants 并集不被旧 slice 截断。
+  const extraIds = ["char-3", "char-4", "char-5", "char-6", "char-7", "char-8"];
+  for (const id of extraIds) {
+    const name = `配角${id}`;
+    contextPackage.characterRoster.push({
+      id,
+      name,
+      role: "配角",
+      personality: "沉稳",
+      identityLabel: null,
+      factionLabel: "主角方",
+      powerLevel: null,
+      currentState: "待命",
+      currentGoal: "支援主角",
+      prohibitions: [],
+    });
+    contextPackage.characterHardFacts.push({
+      characterId: id,
+      name,
+      role: "配角",
+      identityLabel: null,
+      factionLabel: "主角方",
+      stanceLabel: null,
+      powerLevel: null,
+      realm: null,
+      currentLocation: "外城",
+      availability: "可出场",
+      currentState: "待命",
+      currentGoal: "支援主角",
+      prohibitions: [],
+    });
+    contextPackage.characterDynamics.characters.push({
+      characterId: id,
+      name,
+      role: "配角",
+      castRole: "support",
+      currentState: "待命",
+      currentGoal: "支援主角",
+      volumeRoleLabel: null,
+      volumeResponsibility: null,
+      isCoreInVolume: false,
+      plannedChapterOrders: [],
+      appearanceCount: 1,
+      lastAppearanceChapterOrder: 4,
+      absenceSpan: 0,
+      absenceRisk: "none",
+      factionLabel: "主角方",
+      stanceLabel: null,
+    });
+  }
+  contextPackage.plan.participants = ["主角", "女二", ...extraIds.map((id) => `配角${id}`)];
+
+  const writeContext = buildChapterWriteContext({
+    bookContract: contextPackage.bookContract,
+    macroConstraints: contextPackage.macroConstraints,
+    volumeWindow: contextPackage.volumeWindow,
+    contextPackage,
+  });
+
+  // must_on_page 女二 + plan 在场 8 人全部保留硬事实（旧逻辑 slice(0,8) 会裁掉排在后面的在场角色）
+  const hardFactIds = new Set(writeContext.characterHardFacts.map((fact) => fact.characterId));
+  assert.ok(hardFactIds.has("char-2"));
+  for (const id of ["char-1", "char-3", "char-4", "char-5", "char-6", "char-7", "char-8"]) {
+    assert.ok(hardFactIds.has(id), `expected hard fact for ${id}`);
+  }
+  // participants 包含 must_on_page 女二，且不被 6 人窗口截掉义务角色
+  assert.ok(writeContext.participants.some((item) => item.id === "char-2"));
+});
+
+test("chapter hard facts empty selection renders 无相关硬事实 instead of roster fallback", () => {
+  const contextPackage = createContextPackage();
+  // guides 全不命中：清空 dynamics 与 plan participants / conflicts
+  contextPackage.characterDynamics = null;
+  contextPackage.plan.participants = [];
+  contextPackage.openConflicts = [];
+
+  const writeContext = buildChapterWriteContext({
+    bookContract: contextPackage.bookContract,
+    macroConstraints: contextPackage.macroConstraints,
+    volumeWindow: contextPackage.volumeWindow,
+    contextPackage,
+  });
+  // participants fallback 仍是 roster 前4（人物简介用），但硬事实不得注入与本章无关的 roster 前4
+  assert.equal(writeContext.characterHardFacts.length, 0);
+
+  const writerBlocks = buildChapterWriterContextBlocks(writeContext);
+  const hardFactsBlock = writerBlocks.find((block) => block.id === "character_hard_facts");
+  assert.ok(hardFactsBlock);
+  assert.match(hardFactsBlock.content, /本章无相关角色硬事实/);
+  assert.doesNotMatch(hardFactsBlock.content, /被压制的调查者/);
+});
+
+test("previous chapters summary clips each entry to 240 chars", () => {
+  const longSummary = "很长的章节摘要".repeat(100);
+  const fromRequest = buildPreviousChaptersSummary([longSummary], []);
+  assert.equal(fromRequest.length, 1);
+  assert.ok(fromRequest[0].length <= 241);
+  assert.ok(fromRequest[0].endsWith("…"));
+
+  const fromSummaries = buildPreviousChaptersSummary(undefined, [
+    { chapter: { order: 3, title: "陷阱" }, summary: longSummary },
+  ]);
+  assert.equal(fromSummaries.length, 1);
+  assert.ok(fromSummaries[0].startsWith("第3章《陷阱》"));
+  assert.ok(fromSummaries[0].length <= 241);
+
+  // writeContext 注入层同样截断（即使 contextPackage 未经过入口函数）
+  const contextPackage = createContextPackage();
+  contextPackage.previousChaptersSummary = [longSummary];
+  const writeContext = buildChapterWriteContext({
+    bookContract: contextPackage.bookContract,
+    macroConstraints: contextPackage.macroConstraints,
+    volumeWindow: contextPackage.volumeWindow,
+    contextPackage,
+  });
+  assert.equal(writeContext.recentChapterSummaries.length, 1);
+  assert.ok(writeContext.recentChapterSummaries[0].length <= 241);
 });
