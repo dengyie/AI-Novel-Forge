@@ -10,6 +10,12 @@ interface UseSSEOptions {
   onRunStatus?: (payload: { runId: string; status: string; phase?: "streaming" | "finalizing" | "completed"; message?: string }) => void;
 }
 
+/**
+ * 流静默看门狗：服务端 ping 间隔约 15s，若远超该间隔（默认 120s）没有任何帧
+ * （包括 ping），视为连接静默死亡——否则 isStreaming 会永远停在 true，UI 永久“生成中”。
+ */
+const SSE_WATCHDOG_TIMEOUT_MS = 120_000;
+
 export function useSSE(options?: UseSSEOptions) {
   const [content, setContent] = useState("");
   const [reasoning, setReasoning] = useState("");
@@ -103,6 +109,19 @@ export function useSSE(options?: UseSSEOptions) {
 
       const controller = new AbortController();
       controllerRef.current = controller;
+      let watchdogTimedOut = false;
+      let watchdogTimer: ReturnType<typeof setTimeout> | null = null;
+      const armWatchdog = () => {
+        if (watchdogTimer) {
+          clearTimeout(watchdogTimer);
+        }
+        watchdogTimer = setTimeout(() => {
+          watchdogTimedOut = true;
+          setError("生成响应超时（连接静默中断），请重试。");
+          setIsStreaming(false);
+          controller.abort();
+        }, SSE_WATCHDOG_TIMEOUT_MS);
+      };
 
       try {
         const response = await fetch(url.startsWith("http") ? url : `${API_BASE_URL}${url}`, {
@@ -122,12 +141,15 @@ export function useSSE(options?: UseSSEOptions) {
         const reader = response.body.getReader();
         const decoder = new TextDecoder("utf-8");
         let buffer = "";
+        armWatchdog();
 
         while (true) {
           const { value, done } = await reader.read();
           if (done) {
             break;
           }
+          // 收到任意字节（含 ping 帧）都算活跃，重置看门狗
+          armWatchdog();
 
           buffer += decoder.decode(value, { stream: true });
           const frames = buffer.split("\n\n");
@@ -152,8 +174,15 @@ export function useSSE(options?: UseSSEOptions) {
         if ((streamError as Error).name !== "AbortError") {
           setError(streamError instanceof Error ? streamError.message : "流式请求失败。");
           setIsStreaming(false);
+        } else if (watchdogTimedOut) {
+          // 看门狗已置过错误态，这里只需确保 streaming 标志落下
+          setIsStreaming(false);
         }
       } finally {
+        if (watchdogTimer) {
+          clearTimeout(watchdogTimer);
+          watchdogTimer = null;
+        }
         controllerRef.current = null;
       }
     },

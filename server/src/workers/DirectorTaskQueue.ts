@@ -39,6 +39,11 @@ class ResourceGate {
       next();
     }
   }
+
+  /** 无持有者且无排队者——可安全从外层 Map 惰性回收，避免按 novelId 无界累积。 */
+  isIdle(): boolean {
+    return this.active === 0 && this.waiters.length === 0;
+  }
 }
 
 const PER_NOVEL_RESOURCE_LIMITS: Record<string, number> = {
@@ -176,7 +181,15 @@ export class DirectorTaskQueue {
   releaseResourceGate(novelId: string | null | undefined, commandType: string): void {
     const resourceClass = resourceClassForCommand(commandType);
     const key = `${novelId?.trim() || "_global"}:${resourceClass}`;
-    this.gates.get(key)?.release();
+    const gate = this.gates.get(key);
+    if (!gate) {
+      return;
+    }
+    gate.release();
+    // 惰性回收空闲 gate：gates Map 按 novelId:resourceClass 累积，不清理会随书数无界增长
+    if (gate.isIdle()) {
+      this.gates.delete(key);
+    }
   }
 
   startLeaseRenewal(commandId: string, slotId: string): () => void {

@@ -32,22 +32,32 @@ export function createRateLimitMiddleware(options: RateLimitOptions) {
 
   // Opportunistic GC so long-lived process does not retain every IP forever.
   const gcEvery = 200;
+  // 同步 GC 阈值：buckets 超过该规模时立刻清扫，避免低流量期过期桶驻留
+  const maxBucketsBeforeGc = 10000;
   let hits = 0;
 
-  return function rateLimitMiddleware(req: Request, res: Response, next: NextFunction): void {
+  const sweepExpiredBuckets = () => {
+    const now = Date.now();
+    for (const [key, bucket] of buckets) {
+      if (bucket.resetAt <= now) {
+        buckets.delete(key);
+      }
+    }
+  };
+
+  // 周期清扫兜底：低流量期 hits%gcEvery 可能很久不触发，过期 bucket 不能一直驻留
+  const gcTimer = setInterval(sweepExpiredBuckets, Math.max(windowMs, 60_000));
+  gcTimer.unref?.();
+
+  function rateLimitMiddleware(req: Request, res: Response, next: NextFunction): void {
     if (options.skip?.(req)) {
       next();
       return;
     }
 
     hits += 1;
-    if (hits % gcEvery === 0) {
-      const now = Date.now();
-      for (const [key, bucket] of buckets) {
-        if (bucket.resetAt <= now) {
-          buckets.delete(key);
-        }
-      }
+    if (hits % gcEvery === 0 || buckets.size > maxBucketsBeforeGc) {
+      sweepExpiredBuckets();
     }
 
     const key = keyGenerator(req);
@@ -73,5 +83,10 @@ export function createRateLimitMiddleware(options: RateLimitOptions) {
     }
 
     next();
-  };
+  }
+
+  // 测试白盒观测口：让测试能区分「周期/阈值 GC 真删了 key」与「惰性过期只重置被访问 key」
+  rateLimitMiddleware.__bucketsForTest = buckets;
+  rateLimitMiddleware.__sweepForTest = sweepExpiredBuckets;
+  return rateLimitMiddleware;
 }

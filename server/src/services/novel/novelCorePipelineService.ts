@@ -1,4 +1,5 @@
 import { prisma } from "../../db/prisma";
+import { AppError } from "../../middleware/errorHandler";
 import {
   logPipelineInfo,
   logPipelineWarn,
@@ -70,14 +71,24 @@ export class NovelCorePipelineService {
     return `${novelId}:${startOrder}:${endOrder}`;
   }
 
-  private async waitForStartLock(key: string): Promise<void> {
+  /**
+   * 同区间启动锁最长等待时间：runner 里只做 DB reconcile+create，正常远小于该值。
+   * 若持锁方挂起（如 DB 卡顿），不能让 HTTP 请求无限自旋悬挂。
+   */
+  private static readonly START_LOCK_WAIT_TIMEOUT_MS = 30_000;
+
+  private async waitForStartLock(key: string, timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
     while (NovelCorePipelineService.startLocks.has(key)) {
+      if (Date.now() >= deadline) {
+        throw new AppError("同区间批量任务正在启动中，请稍后重试。", 409);
+      }
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
   }
 
   private async withStartLock<T>(key: string, runner: () => Promise<T>): Promise<T> {
-    await this.waitForStartLock(key);
+    await this.waitForStartLock(key, NovelCorePipelineService.START_LOCK_WAIT_TIMEOUT_MS);
     NovelCorePipelineService.startLocks.add(key);
     try {
       return await runner();
