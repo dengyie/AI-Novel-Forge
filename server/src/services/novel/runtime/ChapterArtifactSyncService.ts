@@ -66,10 +66,14 @@ export class ChapterArtifactSyncService {
 
       await withSqliteRetry(
         () => prisma.$transaction(async (tx) => {
+          // regex 摘要仅作 fallback：已有非空 summary（LLM 摘要或此前回填）时不覆写，
+          // 避免把 NovelChapterSummaryService 生成的 LLM 摘要降级为正则截断版。
+          const existingSummary = await tx.chapterSummary.findUnique({ where: { chapterId } });
+          const shouldBackfillSummary = !existingSummary || existingSummary.summary.trim().length === 0;
           await tx.chapterSummary.upsert({
             where: { chapterId },
             update: {
-              summary,
+              ...(shouldBackfillSummary ? { summary } : {}),
               keyEvents: facts.map((item) => item.content).slice(0, 3).join(""),
               characterStates: facts.filter((item) => item.category === "character").map((item) => item.content).slice(0, 3).join(""),
             },

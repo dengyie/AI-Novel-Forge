@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { ChapterRuntimePackage, GenerationContextPackage } from "@ai-novel/shared/types/chapterRuntime";
 import type { QualityScore, ReviewIssue } from "@ai-novel/shared/types/novel";
 import { prisma } from "../../../db/prisma";
+import { withSqliteRetry } from "../../../db/sqliteRetry";
 import { openConflictService } from "../../state/OpenConflictService";
 import { directorAutomationLedgerEventService } from "../director/runtime/DirectorAutomationLedgerEventService";
 import { filterAcceptedFactItems, type FactLedgerExcludedItem } from "../fact/factLedgerFilter";
@@ -27,6 +28,7 @@ import {
   type ChapterTimelineGateResult,
 } from "./ChapterTimelineFinalizationService";
 import { persistChapterQualityScores } from "../quality/chapterQualityScorePersist";
+import { contentRevisionBumpData } from "../chapterContentCas";
 
 export interface ChapterContentFinalizationAgentRuntime {
   finishChapterGenRun: (runId: string, summary: string, durationMs: number) => Promise<void>;
@@ -116,6 +118,44 @@ export class ChapterContentFinalizationService {
       };
     }
     const finalContent = styleReview.autoRewritten ? styleReview.finalContent : input.content;
+    // 改写后正文必须落库，否则 chapter.content 保留有 AI 味的原始草稿，只有下游
+    // artifacts/摘要用的是改写后文本，造成「终稿与落库稿」漂移。手工单章流式路径
+    // （ChapterStreamGenerationOrchestrator.createChapterStream → finalizeChapterContent）
+    // 不走 pipeline 的 saveDraftAndArtifacts 补偿，需在此处补落库。
+    // 注：pipeline 路径（chapterRuntimePipeline pass 分支）随后还会经
+    // saveDraftAndArtifacts 二次落库同一 finalContent 并再 bump 一次 revision——
+    // 两次写的是同一内容，幂等无害（revision 跳号不影响 CAS，客户端先读当前 revision）。
+    // 直接 prisma update，不触发 artifact 同步（由本章后续 deferArtifactBackgroundSync
+    // 分支统一调度）、不改 chapterStatus（避免覆盖调用方前置的 generating 标记，后续
+    // markChapterStatus 会按 needsRepair 正确落终态）。与 pipeline 的
+    // saveDraftAndArtifacts(syncArtifacts:false, scheduleBackgroundSync:false) 行为对齐，
+    // 但更轻——不动 generationState/chapterStatus 配对。
+    if (styleReview.autoRewritten) {
+      try {
+        // 与 ChapterArtifactSyncService.saveDraftAndArtifacts 同款 withSqliteRetry 加固：
+        // 手工流式路径在 finalize 之后没有任何补偿性落库，这次 update 是改写稿落库的
+        // 唯一一环，BUSY/锁超时不能静默吞掉（否则 chapter.content 停留在 AI 味原稿，
+        // 正是本分支要修的漂移）。
+        await withSqliteRetry(
+          () => prisma.chapter.update({
+            where: { id: input.chapterId },
+            data: {
+              content: finalContent,
+              ...contentRevisionBumpData(),
+            },
+          }),
+          { label: "chapterFinalization.autoRewrittenContent" },
+        );
+      } catch (error) {
+        // 落库失败不阻断 finalize——调用方仍拿得到 finalContent 走 SSE 下发；
+        // 但要打 warn 让运维侧发现「改写稿未落库」。
+        console.warn("[chapter-runtime] auto-rewritten content persist failed", {
+          novelId: input.novelId,
+          chapterId: input.chapterId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
     const { acceptance, timelineGate } = await this.qualityGateService.runAcceptanceGateOnly({
       novelId: input.novelId,
       chapterId: input.chapterId,

@@ -117,8 +117,17 @@ export class NovelChapterSummaryService {
     const characterStates = joinFacts(facts.filter((item) => item.category === "character").map((item) => item.content), 3);
 
     await prisma.$transaction(async (tx) => {
-      await tx.chapter.update({
-        where: { id: chapterId },
+      // expectation 语义=规划期章节目标（plannerPersistence 用 objective 写入），
+      // 不应被事后摘要覆写——否则下游 JIT 组装拿到的「本章目标」会变成「本章事后总结」，
+      // 破坏规划→正文对齐链路。仅在 expectation 为空（章节未经规划器生成）时回填摘要兜底。
+      await tx.chapter.updateMany({
+        where: {
+          id: chapterId,
+          OR: [
+            { expectation: null },
+            { expectation: "" },
+          ],
+        },
         data: { expectation: summary },
       });
       await tx.chapterSummary.upsert({
@@ -159,7 +168,9 @@ export class NovelChapterSummaryService {
     return {
       chapterId,
       summary,
-      expectation: summary,
+      // expectation 现已改为「仅空时回填」，返回值需反映章节真实 expectation：
+      // 规划期已有目标时返回原目标，原本为空时返回本次回填的摘要。
+      expectation: existingExpectation || summary,
       concreteFactCount: concreteFacts.length,
     };
   }

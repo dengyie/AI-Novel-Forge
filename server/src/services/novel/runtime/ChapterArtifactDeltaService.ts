@@ -443,14 +443,29 @@ export class ChapterArtifactDeltaService {
       3,
     );
     await prisma.$transaction(async (tx) => {
-      await tx.chapter.update({
-        where: { id: input.chapterId },
+      // expectation 语义=规划期章节目标（plannerPersistence 用 objective 写入），
+      // 不应被事后摘要覆写——否则下游 JIT 组装拿到的「本章目标」会变成「本章事后总结」，
+      // 破坏规划→正文对齐链路。仅在 expectation 为空（章节未经规划器生成）时回填摘要兜底。
+      await tx.chapter.updateMany({
+        where: {
+          id: input.chapterId,
+          OR: [
+            { expectation: null },
+            { expectation: "" },
+          ],
+        },
         data: { expectation: summary },
       });
+      // regex/抽取摘要仅作 fallback：已有非空 summary（LLM 摘要或此前回填）时不覆写，
+      // 避免把 NovelChapterSummaryService 生成的 LLM 摘要降级为抽取版。
+      const existingSummary = await tx.chapterSummary.findUnique({
+        where: { chapterId: input.chapterId },
+      });
+      const shouldBackfillSummary = !existingSummary || existingSummary.summary.trim().length === 0;
       await tx.chapterSummary.upsert({
         where: { chapterId: input.chapterId },
         update: {
-          summary,
+          ...(shouldBackfillSummary ? { summary } : {}),
           keyEvents,
           characterStates,
         },
@@ -924,36 +939,48 @@ export class ChapterArtifactDeltaService {
     output: ChapterArtifactDeltaOutput;
   }): Promise<number> {
     const characterByName = new Map(input.characters.map((item) => [normalizeName(item.name), item]));
-    const updates = input.output.characterKnowledgeStates
+    // 先解析出本章节命中角色的 id 与边界行，避免在事务内重复做 LLM 输出归一化。
+    const pendingUpdates = input.output.characterKnowledgeStates
       .map((state) => {
         const character = characterByName.get(normalizeName(state.characterName));
         const boundaryLine = buildKnowledgeBoundaryLine(state);
         if (!character || !boundaryLine) {
           return null;
         }
-        const nextCurrentState = mergeKnowledgeBoundaryState(character.currentState, boundaryLine);
-        if (nextCurrentState === (character.currentState ?? "")) {
-          return null;
-        }
         return {
           characterId: character.id,
-          currentState: nextCurrentState,
+          boundaryLine,
         };
       })
-      .filter((item): item is { characterId: string; currentState: string } => Boolean(item));
-    if (updates.length === 0) {
+      .filter((item): item is { characterId: string; boundaryLine: string } => Boolean(item));
+    if (pendingUpdates.length === 0) {
       return 0;
     }
 
+    let writeCount = 0;
     await prisma.$transaction(async (tx) => {
-      for (const update of updates) {
+      for (const update of pendingUpdates) {
+        // 事务内重读 currentState：同一 syncChapterArtifacts 流程里 proposeAndCommit
+        // （StateCommitService）会先行把 resource/knowledge 类提案的 currentState 落库，
+        // 若仍使用闭包外 characters 列表里的旧 currentState 合并，会以旧值覆盖新值
+        // 造成 lost-update。在事务内 findUnique 让 merge 基于最新落库值。
+        const fresh = await tx.character.findUnique({
+          where: { id: update.characterId },
+          select: { currentState: true },
+        });
+        const previousState = fresh?.currentState ?? null;
+        const nextCurrentState = mergeKnowledgeBoundaryState(previousState, update.boundaryLine);
+        if (nextCurrentState === (previousState ?? "")) {
+          continue;
+        }
         await tx.character.update({
           where: { id: update.characterId },
-          data: { currentState: update.currentState },
+          data: { currentState: nextCurrentState },
         });
+        writeCount += 1;
       }
     });
-    return updates.length;
+    return writeCount;
   }
 
   private queueRagUpsert(ownerType: RagOwnerType, ownerId: string): void {

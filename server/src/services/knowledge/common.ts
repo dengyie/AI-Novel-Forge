@@ -82,8 +82,14 @@ export async function resolveKnowledgeDocumentIds(input: {
     if (bindings.length > 0) {
       return uniqueIds(bindings.map((item) => item.documentId));
     }
+    // 有 target（novel/world）但无 binding 时，不回退到全租户 enabled 文档——
+    // 否则 A 书的章节 RAG 会召回 B 书绑定的设定文档，造成跨小说/跨世界知识污染。
+    // 语义对齐「知识库采用显式绑定准入」：没绑就是没授权此书使用，返回空集合。
+    return [];
   }
 
+  // 无 target 调用（如运维工具/全局知识管理）保留旧行为：返回全租户 enabled 文档列表，
+  // 由调用方自己再按 scope 过滤。RAG 检索路径必传 target，不会走到这里。
   const documents = await prisma.knowledgeDocument.findMany({
     where: { status: "enabled" },
     select: { id: true },
