@@ -216,6 +216,9 @@ interface RewriteOptions {
   temperature?: number;
   /** 取消穿透：相似改写 LLM 调用可中断 */
   signal?: AbortSignal;
+  /** 传入后，改写失败/未改善时 best-effort 写 chapter.riskFlags 标记（结构化可观测） */
+  novelId?: string;
+  chapterId?: string;
 }
 
 function disabledPack(): ContinuationContextPack {
@@ -605,6 +608,27 @@ ${summaryBlock || "暂无"}`;
       return { content, rewritten: false, maxSimilarity };
     }
 
+    // 超过阈值后三种失败（LLM 异常 / 空输出 / 改写未改善）统一走 unresolved 标记
+    const markUnresolved = (reason: string, error?: unknown) => {
+      console.warn("[novel-continuation] anti-copy rewrite unresolved; high similarity remains", {
+        novelId: input.novelId,
+        chapterId: input.chapterId,
+        chapterTitle,
+        reason,
+        maxSimilarity: Number(maxSimilarity.toFixed(4)),
+        error: error instanceof Error ? error.message : error ? String(error) : undefined,
+      });
+      if (input.novelId && input.chapterId) {
+        void this.persistUnresolvedSimilarityRiskFlag({
+          novelId: input.novelId,
+          chapterId: input.chapterId,
+          chapterTitle,
+          reason,
+          maxSimilarity,
+        });
+      }
+    };
+
     try {
       const rewritten = await runTextPrompt({
         asset: novelContinuationRewritePrompt,
@@ -623,6 +647,7 @@ ${summaryBlock || "暂无"}`;
 
       const rewrittenText = rewritten.output.trim();
       if (!rewrittenText) {
+        markUnresolved("rewrite_empty_output");
         return { content, rewritten: false, maxSimilarity };
       }
 
@@ -632,12 +657,64 @@ ${summaryBlock || "暂无"}`;
       }, 0);
 
       if (rewrittenSimilarity >= maxSimilarity) {
+        markUnresolved("rewrite_not_improved");
         return { content, rewritten: false, maxSimilarity };
       }
 
       return { content: rewrittenText, rewritten: true, maxSimilarity: rewrittenSimilarity };
-    } catch {
+    } catch (error) {
+      markUnresolved("rewrite_llm_error", error);
       return { content, rewritten: false, maxSimilarity };
+    }
+  }
+
+  /**
+   * 续写防复刻失败留债：合并写 chapter.riskFlags.continuationUnresolvedHighSimilarity。
+   * best-effort：二次失败只告警，不影响定稿主路径（与 qualityScorePersistFailed 同款）。
+   */
+  private async persistUnresolvedSimilarityRiskFlag(input: {
+    novelId: string;
+    chapterId: string;
+    chapterTitle: string;
+    reason: string;
+    maxSimilarity: number;
+  }): Promise<void> {
+    try {
+      const existing = await prisma.chapter.findFirst({
+        where: { id: input.chapterId, novelId: input.novelId },
+        select: { riskFlags: true },
+      });
+      let parsed: Record<string, unknown> = {};
+      if (existing?.riskFlags?.trim()) {
+        try {
+          const value = JSON.parse(existing.riskFlags) as unknown;
+          if (value && typeof value === "object" && !Array.isArray(value)) {
+            parsed = value as Record<string, unknown>;
+          }
+        } catch {
+          parsed = {};
+        }
+      }
+      await prisma.chapter.update({
+        where: { id: input.chapterId },
+        data: {
+          riskFlags: JSON.stringify({
+            ...parsed,
+            continuationUnresolvedHighSimilarity: {
+              at: new Date().toISOString(),
+              chapterTitle: input.chapterTitle,
+              reason: input.reason,
+              maxSimilarity: Number(input.maxSimilarity.toFixed(4)),
+            },
+          }),
+        },
+      });
+    } catch (error) {
+      console.warn("[novel-continuation] persist unresolved-similarity riskFlag failed", {
+        novelId: input.novelId,
+        chapterId: input.chapterId,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 }

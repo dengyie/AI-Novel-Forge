@@ -200,8 +200,27 @@ function aliasBlockGroup(block: PromptContextBlock, group: string): PromptContex
   };
 }
 
-function resolveRuntimeBlocksForGroup(group: string, context: PromptExecutionContext): PromptContextBlock[] {
+/**
+ * 同一次 broker resolve 内，N 个 group resolver 共享同一个 executionContext 对象。
+ * 此前每个 group 都全量重建 buildChapterRuntimeBlocks（17+ 次 O(N²)）；
+ * 这里按 executionContext 引用做 WeakMap memo，每次 resolve 只算一次。
+ * 所有调用点每次 resolve 都新建 executionContext 字面量，不会跨请求脏读；
+ * WeakMap 键随 context 对象回收，无内存泄漏。
+ */
+const chapterRuntimeBlocksMemo = new WeakMap<PromptExecutionContext, PromptContextBlock[]>();
+
+function getChapterRuntimeBlocks(context: PromptExecutionContext): PromptContextBlock[] {
+  const cached = chapterRuntimeBlocksMemo.get(context);
+  if (cached) {
+    return cached;
+  }
   const blocks = buildChapterRuntimeBlocks(context);
+  chapterRuntimeBlocksMemo.set(context, blocks);
+  return blocks;
+}
+
+function resolveRuntimeBlocksForGroup(group: string, context: PromptExecutionContext): PromptContextBlock[] {
+  const blocks = getChapterRuntimeBlocks(context);
   const directMatches = blocks.filter((block) => block.group === group);
   if (directMatches.length > 0) {
     return directMatches;

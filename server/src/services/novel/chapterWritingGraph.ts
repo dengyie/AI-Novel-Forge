@@ -17,6 +17,7 @@ import { chapterWriterPrompt } from "../../prompting/prompts/novel/chapterWriter
 import { NovelContinuationService } from "./NovelContinuationService";
 import { assertChapterContentNotEmpty } from "./runtime/chapterEmptyContentError";
 import { throwIfChapterGenerationAborted } from "./runtime/chapterAbortGuard";
+import { buildNGramSet, jaccardSimilarity } from "@ai-novel/shared/utils/textSimilarity";
 
 export interface ChapterGraphLLMOptions {
   provider?: LLMProvider;
@@ -107,8 +108,78 @@ function buildDraftContinuationBlock(content: string, targetWordCount: number, m
   ].join("\n");
 }
 
+/**
+ * 续写回声阈值：appended 与草稿尾的 n-gram jaccard 超过该值视为复读草稿尾段。
+ */
+const CONTINUATION_ECHO_SIMILARITY_THRESHOLD = 0.45;
+
+/**
+ * 裁掉 appended 开头与草稿尾重叠的最长公共段（按行对齐），防止续写复读草稿尾。
+ */
+export function trimContinuationOverlap(draftTail: string, appended: string): string {
+  const appendedLines = appended.split("\n");
+  const tailLines = draftTail.split("\n").filter((line) => line.trim().length > 0);
+  const maxOverlap = Math.min(appendedLines.length, tailLines.length);
+  let overlap = 0;
+  for (let size = maxOverlap; size > 0; size -= 1) {
+    const tailSlice = tailLines.slice(-size).map((line) => line.trim());
+    const headSlice = appendedLines.slice(0, size).map((line) => line.trim());
+    if (tailSlice.every((line, index) => line.length > 0 && line === headSlice[index])) {
+      overlap = size;
+      break;
+    }
+  }
+  return appendedLines.slice(overlap).join("\n").trim();
+}
+
+/**
+ * 续写回声检测：appended 与草稿尾的 n-gram 相似度。
+ */
+function continuationEchoSimilarity(draftTail: string, appended: string): number {
+  if (!draftTail.trim() || !appended.trim()) {
+    return 0;
+  }
+  return jaccardSimilarity(buildNGramSet(draftTail), buildNGramSet(appended));
+}
+
 export class ChapterWritingGraph {
   constructor(private readonly deps: ChapterGraphDeps) {}
+
+  /**
+   * broker 解析结果健康检查：
+   * - resolverErrors 非空（required 组 resolver 抛错）→ fail-fast，避免拿缺骨上下文写出失控章节。
+   * - missingRequiredGroups 仅 logWarn：其中包含「resolver 正常返回空」的合法空组——
+   *   如裸章节（无 plan/无义务数据）的 obligation_contract、无风格基线时的 style_contract，
+   *   旧行为是静默继续写，此处保持可观测但不阻断。
+   */
+  private assertBrokerResolutionHealthy(
+    brokerResolution: {
+      missingRequiredGroups: string[];
+      resolverErrors: Array<{ group: string; message: string }>;
+    },
+    chapterOrder: number,
+    stage: "writer_draft" | "writer_extend",
+  ): void {
+    if (brokerResolution.missingRequiredGroups.length > 0) {
+      this.deps.logWarn("Context broker missing required groups", {
+        chapterOrder,
+        stage,
+        missingRequiredGroups: brokerResolution.missingRequiredGroups,
+      });
+    }
+    if (brokerResolution.resolverErrors.length > 0) {
+      this.deps.logWarn("Context broker resolver errors", {
+        chapterOrder,
+        stage,
+        resolverErrors: brokerResolution.resolverErrors,
+      });
+      const failedRequired = new Set(brokerResolution.resolverErrors.map((error) => error.group));
+      const failedMissing = brokerResolution.missingRequiredGroups.filter((group) => failedRequired.has(group));
+      throw new Error(
+        `章节${chapterOrder} 写章上下文必需组解析失败（${stage}）: ${failedMissing.join(", ")}`,
+      );
+    }
+  }
 
   private async continuityNode(
     novelId: string,
@@ -141,6 +212,8 @@ export class ChapterWritingGraph {
       model: options.model,
       temperature: options.temperature,
       signal: options.signal,
+      novelId,
+      chapterId: chapter.id,
     });
     if (continuationGuard.rewritten) {
       this.deps.logInfo("Continuation anti-copy rewrite applied", {
@@ -158,7 +231,16 @@ export class ChapterWritingGraph {
     content: string;
     contextPackage: GenerationContextPackage;
     options: ChapterGraphLLMOptions;
-  }): Promise<string> {
+  }): Promise<{
+    content: string;
+    /** 仍低于 minWordCount 时的欠账记录（长度兜底未补齐） */
+    lengthDebt?: {
+      targetWordCount: number;
+      minWordCount: number;
+      finalWordCount: number;
+      attempts: number;
+    };
+  }> {
     throwIfChapterGenerationAborted(input.options.signal, "章节生成已取消。");
     const writeContext = input.contextPackage.chapterWriteContext;
     const lengthGoal = buildLengthInstruction(
@@ -168,93 +250,150 @@ export class ChapterWritingGraph {
       ?? null,
     );
     if (!writeContext || lengthGoal.targetWordCount == null || lengthGoal.minWordCount == null) {
-      return input.content;
+      return { content: input.content };
     }
 
-    const currentLength = countChapterCharacters(input.content);
+    let content = input.content;
+    let currentLength = countChapterCharacters(content);
     if (currentLength >= lengthGoal.minWordCount) {
-      return input.content;
+      return { content };
     }
 
-    const missingWordGap = Math.max(
-      lengthGoal.targetWordCount - currentLength,
-      lengthGoal.minWordCount - currentLength,
-    );
     const builtBlocks = buildChapterWriterContextBlocks(writeContext);
-    const sanitized = sanitizeWriterContextBlocks([
-      createContextBlock({
-        id: "current_draft_excerpt",
-        group: "current_draft_excerpt",
-        priority: 99,
-        required: true,
-        content: buildDraftContinuationBlock(
-          input.content,
-          lengthGoal.targetWordCount,
-          lengthGoal.minWordCount,
-        ),
-      }),
-      ...builtBlocks,
-    ]);
-    if (sanitized.removedBlockIds.length > 0) {
-      this.deps.logWarn("Writer continuation blocks removed by guard", {
-        chapterOrder: input.chapter.order,
-        removedBlockIds: sanitized.removedBlockIds,
-      });
-    }
-    const resolvedContext = await resolvePromptContextBlocksForAsset({
-      asset: chapterWriterPrompt,
-      executionContext: {
-        entrypoint: "chapter_pipeline",
-        novelId: input.novelId,
-        chapterId: input.chapter.id,
-        metadata: {
-          chapterWriteContext: writeContext,
-          chapterBlockMode: "full",
-          ragContext: input.contextPackage.ragContext,
-          extraContextBlocks: sanitized.allowedBlocks.filter((block) => block.group === "current_draft_excerpt"),
+    const maxAttempts = 2;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      throwIfChapterGenerationAborted(input.options.signal, "章节生成已取消。");
+      const missingWordGap = Math.max(
+        lengthGoal.targetWordCount - currentLength,
+        lengthGoal.minWordCount - currentLength,
+      );
+      const sanitized = sanitizeWriterContextBlocks([
+        createContextBlock({
+          id: "current_draft_excerpt",
+          group: "current_draft_excerpt",
+          priority: 99,
+          required: true,
+          content: buildDraftContinuationBlock(
+            content,
+            lengthGoal.targetWordCount,
+            lengthGoal.minWordCount,
+          ),
+        }),
+        ...builtBlocks,
+      ]);
+      if (sanitized.removedBlockIds.length > 0) {
+        this.deps.logWarn("Writer continuation blocks removed by guard", {
+          chapterOrder: input.chapter.order,
+          removedBlockIds: sanitized.removedBlockIds,
+        });
+      }
+      const resolvedContext = await resolvePromptContextBlocksForAsset({
+        asset: chapterWriterPrompt,
+        executionContext: {
+          entrypoint: "chapter_pipeline",
+          novelId: input.novelId,
+          chapterId: input.chapter.id,
+          metadata: {
+            chapterWriteContext: writeContext,
+            chapterBlockMode: "full",
+            ragContext: input.contextPackage.ragContext,
+            extraContextBlocks: sanitized.allowedBlocks.filter((block) => block.group === "current_draft_excerpt"),
+          },
         },
-      },
-      fallbackBlocks: sanitized.allowedBlocks,
-    });
+        fallbackBlocks: sanitized.allowedBlocks,
+        log: (message, meta) => this.deps.logWarn(message, { chapterOrder: input.chapter.order, ...meta }),
+      });
+      this.assertBrokerResolutionHealthy(resolvedContext.brokerResolution, input.chapter.order, "writer_extend");
 
-    const completion = await runTextPrompt({
-      asset: chapterWriterPrompt,
-      promptInput: {
-        novelTitle: input.novelTitle,
+      const completion = await runTextPrompt({
+        asset: chapterWriterPrompt,
+        promptInput: {
+          novelTitle: input.novelTitle,
+          chapterOrder: input.chapter.order,
+          chapterTitle: input.chapter.title,
+          mode: "continue",
+          targetWordCount: lengthGoal.targetWordCount,
+          minWordCount: lengthGoal.minWordCount,
+          maxWordCount: lengthGoal.maxWordCount,
+          missingWordGap,
+        },
+        contextBlocks: resolvedContext.blocks,
+        options: {
+          provider: input.options.provider,
+          model: input.options.model,
+          temperature: input.options.temperature ?? 0.8,
+          novelId: input.novelId,
+          chapterId: input.chapter.id,
+          stage: "writer_extend",
+          triggerReason: "length_recovery",
+          signal: input.options.signal,
+        },
+      });
+      let appended = completion.output.trim();
+      if (!appended) {
+        // 空输出视为本轮失败：还有重试额度则再来一次，否则记欠账
+        this.deps.logWarn("Writer continuation returned empty output", {
+          chapterOrder: input.chapter.order,
+          attempt,
+        });
+        continue;
+      }
+
+      // 复读检测：先裁掉与草稿尾的最长公共前缀，再做 n-gram 回声检查
+      const draftTail = content.trim().slice(-1400);
+      appended = trimContinuationOverlap(draftTail, appended);
+      if (!appended) {
+        this.deps.logWarn("Writer continuation discarded: fully overlaps draft tail", {
+          chapterOrder: input.chapter.order,
+          attempt,
+        });
+        continue;
+      }
+      const echoSimilarity = continuationEchoSimilarity(draftTail, appended);
+      if (echoSimilarity >= CONTINUATION_ECHO_SIMILARITY_THRESHOLD) {
+        this.deps.logWarn("Writer continuation discarded: echo of draft tail detected", {
+          chapterOrder: input.chapter.order,
+          attempt,
+          echoSimilarity: Number(echoSimilarity.toFixed(4)),
+        });
+        continue;
+      }
+
+      const merged = `${content.trim()}\n\n${appended}`.trim();
+      const mergedLength = countChapterCharacters(merged);
+      this.deps.logInfo("Chapter draft auto-extended for target length", {
         chapterOrder: input.chapter.order,
-        chapterTitle: input.chapter.title,
-        mode: "continue",
+        attempt,
+        beforeLength: currentLength,
+        afterLength: mergedLength,
         targetWordCount: lengthGoal.targetWordCount,
         minWordCount: lengthGoal.minWordCount,
-        maxWordCount: lengthGoal.maxWordCount,
-        missingWordGap,
-      },
-      contextBlocks: resolvedContext.blocks,
-      options: {
-        provider: input.options.provider,
-        model: input.options.model,
-        temperature: input.options.temperature ?? 0.8,
-        novelId: input.novelId,
-        chapterId: input.chapter.id,
-        stage: "writer_extend",
-        triggerReason: "length_recovery",
-        signal: input.options.signal,
-      },
-    });
-    const appended = completion.output.trim();
-    if (!appended) {
-      return input.content;
+      });
+      content = merged;
+      currentLength = mergedLength;
+      if (currentLength >= lengthGoal.minWordCount) {
+        return { content };
+      }
     }
 
-    const merged = `${input.content.trim()}\n\n${appended}`.trim();
-    this.deps.logInfo("Chapter draft auto-extended for target length", {
-      chapterOrder: input.chapter.order,
-      beforeLength: currentLength,
-      afterLength: countChapterCharacters(merged),
-      targetWordCount: lengthGoal.targetWordCount,
-      minWordCount: lengthGoal.minWordCount,
-    });
-    return merged;
+    if (currentLength < lengthGoal.minWordCount) {
+      this.deps.logWarn("Chapter length target unmet after continuation attempts", {
+        chapterOrder: input.chapter.order,
+        targetWordCount: lengthGoal.targetWordCount,
+        minWordCount: lengthGoal.minWordCount,
+        finalWordCount: currentLength,
+      });
+      return {
+        content,
+        lengthDebt: {
+          targetWordCount: lengthGoal.targetWordCount,
+          minWordCount: lengthGoal.minWordCount,
+          finalWordCount: currentLength,
+          attempts: maxAttempts,
+        },
+      };
+    }
+    return { content };
   }
 
   async createChapterStream(input: ChapterStreamInput): Promise<{
@@ -295,7 +434,9 @@ export class ChapterWritingGraph {
         },
       },
       fallbackBlocks: sanitized.allowedBlocks,
+      log: (message, meta) => this.deps.logWarn(message, { chapterOrder: input.chapter.order, ...meta }),
     });
+    this.assertBrokerResolutionHealthy(resolvedContext.brokerResolution, input.chapter.order, "writer_draft");
 
     const streamed = await streamTextPrompt({
       asset: chapterWriterPrompt,
@@ -344,7 +485,14 @@ export class ChapterWritingGraph {
           contextPackage,
           options: input.options,
         });
-        const safeContent = assertChapterContentNotEmpty(lengthAdjusted, {
+        if (lengthAdjusted.lengthDebt) {
+          // 长度欠账：兜底续写仍未达标，结构化记录供 lengthControl/债板消费
+          this.deps.logWarn("Chapter length debt recorded", {
+            chapterOrder: input.chapter.order,
+            ...lengthAdjusted.lengthDebt,
+          });
+        }
+        const safeContent = assertChapterContentNotEmpty(lengthAdjusted.content, {
           novelId: input.novelId,
           chapterId: input.chapter.id,
           chapterOrder: input.chapter.order,
