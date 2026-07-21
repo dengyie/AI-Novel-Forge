@@ -60,8 +60,9 @@ export default function NovelChapterEdit() {
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-4">
+      {/* key 只随章节切换重置；同章服务器回流交给 ChapterEditorShell 内 resolveChapterContentSync，避免重挂载丢本地草稿 */}
       <ChapterEditorShell
-        key={`${chapter.id}:${chapter.updatedAt}`}
+        key={chapter.id}
         novelId={id}
         chapter={chapter}
         workspace={chapterEditorWorkspaceQuery.data?.data ?? null}
