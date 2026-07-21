@@ -21,6 +21,27 @@ function normalizeStatus(value: unknown, fallback: string): string {
   return text || fallback;
 }
 
+/**
+ * 快照条目终态集合：处于这些状态的信息态/伏笔不再 carry-over 继承。
+ * 覆盖 LLM 可能输出的中英终态写法（normalizeStatus 不收敛枚举，仅兜底空值）。
+ */
+const INACTIVE_SNAPSHOT_STATUSES = new Set([
+  "revealed",
+  "resolved",
+  "abandoned",
+  "expired",
+  "invalidated",
+  "paid_off",
+  "payoff",
+  "completed",
+  "obsolete",
+  "已揭示",
+  "已回收",
+  "已解决",
+  "已废弃",
+  "已失效",
+]);
+
 interface StateChapterReference {
   id: string;
   order: number;
@@ -316,6 +337,54 @@ export class StateService {
       })
       .filter((item): item is NonNullable<typeof item> => Boolean(item));
 
+    // carry-over 兜底：LLM 被要求「继承未变化状态」，但不听话时 deleteMany+createMany
+    // 全量替换会让非终态信息态/伏笔从新快照静默消失、逐章复利丢失。
+    // 对上一快照中仍活跃（非 revealed/resolved/abandoned/expired）且未被本章
+    // 重新提取的条目做确定性继承。仅信息态/伏笔——角色/关系状态需要本章画像，
+    // 盲目继承会冻结角色弧。
+    const extractedInfoKeys = new Set(
+      (input.extracted.informationStates ?? [])
+        .map((item) => `${item.holderType === "character" ? "character" : "reader"}|${(item.fact ?? "").trim()}`)
+        .filter((key) => !key.endsWith("|")),
+    );
+    const inheritedInformationStates = (input.previousSnapshot?.informationStates ?? [])
+      .filter((item) => {
+        const status = (item.status ?? "").trim().toLowerCase();
+        if (!item.fact?.trim() || INACTIVE_SNAPSHOT_STATUSES.has(status)) {
+          return false;
+        }
+        const holderType = item.holderType === "character" ? "character" : "reader";
+        return !extractedInfoKeys.has(`${holderType}|${item.fact.trim()}`);
+      })
+      .map((item) => ({
+        holderType: item.holderType === "character" ? ("character" as const) : ("reader" as const),
+        holderRefId: item.holderType === "character" ? (item.holderRefId ?? null) : null,
+        fact: item.fact!.trim(),
+        status: item.status ?? "known",
+        summary: item.summary?.trim() || null,
+      }));
+
+    const extractedForeshadowKeys = new Set(
+      (input.extracted.foreshadowStates ?? [])
+        .map((item) => (item.title ?? "").trim())
+        .filter(Boolean),
+    );
+    const inheritedForeshadowStates = (input.previousSnapshot?.foreshadowStates ?? [])
+      .filter((item) => {
+        const status = (item.status ?? "").trim().toLowerCase();
+        if (!item.title?.trim() || INACTIVE_SNAPSHOT_STATUSES.has(status)) {
+          return false;
+        }
+        return !extractedForeshadowKeys.has(item.title.trim());
+      })
+      .map((item) => ({
+        title: item.title!.trim(),
+        summary: item.summary?.trim() || null,
+        status: item.status ?? "setup",
+        setupChapterId: item.setupChapterId ?? null,
+        payoffChapterId: item.payoffChapterId ?? null,
+      }));
+
     const normalizedRelationStates = (input.extracted.relationStates ?? [])
       .map((item) => {
         const sourceCharacterId = characterMap.get(item.sourceCharacterId ?? "") ?? characterMap.get(item.sourceCharacterName ?? "");
@@ -379,12 +448,24 @@ export class StateService {
       })
       .filter((item): item is NonNullable<typeof item> => Boolean(item));
 
+    const mergedInformationStates = [...normalizedInformationStates, ...inheritedInformationStates];
+    const mergedForeshadowStates = [...normalizedForeshadowStates, ...inheritedForeshadowStates];
+    if (inheritedInformationStates.length > 0 || inheritedForeshadowStates.length > 0) {
+      console.warn("[state] snapshot carry-over inherited states", {
+        novelId: input.novelId,
+        chapterId: input.chapterId,
+        chapterOrder: input.chapterOrder,
+        inheritedInformation: inheritedInformationStates.length,
+        inheritedForeshadow: inheritedForeshadowStates.length,
+      });
+    }
+
     const rawStateJson = JSON.stringify({
       summary: input.extracted.summary ?? null,
       characterStates: normalizedCharacterStates,
       relationStates: normalizedRelationStates,
-      informationStates: normalizedInformationStates,
-      foreshadowStates: normalizedForeshadowStates,
+      informationStates: mergedInformationStates,
+      foreshadowStates: mergedForeshadowStates,
     });
     const summary = input.extracted.summary?.trim() || `第${input.chapterOrder}章状态快照`;
     const existing = await prisma.storyStateSnapshot.findFirst({
@@ -435,17 +516,17 @@ export class StateService {
           })),
         });
       }
-      if (normalizedInformationStates.length > 0) {
+      if (mergedInformationStates.length > 0) {
         await tx.informationState.createMany({
-          data: normalizedInformationStates.map((item) => ({
+          data: mergedInformationStates.map((item) => ({
             snapshotId: snapshot.id,
             ...item,
           })),
         });
       }
-      if (normalizedForeshadowStates.length > 0) {
+      if (mergedForeshadowStates.length > 0) {
         await tx.foreshadowState.createMany({
-          data: normalizedForeshadowStates.map((item) => ({
+          data: mergedForeshadowStates.map((item) => ({
             snapshotId: snapshot.id,
             ...item,
           })),
