@@ -115,7 +115,23 @@ function buildDraftContinuationBlock(content: string, targetWordCount: number, m
 const CONTINUATION_ECHO_SIMILARITY_THRESHOLD = 0.45;
 
 /**
- * 裁掉 appended 开头与草稿尾重叠的最长公共段（按行对齐），防止续写复读草稿尾。
+ * 中文正文常整段一行，行级对齐大概率 overlap=0；追加字符级对齐作为兜底：
+ * draftTail 末尾与 appended 开头的最长公共子串（≥12 字符）即视为复读段裁掉。
+ */
+const MIN_CHAR_OVERLAP = 12;
+
+function longestSuffixPrefixOverlap(draftTail: string, appended: string): number {
+  const maxLen = Math.min(draftTail.length, appended.length, 600);
+  for (let size = maxLen; size >= MIN_CHAR_OVERLAP; size -= 1) {
+    if (draftTail.endsWith(appended.slice(0, size))) {
+      return size;
+    }
+  }
+  return 0;
+}
+
+/**
+ * 裁掉 appended 开头与草稿尾重叠的最长公共段（行级优先，字符级兜底），防止续写复读草稿尾。
  */
 export function trimContinuationOverlap(draftTail: string, appended: string): string {
   const appendedLines = appended.split("\n");
@@ -130,7 +146,27 @@ export function trimContinuationOverlap(draftTail: string, appended: string): st
       break;
     }
   }
-  return appendedLines.slice(overlap).join("\n").trim();
+  if (overlap > 0) {
+    return appendedLines.slice(overlap).join("\n").trim();
+  }
+  // 行级对齐失败（典型：中文整段无换行）→ 字符级最长公共后缀/前缀兜底。
+  // 匹配在空白归一化串上做，裁切点通过「逐字符消费原串、跳过空白」映射回原 appended，
+  // 避免归一化下标直接切原串导致错位。
+  const normalizedTail = draftTail.replace(/\s+/g, "");
+  const normalizedAppended = appended.replace(/\s+/g, "");
+  const charOverlap = longestSuffixPrefixOverlap(normalizedTail, normalizedAppended);
+  if (charOverlap > 0) {
+    let consumed = 0;
+    let cutIndex = 0;
+    while (cutIndex < appended.length && consumed < charOverlap) {
+      if (!/\s/.test(appended[cutIndex])) {
+        consumed += 1;
+      }
+      cutIndex += 1;
+    }
+    return appended.slice(cutIndex).trim();
+  }
+  return appended.trim();
 }
 
 /**
