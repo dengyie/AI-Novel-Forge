@@ -4,6 +4,41 @@
 
 ## 更新历史
 
+## v0.6.0（2026-07-21 发布）
+
+本次版本把长链路「能不能看见、会不会误停、空白章能不能删、读感有没有合同、书合同改写后账本怎么退役」收成一版可观测与安全闸门能力。产品版本号仍以 `desktop/package.json` 为准；Web 角标随前端构建读取同一版本源。
+
+### AI 创作实况（Live）
+
+- 导航栏新增 **AI 创作实况** 面板：订阅本机进程内 LLM 调用进度（phase / 文本增量），不写业务库、不替代任务中心。
+- 独立路由 **`/api/llm-live/stream`**（SSE），与 `/api/llm` 的 expensive 限流隔离；需鉴权；可按 `novelId` / `taskId` 过滤会话。
+- 结构化 JSON 调用展示阶段进度（不假装 token 流）；纯文本调用可展示增量预览。关闭面板只退订，不取消生成。
+
+### 重规划与 Payoff 安全闸门
+
+- 重规划信号优先级：**显式 next_action → blocking_audit → 逾期键 → force**；纯逾期默认 **warning 可续写**，不再单独把长篇硬停死。
+- 可选环境变量 `REPLAN_OVERDUE_HARD_STOP=1` 恢复「逾期即硬停」行为。
+- **P2a 书合同生命周期**：`book_contract.chapter3/10/30Payoff` 使用固定 refId；合同字段删除或改挂后，纯 book_contract 来源的账本项记 `source_superseded` 并失败退役。
+- 消费侧 `failedCount` 与导演质量清单对 `source_superseded` **去噪**，避免改合同时满屏幽灵失败。
+
+### 读者体验合同（软）
+
+- 章节场景计划可携带 `readerExperience`（读者问题、承诺回报、主角欲望、阻力、情绪位移、钩子等）。
+- 生成侧 schema 可要求字段；读取旧章仍 **optional**，避免无合同杀写章。
+- 验收评估在已有 scenePlan 时，缺读感合同打 **软 tag** `reader_experience_missing`（不替代 literary / quality 主闸）。
+
+### 空白章删除门禁
+
+- 共享门禁：正文空、状态 `unplanned` / `pending_generation`、无忙碌任务、无 sceneCards、pending 时无 taskSheet，且需 **confirmBlank**。
+- 非空白或规划中章节仍拒绝硬删；与归档删除无关。
+
+### 升级提示
+
+- 源码用户：`pnpm install` 后按既有流程 `pnpm build`；**无 Prisma 迁移**。
+- 桌面发布：正式 tag 须为 `v0.6.0` 且与 `desktop/package.json` 一致。
+- 生产部署仍以运维侧 dist cutover 为准；应用内版本角标在重新构建 client 后显示 `v0.6.0`。
+- 自托管若开启 API 鉴权，实况 SSE 须带与其它 `/api/*` 相同的 token；生产默认禁止未过滤的全量 Live 总线（可用运维开关，勿在公网 fail-open）。
+
 ## v0.5.0（2026-07-21 发布）
 
 本次版本把有声书音色匹配推进到「全 AI 耳 + 库规划」主路径，并加固写章上下文与质量链路。产品版本号仍以 `desktop/package.json` 为准；Web 界面角标随前端构建读取同一版本源。
