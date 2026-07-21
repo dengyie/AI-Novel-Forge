@@ -88,7 +88,7 @@ export default function ChapterEditorShell(props: ChapterEditorShellProps) {
 
   const [contentDraft, setContentDraft] = useState(normalizedChapterContent);
   const [savedContent, setSavedContent] = useState(normalizedChapterContent);
-  const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error" | "server_ahead">("idle");
   const [selection, setSelection] = useState<ChapterEditorSelectionRange | null>(null);
   const [selectionToolbarPosition, setSelectionToolbarPosition] = useState<SelectionToolbarPosition | null>(null);
   const [session, setSession] = useState<ChapterEditorSessionState>(EMPTY_SESSION);
@@ -121,7 +121,9 @@ export default function ChapterEditorShell(props: ChapterEditorShellProps) {
       // 仅对齐 saved 基线到服务器，保留本地未保存正文，避免 CAS 冲突后丢稿
       setSavedContent(decision.serverContent);
       savedContentRef.current = decision.serverContent;
-      setSaveStatus("error");
+      // 仅真 CAS 冲突（reason=conflict）才报保存失败；本地未保存编辑期间的服务端
+      // 回流（如后台同步 bump revision 触发 refetch）属正常态，用中性提示避免误报
+      setSaveStatus(decision.reason === "conflict" ? "error" : "server_ahead");
       return;
     }
 

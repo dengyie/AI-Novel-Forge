@@ -50,6 +50,7 @@ test("resolveChapterContentSync keeps local draft when dirty", () => {
   assert.deepEqual(decision, {
     action: "keep_local_draft",
     serverContent: "server-new",
+    reason: "dirty",
   });
 });
 
@@ -64,6 +65,7 @@ test("resolveChapterContentSync keeps local draft when preserve flag set even if
   assert.deepEqual(decision, {
     action: "keep_local_draft",
     serverContent: "server-new",
+    reason: "conflict",
   });
 });
 

@@ -331,7 +331,10 @@ export function buildAiRevisionRequest(input: ChapterEditorRequestBuilderInput) 
   };
 }
 
-export function getSaveStatusLabel(status: "idle" | "saving" | "saved" | "error", isDirty: boolean): string {
+export function getSaveStatusLabel(
+  status: "idle" | "saving" | "saved" | "error" | "server_ahead",
+  isDirty: boolean,
+): string {
   if (status === "saving") {
     return "保存中";
   }
@@ -340,6 +343,9 @@ export function getSaveStatusLabel(status: "idle" | "saving" | "saved" | "error"
   }
   if (status === "error") {
     return "保存失败";
+  }
+  if (status === "server_ahead") {
+    return "服务器有新版本，本地修改已保留";
   }
   return isDirty ? "待保存" : "已同步";
 }
@@ -365,7 +371,7 @@ export function isChapterContentConflictError(error: unknown): boolean {
 
 export type ChapterContentSyncDecision =
   | { action: "full_reset"; content: string }
-  | { action: "keep_local_draft"; serverContent: string };
+  | { action: "keep_local_draft"; serverContent: string; reason: "conflict" | "dirty" };
 
 /**
  * 服务端章节正文回流时的同步策略：
@@ -385,7 +391,12 @@ export function resolveChapterContentSync(input: {
   }
   const isDirty = input.currentDraft !== input.currentSaved;
   if (input.preserveLocalDraft || isDirty) {
-    return { action: "keep_local_draft", serverContent: input.nextServerContent };
+    // conflict = CAS 冲突后的强制保留（真保存失败）；dirty = 本地有未保存编辑（正常态，非失败）
+    return {
+      action: "keep_local_draft",
+      serverContent: input.nextServerContent,
+      reason: input.preserveLocalDraft ? "conflict" : "dirty",
+    };
   }
   return { action: "full_reset", content: input.nextServerContent };
 }

@@ -157,26 +157,30 @@ export class ChapterWritingGraph {
       missingRequiredGroups: string[];
       resolverErrors: Array<{ group: string; message: string }>;
     },
-    chapterOrder: number,
+    context: { novelId: string; chapterId: string; chapterOrder: number },
     stage: "writer_draft" | "writer_extend",
   ): void {
+    const baseMeta = {
+      novelId: context.novelId,
+      chapterId: context.chapterId,
+      chapterOrder: context.chapterOrder,
+      stage,
+    };
     if (brokerResolution.missingRequiredGroups.length > 0) {
       this.deps.logWarn("Context broker missing required groups", {
-        chapterOrder,
-        stage,
+        ...baseMeta,
         missingRequiredGroups: brokerResolution.missingRequiredGroups,
       });
     }
     if (brokerResolution.resolverErrors.length > 0) {
       this.deps.logWarn("Context broker resolver errors", {
-        chapterOrder,
-        stage,
+        ...baseMeta,
         resolverErrors: brokerResolution.resolverErrors,
       });
       const failedRequired = new Set(brokerResolution.resolverErrors.map((error) => error.group));
       const failedMissing = brokerResolution.missingRequiredGroups.filter((group) => failedRequired.has(group));
       throw new Error(
-        `章节${chapterOrder} 写章上下文必需组解析失败（${stage}）: ${failedMissing.join(", ")}`,
+        `小说${context.novelId} 章节${context.chapterOrder} 写章上下文必需组解析失败（${stage}）: ${failedMissing.join(", ")}`,
       );
     }
   }
@@ -283,6 +287,8 @@ export class ChapterWritingGraph {
       ]);
       if (sanitized.removedBlockIds.length > 0) {
         this.deps.logWarn("Writer continuation blocks removed by guard", {
+          novelId: input.novelId,
+          chapterId: input.chapter.id,
           chapterOrder: input.chapter.order,
           removedBlockIds: sanitized.removedBlockIds,
         });
@@ -301,9 +307,18 @@ export class ChapterWritingGraph {
           },
         },
         fallbackBlocks: sanitized.allowedBlocks,
-        log: (message, meta) => this.deps.logWarn(message, { chapterOrder: input.chapter.order, ...meta }),
+        log: (message, meta) => this.deps.logWarn(message, {
+          novelId: input.novelId,
+          chapterId: input.chapter.id,
+          chapterOrder: input.chapter.order,
+          ...meta,
+        }),
       });
-      this.assertBrokerResolutionHealthy(resolvedContext.brokerResolution, input.chapter.order, "writer_extend");
+      this.assertBrokerResolutionHealthy(
+        resolvedContext.brokerResolution,
+        { novelId: input.novelId, chapterId: input.chapter.id, chapterOrder: input.chapter.order },
+        "writer_extend",
+      );
 
       const completion = await runTextPrompt({
         asset: chapterWriterPrompt,
@@ -333,6 +348,8 @@ export class ChapterWritingGraph {
       if (!appended) {
         // 空输出视为本轮失败：还有重试额度则再来一次，否则记欠账
         this.deps.logWarn("Writer continuation returned empty output", {
+          novelId: input.novelId,
+          chapterId: input.chapter.id,
           chapterOrder: input.chapter.order,
           attempt,
         });
@@ -344,6 +361,8 @@ export class ChapterWritingGraph {
       appended = trimContinuationOverlap(draftTail, appended);
       if (!appended) {
         this.deps.logWarn("Writer continuation discarded: fully overlaps draft tail", {
+          novelId: input.novelId,
+          chapterId: input.chapter.id,
           chapterOrder: input.chapter.order,
           attempt,
         });
@@ -352,6 +371,8 @@ export class ChapterWritingGraph {
       const echoSimilarity = continuationEchoSimilarity(draftTail, appended);
       if (echoSimilarity >= CONTINUATION_ECHO_SIMILARITY_THRESHOLD) {
         this.deps.logWarn("Writer continuation discarded: echo of draft tail detected", {
+          novelId: input.novelId,
+          chapterId: input.chapter.id,
           chapterOrder: input.chapter.order,
           attempt,
           echoSimilarity: Number(echoSimilarity.toFixed(4)),
@@ -362,6 +383,8 @@ export class ChapterWritingGraph {
       const merged = `${content.trim()}\n\n${appended}`.trim();
       const mergedLength = countChapterCharacters(merged);
       this.deps.logInfo("Chapter draft auto-extended for target length", {
+        novelId: input.novelId,
+        chapterId: input.chapter.id,
         chapterOrder: input.chapter.order,
         attempt,
         beforeLength: currentLength,
@@ -378,6 +401,8 @@ export class ChapterWritingGraph {
 
     if (currentLength < lengthGoal.minWordCount) {
       this.deps.logWarn("Chapter length target unmet after continuation attempts", {
+        novelId: input.novelId,
+        chapterId: input.chapter.id,
         chapterOrder: input.chapter.order,
         targetWordCount: lengthGoal.targetWordCount,
         minWordCount: lengthGoal.minWordCount,
@@ -417,6 +442,8 @@ export class ChapterWritingGraph {
     const sanitized = sanitizeWriterContextBlocks(builtBlocks);
     if (sanitized.removedBlockIds.length > 0) {
       this.deps.logWarn("Writer context blocks removed by guard", {
+        novelId: input.novelId,
+        chapterId: input.chapter.id,
         chapterOrder: input.chapter.order,
         removedBlockIds: sanitized.removedBlockIds,
       });
@@ -434,9 +461,18 @@ export class ChapterWritingGraph {
         },
       },
       fallbackBlocks: sanitized.allowedBlocks,
-      log: (message, meta) => this.deps.logWarn(message, { chapterOrder: input.chapter.order, ...meta }),
+      log: (message, meta) => this.deps.logWarn(message, {
+        novelId: input.novelId,
+        chapterId: input.chapter.id,
+        chapterOrder: input.chapter.order,
+        ...meta,
+      }),
     });
-    this.assertBrokerResolutionHealthy(resolvedContext.brokerResolution, input.chapter.order, "writer_draft");
+    this.assertBrokerResolutionHealthy(
+      resolvedContext.brokerResolution,
+      { novelId: input.novelId, chapterId: input.chapter.id, chapterOrder: input.chapter.order },
+      "writer_draft",
+    );
 
     const streamed = await streamTextPrompt({
       asset: chapterWriterPrompt,
@@ -488,6 +524,8 @@ export class ChapterWritingGraph {
         if (lengthAdjusted.lengthDebt) {
           // 长度欠账：兜底续写仍未达标，结构化记录供 lengthControl/债板消费
           this.deps.logWarn("Chapter length debt recorded", {
+            novelId: input.novelId,
+            chapterId: input.chapter.id,
             chapterOrder: input.chapter.order,
             ...lengthAdjusted.lengthDebt,
           });

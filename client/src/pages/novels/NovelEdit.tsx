@@ -2183,6 +2183,39 @@ export default function NovelEdit() {
     },
   });
 
+  // SSE 错误（含 120s 静默看门狗）必须在章节主链路可见：
+  // 否则看门狗触发后用户只看到转圈停了，不知道为什么停、能否重试。
+  // 参照 WorldGenerator 的 analyzeStream.error → toast 模式。
+  useEffect(() => {
+    if (!chapterSSE.error) {
+      return;
+    }
+    setActiveChapterStream(null);
+    setChapterOperationMessage(`章节生成中断：${chapterSSE.error}已生成的内容会保留，可重新发起本章写作。`);
+    toast.error(`章节生成中断：${chapterSSE.error}`);
+  }, [chapterSSE.error]);
+
+  useEffect(() => {
+    if (!repairSSE.error) {
+      return;
+    }
+    setActiveRepairStream(null);
+    setChapterOperationMessage(`章节修复中断：${repairSSE.error}可先查看当前修复结果，再决定是否重试。`);
+    toast.error(`章节修复中断：${repairSSE.error}`);
+  }, [repairSSE.error]);
+
+  useEffect(() => {
+    if (bibleSSE.error) {
+      toast.error(`写作圣经生成中断：${bibleSSE.error}`);
+    }
+  }, [bibleSSE.error]);
+
+  useEffect(() => {
+    if (beatsSSE.error) {
+      toast.error(`剧情节拍生成中断：${beatsSSE.error}`);
+    }
+  }, [beatsSSE.error]);
+
   const {
     saveBasicMutation,
     saveOutlineMutation,
