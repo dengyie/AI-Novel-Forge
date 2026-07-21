@@ -446,10 +446,28 @@ export class NovelCoreGenerationService {
       where: { id: chapter.id },
       data: { hook, expectation },
     });
-    await prisma.chapterSummary.upsert({
-      where: { chapterId: chapter.id },
-      update: { hook },
-      create: { novelId, chapterId: chapter.id, summary: briefSummary(chapter.content ?? ""), hook },
+    await prisma.$transaction(async (tx) => {
+      // regex 摘要仅作 fallback：已有记录只补 hook，summary 为空才回填正则摘要，
+      // 避免覆盖 NovelChapterSummaryService 生成的 LLM 摘要。
+      const existingSummary = await tx.chapterSummary.findUnique({
+        where: { chapterId: chapter.id },
+        select: { summary: true },
+      });
+      if (existingSummary) {
+        await tx.chapterSummary.update({
+          where: { chapterId: chapter.id },
+          data: {
+            hook,
+            ...(existingSummary.summary.trim()
+              ? {}
+              : { summary: briefSummary(chapter.content ?? "") }),
+          },
+        });
+      } else {
+        await tx.chapterSummary.create({
+          data: { novelId, chapterId: chapter.id, summary: briefSummary(chapter.content ?? ""), hook },
+        });
+      }
     });
 
     queueRagUpsert("chapter", chapter.id);

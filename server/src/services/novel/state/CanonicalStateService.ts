@@ -177,8 +177,15 @@ export class CanonicalStateService {
         take: 12,
       }),
       prisma.payoffLedgerItem.findMany({
-        where: { novelId },
+        // 快照只消费 pending(setup/hinted/pending_payoff) 与 overdue，
+        // 终态(paid_off/failed) 不进入快照；DB 侧过滤 + 上限，避免拉全量账本再 JS 过滤。
+        // 走 @@index([novelId, currentStatus, updatedAt])。
+        where: {
+          novelId,
+          currentStatus: { in: ["setup", "hinted", "pending_payoff", "overdue"] },
+        },
         orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
+        take: 200,
       }),
       characterResourceLedgerService.listResources(novelId).catch(() => []),
       prisma.chapter.findMany({

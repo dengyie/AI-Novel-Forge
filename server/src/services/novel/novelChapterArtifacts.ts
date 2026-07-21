@@ -81,29 +81,39 @@ export async function syncChapterArtifacts(novelId: string, chapterId: string, c
 
   await withSqliteRetry(
     () => prisma.$transaction(async (tx) => {
-      await tx.chapterSummary.upsert({
+      // regex 摘要仅作 fallback：仅当现有 summary 为空（或无记录）时写入，
+      // 避免 CRUD 正文保存把后台/手动生成的 LLM 摘要降级为正则截断版。
+      // LLM 摘要路径见 NovelChapterSummaryService.generateChapterSummary。
+      const existingSummary = await tx.chapterSummary.findUnique({
         where: { chapterId },
-        update: {
-          summary,
-          keyEvents: facts.map((item) => item.content).slice(0, 3).join(""),
-          characterStates: facts
-            .filter((item) => item.category === "character")
-            .map((item) => item.content)
-            .slice(0, 3)
-            .join(""),
-        },
-        create: {
-          novelId,
-          chapterId,
-          summary,
-          keyEvents: facts.map((item) => item.content).slice(0, 3).join(""),
-          characterStates: facts
-            .filter((item) => item.category === "character")
-            .map((item) => item.content)
-            .slice(0, 3)
-            .join(""),
-        },
+        select: { summary: true },
       });
+      const keyEvents = facts.map((item) => item.content).slice(0, 3).join("");
+      const characterStates = facts
+        .filter((item) => item.category === "character")
+        .map((item) => item.content)
+        .slice(0, 3)
+        .join("");
+      if (existingSummary) {
+        await tx.chapterSummary.update({
+          where: { chapterId },
+          data: {
+            ...(existingSummary.summary.trim() ? {} : { summary }),
+            keyEvents,
+            characterStates,
+          },
+        });
+      } else {
+        await tx.chapterSummary.create({
+          data: {
+            novelId,
+            chapterId,
+            summary,
+            keyEvents,
+            characterStates,
+          },
+        });
+      }
 
       await tx.consistencyFact.deleteMany({ where: { novelId, chapterId } });
       if (facts.length > 0) {
