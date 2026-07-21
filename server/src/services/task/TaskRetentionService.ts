@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 import type { TaskRetentionConfig } from "../../config/taskRetention";
 import { TASK_RETENTION_INTERVAL_MS, taskRetentionConfig } from "../../config/taskRetention";
 import { prisma } from "../../db/prisma";
+import { deleteWorkflowTasksHard } from "../novel/novelDeleteCascade";
 import {
   STALE_AUTO_DIRECTOR_RUNNING_MESSAGE,
   isStaleAutoDirectorRunningTaskBroad,
@@ -10,7 +11,9 @@ import {
 const TERMINAL_WORKFLOW_STATUSES = ["succeeded", "failed", "cancelled"] as const;
 const TERMINAL_PIPELINE_STATUSES = ["succeeded", "failed", "cancelled"] as const;
 const ACTIVE_WORKFLOW_STATUSES = ["queued", "running", "waiting_approval"] as const;
+const ACTIVE_AGENT_STATUSES = ["queued", "running", "waiting_approval"] as const;
 const SUPERSEDE_LANE = "auto_director";
+const NULL_NOVEL_ORPHAN_MESSAGE = "空小说引用任务已过期，由任务保留策略清理。";
 
 export interface TaskRetentionRow {
   id: string;
@@ -36,6 +39,8 @@ export interface TaskRetentionSummary {
   runtimeRowsDeleted: number;
   supersededDeleted: number;
   zombieRunningCancelled: number;
+  nullNovelOrphansDeleted: number;
+  nullNovelAgentRunsDeleted: number;
 }
 
 const NULL_NOVEL_BUCKET = "__none__";
@@ -264,6 +269,72 @@ export class TaskRetentionService {
   }
 
   /**
+   * null-novel active workflow/agent leftovers:
+   * - create-before-bind tasks that never attached a novel and went stale
+   * - historical SetNull orphans after novel delete (pre-cascade / pre-purge)
+   * Hard-delete after nullNovelStaleHours so waiting_approval cannot live forever.
+   */
+  private async purgeStaleNullNovelOrphans(
+    now: Date,
+    cfg: TaskRetentionConfig,
+    summary: TaskRetentionSummary,
+  ): Promise<void> {
+    const cutoff = new Date(now.getTime() - cfg.nullNovelStaleHours * 60 * 60 * 1000);
+    const staleWorkflows = await prisma.novelWorkflowTask.findMany({
+      where: {
+        novelId: null,
+        status: { in: [...ACTIVE_WORKFLOW_STATUSES] },
+        updatedAt: { lt: cutoff },
+      },
+      select: { id: true },
+    });
+    if (staleWorkflows.length > 0) {
+      const ids = staleWorkflows.map((row) => row.id);
+      await prisma.novelWorkflowTask.updateMany({
+        where: { id: { in: ids } },
+        data: {
+          status: "cancelled",
+          cancelRequestedAt: now,
+          finishedAt: now,
+          heartbeatAt: now,
+          lastError: NULL_NOVEL_ORPHAN_MESSAGE,
+        },
+      });
+      const cascadeSummary = await deleteWorkflowTasksHard(ids);
+      summary.novelWorkflowDeleted += cascadeSummary.workflowTasksDeleted;
+      summary.runtimeRowsDeleted += cascadeSummary.runtimeRowsDeleted + cascadeSummary.followUpRowsDeleted;
+      summary.archiveRowsDeleted += cascadeSummary.archiveRowsDeleted;
+      summary.nullNovelOrphansDeleted += cascadeSummary.workflowTasksDeleted;
+    }
+
+    const staleAgents = await prisma.agentRun.findMany({
+      where: {
+        novelId: null,
+        status: { in: [...ACTIVE_AGENT_STATUSES] },
+        updatedAt: { lt: cutoff },
+      },
+      select: { id: true },
+    });
+    if (staleAgents.length > 0) {
+      const agentIds = staleAgents.map((row) => row.id);
+      await prisma.agentApproval.updateMany({
+        where: { runId: { in: agentIds }, status: "pending" },
+        data: {
+          status: "expired",
+          decisionNote: NULL_NOVEL_ORPHAN_MESSAGE,
+          decidedAt: now,
+        },
+      });
+      await prisma.agentRun.deleteMany({ where: { id: { in: agentIds } } });
+      const archiveAgent = await prisma.taskCenterArchive.deleteMany({
+        where: { taskKind: "agent_run", taskId: { in: agentIds } },
+      });
+      summary.archiveRowsDeleted += archiveAgent.count;
+      summary.nullNovelAgentRunsDeleted += agentIds.length;
+    }
+  }
+
+  /**
    * Mark zombie auto_director running tasks (heartbeat stale, no manual-recovery
    * flag) as cancelled — two-step: this cycle only cancels, a later cycle's
    * supersede sweep deletes them. Uses the broad stale guard (no currentItemKey
@@ -365,10 +436,15 @@ export class TaskRetentionService {
       runtimeRowsDeleted: 0,
       supersededDeleted: 0,
       zombieRunningCancelled: 0,
+      nullNovelOrphansDeleted: 0,
+      nullNovelAgentRunsDeleted: 0,
     };
 
     // --- NovelWorkflowTask ---
     try {
+      // Step 0: null-novel active orphans (waiting_approval forever after delete / abandoned create).
+      await this.purgeStaleNullNovelOrphans(now, cfg, summary);
+
       // Step 1: cancel zombie running tasks (two-step: they become supersedeable next).
       summary.zombieRunningCancelled = await this.cancelZombieRunningTasks(now);
 

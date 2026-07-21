@@ -1659,7 +1659,7 @@ model AgentRun {
   startedAt    DateTime?
   finishedAt   DateTime?
   metadataJson String?
-  novel        Novel?         @relation(fields: [novelId], references: [id], onDelete: SetNull)
+  novel        Novel?         @relation(fields: [novelId], references: [id], onDelete: Cascade)
   steps        AgentStep[]
   approvals    AgentApproval[]
   createdAt    DateTime       @default(now())
@@ -1925,7 +1925,7 @@ model NovelWorkflowTask {
   totalTokens        Int                     @default(0)
   llmCallCount       Int                     @default(0)
   lastTokenRecordedAt DateTime?
-  novel              Novel?                  @relation(fields: [novelId], references: [id], onDelete: SetNull)
+  novel              Novel?                  @relation(fields: [novelId], references: [id], onDelete: Cascade)
   autoApprovalRecords AutoDirectorAutoApprovalRecord[]
   directorRun        DirectorRun?
   directorCommands   DirectorRunCommand[]

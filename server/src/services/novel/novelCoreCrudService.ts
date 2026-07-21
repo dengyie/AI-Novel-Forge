@@ -33,6 +33,7 @@ import {
   UpdateNovelInput,
 } from "./novelCoreShared";
 import { queueRagDelete, queueRagUpsert } from "./novelCoreSupport";
+import { purgeTasksOwnedByNovel } from "./novelDeleteCascade";
 import { normalizeChapterTitleForUniqueness } from "./volume/chapterTitleDiversity";
 
 
@@ -448,6 +449,9 @@ export class NovelCoreCrudService {
   }
 
   async deleteNovel(id: string) {
+    // Task-center / agent / director-runtime rows historically used SetNull or no FK.
+    // Purge them first so delete does not leave waiting_approval ghosts in the UI.
+    await purgeTasksOwnedByNovel(id);
     queueRagDelete("novel", id);
     queueRagDelete("bible", id);
     await prisma.novel.delete({ where: { id } });

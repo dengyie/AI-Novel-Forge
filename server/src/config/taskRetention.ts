@@ -20,12 +20,21 @@ export const TASK_RETENTION_SUPERSEDED_MIN_AGE_MS = asInt(
   0,
   24 * 60 * 60 * 1000,
 );
+// null-novel 活跃任务（建书中或删书 SetNull 残留）在心跳/更新停滞超过该小时数后强制取消并硬删。
+// 默认 24h：给合法 create-before-bind 留窗口，同时清掉删书后永远 waiting_approval 的幽灵。
+export const TASK_RETENTION_NULL_NOVEL_STALE_HOURS = asInt(
+  process.env.TASK_RETENTION_NULL_NOVEL_STALE_HOURS,
+  24,
+  1,
+  24 * 30,
+);
 
 export interface TaskRetentionConfig {
   keepPerNovel: number;
   succeededDays: number;
   failedDays: number;
   supersededMinAgeMs: number;
+  nullNovelStaleHours: number;
 }
 
 export const taskRetentionConfig: TaskRetentionConfig = {
@@ -33,4 +42,5 @@ export const taskRetentionConfig: TaskRetentionConfig = {
   succeededDays: TASK_RETENTION_SUCCEEDED_DAYS,
   failedDays: TASK_RETENTION_FAILED_DAYS,
   supersededMinAgeMs: TASK_RETENTION_SUPERSEDED_MIN_AGE_MS,
+  nullNovelStaleHours: TASK_RETENTION_NULL_NOVEL_STALE_HOURS,
 };

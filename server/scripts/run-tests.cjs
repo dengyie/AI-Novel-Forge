@@ -20,6 +20,8 @@ const integrationTests = new Set([
   "runtimeMigrations.test.js",
   // real sqlite + prisma:push — slow; not part of fast suite
   "taskRetentionRunOnce.test.js",
+  "taskRetentionNullNovelOrphan.test.js",
+  "novelDeleteCascade.test.js",
 ]);
 
 function listTestFiles(directory) {
