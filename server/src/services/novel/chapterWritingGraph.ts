@@ -183,13 +183,6 @@ export class ChapterWritingGraph {
   constructor(private readonly deps: ChapterGraphDeps) {}
 
   /**
-   * broker 解析结果健康检查：
-   * - resolverErrors 非空（required 组 resolver 抛错）→ fail-fast，避免拿缺骨上下文写出失控章节。
-   * - missingRequiredGroups 仅 logWarn：其中包含「resolver 正常返回空」的合法空组——
-   *   如裸章节（无 plan/无义务数据）的 obligation_contract、无风格基线时的 style_contract，
-   *   旧行为是静默继续写，此处保持可观测但不阻断。
-   */
-  /**
    * 长度欠账留债：合并写 chapter.riskFlags.chapterLengthDebt，
    * 与 continuationUnresolvedHighSimilarity / qualityScorePersistFailed 同款模式。
    * best-effort：失败只告警，不影响定稿主路径。
@@ -244,6 +237,12 @@ export class ChapterWritingGraph {
     }
   }
 
+  /**
+   * broker 解析结果健康检查：
+   * - 仅当 **required** 组的 resolver 抛错时 fail-fast（缺骨上下文会写出失控章节）。
+   * - 可选组 resolver 错误、以及 missingRequiredGroups 中「resolver 正常返回空」的合法空组
+   *   （裸章节 obligation_contract / 无风格基线 style_contract 等）只 logWarn，不阻断。
+   */
   private assertBrokerResolutionHealthy(
     brokerResolution: {
       missingRequiredGroups: string[];
@@ -264,17 +263,22 @@ export class ChapterWritingGraph {
         missingRequiredGroups: brokerResolution.missingRequiredGroups,
       });
     }
-    if (brokerResolution.resolverErrors.length > 0) {
-      this.deps.logWarn("Context broker resolver errors", {
-        ...baseMeta,
-        resolverErrors: brokerResolution.resolverErrors,
-      });
-      const failedRequired = new Set(brokerResolution.resolverErrors.map((error) => error.group));
-      const failedMissing = brokerResolution.missingRequiredGroups.filter((group) => failedRequired.has(group));
-      throw new Error(
-        `小说${context.novelId} 章节${context.chapterOrder} 写章上下文必需组解析失败（${stage}）: ${failedMissing.join(", ")}`,
-      );
+    if (brokerResolution.resolverErrors.length === 0) {
+      return;
     }
+    this.deps.logWarn("Context broker resolver errors", {
+      ...baseMeta,
+      resolverErrors: brokerResolution.resolverErrors,
+    });
+    // 可选组 resolver 失败不得阻断写章；仅 required ∩ resolverErrors 才 throw。
+    const failedRequiredGroups = new Set(brokerResolution.resolverErrors.map((error) => error.group));
+    const failedMissing = brokerResolution.missingRequiredGroups.filter((group) => failedRequiredGroups.has(group));
+    if (failedMissing.length === 0) {
+      return;
+    }
+    throw new Error(
+      `小说${context.novelId} 章节${context.chapterOrder} 写章上下文必需组解析失败（${stage}）: ${failedMissing.join(", ")}`,
+    );
   }
 
   private async continuityNode(

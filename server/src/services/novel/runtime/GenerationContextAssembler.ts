@@ -314,7 +314,8 @@ export class GenerationContextAssembler {
         orderBy: { chapter: { order: "desc" } },
         take: 3,
       }),
-      // A3 QFP：近邻 PRIOR_LOOKBACK 章，取正文尾 + riskFlags.feedback
+      // A3 QFP + previous_chapter_tail：排除 needs_repair 后扩大 lookback，
+      // 避免连续 ≤3 章 needs_repair 时尾段锚点整空；QFP 展示仍只取前 PRIOR_LOOKBACK 条。
       prisma.chapter.findMany({
         where: {
           novelId,
@@ -324,7 +325,7 @@ export class GenerationContextAssembler {
           chapterStatus: { not: "needs_repair" },
         },
         orderBy: { order: "desc" },
-        take: QUALITY_FEEDBACK_PRIOR_LOOKBACK,
+        take: Math.max(QUALITY_FEEDBACK_PRIOR_LOOKBACK, 20),
         select: { order: true, title: true, content: true, riskFlags: true },
       }),
       // 写作近邻多样性：当前章前序 N 章 title/taskSheet + summary（≠ 债板前 30 观测窗）
@@ -531,10 +532,20 @@ export class GenerationContextAssembler {
     } satisfies GenerationContextPackage["continuation"];
 
     const previousChapterTail = extractChapterTail(recentChapters[0]?.content);
+    if (!previousChapterTail && chapter.order > 1) {
+      // lookback 内无合格章：承接锚点空，续写只能靠摘要/任务单，可观测告警
+      console.warn("[context-assembler] previous_chapter_tail empty after needs_repair filter", {
+        novelId,
+        chapterId,
+        chapterOrder: chapter.order,
+        eligiblePriorCount: recentChapters.length,
+      });
+    }
     // A3：近邻章 QFP 投影 → writer/repair「上章纠偏」（确定性模板，非第二 blocking 引擎）
-    const priorQualityPackets: QualityFeedbackPacket[] = recentChapters.flatMap((row) =>
-      extractQualityFeedbackFromRiskFlags(row.riskFlags),
-    );
+    // 仅取最近 PRIOR_LOOKBACK 条合格章的 feedback，避免扩大 lookback 后纠偏噪声膨胀
+    const priorQualityPackets: QualityFeedbackPacket[] = recentChapters
+      .slice(0, QUALITY_FEEDBACK_PRIOR_LOOKBACK)
+      .flatMap((row) => extractQualityFeedbackFromRiskFlags(row.riskFlags));
     const priorQualityFeedback = formatPriorQualityFeedbackLines(priorQualityPackets);
 
     // 写作近邻同质 → 软强制换场景（advisory；不接 volumeReplanGate；≠ 债板 recommendForce 窗）

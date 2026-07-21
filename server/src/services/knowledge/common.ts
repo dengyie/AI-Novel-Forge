@@ -85,6 +85,11 @@ export async function resolveKnowledgeDocumentIds(input: {
     // 有 target（novel/world）但无 binding 时，不回退到全租户 enabled 文档——
     // 否则 A 书的章节 RAG 会召回 B 书绑定的设定文档，造成跨小说/跨世界知识污染。
     // 语义对齐「知识库采用显式绑定准入」：没绑就是没授权此书使用，返回空集合。
+    // 可观测：静默空集会让写章知识侧变空，打 warn 便于盘点未绑定书。
+    console.warn("[knowledge] target has no enabled bindings; RAG knowledge scope empty", {
+      targetType: input.targetType,
+      targetId: input.targetId,
+    });
     return [];
   }
 
