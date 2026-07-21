@@ -116,6 +116,7 @@ describe("earAgentHeuristics (阶段 2)", () => {
     // 清掉所有可能残留的 env
     delete process.env.VOICE_LIBRARY_APPROVE_TOKEN;
     delete process.env.AUDIOBOOK_OPS_ALLOW_OPEN_APPROVE;
+    delete process.env.EAR_AUTO_SOFT_APPROVE;
   });
 
   it("silent WAV → reject", () => {
@@ -128,16 +129,50 @@ describe("earAgentHeuristics (阶段 2)", () => {
     assert.ok(v.reasons.some((r) => /RMS|时长|静音/.test(r)), `reasons 应提及 RMS/时长/静音：${JSON.stringify(v.reasons)}`);
   });
 
-  it("clipped WAV → needs_human 或 reject（clipOk=false）", () => {
+  it("clipped WAV → reject 或 approve_with_low_confidence（clipOk=false；极端削波 reject）", () => {
     const wav = writeWav(path.join(TMP_ROOT, "clip.wav"), clippedPcm(5));
     const asset = importWavAsDraft("clip-asset", wav);
     const result = earAgent.run({ assetIds: [asset.id], skipApprove: true });
     const v = result.verdicts[0];
     assert.ok(
-      v.decision === "needs_human" || v.decision === "reject",
-      `clip 应 needs_human/reject，actual=${v.decision}`,
+      v.decision === "reject" || v.decision === "approve_with_low_confidence",
+      `clip 应 reject/low_confidence，actual=${v.decision}`,
     );
     assert.equal(v.scores.clipOk, false);
+  });
+
+  it("中区 soft 默认不升权；EAR_AUTO_SOFT_APPROVE=1 才 soft 升", () => {
+    // 较低 RMS 正弦，落 soft 区
+    const rate = 24000;
+    const n = rate * 6;
+    const pcm = new Array(n);
+    for (let i = 0; i < n; i += 1) {
+      const t = i / rate;
+      pcm[i] = Math.floor(Math.sin(2 * Math.PI * 180 * t) * 0.035 * 32768);
+    }
+    const wav = writeWav(path.join(TMP_ROOT, "soft.wav"), pcm);
+    const asset = importWavAsDraft("soft-asset", wav);
+    delete process.env.EAR_AUTO_SOFT_APPROVE;
+    const dry = earAgent.run({ assetIds: [asset.id], skipApprove: true });
+    const d = dry.verdicts[0].decision;
+    assert.ok(
+      d === "approve" || d === "approve_with_low_confidence",
+      `中区应 soft/hard，actual=${d} scores=${JSON.stringify(dry.verdicts[0].scores)}`,
+    );
+    // 默认 requireHard：soft 不升权
+    process.env.AUDIOBOOK_OPS_ALLOW_OPEN_APPROVE = "1";
+    const held = earAgent.run({ assetIds: [asset.id], skipApprove: false });
+    if (dry.verdicts[0].decision === "approve_with_low_confidence") {
+      assert.equal(held.approve.approved, 0, `默认 soft 应不升：${JSON.stringify(held.approve)}`);
+      assert.ok(held.approve.skipped >= 1, JSON.stringify(held.approve));
+    }
+    // 显式开 soft
+    process.env.EAR_AUTO_SOFT_APPROVE = "1";
+    const soft = earAgent.run({ assetIds: [asset.id], skipApprove: false, requireHardApprove: false });
+    if (dry.verdicts[0].decision === "approve_with_low_confidence" || dry.verdicts[0].decision === "approve") {
+      assert.equal(soft.approve.approved, 1, JSON.stringify(soft.approve));
+    }
+    delete process.env.EAR_AUTO_SOFT_APPROVE;
   });
 
   it("正常人声 WAV → approve（heuristic 通过）", () => {
@@ -239,9 +274,13 @@ describe("earAgentHeuristics (阶段 2)", () => {
       minClarity: 0.5,
       minSpeechLikely: 0.4,
       minCleanliness: 0.5,
+      softMinClarity: 0.32,
+      softMinSpeechLikely: 0.28,
+      softMinCleanliness: 0.38,
       silenceAbs: 0.01,
       clipAbs: 0.985,
       clipMaxRatio: 0.02,
+      clipHardRejectRatio: 0.12,
       rmsFloor: 0.0001,
     });
     assert.ok(m.silenceRatio > 0.9);

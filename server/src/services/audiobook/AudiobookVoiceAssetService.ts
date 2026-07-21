@@ -37,6 +37,8 @@ import {
   planCharacterVoices,
   type VoicePlannerCharacterInput,
   type VoicePlannerLibraryAsset,
+  type VoiceCluster,
+  type VoiceSlot,
   inferGenderBucket,
   resolveVoiceCluster,
   inferVoiceSlot,
@@ -54,6 +56,14 @@ import {
   resolvePreviewTtsMode,
 } from "./characterVoicePreview";
 import { tryResolveEffectiveCloneRefPath, voiceLibraryService } from "./voiceLibraryService";
+import {
+  buildVoiceBrief,
+  buildRuleVoiceBrief,
+  formatBookContext,
+  type BookVoiceContext,
+  type VoiceBrief,
+} from "./voiceBriefService";
+import { pickLibraryAssetWithLlm } from "./voiceLibraryPickService";
 import { mimoChatAudioTTSProvider } from "./MimoChatAudioTTSProvider";
 
 const DEFAULT_PREVIEW_TEXT = DEFAULT_CHARACTER_VOICE_PREVIEW_TEXT;
@@ -504,7 +514,24 @@ export class AudiobookVoiceAssetService {
       where: { id: novelId },
       select: {
         id: true,
+        title: true,
+        description: true,
+        styleTone: true,
+        bookSellingPoint: true,
+        first30ChapterPromise: true,
+        competingFeel: true,
+        narrativePov: true,
         audiobookNarratorVoice: true,
+        genre: { select: { name: true } },
+        primaryStoryMode: { select: { name: true } },
+        bible: {
+          select: {
+            coreSetting: true,
+            worldRules: true,
+            mainPromise: true,
+            rawContent: true,
+          },
+        },
         characters: {
           select: {
             id: true,
@@ -535,6 +562,20 @@ export class AudiobookVoiceAssetService {
       throw new AppError("小说不存在。", 404);
     }
 
+    const book: BookVoiceContext = {
+      title: novel.title,
+      description: novel.description,
+      styleTone: novel.styleTone,
+      bookSellingPoint: novel.bookSellingPoint,
+      first30ChapterPromise: novel.first30ChapterPromise,
+      competingFeel: novel.competingFeel,
+      narrativePov: novel.narrativePov ? String(novel.narrativePov) : null,
+      genreName: novel.genre?.name ?? null,
+      storyModeName: novel.primaryStoryMode?.name ?? null,
+      worldSummary: clipWorldSummaryFromBible(novel.bible),
+    };
+    const bookContextBlob = formatBookContext(book);
+
     const narratorVoice = novel.audiobookNarratorVoice?.trim() || "";
     const reservedFromNovel =
       narratorVoice && isMimoTtsPresetVoice(narratorVoice) ? [narratorVoice] : [];
@@ -551,22 +592,255 @@ export class AudiobookVoiceAssetService {
       strategy === "preset_only" || strategy === "prefer_design"
         ? []
         : loadApprovedLibraryAssets();
+
+    const plannerChars = novel.characters.map(toPlannerInput);
+    const wantBrief =
+      strategy === "prefer_library"
+      || strategy === "prefer_library_ai"
+      || strategy === "auto"
+      || process.env.VOICE_PLAN_BRIEF_LLM?.trim() === "1";
+    const useLlmBrief =
+      strategy === "prefer_library_ai"
+      || process.env.VOICE_PLAN_BRIEF_LLM?.trim() === "1";
+
+    const briefByCharacterId: Record<
+      string,
+      {
+        cluster?: VoiceCluster;
+        preferredSlot?: VoiceSlot;
+        personaTags?: string[];
+        avoidTags?: string[];
+        oneLine?: string;
+      }
+    > = {};
+
+    if (wantBrief) {
+      const briefTargets = plannerChars.filter(
+        (ch) => !input.characterIds?.length || input.characterIds.includes(ch.characterId),
+      );
+      // 规则 Brief 可全量；LLM Brief 仅 lead/cast 且有限并发
+      const llmClusterOk = (cluster: string | undefined) =>
+        cluster === "lead" || cluster === "cast";
+      await mapWithConcurrency(briefTargets, 4, async (ch) => {
+        try {
+          // 先规则算 cluster，再决定是否 LLM（省成本：extra/narrator 不调 LLM）
+          const ruleBrief = buildRuleVoiceBrief(ch, book);
+          const allowLlm = useLlmBrief && llmClusterOk(ruleBrief.cluster);
+          const brief: VoiceBrief = await buildVoiceBrief({
+            character: ch,
+            book,
+            useLlm: allowLlm,
+          });
+          briefByCharacterId[ch.characterId] = {
+            cluster: brief.cluster,
+            preferredSlot: {
+              pitchBand: brief.pitch,
+              textureBand: brief.texture,
+              energyBand: brief.energy,
+            },
+            personaTags: brief.personaTags,
+            avoidTags: brief.avoidTags,
+            oneLine: brief.oneLine,
+          };
+        } catch {
+          /* rule path inside buildVoiceBrief already soft-fails */
+        }
+      });
+    }
+
     const planned = planCharacterVoices({
-      characters: novel.characters.map(toPlannerInput),
+      characters: plannerChars,
       strategy,
       onlyMissing: input.onlyMissing !== false,
       characterIds: input.characterIds,
       maxImportantPerPreset: input.maxImportantPerPreset,
       reservedPresets,
       libraryAssets,
+      bookContextBlob,
+      briefByCharacterId,
     });
+
+    // prefer_library_ai：仅 lead/cast 走 LLM pick（校验 id∈候选）；extra/narrator 保持规则
+    let items = planned.items;
+    if (strategy === "prefer_library_ai" && libraryAssets.length && process.env.VOICE_PLAN_AI_PICK?.trim() !== "0") {
+      const usedIds = new Set(
+        items
+          .filter((i) => i.ttsMode === "clone" && i.ttsVoiceAssetId)
+          .map((i) => i.ttsVoiceAssetId!.trim()),
+      );
+      const usedSpeakers = new Set<string>();
+      for (const id of usedIds) {
+        const a = libraryAssets.find((x) => x.id === id);
+        const sp = speakerKeyFromTags(a?.tags, id);
+        if (sp) usedSpeakers.add(sp);
+      }
+
+      const isLeadOrCast = (characterId: string): boolean => {
+        const ch = plannerChars.find((c) => c.characterId === characterId);
+        if (!ch) return false;
+        const cluster = briefByCharacterId[characterId]?.cluster || resolveVoiceCluster(ch);
+        return cluster === "lead" || cluster === "cast";
+      };
+
+      // 无 clone 的 lead/cast：并发 AI pick
+      const needPickIdx: number[] = [];
+      items.forEach((item, idx) => {
+        if (item.ttsMode === "clone" && item.ttsVoiceAssetId) return;
+        if (!isLeadOrCast(item.characterId)) return;
+        needPickIdx.push(idx);
+      });
+
+      // 阶段1：并发 LLM 挑候选（快照 used，不互斥写）
+      // 阶段2：串行落盘，冲突 id/speaker 丢弃，避免并发抢同一资产
+      const pickProposals = await mapWithConcurrency(needPickIdx, 3, async (idx) => {
+        const item = items[idx]!;
+        const briefMeta = briefByCharacterId[item.characterId];
+        const ch = plannerChars.find((c) => c.characterId === item.characterId);
+        if (!ch || !briefMeta) return { idx, item, pickedId: null as string | null, pickReason: "" };
+        const candidates = collectLibraryAssetCandidates({
+          genderBucket: inferGenderBucket(ch),
+          cluster: (briefMeta.cluster || resolveVoiceCluster(ch)) as VoiceCluster,
+          assets: libraryAssets,
+          usedAssetIds: usedIds,
+          usedSpeakerKeys: usedSpeakers,
+          preferredSlot: briefMeta.preferredSlot,
+          personaTags: briefMeta.personaTags,
+          avoidTags: briefMeta.avoidTags,
+        }).slice(0, 80);
+        if (!candidates.length) return { idx, item, pickedId: null, pickReason: "" };
+        const briefForPick: VoiceBrief = {
+          gender: inferGenderBucket(ch),
+          age: "unknown",
+          cluster: (briefMeta.cluster || resolveVoiceCluster(ch)) as VoiceCluster,
+          pitch: briefMeta.preferredSlot?.pitchBand || "mid",
+          texture: briefMeta.preferredSlot?.textureBand || "neutral",
+          energy: briefMeta.preferredSlot?.energyBand || "even",
+          personaTags: briefMeta.personaTags || [],
+          avoidTags: briefMeta.avoidTags || [],
+          oneLine: briefMeta.oneLine || item.characterName,
+          confidence: 0.5,
+          source: "rule",
+        };
+        const pick = await pickLibraryAssetWithLlm({
+          brief: briefForPick,
+          candidates: candidates.map((c) => c.asset),
+        });
+        if (!pick.assetId) return { idx, item, pickedId: null, pickReason: "" };
+        return { idx, item, pickedId: pick.assetId as string, pickReason: pick.reason || "" };
+      });
+
+      const nextItems = items.slice();
+      for (const r of pickProposals) {
+        if (!r.pickedId || usedIds.has(r.pickedId)) {
+          nextItems[r.idx] = r.item;
+          continue;
+        }
+        const sp = speakerKeyFromTags(
+          libraryAssets.find((a) => a.id === r.pickedId)?.tags,
+          r.pickedId,
+        );
+        if (sp && usedSpeakers.has(sp)) {
+          nextItems[r.idx] = r.item;
+          continue;
+        }
+        usedIds.add(r.pickedId);
+        if (sp) usedSpeakers.add(sp);
+        nextItems[r.idx] = {
+          ...r.item,
+          ttsMode: "clone" as const,
+          ttsVoiceAssetId: r.pickedId,
+          ttsDesignPrompt: null,
+          ttsVoice: null,
+          reason: `策略 prefer_library_ai：LLM 选库 ${r.pickedId}（${r.pickReason}）`,
+        };
+      }
+      items = nextItems;
+
+      // 可选：已有规则 clone 的 lead/cast 再 LLM 重排
+      if (process.env.VOICE_PLAN_AI_PICK_RERANK?.trim() === "1") {
+        const rerankIdx: number[] = [];
+        items.forEach((item, idx) => {
+          if (!(item.ttsMode === "clone" && item.ttsVoiceAssetId)) return;
+          if (!isLeadOrCast(item.characterId)) return;
+          rerankIdx.push(idx);
+        });
+        const rerankProposals = await mapWithConcurrency(rerankIdx, 3, async (idx) => {
+          const item = items[idx]!;
+          const briefMeta = briefByCharacterId[item.characterId];
+          const ch = plannerChars.find((c) => c.characterId === item.characterId);
+          if (!ch || !briefMeta) return { idx, item, oldId: null as string | null, pickedId: null as string | null, pickReason: "" };
+          const candidates = collectLibraryAssetCandidates({
+            genderBucket: inferGenderBucket(ch),
+            cluster: (briefMeta.cluster || resolveVoiceCluster(ch)) as VoiceCluster,
+            assets: libraryAssets,
+            usedAssetIds: new Set([...usedIds].filter((id) => id !== item.ttsVoiceAssetId)),
+            usedSpeakerKeys: usedSpeakers,
+            preferredSlot: briefMeta.preferredSlot,
+            personaTags: briefMeta.personaTags,
+            avoidTags: briefMeta.avoidTags,
+          }).slice(0, 80);
+          if (candidates.length < 2) return { idx, item, oldId: null, pickedId: null, pickReason: "" };
+          const briefForPick: VoiceBrief = {
+            gender: inferGenderBucket(ch),
+            age: "unknown",
+            cluster: (briefMeta.cluster || resolveVoiceCluster(ch)) as VoiceCluster,
+            pitch: briefMeta.preferredSlot?.pitchBand || "mid",
+            texture: briefMeta.preferredSlot?.textureBand || "neutral",
+            energy: briefMeta.preferredSlot?.energyBand || "even",
+            personaTags: briefMeta.personaTags || [],
+            avoidTags: briefMeta.avoidTags || [],
+            oneLine: briefMeta.oneLine || item.characterName,
+            confidence: 0.5,
+            source: "rule",
+          };
+          const pick = await pickLibraryAssetWithLlm({
+            brief: briefForPick,
+            candidates: candidates.map((c) => c.asset),
+          });
+          if (pick.assetId && pick.assetId !== item.ttsVoiceAssetId) {
+            return {
+              idx,
+              item,
+              oldId: item.ttsVoiceAssetId!,
+              pickedId: pick.assetId as string,
+              pickReason: pick.reason || "",
+            };
+          }
+          return { idx, item, oldId: null, pickedId: null, pickReason: "" };
+        });
+        const after = items.slice();
+        for (const r of rerankProposals) {
+          if (!r.pickedId || !r.oldId || usedIds.has(r.pickedId)) {
+            after[r.idx] = r.item;
+            continue;
+          }
+          const sp = speakerKeyFromTags(
+            libraryAssets.find((a) => a.id === r.pickedId)?.tags,
+            r.pickedId,
+          );
+          if (sp && usedSpeakers.has(sp)) {
+            after[r.idx] = r.item;
+            continue;
+          }
+          usedIds.delete(r.oldId);
+          usedIds.add(r.pickedId);
+          if (sp) usedSpeakers.add(sp);
+          after[r.idx] = {
+            ...r.item,
+            ttsVoiceAssetId: r.pickedId,
+            reason: `策略 prefer_library_ai：LLM 重排 ${r.pickedId}（${r.pickReason}；原 ${r.oldId}）`,
+          };
+        }
+        items = after;
+      }
+    }
 
     return {
       novelId,
       strategy,
-      items: planned.items,
+      items,
       skipped: planned.skipped,
-      summary: summarizePlan(planned.items, planned.skipped),
+      summary: summarizePlan(items, planned.skipped),
     };
   }
 
@@ -1339,3 +1613,42 @@ export class AudiobookVoiceAssetService {
 
 
 export const audiobookVoiceAssetService = new AudiobookVoiceAssetService();
+
+
+function clipWorldSummaryFromBible(
+  bible?: {
+    coreSetting?: string | null;
+    worldRules?: string | null;
+    mainPromise?: string | null;
+    rawContent?: string | null;
+  } | null,
+): string | null {
+  if (!bible) return null;
+  const parts = [bible.coreSetting, bible.worldRules, bible.mainPromise, bible.rawContent]
+    .map((s) => (s || "").trim())
+    .filter(Boolean);
+  if (!parts.length) return null;
+  const joined = parts.join("；");
+  return joined.length > 400 ? `${joined.slice(0, 400)}…` : joined;
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  worker: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  if (!items.length) return [];
+  const concurrency = Math.max(1, Math.min(limit, items.length));
+  const results = new Array<R>(items.length);
+  let next = 0;
+  async function runOne(): Promise<void> {
+    for (;;) {
+      const i = next;
+      next += 1;
+      if (i >= items.length) return;
+      results[i] = await worker(items[i]!, i);
+    }
+  }
+  await Promise.all(Array.from({ length: concurrency }, () => runOne()));
+  return results;
+}

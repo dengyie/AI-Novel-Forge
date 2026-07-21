@@ -35,7 +35,7 @@
 
 1. 浏览器管理台：sessionStorage 填 approve token → **真人播放** → 点 approve  
 2. 真 LLM redesign 听感（API `source=llm` 已验；人耳听 design 试听未编造）  
-3. seed 包批量人耳后升 approved（**禁止** auto-approve）
+3. seed 包经 EarAgent / 播放写入 heard 后升 approved（**禁止** import 直批 approved；AI 耳可自动升权）
 
 ### 明确不做（本计划外 / P2+）
 
@@ -333,3 +333,14 @@ D–G + heardSha 均已满足停止条件；**勿**自动开 QFP / P2-7 / listen
 | 2026-07-18 | `661c372` | 本计划文档上 main |
 | 2026-07-18 | `1b7078b` | harden live；本计划立项 |
 | 2026-07-18 | A/B/C `5ed6c25` | 库+planner+picker 生产基线 |
+
+
+---
+
+## 全 AI 匹配 + AI 耳（2026-07-21）
+
+详见 [audiobook-ai-voice-match-auto-ear-plan.md](./audiobook-ai-voice-match-auto-ear-plan.md)。
+
+- profile：`ear_auto` / `library_ai_fill`
+- LabelAgent `label:ai-v3` 可赋 lead
+- VoiceBrief + `prefer_library_ai`；Ready design/preset fallback

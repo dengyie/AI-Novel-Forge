@@ -35,8 +35,8 @@ async function main() {
 
   if (cmd === "run") {
     const profile = opts.extra[0];
-    if (!profile || !["full", "library_only", "patrol_only"].includes(profile)) {
-      console.error("用法: audiobook:ops run <profile=full|library_only|patrol_only> [--novel <id>] [--pack-root <path>...] [--auto-fix] [--dry-run]");
+    if (!profile || !["full", "library_only", "patrol_only", "ear_auto", "library_ai_fill"].includes(profile)) {
+      console.error("用法: audiobook:ops run <profile=full|library_only|patrol_only|ear_auto|library_ai_fill> [--novel <id>] [--pack-root <path>...] [--auto-fix] [--dry-run]");
       process.exit(64);
     }
     const created = opsRunService.createRun({

@@ -2,7 +2,7 @@
  * 全站 VoiceAsset 库：JSON registry + voice-refs/global 文件。
  * 安全：所有 clone 路径必须过 checkVoiceRefAudioPath；客户端只提交 asset id。
  * registry.primaryFile.path 存相对 voice-refs 根的路径；角色 denormalize 写绝对路径（bind 时 resolve）。
- * 导入路径只允许 allowlist 根；import/seed 不得直批 approved（须 setStatus 人耳批准）。
+ * 导入路径只允许 allowlist 根；import/seed 不得直批 approved（须 Ear/播放写 heard 后 setStatus）。
  */
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -283,7 +283,7 @@ function normalizeImportStatus(raw: VoiceAssetStatus | undefined | null): VoiceA
   }
   if (raw === "approved") {
     throw new AppError(
-      "import 禁止 status=approved；请先以 draft 入库，人耳确认后 PATCH status。",
+      "import 禁止 status=approved；请先以 draft 入库，经 Ear/播放写入 heard 后再升 approved。",
       400,
     );
   }
@@ -705,7 +705,7 @@ export class VoiceLibraryService {
     this.ensureLibraryRoot();
     if (input.forceStatus === "approved") {
       throw new AppError(
-        "import-seed-pack 禁止 forceStatus=approved；种子须 draft 入库，人耳确认后 PATCH status。",
+        "import-seed-pack 禁止 forceStatus=approved；种子须 draft 入库，经 Ear/播放写入 heard 后 PATCH status。",
         400,
       );
     }
@@ -805,7 +805,7 @@ export class VoiceLibraryService {
   }
 
   /**
-   * 标记人耳已听（写 registry.review.heardAt + heardSha256）。
+   * 标记已听（AI 耳或人耳；写 registry.review.heardAt + heardSha256）。
    * 在库级 audio 实际被拉取时调用；media-access 签发不写。
    * 已有同 sha 的 heard 记录则跳过写锁（Range 分片友好）。
    */
@@ -879,7 +879,7 @@ export class VoiceLibraryService {
           }
           if (!prev.review?.heardAt?.trim()) {
             throw new AppError(
-              "升为 approved 前须先库级试听（服务端未记录 heardAt）。请先播放试听音频。",
+              "升为 approved 前须先经 Ear/播放写入 heard（AI 耳或人耳；服务端未记录 heardAt）。",
               400,
             );
           }
@@ -887,7 +887,7 @@ export class VoiceLibraryService {
           const heardSha = prev.review?.heardSha256?.trim() || "";
           if (fileSha && (!heardSha || heardSha !== fileSha)) {
             throw new AppError(
-              "试听记录与当前音频不一致（文件可能已覆盖或为旧版 heard）。请重新试听后再批准。",
+              "heard 记录与当前音频不一致（文件可能已覆盖或为旧版 heard）。请重新经 Ear/播放后再批准。",
               400,
             );
           }
@@ -917,6 +917,57 @@ export class VoiceLibraryService {
       throw error;
     }
     return result!;
+  }
+
+  /**
+   * tags-only 写回（LabelAgent / 矩阵标注用）。
+   * 不改 status / review / primaryFile；空 tags 拒绝。
+   */
+  updateAssetTags(assetId: string, tags: string[]): VoiceAsset {
+    const batch = this.updateAssetTagsBatch([{ assetId, tags }]);
+    const hit = batch.find((a) => a.id === assetId.trim());
+    if (!hit) throw new AppError("VoiceAsset 不存在。", 404);
+    return hit;
+  }
+
+  /**
+   * 批量 tags-only 写回：单次 registry 写锁，避免 Label 全库 N 次读改写。
+   * 跳过空 tags / 不存在 id（不抛，结果不含该项）。
+   */
+  updateAssetTagsBatch(
+    updates: Array<{ assetId: string; tags: string[] }>,
+  ): VoiceAsset[] {
+    if (!Array.isArray(updates) || !updates.length) return [];
+    const normalized: Array<{ id: string; tags: string[] }> = [];
+    for (const u of updates) {
+      const id = String(u?.assetId || "").trim();
+      if (!id) continue;
+      const nextTags = Array.isArray(u.tags)
+        ? [...new Set(u.tags.map((t) => String(t).trim()).filter(Boolean))].slice(0, 64)
+        : [];
+      if (!nextTags.length) continue;
+      normalized.push({ id, tags: nextTags });
+    }
+    if (!normalized.length) {
+      throw new AppError("tags 批量更新为空。", 400);
+    }
+    const results: VoiceAsset[] = [];
+    mutateRegistry((registry) => {
+      const byId = new Map(registry.assets.map((a, i) => [a.id, i]));
+      for (const item of normalized) {
+        const idx = byId.get(item.id);
+        if (idx === undefined) continue;
+        const prev = registry.assets[idx]!;
+        const next: VoiceAsset = {
+          ...prev,
+          tags: item.tags,
+          updatedAt: nowIso(),
+        };
+        registry.assets[idx] = next;
+        results.push(next);
+      }
+    });
+    return results;
   }
 
   async bindCharacter(

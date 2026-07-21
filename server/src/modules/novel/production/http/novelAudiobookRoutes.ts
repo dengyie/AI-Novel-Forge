@@ -300,7 +300,7 @@ const createAudiobookTaskSchema = z.object({
 const voicePlanSuggestSchema = z.object({
   onlyMissing: z.boolean().optional(),
   characterIds: z.array(z.string().trim().min(1)).max(200).optional(),
-  strategy: z.enum(["auto", "preset_only", "prefer_design", "prefer_library"]).optional(),
+  strategy: z.enum(["auto", "preset_only", "prefer_design", "prefer_library", "prefer_library_ai"]).optional(),
   maxImportantPerPreset: z.number().int().min(1).max(8).optional(),
   reservedPresets: z.array(z.string().trim().min(1).max(64)).max(16).optional(),
 });
@@ -374,7 +374,7 @@ const voiceReadinessPrepareSchema = z.object({
   fillMissingVoice: z.boolean().optional(),
   generatePreview: z.boolean().optional(),
   regenerateStale: z.boolean().optional(),
-  planStrategy: z.enum(["auto", "preset_only", "prefer_design", "prefer_library"]).optional(),
+  planStrategy: z.enum(["auto", "preset_only", "prefer_design", "prefer_library", "prefer_library_ai"]).optional(),
   previewText: z.string().trim().max(200).optional(),
   candidatesPerCharacter: z.number().int().min(1).max(5).optional(),
 });
@@ -1589,7 +1589,7 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
     "/audiobook/ops/runs",
     validate({
       body: z.object({
-        profile: z.enum(["full", "library_only", "patrol_only"]),
+        profile: z.enum(["full", "library_only", "patrol_only", "ear_auto", "library_ai_fill"]),
         novelId: z.string().trim().min(1).max(120).optional(),
         packRoots: z.array(z.string().trim().min(1).max(512)).max(16).optional(),
         assetIds: z.array(z.string().trim().min(1).max(120)).max(256).optional(),
@@ -1600,7 +1600,7 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
     async (req, res, next) => {
       try {
         const body = req.body as {
-          profile: "full" | "library_only" | "patrol_only";
+          profile: "full" | "library_only" | "patrol_only" | "ear_auto" | "library_ai_fill";
           novelId?: string;
           packRoots?: string[];
           assetIds?: string[];

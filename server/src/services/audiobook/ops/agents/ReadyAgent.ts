@@ -5,7 +5,7 @@
  *  1. audiobookVoiceReadinessService.assess(novelId) 扫 missing/invalid
  *  2. audiobookVoiceAssetService.suggest(novelId, { planStrategy: "prefer_library" })
  *  3. audiobookVoiceAssetService.apply(novelId, { items, overwrite: false })
- *     - 仅 apply ttsMode==="clone" 且 ttsVoiceAssetId 非 null 的项（库绑库）
+ *     - 优先 apply clone；无 clone 时默认 apply design/preset（全自动配齐）
  *     - 拒绝 apply draft 资产：suggest 仅给 approved，apply 内部已断（voiceLibraryService.assertBindableCloneRef）
  *
  * 输出 ReadyReport（planned/bound/failed/skipped + 各角色 reason）
@@ -24,9 +24,11 @@ import type {
 
 export interface ReadyAgentRunInput {
   novelId: string;
-  planStrategy?: "auto" | "preset_only" | "prefer_design" | "prefer_library";
+  planStrategy?: "auto" | "preset_only" | "prefer_design" | "prefer_library" | "prefer_library_ai";
   /** 阶段 1 dry-run 不 apply，只列 planned */
   dryRun?: boolean;
+  /** true=无 clone 时也 apply design/preset（全自动配齐，默认 true） */
+  applyDesignFallback?: boolean;
 }
 
 export interface ReadyReport {
@@ -58,6 +60,7 @@ export class ReadyAgent {
       strategy: input.planStrategy ?? "prefer_library",
     } satisfies AudiobookVoicePlanSuggestInput);
 
+    const applyDesignFallback = input.applyDesignFallback !== false;
     const perCharacter: ReadyReport["perCharacter"] = [];
     let planned = 0;
     let bound = 0;
@@ -66,14 +69,26 @@ export class ReadyAgent {
 
     for (const item of suggest.items) {
       planned += 1;
-      // 仅 clone + 带 ttsVoiceAssetId 的项才 apply；其他（design/preset）留后续 Ready 阶段或人工
-      if (item.ttsMode !== "clone" || !item.ttsVoiceAssetId) {
-        perCharacter.push({ characterId: item.characterId, action: "skip", reason: `非 clone 库绑（ttsMode=${item.ttsMode}）` });
+      const isClone = item.ttsMode === "clone" && Boolean(item.ttsVoiceAssetId?.trim());
+      const isDesign = item.ttsMode === "design" && Boolean(item.ttsDesignPrompt?.trim());
+      const isPreset = item.ttsMode === "preset" && Boolean(item.ttsVoice?.trim());
+      if (!isClone && !(applyDesignFallback && (isDesign || isPreset))) {
+        perCharacter.push({
+          characterId: item.characterId,
+          action: "skip",
+          reason: `无可 apply 负载（ttsMode=${item.ttsMode}）`,
+        });
         skipped += 1;
         continue;
       }
       if (input.dryRun) {
-        perCharacter.push({ characterId: item.characterId, action: "skip", reason: "dry-run：仅 suggest 不 apply" });
+        perCharacter.push({
+          characterId: item.characterId,
+          action: "skip",
+          reason: isClone
+            ? "dry-run：仅 suggest 不 apply（clone）"
+            : `dry-run：仅 suggest 不 apply（${item.ttsMode} fallback）`,
+        });
         skipped += 1;
         continue;
       }
@@ -94,7 +109,10 @@ export class ReadyAgent {
         });
         const applied = apply.applied.find((a: AudiobookVoicePlanApplyResult["applied"][number]) => a.characterId === item.characterId);
         if (applied) {
-          perCharacter.push({ characterId: item.characterId, action: "bind", reason: `approved 库 bind (ttsVoiceAssetId=${applied.ttsVoiceAssetId ?? "?"})` });
+          const reason = isClone
+            ? `approved 库 bind (ttsVoiceAssetId=${applied.ttsVoiceAssetId ?? "?"})`
+            : `auto apply ${item.ttsMode}（全自动配齐 fallback）`;
+          perCharacter.push({ characterId: item.characterId, action: "bind", reason });
           bound += 1;
         } else {
           const skippedEntry = apply.skipped.find((s) => s.characterId === item.characterId);

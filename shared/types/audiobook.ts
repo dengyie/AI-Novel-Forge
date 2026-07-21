@@ -440,13 +440,16 @@ export type AudiobookVoicePlanStrategy =
   | "preset_only"
   | "prefer_design"
   /** 优先匹配全站 approved VoiceAsset（clone）；无匹配再回退 design/preset */
-  | "prefer_library";
+  | "prefer_library"
+  /** Brief+规则预筛后走 LLM 选库（仅返回候选 assetId）；失败回退规则 match */
+  | "prefer_library_ai";
 
 export const AUDIOBOOK_VOICE_PLAN_STRATEGIES = [
   "auto",
   "preset_only",
   "prefer_design",
   "prefer_library",
+  "prefer_library_ai",
 ] as const;
 
 export function isAudiobookVoicePlanStrategy(

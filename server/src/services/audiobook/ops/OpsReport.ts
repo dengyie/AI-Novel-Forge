@@ -12,7 +12,8 @@ import type {
 } from "@ai-novel/shared/types/audiobookOps";
 
 export const EAR_AGENT_NAME = "ear" as const;
-export const EAR_AGENT_VERSION = "1";
+/** v2：中区 soft 默认不升权；EAR_AUTO_SOFT_APPROVE=1 才 soft 升权；启发式不再 needs_human。 */
+export const EAR_AGENT_VERSION = "2";
 
 /** Agent 升权路径的进程内门禁（§D）。生产须 token；dev 可显式 allow_open。 */
 export function assertOpsApproveAllowed(): void {
@@ -60,7 +61,7 @@ export function createReportBuilder(input: {
     startedAt: input.startedAt,
     finishedAt: null,
     ear: [],
-    approve: { attempted: 0, approved: 0, rejected: 0, skipped: 0, gateBlocked: 0 },
+    approve: { attempted: 0, approved: 0, approvedHard: 0, approvedSoft: 0, rejected: 0, skipped: 0, gateBlocked: 0 },
     ready: null,
     patrol: null,
     dryRun: input.dryRun,

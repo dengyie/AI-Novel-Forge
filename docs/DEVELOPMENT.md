@@ -61,6 +61,7 @@ pnpm build              # shared + server + client 构建
 
 - [全站音色库 + AI 规划调研（SoT 摘要）](./plans/audiobook-sitewide-voice-library-research.md)
 - [音色库运营与 AI 规划 D–G](./plans/audiobook-voice-library-ops-and-ai-plan.md)（delivered code · D 库管理台 · E 人耳 approve · F setStatus 门禁 · G LLM redesign · §七点四十九）
+- [全 AI 音色匹配 + AI 耳升权](./plans/audiobook-ai-voice-match-auto-ear-plan.md)（M1–M4 代码 · Ear v2 / LabelAgent / VoiceBrief / prefer_library_ai / library_ai_fill · **未**生产 cutover）
 - [Audiobook Segment Delivery Style](./plans/audiobook-segment-delivery-style-plan.md)
 - [Audiobook Character Voice Differentiation](./plans/audiobook-character-voice-differentiation-plan.md)
 - [Audiobook Mimo TTS Multi Backend](./plans/audiobook-mimo-tts-multi-backend-plan.md)

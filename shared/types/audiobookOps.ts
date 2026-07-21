@@ -13,9 +13,15 @@
  * - 人工 override 非 default；写 force 标记后 Agent 不覆盖。
  */
 
-export type OpsRunProfile = "full" | "library_only" | "patrol_only";
+export type OpsRunProfile = "full" | "library_only" | "patrol_only" | "ear_auto" | "library_ai_fill";
 
-export const OPS_RUN_PROFILES: readonly OpsRunProfile[] = ["full", "library_only", "patrol_only"] as const;
+export const OPS_RUN_PROFILES: readonly OpsRunProfile[] = [
+  "full",
+  "library_only",
+  "patrol_only",
+  "ear_auto",
+  "library_ai_fill",
+] as const;
 
 export function isOpsRunProfile(value: string): value is OpsRunProfile {
   return (OPS_RUN_PROFILES as readonly string[]).includes(value);
@@ -35,15 +41,17 @@ export function isOpsRunStatus(value: string): value is OpsRunStatus {
   return (OPS_RUN_STATUSES as readonly string[]).includes(value);
 }
 
-export type OpsRunStepName = "import" | "ear" | "approve" | "ready" | "synth" | "patrol";
+export type OpsRunStepName = "import" | "label" | "ear" | "approve" | "ready" | "synth" | "patrol" | "matrix";
 
 export const OPS_RUN_STEP_NAMES: readonly OpsRunStepName[] = [
   "import",
+  "label",
   "ear",
   "approve",
   "ready",
   "synth",
   "patrol",
+  "matrix",
 ] as const;
 
 export type OpsRunStepStatus = "pending" | "running" | "succeeded" | "failed" | "skipped";
@@ -86,11 +94,24 @@ export type OpsRunListEntry = Pick<
   "id" | "profile" | "status" | "startedAt" | "finishedAt" | "currentStep" | "input"
 >;
 
+/**
+ * Ear 决策：
+ * - approve：声学过硬线，可自动升权
+ * - approve_with_low_confidence：中区可听；默认不自动升权（EAR_AUTO_SOFT_APPROVE=1 才软升）
+ * - reject：损坏/静音/极端削波等硬拒绝
+ * - needs_human：仅门禁/人工 forceKeep 等外部阻断（启发式本身不再产出）
+ */
+export type OpsEarDecision =
+  | "approve"
+  | "approve_with_low_confidence"
+  | "reject"
+  | "needs_human";
+
 /** 客户端可见的 EarVerdict 摘要（写入 review.ear 的同形态）。 */
 export interface OpsEarVerdict {
   assetId: string;
   primarySha256: string;
-  decision: "approve" | "reject" | "needs_human";
+  decision: OpsEarDecision;
   scores: {
     clarity: number;
     cleanliness: number;
@@ -98,6 +119,8 @@ export interface OpsEarVerdict {
     durationOk: boolean;
     clipOk: boolean;
   };
+  /** 稳定审计码，可选 */
+  decisionReasonCodes?: string[];
   reasons: string[];
   agent: { name: "ear"; version: string; model?: string | null };
   heardAt: string;
@@ -129,6 +152,10 @@ export interface OpsRunReport {
   approve: {
     attempted: number;
     approved: number;
+    /** hard approve 升权数（可选，旧 report 可缺） */
+    approvedHard?: number;
+    /** soft 升权数（仅 EAR_AUTO_SOFT_APPROVE=1 时非 0） */
+    approvedSoft?: number;
     rejected: number;
     skipped: number;
     gateBlocked: number;

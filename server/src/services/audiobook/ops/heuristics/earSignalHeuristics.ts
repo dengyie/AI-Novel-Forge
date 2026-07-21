@@ -3,10 +3,10 @@
  *
  * 不引第三方；只用 audiobookWav.parseWavInfo/extractPcmFromWav + Node fs。
  *
- * 输入 WAV 绝对路径；输出 EarScores + decision：
- *   - reject: 时长越界、RMS 极低、RIFF 损坏
- *   - approve: clarity/speechLikely/cleanliness 均过线
- *   - needs_human: 介于两者之间
+ * 决策：
+ *   - reject: 时长越界、RMS 极低、RIFF 损坏、极端削波、过软
+ *   - approve: clarity/speechLikely/cleanliness 均过硬线且 clipOk
+ *   - approve_with_low_confidence: 中区可听（默认**不**自动升权，需 EAR_AUTO_SOFT_APPROVE=1）
  */
 import fs from "node:fs";
 import { extractPcmFromWav } from "../../audiobookWav";
@@ -18,23 +18,45 @@ export interface EarHeuristicThresholds {
   minClarity: number;
   minSpeechLikely: number;
   minCleanliness: number;
+  /** 中区自动升权地板（低于此仍 reject/不自动） */
+  softMinClarity: number;
+  softMinSpeechLikely: number;
+  softMinCleanliness: number;
   silenceAbs: number;     // |sample|<silenceAbs 视为静音
   clipAbs: number;        // |sample|>clipAbs 视为削波
   clipMaxRatio: number;   // 削波占比高于此 → clipOk=false
+  /** 削波超过此比例直接 reject（极端削波） */
+  clipHardRejectRatio: number;
   rmsFloor: number;       // RMS 低于此直接 reject
 }
 
 export const DEFAULT_EAR_THRESHOLDS: EarHeuristicThresholds = {
-  minDurationSec: 3,
+  minDurationSec: 2.5,
   maxDurationSec: 1200,
-  minClarity: 0.55,
-  minSpeechLikely: 0.4,
+  minClarity: 0.5,
+  minSpeechLikely: 0.38,
   minCleanliness: 0.5,
+  softMinClarity: 0.32,
+  softMinSpeechLikely: 0.28,
+  softMinCleanliness: 0.38,
   silenceAbs: 0.01,
   clipAbs: 0.985,
-  clipMaxRatio: 0.02,
+  clipMaxRatio: 0.025,
+  clipHardRejectRatio: 0.12,
   rmsFloor: 0.002,
 };
+
+export type EarDecisionReasonCode =
+  | "file_missing"
+  | "read_fail"
+  | "wav_parse_fail"
+  | "duration_out_of_range"
+  | "rms_floor"
+  | "extreme_clip"
+  | "high_silence"
+  | "pass_hard"
+  | "pass_soft"
+  | "soft_fail";
 
 export interface EarHeuristicInput {
   filePath: string;
@@ -128,15 +150,16 @@ export function runEarHeuristics(input: EarHeuristicInput): OpsEarVerdict {
   };
 
   const reasons: string[] = [];
+  const codes: EarDecisionReasonCode[] = [];
   if (!fs.existsSync(input.filePath)) {
-    return reject(input, [`文件不存在：${input.filePath}`], thresholds);
+    return reject(input, [`文件不存在：${input.filePath}`], ["file_missing"]);
   }
 
   let buffer: Buffer;
   try {
     buffer = fs.readFileSync(input.filePath);
   } catch (err) {
-    return reject(input, [`读文件失败：${(err as Error).message}`], thresholds);
+    return reject(input, [`读文件失败：${(err as Error).message}`], ["read_fail"]);
   }
 
   let pcm: Buffer;
@@ -152,7 +175,7 @@ export function runEarHeuristics(input: EarHeuristicInput): OpsEarVerdict {
       dataSize: parsed.format.dataSize,
     };
   } catch (err) {
-    return reject(input, [`WAV 解析失败：${(err as Error).message}`], thresholds);
+    return reject(input, [`WAV 解析失败：${(err as Error).message}`], ["wav_parse_fail"]);
   }
 
   const samples = readInt16LESamples(pcm);
@@ -160,15 +183,21 @@ export function runEarHeuristics(input: EarHeuristicInput): OpsEarVerdict {
 
   if (!m.durationOk) {
     reasons.push(`时长 ${m.durationSec.toFixed(1)}s 越界`);
+    codes.push("duration_out_of_range");
   }
-  if (!m.clipOk) {
+  if (m.clipRatio >= thresholds.clipHardRejectRatio) {
+    reasons.push(`削波占比 ${(m.clipRatio * 100).toFixed(1)}% 极端`);
+    codes.push("extreme_clip");
+  } else if (!m.clipOk) {
     reasons.push(`削波占比 ${(m.clipRatio * 100).toFixed(1)}% 偏高`);
   }
-  if (m.silenceRatio > 0.6) {
+  if (m.silenceRatio > 0.75) {
     reasons.push(`静音占比 ${(m.silenceRatio * 100).toFixed(0)}% 过高`);
+    codes.push("high_silence");
   }
   if (m.rms < thresholds.rmsFloor) {
     reasons.push(`RMS ${m.rms.toFixed(4)} 低于地板 ${thresholds.rmsFloor}`);
+    codes.push("rms_floor");
   }
 
   const verdictBase = {
@@ -190,28 +219,73 @@ export function runEarHeuristics(input: EarHeuristicInput): OpsEarVerdict {
     heardAt: new Date().toISOString(),
   };
 
-  let decision: OpsEarVerdict["decision"];
-  if (!m.durationOk || m.rms < thresholds.rmsFloor) {
-    decision = "reject";
-  } else if (m.clarity >= thresholds.minClarity && m.speechLikely >= thresholds.minSpeechLikely && m.cleanliness >= thresholds.minCleanliness && m.clipOk) {
-    decision = "approve";
-  } else {
-    decision = "needs_human";
+  // 硬拒绝：时长 / RMS / 极端削波 / 极高静音
+  if (!m.durationOk || m.rms < thresholds.rmsFloor || m.clipRatio >= thresholds.clipHardRejectRatio) {
+    return { ...verdictBase, decision: "reject", decisionReasonCodes: codes.length ? codes : ["soft_fail"] };
+  }
+  if (m.silenceRatio > 0.9) {
+    return {
+      ...verdictBase,
+      decision: "reject",
+      decisionReasonCodes: codes.includes("high_silence") ? codes : [...codes, "high_silence"],
+    };
   }
 
-  return { ...verdictBase, decision } as OpsEarVerdict;
+  const hardPass =
+    m.clarity >= thresholds.minClarity
+    && m.speechLikely >= thresholds.minSpeechLikely
+    && m.cleanliness >= thresholds.minCleanliness
+    && m.clipOk;
+
+  if (hardPass) {
+    return {
+      ...verdictBase,
+      decision: "approve",
+      decisionReasonCodes: [...codes, "pass_hard"],
+    };
+  }
+
+  // 中区：标记 soft；是否升权由 EarAgent requireHardApprove / EAR_AUTO_SOFT_APPROVE 决定
+  const softPass =
+    m.clarity >= thresholds.softMinClarity
+    && m.speechLikely >= thresholds.softMinSpeechLikely
+    && m.cleanliness >= thresholds.softMinCleanliness
+    && m.clipRatio < thresholds.clipHardRejectRatio
+    && m.clipOk !== false;
+
+  if (softPass) {
+    const softReasons = [
+      ...reasons,
+      "中区可听：approve_with_low_confidence（默认不自动升权；EAR_AUTO_SOFT_APPROVE=1 可开）",
+    ];
+    return {
+      ...verdictBase,
+      reasons: softReasons,
+      decision: "approve_with_low_confidence",
+      decisionReasonCodes: [...codes, "pass_soft"],
+    };
+  }
+
+  // 过软地板仍不够：reject
+  return {
+    ...verdictBase,
+    reasons: [...reasons, "声学未达硬/软升权地板"],
+    decision: "reject",
+    decisionReasonCodes: [...codes, "soft_fail"],
+  };
 }
 
 function reject(
   input: EarHeuristicInput,
   reasons: string[],
-  _thresholds: EarHeuristicThresholds,
+  codes: EarDecisionReasonCode[],
 ): OpsEarVerdict {
   return {
     assetId: input.assetId,
     primarySha256: input.expectedSha256,
     decision: "reject",
     scores: { clarity: 0, cleanliness: 1, speechLikely: 0, durationOk: false, clipOk: true },
+    decisionReasonCodes: codes,
     reasons,
     agent: { name: "ear", version: input.agentVersion, model: input.model ?? null },
     heardAt: new Date().toISOString(),

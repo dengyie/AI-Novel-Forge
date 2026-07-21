@@ -58,11 +58,13 @@ interface OpsRunContext {
   log: (line: string) => void;
 }
 
-const STEP_ORDER: OpsRunStepName[] = ["import", "ear", "approve", "ready", "synth", "patrol"];
+const STEP_ORDER: OpsRunStepName[] = ["import", "label", "ear", "approve", "ready", "synth", "patrol", "matrix"];
 
 function stepsForProfile(profile: OpsRunProfile): OpsRunStepName[] {
   if (profile === "library_only") return ["import", "ear", "approve"];
   if (profile === "patrol_only") return ["patrol"];
+  if (profile === "ear_auto") return ["ear", "approve"];
+  if (profile === "library_ai_fill") return ["import", "label", "ear", "approve", "matrix"];
   return ["import", "ear", "approve", "ready", "patrol"];
 }
 
@@ -288,19 +290,82 @@ export class OpsRunService {
         // seed pack 导入留作 backlog（§K）：阶段 1 不改库
         return { step, status: "skipped", durationMs: null, counts: null, message: "阶段 2：pack 导入留 backlog（§K）" };
       }
+      case "label": {
+        // LabelAgent：tags-only AI/规则重标
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { labelAgent } = require("./agents/LabelAgent") as typeof import("./agents/LabelAgent");
+          const labelResult = labelAgent.run({ dryRun: false });
+          ctx.log(`label changed=${labelResult.changed} skipped=${labelResult.skipped} lead=${labelResult.leadCount}`);
+          return {
+            step,
+            status: "succeeded",
+            durationMs: null,
+            counts: {
+              changed: labelResult.changed,
+              skipped: labelResult.skipped,
+              lead: labelResult.leadCount,
+            },
+            message: "label",
+          };
+        } catch (err) {
+          ctx.log(`label skip: ${err instanceof Error ? err.message : String(err)}`);
+          return {
+            step,
+            status: "skipped",
+            durationMs: null,
+            counts: { changed: 0 },
+            message: "label unavailable",
+          };
+        }
+      }
+      case "matrix": {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { writeVoiceLibraryMatrixGapReport } = require("./matrixReport") as typeof import("./matrixReport");
+          const { report: matrix, path: gapPath } = writeVoiceLibraryMatrixGapReport();
+          ctx.log(`matrix gaps=${matrix.gaps.length} lead=${matrix.clusterCounts.lead ?? 0} file=${gapPath}`);
+          return {
+            step,
+            status: "succeeded",
+            durationMs: null,
+            counts: {
+              assets: matrix.totalAssets,
+              speakers: matrix.speakerCount,
+              gaps: matrix.gaps.length,
+              lead: matrix.clusterCounts.lead ?? 0,
+            },
+            message: `matrix written ${gapPath}`,
+          };
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          ctx.log(`matrix fail: ${msg}`);
+          return {
+            step,
+            status: "failed",
+            durationMs: null,
+            counts: { gaps: 0 },
+            message: `matrix failed: ${msg}`,
+          };
+        }
+      }
       case "ear": {
         const result = earAgent.run({
           assetIds: ctx.input.assetIds ?? null,
           skipApprove: false,
+          // 默认 requireHardApprove（生产安全）；EAR_AUTO_SOFT_APPROVE=1 才 soft 升
           isForceKeepDraft: (id) => this.isForceKeepDraft(id),
           isForceReject: (id) => this.isForceReject(id),
         });
         ctx.report.ear = result.verdicts;
         ctx.report.approve.attempted += result.approve.attempted;
         ctx.report.approve.approved += result.approve.approved;
+        ctx.report.approve.approvedHard = (ctx.report.approve.approvedHard ?? 0) + (result.approve.approvedHard ?? 0);
+        ctx.report.approve.approvedSoft = (ctx.report.approve.approvedSoft ?? 0) + (result.approve.approvedSoft ?? 0);
         ctx.report.approve.rejected += result.approve.rejected;
         ctx.report.approve.skipped += result.approve.skipped;
         ctx.report.approve.gateBlocked += result.approve.gateBlocked;
+        const softHeld = result.verdicts.filter((v) => v.decision === "approve_with_low_confidence").length;
         return {
           step,
           status: "succeeded",
@@ -308,10 +373,15 @@ export class OpsRunService {
           counts: {
             verdicts: result.verdicts.length,
             approved: result.approve.approved,
+            approvedHard: result.approve.approvedHard ?? 0,
+            approvedSoft: result.approve.approvedSoft ?? 0,
+            softHeld,
             rejected: result.approve.rejected,
             needs_human: result.verdicts.filter((v) => v.decision === "needs_human").length,
           },
-          message: null,
+          message: softHeld > 0
+            ? `soft 未升权 ${softHeld}（EAR_AUTO_SOFT_APPROVE=1 可开）`
+            : null,
         };
       }
       case "approve": {
@@ -478,10 +548,19 @@ export class OpsRunService {
 }
 
 function normalizeProfile(profile: unknown): OpsRunProfile {
-  if (typeof profile === "string" && (profile === "full" || profile === "library_only" || profile === "patrol_only")) {
+  if (
+    typeof profile === "string"
+    && (
+      profile === "full"
+      || profile === "library_only"
+      || profile === "patrol_only"
+      || profile === "ear_auto"
+      || profile === "library_ai_fill"
+    )
+  ) {
     return profile;
   }
-  throw new AppError("profile 非法（full/library_only/patrol_only）。", 400);
+  throw new AppError("profile 非法（full/library_only/patrol_only/ear_auto/library_ai_fill）。", 400);
 }
 
 function dryRunStepSummary(step: OpsRunStepName, ctx?: OpsRunContext): OpsRunStepSummary {
@@ -544,6 +623,10 @@ function isReportClean(report: OpsRunReport): boolean {
   for (const verdict of report.ear) {
     if (verdict.decision === "needs_human") return false;
   }
+  // soft 批量升权视为 issues（需人工复核库质量）
+  if ((report.approve.approvedSoft ?? 0) > 0) return false;
+  // 中区被硬策略挡住也记 issues，便于运维看见
+  if (report.ear.some((v) => v.decision === "approve_with_low_confidence")) return false;
   return true;
 }
 

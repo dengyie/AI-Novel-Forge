@@ -232,6 +232,8 @@ interface ScoreContext {
   usedSpeakers: Set<string>;
   preferredScopes: string[] | null;
   preferredSlot: VoiceSlot | null;
+  personaTags?: string[] | null;
+  avoidTags?: string[] | null;
 }
 
 interface ScoreOutcome {
@@ -346,6 +348,28 @@ function scoreLibraryAsset(
     }
   }
 
+  const persona = (ctx.personaTags || []).map((t) => t.trim().toLowerCase()).filter(Boolean);
+  const avoid = (ctx.avoidTags || []).map((t) => t.trim().toLowerCase()).filter(Boolean);
+  if (persona.length || avoid.length) {
+    const hay = `${(entry.asset.displayName || "")} ${(entry.asset.slug || "")} ${tags.join(" ")}`.toLowerCase();
+    let hits = 0;
+    for (const t of persona) {
+      if (t && hay.includes(t)) {
+        hits += 1;
+        score += 5;
+      }
+    }
+    if (hits) bits.push(`persona:${hits}`);
+    let avoids = 0;
+    for (const t of avoid) {
+      if (t && hay.includes(t)) {
+        avoids += 1;
+        score -= 8;
+      }
+    }
+    if (avoids) bits.push(`avoid:${avoids}`);
+  }
+
   const floor = genderHit || clusterHit ? 20 : 28;
   if (score < floor) {
     return { ok: false, reason: "floor:low_signal" };
@@ -395,6 +419,8 @@ export function collectLibraryAssetCandidates(
     usedSpeakerKeys?: Set<string>;
     preferredScopes?: string[] | null;
     preferredSlot?: VoiceSlot | null;
+    personaTags?: string[] | null;
+    avoidTags?: string[] | null;
     /** true=保留 speaker 已占候选（对靠链路，附 speakerOccupied 标注）；false=预过滤排除（批量单选语义，默认） */
     includeOccupiedSpeakers?: boolean;
   },
@@ -407,6 +433,8 @@ export function collectLibraryAssetCandidates(
     preferredScopes:
       input.preferredScopes === undefined ? [...DEFAULT_LIBRARY_SCOPES] : input.preferredScopes,
     preferredSlot: input.preferredSlot ?? null,
+    personaTags: input.personaTags ?? null,
+    avoidTags: input.avoidTags ?? null,
   };
 
   const available = filterAvailableAssets(input.assets, ctx, input.includeOccupiedSpeakers ?? false);
@@ -454,6 +482,8 @@ export function matchLibraryAsset(input: {
   usedSpeakerKeys?: Set<string>;
   preferredScopes?: string[] | null;
   preferredSlot?: VoiceSlot | null;
+  personaTags?: string[] | null;
+  avoidTags?: string[] | null;
 }): { asset: VoicePlannerLibraryAsset; score: number; reason: string } | null {
   const ranked = collectLibraryAssetCandidates({
     genderBucket: input.genderBucket,
@@ -463,6 +493,8 @@ export function matchLibraryAsset(input: {
     usedSpeakerKeys: input.usedSpeakerKeys,
     preferredScopes: input.preferredScopes,
     preferredSlot: input.preferredSlot,
+    personaTags: input.personaTags,
+    avoidTags: input.avoidTags,
   });
   if (!ranked.length) return null;
   const top = ranked[0];
@@ -482,6 +514,8 @@ export function matchLibraryAssetsTopN(input: {
   usedSpeakerKeys?: Set<string>;
   preferredScopes?: string[] | null;
   preferredSlot?: VoiceSlot | null;
+  personaTags?: string[] | null;
+  avoidTags?: string[] | null;
   /** 默认 8；硬顶 32；非法回落默认 */
   topN?: number;
 }): VoiceLibraryAssetScore[] {
@@ -496,6 +530,8 @@ export function matchLibraryAssetsTopN(input: {
     usedSpeakerKeys: input.usedSpeakerKeys,
     preferredScopes: input.preferredScopes,
     preferredSlot: input.preferredSlot,
+    personaTags: input.personaTags,
+    avoidTags: input.avoidTags,
     /** 对靠链路：保留已被本书其他角色占用的 speaker 候选并标注，不静默隐藏 */
     includeOccupiedSpeakers: true,
   });
@@ -1395,6 +1431,47 @@ function neighborLabel(slot: VoiceSlot): string {
  * - 库匹配默认 preferredScopes=scope-zh；speaker: 去重
  * - 覆盖语义由调用方 onlyMissing + apply.overwrite 处理（本函数不接收 overwrite）
  */
+/** 规则 persona 词：角色卡 + 书级 blob 关键词 */
+export function extractRulePersonaTags(
+  character: VoicePlannerCharacterInput,
+  bookBlob?: string | null,
+): string[] {
+  const blob = [
+    character.personality,
+    character.voiceTexture,
+    character.appearance,
+    character.background,
+    character.firstImpression,
+    character.storyFunction,
+    character.role,
+    character.castRole,
+    bookBlob || "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const tags = new Set<string>();
+  const rules: Array<[RegExp, string]> = [
+    [/清冷|冷傲|高冷/, "清冷"],
+    [/温柔|软|暖/, "温柔"],
+    [/沙哑|哑|沧桑/, "沙哑"],
+    [/清亮|脆|甜/, "清亮"],
+    [/沉稳|稳重|威严/, "沉稳"],
+    [/活泼|灵动|俏/, "活泼"],
+    [/少年|少女|青春/, "少年感"],
+    [/帝王|王|帝|君/, "帝王"],
+    [/军|将|兵/, "军人"],
+    [/仙|道|玄|修/, "仙侠"],
+    [/都市|现代|职场/, "都市"],
+    [/古风|古代|朝堂/, "古风"],
+    [/反派|阴狠|狠厉/, "反派"],
+    [/旁白|解说/, "旁白"],
+  ];
+  for (const [re, tag] of rules) {
+    if (re.test(blob)) tags.add(tag);
+  }
+  return [...tags].slice(0, 10);
+}
+
 export function planCharacterVoices(input: {
   characters: VoicePlannerCharacterInput[];
   strategy?: AudiobookVoicePlanStrategy;
@@ -1412,12 +1489,30 @@ export function planCharacterVoices(input: {
    * 库语言池；undefined = scope-zh；[] = 不限。
    */
   preferredScopes?: string[] | null;
+  /** 书级上下文短文本（styleTone/卖点等），参与 persona 启发与 reason */
+  bookContextBlob?: string | null;
+  /** 可选：每角色 Brief 覆盖（cluster/slot/persona）；来自 VoiceBrief */
+  briefByCharacterId?: Record<
+    string,
+    {
+      cluster?: VoiceCluster;
+      preferredSlot?: VoiceSlot;
+      personaTags?: string[];
+      avoidTags?: string[];
+      oneLine?: string;
+    }
+  > | null;
 }): {
   items: AudiobookVoicePlanItem[];
   skipped: Array<{ characterId: string; characterName: string; reason: string }>;
 } {
-  const strategy: AudiobookVoicePlanStrategy = input.strategy ?? "auto";
+  const strategyRaw: AudiobookVoicePlanStrategy = input.strategy ?? "auto";
+  // prefer_library_ai 在纯函数侧等同 prefer_library（LLM pick 在 suggest 层）
+  const strategy: AudiobookVoicePlanStrategy =
+    strategyRaw === "prefer_library_ai" ? "prefer_library" : strategyRaw;
   const onlyMissing = input.onlyMissing !== false;
+  const briefMap = input.briefByCharacterId ?? null;
+  const bookBlob = (input.bookContextBlob || "").trim();
   const maxImportantPerPreset = Math.max(1, input.maxImportantPerPreset ?? 1);
   const allowIds = input.characterIds?.length
     ? new Set(input.characterIds)
@@ -1455,6 +1550,9 @@ export function planCharacterVoices(input: {
       configured: boolean;
       preferredSlot: VoiceSlot;
       cluster: VoiceCluster;
+      personaTags: string[];
+      avoidTags: string[];
+      briefOneLine: string;
     }
   > = [];
   const usage = new Map<string, number>();
@@ -1504,15 +1602,19 @@ export function planCharacterVoices(input: {
       continue;
     }
 
-    const cluster = resolveVoiceCluster(character);
+    const brief = briefMap?.[character.characterId];
+    const cluster = brief?.cluster || resolveVoiceCluster(character);
     candidates.push({
       ...character,
       genderBucket: inferGenderBucket(character),
       ageBucket: inferAgeBucket(character),
       importance: scoreImportance(character),
       configured,
-      preferredSlot: inferVoiceSlot(character),
+      preferredSlot: brief?.preferredSlot || inferVoiceSlot(character),
       cluster,
+      personaTags: brief?.personaTags || extractRulePersonaTags(character, bookBlob),
+      avoidTags: brief?.avoidTags || [],
+      briefOneLine: brief?.oneLine || "",
     });
   }
 
@@ -1563,6 +1665,8 @@ export function planCharacterVoices(input: {
         usedSpeakerKeys,
         preferredScopes,
         preferredSlot: character.preferredSlot,
+        personaTags: character.personaTags,
+        avoidTags: character.avoidTags,
       });
       if (matched) {
         ttsMode = "clone";
@@ -1570,10 +1674,14 @@ export function planCharacterVoices(input: {
         usedLibraryIds.add(matched.asset.id);
         const sp = speakerKeyFromTags(matched.asset.tags, matched.asset.id);
         if (sp) usedSpeakerKeys.add(sp);
+        const briefBit = character.briefOneLine ? ` brief=${character.briefOneLine.slice(0, 40)}` : "";
+        const bookBit = bookBlob ? " +book" : "";
         reason =
-          strategy === "prefer_library"
-            ? `策略 prefer_library：匹配库「${matched.asset.displayName || matched.asset.slug}」（${matched.reason}）。`
-            : `策略 auto：库优先匹配「${matched.asset.displayName || matched.asset.slug}」（${matched.reason}）。`;
+          strategyRaw === "prefer_library_ai"
+            ? `策略 prefer_library_ai：规则预匹配「${matched.asset.displayName || matched.asset.slug}」（${matched.reason}）${briefBit}${bookBit}。`
+            : strategy === "prefer_library"
+              ? `策略 prefer_library：匹配库「${matched.asset.displayName || matched.asset.slug}」（${matched.reason}）${briefBit}${bookBit}。`
+              : `策略 auto：库优先匹配「${matched.asset.displayName || matched.asset.slug}」（${matched.reason}）${briefBit}${bookBit}。`;
       }
     }
 
