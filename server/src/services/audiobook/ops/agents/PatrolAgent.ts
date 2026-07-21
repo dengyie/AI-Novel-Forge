@@ -10,12 +10,11 @@
  * 默认 autoFix=false（只报告）；显式 autoFix:true 才执行安全子集（未来扩展点）。
  * 数据来源 prisma.audiobookTask / AudiobookTaskService.getTask辅警件 + voiceLibraryService.list。
  */
-import path from "node:path";
 import fs from "node:fs";
 import { prisma } from "../../../../db/prisma";
 import { voiceLibraryService } from "../../voiceLibraryService";
 import { resolveVoiceAssetStoredPath } from "../../voiceLibraryService";
-import { resolveAudiobookTaskDir } from "../../audiobookPaths";
+import { resolveAudiobookTaskDir, resolveChapterAudioPath } from "../../audiobookPaths";
 import type {
   PatrolCheckId,
   PatrolFinding,
@@ -24,6 +23,11 @@ import type {
 
 const STALE_HEARTBEAT_MS = 30 * 60_000;
 const SPEAKER_UNRESOLVED_RATIO_WARN = 0.2;
+
+/** P3 权威章 wav 路径（含 chapters/ 中间层）。导出供路径契约回归测。 */
+export function resolvePatrolChapterWav(taskDir: string, chapterId: string): string {
+  return resolveChapterAudioPath(taskDir, chapterId);
+}
 
 export interface PatrolAgentRunInput {
   novelId?: string | null;
@@ -119,7 +123,9 @@ export class PatrolAgent {
         if (!entry || entry.status !== "ready") continue;
         const cid = entry.chapterId;
         if (!cid) continue;
-        const chapterWav = path.join(dir, cid, "chapter.wav");
+        // 必须走 resolveChapterAudioPath：权威布局是 {taskDir}/chapters/{cid}/chapter.wav
+        // （旧 path.join(dir, cid, "chapter.wav") 漏 chapters/ 会 13 假阳性）
+        const chapterWav = resolvePatrolChapterWav(dir, cid);
         if (!fs.existsSync(chapterWav)) {
           findings.push({
             id: "P3",
