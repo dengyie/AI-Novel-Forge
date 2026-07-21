@@ -15,6 +15,7 @@ import {
 } from "../../prompting/prompts/novel/chapterLayeredContext";
 import { chapterWriterPrompt } from "../../prompting/prompts/novel/chapterWriter.prompts";
 import { NovelContinuationService } from "./NovelContinuationService";
+import { prisma } from "../../db/prisma";
 import { assertChapterContentNotEmpty } from "./runtime/chapterEmptyContentError";
 import { throwIfChapterGenerationAborted } from "./runtime/chapterAbortGuard";
 import { buildNGramSet, jaccardSimilarity } from "@ai-novel/shared/utils/textSimilarity";
@@ -152,6 +153,61 @@ export class ChapterWritingGraph {
    *   如裸章节（无 plan/无义务数据）的 obligation_contract、无风格基线时的 style_contract，
    *   旧行为是静默继续写，此处保持可观测但不阻断。
    */
+  /**
+   * 长度欠账留债：合并写 chapter.riskFlags.chapterLengthDebt，
+   * 与 continuationUnresolvedHighSimilarity / qualityScorePersistFailed 同款模式。
+   * best-effort：失败只告警，不影响定稿主路径。
+   */
+  private async persistLengthDebtRiskFlag(
+    novelId: string,
+    chapterId: string,
+    chapterOrder: number,
+    lengthDebt: {
+      targetWordCount: number;
+      minWordCount: number;
+      finalWordCount: number;
+      attempts: number;
+    },
+  ): Promise<void> {
+    try {
+      const existing = await prisma.chapter.findFirst({
+        where: { id: chapterId, novelId },
+        select: { riskFlags: true },
+      });
+      let parsed: Record<string, unknown> = {};
+      if (existing?.riskFlags?.trim()) {
+        try {
+          const value = JSON.parse(existing.riskFlags) as unknown;
+          if (value && typeof value === "object" && !Array.isArray(value)) {
+            parsed = value as Record<string, unknown>;
+          }
+        } catch {
+          parsed = {};
+        }
+      }
+      await prisma.chapter.update({
+        where: { id: chapterId },
+        data: {
+          riskFlags: JSON.stringify({
+            ...parsed,
+            chapterLengthDebt: {
+              at: new Date().toISOString(),
+              chapterOrder,
+              ...lengthDebt,
+            },
+          }),
+        },
+      });
+    } catch (error) {
+      this.deps.logWarn("persist length-debt riskFlag failed", {
+        novelId,
+        chapterId,
+        chapterOrder,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   private assertBrokerResolutionHealthy(
     brokerResolution: {
       missingRequiredGroups: string[];
@@ -522,13 +578,19 @@ export class ChapterWritingGraph {
           options: input.options,
         });
         if (lengthAdjusted.lengthDebt) {
-          // 长度欠账：兜底续写仍未达标，结构化记录供 lengthControl/债板消费
+          // 长度欠账：兜底续写仍未达标，logWarn + riskFlags 双写，让用户在债板可见
           this.deps.logWarn("Chapter length debt recorded", {
             novelId: input.novelId,
             chapterId: input.chapter.id,
             chapterOrder: input.chapter.order,
             ...lengthAdjusted.lengthDebt,
           });
+          void this.persistLengthDebtRiskFlag(
+            input.novelId,
+            input.chapter.id,
+            input.chapter.order,
+            lengthAdjusted.lengthDebt,
+          );
         }
         const safeContent = assertChapterContentNotEmpty(lengthAdjusted.content, {
           novelId: input.novelId,
