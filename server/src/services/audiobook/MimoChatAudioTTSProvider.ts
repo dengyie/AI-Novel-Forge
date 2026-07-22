@@ -8,16 +8,22 @@ import {
   type MimoTtsPresetVoice,
 } from "@ai-novel/shared/types/audiobook";
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
-import { prisma } from "../../db/prisma";
-import {
-  getProviderEnvApiKey,
-  isBuiltInProvider,
-  providerRequiresApiKey,
-  resolveProviderBaseUrl,
-} from "../../llm/providers";
 import { AppError } from "../../middleware/errorHandler";
-import { isMissingAudiobookTaskTableError } from "./audiobookErrors";
+import {
+  getCachedAudiobookTtsFallbackBaseUrlsRaw,
+  resolveMimoTtsTransportForSynthesize,
+  resolvePrimaryBaseURLForProbe,
+} from "../settings/AudiobookTtsTransportSettingsService";
+import {
+  parseMimoTtsFallbackApiKeys,
+  parseMimoTtsFallbackBaseUrls,
+} from "./mimoTtsEndpointParse";
 import { checkVoiceRefAudioPath } from "./voiceRefPath";
+
+export {
+  parseMimoTtsFallbackApiKeys,
+  parseMimoTtsFallbackBaseUrls,
+} from "./mimoTtsEndpointParse";
 
 export interface MimoTtsSynthesizeInput {
   /** 旁白/对白正文（assistant 侧） */
@@ -64,11 +70,12 @@ export interface MimoTtsRequestBody {
   stream: false;
 }
 
-const DEFAULT_PROVIDER: LLMProvider = "openai";
-const REQUEST_TIMEOUT_MS = Math.max(
+/** env 默认超时；运行时 synthesize 优先用 transport settings 解析值 */
+const DEFAULT_REQUEST_TIMEOUT_MS = Math.max(
   10_000,
   Number(process.env.AUDIOBOOK_MIMO_TTS_TIMEOUT_MS ?? 120_000) || 120_000,
 );
+const REQUEST_TIMEOUT_MS = DEFAULT_REQUEST_TIMEOUT_MS;
 const MAX_REF_AUDIO_BYTES = Math.max(
   64 * 1024,
   Number(process.env.AUDIOBOOK_CLONE_REF_MAX_BYTES ?? 8 * 1024 * 1024) || 8 * 1024 * 1024,
@@ -79,43 +86,9 @@ export type MimoTtsEndpoint = {
   /** 稳定短名，用于日志/错误（非密钥） */
   id: string;
   baseURL: string;
-  /** 缺省时沿用主链 resolveApiKey */
+  /** 缺省时沿用主链 primaryApiKey */
   apiKey?: string | null;
 };
-
-/**
- * 解析 AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS：
- * 逗号/换行分隔的 OpenAI-compatible baseURL（不含 /chat/completions）。
- * 保留原始槽位顺序与重复项，供 keys 按位对齐；去重在 resolve 时按原 index 跳过。
- * 例：https://fufu.iqach.top/v1,http://127.0.0.1:18080/v1
- */
-export function parseMimoTtsFallbackBaseUrls(raw: string | null | undefined): string[] {
-  if (!raw?.trim()) {
-    return [];
-  }
-  const out: string[] = [];
-  for (const part of raw.split(/[\n,]+/)) {
-    const trimmed = part.trim().replace(/\/+$/, "");
-    if (!trimmed) continue;
-    out.push(trimmed);
-  }
-  return out;
-}
-
-/**
- * 解析 AUDIOBOOK_MIMO_TTS_FALLBACK_API_KEYS：与 fallback baseURL 按位对齐；
- * 空位 / 缺项 = 沿用主链 key。
- */
-export function parseMimoTtsFallbackApiKeys(raw: string | null | undefined): Array<string | null> {
-  if (raw == null) {
-    return [];
-  }
-  // 保留空槽位以与 baseURL 对齐（"sk-a,,sk-b"）
-  return raw.split(",").map((part) => {
-    const trimmed = part.trim();
-    return trimmed ? trimmed : null;
-  });
-}
 
 /** 5xx / 429 / 超时(504) / 取消以外的瞬时失败可换端点；4xx 客户端错误不换。 */
 export function isRetryableMimoTtsStatus(statusCode: number): boolean {
@@ -129,30 +102,47 @@ export function isRetryableMimoTtsStatus(statusCode: number): boolean {
   return false;
 }
 
+/**
+ * 解析 fallback 原始串：显式入参 > 进程缓存（AppSetting 生效后）> env。
+ * 同步路径给 hasEffective* / 单测用；合成主路径走 resolveMimoTtsTransportForSynthesize。
+ */
+export function resolveMimoTtsFallbackBaseUrlsRawForProbe(
+  raw?: string | null,
+): string | null | undefined {
+  if (raw !== undefined) {
+    return raw;
+  }
+  const cached = getCachedAudiobookTtsFallbackBaseUrlsRaw();
+  if (cached !== undefined) {
+    return cached;
+  }
+  return process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS;
+}
+
 /** 是否配置了至少一个 fallback baseURL 字符串（未做 primary 去重）。 */
 export function hasMimoTtsFallbackEndpointsConfigured(
   raw?: string | null,
 ): boolean {
   return parseMimoTtsFallbackBaseUrls(
-    raw ?? process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS,
+    resolveMimoTtsFallbackBaseUrlsRawForProbe(raw) ?? null,
   ).length > 0;
 }
 
 /**
  * 解析后是否存在「独立于 primary」的备链（去重后 chain.length > 1）。
  * pipeline 外层 defaultAttempts 必须看这个，避免 FALLBACK 写了与 primary 同 URL 时误降为 1。
+ *
+ * primary 同步解析：入参 > setting/secret 缓存 > **绑定厂商** env/default
+ * （不再硬编码 openai，避免 bound≠openai 时 outer retry 误判）。
  */
 export function hasEffectiveMimoTtsMultiEndpointChain(input?: {
   primaryBaseURL?: string | null;
   fallbackBaseUrlsRaw?: string | null;
 }): boolean {
-  const primaryFromInput = input?.primaryBaseURL?.trim();
-  const primaryBase =
-    primaryFromInput
-    || resolveProviderBaseUrl("openai")
-    || "";
-  const fallbackRaw =
-    input?.fallbackBaseUrlsRaw ?? process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS;
+  const primaryBase = resolvePrimaryBaseURLForProbe(input?.primaryBaseURL);
+  const fallbackRaw = resolveMimoTtsFallbackBaseUrlsRawForProbe(
+    input?.fallbackBaseUrlsRaw,
+  );
   if (!primaryBase) {
     // 主链未知时：仅有配置字符串仍视为「可能多端」，保守降 outer retry
     return hasMimoTtsFallbackEndpointsConfigured(fallbackRaw);
@@ -224,41 +214,6 @@ export function resolveMimoTtsEndpointChain(input: {
     });
   });
   return chain;
-}
-
-/** 仅 APIKey 表缺失时兜底；与 AudiobookTask 表无关，但 Prisma 缺表码相同 */
-function isMissingApiKeyTableError(error: unknown): boolean {
-  return isMissingAudiobookTaskTableError(error)
-    || (
-      typeof error === "object"
-      && error !== null
-      && "code" in error
-      && (error as { code?: string }).code === "P2021"
-    );
-}
-
-async function resolveApiKey(provider: LLMProvider): Promise<string | undefined> {
-  try {
-    const dbSecret = await prisma.aPIKey.findUnique({ where: { provider } });
-    if (dbSecret?.isActive && dbSecret.key?.trim()) {
-      return dbSecret.key.trim();
-    }
-  } catch (error) {
-    if (!isMissingApiKeyTableError(error)) {
-      throw error;
-    }
-  }
-
-  const envKey = getProviderEnvApiKey(provider);
-  if (envKey) {
-    return envKey;
-  }
-
-  if (!providerRequiresApiKey(provider)) {
-    return undefined;
-  }
-
-  return undefined;
 }
 
 export function extractAudioBase64(payload: unknown): string | null {
@@ -477,10 +432,10 @@ export function buildMimoTtsRequestBody(input: MimoTtsSynthesizeInput): MimoTtsR
  * POST {baseURL}/chat/completions
  * 三模态：preset / design / clone（见 buildMimoTtsRequestBody）
  *
- * 多后端：主链 = LLM provider baseURL（通常 CPA）；
- * 可选 AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS（fufu 等）在 5xx/429/504 时换端点。
- * 4xx（含 401/403 鉴权、400 参数）与 408 取消不换端——备链 key 好但主链 key 坏须修主链。
- * 链耗尽错误会带 details.mimoTtsEndpointChainExhausted；配置了 fallback 时 pipeline 外层不再整链×N。
+ * 多后端：主链 = 运输层解析（AppSetting → SecretStore → env → 默认 openai）；
+ * fallback baseURL：AppSetting 或 AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS；keys 一期仍 env。
+ * 5xx/429/504 换端点；4xx（含 401/403、400）与 408 取消不换。
+ * 链耗尽带 details.mimoTtsEndpointChainExhausted；有效多端时 pipeline 外层不再整链×N。
  */
 
 function markMimoTtsEndpointChainExhausted(error: unknown, endpointCount: number): AppError {
@@ -510,23 +465,18 @@ export class MimoChatAudioTTSProvider {
   async synthesize(input: MimoTtsSynthesizeInput): Promise<MimoTtsSynthesizeResult> {
     const mode = resolveMode(input);
     const body = buildMimoTtsRequestBody(input);
-    const llmProvider = input.provider ?? DEFAULT_PROVIDER;
-
-    const resolvedBaseURL = isBuiltInProvider(llmProvider)
-      ? resolveProviderBaseUrl(llmProvider)
-      : resolveProviderBaseUrl("openai");
-    const baseURL = resolvedBaseURL?.trim();
+    // input.provider 临时覆盖绑定；未传则走 AppSetting/env/default(openai)
+    const transport = await resolveMimoTtsTransportForSynthesize({
+      providerOverride: input.provider ?? null,
+    });
+    const baseURL = transport.primaryBaseURL.trim();
+    const apiKey = transport.primaryApiKey.trim();
     if (!baseURL) {
       throw new AppError(
         "未配置 LLM/CPA baseURL，无法调用 MiMo TTS。请配置对应 provider 的 base URL。",
         400,
       );
     }
-
-    const apiKey = await resolveApiKey(isBuiltInProvider(llmProvider) ? llmProvider : "openai")
-      ?? await resolveApiKey("openai")
-      ?? await resolveApiKey("deepseek");
-
     if (!apiKey) {
       throw new AppError("未配置可用的 CPA/LLM API Key，无法调用 MiMo TTS。", 400);
     }
@@ -534,10 +484,14 @@ export class MimoChatAudioTTSProvider {
     const endpoints = resolveMimoTtsEndpointChain({
       primaryBaseURL: baseURL,
       primaryApiKey: apiKey,
+      fallbackBaseUrlsRaw: transport.fallbackBaseUrlsRaw,
+      fallbackApiKeysRaw: transport.fallbackApiKeysRaw,
     });
     if (endpoints.length === 0) {
       throw new AppError("未解析到可用的 MiMo TTS 端点。", 400);
     }
+
+    const requestTimeoutMs = Math.max(10_000, transport.timeoutMs || DEFAULT_REQUEST_TIMEOUT_MS);
 
     let lastError: unknown;
     for (let index = 0; index < endpoints.length; index += 1) {
@@ -554,6 +508,7 @@ export class MimoChatAudioTTSProvider {
           input,
           endpoint,
           apiKey: endpointKey,
+          requestTimeoutMs,
         });
       } catch (error) {
         lastError = error;
@@ -591,12 +546,14 @@ export class MimoChatAudioTTSProvider {
     input: MimoTtsSynthesizeInput;
     endpoint: MimoTtsEndpoint;
     apiKey: string;
+    requestTimeoutMs?: number;
   }): Promise<MimoTtsSynthesizeResult> {
     const { body, mode, input, endpoint, apiKey } = params;
     const url = `${endpoint.baseURL.replace(/\/$/, "")}/chat/completions`;
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    const timeoutMs = Math.max(10_000, params.requestTimeoutMs ?? REQUEST_TIMEOUT_MS);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     const onExternalAbort = () => controller.abort();
     input.signal?.addEventListener("abort", onExternalAbort);
 

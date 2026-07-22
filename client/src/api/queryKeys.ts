@@ -162,6 +162,7 @@ export const queryKeys = {
     ragEmbeddingModels: (provider: string) => ["settings", "rag", "embedding-models", provider] as const,
     styleEngineRuntime: ["settings", "style-engine-runtime"] as const,
     chapterWriterRuntime: ["settings", "chapter-writer-runtime"] as const,
+    audiobookTtsTransport: ["settings", "audiobook-tts-transport"] as const,
     modelRoutes: ["settings", "model-routes"] as const,
     modelRouteConnectivity: ["settings", "model-route-connectivity"] as const,
     structuredFallback: ["settings", "structured-fallback"] as const,

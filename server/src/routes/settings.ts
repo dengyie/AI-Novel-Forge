@@ -55,6 +55,15 @@ import {
   MIN_OPENING_DIVERSITY_SIMILARITY_THRESHOLD,
   MIN_TRANSPORT_RETRY_MAX_ATTEMPTS,
 } from "../services/settings/ChapterWriterRuntimeSettingsService";
+import {
+  getAudiobookTtsTransportStatus,
+  invalidateAudiobookTtsTransportCache,
+  saveAudiobookTtsTransportSettings,
+} from "../services/settings/AudiobookTtsTransportSettingsService";
+import {
+  MAX_AUDIOBOOK_TTS_TIMEOUT_MS,
+  MIN_AUDIOBOOK_TTS_TIMEOUT_MS,
+} from "../services/settings/audiobookTtsSettingKeys";
 import { registerCustomProviderRoutes } from "./settings/customProviderRoutes";
 import { registerLLMSelectionRoutes } from "./settings/llmSelectionRoutes";
 
@@ -145,6 +154,21 @@ const chapterWriterRuntimeSettingsSchema = z.object({
     .min(MIN_TRANSPORT_RETRY_MAX_ATTEMPTS)
     .max(MAX_TRANSPORT_RETRY_MAX_ATTEMPTS),
 });
+
+/** 有声书 TTS 运输：非密钥字段；禁止 fallback keys 进 body */
+const audiobookTtsTransportSettingsSchema = z.object({
+  boundProvider: z.union([z.string().trim().min(1).max(120), z.literal(""), z.null()]).optional(),
+  primaryBaseURL: z.union([
+    z.string().trim().url("primaryBaseURL 格式不正确。"),
+    z.literal(""),
+    z.null(),
+  ]).optional(),
+  fallbackBaseUrls: z.union([z.string().max(8000), z.literal(""), z.null()]).optional(),
+  timeoutMs: z.union([
+    z.coerce.number().int().min(MIN_AUDIOBOOK_TTS_TIMEOUT_MS).max(MAX_AUDIOBOOK_TTS_TIMEOUT_MS),
+    z.null(),
+  ]).optional(),
+}).strict();
 
 type APIKeyRecordLike = {
   provider: string;
@@ -367,6 +391,42 @@ router.put(
         success: true,
         data,
         message: "章节写作运行设置保存成功。",
+      } satisfies ApiResponse<typeof data>);
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+router.get("/audiobook-tts-transport", async (_req, res, next) => {
+  try {
+    const data = await getAudiobookTtsTransportStatus();
+    res.status(200).json({
+      success: true,
+      data,
+      message: "有声书 TTS 运输设置读取成功。",
+    } satisfies ApiResponse<typeof data>);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.put(
+  "/audiobook-tts-transport",
+  validate({ body: audiobookTtsTransportSettingsSchema }),
+  async (req, res, next) => {
+    try {
+      const body = req.body as z.infer<typeof audiobookTtsTransportSettingsSchema>;
+      const data = await saveAudiobookTtsTransportSettings({
+        boundProvider: body.boundProvider,
+        primaryBaseURL: body.primaryBaseURL,
+        fallbackBaseUrls: body.fallbackBaseUrls,
+        timeoutMs: body.timeoutMs,
+      });
+      res.status(200).json({
+        success: true,
+        data,
+        message: "有声书 TTS 运输设置保存成功。",
       } satisfies ApiResponse<typeof data>);
     } catch (error) {
       next(error);
@@ -619,6 +679,8 @@ router.put(
         requestIntervalMs: data.requestIntervalMs ?? 0,
       } : null);
       evictSharedLimiters(provider);
+      // 主链 baseURL/key 可能来自 SecretStore；丢弃 TTS 运输缓存以便下次 warm 读新值
+      invalidateAudiobookTtsTransportCache();
 
       let models = getFallbackModels(provider, data.model ?? undefined);
       let message = "厂商配置已保存。";

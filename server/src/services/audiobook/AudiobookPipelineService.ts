@@ -43,6 +43,7 @@ import {
   parseWavInfo,
   writeWavFileAtomic,
 } from "./audiobookWav";
+import { ensureAudiobookTtsTransportCacheWarm } from "../settings/AudiobookTtsTransportSettingsService";
 import {
   hasEffectiveMimoTtsMultiEndpointChain,
   isMimoTtsEndpointChainExhaustedError,
@@ -588,6 +589,14 @@ export async function synthesizeChunkWithRetry(input: {
 }): Promise<Buffer> {
   // 有效多端点时 provider 内已走完整链；外层默认 1，避免 chain×N。
   // 仅 primary（含 FALLBACK 与 primary 去重后仍单端）保留短暂 5xx/504 重试（默认 3）。
+  // 先 warm 运输缓存，避免 cold probe 仍按 openai primary 误判 multi-endpoint。
+  if (input.maxAttempts == null) {
+    try {
+      await ensureAudiobookTtsTransportCacheWarm();
+    } catch {
+      // warm 失败时退回 env/cache probe，不阻断合成
+    }
+  }
   const maxAttempts = resolveSynthesizeChunkMaxAttempts(input.maxAttempts);
   let lastError: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {

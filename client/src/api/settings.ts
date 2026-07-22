@@ -117,6 +117,44 @@ export interface StyleEngineRuntimeSettingsStatus {
   maxStyleExtractionTimeoutMs: number;
 }
 
+export type AudiobookTtsBaseUrlSource = "setting" | "secret" | "env" | "default" | "none";
+
+export type AudiobookTtsApiKeySource =
+  | "secret"
+  | "env"
+  | "fallback-openai"
+  | "fallback-deepseek"
+  | "none";
+
+export interface AudiobookTtsTransportStatus {
+  boundProvider: string;
+  boundProviderSource: "setting" | "env" | "default";
+  primaryBaseURL: string | null;
+  primaryBaseURLSource: AudiobookTtsBaseUrlSource;
+  primaryBaseURLOverride: string | null;
+  /** 库内 timeout 覆盖；null = 未写库 */
+  timeoutMsOverride: number | null;
+  fallbackBaseUrlsRaw: string | null;
+  fallbackBaseUrlsSource: "setting" | "env" | "none";
+  fallbackCount: number;
+  timeoutMs: number;
+  timeoutMsSource: "setting" | "env" | "default";
+  hasApiKey: boolean;
+  /** 绑定厂商自身 key 来源 */
+  boundApiKeySource: "secret" | "env" | "none";
+  /** 合成实际 key 来源（可含 openai↔deepseek 兜底） */
+  apiKeySource: AudiobookTtsApiKeySource;
+  apiKeyFromProvider: string | null;
+  secretRecordPresent: boolean;
+  secretBaseURL: string | null;
+  envBootstrapHints: {
+    boundProviderEnv: string;
+    fallbackBaseUrlsEnv: string;
+    fallbackApiKeysEnv: string;
+    timeoutMsEnv: string;
+  };
+}
+
 export interface ChapterWriterRuntimeSettingsStatus {
   openingDiversityRecentWindow: number;
   openingDiversitySimilarityThreshold: number;
@@ -355,6 +393,26 @@ export async function saveChapterWriterRuntimeSettings(
 ) {
   const { data } = await apiClient.put<ApiResponse<ChapterWriterRuntimeSettingsStatus>>(
     "/settings/chapter-writer-runtime",
+    payload,
+  );
+  return data;
+}
+
+export async function getAudiobookTtsTransportSettings() {
+  const { data } = await apiClient.get<ApiResponse<AudiobookTtsTransportStatus>>(
+    "/settings/audiobook-tts-transport",
+  );
+  return data;
+}
+
+export async function saveAudiobookTtsTransportSettings(payload: {
+  boundProvider?: string | null;
+  primaryBaseURL?: string | null;
+  fallbackBaseUrls?: string | null;
+  timeoutMs?: number | null;
+}) {
+  const { data } = await apiClient.put<ApiResponse<AudiobookTtsTransportStatus>>(
+    "/settings/audiobook-tts-transport",
     payload,
   );
   return data;

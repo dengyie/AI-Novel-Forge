@@ -17,6 +17,9 @@ const {
   resolveSynthesizeChunkMaxAttempts,
   synthesizeChunkWithRetry,
 } = require("../dist/services/audiobook/AudiobookPipelineService.js");
+const {
+  __resetAudiobookTtsTransportCacheForTests,
+} = require("../dist/services/settings/AudiobookTtsTransportSettingsService.js");
 const { AppError } = require("../dist/middleware/errorHandler.js");
 
 test("parseMimoTtsFallbackBaseUrls splits comma/newline and keeps slots", () => {
@@ -518,6 +521,7 @@ test("synthesizeChunkWithRetry does not multiply full chain when fallback config
   const originalEnv = process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS;
   const prevOpenAi = process.env.OPENAI_BASE_URL;
   const prevKey = process.env.OPENAI_API_KEY;
+  __resetAudiobookTtsTransportCacheForTests();
   process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS = "https://fufu.test/v1";
   process.env.OPENAI_BASE_URL = "http://primary.test/v1";
   process.env.OPENAI_API_KEY = "sk-primary";
@@ -550,6 +554,7 @@ test("synthesizeChunkWithRetry does not multiply full chain when fallback config
     process.env.OPENAI_API_KEY = prevKey;
     if (originalEnv === undefined) delete process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS;
     else process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS = originalEnv;
+    __resetAudiobookTtsTransportCacheForTests();
   }
 });
 
@@ -558,6 +563,7 @@ test("synthesizeChunkWithRetry primary-only 502 retries up to 3", async () => {
   const originalEnv = process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS;
   const prevOpenAi = process.env.OPENAI_BASE_URL;
   const prevKey = process.env.OPENAI_API_KEY;
+  __resetAudiobookTtsTransportCacheForTests();
   delete process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS;
   process.env.OPENAI_BASE_URL = "http://primary.test/v1";
   process.env.OPENAI_API_KEY = "sk-primary";
@@ -588,6 +594,7 @@ test("synthesizeChunkWithRetry primary-only 502 retries up to 3", async () => {
     process.env.OPENAI_API_KEY = prevKey;
     if (originalEnv === undefined) delete process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS;
     else process.env.AUDIOBOOK_MIMO_TTS_FALLBACK_BASE_URLS = originalEnv;
+    __resetAudiobookTtsTransportCacheForTests();
   }
 });
 

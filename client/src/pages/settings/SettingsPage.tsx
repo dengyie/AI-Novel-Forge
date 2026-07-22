@@ -29,6 +29,7 @@ import SettingsReadinessCard, { buildSettingsReadinessItems } from "./components
 import SettingsSectionGroup from "./components/SettingsSectionGroup";
 import StyleEngineRuntimeSettingsCard from "./components/StyleEngineRuntimeSettingsCard";
 import ChapterWriterRuntimeSettingsCard from "./components/ChapterWriterRuntimeSettingsCard";
+import AudiobookTtsTransportCard from "./components/AudiobookTtsTransportCard";
 import SettingsActionResult from "./SettingsActionResult";
 import { AUTO_DIRECTOR_MOBILE_CLASSES } from "@/mobile/autoDirector";
 
@@ -156,6 +157,8 @@ export default function SettingsPage() {
       queryClient.invalidateQueries({ queryKey: queryKeys.llm.providers }),
       queryClient.invalidateQueries({ queryKey: queryKeys.settings.modelRoutes }),
       queryClient.invalidateQueries({ queryKey: queryKeys.settings.modelRouteConnectivity }),
+      // 运输主链可能来自 SecretStore baseURL/key
+      queryClient.invalidateQueries({ queryKey: queryKeys.settings.audiobookTtsTransport }),
     ]);
   };
 
@@ -184,6 +187,7 @@ export default function SettingsPage() {
       queryClient.invalidateQueries({ queryKey: queryKeys.llm.providers }),
       queryClient.invalidateQueries({ queryKey: queryKeys.settings.modelRoutes }),
       queryClient.invalidateQueries({ queryKey: queryKeys.settings.modelRouteConnectivity }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.settings.audiobookTtsTransport }),
     ]);
   };
 
@@ -497,6 +501,7 @@ export default function SettingsPage() {
             });
           }}
         />
+        <AudiobookTtsTransportCard />
         <SettingsNavigationCards mode="routes" />
       </SettingsSectionGroup>
 

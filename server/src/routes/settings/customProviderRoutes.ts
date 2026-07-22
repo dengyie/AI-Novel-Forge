@@ -13,6 +13,7 @@ import {
   getImageModelOptions,
   saveProviderImageModel,
 } from "../../services/settings/ProviderImageSettingsService";
+import { invalidateAudiobookTtsTransportCache } from "../../services/settings/AudiobookTtsTransportSettingsService";
 import { secretStore } from "../../services/settings/secretStore";
 
 const MAX_PROVIDER_CONCURRENCY_LIMIT = 100;
@@ -170,6 +171,7 @@ export function registerCustomProviderRoutes(router: Router): void {
           concurrencyLimit: data.concurrencyLimit ?? 0,
           requestIntervalMs: data.requestIntervalMs ?? 0,
         } : null);
+        invalidateAudiobookTtsTransportCache();
         const imageModel = await saveProviderImageModel(provider, body.imageModel);
         const imageModels = Array.from(new Set([
           ...getImageModelOptions(provider),
@@ -236,6 +238,7 @@ export function registerCustomProviderRoutes(router: Router): void {
         await saveProviderImageModel(provider, null);
         setProviderSecretCache(provider, null);
         evictSharedLimiters(provider);
+        invalidateAudiobookTtsTransportCache();
         res.status(200).json({
           success: true,
           message: "自定义厂商已删除。",
