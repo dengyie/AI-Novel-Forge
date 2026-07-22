@@ -212,10 +212,12 @@ test("workspace artifact inventory skips repair tickets when the latest quality 
 });
 
 test("workspace artifact inventory skips repair tickets when the latest quality loop is terminally deferred", () => {
+  // terminalAction=defer_and_continue 且无 replan / 设定硬失败 / 政策 L0 → non_blocking
+  // recommendedAction 用 continue（manual_gate 在分类器里优先 blocking，不会被 defer 降级）
   const riskFlags = JSON.stringify({
     qualityLoop: {
       overallStatus: "risk",
-      recommendedAction: "manual_gate",
+      recommendedAction: "continue",
       terminalAction: "defer_and_continue",
     },
   });

@@ -72,7 +72,16 @@ export interface ChapterStreamInput {
   options: ChapterGraphGenerateOptions;
 }
 
-const continuationService = new NovelContinuationService();
+// Lazy: top-level `new NovelContinuationService()` re-enters this module mid-load
+// via promptRunner → director → ChapterRuntimeCoordinator → chapterWritingGraph
+// while NovelContinuationService exports are still incomplete (CJS cycle).
+let continuationServiceSingleton: NovelContinuationService | null = null;
+function getContinuationService(): NovelContinuationService {
+  if (!continuationServiceSingleton) {
+    continuationServiceSingleton = new NovelContinuationService();
+  }
+  return continuationServiceSingleton;
+}
 
 function countChapterCharacters(content: string): number {
   return content.replace(/\s+/g, "").trim().length;
@@ -304,7 +313,7 @@ export class ChapterWritingGraph {
       });
     }
 
-    const continuationGuard = await continuationService.rewriteIfTooSimilar({
+    const continuationGuard = await getContinuationService().rewriteIfTooSimilar({
       chapterTitle: chapter.title,
       content: openingGuard.content,
       continuationPack,
@@ -527,7 +536,7 @@ export class ChapterWritingGraph {
     } | void>;
   }> {
     const continuationPack = (input.contextPackage?.continuation as ContinuationPack | undefined)
-      ?? await continuationService.buildChapterContextPack(input.novelId);
+      ?? await getContinuationService().buildChapterContextPack(input.novelId);
     const chapterWriteContext = input.contextPackage?.chapterWriteContext;
     if (!input.contextPackage || !chapterWriteContext) {
       throw new Error("Chapter runtime context is required before chapter generation.");

@@ -233,6 +233,7 @@ test("manual review and manual audit pass assembled chapter review context into 
   const originalChapterFindFirst = prisma.chapter.findFirst;
   const originalChapterUpdate = prisma.chapter.update;
   const originalQualityReportCreate = prisma.qualityReport.create;
+  const originalTransaction = prisma.$transaction;
   const originalShouldTriggerReplanFromAudit = plannerService.shouldTriggerReplanFromAudit;
   const originalAuditChapter = auditService.auditChapter;
   const originalAssemble = GenerationContextAssembler.prototype.assemble;
@@ -243,11 +244,20 @@ test("manual review and manual audit pass assembled chapter review context into 
     id: "chapter-1",
     title: "第1章",
     content: "章节正文",
+    order: 1,
     novel: { title: "测试小说" },
   });
   prisma.chapter.update = async (payload) => {
     chapterUpdateCalls.push(payload);
-    return null;
+    // persistChapterQualityScores 会按 chapterId update 分数列；假库必须返回成功
+    return { id: payload?.where?.id ?? "chapter-1", ...payload?.data };
+  };
+  // $transaction 用于 persistChapterQualityScores；透传调用方回调并用同一 fake prisma
+  prisma.$transaction = async (fn) => {
+    if (typeof fn === "function") {
+      return fn(prisma);
+    }
+    return fn;
   };
   prisma.qualityReport.create = async () => null;
   plannerService.shouldTriggerReplanFromAudit = () => false;
@@ -280,6 +290,7 @@ test("manual review and manual audit pass assembled chapter review context into 
       ["full", "shared-review-context"],
       ["plot", "shared-review-context"],
     ]);
+    // 第一笔 update 是 manual review 的 lifecycle state（分数列在后续 $transaction 内再 update）
     assert.deepEqual(chapterUpdateCalls[0], {
       where: { id: "chapter-1" },
       data: {
@@ -291,6 +302,7 @@ test("manual review and manual audit pass assembled chapter review context into 
     prisma.chapter.findFirst = originalChapterFindFirst;
     prisma.chapter.update = originalChapterUpdate;
     prisma.qualityReport.create = originalQualityReportCreate;
+    prisma.$transaction = originalTransaction;
     plannerService.shouldTriggerReplanFromAudit = originalShouldTriggerReplanFromAudit;
     auditService.auditChapter = originalAuditChapter;
     GenerationContextAssembler.prototype.assemble = originalAssemble;
@@ -333,7 +345,7 @@ test("repair stream builds prompt blocks from the assembled repair context packa
 
   try {
     const service = new NovelCoreReviewService();
-    await service.createRepairStream("novel-1", "chapter-1", {
+    const repairStream = await service.createRepairStream("novel-1", "chapter-1", {
       reviewIssues: [{
         severity: "high",
         category: "pacing",
@@ -347,6 +359,15 @@ test("repair stream builds prompt blocks from the assembled repair context packa
     assert.ok(capturedContextBlocks.some((block) => block.id === "character_dynamics"));
     assert.ok(capturedContextBlocks.some((block) => block.id === "structure_obligations"));
     assert.ok(capturedContextBlocks.some((block) => block.id === "repair_boundaries"));
+
+    // F4 章节 repair 锁在 onDone finally 释放；本测只验证 create 的 context blocks。
+    // 若从不调用 onDone，同 chapterId 后续用例会永远 await 锁。
+    // finalize 依赖完整 baseline/评分链路——此处让 findFirst 立即 miss，快速 throw 并释放锁。
+    prisma.chapter.findFirst = async () => null;
+    await assert.rejects(
+      repairStream.onDone("修复片段", { writeFrame: () => {} }),
+      /章节不存在|无法完成修复/,
+    );
   } finally {
     prisma.novel.findUnique = originalNovelFindUnique;
     prisma.chapter.findFirst = originalChapterFindFirst;

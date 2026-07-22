@@ -535,6 +535,19 @@ test("chapter task sheet schema parses taskSheet plus aliased scene cards", () =
   const schema = createChapterTaskSheetSchema();
   const parsed = schema.parse({
     task_sheet: "本章先让主角接住情报，再完成第一次明确反压，最后留下更大威胁。",
+    readerExperience: {
+      readerQuestion: "主角能不能接住情报并完成第一次反压？",
+      promisedReward: "情报到手并拿到阶段性主动权。",
+      rewardLevel: "partial",
+      protagonistWant: "拿到反压切入口。",
+      primaryResistance: "敌方压迫与情报链断裂。",
+      keyTurn: "女二送达关键情报，主角完成第一次反压。",
+      emotionalShift: "从受压到有反击抓手。",
+      informationReveal: "敌方弱点与下一步威胁。",
+      netChange: "主角确认反压成立，章末压力抬高。",
+      inheritedHookResponsibilities: [],
+      endingHook: "更大威胁出现。",
+    },
     scenes: [
       {
         sceneKey: "intel_handover",
@@ -578,4 +591,5 @@ test("chapter task sheet schema parses taskSheet plus aliased scene cards", () =
   assert.deepEqual(parsed.sceneCards[1].mustAdvance, ["明确收益", "敌方被迫应对"]);
   assert.deepEqual(parsed.sceneCards[1].forbiddenExpansion, ["不要洗白敌方", "不要直接大决战"]);
   assert.equal(parsed.sceneCards[2].targetWordCount, 800);
+  assert.equal(parsed.readerExperience.rewardLevel, "partial");
 });

@@ -524,9 +524,12 @@ test("mode=off qualityLoop assessment has no setting_alignment signal", () => {
     issues: [],
     // 不传 settingAlignment
   });
-  // retention + literary_score + continuity + prose + rolling_window（无 setting_alignment）
-  assert.equal(assessment.signals.length, 5);
+  // retention + literary_score + continuity + prose + rolling_window + style_pronoun + style_residual
+  // （无 setting_alignment；style_* 始终由 quality loop 发出）
+  assert.equal(assessment.signals.length, 7);
   assert.ok(assessment.signals.every((s) => s.artifactType !== "setting_alignment"));
+  assert.ok(assessment.signals.some((s) => s.artifactType === "style_pronoun"));
+  assert.ok(assessment.signals.some((s) => s.artifactType === "style_residual"));
   assert.equal(assessment.recommendedAction, "continue");
 });
 

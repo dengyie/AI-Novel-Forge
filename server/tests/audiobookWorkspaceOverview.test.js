@@ -17,7 +17,9 @@ test("overview max constant is 50", () => {
   assert.equal(AUDIOBOOK_WORKSPACE_OVERVIEW_MAX, 50);
 });
 
-test("buildSummaryFromRows skipRefAudioProbe avoids probe path for clone with path", () => {
+test("buildSummaryFromRows skipRefAudioProbe still lightly probes legacy path without assetId", () => {
+  // 列表态势：有 assetId 的 resolved 不 probe 文件；无 assetId 的 legacy path 仍轻检，
+  // 防越界/缺失被盲信为 configured（AudiobookVoiceReadinessService.buildSummaryFromRows）。
   const summary = audiobookVoiceReadinessService.buildSummaryFromRows({
     novelId: "n-list",
     narratorVoice: "茉莉",
@@ -32,7 +34,6 @@ test("buildSummaryFromRows skipRefAudioProbe avoids probe path for clone with pa
         ttsVoice: null,
         ttsStyle: null,
         ttsDesignPrompt: null,
-        // 故意给不存在的路径；列表模式不得因 probe 判 invalid
         ttsRefAudioPath: "/definitely/not/a/real/ref-audio-for-overview.wav",
         ttsPreviewAudioPath: null,
         ttsPreviewSampleText: null,
@@ -42,9 +43,8 @@ test("buildSummaryFromRows skipRefAudioProbe avoids probe path for clone with pa
     ],
     skipRefAudioProbe: true,
   });
-  assert.equal(summary.voiceOk, true);
-  assert.equal(summary.voiceConfigured, 1);
-  assert.equal(summary.items[0].voiceBindingStatus, "configured");
+  assert.equal(summary.voiceOk, false);
+  assert.equal(summary.items[0].voiceBindingStatus, "invalid");
 });
 
 test("buildSummaryFromRows skipRefAudioProbe still rejects missing library assetId", () => {

@@ -1,0 +1,67 @@
+name: Server Test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "server/**"
+      - "shared/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - ".github/workflows/server-test.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "server/**"
+      - "shared/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - ".github/workflows/server-test.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: server-test-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typecheck-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10.6.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build shared
+        run: pnpm --filter @ai-novel/shared build
+
+      - name: Generate Prisma client
+        run: pnpm --filter @ai-novel/server prisma:generate
+
+      - name: Typecheck server
+        run: pnpm --filter @ai-novel/server typecheck
+
+      - name: Build server (tests load dist/)
+        run: pnpm --filter @ai-novel/server build
+
+      - name: Run server fast tests
+        env:
+          # process isolation 防跨测试污染；CI 上提高并发
+          TEST_ISOLATION: process
+          TEST_CONCURRENCY: "6"
+        run: pnpm --filter @ai-novel/server test:node

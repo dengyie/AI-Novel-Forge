@@ -420,8 +420,10 @@ test("finalizeChapterContent runs acceptance gate once and defers timeline extra
     const firstAcceptanceEnd = gateCalls.find((item) => item[0] === "acceptance-end")[1];
 
     assert.equal(acceptanceCalls, 1);
+    // 真正 defer 信号：热路径不调 timeline。duration 仅作软上限（process isolation 并行时
+    // 机器负载会把 70ms sleep 放大到 200ms+，勿用 <160 这种脆弱门槛）。
     assert.equal(timelineCalls, 0);
-    assert.ok(duration < 160);
+    assert.ok(duration < 1500, `acceptance-only path too slow: ${duration}ms`);
 
     await coordinator.contentFinalizationService.finalizeChapterContent({
       novelId: "novel-1",
@@ -696,19 +698,25 @@ test("finalizeChapterContent writes only acceptance-covered mustHitNow facts bef
       deferArtifactBackgroundSync: true,
     });
 
-    assert.deepEqual(calls, ["facts", "artifact"]);
+    // hard must_hit_now 缺失 → obligationCoverage=unmet → 整批义务都不入账（避免半验收写脏账）
+    assert.deepEqual(calls, ["artifact"]);
     assert.equal(syncCalls.length, 1);
     assert.equal(syncCalls[0][3].awaitArtifactDelta, true);
     assert.equal(syncCalls[0][3].skipLegacySummaryAndFacts, true);
-    assert.deepEqual(createdFacts.map((item) => item.text), [
-      "第1章已完成：主角当众拒绝婚约，明确站到家族对立面。",
-    ]);
-    assert.deepEqual(createdFacts.map((item) => item.category), ["completed"]);
-    assert.equal(createdFacts.some((item) => item.text.includes("已完全揭示")), false);
+    assert.deepEqual(createdFacts, []);
     assert.equal(eventCalls.length, 1);
     assert.equal(eventCalls[0].type, "continue_with_risk");
-    assert.equal(eventCalls[0].metadata.excludedObligations.length, 1);
-    assert.equal(eventCalls[0].metadata.excludedObligations[0].text, "拿到青铜钥匙，并发现钥匙来自失踪师父。");
+    assert.equal(eventCalls[0].metadata.excludedObligations.length, 2);
+    assert.deepEqual(
+      eventCalls[0].metadata.excludedObligations.map((item) => item.text).sort(),
+      [
+        "主角当众拒绝婚约，明确站到家族对立面。",
+        "拿到青铜钥匙，并发现钥匙来自失踪师父。",
+      ].sort(),
+    );
+    assert.ok(
+      eventCalls[0].metadata.excludedObligations.every((item) => item.reason === "coverage_unmet"),
+    );
   } finally {
     prisma.chapter.update = originalChapterUpdate;
     prisma.novelFactEntry.findMany = originalFactFindMany;
@@ -824,8 +832,9 @@ test("createRepairStream escalates patch schema failures to a single heavy repai
     });
 
     assert.equal(streamedContent, "全文修复片段");
-    // evaluateOnly candidate 评估 + 采纳后正式 recheck
+    // baseline evaluateOnly + candidate evaluateOnly + 采纳后正式 recheck
     assert.deepEqual(reviewCalls, [
+      { content: "旧正文里有一段需要修复的内容。", evaluateOnly: true },
       { content: "全文修复后的正文", evaluateOnly: true },
       { content: "全文修复后的正文", evaluateOnly: false },
     ]);
@@ -946,9 +955,10 @@ test("createRepairStream discards candidate on overall regression without overwr
     });
 
     assert.equal(syncCalls.length, 0, "discard must not sync artifacts");
-    assert.equal(chapterUpdates.length, 1);
-    assert.equal(chapterUpdates[0].content, undefined, "discard must not overwrite content");
-    assert.ok(chapterUpdates[0].repairHistory?.includes("decision=discard"));
+    // discard: 1) repairHistory 决策行  2) QFP recordRepairFeedbackDecision 投影更新
+    assert.equal(chapterUpdates.length, 2);
+    assert.ok(chapterUpdates.every((item) => item.content === undefined), "discard must not overwrite content");
+    assert.ok(chapterUpdates.some((item) => item.repairHistory?.includes("decision=discard")));
     assert.match(frames.at(-1)?.message ?? "", /未采纳/);
   } finally {
     prisma.novel.findUnique = originalNovelFindUnique;
@@ -1318,6 +1328,7 @@ test("post-generation style review policy disables detection and rewrite", async
     autoRewritten: false,
     originalContent: null,
     finalContent: "正文草稿",
+    hotspotRewrites: 0,
   });
 });
 

@@ -88,7 +88,15 @@ describe("audiobookOpsRun (阶段 1 运行面)", () => {
     assert.equal(report.dryRun, true);
     assert.deepEqual(report.dryRunPlan.packsToImport, ["/tmp/no-such-pack"]);
     assert.deepEqual(report.ear, []);
-    assert.deepEqual(report.approve, { attempted: 0, approved: 0, rejected: 0, skipped: 0, gateBlocked: 0 });
+    assert.deepEqual(report.approve, {
+      attempted: 0,
+      approved: 0,
+      approvedHard: 0,
+      approvedSoft: 0,
+      rejected: 0,
+      skipped: 0,
+      gateBlocked: 0,
+    });
   });
 
   it("幂等短窗：60s 内同输入返回 duplicateOfRunId", async () => {

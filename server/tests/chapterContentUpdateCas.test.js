@@ -69,10 +69,16 @@ test("updateChapter content CAS: matching expectedContentRevision succeeds and b
     };
     prisma.chapter.findMany = async () => [];
     // 跳过 syncChapterArtifacts 真实写库（FK 依赖 novel/chapter 行）
+    // product: novelChapterArtifacts 先 findUnique 再 update/create，不能只 stub upsert
     prisma.$transaction = async (fn) => {
       if (typeof fn === "function") {
         const tx = {
-          chapterSummary: { upsert: async () => null },
+          chapterSummary: {
+            findUnique: async () => null,
+            update: async () => null,
+            create: async () => null,
+            upsert: async () => null,
+          },
           consistencyFact: { deleteMany: async () => ({ count: 0 }), createMany: async () => ({ count: 0 }) },
         };
         return fn(tx);
@@ -172,7 +178,12 @@ test("updateChapter without expectedContentRevision is last-write-wins and still
     prisma.$transaction = async (fn) => {
       if (typeof fn === "function") {
         const tx = {
-          chapterSummary: { upsert: async () => null },
+          chapterSummary: {
+            findUnique: async () => null,
+            update: async () => null,
+            create: async () => null,
+            upsert: async () => null,
+          },
           consistencyFact: { deleteMany: async () => ({ count: 0 }), createMany: async () => ({ count: 0 }) },
         };
         return fn(tx);

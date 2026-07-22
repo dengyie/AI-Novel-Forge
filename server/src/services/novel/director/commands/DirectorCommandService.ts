@@ -787,8 +787,9 @@ export class DirectorCommandService {
     if (row.lane !== "auto_director") {
       throw new AppError("Only auto director workflow tasks can be queued as director commands.", 400);
     }
-    // stale lease recovery 已迁到 DirectorTaskQueue 后台节流扫描，
-    // 不再在每次 enqueue 热路径同步扫库（避免命令风暴时放大延迟）。
+    // 全量 stale lease 扫描在 DirectorTaskQueue 后台节流；enqueue 热路径只对本 task
+    // 做一次定点 recover：否则 attempt 耗尽仍 status=running 的 continue 会永远挡住新 continue。
+    await this.recoverStaleLeases(new Date(), { taskId: input.taskId }).catch(() => null);
     const reusableCommand = await prisma.directorRunCommand.findFirst({
       where: {
         taskId: input.taskId,

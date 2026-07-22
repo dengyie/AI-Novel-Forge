@@ -323,11 +323,24 @@ test("extractAudioBase64 reads message.audio.data", () => {
     }),
     "UklGRdata",
   );
+  // content 兜底仅在可解码为合法 PCM WAV 时采信（防 UklGR 开头的文本误判）
   assert.equal(
     extractAudioBase64({
       choices: [{ message: { content: "UklGRfallback" } }],
     }),
-    "UklGRfallback",
+    null,
+  );
+  const { buildWavBuffer } = require("../dist/services/audiobook/audiobookWav.js");
+  const validWavBase64 = buildWavBuffer(Buffer.alloc(48), {
+    numChannels: 1,
+    sampleRate: 24_000,
+    bitsPerSample: 16,
+  }).toString("base64");
+  assert.equal(
+    extractAudioBase64({
+      choices: [{ message: { content: validWavBase64 } }],
+    }),
+    validWavBase64,
   );
 });
 

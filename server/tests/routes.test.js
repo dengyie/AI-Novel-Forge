@@ -159,6 +159,10 @@ test("PUT /api/settings/rag saves extended settings and auto-enqueues reindex", 
         workerMaxAttempts: current.workerMaxAttempts,
         workerRetryBaseMs: current.workerRetryBaseMs,
         httpTimeoutMs: current.httpTimeoutMs,
+        retrievalTraceSampleRate: current.retrievalTraceSampleRate,
+        retrievalTraceRetentionDays: current.retrievalTraceRetentionDays,
+        contextualRetrievalConcurrency: current.contextualRetrievalConcurrency,
+        rerankerCandidateLimit: current.rerankerCandidateLimit,
       }),
     });
     assert.equal(response.status, 200);
@@ -199,6 +203,10 @@ test("PUT /api/settings/rag saves extended settings and auto-enqueues reindex", 
         workerMaxAttempts: current.workerMaxAttempts,
         workerRetryBaseMs: current.workerRetryBaseMs,
         httpTimeoutMs: current.httpTimeoutMs,
+        retrievalTraceSampleRate: current.retrievalTraceSampleRate,
+        retrievalTraceRetentionDays: current.retrievalTraceRetentionDays,
+        contextualRetrievalConcurrency: current.contextualRetrievalConcurrency,
+        rerankerCandidateLimit: current.rerankerCandidateLimit,
       }),
     });
   } finally {
@@ -441,12 +449,14 @@ test("GET and PUT /api/llm/structured-fallback expose the global fallback config
     assert.equal(putResponse.status, 200);
     const putPayload = await putResponse.json();
     assert.equal(putPayload.success, true);
+    // route always forwards body.chain?.map(...) → undefined when chain omitted
     assert.deepEqual(savedPayload, {
       enabled: true,
       provider: "openai",
       model: "gpt-4o-mini",
       temperature: 0.15,
       maxTokens: 2048,
+      chain: undefined,
     });
     assert.equal(putPayload.data.enabled, true);
     assert.equal(putPayload.data.provider, "openai");
@@ -588,8 +598,9 @@ test("GET /api/settings/api-keys uses lightweight local model metadata", async (
     assert.equal(payload.success, true);
     const deepseek = payload.data.find((item) => item.provider === "deepseek");
     assert.ok(deepseek);
-    assert.equal(deepseek.currentModel, "deepseek-v4-flash");
+    assert.equal(deepseek.currentModel, "deepseek-v4-pro");
     assert.equal(deepseek.isConfigured, true);
+    assert.ok(deepseek.models.includes("deepseek-v4-pro"));
     assert.ok(deepseek.models.includes("deepseek-v4-flash"));
   } finally {
     prisma.aPIKey.findMany = originalFindMany;

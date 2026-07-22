@@ -106,6 +106,8 @@ function createAcceptanceGateUnavailableRuntimePackage(overallScore) {
     meta: {
       acceptanceStatus: "continue_with_risk",
       continuePolicy: "continue",
+      // 产品短路依赖 riskTag=acceptance_gate_unavailable（judge 失败唯一真源）
+      riskTags: ["acceptance_gate_unavailable"],
     },
   };
 }
@@ -807,7 +809,8 @@ test("runPipelineChapterWithRuntime defers acceptance gate unavailable risk with
       },
     );
 
-    assert.deepEqual(stages, ["generating_chapters", "reviewing", "repairing"]);
+    // 闸门不可用短路：不进入 repairDraftContent，故 stage 无 repairing
+    assert.deepEqual(stages, ["generating_chapters", "reviewing"]);
     assert.equal(reviewCount, 1);
     assert.equal(result.pass, false);
     assert.equal(result.retryCountUsed, 0);

@@ -103,6 +103,8 @@ describe("voice plan library (milestone B)", () => {
       });
       assert.equal(plannedDraft.items[0].ttsMode, "design");
 
+      // clone_ref → approved 前须经 Ear/播放写入 heardAt
+      voiceLibraryService.markLibraryPreviewHeard(asset.id, { heardBy: "test" });
       asset = voiceLibraryService.setStatus(asset.id, "approved");
       const planned = planCharacterVoices({
         strategy: "prefer_library",
@@ -226,6 +228,7 @@ describe("voice plan apply clone contract (milestone B harden)", () => {
         assert.equal(result.skipped.length, 1);
         assert.match(result.skipped[0].reason, /approved|批准|draft|Draft|状态/i);
 
+        voiceLibraryService.markLibraryPreviewHeard(asset.id, { heardBy: "test" });
         asset = voiceLibraryService.setStatus(asset.id, "approved");
 
         // approved bind → applied
