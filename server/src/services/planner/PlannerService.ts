@@ -683,6 +683,8 @@ export class PlannerService {
       scopeLabel: `章节规划：第${chapter.order}章《${chapter.title}》`,
       planLevel: "chapter",
       contextBlocks,
+      chapterOrder: chapter.order,
+      totalChapters: novel.estimatedChapterCount ?? null,
     });
     const metadata = normalizePlanMetadata("chapter", output, {
       ...defaultMetadata,

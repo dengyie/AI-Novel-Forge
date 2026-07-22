@@ -16,6 +16,9 @@ const {
   ChapterEmptyContentError,
 } = require("../dist/services/novel/runtime/chapterEmptyContentError.js");
 const {
+  ChapterChineseProseGateError,
+} = require("../dist/services/novel/runtime/chapterChineseProseGateError.js");
+const {
   parsePipelinePayload,
   stringifyPipelinePayload,
   decoratePipelineJob,
@@ -57,6 +60,16 @@ test("isPipelineJobAutoRetryableError accepts transport and empty content", () =
       source: "pipeline_chapter_writer",
       rawLength: 0,
       trimmedLength: 0,
+    })),
+    true,
+  );
+  assert.equal(
+    isPipelineJobAutoRetryableError(new ChapterChineseProseGateError({
+      source: "chapter_writer",
+      cjkCount: 10,
+      latinCount: 500,
+      rawLength: 800,
+      reason: "english_heavy",
     })),
     true,
   );

@@ -18,6 +18,10 @@ import {
   isChapterEmptyContentError,
   type ChapterEmptyContentError,
 } from "./chapterEmptyContentError";
+import {
+  isChapterChineseProseGateError,
+  type ChapterChineseProseGateError,
+} from "./chapterChineseProseGateError";
 import { isTransientTransportError } from "../../../llm/transportRetry";
 import { runChapterRepairText } from "./repair/chapterRepairRuntime";
 import { getChapterWriterRuntimeSettings } from "../../settings/ChapterWriterRuntimeSettingsService";
@@ -26,6 +30,8 @@ export interface PipelineRuntimeHooks {
   onCheckCancelled?: () => Promise<void>;
   onStageChange?: (stage: "generating_chapters" | "reviewing" | "repairing") => Promise<void>;
   onEmptyContent?: (event: PipelineEmptyContentEvent) => Promise<void>;
+  /** 中文硬门失败后整章重试时回调（可观测） */
+  onChineseProseGate?: (event: PipelineChineseProseGateEvent) => Promise<void>;
   /** mid-stream / writer 瞬时 transport 失败，将整章重试时回调（可观测） */
   onWriterTransportRetry?: (event: PipelineWriterTransportRetryEvent) => Promise<void>;
 }
@@ -35,6 +41,14 @@ export interface PipelineEmptyContentEvent {
   willRetry: boolean;
   error: ChapterEmptyContentError;
   contentLength: number;
+  rawContentLength: number;
+}
+
+export interface PipelineChineseProseGateEvent {
+  attempt: number;
+  willRetry: boolean;
+  error: ChapterChineseProseGateError;
+  reason?: string;
   rawContentLength: number;
 }
 
@@ -178,6 +192,7 @@ interface RunPipelineChapterDeps {
 /** 分维固定阈；与 options.qualityThreshold（overall）合取，见 isQualityPass。与 shared isPass 同源。 */
 const QUALITY_THRESHOLD = DEFAULT_QUALITY_IS_PASS_THRESHOLD;
 const EMPTY_CONTENT_GENERATION_RETRY_LIMIT = 1;
+const CHINESE_PROSE_GATE_RETRY_LIMIT = 1;
 /**
  * mid-stream / writer transport 瞬时失败整章重试上限（不含首次）。
  *
@@ -462,6 +477,7 @@ async function generateNonEmptyDraftFromWriter(input: {
   artifactsAlreadySynced?: boolean;
 }> {
   let emptyAttempt = 0;
+  let chineseGateAttempt = 0;
   let transportAttempt = 0;
   while (true) {
     await input.hooks.onCheckCancelled?.();
@@ -500,6 +516,22 @@ async function generateNonEmptyDraftFromWriter(input: {
           willRetry,
           error,
           contentLength: error.details.trimmedLength,
+          rawContentLength: error.details.rawLength,
+        });
+        if (willRetry) {
+          continue;
+        }
+        throw error;
+      }
+
+      if (isChapterChineseProseGateError(error)) {
+        chineseGateAttempt += 1;
+        const willRetry = chineseGateAttempt <= CHINESE_PROSE_GATE_RETRY_LIMIT;
+        await input.hooks.onChineseProseGate?.({
+          attempt: chineseGateAttempt,
+          willRetry,
+          error,
+          reason: error.details.reason,
           rawContentLength: error.details.rawLength,
         });
         if (willRetry) {

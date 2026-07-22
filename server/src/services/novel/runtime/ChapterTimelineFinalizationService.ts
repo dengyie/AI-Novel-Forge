@@ -15,11 +15,16 @@ import {
   timelineExtractorService,
   timelineRepository,
 } from "../../../modules/timeline";
+import {
+  ARTIFACT_CHECKPOINT_RUNNING_STALE_MS,
+  reclaimStaleRunningArtifactCheckpointsThrottled,
+} from "./ChapterArtifactSyncCheckpointHygiene";
+import { withBackgroundChapterLlmSlot } from "./backgroundLlmGate";
 
 export type ChapterTimelineFinalizationMode = "stable" | "degraded";
 type TimelineFinalizationClaimStatus = "claimed" | "already_done" | "running";
 
-const TIMELINE_FINALIZATION_RUNNING_STALE_MS = 15 * 60 * 1000;
+const TIMELINE_FINALIZATION_RUNNING_STALE_MS = ARTIFACT_CHECKPOINT_RUNNING_STALE_MS;
 
 export interface ChapterTimelineGateResult {
   result: TimelineCheckResult;
@@ -113,6 +118,9 @@ export class ChapterTimelineFinalizationService {
     chapterId: string;
     content: string;
   }): Promise<ChapterTimelineFinalizationMode | null> {
+    // Throttled opportunistic reclaim — interval scanner is primary hygiene.
+    await reclaimStaleRunningArtifactCheckpointsThrottled({ limit: 100 }).catch(() => 0);
+
     const contentHash = hashContent(input.content.trim());
     const row = await prisma.chapterArtifactSyncCheckpoint.findFirst({
       where: {
@@ -419,20 +427,24 @@ export class ChapterTimelineFinalizationService {
         timelineContext: null,
       };
     }
+    // Narrowed after early return above; local const keeps TS happy across the async slot.
+    const timelineContext = input.timelineContext;
     try {
-      const extracted = await timelineExtractorService.extractFromChapter({
-        novelId: input.novelId,
-        chapterId: input.chapterId,
-        chapterIndex: input.chapterIndex,
-        novelTitle: input.novelTitle,
-        chapterTitle: input.chapterTitle,
-        chapterGoal: input.chapterGoal,
-        chapterContent: input.content,
-        timelineContext: input.timelineContext,
-        provider: input.request?.provider,
-        model: input.request?.model,
-        temperature: input.request?.temperature,
-      });
+      const extracted = await withBackgroundChapterLlmSlot("timeline_extract", () => (
+        timelineExtractorService.extractFromChapter({
+          novelId: input.novelId,
+          chapterId: input.chapterId,
+          chapterIndex: input.chapterIndex,
+          novelTitle: input.novelTitle,
+          chapterTitle: input.chapterTitle,
+          chapterGoal: input.chapterGoal,
+          chapterContent: input.content,
+          timelineContext,
+          provider: input.request?.provider,
+          model: input.request?.model,
+          temperature: input.request?.temperature,
+        })
+      ));
       const extractedEvents = timelineExtractorService.normalizeEvents(extracted);
       const extractedHooks = timelineExtractorService.normalizeHooks(extracted);
       const result = timelineCheckerService.checkChapter({
@@ -645,6 +657,30 @@ export class ChapterTimelineFinalizationService {
       const staleBefore = new Date(Date.now() - TIMELINE_FINALIZATION_RUNNING_STALE_MS);
       if (existing?.status === "running" && existing.updatedAt > staleBefore) {
         return "running";
+      }
+      if (existing?.status === "running" && existing.updatedAt <= staleBefore) {
+        await prisma.chapterArtifactSyncCheckpoint.updateMany({
+          where: {
+            novelId: input.novelId,
+            chapterId: input.chapterId,
+            contentHash: input.contentHash,
+            artifactType: "timeline_finalization",
+            syncMode: input.syncMode,
+            status: "running",
+            updatedAt: { lt: staleBefore },
+          },
+          data: {
+            status: "failed",
+            sourceType: "chapter_runtime",
+            sourceStage: input.sourceStage,
+            metadataJson: JSON.stringify({
+              ...input.metadata,
+              reason: "stale_running_before_reclaim",
+              reclaimedAt: new Date().toISOString(),
+            }),
+            updatedAt: new Date(),
+          },
+        }).catch(() => null);
       }
       const claimed = await prisma.chapterArtifactSyncCheckpoint.updateMany({
         where: {

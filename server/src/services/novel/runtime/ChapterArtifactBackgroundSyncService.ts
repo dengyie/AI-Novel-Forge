@@ -13,6 +13,10 @@ import type {
 import type { ContentProvenance } from "@ai-novel/shared/types/canonicalState";
 import { buildContentHash, ChapterArtifactDeltaService } from "./ChapterArtifactDeltaService";
 import { rememberCacheValue } from "./chapterRuntimePackageBuilders";
+import {
+  ARTIFACT_CHECKPOINT_RUNNING_STALE_MS,
+  reclaimStaleRunningArtifactCheckpointsThrottled,
+} from "./ChapterArtifactSyncCheckpointHygiene";
 
 interface ChapterBackgroundSyncContext {
   chapterId: string;
@@ -32,7 +36,7 @@ type ArtifactSyncClaimStatus = "claimed" | "already_done" | "running";
 
 const DEFAULT_ARTIFACT_SYNC_MODE: ArtifactSyncMode = "adaptive";
 const DEFERRED_SYNC_DELAY_MS = 5000;
-const ARTIFACT_SYNC_RUNNING_STALE_MS = 15 * 60 * 1000;
+const ARTIFACT_SYNC_RUNNING_STALE_MS = ARTIFACT_CHECKPOINT_RUNNING_STALE_MS;
 
 export class ChapterArtifactBackgroundSyncService {
   private readonly artifactDeltaService = new ChapterArtifactDeltaService();
@@ -303,6 +307,10 @@ export class ChapterArtifactBackgroundSyncService {
     artifactType: string;
     syncMode: ArtifactSyncMode;
   }): Promise<boolean> {
+    // Throttled opportunistic reclaim — interval scanner is primary; avoid
+    // findMany thrash on every hasCompletedCheckpoint hot read.
+    await reclaimStaleRunningArtifactCheckpointsThrottled({ limit: 100 }).catch(() => 0);
+
     const row = await prisma.chapterArtifactSyncCheckpoint.findUnique({
       where: {
         novelId_chapterId_contentHash_artifactType_syncMode: {
@@ -313,9 +321,40 @@ export class ChapterArtifactBackgroundSyncService {
           syncMode: input.syncMode,
         },
       },
-      select: { status: true },
+      select: { status: true, updatedAt: true },
     }).catch(() => null);
-    return row?.status === "succeeded";
+    if (!row) {
+      return false;
+    }
+    if (row.status === "succeeded") {
+      return true;
+    }
+    // Stale running on this key: fail it so claim can proceed.
+    if (row.status === "running") {
+      const staleBefore = new Date(Date.now() - ARTIFACT_SYNC_RUNNING_STALE_MS);
+      if (row.updatedAt < staleBefore) {
+        await prisma.chapterArtifactSyncCheckpoint.updateMany({
+          where: {
+            novelId: input.novelId,
+            chapterId: input.chapterId,
+            contentHash: input.contentHash,
+            artifactType: input.artifactType,
+            syncMode: input.syncMode,
+            status: "running",
+            updatedAt: { lt: staleBefore },
+          },
+          data: {
+            status: "failed",
+            metadataJson: JSON.stringify({
+              reason: "stale_running_on_read",
+              reclaimedAt: new Date().toISOString(),
+            }),
+            updatedAt: new Date(),
+          },
+        }).catch(() => null);
+      }
+    }
+    return false;
   }
 
   private async claimCheckpoint(input: {
@@ -364,6 +403,28 @@ export class ChapterArtifactBackgroundSyncService {
       const staleBefore = new Date(Date.now() - ARTIFACT_SYNC_RUNNING_STALE_MS);
       if (existing?.status === "running" && existing.updatedAt > staleBefore) {
         return "running";
+      }
+      // Explicit fail-then-reclaim when stale so metadata records hygiene reason.
+      if (existing?.status === "running" && existing.updatedAt <= staleBefore) {
+        await prisma.chapterArtifactSyncCheckpoint.updateMany({
+          where: {
+            novelId: input.novelId,
+            chapterId: input.chapterId,
+            contentHash: input.contentHash,
+            artifactType: input.artifactType,
+            syncMode: input.syncMode,
+            status: "running",
+            updatedAt: { lt: staleBefore },
+          },
+          data: {
+            status: "failed",
+            metadataJson: JSON.stringify({
+              reason: "stale_running_before_reclaim",
+              reclaimedAt: new Date().toISOString(),
+            }),
+            updatedAt: new Date(),
+          },
+        }).catch(() => null);
       }
       const claimed = await prisma.chapterArtifactSyncCheckpoint.updateMany({
         where: {

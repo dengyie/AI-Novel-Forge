@@ -13,6 +13,10 @@ import {
   isChapterEmptyContentError,
   type ChapterEmptyContentError,
 } from "./chapterEmptyContentError";
+import {
+  isChapterChineseProseGateError,
+  type ChapterChineseProseGateError,
+} from "./chapterChineseProseGateError";
 import { throwIfChapterGenerationAborted } from "./chapterAbortGuard";
 import {
   ChapterContentFinalizationService,
@@ -308,18 +312,29 @@ export class ChapterStreamGenerationOrchestrator {
         finalContent,
       };
     } catch (error) {
-      if (!isChapterEmptyContentError(error)) {
+      if (isChapterEmptyContentError(error)) {
+        this.logEmptyChapterContent({
+          error,
+          novelId: input.novelId,
+          chapterId: input.chapterId,
+          chapterOrder: input.assembled.chapter.order,
+          request: input.request,
+          willRetry: true,
+          attempt: 1,
+        });
+      } else if (isChapterChineseProseGateError(error)) {
+        this.logChineseProseGateFailure({
+          error,
+          novelId: input.novelId,
+          chapterId: input.chapterId,
+          chapterOrder: input.assembled.chapter.order,
+          request: input.request,
+          willRetry: true,
+          attempt: 1,
+        });
+      } else {
         throw error;
       }
-      this.logEmptyChapterContent({
-        error,
-        novelId: input.novelId,
-        chapterId: input.chapterId,
-        chapterOrder: input.assembled.chapter.order,
-        request: input.request,
-        willRetry: true,
-        attempt: 1,
-      });
     }
 
     try {
@@ -339,6 +354,17 @@ export class ChapterStreamGenerationOrchestrator {
     } catch (error) {
       if (isChapterEmptyContentError(error)) {
         this.logEmptyChapterContent({
+          error,
+          novelId: input.novelId,
+          chapterId: input.chapterId,
+          chapterOrder: input.assembled.chapter.order,
+          request: input.request,
+          willRetry: false,
+          attempt: 2,
+        });
+        await this.markChapterStatus(input.chapterId, "pending_generation");
+      } else if (isChapterChineseProseGateError(error)) {
+        this.logChineseProseGateFailure({
           error,
           novelId: input.novelId,
           chapterId: input.chapterId,
@@ -371,6 +397,32 @@ export class ChapterStreamGenerationOrchestrator {
       willRetry: input.willRetry,
       attempt: input.attempt,
       contentLength: input.error.details.trimmedLength,
+      rawContentLength: input.error.details.rawLength,
+      source: input.error.details.source,
+    });
+  }
+
+  private logChineseProseGateFailure(input: {
+    error: ChapterChineseProseGateError;
+    novelId: string;
+    chapterId: string;
+    chapterOrder: number;
+    request: ChapterRuntimeRequestInput;
+    willRetry: boolean;
+    attempt: number;
+  }): void {
+    console.warn("[chapter-runtime] chinese prose gate failed", {
+      novelId: input.novelId,
+      chapterId: input.chapterId,
+      chapterOrder: input.chapterOrder,
+      provider: input.request.provider,
+      model: input.request.model,
+      willRetry: input.willRetry,
+      attempt: input.attempt,
+      reason: input.error.details.reason,
+      metaMarker: input.error.details.metaMarker,
+      cjkCount: input.error.details.cjkCount,
+      latinCount: input.error.details.latinCount,
       rawContentLength: input.error.details.rawLength,
       source: input.error.details.source,
     });

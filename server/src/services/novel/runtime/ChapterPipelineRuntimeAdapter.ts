@@ -10,6 +10,7 @@ import {
 import {
   isChapterEmptyContentError,
 } from "./chapterEmptyContentError";
+import { isChapterChineseProseGateError } from "./chapterChineseProseGateError";
 import type { ChapterContentFinalizationService } from "./ChapterContentFinalizationService";
 import type { ChapterStreamGenerationOrchestrator } from "./ChapterStreamGenerationOrchestrator";
 
@@ -90,7 +91,7 @@ export class ChapterPipelineRuntimeAdapter {
         hooks,
       );
     } catch (error) {
-      if (isChapterEmptyContentError(error)) {
+      if (isChapterEmptyContentError(error) || isChapterChineseProseGateError(error)) {
         await this.deps.streamOrchestrator.markChapterStatus(chapterId, "pending_generation");
       }
       throw error;

@@ -38,6 +38,7 @@ import {
   attachProposalSourceQuality,
   normalizeContentProvenance,
 } from "../state/stateProposalSourceQuality";
+import { withBackgroundChapterLlmSlot } from "./backgroundLlmGate";
 
 const ARTIFACT_DELTA_SOURCE_TYPE = "chapter_artifact_delta";
 const ARTIFACT_DELTA_SOURCE_STAGE = "chapter_execution";
@@ -299,7 +300,9 @@ export class ChapterArtifactDeltaService {
 
     const previousSnapshot = await stateService.getLatestSnapshotBeforeChapter(input.novelId, chapter.order);
     const contentHash = buildContentHash(content);
-    const result = await runStructuredPrompt({
+    // Cap concurrent background chapter LLM so multi-chapter artifact backlog
+    // cannot starve writer_draft / writer_extend on small hosts.
+    const result = await withBackgroundChapterLlmSlot("chapter_artifact_delta", () => runStructuredPrompt({
       asset: chapterArtifactDeltaPrompt,
       promptInput: {
         novelTitle: novel.title,
@@ -320,7 +323,7 @@ export class ChapterArtifactDeltaService {
         chapterId: input.chapterId,
         stage: "chapter_artifact_delta",
       },
-    });
+    }));
 
     const output = result.output;
     const sourceType = input.sourceType?.trim() || ARTIFACT_DELTA_SOURCE_TYPE;

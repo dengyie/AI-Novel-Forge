@@ -17,8 +17,10 @@ import { chapterWriterPrompt } from "../../prompting/prompts/novel/chapterWriter
 import { NovelContinuationService } from "./NovelContinuationService";
 import { prisma } from "../../db/prisma";
 import { assertChapterContentNotEmpty } from "./runtime/chapterEmptyContentError";
+import { buildChapterChineseProseGateError } from "./runtime/chapterChineseProseGateError";
 import { throwIfChapterGenerationAborted } from "./runtime/chapterAbortGuard";
 import { buildNGramSet, jaccardSimilarity } from "@ai-novel/shared/utils/textSimilarity";
+import { assessChineseProse } from "../../utils/chineseProseGate";
 
 export interface ChapterGraphLLMOptions {
   provider?: LLMProvider;
@@ -113,6 +115,8 @@ function buildDraftContinuationBlock(content: string, targetWordCount: number, m
     `Current saved draft length: ${countChapterCharacters(trimmed)} Chinese characters.`,
     `Target length: about ${targetWordCount} Chinese characters. Minimum acceptable length: ${minWordCount}.`,
     "Continue from the existing ending. Do not restart the chapter. Do not repeat already written events.",
+    "Write only Chinese narrative prose. No English meta commentary, writing plans, or task checklists.",
+    "Do not pad with pure atmosphere, weather loops, or repeated sensory description without new plot/relationship movement.",
     "Current draft tail (continue after this):",
     excerpt || "none",
   ].join("\n");
@@ -122,6 +126,11 @@ function buildDraftContinuationBlock(content: string, targetWordCount: number, m
  * 续写回声阈值：appended 与草稿尾的 n-gram jaccard 超过该值视为复读草稿尾段。
  */
 const CONTINUATION_ECHO_SIMILARITY_THRESHOLD = 0.45;
+
+/**
+ * length_recovery 若合并后净增字符低于此阈值，视为无有效推进，停止空转续写。
+ */
+const LENGTH_RECOVERY_MIN_USEFUL_DELTA_CHARS = 80;
 
 /**
  * 中文正文常整段一行，行级对齐大概率 overlap=0；追加字符级对齐作为兜底：
@@ -370,7 +379,9 @@ export class ChapterWritingGraph {
 
     const builtBlocks = buildChapterWriterContextBlocks(writeContext);
     const maxAttempts = 2;
+    let attemptsUsed = 0;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      attemptsUsed = attempt;
       throwIfChapterGenerationAborted(input.options.signal, "章节生成已取消。");
       const missingWordGap = Math.max(
         lengthGoal.targetWordCount - currentLength,
@@ -485,8 +496,24 @@ export class ChapterWritingGraph {
         continue;
       }
 
+      const proseGate = assessChineseProse(appended);
+      if (!proseGate.ok) {
+        this.deps.logWarn("Writer continuation discarded: Chinese prose gate failed", {
+          novelId: input.novelId,
+          chapterId: input.chapter.id,
+          chapterOrder: input.chapter.order,
+          attempt,
+          reason: proseGate.reason,
+          metaMarker: proseGate.metaMarker,
+          cjkCount: proseGate.cjkCount,
+          latinCount: proseGate.latinCount,
+        });
+        continue;
+      }
+
       const merged = `${content.trim()}\n\n${appended}`.trim();
       const mergedLength = countChapterCharacters(merged);
+      const usefulDelta = mergedLength - currentLength;
       this.deps.logInfo("Chapter draft auto-extended for target length", {
         novelId: input.novelId,
         chapterId: input.chapter.id,
@@ -494,9 +521,26 @@ export class ChapterWritingGraph {
         attempt,
         beforeLength: currentLength,
         afterLength: mergedLength,
+        usefulDelta,
         targetWordCount: lengthGoal.targetWordCount,
         minWordCount: lengthGoal.minWordCount,
       });
+      // Tiny net growth after echo/overlap trim is padding thrash — stop early.
+      if (usefulDelta < LENGTH_RECOVERY_MIN_USEFUL_DELTA_CHARS) {
+        this.deps.logWarn("Writer continuation stopped: useful delta below threshold", {
+          novelId: input.novelId,
+          chapterId: input.chapter.id,
+          chapterOrder: input.chapter.order,
+          attempt,
+          usefulDelta,
+          minUsefulDelta: LENGTH_RECOVERY_MIN_USEFUL_DELTA_CHARS,
+        });
+        if (usefulDelta > 0) {
+          content = merged;
+          currentLength = mergedLength;
+        }
+        break;
+      }
       content = merged;
       currentLength = mergedLength;
       if (currentLength >= lengthGoal.minWordCount) {
@@ -512,6 +556,7 @@ export class ChapterWritingGraph {
         targetWordCount: lengthGoal.targetWordCount,
         minWordCount: lengthGoal.minWordCount,
         finalWordCount: currentLength,
+        attempts: attemptsUsed,
       });
       return {
         content,
@@ -519,7 +564,7 @@ export class ChapterWritingGraph {
           targetWordCount: lengthGoal.targetWordCount,
           minWordCount: lengthGoal.minWordCount,
           finalWordCount: currentLength,
-          attempts: maxAttempts,
+          attempts: attemptsUsed,
         },
       };
     }
@@ -640,6 +685,24 @@ export class ChapterWritingGraph {
             input.chapter.order,
             lengthAdjusted.lengthDebt,
           );
+        }
+        const chineseGate = assessChineseProse(lengthAdjusted.content);
+        if (!chineseGate.ok) {
+          this.deps.logWarn("Chapter writer Chinese prose hard gate failed", {
+            novelId: input.novelId,
+            chapterId: input.chapter.id,
+            chapterOrder: input.chapter.order,
+            reason: chineseGate.reason,
+            metaMarker: chineseGate.metaMarker,
+            cjkCount: chineseGate.cjkCount,
+            latinCount: chineseGate.latinCount,
+          });
+          throw buildChapterChineseProseGateError(lengthAdjusted.content, chineseGate, {
+            novelId: input.novelId,
+            chapterId: input.chapter.id,
+            chapterOrder: input.chapter.order,
+            source: "chapter_writer",
+          });
         }
         const safeContent = assertChapterContentNotEmpty(lengthAdjusted.content, {
           novelId: input.novelId,

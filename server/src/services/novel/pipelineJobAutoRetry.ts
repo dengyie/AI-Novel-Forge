@@ -1,4 +1,5 @@
 import { isChapterEmptyContentError } from "./runtime/chapterEmptyContentError";
+import { isChapterChineseProseGateError } from "./runtime/chapterChineseProseGateError";
 import { isTransientTransportError } from "../../llm/transportRetry";
 
 /**
@@ -121,6 +122,7 @@ export function isPipelineCancellationError(error: unknown): boolean {
  * 是否值得在 job 层自动 requeue（而非终态 failed）。
  * - 瞬时 transport（超时/连接/502 等）
  * - 空正文（章节内 empty 重试已耗尽时，常为渠道空回）
+ * - 中文硬门失败（章节内 gate 重试已耗尽时，常为模型 meta 泄漏）
  * - 取消 / AbortError / 业务错误 → false
  *
  * transport 层 isTransientTransportError 已排除 AbortError/取消文案；
@@ -138,6 +140,9 @@ export function isPipelineJobAutoRetryableError(error: unknown): boolean {
     return false;
   }
   if (isChapterEmptyContentError(error)) {
+    return true;
+  }
+  if (isChapterChineseProseGateError(error)) {
     return true;
   }
   return isTransientTransportError(error);

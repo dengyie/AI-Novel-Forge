@@ -15,6 +15,7 @@ import { NovelVolumeService } from "./volume/NovelVolumeService";
 import { runWithLlmUsageTracking } from "../../llm/usageTracking";
 import type { ChapterRuntimeCoordinator } from "./runtime/ChapterRuntimeCoordinator";
 import { isChapterEmptyContentError } from "./runtime/chapterEmptyContentError";
+import { isChapterChineseProseGateError } from "./runtime/chapterChineseProseGateError";
 import {
   logPipelineError,
   logPipelineInfo,
@@ -978,6 +979,21 @@ export async function executePipelineJob(
         workflowTaskId: runtimePayload.workflowTaskId,
         source: error.details.source,
         contentLength: error.details.trimmedLength,
+        rawContentLength: error.details.rawLength,
+      });
+    } else if (isChapterChineseProseGateError(error)) {
+      logPipelineError("任务因章节中文硬门失败", {
+        jobId,
+        novelId,
+        provider: runtimePayload.provider,
+        model: runtimePayload.model,
+        runMode: runtimePayload.runMode,
+        workflowTaskId: runtimePayload.workflowTaskId,
+        source: error.details.source,
+        reason: error.details.reason,
+        metaMarker: error.details.metaMarker,
+        cjkCount: error.details.cjkCount,
+        latinCount: error.details.latinCount,
         rawContentLength: error.details.rawLength,
       });
     }

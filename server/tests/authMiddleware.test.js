@@ -141,6 +141,24 @@ test("health liveness is exempt from token auth", async () => {
   });
 });
 
+test("health readiness is exempt from token auth", async () => {
+  await withEnv({ API_AUTH_TOKEN: "secret-token" }, async () => {
+    const { authMiddleware } = loadAuth();
+    let nextCalled = false;
+    authMiddleware(
+      {
+        originalUrl: "/api/health/ready",
+        header: () => undefined,
+      },
+      mockRes(),
+      () => {
+        nextCalled = true;
+      },
+    );
+    assert.equal(nextCalled, true);
+  });
+});
+
 test("production public bind without token is refused", async () => {
   await withEnv({
     NODE_ENV: "production",

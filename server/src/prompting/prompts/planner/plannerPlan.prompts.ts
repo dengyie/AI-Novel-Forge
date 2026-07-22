@@ -3,9 +3,13 @@ import type { StoryPlanLevel } from "@ai-novel/shared/types/novel";
 import type { PromptAsset } from "../../core/promptTypes";
 import { normalizePlannerOutput, type PlannerOutput } from "../../../services/planner/plannerOutputNormalization";
 import { plannerOutputSchema } from "../../../services/planner/plannerSchemas";
+import { buildDefaultPlanMetadata } from "../../../services/planner/plannerPlanMetadata";
 
 interface PlannerPlanPromptInput {
   scopeLabel: string;
+  /** Chapter order when planLevel=chapter; used for order-aware soft defaults. */
+  chapterOrder?: number | null;
+  totalChapters?: number | null;
 }
 
 function buildPlannerPlanAsset(input: {
@@ -144,10 +148,20 @@ function buildPlannerPlanAsset(input: {
 
       return [new SystemMessage(systemPrompt), new HumanMessage(userPrompt)];
     },
-    postValidate: (output) => {
+    postValidate: (output, promptInput) => {
       const normalized = normalizePlannerOutput(output);
+      // Soft defaults must apply inside postValidate (before hard throws),
+      // matching plannerPlanMetadata service-layer fallbacks.
+      // chapterOrder/totalChapters come from promptInput so mid/late chapters
+      // do not soft-fill setup/开篇 when order is known.
+      const defaults = buildDefaultPlanMetadata(input.planLevel, {
+        expectation: normalized.objective ?? null,
+        chapterOrder: promptInput?.chapterOrder ?? null,
+        totalChapters: promptInput?.totalChapters ?? null,
+      });
 
       if (!normalized.title?.trim()) {
+        // Title is still required: no safe generic title without scope context.
         throw new Error("Planner output is missing title.");
       }
 
@@ -155,19 +169,41 @@ function buildPlannerPlanAsset(input: {
         throw new Error("Planner output is missing objective.");
       }
 
+      if (!normalized.phaseLabel?.trim() && defaults.phaseLabel) {
+        normalized.phaseLabel = defaults.phaseLabel;
+      }
       if (!normalized.phaseLabel?.trim()) {
         throw new Error("Planner output is missing phaseLabel.");
       }
 
       if ((normalized.mustAdvance ?? []).length === 0) {
+        if (defaults.mustAdvance.length > 0) {
+          normalized.mustAdvance = [...defaults.mustAdvance];
+        } else if (normalized.objective?.trim()) {
+          normalized.mustAdvance = [normalized.objective.trim()];
+        }
+      }
+      if ((normalized.mustAdvance ?? []).length === 0) {
         throw new Error("Planner output is missing mustAdvance.");
       }
 
+      if ((normalized.mustPreserve ?? []).length === 0) {
+        if (defaults.mustPreserve.length > 0) {
+          normalized.mustPreserve = [...defaults.mustPreserve];
+        } else {
+          // book/arc metadata defaults leave mustPreserve empty — soft fill so
+          // postValidate does not hard-fail before service-layer persistence.
+          normalized.mustPreserve = ["保持主线因果连续", "不提前透支终局兑现"];
+        }
+      }
       if ((normalized.mustPreserve ?? []).length === 0) {
         throw new Error("Planner output is missing mustPreserve.");
       }
 
       if (input.planLevel === "chapter") {
+        if (!normalized.planRole && defaults.planRole) {
+          normalized.planRole = defaults.planRole;
+        }
         if (!normalized.planRole) {
           throw new Error("Chapter planner output is missing planRole.");
         }

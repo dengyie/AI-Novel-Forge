@@ -1,5 +1,6 @@
 import { ragConfig } from "../../config/rag";
 import { RagIndexService, RagJobCancelledError } from "./RagIndexService";
+import { RagJobCleanupService } from "./RagJobCleanupService";
 
 function backoffMs(attempt: number): number {
   const factor = Math.min(Math.max(attempt, 1), 6);
@@ -9,8 +10,14 @@ function backoffMs(attempt: number): number {
 export class RagWorker {
   private timer: NodeJS.Timeout | null = null;
   private isTicking = false;
+  private readonly cleanupService: RagJobCleanupService;
 
-  constructor(private readonly ragIndexService: RagIndexService) {}
+  constructor(
+    private readonly ragIndexService: RagIndexService,
+    cleanupService?: RagJobCleanupService,
+  ) {
+    this.cleanupService = cleanupService ?? new RagJobCleanupService();
+  }
 
   private logInfo(message: string, meta?: Record<string, unknown>): void {
     if (!ragConfig.verboseLog) {
@@ -35,7 +42,15 @@ export class RagWorker {
   }
 
   start(): void {
-    if (!ragConfig.enabled || this.timer) {
+    if (this.timer) {
+      return;
+    }
+    // When RAG_ENABLED=false the worker never ticks, so cancelStaleActiveJobs
+    // will not run automatically — use POST /api/rag/jobs/cancel-stale or SQL.
+    if (!ragConfig.enabled) {
+      console.info(
+        "[RAG][Worker] skipped start (RAG_ENABLED=false); stale job cancel will not auto-run.",
+      );
       return;
     }
     this.logInfo("Worker started.", {
@@ -86,6 +101,13 @@ export class RagWorker {
     }
     this.isTicking = true;
     try {
+      // Drain multi-day zombies before picking so FIFO head cannot pin forever.
+      try {
+        await this.cleanupService.cancelStaleActiveJobs({ limit: 500 });
+      } catch {
+        // best-effort; worker continues
+      }
+
       const job = await this.ragIndexService.getNextRunnableJob();
       if (!job) {
         return;
@@ -93,7 +115,8 @@ export class RagWorker {
 
       const nextAttempt = job.attempts + 1;
       const startedAt = Date.now();
-      this.logInfo("Job picked.", {
+      // Always log pick (not only verbose) so silent backlog is diagnosable.
+      console.info("[RAG][Worker] Job picked.", {
         jobId: job.id,
         jobType: job.jobType,
         ownerType: job.ownerType,
@@ -134,7 +157,8 @@ export class RagWorker {
             attempts: nextAttempt,
             lastError: message,
           });
-          this.logWarn("Job failed permanently.", {
+          // Permanent fail always visible (verboseLog may be off).
+          console.warn("[RAG][Worker] Job failed permanently.", {
             jobId: job.id,
             attempt: nextAttempt,
             maxAttempts: job.maxAttempts,
@@ -150,7 +174,7 @@ export class RagWorker {
           runAfter: new Date(Date.now() + delayMs),
           lastError: message,
         });
-        this.logWarn("Job failed and requeued.", {
+        console.warn("[RAG][Worker] Job failed and requeued.", {
           jobId: job.id,
           attempt: nextAttempt,
           nextRetryInMs: delayMs,

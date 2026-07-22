@@ -21,8 +21,8 @@ router.get("/", (_req, res) => {
 });
 
 /**
- * Readiness: DB is reachable. Auth required when token mode is on
- * (same as other /api routes except liveness).
+ * Readiness: DB is reachable. Auth-exempt (see auth isHealthLivenessPath)
+ * so orchestrators can probe without tokens.
  */
 router.get("/ready", async (_req, res) => {
   const timestamp = new Date().toISOString();

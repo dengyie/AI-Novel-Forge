@@ -76,9 +76,12 @@ function extractPresentedToken(req: Request): string | null {
 }
 
 function isHealthLivenessPath(req: Request): boolean {
-  // Mounted at /api/health; router path is "/" for liveness.
+  // Mounted at /api/health; router path is "/" for liveness, "/ready" for readiness.
+  // Both must stay auth-exempt so tunnel/orchestrator probes work without tokens.
   const url = req.originalUrl?.split("?")[0] ?? req.path ?? "";
-  return url === "/api/health" || url === "/api/health/";
+  return url === "/api/health"
+    || url === "/api/health/"
+    || url === "/api/health/ready";
 }
 
 /**

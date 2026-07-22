@@ -90,7 +90,7 @@ function getHybridRetrievalService(): HybridRetrievalService {
 
 function getRagWorker(): RagWorker {
   if (!ragWorkerSingleton) {
-    ragWorkerSingleton = new RagWorker(getRagIndexService());
+    ragWorkerSingleton = new RagWorker(getRagIndexService(), getRagJobCleanupService());
   }
   return ragWorkerSingleton;
 }

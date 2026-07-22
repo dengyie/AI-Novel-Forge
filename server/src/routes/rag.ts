@@ -69,6 +69,34 @@ router.delete("/jobs/finished", async (_req, res, next) => {
   }
 });
 
+const cancelStaleSchema = z.object({
+  maxAgeMs: z.coerce.number().int().min(60_000).max(90 * 24 * 60 * 60 * 1000).optional(),
+  runningMaxAgeMs: z.coerce.number().int().min(60_000).max(24 * 60 * 60 * 1000).optional(),
+  limit: z.coerce.number().int().min(1).max(10_000).optional(),
+});
+
+/**
+ * Cancel multi-day queued / stuck-running RAG jobs (zombie backlog hygiene).
+ * When RAG_ENABLED=false the worker never ticks cancelStaleActiveJobs — this
+ * endpoint (or SQL) is the manual drain path.
+ */
+router.post("/jobs/cancel-stale", validate({ body: cancelStaleSchema }), async (req, res, next) => {
+  try {
+    const body = req.body as z.infer<typeof cancelStaleSchema>;
+    const data = await ragServices.ragJobCleanupService.cancelStaleActiveJobs(body);
+    const activeByOwner = await ragServices.ragJobCleanupService.countActiveByOwnerType();
+    res.status(200).json({
+      success: true,
+      data: { ...data, activeByOwner },
+      message: (data.cancelledQueued + data.cancelledRunning) > 0
+        ? `已取消过期任务 queued=${data.cancelledQueued} running=${data.cancelledRunning}。`
+        : "没有可取消的过期活跃任务。",
+    } satisfies ApiResponse<typeof data & { activeByOwner: unknown }>);
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.delete("/jobs/:jobId", validate({ params: jobParamsSchema }), async (req, res, next) => {
   try {
     const { jobId } = req.params as z.infer<typeof jobParamsSchema>;

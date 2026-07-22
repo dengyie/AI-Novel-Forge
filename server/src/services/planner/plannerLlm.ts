@@ -20,6 +20,9 @@ export async function invokePlannerLLM(input: {
   scopeLabel: string;
   planLevel: StoryPlanLevel;
   contextBlocks: PromptContextBlock[];
+  /** For chapter soft defaults in postValidate (order-aware planRole/phase). */
+  chapterOrder?: number | null;
+  totalChapters?: number | null;
 }): Promise<PlannerOutput> {
   const asset = input.planLevel === "book"
     ? plannerBookPlanPrompt
@@ -30,6 +33,8 @@ export async function invokePlannerLLM(input: {
     asset,
     promptInput: {
       scopeLabel: input.scopeLabel,
+      chapterOrder: input.chapterOrder ?? null,
+      totalChapters: input.totalChapters ?? null,
     },
     contextBlocks: input.contextBlocks,
     options: {

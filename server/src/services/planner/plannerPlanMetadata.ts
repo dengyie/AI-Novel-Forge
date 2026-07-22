@@ -52,8 +52,18 @@ function normalizeStoryPlanRole(value: unknown, fallback: StoryPlanRole | null):
 }
 
 function buildDefaultChapterPlanRole(input: ChapterPlanFallbackInput): StoryPlanRole {
-  const chapterOrder = input.chapterOrder ?? 1;
-  const total = Math.max(input.totalChapters ?? chapterOrder, chapterOrder, 1);
+  // Without chapterOrder, do not assume ch1 setup — neutral mid-book progress.
+  if (typeof input.chapterOrder !== "number" || !Number.isFinite(input.chapterOrder) || input.chapterOrder < 1) {
+    return "progress";
+  }
+  const chapterOrder = Math.floor(input.chapterOrder);
+  const total = Math.max(
+    (typeof input.totalChapters === "number" && Number.isFinite(input.totalChapters) && input.totalChapters >= 1
+      ? Math.floor(input.totalChapters)
+      : chapterOrder),
+    chapterOrder,
+    1,
+  );
   const progress = chapterOrder / total;
 
   if (chapterOrder <= 2 || progress <= 0.15) {
@@ -79,8 +89,17 @@ function buildDefaultPhaseLabel(level: StoryPlanLevel, input: ChapterPlanFallbac
     return "阶段推进";
   }
 
-  const chapterOrder = input.chapterOrder ?? 1;
-  const total = Math.max(input.totalChapters ?? chapterOrder, chapterOrder, 1);
+  if (typeof input.chapterOrder !== "number" || !Number.isFinite(input.chapterOrder) || input.chapterOrder < 1) {
+    return "阶段推进";
+  }
+  const chapterOrder = Math.floor(input.chapterOrder);
+  const total = Math.max(
+    (typeof input.totalChapters === "number" && Number.isFinite(input.totalChapters) && input.totalChapters >= 1
+      ? Math.floor(input.totalChapters)
+      : chapterOrder),
+    chapterOrder,
+    1,
+  );
   const progress = chapterOrder / total;
 
   if (progress <= 0.2) {

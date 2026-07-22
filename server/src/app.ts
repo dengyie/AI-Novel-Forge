@@ -61,6 +61,10 @@ import { qualityDebtSettingsService } from "./services/settings/QualityDebtSetti
 import { DirectorWorker } from "./workers/directorWorker";
 import { cleanupLogDirectory, resolveLogRetentionConfig } from "./platform/logging/logRetention";
 import { resolveClientDistPath, resolveLogsRoot } from "./runtime/appPaths";
+import {
+  startArtifactCheckpointHygieneScanner,
+  stopArtifactCheckpointHygieneScanner,
+} from "./services/novel/runtime/ChapterArtifactSyncCheckpointHygiene";
 
 getSharedNovelServices();
 registerNovelEventHandlers(novelEventBus);
@@ -139,7 +143,9 @@ export function createApp() {
       windowMs: parsePositiveInt(process.env.API_RATE_LIMIT_WINDOW_MS, 60_000),
       skip: (req) => {
         const url = req.originalUrl?.split("?")[0] ?? "";
-        return url === "/api/health" || url === "/api/health/";
+        return url === "/api/health"
+          || url === "/api/health/"
+          || url === "/api/health/ready";
       },
     }));
   }
@@ -305,6 +311,8 @@ function initializeBackgroundServices(): BackgroundServicesHandle {
   ragServices.ragRetrievalTraceRetention.start();
   taskRetentionService.start();
   novelSideEffectWorker.start();
+  // Prevent zombie chapterArtifactSyncCheckpoint rows from blocking writer claim paths.
+  startArtifactCheckpointHygieneScanner();
   const directorWorker = new DirectorWorker();
   void directorWorker.start().catch((error) => {
     console.error("[director.worker] unexpected stop", error);
@@ -351,6 +359,7 @@ function initializeBackgroundServices(): BackgroundServicesHandle {
         console.warn(`[director.worker] in-flight drain timed out after ${drainMs}ms; continuing shutdown.`);
       }
       novelSideEffectWorker.stop();
+      stopArtifactCheckpointHygieneScanner();
       ragServices.ragWorker.stop();
       ragServices.ragRetrievalTraceRetention.stop();
       taskRetentionService.stop();
