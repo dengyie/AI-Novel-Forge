@@ -1,6 +1,7 @@
 import type {
   AudiobookChapterAnnotation,
   AudiobookChapterReprocessMode,
+  AudiobookQualityFlag,
   AudiobookTaskAnnotationsView,
   AudiobookTaskDetail,
   AudiobookTaskSummary,
@@ -41,6 +42,11 @@ import { concatWavFiles } from "./audiobookWav";
 import { resolveDeliveryStyleMode } from "./deliveryStyle";
 import { checkVoiceRefAudioPath } from "./voiceRefPath";
 import { resolveEffectiveCloneRefPath, tryResolveEffectiveCloneRefPath } from "./voiceLibraryService";
+import {
+  buildQualityCompletionLabel,
+  collectTaskQualityFlags,
+  isWholeChapterNarratorFallback,
+} from "./diarize/diarizeQualityGate";
 
 const AUDIOBOOK_HEARTBEAT_INTERVAL_MS = Math.max(
   5_000,
@@ -292,8 +298,27 @@ function collectAnnotationWarnings(annotations: AudiobookChapterAnnotation[]): s
     if (annotation.error?.trim()) {
       warnings.push(`第 ${annotation.chapterOrder} 章：${annotation.error.trim()}`);
     }
+    if (annotation.wholeChapterNarratorFallback || annotation.diarizeStats?.wholeChapterNarratorFallback) {
+      warnings.push(`第 ${annotation.chapterOrder} 章：整章旁白回退（cast 不通过）`);
+    }
     if (annotation.contentTruncated) {
       warnings.push(`第 ${annotation.chapterOrder} 章：正文超 28k，标注仅见前部`);
+    }
+    const d = annotation.diarizeStats;
+    if (d && !d.castOk && d.failReasons?.length) {
+      warnings.push(
+        `第 ${annotation.chapterOrder} 章：cast 未通过（${d.failReasons.slice(0, 3).join("；")}）`,
+      );
+    }
+    if (d && d.spokenQuoteSpanCount > 0 && d.spokenQuoteCoverage < 0.85) {
+      warnings.push(
+        `第 ${annotation.chapterOrder} 章：对白覆盖 ${Math.round(d.spokenQuoteCoverage * 100)}%`,
+      );
+    }
+    if (d && (d.typedSkippedCount > 0 || d.chatSkippedCount > 0)) {
+      warnings.push(
+        `第 ${annotation.chapterOrder} 章：已跳过非口语 ${d.typedSkippedCount + d.chatSkippedCount + (d.onScreenSkippedCount || 0)} 段`,
+      );
     }
     const stats = annotation.deliveryStats;
     if (stats && stats.deliveryPeeled > 0) {
@@ -310,9 +335,9 @@ function collectAnnotationWarnings(annotations: AudiobookChapterAnnotation[]): s
   return warnings;
 }
 
-/** 仅统计「整章旁白回退」类 error，不含截断/剥表演等软警告 */
+/** 仅统计「整章旁白回退」；优先 wholeChapterNarratorFallback，兼容旧 error 文案 */
 function countNarratorFallbackChapters(annotations: AudiobookChapterAnnotation[]): number {
-  return annotations.filter((item) => Boolean(item.error?.trim())).length;
+  return annotations.filter((item) => isWholeChapterNarratorFallback(item)).length;
 }
 
 type AudiobookTaskRow = {
@@ -1681,9 +1706,12 @@ export class AudiobookTaskService {
       }
 
       const annotationFallbackCount = countNarratorFallbackChapters(result.annotations);
+      const qualityFlags: AudiobookQualityFlag[] = collectTaskQualityFlags(result.annotations);
       const annotationSuffix = annotationFallbackCount > 0
         ? `；标注回退 ${annotationFallbackCount} 章`
-        : "";
+        : qualityFlags.includes("cast_degraded")
+          ? "；cast 降级"
+          : "";
       const m4bSuffix = result.m4b.status === "ready"
         ? "，含 m4b"
         : result.m4b.status === "skipped"
@@ -1691,11 +1719,17 @@ export class AudiobookTaskService {
           : result.m4b.status === "failed"
             ? `；m4b 失败（${result.m4b.reason ?? "failed"}）`
             : "";
-      const currentItemLabel = annotationFallbackCount > 0
-        ? `完成（${annotationFallbackCount} 章旁白回退${result.m4b.status === "ready" ? "，含 m4b" : ""}）`
-        : result.m4b.status === "ready"
-          ? "有声书生成完成（含 m4b）"
-          : "有声书生成完成";
+      const m4bNote = result.m4b.status === "skipped"
+        ? `m4b 未生成（${result.m4b.reason ?? "skipped"}）`
+        : result.m4b.status === "failed"
+          ? `m4b 失败（${result.m4b.reason ?? "failed"}）`
+          : undefined;
+      const currentItemLabel = buildQualityCompletionLabel({
+        qualityFlags,
+        narratorFallbackCount: annotationFallbackCount,
+        m4bReady: result.m4b.status === "ready",
+        m4bNote,
+      });
 
       // 成功后删 chunk，保留 chapter.wav / full-book.*；重合成会 wipe 整章再生成
       const chapterIdsForPrune = result.chapterAudioPaths.map((item) => item.chapterId);
@@ -1746,6 +1780,9 @@ export class AudiobookTaskService {
             chapterIds: chapterIdsForPrune,
             completedChunks: result.completedChunks,
             qualityWarnings: result.qualityWarnings,
+            qualityFlags,
+            narratorFallbackChapterCount: annotationFallbackCount,
+            castDegraded: qualityFlags.includes("cast_degraded"),
             chunksPruned,
             prunedChunkFiles,
             m4b: {

@@ -54,6 +54,70 @@ export type AudiobookScopeMode = "chapter" | "range" | "full";
 export type AudiobookSpeakerKind = "narrator" | "character";
 
 /**
+ * 段通道（先于说话人）：决定是否出声与默认 renderPolicy。
+ * 缺省时由 speakerKind 推断 speech|narration。
+ */
+export type AudiobookSegmentKind =
+  | "speech"
+  | "narration"
+  | "typed"
+  | "chat"
+  | "on_screen"
+  | "phone"
+  | "broadcast"
+  | "inner"
+  | "quote_read"
+  | "sfx_cue";
+
+export const AUDIOBOOK_SEGMENT_KINDS = [
+  "speech",
+  "narration",
+  "typed",
+  "chat",
+  "on_screen",
+  "phone",
+  "broadcast",
+  "inner",
+  "quote_read",
+  "sfx_cue",
+] as const;
+
+export function isAudiobookSegmentKind(value: string): value is AudiobookSegmentKind {
+  return (AUDIOBOOK_SEGMENT_KINDS as readonly string[]).includes(value);
+}
+
+/**
+ * 合成策略。
+ * - tts：正常合成
+ * - tts_neutral：中性旁白（屏幕字可选）
+ * - skip：不进 TTS（手机打字默认）
+ * - beep：占位音（二期）
+ */
+export type AudiobookRenderPolicy = "tts" | "tts_neutral" | "skip" | "beep";
+
+export const AUDIOBOOK_RENDER_POLICIES = ["tts", "tts_neutral", "skip", "beep"] as const;
+
+export function isAudiobookRenderPolicy(value: string): value is AudiobookRenderPolicy {
+  return (AUDIOBOOK_RENDER_POLICIES as readonly string[]).includes(value);
+}
+
+/** 任务级质量标记（succeeded 仍可能带 degraded flags） */
+export type AudiobookQualityFlag =
+  | "cast_ok"
+  | "cast_degraded"
+  | "narrator_fallback"
+  | "low_quote_coverage"
+  | "high_unresolved";
+
+export const AUDIOBOOK_QUALITY_FLAGS = [
+  "cast_ok",
+  "cast_degraded",
+  "narrator_fallback",
+  "low_quote_coverage",
+  "high_unresolved",
+] as const;
+
+/**
  * 段级语境表演开关。
  * - off：完全沿用角色卡静态 style/design
  * - characters：仅角色对白注入 delivery
@@ -154,6 +218,22 @@ export interface AudiobookDialogueSegment {
   /** 展示名：旁白 / 角色名 */
   speakerLabel: string;
   text: string;
+  /**
+   * 通道种类；缺省由 speakerKind 推断（character→speech, narrator→narration）。
+   * typed/chat/on_screen 等用于决定是否 skip 合成。
+   */
+  segmentKind?: AudiobookSegmentKind | null;
+  /**
+   * 合成策略；缺省：typed/chat/on_screen/sfx_cue → skip，其余 tts。
+   * expandSegmentsToChunkJobs 过滤非 tts* 段。
+   */
+  renderPolicy?: AudiobookRenderPolicy | null;
+  /** 审计：通道线索（「微信气泡」「输入框」） */
+  channelHint?: string | null;
+  /** diarize 置信度 0–1；规则装配可空 */
+  diarizeConfidence?: number | null;
+  /** 对齐 rule span 的 id 列表（审计） */
+  quoteSpanIds?: string[] | null;
   /** 合成模态；缺省 preset。 */
   ttsMode?: AudiobookTtsMode | null;
   /** preset 的预置名；design 可空；clone 不用作预置名。 */
@@ -216,6 +296,35 @@ export interface AudiobookDeliveryChapterStats {
   unresolvedSpeakerNames?: string[];
 }
 
+/**
+ * 章级通道/分轨质量（rule span + diarize 后写入）。
+ * 与 deliveryStats 正交：先 cast，再表演。
+ */
+export interface AudiobookDiarizeChapterStats {
+  quoteSpanCount: number;
+  /** 已落入 speech/phone/broadcast/quote_read，或已正确 skip 的 typed/chat/on_screen */
+  quoteCoveredCount: number;
+  /** covered / span；span=0 时为 1 */
+  quoteCoverage: number;
+  /** 应出声 quote 覆盖率（不含通道 skip 类 span） */
+  spokenQuoteCoverage: number;
+  spokenQuoteSpanCount: number;
+  spokenQuoteCoveredCount: number;
+  typedSkippedCount: number;
+  chatSkippedCount: number;
+  onScreenSkippedCount: number;
+  speechCharacterCount: number;
+  narrationCount: number;
+  unresolvedSpeakerCount: number;
+  /** 整章旁白兜底（LLM/装配失败） */
+  wholeChapterNarratorFallback: boolean;
+  /** 综合门禁 */
+  castOk: boolean;
+  failReasons?: string[];
+  /** 装配来源：llm | rules | narrator_fallback */
+  assemblySource?: "llm" | "rules" | "narrator_fallback" | null;
+}
+
 export interface AudiobookChapterAnnotation {
   chapterId: string;
   chapterOrder: number;
@@ -227,6 +336,13 @@ export interface AudiobookChapterAnnotation {
   contentTruncated?: boolean;
   /** 段级表演统计；mode=off 时也可有零值 */
   deliveryStats?: AudiobookDeliveryChapterStats | null;
+  /** 通道/分轨质量；缺省表示旧任务未计算 */
+  diarizeStats?: AudiobookDiarizeChapterStats | null;
+  /**
+   * 整章旁白回退标记（与 error 文案双写；门禁优先读本字段）。
+   * buildNarratorOnlyAnnotation 恒 true（空章除外可仍 true）。
+   */
+  wholeChapterNarratorFallback?: boolean;
   /**
    * 标注时生效的 deliveryStyleMode 快照。
    * resume 时若与任务 progressJson 不一致，应 reannotate 而非盲用旧段。

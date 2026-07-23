@@ -3,6 +3,8 @@ import {
   type AudiobookDialogueSegment,
 } from "@ai-novel/shared/types/audiobook";
 import { speakerKeyFromSegment } from "./audiobookGap";
+import { shouldSynthesizeSegment } from "./diarize/renderPolicy";
+import { sanitizeTtsChunkText } from "./diarize/ttsTextSanitize";
 
 /**
  * 将一段旁白/对白切成 ≤maxChars 的 TTS 块。
@@ -58,6 +60,10 @@ export function coalesceSegmentsBySpeaker(
 ): AudiobookDialogueSegment[] {
   const merged: AudiobookDialogueSegment[] = [];
   for (const segment of segments) {
+    // skip 通道不参与合并与合成
+    if (!shouldSynthesizeSegment(segment)) {
+      continue;
+    }
     const text = segment.text.replace(/\r\n/g, "\n").trim();
     if (!text) {
       continue;
@@ -77,7 +83,7 @@ export function coalesceSegmentsBySpeaker(
 }
 
 /**
- * 段 → TTS chunk 作业：先 group_by_speaker 合并，再 splitTextForTts。
+ * 段 → TTS chunk 作业：过滤 skip → group_by_speaker 合并 → split → sanitize。
  */
 export function expandSegmentsToChunkJobs(segments: AudiobookDialogueSegment[]): Array<{
   segment: AudiobookDialogueSegment;
@@ -92,7 +98,11 @@ export function expandSegmentsToChunkJobs(segments: AudiobookDialogueSegment[]):
     if (pieces.length === 0) {
       continue;
     }
-    for (const text of pieces) {
+    for (const raw of pieces) {
+      const text = sanitizeTtsChunkText(raw);
+      if (!text) {
+        continue;
+      }
       items.push({ segment, text, globalChunkIndex });
       globalChunkIndex += 1;
     }
@@ -104,6 +114,13 @@ function canMergeSegments(
   prev: AudiobookDialogueSegment,
   next: AudiobookDialogueSegment,
 ): boolean {
+  // 不同通道不合并（speech 与 phone 等）
+  if ((prev.segmentKind ?? null) !== (next.segmentKind ?? null)) {
+    return false;
+  }
+  if ((prev.renderPolicy ?? null) !== (next.renderPolicy ?? null)) {
+    return false;
+  }
   if (speakerKeyFromSegment(prev) !== speakerKeyFromSegment(next)) {
     return false;
   }
