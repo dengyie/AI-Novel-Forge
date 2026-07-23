@@ -9,6 +9,7 @@ import type {
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
 import { runStructuredPrompt } from "../../prompting/core/promptRunner";
 import { audiobookChapterAnnotatePrompt } from "../../prompting/prompts/audiobook/audiobookChapterAnnotate.prompts";
+import { audiobookChapterDiarizePrompt } from "../../prompting/prompts/audiobook/audiobookChapterDiarize.prompts";
 import { AppError } from "../../middleware/errorHandler";
 import {
   applyDeliveryToSegment,
@@ -25,6 +26,9 @@ import {
   inferSegmentKindFromSpeaker,
 } from "./diarize/renderPolicy";
 import { overlayChannelSkips } from "./diarize/overlayChannelSkips";
+import { runRuleSpanPass } from "./diarize/ruleSpanPass";
+import type { AudiobookSegmentKind } from "@ai-novel/shared/types/audiobook";
+import { isAudiobookSegmentKind } from "@ai-novel/shared/types/audiobook";
 
 /** 标注缓存用正文指纹：trim + CRLF→LF 后 sha1 前 16 hex。 */
 export function hashAudiobookChapterContent(content: string | null | undefined): string {
@@ -291,6 +295,231 @@ function buildBaseSegment(input: {
   };
 }
 
+type RawAnnotateSegment = {
+  speakerKind: "narrator" | "character";
+  speakerName?: string | null;
+  text: string;
+  delivery?: unknown;
+  segmentKind?: string | null;
+  channelHint?: string | null;
+  confidence?: number | null;
+};
+
+function resolveRawSegmentKind(
+  raw: RawAnnotateSegment,
+): AudiobookSegmentKind {
+  if (raw.segmentKind && isAudiobookSegmentKind(raw.segmentKind)) {
+    return raw.segmentKind;
+  }
+  return inferSegmentKindFromSpeaker(raw.speakerKind);
+}
+
+/**
+ * 将 LLM 原始段（diarize 或 annotate）落到角色音色 + 通道字段。
+ * delivery 可选；坏表演只剥 delivery。
+ */
+export function materializeAnnotationSegments(input: {
+  rawSegments: RawAnnotateSegment[];
+  narrator: AudiobookNarratorConfig;
+  characterVoices: AudiobookCharacterVoiceConfig[];
+  deliveryStyleMode: DeliveryStyleMode;
+}): { segments: AudiobookDialogueSegment[]; peeledCount: number } {
+  const index = buildCharacterIndex(input.characterVoices);
+  const segments: AudiobookDialogueSegment[] = [];
+  let segIndex = 0;
+  let peeledCount = 0;
+  const deliveryStyleMode = input.deliveryStyleMode;
+
+  for (const raw of input.rawSegments) {
+    const text = raw.text.replace(/\r\n/g, "\n").trim();
+    if (!text) continue;
+
+    const rawDelivery = raw.delivery;
+    const hadRawDelivery = Boolean(rawDelivery && typeof rawDelivery === "object");
+    const kind = resolveRawSegmentKind(raw);
+    const policy = defaultRenderPolicyForKind(kind);
+
+    if (raw.speakerKind === "character") {
+      const matched = resolveCharacter(raw.speakerName, index);
+      if (matched) {
+        const mode = matched.ttsMode?.trim() || "preset";
+        const ttsMode = mode === "design" || mode === "clone" ? mode : "preset";
+        const baseStyle = (matched.ttsStyle ?? input.narrator.style) || null;
+        const baseDesignPrompt = matched.ttsDesignPrompt ?? null;
+        const base = buildBaseSegment({
+          index: segIndex++,
+          speakerKind: "character",
+          characterId: matched.characterId,
+          speakerLabel: matched.characterName,
+          text,
+          ttsMode,
+          voice: matched.ttsVoice?.trim() || "",
+          baseStyle,
+          baseDesignPrompt,
+          refAudioPath: matched.ttsRefAudioPath ?? null,
+        });
+        const withChannel: AudiobookDialogueSegment = {
+          ...base,
+          segmentKind: kind,
+          renderPolicy: policy,
+          channelHint: raw.channelHint ?? null,
+          diarizeConfidence:
+            typeof raw.confidence === "number" ? raw.confidence : null,
+        };
+        const withDelivery = shouldApplyDelivery(deliveryStyleMode, "character")
+          ? applyDeliveryToSegment(withChannel, rawDelivery, {
+              deliveryStyleMode,
+              baseStyle,
+              baseDesignPrompt,
+            })
+          : applyDeliveryToSegment(withChannel, null, {
+              deliveryStyleMode: "off",
+              baseStyle,
+              baseDesignPrompt,
+            });
+        if (
+          hadRawDelivery
+          && shouldApplyDelivery(deliveryStyleMode, "character")
+          && !withDelivery.delivery
+        ) {
+          peeledCount += 1;
+        }
+        segments.push(withDelivery);
+        continue;
+      }
+    }
+
+    const unmatchedCharacterForcedNarrator = raw.speakerKind === "character";
+    const rawSpeakerName = typeof raw.speakerName === "string"
+      ? raw.speakerName.trim()
+      : "";
+    const skipLike = policy === "skip";
+    const label = skipLike
+      ? (kind === "typed" ? "打字" : kind === "chat" ? "消息" : kind === "on_screen" ? "屏幕" : "旁白")
+      : unmatchedCharacterForcedNarrator && rawSpeakerName
+        ? rawSpeakerName
+        : "旁白";
+
+    const narratorBase = buildBaseSegment({
+      index: segIndex++,
+      speakerKind: "narrator",
+      characterId: null,
+      speakerLabel: label,
+      text,
+      ttsMode: "preset",
+      voice: input.narrator.voice,
+      baseStyle: input.narrator.style,
+      baseDesignPrompt: null,
+      refAudioPath: null,
+    });
+    const narratorKind = unmatchedCharacterForcedNarrator && !skipLike
+      ? ("speech" as const)
+      : kind;
+    const narratorWithChannel: AudiobookDialogueSegment = {
+      ...narratorBase,
+      segmentKind: narratorKind,
+      renderPolicy: defaultRenderPolicyForKind(narratorKind),
+      channelHint: raw.channelHint ?? null,
+      diarizeConfidence:
+        typeof raw.confidence === "number" ? raw.confidence : null,
+    };
+    let narratorSeg = unmatchedCharacterForcedNarrator || skipLike
+      ? applyDeliveryToSegment(narratorWithChannel, null, {
+          deliveryStyleMode: "off",
+          baseStyle: input.narrator.style,
+          baseDesignPrompt: null,
+        })
+      : shouldApplyDelivery(deliveryStyleMode, "narrator")
+        ? applyDeliveryToSegment(narratorWithChannel, rawDelivery, {
+            deliveryStyleMode,
+            baseStyle: input.narrator.style,
+            baseDesignPrompt: null,
+          })
+        : applyDeliveryToSegment(narratorWithChannel, null, {
+            deliveryStyleMode: "off",
+            baseStyle: input.narrator.style,
+            baseDesignPrompt: null,
+          });
+    if (unmatchedCharacterForcedNarrator && !skipLike) {
+      narratorSeg = {
+        ...narratorSeg,
+        speakerUnresolved: true,
+        unresolvedSpeakerName: rawSpeakerName || null,
+      };
+    }
+    if (unmatchedCharacterForcedNarrator && hadRawDelivery) {
+      peeledCount += 1;
+    } else if (
+      hadRawDelivery
+      && !skipLike
+      && shouldApplyDelivery(deliveryStyleMode, "narrator")
+      && !narratorSeg.delivery
+    ) {
+      peeledCount += 1;
+    }
+    segments.push(narratorSeg);
+  }
+
+  return { segments, peeledCount };
+}
+
+function finishAnnotation(input: {
+  chapterId: string;
+  chapterOrder: number;
+  chapterTitle: string;
+  content: string;
+  segments: AudiobookDialogueSegment[];
+  peeledCount: number;
+  deliveryStyleMode: DeliveryStyleMode;
+  contentTruncated: boolean;
+  assemblySource: "llm" | "rules";
+  error?: string | null;
+}): AudiobookChapterAnnotation {
+  const overlaid = overlayChannelSkips(input.content, input.segments);
+  const withContinuity = fillContinuityFrom(overlaid, {
+    deliveryStyleMode: input.deliveryStyleMode,
+  });
+  const chunkJobCount = expandSegmentsToChunkJobs(withContinuity).length;
+  const deliveryStats = computeDeliveryChapterStats(withContinuity, {
+    peeledCount: input.peeledCount,
+    chunkJobCount,
+  });
+  const diarizeStats = computeDiarizeChapterStats({
+    content: input.content,
+    segments: withContinuity,
+    wholeChapterNarratorFallback: false,
+    assemblySource: input.assemblySource,
+  });
+  return {
+    chapterId: input.chapterId,
+    chapterOrder: input.chapterOrder,
+    chapterTitle: input.chapterTitle,
+    segments: withContinuity,
+    annotatedAt: new Date().toISOString(),
+    error: input.error ?? null,
+    contentTruncated: input.contentTruncated || undefined,
+    deliveryStats,
+    diarizeStats,
+    wholeChapterNarratorFallback: false,
+    deliveryStyleMode: input.deliveryStyleMode,
+    contentSha1: hashAudiobookChapterContent(input.content),
+  };
+}
+
+function buildRuleSpanSummary(content: string, maxLines = 40): string {
+  const pass = runRuleSpanPass(content);
+  const lines = pass.spans.slice(0, maxLines).map((s) => {
+    const speak = s.shouldSpeak ? "speak" : "skip";
+    const who = s.speakerHint ? ` speaker=${s.speakerHint}` : "";
+    const clip = s.text.length > 36 ? `${s.text.slice(0, 36)}…` : s.text;
+    return `- [${s.kind}/${speak}]${who} 「${clip}」`;
+  });
+  if (pass.spans.length > maxLines) {
+    lines.push(`- …共 ${pass.spans.length} 条 span`);
+  }
+  return lines.join("\n");
+}
+
 export class AudiobookAnnotationService {
   async annotateChapter(input: AnnotateChapterInput): Promise<AudiobookChapterAnnotation> {
     const content = input.chapterContent.replace(/\r\n/g, "\n").trim();
@@ -305,7 +534,6 @@ export class AudiobookAnnotationService {
       });
     }
 
-    // 极短正文不值得打 LLM
     if (content.length < 40) {
       return buildNarratorOnlyAnnotation({
         chapterId: input.chapterId,
@@ -320,158 +548,99 @@ export class AudiobookAnnotationService {
     const deliveryStyleMode = resolveDeliveryStyleMode(input.deliveryStyleMode ?? null);
     const requestDelivery = deliveryStyleMode !== "off";
     const contentTruncated = content.length > 28_000;
-
     const roster = input.characterVoices.map(buildCharacterRosterLine).join("\n");
+    const contentSlice = content.slice(0, 28_000);
+    const llmOptions = {
+      provider: input.provider ?? undefined,
+      model: input.model ?? undefined,
+      temperature: typeof input.temperature === "number" ? input.temperature : 0.2,
+      signal: input.signal,
+      novelId: undefined as string | undefined,
+      chapterId: input.chapterId,
+    };
 
+    // ── L0: 专用 diarize（无 delivery，通道优先）──────────────────────────
+    try {
+      const diarize = await runStructuredPrompt({
+        asset: audiobookChapterDiarizePrompt,
+        promptInput: {
+          chapterOrder: input.chapterOrder,
+          chapterTitle: input.chapterTitle,
+          chapterContent: contentSlice,
+          characterRosterText: roster,
+          narratorLabel: "旁白",
+          ruleSpanSummary: buildRuleSpanSummary(contentSlice),
+        },
+        options: {
+          ...llmOptions,
+          temperature: typeof input.temperature === "number" ? input.temperature : 0.15,
+          stage: "audiobook_diarize",
+          entrypoint: "audiobook.diarize",
+        },
+      });
+
+      const { segments, peeledCount } = materializeAnnotationSegments({
+        rawSegments: diarize.output.segments as RawAnnotateSegment[],
+        narrator: input.narrator,
+        characterVoices: input.characterVoices,
+        // diarize 路径暂不带 delivery；表演另 job（Phase 2.1），避免拖垮分轨
+        deliveryStyleMode: "off",
+      });
+
+      if (segments.length > 0) {
+        return finishAnnotation({
+          chapterId: input.chapterId,
+          chapterOrder: input.chapterOrder,
+          chapterTitle: input.chapterTitle,
+          content,
+          segments,
+          peeledCount,
+          // 快照仍记录用户请求的 mode（resume 指纹）；段上 delivery 为空
+          deliveryStyleMode,
+          contentTruncated,
+          assemblySource: "llm",
+          error: requestDelivery
+            ? null // delivery 留空不记 error；UI 可见 deliveryApplied=0
+            : null,
+        });
+      }
+    } catch (error) {
+      if (input.signal?.aborted) {
+        throw error instanceof Error ? error : new AppError("标注已取消。", 408);
+      }
+      // fall through → legacy annotate → rules → narrator
+      console.warn(
+        "[audiobook] diarize failed, falling back",
+        input.chapterId,
+        error instanceof Error ? error.message : error,
+      );
+    }
+
+    // ── L0b: 旧 annotate（含 optional delivery）───────────────────────────
     try {
       const result = await runStructuredPrompt({
         asset: audiobookChapterAnnotatePrompt,
         promptInput: {
           chapterOrder: input.chapterOrder,
           chapterTitle: input.chapterTitle,
-          chapterContent: content.slice(0, 28_000),
+          chapterContent: contentSlice,
           characterRosterText: roster,
           narratorLabel: "旁白",
           requestDelivery,
         },
         options: {
-          provider: input.provider ?? undefined,
-          model: input.model ?? undefined,
-          temperature: typeof input.temperature === "number" ? input.temperature : 0.2,
-          signal: input.signal,
-          novelId: undefined,
-          chapterId: input.chapterId,
+          ...llmOptions,
           stage: "audiobook_annotate",
           entrypoint: "audiobook.annotation",
         },
       });
 
-      const index = buildCharacterIndex(input.characterVoices);
-      const segments: AudiobookDialogueSegment[] = [];
-      let segIndex = 0;
-      let peeledCount = 0;
-
-      for (const raw of result.output.segments) {
-        const text = raw.text.replace(/\r\n/g, "\n").trim();
-        if (!text) {
-          continue;
-        }
-
-        // delivery 单独 normalize；坏表演只剥 delivery，绝不整章旁白
-        const rawDelivery = (raw as { delivery?: unknown }).delivery;
-        const hadRawDelivery = Boolean(rawDelivery && typeof rawDelivery === "object");
-
-        if (raw.speakerKind === "character") {
-          const matched = resolveCharacter(raw.speakerName, index);
-          if (matched) {
-            const mode = matched.ttsMode?.trim() || "preset";
-            const ttsMode = mode === "design" || mode === "clone" ? mode : "preset";
-            const baseStyle = (matched.ttsStyle ?? input.narrator.style) || null;
-            const baseDesignPrompt = matched.ttsDesignPrompt ?? null;
-            const base = buildBaseSegment({
-              index: segIndex++,
-              speakerKind: "character",
-              characterId: matched.characterId,
-              speakerLabel: matched.characterName,
-              text,
-              ttsMode,
-              voice: matched.ttsVoice?.trim() || "",
-              baseStyle,
-              baseDesignPrompt,
-              refAudioPath: matched.ttsRefAudioPath ?? null,
-            });
-            const kind = inferSegmentKindFromSpeaker("character");
-            const withChannel: AudiobookDialogueSegment = {
-              ...base,
-              segmentKind: kind,
-              renderPolicy: defaultRenderPolicyForKind(kind),
-            };
-            const withDelivery = shouldApplyDelivery(deliveryStyleMode, "character")
-              ? applyDeliveryToSegment(withChannel, rawDelivery, {
-                  deliveryStyleMode,
-                  baseStyle,
-                  baseDesignPrompt,
-                })
-              : applyDeliveryToSegment(withChannel, null, {
-                  deliveryStyleMode: "off",
-                  baseStyle,
-                  baseDesignPrompt,
-                });
-            if (
-              hadRawDelivery
-              && shouldApplyDelivery(deliveryStyleMode, "character")
-              && !withDelivery.delivery
-            ) {
-              peeledCount += 1;
-            }
-            segments.push(withDelivery);
-            continue;
-          }
-        }
-
-        // 未匹配角色名：已从 character 分支 fallthrough，按旁白落段并强制剥 delivery
-        const unmatchedCharacterForcedNarrator = raw.speakerKind === "character";
-        const rawSpeakerName = typeof raw.speakerName === "string"
-          ? raw.speakerName.trim()
-          : "";
-
-        const narratorBase = buildBaseSegment({
-          index: segIndex++,
-          speakerKind: "narrator",
-          characterId: null,
-          speakerLabel: unmatchedCharacterForcedNarrator && rawSpeakerName
-            ? rawSpeakerName
-            : "旁白",
-          text,
-          ttsMode: "preset",
-          voice: input.narrator.voice,
-          baseStyle: input.narrator.style,
-          baseDesignPrompt: null,
-          refAudioPath: null,
-        });
-        const narratorKind = unmatchedCharacterForcedNarrator
-          ? ("speech" as const)
-          : inferSegmentKindFromSpeaker("narrator");
-        const narratorWithChannel: AudiobookDialogueSegment = {
-          ...narratorBase,
-          segmentKind: narratorKind,
-          renderPolicy: defaultRenderPolicyForKind(narratorKind),
-        };
-        let narratorSeg = unmatchedCharacterForcedNarrator
-          ? applyDeliveryToSegment(narratorWithChannel, null, {
-              deliveryStyleMode: "off",
-              baseStyle: input.narrator.style,
-              baseDesignPrompt: null,
-            })
-          : shouldApplyDelivery(deliveryStyleMode, "narrator")
-            ? applyDeliveryToSegment(narratorWithChannel, rawDelivery, {
-                deliveryStyleMode,
-                baseStyle: input.narrator.style,
-                baseDesignPrompt: null,
-              })
-            : applyDeliveryToSegment(narratorWithChannel, null, {
-                deliveryStyleMode: "off",
-                baseStyle: input.narrator.style,
-                baseDesignPrompt: null,
-              });
-        if (unmatchedCharacterForcedNarrator) {
-          narratorSeg = {
-            ...narratorSeg,
-            speakerUnresolved: true,
-            unresolvedSpeakerName: rawSpeakerName || null,
-          };
-        }
-        if (unmatchedCharacterForcedNarrator && hadRawDelivery) {
-          peeledCount += 1;
-        } else if (
-          hadRawDelivery
-          && shouldApplyDelivery(deliveryStyleMode, "narrator")
-          && !narratorSeg.delivery
-        ) {
-          peeledCount += 1;
-        }
-        segments.push(narratorSeg);
-      }
+      const { segments, peeledCount } = materializeAnnotationSegments({
+        rawSegments: result.output.segments as RawAnnotateSegment[],
+        narrator: input.narrator,
+        characterVoices: input.characterVoices,
+        deliveryStyleMode,
+      });
 
       if (segments.length === 0) {
         const rulesEmpty = tryBuildRuleAssemblyAnnotation({
@@ -496,41 +665,22 @@ export class AudiobookAnnotationService {
         });
       }
 
-      // LLM 结果叠加 typed/chat/on_screen skip，避免手机字被念
-      const overlaid = overlayChannelSkips(content, segments);
-      const withContinuity = fillContinuityFrom(overlaid, { deliveryStyleMode });
-      const chunkJobCount = expandSegmentsToChunkJobs(withContinuity).length;
-      const deliveryStats = computeDeliveryChapterStats(withContinuity, {
-        peeledCount,
-        chunkJobCount,
-      });
-      const diarizeStats = computeDiarizeChapterStats({
-        content,
-        segments: withContinuity,
-        wholeChapterNarratorFallback: false,
-        assemblySource: "llm",
-      });
-
-      return {
+      return finishAnnotation({
         chapterId: input.chapterId,
         chapterOrder: input.chapterOrder,
         chapterTitle: input.chapterTitle,
-        segments: withContinuity,
-        annotatedAt: new Date().toISOString(),
-        error: null,
-        contentTruncated: contentTruncated || undefined,
-        deliveryStats,
-        diarizeStats,
-        wholeChapterNarratorFallback: false,
+        content,
+        segments,
+        peeledCount,
         deliveryStyleMode,
-        contentSha1: hashAudiobookChapterContent(content),
-      };
+        contentTruncated,
+        assemblySource: "llm",
+      });
     } catch (error) {
       if (input.signal?.aborted) {
         throw error instanceof Error ? error : new AppError("标注已取消。", 408);
       }
       const message = error instanceof Error ? error.message : String(error);
-      // L1 规则装配优先于 L3 整章旁白
       const rules = tryBuildRuleAssemblyAnnotation({
         chapterId: input.chapterId,
         chapterOrder: input.chapterOrder,

@@ -83,11 +83,14 @@ Fallback 阶梯：
 
 | Phase | 内容 | 状态 |
 |---|---|---|
-| 0 | wholeChapterNarratorFallback、qualityFlags、完成标签、短句 normalize | **本 PR** |
-| 1 | 类型扩展、ruleSpanPass、L1 assembly、expand 过滤 skip、typed 不念 | **本 PR** |
-| 2 | 专用 `audiobook.chapter.diarize@v1`、与 delivery 拆 job、缓存指纹拆分 | backlog |
+| 0 | wholeChapterNarratorFallback、qualityFlags、完成标签、短句 normalize | **done** |
+| 1 | 类型扩展、ruleSpanPass、L1 assembly、expand 过滤 skip、typed 不念 | **done** |
+| 2 | 专用 `audiobook.chapter.diarize@v1`（先于 annotate）；失败 → annotate → rules → narrator | **done（本批）** |
+| 2.1 | delivery 独立 job（diarize 成功后再填表演；缓存指纹拆分） | backlog |
 | 3 | 分块 L2、路人 temp_preset、Patrol 扩展、队列 HA | backlog |
 | 4 | 标注可视化、alias 快捷、通道渲染开关 UI | backlog |
+
+> Phase 2 说明：主路径先跑 diarize（无 delivery 字段）。成功则段上 delivery 为空，`deliveryStyleMode` 快照仍记用户请求值。表演二段式见 2.1。
 
 ---
 
