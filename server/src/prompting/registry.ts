@@ -446,6 +446,10 @@ const promptAssetLoaderEntries: PromptAssetLoaderEntry[] = [
     load: () => require("./prompts/audiobook/audiobookChapterAnnotate.prompts").audiobookChapterAnnotatePrompt as UnknownPromptAsset,
   },
   {
+    key: "audiobook.chapter.diarize@v1",
+    load: () => require("./prompts/audiobook/audiobookChapterDiarize.prompts").audiobookChapterDiarizePrompt as UnknownPromptAsset,
+  },
+  {
     key: "audiobook.voice.brief@v1",
     load: () => require("./prompts/audiobook/voiceBrief.prompts").voiceBriefPrompt as UnknownPromptAsset,
   },
