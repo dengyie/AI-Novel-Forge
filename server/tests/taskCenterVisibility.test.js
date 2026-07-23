@@ -29,3 +29,34 @@ test("collectWorkflowLinkedPipelineIds ignores failed and cancelled workflow wra
 
   assert.deepEqual([...linkedIds], ["job-running"]);
 });
+
+test("collectWorkflowLinkedPipelineIds includes waiting/queued/succeeded and trims ids", () => {
+  const linkedIds = collectWorkflowLinkedPipelineIds([
+    {
+      id: "wf-wait",
+      kind: "novel_workflow",
+      status: "waiting_approval",
+      targetResources: [{ type: "generation_job", id: "  job-wait  " }],
+    },
+    {
+      id: "wf-ok",
+      kind: "novel_workflow",
+      status: "succeeded",
+      targetResources: [{ type: "generation_job", id: "job-ok" }],
+    },
+    {
+      id: "wf-queued",
+      kind: "novel_workflow",
+      status: "queued",
+      targetResources: [{ type: "generation_job", id: "job-queued" }],
+    },
+    {
+      id: "pipeline-self",
+      kind: "novel_pipeline",
+      status: "running",
+      targetResources: [{ type: "generation_job", id: "should-ignore" }],
+    },
+  ]);
+
+  assert.deepEqual([...linkedIds].sort(), ["job-ok", "job-queued", "job-wait"]);
+});

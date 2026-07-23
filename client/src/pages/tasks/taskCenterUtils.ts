@@ -10,6 +10,7 @@ import type {
 export const ACTIVE_STATUSES = new Set<TaskStatus>(["queued", "running", "waiting_approval"]);
 export const ANOMALY_STATUSES = new Set<TaskStatus>(["failed", "cancelled"]);
 export const ARCHIVABLE_STATUSES = new Set<TaskStatus>(["succeeded", "failed", "cancelled"]);
+export const BULK_ARCHIVE_STATUSES = new Set<TaskStatus>(["succeeded"]);
 
 export type TaskSortMode = "default" | "updated_desc" | "updated_asc" | "heartbeat_desc" | "heartbeat_asc";
 
@@ -30,7 +31,7 @@ export const TASK_VIEW_GROUP_ORDER: TaskViewGroup[] = ["active", "needs_attentio
 export const TASK_VIEW_GROUP_LABEL: Record<TaskViewGroup, string> = {
   active: "进行中",
   needs_attention: "需要关注",
-  completed: "已完成",
+  completed: "完成任务",
 };
 
 export const TASK_VIEW_GROUP_DEFAULT_COLLAPSED: Record<TaskViewGroup, boolean> = {
@@ -39,8 +40,72 @@ export const TASK_VIEW_GROUP_DEFAULT_COLLAPSED: Record<TaskViewGroup, boolean> =
   completed: true,
 };
 
+/**
+ * Lower = higher list priority (used as primary key in default sort,
+ * secondary key when sorting by time/heartbeat).
+ * failed > cancelled > waiting_approval > running > queued > succeeded.
+ */
 export function getTaskListPriority(status: TaskStatus): number {
-  return status === "failed" ? 0 : 1;
+  if (status === "failed") {
+    return 0;
+  }
+  if (status === "cancelled") {
+    return 1;
+  }
+  if (status === "waiting_approval") {
+    return 2;
+  }
+  if (status === "running") {
+    return 3;
+  }
+  if (status === "queued") {
+    return 4;
+  }
+  if (status === "succeeded") {
+    return 5;
+  }
+  return 6;
+}
+
+/** Heartbeat older than this is treated as "可能已僵死" for list hint only. */
+export const STALE_HEARTBEAT_MS = 15 * 60 * 1000;
+
+/**
+ * Running-task staleness probe for list UI only (backend retention still owns cancel).
+ * Prefer heartbeatAt; when adapters omit it, fall back to updatedAt.
+ * Missing both timestamps → treat as stale so the row is not silently "healthy".
+ */
+export function isStaleHeartbeat(
+  heartbeatAt: string | null | undefined,
+  nowMs: number = Date.now(),
+  thresholdMs: number = STALE_HEARTBEAT_MS,
+  updatedAt?: string | null,
+): boolean {
+  const probe = heartbeatAt?.trim() || updatedAt?.trim() || "";
+  if (!probe) {
+    return true;
+  }
+  const ts = getTimestamp(probe);
+  if (Number.isNaN(ts)) {
+    return true;
+  }
+  return nowMs - ts > thresholdMs;
+}
+
+export function getTaskRowAccent(status: TaskStatus): "failed" | "cancelled" | "waiting" | "running" | "none" {
+  if (status === "failed") {
+    return "failed";
+  }
+  if (status === "cancelled") {
+    return "cancelled";
+  }
+  if (status === "waiting_approval") {
+    return "waiting";
+  }
+  if (status === "running") {
+    return "running";
+  }
+  return "none";
 }
 
 export function getTimestamp(value: string | null | undefined): number {

@@ -2,14 +2,14 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 interface TaskCenterSummaryCardsProps {
   runningCount: number;
-  queuedCount: number;
+  waitingApprovalCount: number;
   failedCount: number;
   completed24hCount: number;
 }
 
 export default function TaskCenterSummaryCards({
   runningCount,
-  queuedCount,
+  waitingApprovalCount,
   failedCount,
   completed24hCount,
 }: TaskCenterSummaryCardsProps) {
@@ -25,10 +25,10 @@ export default function TaskCenterSummaryCards({
       </Card>
       <Card>
         <CardHeader className="pb-2">
-          <CardTitle className="text-base">排队中</CardTitle>
+          <CardTitle className="text-base">等待审批</CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="text-2xl font-semibold">{queuedCount}</div>
+          <div className="text-2xl font-semibold">{waitingApprovalCount}</div>
         </CardContent>
       </Card>
       <Card>

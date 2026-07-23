@@ -303,12 +303,16 @@ function mapSummary(row: {
     label: row.title,
     route: sourceRoute,
   }];
-  if (linkedPipelineJobId && row.novelId) {
+  // Always attach linked pipeline when seed has pipelineJobId so TaskCenter can
+  // hide the dual row even for create-before-bind / null-novel workflows.
+  if (linkedPipelineJobId) {
     targetResources.push({
       type: "generation_job" as const,
       id: linkedPipelineJobId,
       label: "章节流水线",
-      route: `/novels/${row.novelId}/edit`,
+      route: row.novelId
+        ? `/novels/${row.novelId}/edit`
+        : `/tasks?kind=novel_pipeline&id=${linkedPipelineJobId}`,
     });
   }
   const explainability = buildWorkflowExplainability({

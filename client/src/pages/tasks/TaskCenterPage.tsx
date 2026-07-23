@@ -6,7 +6,7 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import type { NovelWorkflowMilestone } from "@ai-novel/shared/types/novelWorkflow";
 import { getDirectorTaskSnapshot } from "@/api/novelDirector";
 import { continueNovelWorkflow } from "@/api/novelWorkflow";
-import { archiveTask, cancelTask, getTaskDetail, listTasks, retryTask } from "@/api/tasks";
+import { archiveTask, cancelTask, getTaskDetail, getTaskOverview, listTasks, retryTask } from "@/api/tasks";
 import { queryKeys } from "@/api/queryKeys";
 import DirectorRuntimeProjectionCard from "@/components/autoDirector/DirectorRuntimeProjectionCard";
 import { Badge } from "@/components/ui/badge";
@@ -28,12 +28,10 @@ import {
   ACTIVE_STATUSES,
   ANOMALY_STATUSES,
   ARCHIVABLE_STATUSES,
-  formatCheckpoint,
-  formatStatus,
+  BULK_ARCHIVE_STATUSES,
   getTaskListPriority,
   getTimestamp,
   serializeListParams,
-  toStatusVariant,
   type TaskSortMode,
 } from "./taskCenterUtils";
 
@@ -56,7 +54,7 @@ export default function TaskCenterPage() {
   const [kind, setKind] = useState<TaskKind | "">("");
   const [status, setStatus] = useState<TaskStatus | "">("");
   const [keyword, setKeyword] = useState("");
-  const [onlyAnomaly, setOnlyAnomaly] = useState(false);
+  const [onlyAnomaly, setOnlyAnomaly] = useState(() => searchParams.get("attention") === "1");
   const [sortMode, setSortMode] = useState<TaskSortMode>("updated_desc");
 
   const selectedKind = (searchParams.get("kind") as TaskKind | null) ?? null;
@@ -75,6 +73,20 @@ export default function TaskCenterPage() {
     refetchInterval: (query) => {
       const rows = query.state.data?.data?.items ?? [];
       return rows.some((item) => ACTIVE_STATUSES.has(item.status)) ? 4000 : false;
+    },
+  });
+
+  const overviewQuery = useQuery({
+    queryKey: queryKeys.tasks.overview,
+    queryFn: getTaskOverview,
+    staleTime: 15_000,
+    refetchInterval: (query) => {
+      const overview = query.state.data?.data;
+      if (!overview) {
+        return 4000;
+      }
+      const active = overview.runningCount + overview.queuedCount + overview.waitingApprovalCount;
+      return active > 0 ? 4000 : false;
     },
   });
 
@@ -109,6 +121,23 @@ export default function TaskCenterPage() {
         .map(({ item }) => item),
     [allRows, onlyAnomaly, sortMode],
   );
+
+  // Keep ?attention=1 in sync with the filter checkbox (replace, preserve kind/id).
+  useEffect(() => {
+    setSearchParams((prev) => {
+      const hasAttention = prev.get("attention") === "1";
+      if (onlyAnomaly === hasAttention) {
+        return prev;
+      }
+      const next = new URLSearchParams(prev);
+      if (onlyAnomaly) {
+        next.set("attention", "1");
+      } else {
+        next.delete("attention");
+      }
+      return next;
+    }, { replace: true });
+  }, [onlyAnomaly, setSearchParams]);
 
   const detailQuery = useQuery({
     queryKey: queryKeys.tasks.detail(selectedKind ?? "none", selectedId ?? "none"),
@@ -146,9 +175,13 @@ export default function TaskCenterPage() {
     }
   }, [selectedKind, selectedId, setSearchParams, visibleRows]);
 
-  const runningCount = allRows.filter((item) => item.status === "running").length;
-  const queuedCount = allRows.filter((item) => item.status === "queued").length;
-  const failedCount = allRows.filter((item) => item.status === "failed").length;
+  const overview = overviewQuery.data?.data;
+  const runningCount = overview?.runningCount ?? allRows.filter((item) => item.status === "running").length;
+  const waitingApprovalCount = overview?.waitingApprovalCount
+    ?? allRows.filter((item) => item.status === "waiting_approval").length;
+  const failedCount = overview?.failedCount ?? allRows.filter((item) => item.status === "failed").length;
+  // Bulk archive only covers the currently loaded list page (limit 80), not the whole DB.
+  const succeededRows = allRows.filter((item) => BULK_ARCHIVE_STATUSES.has(item.status));
   const completed24hCount = allRows.filter((item) => {
     if (item.status !== "succeeded") {
       return false;
@@ -260,6 +293,31 @@ export default function TaskCenterPage() {
     },
   });
 
+  const bulkArchiveSucceededMutation = useMutation({
+    mutationFn: async (rows: Array<{ kind: TaskKind; id: string }>) => {
+      const results = await Promise.allSettled(
+        rows.map((row) => archiveTask(row.kind, row.id)),
+      );
+      const succeeded = results.filter((result) => result.status === "fulfilled").length;
+      const failed = results.length - succeeded;
+      return { succeeded, failed, total: results.length };
+    },
+    onSuccess: async (result) => {
+      setSearchParams((prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete("kind");
+        next.delete("id");
+        return next;
+      });
+      await invalidateTaskQueries();
+      if (result.failed === 0) {
+        toast.success(`已归档 ${result.succeeded} 个完成任务`);
+        return;
+      }
+      toast.error(`归档完成 ${result.succeeded}/${result.total}，失败 ${result.failed}`);
+    },
+  });
+
   const selectedTask = detailQuery.data?.data;
   const selectedTaskMeta = useMemo(
     () => normalizeTaskMeta(selectedTask?.meta),
@@ -357,24 +415,56 @@ export default function TaskCenterPage() {
     <div className="space-y-4">
       <TaskCenterSummaryCards
         runningCount={runningCount}
-        queuedCount={queuedCount}
+        waitingApprovalCount={waitingApprovalCount}
         failedCount={failedCount}
         completed24hCount={completed24hCount}
       />
 
       <div className="grid gap-4 xl:grid-cols-[260px_minmax(0,1fr)_360px]">
-        <TaskCenterFilterPanel
-          kind={kind}
-          status={status}
-          keyword={keyword}
-          onlyAnomaly={onlyAnomaly}
-          sortMode={sortMode}
-          onKindChange={setKind}
-          onStatusChange={setStatus}
-          onKeywordChange={setKeyword}
-          onOnlyAnomalyChange={setOnlyAnomaly}
-          onSortModeChange={setSortMode}
-        />
+        <div className="space-y-3">
+          <TaskCenterFilterPanel
+            kind={kind}
+            status={status}
+            keyword={keyword}
+            onlyAnomaly={onlyAnomaly}
+            sortMode={sortMode}
+            onKindChange={setKind}
+            onStatusChange={setStatus}
+            onKeywordChange={setKeyword}
+            onOnlyAnomalyChange={setOnlyAnomaly}
+            onSortModeChange={setSortMode}
+          />
+          {succeededRows.length > 0 ? (
+            <Card>
+              <CardContent className="flex flex-col gap-2 p-3">
+                <div className="text-xs text-muted-foreground">
+                  已加载列表（最多 80 条）里有 {succeededRows.length} 个完成任务可归档：软隐藏，不删库；不含未加载的历史完成任务。
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={bulkArchiveSucceededMutation.isPending}
+                  onClick={() => {
+                    const count = succeededRows.length;
+                    const confirmed = window.confirm(
+                      `确认归档当前已加载列表中的 ${count} 个完成任务？\n仅处理本页 limit=80 内的 succeeded，不会扫全库。\n归档后从任务中心隐藏，不影响保留策略硬删。`,
+                    );
+                    if (!confirmed) {
+                      return;
+                    }
+                    bulkArchiveSucceededMutation.mutate(
+                      succeededRows.map((row) => ({ kind: row.kind, id: row.id })),
+                    );
+                  }}
+                >
+                  {bulkArchiveSucceededMutation.isPending
+                    ? "归档中…"
+                    : `一键归档本页完成任务（${succeededRows.length}）`}
+                </Button>
+              </CardContent>
+            </Card>
+          ) : null}
+        </div>
 
         <TaskCenterListPanel
           tasks={visibleRows}
