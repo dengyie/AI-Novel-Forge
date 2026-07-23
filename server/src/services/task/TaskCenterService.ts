@@ -65,6 +65,30 @@ async function safeAudiobookRecoveryCount(archivedAudiobookIds: string[]): Promi
   }
 }
 
+async function safeAudiobookSucceededSinceCount(
+  archivedAudiobookIds: string[],
+  since: Date,
+): Promise<number> {
+  try {
+    return await prisma.audiobookTask.count({
+      where: {
+        status: "succeeded",
+        updatedAt: { gte: since },
+        ...(archivedAudiobookIds.length ? { id: { notIn: archivedAudiobookIds } } : {}),
+      },
+    });
+  } catch (error) {
+    if (isMissingAudiobookTaskTableError(error)) {
+      return 0;
+    }
+    throw error;
+  }
+}
+
+function notInArchived(archivedIds: string[]): { id: { notIn: string[] } } | Record<string, never> {
+  return archivedIds.length ? { id: { notIn: archivedIds } } : {};
+}
+
 const overviewTaskKinds: TaskKind[] = [
   "book_analysis",
   "novel_pipeline",
@@ -106,6 +130,8 @@ export class TaskCenterService {
     const archivedStyleExtractionIds = archivedIdsByKind.get("style_extraction") ?? [];
     const archivedAudiobookIds = archivedIdsByKind.get("novel_audiobook") ?? [];
 
+    const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
     const [
       bookRows,
       pipelineRows,
@@ -121,19 +147,27 @@ export class TaskCenterService {
       workflowRecoveryCount,
       styleExtractionRecoveryCount,
       audiobookRecoveryCount,
+      bookCompleted24h,
+      pipelineCompleted24h,
+      knowledgeCompleted24h,
+      imageCompleted24h,
+      agentCompleted24h,
+      workflowCompleted24h,
+      styleExtractionCompleted24h,
+      audiobookCompleted24h,
     ] = await Promise.all([
       prisma.bookAnalysis.groupBy({
         by: ["status"],
         where: {
           status: { in: ["queued", "running", "succeeded", "failed", "cancelled"] },
-          ...(archivedBookIds.length ? { id: { notIn: archivedBookIds } } : {}),
+          ...notInArchived(archivedBookIds),
         },
         _count: { _all: true },
       }),
       prisma.generationJob.groupBy({
         by: ["status"],
         where: {
-          ...(archivedPipelineIds.length ? { id: { notIn: archivedPipelineIds } } : {}),
+          ...notInArchived(archivedPipelineIds),
         },
         _count: { _all: true },
       }),
@@ -141,21 +175,21 @@ export class TaskCenterService {
         by: ["status"],
         where: {
           ownerType: "knowledge_document",
-          ...(archivedKnowledgeIds.length ? { id: { notIn: archivedKnowledgeIds } } : {}),
+          ...notInArchived(archivedKnowledgeIds),
         },
         _count: { _all: true },
       }),
       prisma.imageGenerationTask.groupBy({
         by: ["status"],
         where: {
-          ...(archivedImageIds.length ? { id: { notIn: archivedImageIds } } : {}),
+          ...notInArchived(archivedImageIds),
         },
         _count: { _all: true },
       }),
       prisma.agentRun.groupBy({
         by: ["status"],
         where: {
-          ...(archivedAgentIds.length ? { id: { notIn: archivedAgentIds } } : {}),
+          ...notInArchived(archivedAgentIds),
         },
         _count: { _all: true },
       }),
@@ -163,14 +197,14 @@ export class TaskCenterService {
         by: ["status"],
         where: {
           lane: "auto_director",
-          ...(archivedWorkflowIds.length ? { id: { notIn: archivedWorkflowIds } } : {}),
+          ...notInArchived(archivedWorkflowIds),
         },
         _count: { _all: true },
       }),
       prisma.styleExtractionTask.groupBy({
         by: ["status"],
         where: {
-          ...(archivedStyleExtractionIds.length ? { id: { notIn: archivedStyleExtractionIds } } : {}),
+          ...notInArchived(archivedStyleExtractionIds),
         },
         _count: { _all: true },
       }),
@@ -179,21 +213,21 @@ export class TaskCenterService {
         where: {
           status: { in: ["queued", "running"] },
           pendingManualRecovery: true,
-          ...(archivedBookIds.length ? { id: { notIn: archivedBookIds } } : {}),
+          ...notInArchived(archivedBookIds),
         },
       }),
       prisma.generationJob.count({
         where: {
           status: { in: ["queued", "running"] },
           pendingManualRecovery: true,
-          ...(archivedPipelineIds.length ? { id: { notIn: archivedPipelineIds } } : {}),
+          ...notInArchived(archivedPipelineIds),
         },
       }),
       prisma.imageGenerationTask.count({
         where: {
           status: { in: ["queued", "running"] },
           pendingManualRecovery: true,
-          ...(archivedImageIds.length ? { id: { notIn: archivedImageIds } } : {}),
+          ...notInArchived(archivedImageIds),
         },
       }),
       prisma.novelWorkflowTask.count({
@@ -201,17 +235,69 @@ export class TaskCenterService {
           lane: "auto_director",
           status: { in: ["queued", "running"] },
           pendingManualRecovery: true,
-          ...(archivedWorkflowIds.length ? { id: { notIn: archivedWorkflowIds } } : {}),
+          ...notInArchived(archivedWorkflowIds),
         },
       }),
       prisma.styleExtractionTask.count({
         where: {
           status: { in: ["queued", "running"] },
           pendingManualRecovery: true,
-          ...(archivedStyleExtractionIds.length ? { id: { notIn: archivedStyleExtractionIds } } : {}),
+          ...notInArchived(archivedStyleExtractionIds),
         },
       }),
       safeAudiobookRecoveryCount(archivedAudiobookIds),
+      prisma.bookAnalysis.count({
+        where: {
+          status: "succeeded",
+          updatedAt: { gte: since24h },
+          ...notInArchived(archivedBookIds),
+        },
+      }),
+      prisma.generationJob.count({
+        where: {
+          status: "succeeded",
+          updatedAt: { gte: since24h },
+          ...notInArchived(archivedPipelineIds),
+        },
+      }),
+      prisma.ragIndexJob.count({
+        where: {
+          ownerType: "knowledge_document",
+          status: "succeeded",
+          updatedAt: { gte: since24h },
+          ...notInArchived(archivedKnowledgeIds),
+        },
+      }),
+      prisma.imageGenerationTask.count({
+        where: {
+          status: "succeeded",
+          updatedAt: { gte: since24h },
+          ...notInArchived(archivedImageIds),
+        },
+      }),
+      prisma.agentRun.count({
+        where: {
+          status: "succeeded",
+          updatedAt: { gte: since24h },
+          ...notInArchived(archivedAgentIds),
+        },
+      }),
+      prisma.novelWorkflowTask.count({
+        where: {
+          lane: "auto_director",
+          status: "succeeded",
+          updatedAt: { gte: since24h },
+          ...notInArchived(archivedWorkflowIds),
+        },
+      }),
+      prisma.styleExtractionTask.count({
+        where: {
+          status: "succeeded",
+          updatedAt: { gte: since24h },
+          ...notInArchived(archivedStyleExtractionIds),
+        },
+      }),
+      safeAudiobookSucceededSinceCount(archivedAudiobookIds, since24h),
     ]);
 
     const overview: TaskOverviewSummary = {
@@ -221,6 +307,15 @@ export class TaskCenterService {
       cancelledCount: 0,
       waitingApprovalCount: 0,
       recoveryCandidateCount: bookRecoveryCount + pipelineRecoveryCount + imageRecoveryCount + workflowRecoveryCount + styleExtractionRecoveryCount + audiobookRecoveryCount,
+      completed24hCount:
+        bookCompleted24h
+        + pipelineCompleted24h
+        + knowledgeCompleted24h
+        + imageCompleted24h
+        + agentCompleted24h
+        + workflowCompleted24h
+        + styleExtractionCompleted24h
+        + audiobookCompleted24h,
     };
 
     for (const rows of [bookRows, pipelineRows, knowledgeRows, imageRows, agentRows, workflowRows, styleExtractionRows, audiobookRows]) {

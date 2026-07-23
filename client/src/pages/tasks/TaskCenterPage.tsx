@@ -81,9 +81,13 @@ export default function TaskCenterPage() {
     queryFn: getTaskOverview,
     staleTime: 15_000,
     refetchInterval: (query) => {
+      // Error / still-loading: do not spin every 4s forever.
+      if (query.state.status === "error") {
+        return false;
+      }
       const overview = query.state.data?.data;
       if (!overview) {
-        return 4000;
+        return false;
       }
       const active = overview.runningCount + overview.queuedCount + overview.waitingApprovalCount;
       return active > 0 ? 4000 : false;
@@ -182,7 +186,8 @@ export default function TaskCenterPage() {
   const failedCount = overview?.failedCount ?? allRows.filter((item) => item.status === "failed").length;
   // Bulk archive only covers the currently loaded list page (limit 80), not the whole DB.
   const succeededRows = allRows.filter((item) => BULK_ARCHIVE_STATUSES.has(item.status));
-  const completed24hCount = allRows.filter((item) => {
+  // Prefer overview (full DB minus soft-archive); list-page count is a degraded fallback only.
+  const completed24hCount = overview?.completed24hCount ?? allRows.filter((item) => {
     if (item.status !== "succeeded") {
       return false;
     }

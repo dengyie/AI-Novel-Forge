@@ -70,6 +70,7 @@ test("task recovery routes expose overview, recovery candidates, and resume acti
     cancelledCount: 1,
     waitingApprovalCount: 4,
     recoveryCandidateCount: 2,
+    completed24hCount: 5,
   });
   recoveryTaskService.listRecoveryCandidates = async () => ({
     items: [{

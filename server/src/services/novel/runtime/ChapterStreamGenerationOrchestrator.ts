@@ -303,114 +303,117 @@ export class ChapterStreamGenerationOrchestrator {
     artifactsAlreadySynced?: boolean;
     backgroundSyncDeferred?: boolean;
   }> {
+    // Align with pipeline: independent empty / chinese counters (1 retry each).
+    const EMPTY_CONTENT_GENERATION_RETRY_LIMIT = 1;
+    const CHINESE_PROSE_GATE_RETRY_LIMIT = 1;
+    let emptyAttempt = 0;
+    let chineseGateAttempt = 0;
     let lastWriteFeedback: SameChapterWriteFeedback | null = null;
-    try {
-      const normalized = await input.writerDone();
-      const finalContent = assertChapterContentNotEmpty(normalized?.finalContent ?? input.fallbackContent, {
-        novelId: input.novelId,
-        chapterId: input.chapterId,
-        chapterOrder: input.assembled.chapter.order,
-        source: "chapter_stream_writer",
-        attempt: 1,
-        maxEmptyRetries: 1,
-      });
-      return {
-        ...(normalized ?? {}),
-        finalContent,
-      };
-    } catch (error) {
-      if (isChapterEmptyContentError(error)) {
-        lastWriteFeedback = buildSameChapterWriteFeedbackFromError(error);
-        this.logEmptyChapterContent({
-          error,
-          novelId: input.novelId,
-          chapterId: input.chapterId,
-          chapterOrder: input.assembled.chapter.order,
-          request: input.request,
-          willRetry: true,
-          attempt: 1,
-        });
-        console.warn(
-          "[chapter-runtime] same-chapter write feedback",
-          formatSameChapterWriteFeedbackLog({
-            feedback: lastWriteFeedback,
-            willRetry: true,
-            novelId: input.novelId,
-            chapterId: input.chapterId,
-            chapterOrder: input.assembled.chapter.order,
-            attempt: 1,
-          }),
-        );
-      } else if (isChapterChineseProseGateError(error)) {
-        lastWriteFeedback = buildSameChapterWriteFeedbackFromError(error);
-        this.logChineseProseGateFailure({
-          error,
-          novelId: input.novelId,
-          chapterId: input.chapterId,
-          chapterOrder: input.assembled.chapter.order,
-          request: input.request,
-          willRetry: true,
-          attempt: 1,
-        });
-        console.warn(
-          "[chapter-runtime] same-chapter write feedback",
-          formatSameChapterWriteFeedbackLog({
-            feedback: lastWriteFeedback,
-            willRetry: true,
-            novelId: input.novelId,
-            chapterId: input.chapterId,
-            chapterOrder: input.assembled.chapter.order,
-            attempt: 1,
-          }),
-        );
-      } else {
-        throw error;
-      }
-    }
+    let useInitialWriterDone = true;
 
-    try {
-      const assembledForRetry = applySameChapterWriteFeedbackToAssembled(
+    while (true) {
+      throwIfChapterGenerationAborted(input.signal, "章节生成已取消。");
+      const assembledForAttempt = applySameChapterWriteFeedbackToAssembled(
         input.assembled,
         lastWriteFeedback?.lines,
       );
-      const retryDraft = await this.generateDraftFromWriter({
-        novelId: input.novelId,
-        chapterId: input.chapterId,
-        request: input.request,
-        assembled: assembledForRetry,
-        signal: input.signal,
-      });
-      return {
-        finalContent: retryDraft.content,
-        lengthControl: retryDraft.lengthControl,
-        artifactsAlreadySynced: retryDraft.artifactsAlreadySynced,
-        backgroundSyncDeferred: retryDraft.backgroundSyncDeferred,
-      };
-    } catch (error) {
-      if (isChapterEmptyContentError(error)) {
-        this.logEmptyChapterContent({
-          error,
+      try {
+        if (useInitialWriterDone) {
+          useInitialWriterDone = false;
+          const normalized = await input.writerDone();
+          const finalContent = assertChapterContentNotEmpty(
+            normalized?.finalContent ?? input.fallbackContent,
+            {
+              novelId: input.novelId,
+              chapterId: input.chapterId,
+              chapterOrder: input.assembled.chapter.order,
+              source: "chapter_stream_writer",
+              attempt: emptyAttempt + 1,
+              maxEmptyRetries: EMPTY_CONTENT_GENERATION_RETRY_LIMIT,
+            },
+          );
+          return {
+            ...(normalized ?? {}),
+            finalContent,
+          };
+        }
+
+        const retryDraft = await this.generateDraftFromWriter({
           novelId: input.novelId,
           chapterId: input.chapterId,
-          chapterOrder: input.assembled.chapter.order,
           request: input.request,
-          willRetry: false,
-          attempt: 2,
+          assembled: assembledForAttempt,
+          signal: input.signal,
         });
-        await this.markChapterStatus(input.chapterId, "pending_generation");
-      } else if (isChapterChineseProseGateError(error)) {
-        this.logChineseProseGateFailure({
-          error,
-          novelId: input.novelId,
-          chapterId: input.chapterId,
-          chapterOrder: input.assembled.chapter.order,
-          request: input.request,
-          willRetry: false,
-          attempt: 2,
-        });
-        await this.markChapterStatus(input.chapterId, "pending_generation");
+        return {
+          finalContent: retryDraft.content,
+          lengthControl: retryDraft.lengthControl,
+          artifactsAlreadySynced: retryDraft.artifactsAlreadySynced,
+          backgroundSyncDeferred: retryDraft.backgroundSyncDeferred,
+        };
+      } catch (error) {
+        if (isChapterEmptyContentError(error)) {
+          emptyAttempt += 1;
+          const willRetry = emptyAttempt <= EMPTY_CONTENT_GENERATION_RETRY_LIMIT;
+          lastWriteFeedback = buildSameChapterWriteFeedbackFromError(error);
+          this.logEmptyChapterContent({
+            error,
+            novelId: input.novelId,
+            chapterId: input.chapterId,
+            chapterOrder: input.assembled.chapter.order,
+            request: input.request,
+            willRetry,
+            attempt: emptyAttempt,
+          });
+          console.warn(
+            "[chapter-runtime] same-chapter write feedback",
+            formatSameChapterWriteFeedbackLog({
+              feedback: lastWriteFeedback,
+              willRetry,
+              novelId: input.novelId,
+              chapterId: input.chapterId,
+              chapterOrder: input.assembled.chapter.order,
+              attempt: emptyAttempt,
+            }),
+          );
+          if (willRetry) {
+            continue;
+          }
+          await this.markChapterStatus(input.chapterId, "pending_generation");
+          throw error;
+        }
+        if (isChapterChineseProseGateError(error)) {
+          chineseGateAttempt += 1;
+          const willRetry = chineseGateAttempt <= CHINESE_PROSE_GATE_RETRY_LIMIT;
+          lastWriteFeedback = buildSameChapterWriteFeedbackFromError(error);
+          this.logChineseProseGateFailure({
+            error,
+            novelId: input.novelId,
+            chapterId: input.chapterId,
+            chapterOrder: input.assembled.chapter.order,
+            request: input.request,
+            willRetry,
+            attempt: chineseGateAttempt,
+          });
+          console.warn(
+            "[chapter-runtime] same-chapter write feedback",
+            formatSameChapterWriteFeedbackLog({
+              feedback: lastWriteFeedback,
+              willRetry,
+              novelId: input.novelId,
+              chapterId: input.chapterId,
+              chapterOrder: input.assembled.chapter.order,
+              attempt: chineseGateAttempt,
+            }),
+          );
+          if (willRetry) {
+            continue;
+          }
+          await this.markChapterStatus(input.chapterId, "pending_generation");
+          throw error;
+        }
+        throw error;
       }
-      throw error;
     }
   }
 

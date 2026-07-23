@@ -93,6 +93,8 @@ export interface TaskOverviewSummary {
   cancelledCount: number;
   waitingApprovalCount: number;
   recoveryCandidateCount: number;
+  /** Succeeded tasks with updatedAt within the last 24h (excludes soft-archived). */
+  completed24hCount: number;
 }
 
 export interface RecoverableTaskSummary {

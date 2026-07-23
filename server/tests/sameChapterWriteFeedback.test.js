@@ -125,6 +125,39 @@ test("applySameChapterWriteFeedbackToAssembled no-ops on empty lines", () => {
   assert.equal(applySameChapterWriteFeedbackToAssembled(assembled, null), assembled);
 });
 
+test("applySameChapterWriteFeedbackToAssembled warns when chapterWriteContext missing", () => {
+  const warns = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => {
+    warns.push(args.map(String).join(" "));
+  };
+  try {
+    const assembled = {
+      contextPackage: {
+        priorQualityFeedback: [],
+      },
+    };
+    const feedback = buildSameChapterWriteFeedbackFromEmpty(new ChapterEmptyContentError({
+      novelId: "n",
+      chapterId: "c",
+      chapterOrder: 1,
+      source: "t",
+      rawLength: 0,
+      trimmedLength: 0,
+    }));
+    const next = applySameChapterWriteFeedbackToAssembled(assembled, feedback.lines);
+    assert.ok(Array.isArray(next.contextPackage.priorQualityFeedback));
+    assert.ok(next.contextPackage.priorQualityFeedback.length > 0);
+    assert.equal(next.contextPackage.chapterWriteContext, undefined);
+    assert.ok(
+      warns.some((line) => line.includes("chapterWriteContext missing")),
+      `expected missing-WC warn, got ${JSON.stringify(warns)}`,
+    );
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
 test("formatSameChapterWriteFeedbackLog marks injected when willRetry", () => {
   const feedback = buildSameChapterWriteFeedbackFromChineseGate(new ChapterChineseProseGateError({
     novelId: "n1",

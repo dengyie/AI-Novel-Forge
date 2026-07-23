@@ -247,6 +247,13 @@ export function applySameChapterWriteFeedbackToAssembled<
       ...wc,
       priorQualityFeedback: [...feedbackLines, ...wcPrior],
     };
+  } else {
+    // Writer blocks read chapterWriteContext only; top-level prior alone is not enough.
+    console.warn(
+      "[chapter-runtime] same-chapter write feedback: chapterWriteContext missing; "
+      + "top-level priorQualityFeedback patched but writer may not see it",
+      { lineCount: feedbackLines.length },
+    );
   }
 
   return {

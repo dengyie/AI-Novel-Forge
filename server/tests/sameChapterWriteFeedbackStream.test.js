@@ -149,7 +149,10 @@ test("stream empty content retry also injects same-chapter feedback", async () =
     assembled: {
       novel: { id: "n", title: "t" },
       chapter: { id: "c", title: "t", order: 1, content: null, expectation: null },
-      contextPackage: { priorQualityFeedback: [] },
+      contextPackage: {
+        priorQualityFeedback: [],
+        chapterWriteContext: { priorQualityFeedback: [] },
+      },
     },
     writerDone: async () => {
       throw new ChapterEmptyContentError({
@@ -167,4 +170,83 @@ test("stream empty content retry also injects same-chapter feedback", async () =
   assert.ok(
     writerAssembledFeedback[0].some((line) => String(line).includes("空正文") || String(line).includes("本章上枪")),
   );
+});
+
+test("stream allows independent empty then chinese retries with latest feedback", async () => {
+  const writerAssembledFeedback = [];
+  let writerCalls = 0;
+  const statuses = [];
+  const orchestrator = new ChapterStreamGenerationOrchestrator({
+    assembler: { async assemble() {} },
+    chapterWritingGraph: { async createChapterStream() {} },
+    readinessService: { async assertReady() {} },
+    contentFinalizationService: {
+      async finalizeChapterContent() {},
+      async markChapterStatus(chapterId, status) {
+        statuses.push({ chapterId, status });
+      },
+    },
+    agentRuntime: { async createChapterGenRun() { return "r"; } },
+    validateRequest(input) { return input; },
+    async ensureNovelCharacters() {},
+  });
+
+  orchestrator.generateDraftFromWriter = async (input) => {
+    writerCalls += 1;
+    const prior = input?.assembled?.contextPackage?.priorQualityFeedback ?? [];
+    writerAssembledFeedback.push(Array.isArray(prior) ? [...prior] : []);
+    if (writerCalls === 1) {
+      // empty-retry gun still produces english meta → chinese gate
+      throw new ChapterChineseProseGateError({
+        novelId: "n",
+        chapterId: "c",
+        chapterOrder: 2,
+        source: "stream_test",
+        reason: "english_meta",
+        metaMarker: "However we must",
+        cjkCount: 2,
+        latinCount: 200,
+        rawLength: 220,
+      });
+    }
+    return { content: "第二次独立重试后的中文正文。" };
+  };
+
+  const result = await orchestrator.resolveWriterResultWithEmptyRetry({
+    novelId: "n",
+    chapterId: "c",
+    request: {},
+    assembled: {
+      novel: { id: "n", title: "t" },
+      chapter: { id: "c", title: "t", order: 2, content: null, expectation: null },
+      contextPackage: {
+        priorQualityFeedback: [],
+        chapterWriteContext: { priorQualityFeedback: [] },
+      },
+    },
+    writerDone: async () => {
+      throw new ChapterEmptyContentError({
+        novelId: "n",
+        chapterId: "c",
+        chapterOrder: 2,
+        source: "stream_test",
+        rawLength: 0,
+        trimmedLength: 0,
+      });
+    },
+    fallbackContent: "",
+  });
+
+  assert.equal(result.finalContent, "第二次独立重试后的中文正文。");
+  assert.equal(writerCalls, 2, "empty + chinese each get one generateDraftFromWriter gun");
+  assert.equal(writerAssembledFeedback.length, 2);
+  assert.ok(
+    writerAssembledFeedback[0].some((line) => String(line).includes("空正文") || String(line).includes("本章上枪")),
+    "first retry carries empty-content feedback",
+  );
+  assert.ok(
+    writerAssembledFeedback[1].some((line) => String(line).includes("However") || String(line).includes("中文硬门")),
+    "second retry carries chinese-gate feedback",
+  );
+  assert.equal(statuses.length, 0, "should not mark pending_generation when a retry still remains");
 });

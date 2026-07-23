@@ -38,6 +38,9 @@ test("task center page wires overview counts, attention sync, and bulk archive s
   assert.match(page, /getTaskOverview/);
   assert.match(page, /queryKeys\.tasks\.overview/);
   assert.match(page, /waitingApprovalCount/);
+  assert.match(page, /completed24hCount/);
+  assert.match(page, /overview\?\.completed24hCount/);
+  assert.match(page, /status === "error"/);
   assert.match(page, /bulkArchiveSucceededMutation/);
   assert.match(page, /一键归档本页完成任务/);
   assert.match(page, /最多 80/);
