@@ -96,10 +96,17 @@ Fallback 阶梯：
 
 ## 5. 验收（源世界 ch1）
 
-- [ ] 手机打字 /「收到」类不进 wav  
-- [ ] spokenQuoteCoverage 可计算且 L1 明显高于整章旁白  
-- [ ] 旁白回退任务文案含「降级」  
-- [ ] 单测：rule span / typed skip / coverage / fallback 标记 / chunk filter  
+- [x] 单测：rule span / typed skip / coverage / fallback 标记 / chunk filter（`server/tests/audiobookChannelDiarize.test.js`）
+- [x] spokenQuoteCoverage 可计算且 L1 明显高于整章旁白（pxed 规则装配：spokenQuoteCoverage≈0.993 vs 整章旁白 0）
+- [x] chat/typed/on_screen 进 skip 段（pxed 注入：typed=2 chat=6 on_screen=2；TTS jobs 不含「截图发你了」「对方正在输入」）
+- [ ] 重合成整章 wav/m4b 完成并可听验（task `cmrwokz840000l39kjhks1p55` 进行中，229 chunks）
+- [ ] 旁白回退任务文案含「降级」（需 L3 回退样例；本路径为 rules 非 fallback）
+
+### 5.1 实产注记（2026-07-23）
+
+- diarize prompt 漏注册：`audiobook.chapter.diarize@v1` 已补 `prompting/registry.ts`（`1aa02c4`）
+- resynthesize 缓存失效条件：`deliveryStyleMode` 必须与任务一致（characters），且 `contentSha1` 对齐
+- L1 规则路径 speaker 归属仍弱（大量 speech 落旁白 / 误切「笑着」等）→ 听感上角色差仍依赖后续 L0 diarize 或规则加强；本验收优先验证 **skip 通道不念**  
 
 ---
 
