@@ -17,6 +17,12 @@ import {
   isChapterChineseProseGateError,
   type ChapterChineseProseGateError,
 } from "./chapterChineseProseGateError";
+import {
+  applySameChapterWriteFeedbackToAssembled,
+  buildSameChapterWriteFeedbackFromError,
+  formatSameChapterWriteFeedbackLog,
+  type SameChapterWriteFeedback,
+} from "./sameChapterWriteFeedback";
 import { throwIfChapterGenerationAborted } from "./chapterAbortGuard";
 import {
   ChapterContentFinalizationService,
@@ -297,6 +303,7 @@ export class ChapterStreamGenerationOrchestrator {
     artifactsAlreadySynced?: boolean;
     backgroundSyncDeferred?: boolean;
   }> {
+    let lastWriteFeedback: SameChapterWriteFeedback | null = null;
     try {
       const normalized = await input.writerDone();
       const finalContent = assertChapterContentNotEmpty(normalized?.finalContent ?? input.fallbackContent, {
@@ -313,6 +320,7 @@ export class ChapterStreamGenerationOrchestrator {
       };
     } catch (error) {
       if (isChapterEmptyContentError(error)) {
+        lastWriteFeedback = buildSameChapterWriteFeedbackFromError(error);
         this.logEmptyChapterContent({
           error,
           novelId: input.novelId,
@@ -322,7 +330,19 @@ export class ChapterStreamGenerationOrchestrator {
           willRetry: true,
           attempt: 1,
         });
+        console.warn(
+          "[chapter-runtime] same-chapter write feedback",
+          formatSameChapterWriteFeedbackLog({
+            feedback: lastWriteFeedback,
+            willRetry: true,
+            novelId: input.novelId,
+            chapterId: input.chapterId,
+            chapterOrder: input.assembled.chapter.order,
+            attempt: 1,
+          }),
+        );
       } else if (isChapterChineseProseGateError(error)) {
+        lastWriteFeedback = buildSameChapterWriteFeedbackFromError(error);
         this.logChineseProseGateFailure({
           error,
           novelId: input.novelId,
@@ -332,17 +352,32 @@ export class ChapterStreamGenerationOrchestrator {
           willRetry: true,
           attempt: 1,
         });
+        console.warn(
+          "[chapter-runtime] same-chapter write feedback",
+          formatSameChapterWriteFeedbackLog({
+            feedback: lastWriteFeedback,
+            willRetry: true,
+            novelId: input.novelId,
+            chapterId: input.chapterId,
+            chapterOrder: input.assembled.chapter.order,
+            attempt: 1,
+          }),
+        );
       } else {
         throw error;
       }
     }
 
     try {
+      const assembledForRetry = applySameChapterWriteFeedbackToAssembled(
+        input.assembled,
+        lastWriteFeedback?.lines,
+      );
       const retryDraft = await this.generateDraftFromWriter({
         novelId: input.novelId,
         chapterId: input.chapterId,
         request: input.request,
-        assembled: input.assembled,
+        assembled: assembledForRetry,
         signal: input.signal,
       });
       return {

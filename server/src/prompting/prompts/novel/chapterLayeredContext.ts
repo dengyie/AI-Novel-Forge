@@ -845,17 +845,23 @@ export function buildChapterWriterContextBlocks(
       })
       : null,
     writeContext.priorQualityFeedback.length > 0
-      ? createContextBlock({
-        id: "prior_quality_feedback",
-        group: "prior_quality_feedback",
-        priority: 98,
-        required: false,
-        allowSummary: true,
-        content: [
-          "上章纠偏（质量反馈总线；按建议规避同类硬伤，禁止 skip_quality / 同签连 patch）：",
-          ...writeContext.priorQualityFeedback.map((line) => `- ${line}`),
-        ].join("\n"),
-      })
+      ? (() => {
+        // 本章上枪失败反馈不可被预算摘要丢掉；仅上章 QFP 时仍允许 summary。
+        const hasSameChapterGun = writeContext.priorQualityFeedback.some(
+          (line) => typeof line === "string" && line.includes("【本章上枪】"),
+        );
+        return createContextBlock({
+          id: "prior_quality_feedback",
+          group: "prior_quality_feedback",
+          priority: 98,
+          required: hasSameChapterGun,
+          allowSummary: !hasSameChapterGun,
+          content: [
+            "纠偏反馈（上章质量债 / 本章上枪失败；按建议规避同类硬伤，禁止 skip_quality / 同签连 patch）：",
+            ...writeContext.priorQualityFeedback.map((line) => `- ${line}`),
+          ].join("\n"),
+        });
+      })()
       : null,
     hasObligationContract
       ? createContextBlock({

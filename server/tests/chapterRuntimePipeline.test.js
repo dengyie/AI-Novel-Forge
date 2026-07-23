@@ -11,6 +11,9 @@ const {
   ChapterEmptyContentError,
 } = require("../dist/services/novel/runtime/chapterEmptyContentError.js");
 const {
+  ChapterChineseProseGateError,
+} = require("../dist/services/novel/runtime/chapterChineseProseGateError.js");
+const {
   mergeChapterPatchForGenerationStateBump,
 } = require("../dist/services/novel/chapterLifecycleState.js");
 
@@ -1046,6 +1049,7 @@ test("runPipelineChapterWithRuntime retries once when writer returns empty conte
   const stages = [];
   const emptyEvents = [];
   const savedDrafts = [];
+  const writerAssembledFeedback = [];
   let generationCount = 0;
 
   const result = await runPipelineChapterWithRuntime(
@@ -1064,11 +1068,15 @@ test("runPipelineChapterWithRuntime retries once when writer returns empty conte
             content: null,
             expectation: null,
           },
-          contextPackage: {},
+          contextPackage: {
+            priorQualityFeedback: [],
+          },
         };
       },
-      async generateDraftFromWriter() {
+      async generateDraftFromWriter(input) {
         generationCount += 1;
+        const prior = input?.assembled?.contextPackage?.priorQualityFeedback ?? [];
+        writerAssembledFeedback.push(Array.isArray(prior) ? [...prior] : []);
         return { content: generationCount === 1 ? "   " : "重试后的正文" };
       },
       async saveDraftAndArtifacts(_novelId, _chapterId, content, generationState) {
@@ -1112,6 +1120,107 @@ test("runPipelineChapterWithRuntime retries once when writer returns empty conte
     generationState: "drafted",
   }]);
   assert.equal(result.pass, true);
+  // First gun: no same-chapter feedback yet.
+  assert.deepEqual(writerAssembledFeedback[0], []);
+  // Second gun: empty failure injected as 本章上枪 lines.
+  assert.ok(
+    writerAssembledFeedback[1].some((line) => String(line).includes("本章上枪")),
+    `expected same-chapter feedback on retry, got ${JSON.stringify(writerAssembledFeedback[1])}`,
+  );
+});
+
+test("runPipelineChapterWithRuntime retries chinese prose gate with same-chapter feedback", async () => {
+  const chineseEvents = [];
+  const writerAssembledFeedback = [];
+  let generationCount = 0;
+
+  const result = await runPipelineChapterWithRuntime(
+    {
+      validateRequest(input) {
+        return input;
+      },
+      async ensureNovelCharacters() {},
+      async assemble() {
+        return {
+          novel: { id: "novel-1", title: "测试小说" },
+          chapter: {
+            id: "chapter-1",
+            title: "第一章",
+            order: 12,
+            content: null,
+            expectation: null,
+          },
+          contextPackage: {
+            priorQualityFeedback: ["上章债：示例"],
+            chapterWriteContext: {
+              priorQualityFeedback: ["上章债：示例"],
+            },
+          },
+        };
+      },
+      async generateDraftFromWriter(input) {
+        generationCount += 1;
+        const prior = input?.assembled?.contextPackage?.priorQualityFeedback ?? [];
+        writerAssembledFeedback.push(Array.isArray(prior) ? [...prior] : []);
+        if (generationCount === 1) {
+          throw new ChapterChineseProseGateError({
+            novelId: "novel-1",
+            chapterId: "chapter-1",
+            chapterOrder: 12,
+            source: "pipeline_test",
+            reason: "english_meta",
+            metaMarker: "We need to write",
+            cjkCount: 20,
+            latinCount: 800,
+            rawLength: 1000,
+          });
+        }
+        return { content: "中文正文重试通过。" };
+      },
+      async saveDraftAndArtifacts() {},
+      async syncFinalChapterArtifacts() {},
+      async finalizeChapterContent({ content }) {
+        return {
+          finalContent: content,
+          runtimePackage: createRuntimePackage(90),
+        };
+      },
+      async markChapterGenerationState() {},
+      async markChapterNeedsRepair() {},
+    },
+    "novel-1",
+    "chapter-1",
+    {
+      autoReview: true,
+      autoRepair: true,
+    },
+    {
+      async onChineseProseGate(event) {
+        chineseEvents.push({
+          attempt: event.attempt,
+          willRetry: event.willRetry,
+          reason: event.reason,
+        });
+      },
+    },
+  );
+
+  assert.equal(generationCount, 2);
+  assert.equal(result.pass, true);
+  assert.deepEqual(chineseEvents, [{
+    attempt: 1,
+    willRetry: true,
+    reason: "english_meta",
+  }]);
+  assert.deepEqual(writerAssembledFeedback[0], ["上章债：示例"]);
+  assert.ok(
+    writerAssembledFeedback[1].some((line) => String(line).includes("本章上枪")),
+    `expected same-chapter feedback on chinese-gate retry, got ${JSON.stringify(writerAssembledFeedback[1])}`,
+  );
+  assert.ok(
+    writerAssembledFeedback[1].includes("上章债：示例"),
+    "prior chapter feedback should remain after prepend",
+  );
 });
 
 test("runPipelineChapterWithRuntime fails empty writer output without saving or advancing state", async () => {

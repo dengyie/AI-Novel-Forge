@@ -22,6 +22,12 @@ import {
   isChapterChineseProseGateError,
   type ChapterChineseProseGateError,
 } from "./chapterChineseProseGateError";
+import {
+  applySameChapterWriteFeedbackToAssembled,
+  buildSameChapterWriteFeedbackFromError,
+  formatSameChapterWriteFeedbackLog,
+  type SameChapterWriteFeedback,
+} from "./sameChapterWriteFeedback";
 import { isTransientTransportError } from "../../../llm/transportRetry";
 import { runChapterRepairText } from "./repair/chapterRepairRuntime";
 import { getChapterWriterRuntimeSettings } from "../../settings/ChapterWriterRuntimeSettingsService";
@@ -479,6 +485,8 @@ async function generateNonEmptyDraftFromWriter(input: {
   let emptyAttempt = 0;
   let chineseGateAttempt = 0;
   let transportAttempt = 0;
+  /** Memory-only: last empty/chinese-gate failure lines for the next same-chapter gun. */
+  let lastWriteFeedback: SameChapterWriteFeedback | null = null;
   while (true) {
     await input.hooks.onCheckCancelled?.();
     if (input.signal?.aborted) {
@@ -487,12 +495,16 @@ async function generateNonEmptyDraftFromWriter(input: {
         : new Error("章节生成已取消。");
     }
     await input.hooks.onStageChange?.("generating_chapters");
+    const assembledForAttempt = applySameChapterWriteFeedbackToAssembled(
+      input.assembled,
+      lastWriteFeedback?.lines,
+    );
     try {
       const generatedDraft = await input.deps.generateDraftFromWriter({
         novelId: input.novelId,
         chapterId: input.chapterId,
         request: input.request,
-        assembled: input.assembled,
+        assembled: assembledForAttempt,
         signal: input.signal,
       });
       const content = assertChapterContentNotEmpty(generatedDraft.content, {
@@ -511,6 +523,7 @@ async function generateNonEmptyDraftFromWriter(input: {
       if (isChapterEmptyContentError(error)) {
         emptyAttempt += 1;
         const willRetry = emptyAttempt <= EMPTY_CONTENT_GENERATION_RETRY_LIMIT;
+        lastWriteFeedback = buildSameChapterWriteFeedbackFromError(error);
         await input.hooks.onEmptyContent?.({
           attempt: emptyAttempt,
           willRetry,
@@ -518,6 +531,17 @@ async function generateNonEmptyDraftFromWriter(input: {
           contentLength: error.details.trimmedLength,
           rawContentLength: error.details.rawLength,
         });
+        console.warn(
+          "[chapter-runtime] same-chapter write feedback",
+          formatSameChapterWriteFeedbackLog({
+            feedback: lastWriteFeedback,
+            willRetry,
+            novelId: input.novelId,
+            chapterId: input.chapterId,
+            chapterOrder: input.assembled.chapter.order,
+            attempt: emptyAttempt,
+          }),
+        );
         if (willRetry) {
           continue;
         }
@@ -527,6 +551,7 @@ async function generateNonEmptyDraftFromWriter(input: {
       if (isChapterChineseProseGateError(error)) {
         chineseGateAttempt += 1;
         const willRetry = chineseGateAttempt <= CHINESE_PROSE_GATE_RETRY_LIMIT;
+        lastWriteFeedback = buildSameChapterWriteFeedbackFromError(error);
         await input.hooks.onChineseProseGate?.({
           attempt: chineseGateAttempt,
           willRetry,
@@ -534,6 +559,17 @@ async function generateNonEmptyDraftFromWriter(input: {
           reason: error.details.reason,
           rawContentLength: error.details.rawLength,
         });
+        console.warn(
+          "[chapter-runtime] same-chapter write feedback",
+          formatSameChapterWriteFeedbackLog({
+            feedback: lastWriteFeedback,
+            willRetry,
+            novelId: input.novelId,
+            chapterId: input.chapterId,
+            chapterOrder: input.assembled.chapter.order,
+            attempt: chineseGateAttempt,
+          }),
+        );
         if (willRetry) {
           continue;
         }
@@ -542,6 +578,8 @@ async function generateNonEmptyDraftFromWriter(input: {
 
       // mid-stream / establish 瞬时故障：整章重开（与 empty 重试独立计数）。
       // 用户/流水线 abort 不重试；非瞬时错误直接失败。
+      // Transport: blind retry only (no *new* feedback). Do NOT clear lastWriteFeedback —
+      // a prior empty/chinese failure's lines still apply on the next gun.
       const cancelled = input.signal?.aborted
         || (error instanceof Error && (
           error.message === "PIPELINE_CANCELLED"
