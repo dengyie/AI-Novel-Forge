@@ -333,7 +333,11 @@ test("mode=off path style has no 本句表演", () => {
 });
 
 
-const { resolveChunkSynthesizeFields } = require("../dist/services/audiobook/AudiobookPipelineService.js");
+const { compileDeliveryStyleForSegment } = require(
+  "../dist/services/audiobook/frontend/synthesisBuilder.js",
+);
+// M9: resolveChunkSynthesizeFields（薄别名）已删，SoT 现为 compileDeliveryStyleForSegment。
+const resolveChunkSynthesizeFields = compileDeliveryStyleForSegment;
 
 test("resolveChunkSynthesizeFields keeps narrator 本句叙述 SoT", () => {
   const narratorSeg = applyDeliveryToSegment(

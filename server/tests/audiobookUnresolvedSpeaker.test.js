@@ -5,9 +5,13 @@ const {
   computeDeliveryChapterStats,
 } = require("../dist/services/audiobook/deliveryStyle.js");
 const {
-  resolveChunkSynthesizeFields,
   peelCompiledDeliveryMarks,
 } = require("../dist/services/audiobook/AudiobookPipelineService.js");
+const { compileDeliveryStyleForSegment } = require(
+  "../dist/services/audiobook/frontend/synthesisBuilder.js",
+);
+// M9: resolveChunkSynthesizeFields（薄别名）已删，SoT 现为 compileDeliveryStyleForSegment。
+const resolveChunkSynthesizeFields = compileDeliveryStyleForSegment;
 const {
   splitTextForTts,
 } = require("../dist/services/audiobook/audiobookChunk.js");

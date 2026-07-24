@@ -2,11 +2,17 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
-  resolveChunkSynthesizeFields,
   peelCompiledDeliveryMarks,
   chunkLayoutFingerprint,
   reconcileAnnotationSegmentsWithVoices,
 } = require("../dist/services/audiobook/AudiobookPipelineService.js");
+
+const { compileDeliveryStyleForSegment } = require(
+  "../dist/services/audiobook/frontend/synthesisBuilder.js",
+);
+// M9: resolveChunkSynthesizeFields（薄别名）已删，SoT 现为 compileDeliveryStyleForSegment。
+// 本文件保留 import 名以最小改动——用别名指回 SoT，断言语义不变。
+const resolveChunkSynthesizeFields = compileDeliveryStyleForSegment;
 
 test("resolveChunkSynthesizeFields without delivery peels dirty marks to base", () => {
   const synth = resolveChunkSynthesizeFields({

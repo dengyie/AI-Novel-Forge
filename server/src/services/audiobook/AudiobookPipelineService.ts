@@ -468,21 +468,6 @@ export function chunkLayoutFingerprint(
   return hash.digest("hex").slice(0, 16);
 }
 
-/**
- * @deprecated M3: 逻辑已搬至 `synthesisBuilder.compileDeliveryStyleForSegment`。
- * 此处保留为薄别名，供旧 importer（含 audiobookSynthSotFingerprint / audiobookUnresolvedSpeaker
- * 等单测 `from dist`）零改动并可行 golden 对照；M4/M5 稳定后连同 re-export 一并删除。
- *
- * - 无 delivery：只用干净 base（剥编译标记），不盲信缓存 style/design
- * - 有 delivery：旁白/角色均以干净 base + delivery 重 compile
- */
-export function resolveChunkSynthesizeFields(segment: AudiobookDialogueSegment): {
-  style: string | null;
-  designPrompt: string | null;
-} {
-  return compileDeliveryStyleForSegment(segment);
-}
-
 function resolveChunkLayoutPath(taskDir: string, chapterId: string): string {
   return path.join(ensureChapterAudioDir(taskDir, chapterId), "chunk-layout.sha1");
 }
