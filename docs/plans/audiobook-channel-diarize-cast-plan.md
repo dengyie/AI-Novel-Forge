@@ -87,7 +87,7 @@ Fallback 阶梯：
 | 1 | 类型扩展、ruleSpanPass、L1 assembly、expand 过滤 skip、typed 不念 | **done** |
 | 2 | 专用 `audiobook.chapter.diarize@v1`（先于 annotate）；失败 → annotate → rules → narrator | **done（本批）** |
 | 2.1 | delivery 独立 job（diarize 成功后再填表演；缓存指纹拆分） | backlog |
-| 2.2 | P0 gap-fill：env window、顶层 assemblySource、通道纠错、路人 preset、quote 补洞、prompt 加固 | **done（本批源码，未 commit/deploy）** |
+| 2.2 | P0 gap-fill：env window、顶层 assemblySource、通道纠错、路人 preset、quote 补洞、prompt 加固 | **done + tip `f4a6128` pxed live（2026-07-24）** |
 | 3 | 分块 L2 强化、Patrol 扩展、队列 HA | backlog |
 | 4 | 标注可视化、alias 快捷、通道渲染开关 UI | backlog |
 
@@ -139,13 +139,15 @@ Fallback 阶梯：
   - cast：speech 92 角色 design 音色 / 10 unresolved 旁白；skip 通道验收过
   - 产物：chapter.wav + full-book.wav ~131MB、full-book.m4b ~32MB ready
   - 已知：电话/部分对话误标 on_screen；在线整章 diarize 易 600s transport_error → 离线分块路径
-- **P0 gap-fill 源码（2026-07-24，未 commit/deploy）**：
-  - `AUDIOBOOK_LLM_CONTENT_WINDOW` / `OVERLAP` 读 env（默认 28k/400）
+- **P0 gap-fill 源码 + 部署（2026-07-24 · tip `f4a6128` live）**：
+  - `AUDIOBOOK_LLM_CONTENT_WINDOW` / `OVERLAP` 读 env（默认 28k/400）；生产 `.env` **4500/400**
   - 顶层 `annotation.assemblySource`（llm | hybrid | rules | narrator_fallback）
   - `guestVoice` + materialize/ruleAssembly 路人 preset（仍 speakerUnresolved）
-  - `channelRepair`：误标 on_screen→speech/phone；spoken quote 补洞
+  - `channelRepair`：仅误标 **on_screen**→speech/phone；spoken quote 补洞；typed/chat 不升级
   - diarize prompt 规则 12–14：phone vs on_screen、口头优先
   - 单测 `audiobookChannelDiarize.test.js` **26/26**
+  - cutover：手册 **附录 B · 七点七十二**；client `index-D5mppX1o.js`；备份 `pre-f4a6128-20260724T030214Z`
+  - **未**本轮自动 re-annotate 源世界 ch1（另令）
 
 ---
 
@@ -171,7 +173,8 @@ server/tests/audiobookChannelDiarize.test.js
 
 ## 7. 明确不做（本批）
 
-- 生产 tip cutover / 全量 dist 部署（需用户授权）  
+- ~~生产 tip cutover / 全量 dist 部署~~ → **已做 `f4a6128`（用户授权）**  
 - 改 DB schema / 任务 status 枚举扩展  
 - drama TTS / 写文线  
 - ASR 反标 / 声学聚类  
+- 本轮不自动 re-annotate / resynth 源世界 ch1  
