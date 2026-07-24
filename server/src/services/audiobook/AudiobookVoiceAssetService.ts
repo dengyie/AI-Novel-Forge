@@ -19,6 +19,7 @@ import {
   type CharacterVoicePreviewGenerateResult,
   isAudiobookTtsMode,
   isMimoTtsPresetVoice,
+  type AudiobookDialogueSegment,
 } from "@ai-novel/shared/types/audiobook";
 import { prisma } from "../../db/prisma";
 import { AppError } from "../../middleware/errorHandler";
@@ -65,7 +66,7 @@ import {
 } from "./voiceBriefService";
 import { pickLibraryAssetWithLlm } from "./voiceLibraryPickService";
 import { getEngine } from "./engine/engineRegistry";
-import { buildLegacySynthesisRequest } from "./engine/legacyRequestBridge";
+import { buildChunkSynthesisRequest } from "./frontend/synthesisBuilder";
 
 const DEFAULT_PREVIEW_TEXT = DEFAULT_CHARACTER_VOICE_PREVIEW_TEXT;
 export const DEFAULT_PREVIEW_CANDIDATES = 3;
@@ -1100,14 +1101,25 @@ export class AudiobookVoiceAssetService {
     }
 
     const sampleText = clampCharacterVoicePreviewSampleText(input.text?.trim() || DEFAULT_PREVIEW_TEXT);
-    const req = buildLegacySynthesisRequest({
+    // M8: ephemeral preview 改走 SynthesisBuilder（与合成主链同 SoT）。
+    // 预览无段绑定，就地构造最小 segment；delivery=null → compileDeliveryStyleForSegment
+    // 走「无 delivery 返回干净 base」分支，与旧 legacy bridge 逐字段等价（见 golden 门）。
+    const previewSegment: AudiobookDialogueSegment = {
+      index: 0,
+      speakerKind: mode === "preset" ? "narrator" : "character",
+      characterId: null,
+      speakerLabel: "preview",
       text: sampleText,
-      mode,
-      voice: mode === "preset" ? voice : null,
+      ttsMode: mode,
+      voice: mode === "preset" ? voice : "",
+      refAudioPath: null,
+      baseStyle: style,
+      baseDesignPrompt: mode === "design" ? designPrompt : null,
       style,
       designPrompt: mode === "design" ? designPrompt : null,
-      refAudioPath: null,
-    });
+      delivery: null,
+    };
+    const req = buildChunkSynthesisRequest({ segment: previewSegment, text: sampleText });
     const synth = await getEngine("mimo").synthesize(req);
     return {
       characterId: null,
@@ -1248,15 +1260,26 @@ export class AudiobookVoiceAssetService {
     }> = [];
 
     for (let i = 0; i < candidatesCount; i += 1) {
-      // M2: 改走 registry → MimoTtsEngine（逐字节等价于旧直连，见
-      // docs/plans/audiobook-synthesis-layering-refactor-design.md §7 M2）。
-      const candidateReq = buildLegacySynthesisRequest({
+      // M8: 改走 SynthesisBuilder（与合成主链同 SoT，取代 M2 的 legacy bridge）。
+      // 逐字节等价于旧直连，见 docs/plans/audiobook-synthesis-layering-refactor-design.md §7 M2/M8。
+      const candidateSegment: AudiobookDialogueSegment = {
+        index: i,
+        speakerKind: ready.mode === "preset" ? "narrator" : "character",
+        characterId: null,
+        speakerLabel: "preview-candidate",
         text: sampleText,
-        mode: ready.mode,
-        voice: ready.mode === "preset" ? ready.voice : null,
+        ttsMode: ready.mode,
+        voice: ready.mode === "preset" ? ready.voice : "",
+        refAudioPath: ready.mode === "clone" ? ready.refAudioPath : null,
+        baseStyle: ready.style,
+        baseDesignPrompt: ready.mode === "design" ? ready.designPrompt : null,
         style: ready.style,
         designPrompt: ready.mode === "design" ? ready.designPrompt : null,
-        refAudioPath: ready.mode === "clone" ? ready.refAudioPath : null,
+        delivery: null,
+      };
+      const candidateReq = buildChunkSynthesisRequest({
+        segment: candidateSegment,
+        text: sampleText,
       });
       const synth = await getEngine("mimo").synthesize(candidateReq);
       const synthBase64 = synth.audio.toString("base64");
