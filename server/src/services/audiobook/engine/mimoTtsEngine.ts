@@ -11,7 +11,8 @@
  *
  * M2 阶段三处直连改走 `getEngine("mimo").synthesize(req)`（AudiobookPipelineService /
  * AudiobookVoiceAssetService 预览两处）；M5 起 SynthesisRequest 由 VoiceResolver/SynthesisBuilder
- * 正经产出，`legacySynthesisRequestToSynthesisRequest` 过渡桥随之删除。
+ * 正经产出，`buildLegacySynthesisRequest`（engine/legacyRequestBridge.ts）过渡桥于 M8
+ * 删除——预览两站点改由 `buildChunkSynthesisRequest` + 就地构造最小 segment 直接驱动。
  */
 
 import {
