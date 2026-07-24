@@ -22,6 +22,28 @@ function normalizeLoose(text: string): string {
 }
 
 /**
+ * 参与 cast 归属统计的「对白单元」：
+ * - 非 skip 的 character 段
+ * - 或 speakerUnresolved 的非 skip 对白类段（含未匹配强制旁白声）
+ * 分子分母同域，避免 unresolved 落在 narrator 却分母只计 character。
+ */
+export function isCastSpeechAttributionUnit(seg: AudiobookDialogueSegment): boolean {
+  const { segmentKind, renderPolicy } = resolveSegmentChannel(seg);
+  if (renderPolicy === "skip") return false;
+  if (seg.speakerKind === "character") return true;
+  if (!seg.speakerUnresolved) return false;
+  return (
+    segmentKind === "speech"
+    || segmentKind === "phone"
+    || segmentKind === "broadcast"
+    || segmentKind === "quote_read"
+    || segmentKind === "inner"
+    // 旧数据无 segmentKind 时，有 unresolved 仍计入
+    || !seg.segmentKind
+  );
+}
+
+/**
  * span 文本是否被某段覆盖（子串双向，宽松）。
  */
 export function spanCoveredBySegments(
@@ -91,17 +113,17 @@ export function computeDiarizeChapterStats(input: {
 
   for (const seg of input.segments) {
     const { segmentKind, renderPolicy } = resolveSegmentChannel(seg);
-    if (seg.speakerUnresolved) unresolvedSpeakerCount += 1;
     if (segmentKind === "narration" || (seg.speakerKind === "narrator" && !seg.segmentKind)) {
       narrationCount += 1;
-    }
-    if (seg.speakerKind === "character" && renderPolicy !== "skip") {
-      speechCharacterCount += 1;
     }
     if (renderPolicy === "skip") {
       if (segmentKind === "typed") typedSkippedCount += 1;
       if (segmentKind === "chat") chatSkippedCount += 1;
       if (segmentKind === "on_screen") onScreenSkippedCount += 1;
+    }
+    if (isCastSpeechAttributionUnit(seg)) {
+      speechCharacterCount += 1;
+      if (seg.speakerUnresolved) unresolvedSpeakerCount += 1;
     }
   }
 
@@ -141,6 +163,11 @@ export function computeDiarizeChapterStats(input: {
         `unresolved_ratio ${ratio.toFixed(2)} > ${gate.maxUnresolvedRatio}`,
       );
     }
+  } else if (unresolvedSpeakerCount > 0) {
+    // 分母为 0 但分子仍有（异常数据）→ 不得假 castOk
+    failReasons.push(
+      `unresolved_without_speech_units ${unresolvedSpeakerCount}`,
+    );
   }
 
   const castOk = failReasons.length === 0;
@@ -178,10 +205,10 @@ export function collectTaskQualityFlags(
 
   for (const ann of annotations) {
     const stats = ann.diarizeStats;
+    // 只认布尔位；error 字符串不再劫持旁白回退（规则装配成功常带诊断文案）
     const fallback =
       ann.wholeChapterNarratorFallback === true
-      || stats?.wholeChapterNarratorFallback === true
-      || Boolean(ann.error?.trim());
+      || stats?.wholeChapterNarratorFallback === true;
     if (fallback) {
       flags.add("narrator_fallback");
       anyDegraded = true;
@@ -200,6 +227,12 @@ export function collectTaskQualityFlags(
         stats.speechCharacterCount > 0
         && stats.unresolvedSpeakerCount / stats.speechCharacterCount
           > DEFAULT_DIARIZE_GATE.maxUnresolvedRatio
+      ) {
+        flags.add("high_unresolved");
+        anyDegraded = true;
+      } else if (
+        stats.speechCharacterCount === 0
+        && stats.unresolvedSpeakerCount > 0
       ) {
         flags.add("high_unresolved");
         anyDegraded = true;
@@ -247,12 +280,15 @@ export function buildQualityCompletionLabel(input: {
   return "有声书生成完成（多角色）";
 }
 
-/** 整章旁白回退判定（兼容仅有 error 的旧数据） */
+/**
+ * 整章旁白回退判定。
+ * 只认 wholeChapterNarratorFallback 布尔位；兼容旧 diarizeStats 同名。
+ * 不再把任意 error 字符串当成旁白回退（L1 规则成功会带诊断 note/旧 error）。
+ */
 export function isWholeChapterNarratorFallback(
   annotation: AudiobookChapterAnnotation,
 ): boolean {
   if (annotation.wholeChapterNarratorFallback === true) return true;
   if (annotation.diarizeStats?.wholeChapterNarratorFallback === true) return true;
-  if (annotation.error?.trim()) return true;
   return false;
 }

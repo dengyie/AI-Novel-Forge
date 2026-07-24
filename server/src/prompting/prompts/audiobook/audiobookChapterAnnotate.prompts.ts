@@ -141,10 +141,11 @@ export const audiobookChapterAnnotatePrompt: PromptAsset<
       "3. character 的 speakerName 必须尽量匹配「角色表」中的正式名；若正文用外号/称呼，优先映射到角色表正式名（角色表可含别名）。无法匹配时仍写原文称呼，后续系统会回退旁白。",
       "4. 不要改写正文语义；可做最小切分与标点整理，但不要扩写、不要删剧情。",
       "5. 合并连续同一说话人的短句为一段，避免碎片化；单段不宜超过约 500 字。",
-      "6. 覆盖整章正文主线内容；不要输出空 segments。",
+      "6. 覆盖**本段输入正文**主线（可能是整章或超长章的一块）；不要输出空 segments；不要假设见过前后章。",
       "7. narrator 的 speakerName 可写「旁白」或省略。",
       "8. 禁止因情绪分析改写 narrator/character 边界；先定 speaker，再填 delivery。",
       "9. 不把舞台指示 / stage direction 写进 text。",
+      "10. 角色归属只根据本段正文 + 角色表判断，禁止跨章/全文推断。",
     ];
 
     if (requestDelivery) {
@@ -171,6 +172,7 @@ export const audiobookChapterAnnotatePrompt: PromptAsset<
       new HumanMessage(
         [
           `章节：第 ${input.chapterOrder} 章 ${input.chapterTitle}`,
+          "范围：仅下方「正文」片段（按章/按块调用；非全书）。",
           `默认旁白标签：${input.narratorLabel}`,
           "",
           "角色表：",

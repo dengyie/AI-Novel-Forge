@@ -321,8 +321,14 @@ export interface AudiobookDiarizeChapterStats {
   /** 综合门禁 */
   castOk: boolean;
   failReasons?: string[];
-  /** 装配来源：llm | rules | narrator_fallback */
-  assemblySource?: "llm" | "rules" | "narrator_fallback" | null;
+  /**
+   * 装配来源：
+   * - llm：块均来自 LLM（可含章内分块拼接）
+   * - llm_rules_hybrid：部分块 LLM + 失败块规则补齐
+   * - rules：整章 L1 规则
+   * - narrator_fallback：整章旁白
+   */
+  assemblySource?: "llm" | "llm_rules_hybrid" | "rules" | "narrator_fallback" | null;
 }
 
 export interface AudiobookChapterAnnotation {
@@ -331,16 +337,30 @@ export interface AudiobookChapterAnnotation {
   chapterTitle: string;
   segments: AudiobookDialogueSegment[];
   annotatedAt?: string | null;
+  /**
+   * 硬失败/整章回退等用户可见错误。
+   * 不得把「已用规则装配成功」写进本字段——那类诊断用 assemblyNote。
+   * 门禁 isWholeChapterNarratorFallback **不**再把非空 error 当旁白回退。
+   */
   error?: string | null;
-  /** 正文超过 annotate 截断阈值（28k）时 true */
+  /**
+   * 非致命装配说明（如 LLM 失败后 L1 规则成功、ops 注入来源）。
+   * 进 qualityWarnings，不触发 narrator_fallback。
+   */
+  assemblyNote?: string | null;
+  /**
+   * LLM 未覆盖全章正文时 true（旧路径单窗截断；或分块失败且无规则补洞时）。
+   * 分块 diarize/annotate 覆盖全章（含失败块规则补齐）则为 false。
+   * UI 勿再写死「正文截断 28k」。
+   */
   contentTruncated?: boolean;
   /** 段级表演统计；mode=off 时也可有零值 */
   deliveryStats?: AudiobookDeliveryChapterStats | null;
   /** 通道/分轨质量；缺省表示旧任务未计算 */
   diarizeStats?: AudiobookDiarizeChapterStats | null;
   /**
-   * 整章旁白回退标记（与 error 文案双写；门禁优先读本字段）。
-   * buildNarratorOnlyAnnotation 恒 true（空章除外可仍 true）。
+   * 整章旁白回退标记。门禁只认本字段 / diarizeStats 同名字段，不认 error 字符串。
+   * buildNarratorOnlyAnnotation 恒 true。
    */
   wholeChapterNarratorFallback?: boolean;
   /**
@@ -353,6 +373,11 @@ export interface AudiobookChapterAnnotation {
    * resume 时与当前 chapter.content 不一致则 reannotate，避免改稿后盲用旧音。
    */
   contentSha1?: string | null;
+  /**
+   * 装配来源（与 diarizeStats.assemblySource 对齐的顶层快照）。
+   * inject / 运维脚本应优先读本字段；旧注解可能仅有 diarizeStats。
+   */
+  assemblySource?: "llm" | "llm_rules_hybrid" | "rules" | "narrator_fallback" | null;
 }
 
 export interface CreateAudiobookTaskInput {

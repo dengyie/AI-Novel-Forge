@@ -116,9 +116,13 @@ export const audiobookChapterDiarizePrompt: PromptAsset<
       "5. character 的 speakerName 尽量匹配角色表；外号映射正式名；无法匹配仍写原文称呼。",
       "6. 不要扩写/删剧情；可最小切分与标点整理；单段不宜超过约 500 字。",
       "7. 合并连续同 speaker + 同 segmentKind 的短句。",
-      "8. 覆盖整章主线；不要空 segments。",
+      "8. 覆盖**本段输入正文**主线（可能是整章，也可能是超长章的一块）；不要空 segments；不要假设你见过前后章或其它块。",
       "9. narrator 的 speakerName 可写「旁白」；typed/chat 可用「打字」「消息」。",
       "10. 若提供了「规则预切摘要」，应对齐其中的 quote，不要把应出声对白整段吞进 narration。",
+      "11. 角色归属只根据本段正文 + 角色表判断，禁止跨章/全文推断。",
+      "12. **phone vs on_screen**：电话/通话/听筒/那头传来/手机里说 → phone（要出声 tts）；只有屏幕上的文字/告示/UI 标签/弹窗提示 → on_screen（skip）。禁止把口头短句「吃饭了吗」「吃了」「在吗」标成 on_screen。",
+      "13. **口头发声优先**：带「说/道/问/喊/答/回」「电话里」「那边说」的引号 → speech 或 phone，绝不要 typed/chat/on_screen。",
+      "14. 无说话人线索但明显是当面/电话对话的引号 → 仍标 speech（或 phone），speakerName 写能推断的称呼；不要为了「安全」标 on_screen skip。",
     ];
 
     return [
@@ -126,6 +130,7 @@ export const audiobookChapterDiarizePrompt: PromptAsset<
       new HumanMessage(
         [
           `章节：第 ${input.chapterOrder} 章 ${input.chapterTitle}`,
+          "范围：仅下方「正文」片段（按章/按块调用；非全书）。",
           `默认旁白标签：${input.narratorLabel}`,
           "",
           "角色表：",

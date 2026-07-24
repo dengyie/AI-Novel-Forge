@@ -279,14 +279,18 @@ function parseAnnotationsJson(json: string | null | undefined): AudiobookChapter
     if (!Array.isArray(parsed)) {
       return [];
     }
-    return parsed.filter((item): item is AudiobookChapterAnnotation => {
-      return Boolean(
-        item
-        && typeof item === "object"
-        && typeof (item as AudiobookChapterAnnotation).chapterId === "string"
-        && Array.isArray((item as AudiobookChapterAnnotation).segments),
-      );
-    });
+    // 延迟 require：避免 TaskService ↔ AnnotationService 循环依赖
+    const { normalizeAnnotationDiagnostics } = require("./AudiobookAnnotationService") as typeof import("./AudiobookAnnotationService");
+    return parsed
+      .filter((item): item is AudiobookChapterAnnotation => {
+        return Boolean(
+          item
+          && typeof item === "object"
+          && typeof (item as AudiobookChapterAnnotation).chapterId === "string"
+          && Array.isArray((item as AudiobookChapterAnnotation).segments),
+        );
+      })
+      .map((item) => normalizeAnnotationDiagnostics(item));
   } catch {
     return [];
   }
@@ -298,11 +302,14 @@ function collectAnnotationWarnings(annotations: AudiobookChapterAnnotation[]): s
     if (annotation.error?.trim()) {
       warnings.push(`第 ${annotation.chapterOrder} 章：${annotation.error.trim()}`);
     }
+    if (annotation.assemblyNote?.trim()) {
+      warnings.push(`第 ${annotation.chapterOrder} 章：${annotation.assemblyNote.trim()}`);
+    }
     if (annotation.wholeChapterNarratorFallback || annotation.diarizeStats?.wholeChapterNarratorFallback) {
       warnings.push(`第 ${annotation.chapterOrder} 章：整章旁白回退（cast 不通过）`);
     }
     if (annotation.contentTruncated) {
-      warnings.push(`第 ${annotation.chapterOrder} 章：正文超 28k，标注仅见前部`);
+      warnings.push(`第 ${annotation.chapterOrder} 章：正文超窗且未分块覆盖，标注可能不全`);
     }
     const d = annotation.diarizeStats;
     if (d && !d.castOk && d.failReasons?.length) {
@@ -335,7 +342,7 @@ function collectAnnotationWarnings(annotations: AudiobookChapterAnnotation[]): s
   return warnings;
 }
 
-/** 仅统计「整章旁白回退」；优先 wholeChapterNarratorFallback，兼容旧 error 文案 */
+/** 仅统计「整章旁白回退」；只认 wholeChapterNarratorFallback 布尔位 */
 function countNarratorFallbackChapters(annotations: AudiobookChapterAnnotation[]): number {
   return annotations.filter((item) => isWholeChapterNarratorFallback(item)).length;
 }

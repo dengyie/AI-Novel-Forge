@@ -11,6 +11,10 @@ import type {
   AudiobookRenderPolicy,
 } from "@ai-novel/shared/types/audiobook";
 import { defaultRenderPolicyForKind } from "./renderPolicy";
+import {
+  guestStyleForUnresolvedName,
+  pickGuestPresetVoice,
+} from "./guestVoice";
 import { runRuleSpanPass, type RuleSpan } from "./ruleSpanPass";
 
 export interface RuleAssemblyInput {
@@ -180,32 +184,35 @@ function pushSpanSegment(
     return;
   }
 
-  // 有 speakerHint 但未匹配 → unresolved 旁白声
+  // 有 speakerHint 但未匹配 → unresolved + 路人 preset（与旁白可辨）
   if (span.speakerHint?.trim()) {
+    const hint = span.speakerHint.trim();
+    const guestVoice = pickGuestPresetVoice(hint, narrator.voice);
+    const guestStyle = guestStyleForUnresolvedName(hint);
     segments.push({
       index: segments.length,
       speakerKind: "narrator",
       characterId: null,
-      speakerLabel: span.speakerHint.trim(),
+      speakerLabel: hint,
       text,
       segmentKind,
       renderPolicy: "tts",
       channelHint: span.channelHint ?? "speech",
       quoteSpanIds: [span.id],
       ttsMode: "preset",
-      voice: narrator.voice,
-      style: narrator.style,
-      baseStyle: narrator.style,
+      voice: guestVoice,
+      style: guestStyle,
+      baseStyle: guestStyle,
       delivery: null,
       deliveryMergeKey: "none",
       speakerUnresolved: true,
-      unresolvedSpeakerName: span.speakerHint.trim(),
+      unresolvedSpeakerName: hint,
       diarizeConfidence: 0.4,
     });
     return;
   }
 
-  // 无说话人线索的 quote：仍标 speech 但旁白声 + unresolved 空名，便于 coverage 计 spoken
+  // 无说话人线索的 quote：speech + 旁白声 + unresolved，便于 coverage 计 spoken 且进 cast 分母
   // 产品选择：宁可旁白念对白也不丢 coverage；LLM 路径应补 speaker
   segments.push({
     index: segments.length,
@@ -223,6 +230,8 @@ function pushSpanSegment(
     baseStyle: narrator.style,
     delivery: null,
     deliveryMergeKey: "none",
+    speakerUnresolved: true,
+    unresolvedSpeakerName: null,
     diarizeConfidence: 0.35,
   });
 }

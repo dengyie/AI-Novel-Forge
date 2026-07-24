@@ -13,6 +13,7 @@ import { AppError } from "../../middleware/errorHandler";
 import {
   audiobookAnnotationService,
   hashAudiobookChapterContent,
+  normalizeAnnotationDiagnostics,
 } from "./AudiobookAnnotationService";
 import { expandSegmentsToChunkJobs } from "./audiobookChunk";
 import {
@@ -361,14 +362,16 @@ function loadExistingAnnotations(annotationsJson: string | null | undefined): Au
     if (!Array.isArray(parsed)) {
       return [];
     }
-    return parsed.filter((item): item is AudiobookChapterAnnotation => {
-      return Boolean(
-        item
-        && typeof item === "object"
-        && typeof (item as AudiobookChapterAnnotation).chapterId === "string"
-        && Array.isArray((item as AudiobookChapterAnnotation).segments),
-      );
-    });
+    return parsed
+      .filter((item): item is AudiobookChapterAnnotation => {
+        return Boolean(
+          item
+          && typeof item === "object"
+          && typeof (item as AudiobookChapterAnnotation).chapterId === "string"
+          && Array.isArray((item as AudiobookChapterAnnotation).segments),
+        );
+      })
+      .map((item) => normalizeAnnotationDiagnostics(item));
   } catch {
     return [];
   }
@@ -397,7 +400,7 @@ function readAnnotationFile(taskDir: string, chapterId: string): AudiobookChapte
     if (!parsed?.chapterId || !Array.isArray(parsed.segments)) {
       return null;
     }
-    return parsed;
+    return normalizeAnnotationDiagnostics(parsed);
   } catch {
     return null;
   }
@@ -541,8 +544,11 @@ function collectQualityWarnings(annotations: AudiobookChapterAnnotation[]): stri
     if (annotation.error?.trim()) {
       warnings.push(`第 ${annotation.chapterOrder} 章：${annotation.error.trim()}`);
     }
+    if (annotation.assemblyNote?.trim()) {
+      warnings.push(`第 ${annotation.chapterOrder} 章：${annotation.assemblyNote.trim()}`);
+    }
     if (annotation.contentTruncated) {
-      warnings.push(`第 ${annotation.chapterOrder} 章：正文超 28k，标注仅见前部`);
+      warnings.push(`第 ${annotation.chapterOrder} 章：正文超窗且未分块覆盖，标注可能不全`);
     }
     const stats = annotation.deliveryStats;
     if (stats && stats.deliveryPeeled > 0) {
@@ -817,9 +823,10 @@ export class AudiobookPipelineService {
       const annotationForPersist: AudiobookChapterAnnotation = {
         ...annotation,
         segments: reconciledSegments,
-        error: orphanNote
-          ? [annotation.error?.trim(), orphanNote].filter(Boolean).join("；")
-          : annotation.error,
+        // orphan 是 cast 降级诊断，不进 error（避免旧逻辑/UI 当成硬失败旁白回退）
+        assemblyNote: orphanNote
+          ? [annotation.assemblyNote?.trim(), orphanNote].filter(Boolean).join("；")
+          : annotation.assemblyNote,
       };
       const annotationIndex = annotations.findIndex((item) => item.chapterId === chapter.id);
       if (annotationIndex >= 0) {

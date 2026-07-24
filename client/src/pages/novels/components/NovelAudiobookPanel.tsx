@@ -914,9 +914,30 @@ function TaskAnnotationsPanel(props: {
                     </div>
                   ) : null}
                 </div>
-                {annotation.error ? (
-                  <div className="mt-2 text-xs leading-5 text-amber-800">回退：{annotation.error}</div>
-                ) : null}
+                {(() => {
+                  // 旧任务可能把「已用规则装配」写进 error；门禁已不认，UI 也不得标「回退」
+                  const rawError = annotation.error?.trim() || "";
+                  const rawNote = annotation.assemblyNote?.trim() || "";
+                  const legacyAssembly =
+                    Boolean(rawError)
+                    && annotation.wholeChapterNarratorFallback !== true
+                    && annotation.diarizeStats?.wholeChapterNarratorFallback !== true
+                    && /已用规则装配|规则装配成功|规则装配：/.test(rawError);
+                  const hardError = legacyAssembly ? "" : rawError;
+                  const note = legacyAssembly
+                    ? (rawNote ? (rawNote.includes(rawError) ? rawNote : `${rawNote}；${rawError}`) : rawError)
+                    : rawNote;
+                  return (
+                    <>
+                      {hardError ? (
+                        <div className="mt-2 text-xs leading-5 text-amber-800">回退：{hardError}</div>
+                      ) : null}
+                      {note ? (
+                        <div className="mt-2 text-xs leading-5 text-amber-800/90">说明：{note}</div>
+                      ) : null}
+                    </>
+                  );
+                })()}
                 <div className="mt-2 space-y-1">
                   {(() => {
                     const expanded = Boolean(expandedChapterIds[annotation.chapterId]);
@@ -986,10 +1007,10 @@ function TaskAnnotationsPanel(props: {
                         : ""}{(annotation.deliveryStats.unresolvedSpeakerCount ?? 0) > 0
                         ? ` · 未匹配 ${annotation.deliveryStats.unresolvedSpeakerCount}`
                         : ""}
-                      {annotation.contentTruncated ? " · 正文截断 28k" : ""}
+                      {annotation.contentTruncated ? " · LLM 覆盖不全（超窗未分块补齐）" : ""}
                     </div>
                   ) : annotation.contentTruncated ? (
-                    <div className="pt-1 text-[11px] leading-5 text-amber-800">正文截断 28k</div>
+                    <div className="pt-1 text-[11px] leading-5 text-amber-800">LLM 覆盖不全（超窗未分块补齐）</div>
                   ) : null}
                 </div>
               </div>

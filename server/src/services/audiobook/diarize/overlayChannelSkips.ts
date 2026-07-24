@@ -39,10 +39,56 @@ function spanToSkipSegment(
   };
 }
 
+/** 在原文中定位 skip 正文（带/不带常见引号）。 */
+function findSkipHit(raw: string, spanText: string): { hit: string; at: number } | null {
+  const trimmed = spanText.replace(/\r\n/g, "\n").trim();
+  if (!trimmed) return null;
+  const candidates = [
+    trimmed,
+    `「${trimmed}」`,
+    `“${trimmed}”`,
+    `"${trimmed}"`,
+    `'${trimmed}'`,
+    `『${trimmed}』`,
+  ];
+  let best: { hit: string; at: number } | null = null;
+  for (const c of candidates) {
+    const at = raw.indexOf(c);
+    if (at >= 0 && (best == null || at < best.at)) {
+      best = { hit: c, at };
+    }
+  }
+  if (best) return best;
+
+  // 归一化后包含：在 raw 上去空白对齐 needle（仅短 needle，避免误切）
+  const needle = norm(trimmed);
+  if (needle.length < 2) return null;
+  const hay = norm(raw);
+  const normAt = hay.indexOf(needle);
+  if (normAt < 0) return null;
+
+  // 将 norm 下标映射回 raw：顺序扫 raw 累计非空白
+  let normIdx = 0;
+  let rawStart = -1;
+  let rawEnd = -1;
+  for (let i = 0; i < raw.length; i += 1) {
+    if (/\s/.test(raw[i]!)) continue;
+    if (normIdx === normAt) rawStart = i;
+    if (normIdx === normAt + needle.length - 1) {
+      rawEnd = i + 1;
+      break;
+    }
+    normIdx += 1;
+  }
+  if (rawStart < 0 || rawEnd < 0) return null;
+  return { hit: raw.slice(rawStart, rawEnd), at: rawStart };
+}
+
 /**
  * 将 typed/chat/on_screen span 从可合成段中剥离为 skip 段。
  * - 段文本 ≈ span → 整段改 skip
- * - 段包含 span → 尝试按「…」切开（简单 split）
+ * - 段包含 span → 按命中切开
+ * - 同一段可被多个 skip span 依次切开（每轮只消费一个 span 的一处命中）
  */
 export function overlayChannelSkips(
   content: string,
@@ -66,42 +112,43 @@ export function overlayChannelSkips(
     let consumed = false;
 
     for (const seg of result) {
+      // 已是 skip 通道：不再二次切开
+      if (seg.renderPolicy === "skip"
+        && (seg.segmentKind === "typed" || seg.segmentKind === "chat" || seg.segmentKind === "on_screen")
+      ) {
+        next.push(seg);
+        continue;
+      }
+
       const hay = norm(seg.text);
       if (!hay || consumed) {
         next.push(seg);
         continue;
       }
 
-      // 整段就是该 span（或几乎）
-      if (hay === needle || (needle.length >= 2 && hay === needle)) {
+      // 整段就是该 span（归一化相等，或 span 几乎占满整段）
+      const almostWhole =
+        hay === needle
+        || (needle.length >= 2 && hay.includes(needle) && needle.length / hay.length >= 0.85);
+      if (almostWhole) {
         next.push(spanToSkipSegment(span, seg, next.length));
         consumed = true;
         continue;
       }
 
-      // 段内包含 span 原文（带引号或不带）
-      const raw = seg.text;
-      const candidates = [
-        span.text,
-        `「${span.text}」`,
-        `“${span.text}”`,
-        `"${span.text}"`,
-      ];
-      let hit: string | null = null;
-      let hitAt = -1;
-      for (const c of candidates) {
-        const at = raw.indexOf(c);
-        if (at >= 0) {
-          hit = c;
-          hitAt = at;
-          break;
-        }
-      }
-      if (hit == null || hitAt < 0) {
+      if (!hay.includes(needle)) {
         next.push(seg);
         continue;
       }
 
+      const hitInfo = findSkipHit(seg.text, span.text);
+      if (hitInfo == null) {
+        next.push(seg);
+        continue;
+      }
+
+      const { hit, at: hitAt } = hitInfo;
+      const raw = seg.text;
       const before = raw.slice(0, hitAt).trim();
       const after = raw.slice(hitAt + hit.length).trim();
       if (before) {
