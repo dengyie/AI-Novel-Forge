@@ -61,12 +61,28 @@ jobs:
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             COMPONENTS="${{ inputs.components }}"
           else
-            # tag 默认 server-client；可用 message 后缀 #server 覆盖（可选）
+            # tag 默认 server-client。
+            # 覆盖来源（任一命中）：annotated tag 注解、tag 名后缀、commit message。
+            # 例：git tag -a deploy/<sha12> -m "prod #server" && git push origin deploy/<sha12>
+            # 或：deploy/<sha12>-server / deploy/<sha12>-all
             COMPONENTS="server-client"
-            if git show -s --format=%B "$SHA" | grep -qE '(^| )#server($| )'; then
+            MSG="$(git show -s --format=%B "$SHA" 2>/dev/null || true)"
+            if [[ "${{ github.ref_type }}" == "tag" ]]; then
+              TAG_MSG="$(git for-each-ref --format='%(contents)' "refs/tags/${{ github.ref_name }}" 2>/dev/null || true)"
+              MSG="${TAG_MSG}"$'\n'"${MSG}"
+              REF_NAME="${{ github.ref_name }}"
+              # 仅认明确后缀，避免 sha 偶然含 server/all 字样误匹配
+              if [[ "$REF_NAME" == *-server ]]; then
+                COMPONENTS="server"
+              fi
+              if [[ "$REF_NAME" == *-all ]]; then
+                COMPONENTS="all"
+              fi
+            fi
+            if printf '%s' "$MSG" | grep -qE '(^|[[:space:]])#server($|[[:space:]])'; then
               COMPONENTS="server"
             fi
-            if git show -s --format=%B "$SHA" | grep -qE '(^| )#all($| )'; then
+            if printf '%s' "$MSG" | grep -qE '(^|[[:space:]])#all($|[[:space:]])'; then
               COMPONENTS="all"
             fi
           fi
@@ -241,25 +257,32 @@ jobs:
           set -euo pipefail
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
+          # 私钥末尾保证换行，避免 OpenSSH 拒读
           printf '%s\n' "$PXED_SSH_KEY" > ~/.ssh/pxed_deploy_key
           chmod 600 ~/.ssh/pxed_deploy_key
           PORT="${PXED_SSH_PORT:-22}"
+          HOST_KEY_CHECK="accept-new"
           if [[ -n "${PXED_SSH_KNOWN_HOSTS:-}" ]]; then
             printf '%s\n' "$PXED_SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+            HOST_KEY_CHECK="yes"
           else
-            ssh-keyscan -p "$PORT" -H "$PXED_SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+            echo "::warning::PXED_SSH_KNOWN_HOSTS empty; falling back to ssh-keyscan + accept-new (TOFU)"
+            ssh-keyscan -p "$PORT" "$PXED_SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
           fi
           chmod 644 ~/.ssh/known_hosts
-          cat > ~/.ssh/config <<EOF
-          Host pxed-deploy
-            HostName ${PXED_SSH_HOST}
-            User ${PXED_SSH_USER}
-            Port ${PORT}
-            IdentityFile ~/.ssh/pxed_deploy_key
-            IdentitiesOnly yes
-            StrictHostKeyChecking accept-new
-          EOF
+          {
+            echo "Host pxed-deploy"
+            echo "  HostName ${PXED_SSH_HOST}"
+            echo "  User ${PXED_SSH_USER}"
+            echo "  Port ${PORT}"
+            echo "  IdentityFile ~/.ssh/pxed_deploy_key"
+            echo "  IdentitiesOnly yes"
+            echo "  StrictHostKeyChecking ${HOST_KEY_CHECK}"
+            echo "  ServerAliveInterval 30"
+            echo "  ServerAliveCountMax 3"
+          } > ~/.ssh/config
           chmod 600 ~/.ssh/config
+          ssh -G pxed-deploy | head -20
 
       - name: Upload packages + remote cutover
         env:
@@ -290,6 +313,8 @@ jobs:
           fi
 
           # shellcheck disable=SC2029
+          # 不自动回滚：失败时保留 snap 目录，人工按脚本日志 rollback hint 处理。
+          # 有运行中的导演/TTS 长任务时请先 drain 再 Approve。
           ssh pxed-deploy "env \
             DEPLOY_SHA='$DEPLOY_SHA' \
             DEPLOY_COMPONENTS='$COMPONENTS' \
@@ -303,12 +328,16 @@ jobs:
       - name: Public health check
         run: |
           set -euo pipefail
-          for i in 1 2 3 4 5; do
-            if curl -fsS "https://ainovel.mangoqwq.com/api/health" | head -c 300; then
-              echo
-              curl -fsS "https://ainovel.mangoqwq.com/api/health/ready" | head -c 300
-              echo
-              exit 0
+          for i in 1 2 3 4 5 6 7 8; do
+            if curl -fsS --max-time 20 -o /tmp/pub-health.json "https://ainovel.mangoqwq.com/api/health"; then
+              if grep -q '"success"[[:space:]]*:[[:space:]]*true' /tmp/pub-health.json; then
+                head -c 400 /tmp/pub-health.json; echo
+                curl -fsS --max-time 20 -o /tmp/pub-ready.json "https://ainovel.mangoqwq.com/api/health/ready"
+                head -c 400 /tmp/pub-ready.json; echo
+                exit 0
+              fi
+              echo "health body without success:true (attempt $i)"
+              head -c 200 /tmp/pub-health.json; echo
             fi
             sleep 3
           done

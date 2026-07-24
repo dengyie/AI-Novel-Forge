@@ -4,15 +4,17 @@
 #
 # 环境变量（必填）：
 #   DEPLOY_SHA          目标 git sha（完整或 short）
-#   DEPLOY_COMPONENTS   server | server-client | all（all=server+client+shared 强制）
-#   SERVER_TGZ          本机已 scp 的 server dist 包路径
+#   DEPLOY_COMPONENTS   server | server-client | all
+#   SERVER_TGZ          已 scp 的 server dist 包路径
 # 可选：
-#   CLIENT_TGZ          client dist 包
-#   SHARED_TGZ          shared dist 包
+#   CLIENT_TGZ          client dist 包（server-client|all 必填）
+#   SHARED_TGZ          shared dist 包（始终建议传）
 #   APP_DIR             默认 /personal/pxed/ai-novel
 #   SUPERVISOR_CONF     默认 /personal/pxed/supervisord.conf
 #   SNAPSHOT_ROOT       默认 /data/ainovel/db-snapshots
 #   SKIP_GIT_RESET=1    跳过 git reset（仅 overlay dist；不推荐）
+#   ALLOW_LOCKFILE_DRIFT=1  允许 pnpm-lock 相对 prev tip 变更而不失败（默认失败，需人工 install）
+#   RUN_PNPM_INSTALL=1  lockfile 变更时尝试 pnpm install --frozen-lockfile（慢）
 set -euo pipefail
 
 APP_DIR="${APP_DIR:-/personal/pxed/ai-novel}"
@@ -24,6 +26,8 @@ SERVER_TGZ="${SERVER_TGZ:?SERVER_TGZ required}"
 CLIENT_TGZ="${CLIENT_TGZ:-}"
 SHARED_TGZ="${SHARED_TGZ:-}"
 SKIP_GIT_RESET="${SKIP_GIT_RESET:-0}"
+ALLOW_LOCKFILE_DRIFT="${ALLOW_LOCKFILE_DRIFT:-0}"
+RUN_PNPM_INSTALL="${RUN_PNPM_INSTALL:-0}"
 
 log() { printf '[pxed-cutover] %s\n' "$*"; }
 die() { printf '[pxed-cutover] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -34,6 +38,36 @@ need_file() {
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "missing command: $1"
+}
+
+# 避免 curl|head SIGPIPE（pipefail 下 exit 141）假失败
+http_get() {
+  # usage: http_get URL [out_file]
+  local url="$1"
+  local out="${2:-}"
+  if [[ -n "$out" ]]; then
+    curl --noproxy '*' -fsS --max-time 20 -o "$out" "$url"
+  else
+    curl --noproxy '*' -fsS --max-time 20 -o /tmp/pxed-cutover-http.out "$url"
+    cat /tmp/pxed-cutover-http.out
+  fi
+}
+
+assert_health_json() {
+  local file="$1"
+  local label="$2"
+  [[ -s "$file" ]] || die "$label empty body"
+  # 期望 {"success":true,...}；无 jq 时用 grep
+  if command -v jq >/dev/null 2>&1; then
+    local ok
+    ok="$(jq -r '.success // empty' "$file" 2>/dev/null || true)"
+    [[ "$ok" == "true" ]] || die "$label JSON success!=true body=$(head -c 200 "$file")"
+  else
+    grep -q '"success"[[:space:]]*:[[:space:]]*true' "$file" \
+      || die "$label missing success:true body=$(head -c 200 "$file")"
+  fi
+  head -c 400 "$file"
+  echo
 }
 
 need_cmd tar
@@ -75,26 +109,48 @@ SNAP_DIR="$SNAPSHOT_ROOT/pre-${SHORT_SHA}-${TS}"
 mkdir -p "$SNAP_DIR/db" "$SNAP_DIR/server-dist" "$SNAP_DIR/client-dist" "$SNAP_DIR/shared-dist"
 
 PREV_TIP="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
-PREV_PID="$(supervisorctl -c "$SUPERVISOR_CONF" status novel-server 2>/dev/null | awk '{print $4}' | tr -d ',' || true)"
+# supervisorctl: "novel-server  RUNNING   pid 2735119, uptime ..."
+PREV_STATUS="$(supervisorctl -c "$SUPERVISOR_CONF" status novel-server 2>/dev/null || true)"
+PREV_PID="$(printf '%s' "$PREV_STATUS" | sed -n 's/.*pid \([0-9][0-9]*\).*/\1/p' | head -1)"
+PREV_LOCK_HASH=""
+if [[ -f "$APP_DIR/pnpm-lock.yaml" ]]; then
+  PREV_LOCK_HASH="$(md5sum "$APP_DIR/pnpm-lock.yaml" | awk '{print $1}')"
+fi
+
 {
   echo "prev_tip=$PREV_TIP"
   echo "deploy_sha=$DEPLOY_SHA"
   echo "components=$DEPLOY_COMPONENTS"
-  echo "pid_before=$PREV_PID"
+  echo "pid_before=${PREV_PID:-unknown}"
+  echo "status_before=$PREV_STATUS"
   echo "ts=$TS"
+  echo "db_snapshot=best_effort_live_copy"
   echo "server_tgz=$(basename "$SERVER_TGZ")"
   echo "server_md5=$(md5sum "$SERVER_TGZ" | awk '{print $1}')"
   [[ -n "$CLIENT_TGZ" ]] && echo "client_tgz=$(basename "$CLIENT_TGZ")" && echo "client_md5=$(md5sum "$CLIENT_TGZ" | awk '{print $1}')"
   [[ -n "$SHARED_TGZ" ]] && echo "shared_tgz=$(basename "$SHARED_TGZ")" && echo "shared_md5=$(md5sum "$SHARED_TGZ" | awk '{print $1}')"
+  echo "prev_lock_md5=${PREV_LOCK_HASH:-none}"
 } >"$SNAP_DIR/META"
 
 log "snapshot → $SNAP_DIR"
-# DB（含 wal/shm）
-if compgen -G "$SERVER_DIR/dev.db*" >/dev/null; then
+# DB：热拷 best-effort（服务可能仍在写）。优先 sqlite .backup 若可用。
+if [[ -f "$SERVER_DIR/dev.db" ]] && command -v sqlite3 >/dev/null 2>&1; then
+  if sqlite3 "$SERVER_DIR/dev.db" ".backup '$SNAP_DIR/db/dev.db'" 2>/dev/null; then
+    # 一并留 wal/shm 参考（backup 已合并进 dev.db）
+    echo "db_snapshot=sqlite3_backup" >>"$SNAP_DIR/META"
+    log "db snapshot via sqlite3 .backup"
+  else
+    cp -a "$SERVER_DIR"/dev.db* "$SNAP_DIR/db/" 2>/dev/null || true
+    echo "db_snapshot=best_effort_live_copy" >>"$SNAP_DIR/META"
+    log "warn: sqlite3 .backup failed; fell back to cp -a dev.db*"
+  fi
+elif compgen -G "$SERVER_DIR/dev.db*" >/dev/null; then
   cp -a "$SERVER_DIR"/dev.db* "$SNAP_DIR/db/" || true
+  log "db snapshot via cp -a (no sqlite3 or no dev.db)"
 else
   log "warn: no server/dev.db* found (still continue)"
 fi
+
 if [[ -d "$SERVER_DIR/dist" ]]; then
   tar czf "$SNAP_DIR/server-dist/dist.tgz" -C "$SERVER_DIR" dist
 fi
@@ -107,50 +163,119 @@ fi
 
 if [[ "$SKIP_GIT_RESET" != "1" ]]; then
   log "git fetch + reset --hard $DEPLOY_SHA"
-  # 机上 deploy key 只读 origin；允许按 sha 对齐 tip
   git fetch origin --prune
   if git cat-file -e "${DEPLOY_SHA}^{commit}" 2>/dev/null; then
     git reset --hard "$DEPLOY_SHA"
-  elif git rev-parse --verify "origin/main" >/dev/null 2>&1; then
-    # tag 推送后 fetch 可能只要再拉一次
+  else
     git fetch origin "+refs/heads/main:refs/remotes/origin/main" || true
     git fetch origin "$DEPLOY_SHA" || true
     git cat-file -e "${DEPLOY_SHA}^{commit}" 2>/dev/null || die "cannot resolve DEPLOY_SHA=$DEPLOY_SHA on pxed"
     git reset --hard "$DEPLOY_SHA"
-  else
-    die "git cannot resolve $DEPLOY_SHA"
   fi
   git rev-parse --short HEAD
 else
   log "SKIP_GIT_RESET=1 — source tip not updated"
 fi
 
+# lockfile 漂移门：源 tip 变了但 node_modules 未装 → 易 runtime/generate 炸
+NEW_LOCK_HASH=""
+if [[ -f "$APP_DIR/pnpm-lock.yaml" ]]; then
+  NEW_LOCK_HASH="$(md5sum "$APP_DIR/pnpm-lock.yaml" | awk '{print $1}')"
+fi
+echo "new_lock_md5=${NEW_LOCK_HASH:-none}" >>"$SNAP_DIR/META"
+if [[ -n "$PREV_LOCK_HASH" && -n "$NEW_LOCK_HASH" && "$PREV_LOCK_HASH" != "$NEW_LOCK_HASH" ]]; then
+  log "pnpm-lock.yaml changed ($PREV_LOCK_HASH → $NEW_LOCK_HASH)"
+  if [[ "$RUN_PNPM_INSTALL" == "1" ]]; then
+    log "RUN_PNPM_INSTALL=1 → pnpm install --frozen-lockfile"
+    (
+      cd "$APP_DIR"
+      if command -v pnpm >/dev/null 2>&1; then
+        pnpm install --frozen-lockfile
+      else
+        die "pnpm missing; cannot install after lockfile change"
+      fi
+    )
+  elif [[ "$ALLOW_LOCKFILE_DRIFT" == "1" ]]; then
+    log "warn: ALLOW_LOCKFILE_DRIFT=1 — continuing without install"
+  else
+    die "pnpm-lock.yaml changed vs prev tip. Refusing auto cutover. Options: (1) on pxed run pnpm install --frozen-lockfile then re-tag, (2) re-run with RUN_PNPM_INSTALL=1, (3) ALLOW_LOCKFILE_DRIFT=1 (危险)."
+  fi
+fi
+
+# 原子解包：解到临时目录 → 校验 → rename 切换；失败绝不碰旧 dist
+# （禁止 tar 直接解到 live dist：半截/合并残留旧文件都会坏生产）
 unpack_dist() {
   local tgz="$1"
   local dest_parent="$2"
   local label="$3"
+  local marker="${4:-}"
   need_file "$tgz"
   [[ -d "$dest_parent" ]] || die "dest parent missing for $label: $dest_parent"
-  # 只覆 dist/，不动 storage/tmp 等
-  rm -rf "${dest_parent}/dist"
-  mkdir -p "${dest_parent}/dist"
-  tar xzf "$tgz" -C "${dest_parent}"
-  find "${dest_parent}/dist" -name '._*' -delete 2>/dev/null || true
-  [[ -d "${dest_parent}/dist" ]] || die "$label dist missing after unpack"
-  log "unpacked $label → ${dest_parent}/dist"
+
+  local stage next prev
+  stage="${dest_parent}/.unpack-stage.$$"
+  next="${dest_parent}/dist.next.$$"
+  prev="${dest_parent}/dist.prev.$$"
+  rm -rf "$stage" "$next" "$prev"
+  mkdir -p "$stage"
+
+  # 包内顶层是 dist/（workflow: tar -C <pkg> dist）
+  if ! tar xzf "$tgz" -C "$stage"; then
+    rm -rf "$stage"
+    die "$label tar extract failed (live dist untouched)"
+  fi
+  if [[ ! -d "${stage}/dist" ]]; then
+    rm -rf "$stage"
+    die "$label tar did not contain top-level dist/ (live dist untouched)"
+  fi
+  mv "${stage}/dist" "$next"
+  rm -rf "$stage"
+  find "$next" -name '._*' -delete 2>/dev/null || true
+
+  if [[ -n "$marker" ]]; then
+    if [[ ! -e "$next/$marker" ]]; then
+      rm -rf "$next"
+      die "$label missing marker after unpack: $marker (live dist untouched)"
+    fi
+  fi
+  local count
+  count="$(find "$next" -type f | wc -l | tr -d ' ')"
+  if [[ "$count" -le 0 ]]; then
+    rm -rf "$next"
+    die "$label dist.next has 0 files (live dist untouched)"
+  fi
+
+  # 切换窗口尽量短：旧 dist → prev，next → dist，再删 prev
+  if [[ -d "${dest_parent}/dist" ]]; then
+    mv "${dest_parent}/dist" "$prev"
+  fi
+  if ! mv "$next" "${dest_parent}/dist"; then
+    # 尝试把旧 dist 挪回来
+    if [[ -d "$prev" ]]; then
+      mv "$prev" "${dest_parent}/dist" || true
+    fi
+    rm -rf "$next"
+    die "$label failed to promote dist.next → dist"
+  fi
+  rm -rf "$prev"
+  log "unpacked $label → ${dest_parent}/dist (files=$count)"
 }
 
 log "unpack server dist"
-unpack_dist "$SERVER_TGZ" "$SERVER_DIR" "server"
+unpack_dist "$SERVER_TGZ" "$SERVER_DIR" "server" "app.js"
 
 if [[ -n "$SHARED_TGZ" ]]; then
   log "unpack shared dist"
-  unpack_dist "$SHARED_TGZ" "$APP_DIR/shared" "shared"
+  # shared 入口因包而异；至少保证非空 + 常见 index
+  unpack_dist "$SHARED_TGZ" "$APP_DIR/shared" "shared" ""
+  if [[ ! -e "$APP_DIR/shared/dist/index.js" && ! -e "$APP_DIR/shared/dist/index.mjs" ]]; then
+    log "warn: shared/dist has no index.js|mjs (continue if package layout differs)"
+  fi
 fi
 
 if [[ "$DEPLOY_COMPONENTS" == "server-client" || "$DEPLOY_COMPONENTS" == "all" ]]; then
   log "unpack client dist"
-  unpack_dist "$CLIENT_TGZ" "$APP_DIR/client" "client"
+  unpack_dist "$CLIENT_TGZ" "$APP_DIR/client" "client" "index.html"
 fi
 
 # symlink 纪律（手册 §8.3）
@@ -165,10 +290,18 @@ for link in storage tmp; do
   fi
 done
 
+# dist 标记（手册 §8.1.9）：记录 app.js mtime/size + 可选字符串探针
+if [[ -f "$SERVER_DIR/dist/app.js" ]]; then
+  {
+    echo "server_app_js_md5=$(md5sum "$SERVER_DIR/dist/app.js" | awk '{print $1}')"
+    echo "server_app_js_bytes=$(wc -c <"$SERVER_DIR/dist/app.js" | tr -d ' ')"
+  } >>"$SNAP_DIR/META"
+  log "dist mark server/dist/app.js md5=$(md5sum "$SERVER_DIR/dist/app.js" | awk '{print $1}')"
+fi
+
 log "prisma generate"
 (
   cd "$SERVER_DIR"
-  # 不 export NODE_ENV=production
   if command -v pnpm >/dev/null 2>&1; then
     pnpm prisma:generate
   else
@@ -179,10 +312,10 @@ log "prisma generate"
 log "supervisorctl restart novel-server (once)"
 supervisorctl -c "$SUPERVISOR_CONF" restart novel-server
 
-# 冷启动：给 node 一点时间 LISTEN
+# 冷启动等待
 sleep 3
-for i in 1 2 3 4 5 6 7 8 9 10; do
-  if curl --noproxy '*' -fsS "http://127.0.0.1:3001/api/health" >/dev/null 2>&1; then
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+  if curl --noproxy '*' -fsS --max-time 5 -o /tmp/pxed-h1.json "http://127.0.0.1:3001/api/health" 2>/dev/null; then
     break
   fi
   sleep 2
@@ -191,12 +324,23 @@ done
 log "health checks"
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy || true
 supervisorctl -c "$SUPERVISOR_CONF" status novel-server
-curl --noproxy '*' -fsS "http://127.0.0.1:3001/api/health" | head -c 500 || die "health :3001 failed"
-echo
-curl --noproxy '*' -fsS "http://127.0.0.1:3000/api/health" | head -c 500 || die "health :3000 failed"
-echo
-curl --noproxy '*' -fsS "http://127.0.0.1:3000/api/health/ready" | head -c 500 || die "ready :3000 failed"
-echo
+
+http_get "http://127.0.0.1:3001/api/health" /tmp/pxed-h-3001.json
+assert_health_json /tmp/pxed-h-3001.json "health :3001"
+
+http_get "http://127.0.0.1:3000/api/health" /tmp/pxed-h-3000.json
+assert_health_json /tmp/pxed-h-3000.json "health :3000"
+
+http_get "http://127.0.0.1:3000/api/health/ready" /tmp/pxed-h-ready.json
+# ready 也可能包 success；至少非空
+[[ -s /tmp/pxed-h-ready.json ]] || die "ready :3000 empty"
+if grep -q '"success"' /tmp/pxed-h-ready.json; then
+  assert_health_json /tmp/pxed-h-ready.json "ready :3000"
+else
+  head -c 400 /tmp/pxed-h-ready.json
+  echo
+fi
 
 log "done sha=$(git rev-parse --short HEAD 2>/dev/null || echo "$SHORT_SHA") snap=$SNAP_DIR"
-log "rollback hint: restore $SNAP_DIR/server-dist/dist.tgz → server/dist (+ optional db) then supervisorctl restart novel-server"
+log "rollback: tar xzf $SNAP_DIR/server-dist/dist.tgz -C $SERVER_DIR  (after rm -rf dist) then supervisorctl restart novel-server"
+log "note: failed cutover does NOT auto-rollback; use snap above. Drain long director/TTS jobs before approving next deploy."
