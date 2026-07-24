@@ -64,7 +64,8 @@ import {
   type VoiceBrief,
 } from "./voiceBriefService";
 import { pickLibraryAssetWithLlm } from "./voiceLibraryPickService";
-import { mimoChatAudioTTSProvider } from "./MimoChatAudioTTSProvider";
+import { getEngine } from "./engine/engineRegistry";
+import { buildLegacySynthesisRequest } from "./engine/legacyRequestBridge";
 
 const DEFAULT_PREVIEW_TEXT = DEFAULT_CHARACTER_VOICE_PREVIEW_TEXT;
 export const DEFAULT_PREVIEW_CANDIDATES = 3;
@@ -1099,22 +1100,21 @@ export class AudiobookVoiceAssetService {
     }
 
     const sampleText = clampCharacterVoicePreviewSampleText(input.text?.trim() || DEFAULT_PREVIEW_TEXT);
-    const result = await mimoChatAudioTTSProvider.synthesize({
+    const req = buildLegacySynthesisRequest({
       text: sampleText,
       mode,
       voice: mode === "preset" ? voice : null,
       style,
       designPrompt: mode === "design" ? designPrompt : null,
       refAudioPath: null,
-      format: "wav",
     });
-
+    const synth = await getEngine("mimo").synthesize(req);
     return {
       characterId: null,
       characterName: null,
       ttsMode: mode,
       voice: mode === "preset" ? voice : null,
-      audioBase64: result.audioBase64,
+      audioBase64: synth.audio.toString("base64"),
       format: "wav",
       sampleText,
     };
@@ -1248,29 +1248,32 @@ export class AudiobookVoiceAssetService {
     }> = [];
 
     for (let i = 0; i < candidatesCount; i += 1) {
-      const synth = await mimoChatAudioTTSProvider.synthesize({
+      // M2: 改走 registry → MimoTtsEngine（逐字节等价于旧直连，见
+      // docs/plans/audiobook-synthesis-layering-refactor-design.md §7 M2）。
+      const candidateReq = buildLegacySynthesisRequest({
         text: sampleText,
         mode: ready.mode,
         voice: ready.mode === "preset" ? ready.voice : null,
         style: ready.style,
         designPrompt: ready.mode === "design" ? ready.designPrompt : null,
         refAudioPath: ready.mode === "clone" ? ready.refAudioPath : null,
-        format: "wav",
       });
+      const synth = await getEngine("mimo").synthesize(candidateReq);
+      const synthBase64 = synth.audio.toString("base64");
       let filePath: string;
       try {
         if (candidatesCount === 1 && autoAdopt) {
           filePath = writeCharacterVoicePreviewFromBase64({
             novelId,
             characterId,
-            base64: synth.audioBase64,
+            base64: synthBase64,
           });
         } else {
           filePath = writeCharacterVoicePreviewCandidateFromBase64({
             novelId,
             characterId,
             index: i,
-            base64: synth.audioBase64,
+            base64: synthBase64,
           });
         }
       } catch (error) {
@@ -1280,8 +1283,8 @@ export class AudiobookVoiceAssetService {
         id: `c${i}`,
         index: i,
         path: filePath,
-        durationMs: wavDurationMsFromBase64(synth.audioBase64),
-        base64: synth.audioBase64,
+        durationMs: wavDurationMsFromBase64(synthBase64),
+        base64: synthBase64,
       });
     }
 

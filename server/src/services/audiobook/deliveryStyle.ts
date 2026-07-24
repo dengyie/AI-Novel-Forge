@@ -24,6 +24,44 @@ export const DELIVERY_LINE_MAX = 120;
 export const BASE_STYLE_PREFER_MAX = 120;
 export const MIMO_USER_MAX = 280;
 
+/**
+ * 剥除已编译的表演/叙述/指令行，避免缺 baseStyle 时把「本句表演」再当 base 二次编译。
+ *
+ * 历史上住在 `AudiobookPipelineService`；M3 SynthesisBuilder 需复用，为破环（pipeline↔builder 不能互引），
+ * 迁本模块作为 SoT。`AudiobookPipelineService` 现改成从这里 re-export，旧外部 importer（含单测）零改动。
+ *
+ * SoT: docs/plans/audiobook-synthesis-layering-refactor-design.md §7 M3
+ */
+export function peelCompiledDeliveryMarks(value: string | null | undefined): string | null {
+  if (value == null) return null;
+  const raw = String(value);
+  if (
+    !raw.includes("本句表演：")
+    && !raw.includes("本句叙述：")
+    && !raw.includes("表演指令：")
+    && !raw.includes("保持该角色声线与身份一致")
+  ) {
+    const trimmed = raw.trim();
+    return trimmed || null;
+  }
+  const cleaned = raw
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter((line) => {
+      if (!line) return false;
+      if (line.startsWith("本句表演：") || line.startsWith("本句叙述：") || line.startsWith("表演指令：")) {
+        return false;
+      }
+      if (line.includes("保持该角色声线与身份一致")) {
+        return false;
+      }
+      return true;
+    })
+    .join("\n")
+    .trim();
+  return cleaned || null;
+}
+
 const INTENSITIES = new Set<DeliveryIntensity>(["low", "mid", "high"]);
 const EFFORTS = new Set<DeliveryVocalEffort>([
   "whisper",

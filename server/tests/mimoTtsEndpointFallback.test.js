@@ -18,6 +18,11 @@ const {
   synthesizeChunkWithRetry,
 } = require("../dist/services/audiobook/AudiobookPipelineService.js");
 const {
+  buildChunkSynthesisRequest,
+} = require("../dist/services/audiobook/frontend/synthesisBuilder.js");
+// M2/M3：合成侧改走 engine registry；进程内 synthesizeChunkWithRetry 路径需注册 mimo 引擎。
+require("../dist/services/audiobook/engine/registerBuiltInEngines.js").registerBuiltInEngines();
+const {
   __resetAudiobookTtsTransportCacheForTests,
 } = require("../dist/services/settings/AudiobookTtsTransportSettingsService.js");
 const { AppError } = require("../dist/middleware/errorHandler.js");
@@ -536,10 +541,23 @@ test("synthesizeChunkWithRetry does not multiply full chain when fallback config
     };
     await assert.rejects(
       () => synthesizeChunkWithRetry({
-        text: "防 chain×N。",
-        voice: "茉莉",
-        ttsMode: "preset",
-        provider: "openai",
+        req: buildChunkSynthesisRequest({
+          segment: {
+            index: 0,
+            speakerKind: "narrator",
+            characterId: null,
+            speakerLabel: "旁白",
+            text: "防 chain×N。",
+            ttsMode: "preset",
+            voice: "茉莉",
+            baseStyle: null,
+            baseDesignPrompt: null,
+            refAudioPath: null,
+            delivery: null,
+          },
+          text: "防 chain×N。",
+          provider: "openai",
+        }),
       }),
       (err) => {
         assert.equal(isMimoTtsEndpointChainExhaustedError(err), true);
@@ -578,10 +596,23 @@ test("synthesizeChunkWithRetry primary-only 502 retries up to 3", async () => {
     };
     await assert.rejects(
       () => synthesizeChunkWithRetry({
-        text: "primary retry。",
-        voice: "茉莉",
-        ttsMode: "preset",
-        provider: "openai",
+        req: buildChunkSynthesisRequest({
+          segment: {
+            index: 0,
+            speakerKind: "narrator",
+            characterId: null,
+            speakerLabel: "旁白",
+            text: "primary retry。",
+            ttsMode: "preset",
+            voice: "茉莉",
+            baseStyle: null,
+            baseDesignPrompt: null,
+            refAudioPath: null,
+            delivery: null,
+          },
+          text: "primary retry。",
+          provider: "openai",
+        }),
       }),
       () => {
         assert.equal(fetchCount, 3);

@@ -67,9 +67,11 @@ import {
   startArtifactCheckpointHygieneScanner,
   stopArtifactCheckpointHygieneScanner,
 } from "./services/novel/runtime/ChapterArtifactSyncCheckpointHygiene";
+import { registerBuiltInEngines } from "./services/audiobook/engine/registerBuiltInEngines";
 
 getSharedNovelServices();
 registerNovelEventHandlers(novelEventBus);
+registerBuiltInEngines();
 const novelPipelineRuntimeService = new NovelPipelineRuntimeService();
 
 morgan.token("error-message", (_req, res) => {

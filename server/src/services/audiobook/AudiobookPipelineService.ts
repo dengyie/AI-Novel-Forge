@@ -48,13 +48,18 @@ import { ensureAudiobookTtsTransportCacheWarm } from "../settings/AudiobookTtsTr
 import {
   hasEffectiveMimoTtsMultiEndpointChain,
   isMimoTtsEndpointChainExhaustedError,
-  mimoChatAudioTTSProvider,
 } from "./MimoChatAudioTTSProvider";
+import { getEngine } from "./engine/engineRegistry";
+import type { SynthesisRequest } from "./engine/synthesisRequest";
+import {
+  buildChunkSynthesisRequest,
+  compileDeliveryStyleForSegment,
+} from "./frontend/synthesisBuilder";
 import {
   applyDeliveryToSegment,
   fingerprintStyleParts,
+  peelCompiledDeliveryMarks,
   resolveDeliveryStyleMode,
-  resolveSynthesizeInput,
   shouldApplyDelivery,
 } from "./deliveryStyle";
 
@@ -105,38 +110,10 @@ export type ReconcileAnnotationSegmentsResult = {
   orphanSpeakerLabels: string[];
 };
 
-/**
- * 剥除已编译的表演/叙述/指令行，避免缺 baseStyle 时把「本句表演」再当 base 二次编译。
- */
-export function peelCompiledDeliveryMarks(value: string | null | undefined): string | null {
-  if (value == null) return null;
-  const raw = String(value);
-  if (
-    !raw.includes("本句表演：")
-    && !raw.includes("本句叙述：")
-    && !raw.includes("表演指令：")
-    && !raw.includes("保持该角色声线与身份一致")
-  ) {
-    const trimmed = raw.trim();
-    return trimmed || null;
-  }
-  const cleaned = raw
-    .split(/\n+/)
-    .map((line) => line.trim())
-    .filter((line) => {
-      if (!line) return false;
-      if (line.startsWith("本句表演：") || line.startsWith("本句叙述：") || line.startsWith("表演指令：")) {
-        return false;
-      }
-      if (line.includes("保持该角色声线与身份一致")) {
-        return false;
-      }
-      return true;
-    })
-    .join("\n")
-    .trim();
-  return cleaned || null;
-}
+// M3: peelCompiledDeliveryMarks 已迁 `deliveryStyle.ts`（破 pipeline↔builder 互引环）。
+// 保留 re-export 以维持旧 importer（含 audiobookSynthSotFingerprint / audiobookDeliveryPipeline /
+// audiobookUnresolvedSpeaker 等单测 from dist）零改动。M5 删 peel 时连 re-export 一起清。
+export { peelCompiledDeliveryMarks };
 
 /**
  * 合成前用任务当前 characterVoices / narrator 覆盖段绑定。
@@ -420,22 +397,57 @@ function listExistingChunkPaths(taskDir: string, chapterId: string, expectedCoun
 
 
 /**
+ * M6 灰度开关：`AUDIOBOOK_FP_V2=1` 开启指纹 v2（含 engine.fingerprintKey）。
+ * 关闭（缺省）时指纹形态与旧完全一致——灰度期间既有任务 resume 仍 skip 正常。
+ * 一次定后全量打开即可删除本开关与旧路径（见 doc §6 灰度策略）。
+ */
+export function isAudiobookFingerprintV2Enabled(): boolean {
+  const raw = (process.env.AUDIOBOOK_FP_V2 ?? "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "on";
+}
+
+/**
  * 章内 chunk 布局指纹。
- * D11：style + designPrompt 必须与 TTS 注入一致（resolveChunkSynthesizeFields SoT）；
+ * D11：style + designPrompt 必须与 TTS 注入一致（compileDeliveryStyleForSegment SoT）；
  * 另含 refAudioPath 与全文 sha1，防 clone 换文件/正文中部改写仍 skip。
+ *
+ * M6（P-5）：开启 `AUDIOBOOK_FP_V2` 时追加 `engine.fingerprintKey(req)`（含 engineId + 按
+ * mode 解析的 model 版本），消灭「换 model/换引擎不致缓存失效」。版本号 `v2:` 前缀写进指纹值，
+ * 与旧裸 hash 天然字符串不等 → 旧 `chunk-layout.sha1` 一次性全章 miss、book 重合成一次，
+ * 无需手动清。灰度由 env 控制；关闭时形态与旧完全一致（既有 fingerprint 稳定性测试零回归）。
+ *
+ * 写盘读取：`writeChunkLayoutFingerprint` 直接落本函数返回值（含 `v2:` 前缀时一并写入文件，
+ * 兼当持久化版本标记）；`readChunkLayoutFingerprint` 仅 `.trim()`，原样比对。
  */
 export function chunkLayoutFingerprint(
   jobs: Array<{ text: string; segment: AudiobookDialogueSegment }>,
 ): string {
+  const fpV2 = isAudiobookFingerprintV2Enabled();
   const hash = createHash("sha1");
+  if (fpV2) {
+    // 版本号前缀：与旧裸 hash 字符串不等 → 旧缓存一次性全失效，自然重合成一次
+    hash.update("v2:");
+  }
   for (const job of jobs) {
-    // 与 synthesize 同一 SoT，避免缓存 style 与 peel/recompile 后注入漂移导致错误 skip/wipe
-    const synth = resolveChunkSynthesizeFields(job.segment);
+    // 与 synthesize 同一 SoT（compileDeliveryStyleForSegment），避免缓存 style 与
+    // peel/recompile 后注入漂移导致错误 skip/wipe
+    const synth = compileDeliveryStyleForSegment(job.segment);
     const styleParts = fingerprintStyleParts({
       style: synth.style ?? "",
       designPrompt: synth.designPrompt ?? "",
     });
     const textHash = createHash("sha1").update(job.text).digest("hex").slice(0, 12);
+    if (fpV2) {
+      // P-5：进缓存的引擎身份（engineId + model 版本）。mode→model 映射在 MimoTtsEngine
+      // 一处定义；换 model 或换第二引擎 → fingerprintKey 变 → 章 skip 正确失效。
+      const req = buildChunkSynthesisRequest({
+        segment: job.segment,
+        text: job.text,
+        provider: null,
+      });
+      hash.update(getEngine("mimo").fingerprintKey(req));
+      hash.update("\0");
+    }
     hash.update(speakerKeyFromSegment(job.segment));
     hash.update("\0");
     hash.update(job.segment.ttsMode ?? "preset");
@@ -457,66 +469,18 @@ export function chunkLayoutFingerprint(
 }
 
 /**
- * 合成前唯一解析 style/designPrompt（SoT = base* + delivery）。
+ * @deprecated M3: 逻辑已搬至 `synthesisBuilder.compileDeliveryStyleForSegment`。
+ * 此处保留为薄别名，供旧 importer（含 audiobookSynthSotFingerprint / audiobookUnresolvedSpeaker
+ * 等单测 `from dist`）零改动并可行 golden 对照；M4/M5 稳定后连同 re-export 一并删除。
+ *
  * - 无 delivery：只用干净 base（剥编译标记），不盲信缓存 style/design
  * - 有 delivery：旁白/角色均以干净 base + delivery 重 compile
  */
 export function resolveChunkSynthesizeFields(segment: AudiobookDialogueSegment): {
-  style?: string | null;
-  designPrompt?: string | null;
+  style: string | null;
+  designPrompt: string | null;
 } {
-  const styleRaw = typeof segment.style === "string" ? segment.style : "";
-  const designRaw = typeof segment.designPrompt === "string" ? segment.designPrompt : "";
-  const dirtyStyle = styleRaw.includes("本句表演：")
-    || styleRaw.includes("本句叙述：")
-    || styleRaw.includes("表演指令：");
-  const dirtyDesign = designRaw.includes("表演指令：");
-
-  const baseStyleClean = peelCompiledDeliveryMarks(segment.baseStyle)
-    ?? (dirtyStyle
-      ? peelCompiledDeliveryMarks(segment.style)
-      : (segment.baseStyle ?? segment.style ?? null));
-  const baseDesignClean = peelCompiledDeliveryMarks(segment.baseDesignPrompt)
-    ?? (dirtyDesign
-      ? peelCompiledDeliveryMarks(segment.designPrompt)
-      : (segment.baseDesignPrompt ?? segment.designPrompt ?? null));
-
-  if (!segment.delivery) {
-    return {
-      style: baseStyleClean,
-      designPrompt: baseDesignClean,
-    };
-  }
-
-  if (segment.speakerKind === "narrator") {
-    const rebuilt = applyDeliveryToSegment(
-      {
-        ...segment,
-        style: baseStyleClean,
-        designPrompt: baseDesignClean,
-      },
-      segment.delivery,
-      {
-        deliveryStyleMode: "all",
-        baseStyle: baseStyleClean,
-        baseDesignPrompt: baseDesignClean,
-      },
-    );
-    return {
-      style: rebuilt.style,
-      designPrompt: rebuilt.designPrompt,
-    };
-  }
-
-  return resolveSynthesizeInput({
-    ttsMode: segment.ttsMode,
-    baseStyle: baseStyleClean,
-    baseDesignPrompt: baseDesignClean,
-    style: baseStyleClean,
-    designPrompt: baseDesignClean,
-    delivery: segment.delivery,
-    text: segment.text,
-  });
+  return compileDeliveryStyleForSegment(segment);
 }
 
 function resolveChunkLayoutPath(taskDir: string, chapterId: string): string {
@@ -581,15 +545,14 @@ export function resolveSynthesizeChunkMaxAttempts(maxAttempts?: number): number 
   return Math.max(1, maxAttempts ?? defaultAttempts);
 }
 
-/** @internal 导出供门禁单测；生产仅 pipeline 调用。 */
+/**
+ * @internal 导出供门禁单测；生产仅 pipeline 调用。
+ *
+ * M3: 形参从「散字段 + provider」收敛为单个 `SynthesisRequest`（由 SynthesisBuilder 一次编译）。
+ * 重试语义、warm cache、状态码分流、chain-exhausted 短路与旧实现逐字节等价。
+ */
 export async function synthesizeChunkWithRetry(input: {
-  text: string;
-  voice: string;
-  style?: string | null;
-  ttsMode?: string | null;
-  designPrompt?: string | null;
-  refAudioPath?: string | null;
-  provider?: LLMProvider | null;
+  req: SynthesisRequest;
   signal?: AbortSignal;
   maxAttempts?: number;
 }): Promise<Buffer> {
@@ -607,20 +570,8 @@ export async function synthesizeChunkWithRetry(input: {
   let lastError: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
-      const modeRaw = input.ttsMode?.trim();
-      const mode = modeRaw === "design" || modeRaw === "clone" ? modeRaw : "preset";
-      const result = await mimoChatAudioTTSProvider.synthesize({
-        text: input.text,
-        mode,
-        voice: input.voice,
-        style: input.style,
-        designPrompt: input.designPrompt,
-        refAudioPath: input.refAudioPath,
-        format: "wav",
-        provider: input.provider ?? undefined,
-        signal: input.signal,
-      });
-      return Buffer.from(result.audioBase64, "base64");
+      const synth = await getEngine("mimo").synthesize(input.req, { signal: input.signal });
+      return synth.audio;
     } catch (error) {
       lastError = error;
       if (input.signal?.aborted) {
@@ -919,15 +870,15 @@ export class AudiobookPipelineService {
           chapterProgress: snapshotChapterProgress(),
         });
 
-        const synth = resolveChunkSynthesizeFields(job.segment);
-        const audioBuffer = await synthesizeChunkWithRetry({
+        // M3: SynthesisBuilder 一次编译 delivery，产出 SynthesisRequest；retry wrapper 直接消费。
+        // golden 等价于旧 resolveChunkSynthesizeFields(job.segment) → synthesizeChunkWithRetry(扁平字段)
+        const req = buildChunkSynthesisRequest({
+          segment: job.segment,
           text: job.text,
-          voice: job.segment.voice,
-          style: synth.style,
-          ttsMode: job.segment.ttsMode,
-          designPrompt: synth.designPrompt,
-          refAudioPath: job.segment.refAudioPath,
-          provider: input.provider,
+          provider: input.provider ?? null,
+        });
+        const audioBuffer = await synthesizeChunkWithRetry({
+          req,
           signal: input.signal,
         });
         if (!isValidPcmWavBuffer(audioBuffer)) {

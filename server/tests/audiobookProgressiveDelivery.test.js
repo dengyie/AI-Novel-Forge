@@ -25,6 +25,11 @@ const {
   listReadyChapterAudioIds,
 } = require(pathsHelpersPath);
 
+// M2：合成侧改成 getEngine("mimo").synthesize()，registry 默认在 server 启动时注册；
+// 进程内驱动整条 pipeline.run 的 test 需手动注册一次（幂等），否则 TtsEngine not registered。
+// MimoTtsEngine.synthesize 委派给 mimoChatAudioTTSProvider 单例，故下面的 monkey-patch 仍生效。
+require("../dist/services/audiobook/engine/registerBuiltInEngines.js").registerBuiltInEngines();
+
 function tinyWavBase64() {
   const pcm = createSilentPcm(50, 24_000, 1);
   const buf = buildWavBuffer(pcm, { numChannels: 1, sampleRate: 24_000, bitsPerSample: 16 });
