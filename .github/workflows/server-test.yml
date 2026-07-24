@@ -53,6 +53,15 @@ jobs:
       - name: Generate Prisma client
         run: pnpm --filter @ai-novel/server prisma:generate
 
+      # Fast suite 里不少 mock 测试仍会漏打真实 prisma（character/appSetting/chapter 等）。
+      # 无 schema 时 DriverAdapterError: TableDoesNotExist 整片红；本地靠 ensure-dev-prisma
+      # 推过 file:./dev.db，CI 此前只 generate 不 push。
+      - name: Push sqlite schema for tests
+        env:
+          DATABASE_URL: file:./dev.db
+          AI_NOVEL_DATABASE_MODE: sqlite
+        run: pnpm --filter @ai-novel/server prisma:push
+
       - name: Typecheck server
         run: pnpm --filter @ai-novel/server typecheck
 
@@ -64,4 +73,6 @@ jobs:
           # process isolation 防跨测试污染；CI 上提高并发
           TEST_ISOLATION: process
           TEST_CONCURRENCY: "6"
+          DATABASE_URL: file:./dev.db
+          AI_NOVEL_DATABASE_MODE: sqlite
         run: pnpm --filter @ai-novel/server test:node
