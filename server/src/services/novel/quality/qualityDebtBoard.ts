@@ -42,6 +42,11 @@ export interface QualityDebtChapterRow {
   generationState?: string | null;
   chapterStatus?: string | null;
   riskFlags?: string | null;
+  /**
+   * 可选：正文级 pad 扫词结果覆盖（Volume Readiness assess 注入）。
+   * 缺省时从 qualityLoop signals 的 prose_pad_phrase 计数投影。
+   */
+  padHitCountOverride?: number | null;
 }
 
 /** 债板可见的最新 QFP 摘要（不回传完整 evidence 列表，避免 UI 噪声）。 */
@@ -79,6 +84,12 @@ export interface QualityDebtBoardItem {
   residualRiskScore: number | null;
   /** 最新 QFP 摘要（无 feedback → null） */
   latestFeedback: QualityDebtBoardFeedbackSummary | null;
+  /**
+   * 垫长/套话命中数（prose_pad_phrase）。
+   * 优先读 qualityLoop.signals 聚合；缺 content 扫描时由 caller 注入 padHitCountOverride。
+   * null = 不可解析。
+   */
+  padHitCount: number | null;
 }
 
 export interface QualityDebtBoardSummary {
@@ -432,6 +443,52 @@ export function extractResidualRiskScoreFromQualityLoop(
   return null;
 }
 
+/**
+ * 从 qualityLoop.signals 投影 padHitCount。
+ * 约定：issueCodes 含 prose_pad_phrase 时，优先读 signal.metrics.padHitCount / hitCount；
+ * 否则对 code 计数；无信号 → null。
+ */
+export function extractPadHitCountFromQualityLoop(
+  qualityLoop: Record<string, unknown> | null | undefined,
+): number | null {
+  if (!qualityLoop) {
+    return null;
+  }
+  const signals = Array.isArray(qualityLoop.signals) ? qualityLoop.signals : [];
+  let total = 0;
+  let found = false;
+  for (const signal of signals) {
+    if (!isRecord(signal)) {
+      continue;
+    }
+    if (signal.artifactType === "prose_quality" || signal.artifactType === "prose_pad") {
+      const metrics = isRecord(signal.metrics) ? signal.metrics : null;
+      const fromMetrics = metrics
+        && (typeof metrics.padHitCount === "number"
+          ? metrics.padHitCount
+          : typeof metrics.hitCount === "number"
+            ? metrics.hitCount
+            : null);
+      if (typeof fromMetrics === "number" && Number.isFinite(fromMetrics)) {
+        total += Math.max(0, Math.floor(fromMetrics));
+        found = true;
+        continue;
+      }
+    }
+    const codes = Array.isArray(signal.issueCodes) ? signal.issueCodes : [];
+    const padCodes = codes.filter((code) => code === "prose_pad_phrase");
+    if (padCodes.length > 0) {
+      found = true;
+      total += padCodes.length;
+    }
+  }
+  // top-level convenience field (readiness evaluateOnly 可写)
+  if (typeof qualityLoop.padHitCount === "number" && Number.isFinite(qualityLoop.padHitCount)) {
+    return Math.max(0, Math.floor(qualityLoop.padHitCount));
+  }
+  return found ? total : null;
+}
+
 function projectLatestFeedbackSummary(
   qualityLoop: Record<string, unknown>,
 ): QualityDebtBoardFeedbackSummary | null {
@@ -491,6 +548,10 @@ export function buildQualityDebtBoardItem(
     styleClear: projectStyleClearFromQualityLoop(qualityLoop),
     residualRiskScore: extractResidualRiskScoreFromQualityLoop(qualityLoop),
     latestFeedback: projectLatestFeedbackSummary(qualityLoop),
+    padHitCount: typeof chapter.padHitCountOverride === "number"
+      && Number.isFinite(chapter.padHitCountOverride)
+      ? Math.max(0, Math.floor(chapter.padHitCountOverride))
+      : extractPadHitCountFromQualityLoop(qualityLoop),
   };
 }
 

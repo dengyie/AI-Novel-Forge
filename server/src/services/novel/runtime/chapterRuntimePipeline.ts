@@ -79,6 +79,11 @@ export interface PipelineRuntimeInput extends ChapterRuntimeRequestInput {
    */
   qualityThreshold?: number;
   repairMode?: "detect_only" | "light_repair" | "heavy_repair" | "continuity_only" | "character_only" | "ending_only";
+  /**
+   * polish：章已有 content 时跳过 writer graph，直接进 finalize（风格/验收/L0/双门）。
+   * 空 content 仍会走 writer（与 fast 一致），避免 polish 误清稿。
+   */
+  runMode?: "fast" | "polish";
   /** 取消穿透到 LLM stream；与 onCheckCancelled 互补（轮询间隙 vs 流内中断） */
   signal?: AbortSignal;
 }
@@ -230,6 +235,7 @@ export async function runPipelineChapterWithRuntime(
     qualityThreshold = 75,
     repairMode = "light_repair",
     artifactSyncMode = "adaptive",
+    runMode = "fast",
     signal: cancelSignal,
     ...requestInput
   } = options;
@@ -259,7 +265,9 @@ export async function runPipelineChapterWithRuntime(
 
   for (let attempt = 0; attempt <= effectiveMaxRetries; attempt += 1) {
     await hooks.onCheckCancelled?.();
-    if (!content.trim()) {
+    // polish：已有正文则跳过 writer，直接 finalize（风格/验收/L0）；空稿仍生成。
+    const skipWriterForPolish = runMode === "polish" && content.trim().length > 0;
+    if (!content.trim() && !skipWriterForPolish) {
       const generatedDraft = await generateNonEmptyDraftFromWriter({
         deps,
         novelId,

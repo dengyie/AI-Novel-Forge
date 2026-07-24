@@ -471,6 +471,52 @@ export const repairSchema = llmGenerateSchema.extend({
   auditIssueIds: z.array(z.string().trim().min(1)).optional(),
 });
 
+const volumeReadinessActionFilterSchema = z.enum([
+  "needs_re_review",
+  "needs_patch",
+  "needs_polish",
+  "needs_heavy",
+  "needs_manual",
+]);
+
+export const volumeReadinessQuerySchema = z.object({
+  volumeOrder: z.coerce.number().int().min(1).max(200).optional(),
+  fromOrder: z.coerce.number().int().min(1).optional(),
+  toOrder: z.coerce.number().int().min(1).optional(),
+  refresh: z
+    .union([z.boolean(), z.enum(["true", "false", "1", "0"])])
+    .optional()
+    .transform((value) => value === true || value === "true" || value === "1"),
+});
+
+export const volumeReadinessRunSchema = z.object({
+  volumeOrder: z.number().int().min(1).max(200).optional(),
+  fromOrder: z.number().int().min(1).optional(),
+  toOrder: z.number().int().min(1).optional(),
+  dryRun: z.boolean().optional(),
+  actionFilter: z.array(volumeReadinessActionFilterSchema).max(5).optional(),
+  budget: z.object({
+    maxChapters: z.number().int().min(1).max(500).optional(),
+    maxHeavyRewrites: z.number().int().min(0).max(100).optional(),
+    maxLlmCalls: z.number().int().min(1).max(2000).optional(),
+    maxWallMinutes: z.number().int().min(1).max(24 * 60).optional(),
+  }).optional(),
+  refresh: z.boolean().optional(),
+  resumeFromRunId: z.string().trim().min(1).optional().nullable(),
+}).refine((value) => {
+  if (typeof value.fromOrder === "number" && typeof value.toOrder === "number") {
+    return value.fromOrder <= value.toOrder;
+  }
+  return true;
+}, {
+  message: "fromOrder 必须小于或等于 toOrder。",
+});
+
+export const volumeReadinessRunParamsSchema = z.object({
+  id: z.string().trim().min(1),
+  runId: z.string().trim().min(1),
+});
+
 export const replanSchema = llmGenerateSchema.extend({
   chapterId: z.string().trim().optional(),
   triggerType: z.string().trim().optional(),

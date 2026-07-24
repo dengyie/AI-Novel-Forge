@@ -196,7 +196,35 @@ export class NovelExportService {
     novelId: string,
     format: NovelExportFormat,
     scope: NovelExportScope = "full",
+    options: {
+      requirePublishReady?: boolean;
+      fromOrder?: number;
+      toOrder?: number;
+      volumeOrder?: number;
+    } = {},
   ): Promise<NovelExportResult> {
+    if (options.requirePublishReady === true) {
+      const { volumeReadinessService } = await import(
+        "../../services/novel/volume/VolumeReadinessService"
+      );
+      // 门与导出内容同窗：当前各 format 实际都导出全书（TXT 正文全书；
+      // markdown/json 的 scope 是 section 维度，不按 chapter order 裁切）。
+      // 故 requirePublishReady 一律全书 assess，忽略 volumeOrder/from/to，
+      // 防「卷一绿导出全书含未就绪章」。
+      const report = await volumeReadinessService.assess(novelId, { refresh: false });
+      const notReady = report.chapters.filter((chapter) => chapter.verdict !== "publish_ready");
+      if (notReady.length > 0) {
+        const sample = notReady
+          .slice(0, 8)
+          .map((chapter) => `ch${chapter.chapterOrder}:${chapter.verdict}`)
+          .join(", ");
+        throw new AppError(
+          `导出被发布门拦截（全书）：${notReady.length}/${report.summary.total} 章未达 publish_ready（${sample}${notReady.length > 8 ? "…" : ""}）。`,
+          409,
+        );
+      }
+    }
+
     if (format === "txt") {
       if (scope !== "full") {
         throw new AppError("TXT 导出仅支持整本书正文导出。", 400);

@@ -13,6 +13,7 @@ import { registerNovelFramingRoutes } from "../setup/http/novelFramingRoutes";
 import { registerNovelPlanningRoutes } from "../planning/http/novelPlanningRoutes";
 import { registerNovelProductionRoutes } from "../production/http/novelProductionRoutes";
 import { registerNovelReviewRoutes } from "../production/http/novelReviewRoutes";
+import { registerNovelVolumeReadinessRoutes } from "../production/http/novelVolumeReadinessRoutes";
 import { registerNovelSnapshotCharacterRoutes } from "../characters/http/novelSnapshotCharacterRoutes";
 import { registerNovelStoryMacroRoutes } from "../planning/http/novelStoryMacroRoutes";
 import { registerNovelStorylineRoutes } from "../planning/http/novelStorylineRoutes";
@@ -57,6 +58,9 @@ import {
   volumeDraftSchema,
   volumeGenerateSchema,
   volumeImpactSchema,
+  volumeReadinessQuerySchema,
+  volumeReadinessRunParamsSchema,
+  volumeReadinessRunSchema,
   volumeSyncSchema,
   volumeVersionParamsSchema,
 } from "./novelHttpSchemas";
@@ -206,6 +210,14 @@ export function registerNovelHttpRoutes(router: Router, services: NovelHttpServi
     auditIssueParamsSchema,
     reviewSchema,
     repairSchema,
+  });
+
+  registerNovelVolumeReadinessRoutes({
+    router,
+    idParamsSchema,
+    volumeReadinessQuerySchema,
+    volumeReadinessRunSchema,
+    volumeReadinessRunParamsSchema,
   });
 
   registerNovelProductionRoutes({

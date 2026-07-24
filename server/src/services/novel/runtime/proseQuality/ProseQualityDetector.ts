@@ -2,6 +2,10 @@ import type {
   RuntimeAuditIssue,
   RuntimeAuditReport,
 } from "@ai-novel/shared/types/chapterRuntime";
+import {
+  proseQualityPadConfig,
+  type ProseQualityPadConfig,
+} from "../../../../config/proseQuality";
 
 export type ProseQualityIssueCode =
   | "prose_negative_flip"
@@ -17,6 +21,7 @@ export type ProseQualityIssueCode =
   | "prose_pronoun_subject_stack"
   | "prose_pronoun_density"
   | "prose_pronoun_density_soft"
+  | "prose_pad_phrase"
   | "sot_banned_term"
   | "sot_must_avoid_leak";
 
@@ -39,6 +44,14 @@ export interface ProseQualityReport {
 export interface ProseQualityDetectOptions {
   bannedTerms?: string[] | null;
   mustAvoidTerms?: string[] | null;
+  /** 覆盖默认垫长词表/阈值；缺省用 config/proseQuality。 */
+  pad?: Partial<ProseQualityPadConfig> | null;
+}
+
+/** 垫长词条命中摘要（readiness / debt 投影用，无 finding 截断）。 */
+export interface PadPhraseHitSummary {
+  totalHits: number;
+  byPhrase: Array<{ phrase: string; count: number }>;
 }
 
 export interface ProseQualityAuditReportInput {
@@ -165,12 +178,177 @@ export function detectProseQuality(
   // 指代 AI 味：句首他/她 连续堆叠 + 密度（对话行跳过）。
   scanPronounSubjectStackAndDensity(segments, addFinding);
 
+  // 垫长/套话：确定性扫词；totalHits ≥ hard → high（hasBlockingFindings），不入 non-deferrable code 表以免 medium 误硬门。
+  scanPadPhrases(content, segments, resolvePadConfig(options.pad), addFinding);
+
   return {
     findings,
     hasBlockingFindings: findings.some((finding) => (
       finding.severity === "high" || finding.severity === "critical"
     )),
   };
+}
+
+/**
+ * 全文垫长词命中计数（不经 finding 截断）。
+ * readiness / qualityDebt padHitCount 与 detectProseQuality 共用词表与阈值配置。
+ */
+export function countPadPhraseHits(
+  content: string,
+  padConfig: Partial<ProseQualityPadConfig> | null | undefined = null,
+): PadPhraseHitSummary {
+  const config = resolvePadConfig(padConfig);
+  const byPhrase: Array<{ phrase: string; count: number }> = [];
+  let totalHits = 0;
+  if (!content) {
+    return { totalHits: 0, byPhrase };
+  }
+  for (const phrase of config.phrases) {
+    if (!phrase || phrase.length < 2) {
+      continue;
+    }
+    const count = countSubstringOccurrences(content, phrase);
+    if (count <= 0) {
+      continue;
+    }
+    totalHits += count;
+    byPhrase.push({ phrase, count });
+  }
+  byPhrase.sort((left, right) => right.count - left.count || left.phrase.localeCompare(right.phrase));
+  return { totalHits, byPhrase };
+}
+
+function resolvePadConfig(
+  override: Partial<ProseQualityPadConfig> | null | undefined,
+): ProseQualityPadConfig {
+  const base = proseQualityPadConfig;
+  if (!override) {
+    return base;
+  }
+  return {
+    phrases: override.phrases && override.phrases.length > 0 ? override.phrases : base.phrases,
+    softThreshold: typeof override.softThreshold === "number" && Number.isFinite(override.softThreshold)
+      ? Math.max(1, Math.floor(override.softThreshold))
+      : base.softThreshold,
+    hardThreshold: typeof override.hardThreshold === "number" && Number.isFinite(override.hardThreshold)
+      ? Math.max(1, Math.floor(override.hardThreshold))
+      : base.hardThreshold,
+    maxLocationsPerPhrase: typeof override.maxLocationsPerPhrase === "number"
+      && Number.isFinite(override.maxLocationsPerPhrase)
+      ? Math.max(1, Math.floor(override.maxLocationsPerPhrase))
+      : base.maxLocationsPerPhrase,
+  };
+}
+
+function countSubstringOccurrences(haystack: string, needle: string): number {
+  if (!needle) {
+    return 0;
+  }
+  let count = 0;
+  let from = 0;
+  while (from < haystack.length) {
+    const index = haystack.indexOf(needle, from);
+    if (index < 0) {
+      break;
+    }
+    count += 1;
+    from = index + needle.length;
+  }
+  return count;
+}
+
+/**
+ * 垫长/套话扫词：按 phrase 记 finding（带首现 line/offset 语义的 line/column）。
+ * totalHits ≥ hardThreshold → 全部 pad finding 抬 high（blocking）；否则 medium。
+ */
+function scanPadPhrases(
+  content: string,
+  segments: TextSegment[],
+  config: ProseQualityPadConfig,
+  addFinding: (finding: ProseQualityFinding) => void,
+): void {
+  if (!content || config.phrases.length === 0) {
+    return;
+  }
+  const summary = countPadPhraseHits(content, config);
+  if (summary.totalHits <= 0) {
+    return;
+  }
+  const severity: RuntimeAuditIssue["severity"] = summary.totalHits >= config.hardThreshold
+    ? "high"
+    : "medium";
+  const lineStarts = buildLineStartOffsets(content);
+
+  for (const { phrase, count } of summary.byPhrase) {
+    if (count <= 0) {
+      continue;
+    }
+    const firstIndex = content.indexOf(phrase);
+    const { line, column } = offsetToLineColumn(firstIndex >= 0 ? firstIndex : 0, lineStarts);
+    const excerptSource = firstIndex >= 0
+      ? content.slice(Math.max(0, firstIndex - 12), firstIndex + phrase.length + 24)
+      : phrase;
+    addFinding({
+      code: "prose_pad_phrase",
+      severity,
+      line,
+      column,
+      message: summary.totalHits >= config.hardThreshold
+        ? `正文垫长/套话「${phrase}」出现 ${count} 次（章内合计 ${summary.totalHits} ≥ 硬阈 ${config.hardThreshold}）。`
+        : `正文垫长/套话「${phrase}」出现 ${count} 次（章内合计 ${summary.totalHits}）。`,
+      excerpt: formatExcerpt(excerptSource),
+      fixSuggestion: "删减或改写重复过渡套话，改用具体动作/环境/对话推进；避免用同一连接语垫长。",
+    });
+    // 为 patch 定向：同词多处只再补有限个 location finding（受 MAX_FINDINGS_PER_CODE 约束）
+    let found = 0;
+    let searchFrom = firstIndex >= 0 ? firstIndex + phrase.length : 0;
+    while (found < config.maxLocationsPerPhrase - 1 && searchFrom < content.length) {
+      const next = content.indexOf(phrase, searchFrom);
+      if (next < 0) {
+        break;
+      }
+      const loc = offsetToLineColumn(next, lineStarts);
+      const locExcerpt = content.slice(Math.max(0, next - 12), next + phrase.length + 24);
+      addFinding({
+        code: "prose_pad_phrase",
+        severity,
+        line: loc.line,
+        column: loc.column,
+        message: `垫长/套话「${phrase}」重复位置。`,
+        excerpt: formatExcerpt(locExcerpt),
+        fixSuggestion: "在该位置替换为具体动作或删去冗余过渡。",
+      });
+      found += 1;
+      searchFrom = next + phrase.length;
+    }
+    void segments;
+  }
+}
+
+function buildLineStartOffsets(content: string): number[] {
+  const starts = [0];
+  for (let i = 0; i < content.length; i += 1) {
+    if (content[i] === "\n") {
+      starts.push(i + 1);
+    }
+  }
+  return starts;
+}
+
+function offsetToLineColumn(
+  offset: number,
+  lineStarts: number[],
+): { line: number; column: number } {
+  let line = 1;
+  for (let i = 0; i < lineStarts.length; i += 1) {
+    if (lineStarts[i]! <= offset) {
+      line = i + 1;
+    } else {
+      break;
+    }
+  }
+  const start = lineStarts[line - 1] ?? 0;
+  return { line, column: Math.max(1, offset - start + 1) };
 }
 
 /** 将 mustAvoid 原文或词表规范为 ≥2 字去重词。 */

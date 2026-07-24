@@ -461,6 +461,7 @@ export async function executePipelineJob(
             qualityThreshold,
             repairMode: runtimePayload.repairMode,
             artifactSyncMode: runtimePayload.artifactSyncMode,
+            runMode: runtimePayload.runMode === "polish" ? "polish" : "fast",
             signal: chapterAbort.signal,
           },
           {

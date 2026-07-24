@@ -204,6 +204,15 @@ export class NovelCoreService {
     return this.reviewService.createRepairStream(novelId, chapterId, options);
   }
 
+  /** 单章 pipeline（含 runMode=polish）：经 ChapterRuntimeCoordinator，不另起写路径。 */
+  async runPipelineChapter(
+    novelId: string,
+    chapterId: string,
+    options: import("./runtime/chapterRuntimePipeline").PipelineRuntimeInput = {},
+  ) {
+    return this.pipelineService.runPipelineChapter(novelId, chapterId, options);
+  }
+
   async getNovelState(novelId: string) {
     return this.reviewService.getNovelState(novelId);
   }

@@ -40,6 +40,7 @@ export interface NovelApplicationServices {
   reviewChapter: NovelApplicationMethod;
   createRepairStream: NovelApplicationMethod;
   getQualityReport: NovelApplicationMethod;
+  runPipelineChapter: NovelApplicationMethod;
   startPipelineJob: NovelApplicationMethod;
   getPipelineJob: NovelApplicationMethod;
   getPipelineJobById: NovelApplicationMethod;
@@ -146,6 +147,7 @@ export const novelApplicationServiceMethodNames = [
   "reviewChapter",
   "createRepairStream",
   "getQualityReport",
+  "runPipelineChapter",
   "startPipelineJob",
   "getPipelineJob",
   "getPipelineJobById",

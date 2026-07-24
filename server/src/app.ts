@@ -52,6 +52,8 @@ import { novelSideEffectWorker } from "./events/sideEffects";
 import { NovelPipelineRuntimeService } from "./services/novel/NovelPipelineRuntimeService";
 import { recoveryTaskService } from "./services/task/RecoveryTaskService";
 import { taskRetentionService } from "./services/task/TaskRetentionService";
+import { volumeReadinessScheduler } from "./services/novel/volume/VolumeReadinessScheduler";
+import { ensureVolumeReadinessRunsHydrated } from "./services/novel/volume/volumeReadinessRunStore";
 import {
   ensureSystemResourceStarterData,
   hasSystemResourceBootstrapChanges,
@@ -310,6 +312,11 @@ function initializeBackgroundServices(): BackgroundServicesHandle {
   ragServices.ragWorker.start();
   ragServices.ragRetrievalTraceRetention.start();
   taskRetentionService.start();
+  // 默认关；VOLUME_READINESS_SCHEDULE=1 时才真正注册 dry-run 巡检。
+  void ensureVolumeReadinessRunsHydrated().catch((error) => {
+    console.warn("[volume.readiness] hydrate runs failed", error);
+  });
+  volumeReadinessScheduler.start();
   novelSideEffectWorker.start();
   // Prevent zombie chapterArtifactSyncCheckpoint rows from blocking writer claim paths.
   startArtifactCheckpointHygieneScanner();
@@ -363,6 +370,7 @@ function initializeBackgroundServices(): BackgroundServicesHandle {
       ragServices.ragWorker.stop();
       ragServices.ragRetrievalTraceRetention.stop();
       taskRetentionService.stop();
+      volumeReadinessScheduler.stop();
       bookAnalysisService.stopWatchdog();
       novelPipelineRuntimeService.stopWatchdog();
     },

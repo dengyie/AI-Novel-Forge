@@ -331,6 +331,14 @@ export class NovelCorePipelineService {
     });
   }
 
+  async runPipelineChapter(
+    novelId: string,
+    chapterId: string,
+    options: import("./runtime/chapterRuntimePipeline").PipelineRuntimeInput = {},
+  ) {
+    return this.chapterRuntimeCoordinator.runPipelineChapter(novelId, chapterId, options);
+  }
+
   async startPipelineJob(novelId: string, options: PipelineRunOptions) {
     const rangeKey = this.buildRangeKey(novelId, options.startOrder, options.endOrder);
     return this.withStartLock(rangeKey, async () => {

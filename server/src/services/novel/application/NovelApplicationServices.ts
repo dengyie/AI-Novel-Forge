@@ -311,6 +311,12 @@ export class DefaultNovelApplicationServices {
     return this.core.getQualityReport(...args);
   }
 
+  async runPipelineChapter(
+    ...args: Parameters<NovelCoreService["runPipelineChapter"]>
+  ) {
+    return this.core.runPipelineChapter(...args);
+  }
+
   async startPipelineJob(...args: Parameters<NovelCoreService["startPipelineJob"]>) {
     const [novelId] = args;
     await this.createNovelSnapshot(novelId, "before_pipeline", `before-pipeline-${Date.now()}`);
