@@ -1,0 +1,316 @@
+name: Deploy pxed
+
+# CI 自动测（server-test）+ 人工/审批触发部署。
+# 触发：
+#   - push tag deploy/*（推荐：git tag deploy/<shortsha> && git push origin deploy/<shortsha>）
+#   - workflow_dispatch（Actions 页手动）
+# 门禁：
+#   - 仅允许 main 祖先 commit（防野分支误上生产）
+#   - 本 workflow 内重跑 generate + typecheck + fast tests
+#   - GitHub Environment `pxed-production` required reviewers（审批后才 SSH）
+# 不做：每个 main push 裸 auto-deploy；不在 pxed 上 tsc；不设 NODE_ENV=production
+
+on:
+  push:
+    tags:
+      - "deploy/**"
+  workflow_dispatch:
+    inputs:
+      components:
+        description: "Deploy components"
+        type: choice
+        options:
+          - server
+          - server-client
+          - all
+        default: server-client
+      ref:
+        description: "Git ref/sha to deploy (empty = this workflow ref)"
+        required: false
+        type: string
+
+concurrency:
+  group: deploy-pxed
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: Gate (main ancestor + server fast tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      sha: ${{ steps.meta.outputs.sha }}
+      short_sha: ${{ steps.meta.outputs.short_sha }}
+      components: ${{ steps.meta.outputs.components }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && (inputs.ref || github.sha) || github.sha }}
+
+      - name: Resolve deploy meta
+        id: meta
+        run: |
+          set -euo pipefail
+          SHA="$(git rev-parse HEAD)"
+          SHORT="$(git rev-parse --short=12 HEAD)"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            COMPONENTS="${{ inputs.components }}"
+          else
+            # tag 默认 server-client；可用 message 后缀 #server 覆盖（可选）
+            COMPONENTS="server-client"
+            if git show -s --format=%B "$SHA" | grep -qE '(^| )#server($| )'; then
+              COMPONENTS="server"
+            fi
+            if git show -s --format=%B "$SHA" | grep -qE '(^| )#all($| )'; then
+              COMPONENTS="all"
+            fi
+          fi
+          echo "sha=$SHA" >>"$GITHUB_OUTPUT"
+          echo "short_sha=$SHORT" >>"$GITHUB_OUTPUT"
+          echo "components=$COMPONENTS" >>"$GITHUB_OUTPUT"
+          echo "Deploy target sha=$SHA components=$COMPONENTS"
+
+      - name: Require commit is ancestor of origin/main
+        run: |
+          set -euo pipefail
+          # full history already fetched (fetch-depth: 0); still refresh main tip
+          git fetch origin main:refs/remotes/origin/main --force
+          SHA="${{ steps.meta.outputs.sha }}"
+          MAIN="$(git rev-parse origin/main)"
+          if [[ "$SHA" == "$MAIN" ]] || git merge-base --is-ancestor "$SHA" origin/main; then
+            echo "OK: $SHA is on origin/main lineage (main=$MAIN)"
+          else
+            echo "::error::Deploy sha is not on origin/main. Refuse non-main production deploys."
+            exit 1
+          fi
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10.6.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build shared
+        run: pnpm --filter @ai-novel/shared build
+
+      - name: Generate Prisma client
+        run: pnpm --filter @ai-novel/server prisma:generate
+
+      - name: Push sqlite schema for tests
+        env:
+          DATABASE_URL: file:./dev.db
+          AI_NOVEL_DATABASE_MODE: sqlite
+        run: pnpm --filter @ai-novel/server prisma:push
+
+      - name: Typecheck server
+        run: pnpm --filter @ai-novel/server typecheck
+
+      - name: Build server
+        run: pnpm --filter @ai-novel/server build
+
+      - name: Run server fast tests
+        env:
+          TEST_ISOLATION: process
+          TEST_CONCURRENCY: "6"
+          DATABASE_URL: file:./dev.db
+          AI_NOVEL_DATABASE_MODE: sqlite
+        run: pnpm --filter @ai-novel/server test:node
+
+  build-artifacts:
+    name: Build deploy tarballs
+    needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          ref: ${{ needs.gate.outputs.sha }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10.6.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build shared + server
+        run: |
+          set -euo pipefail
+          pnpm --filter @ai-novel/shared build
+          pnpm --filter @ai-novel/server prisma:generate
+          pnpm --filter @ai-novel/server build
+
+      - name: Build client (if needed)
+        if: ${{ needs.gate.outputs.components != 'server' }}
+        run: pnpm --filter @ai-novel/client build
+
+      - name: Pack dist tarballs
+        id: pack
+        run: |
+          set -euo pipefail
+          SHA="${{ needs.gate.outputs.short_sha }}"
+          mkdir -p /tmp/ainovel-deploy
+          tar czf "/tmp/ainovel-deploy/server-dist-${SHA}.tgz" -C server dist
+          tar czf "/tmp/ainovel-deploy/shared-dist-${SHA}.tgz" -C shared dist
+          md5sum "/tmp/ainovel-deploy/server-dist-${SHA}.tgz" | tee /tmp/ainovel-deploy/server.md5
+          md5sum "/tmp/ainovel-deploy/shared-dist-${SHA}.tgz" | tee /tmp/ainovel-deploy/shared.md5
+          if [[ "${{ needs.gate.outputs.components }}" != "server" ]]; then
+            tar czf "/tmp/ainovel-deploy/client-dist-${SHA}.tgz" -C client dist
+            md5sum "/tmp/ainovel-deploy/client-dist-${SHA}.tgz" | tee /tmp/ainovel-deploy/client.md5
+          fi
+          ls -la /tmp/ainovel-deploy
+
+      - name: Upload deploy artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pxed-dist-${{ needs.gate.outputs.short_sha }}
+          path: /tmp/ainovel-deploy/*
+          if-no-files-found: error
+          retention-days: 14
+
+  deploy:
+    name: Approve + cutover pxed
+    needs: [gate, build-artifacts]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: pxed-production
+      url: https://ainovel.mangoqwq.com
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          ref: ${{ needs.gate.outputs.sha }}
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: pxed-dist-${{ needs.gate.outputs.short_sha }}
+          path: /tmp/ainovel-deploy
+
+      - name: Require SSH secrets
+        env:
+          PXED_SSH_HOST: ${{ secrets.PXED_SSH_HOST }}
+          PXED_SSH_USER: ${{ secrets.PXED_SSH_USER }}
+          PXED_SSH_KEY: ${{ secrets.PXED_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for v in PXED_SSH_HOST PXED_SSH_USER PXED_SSH_KEY; do
+            if [[ -z "${!v}" ]]; then
+              echo "::error::Missing repository/environment secret: $v"
+              missing=1
+            fi
+          done
+          if [[ "$missing" -ne 0 ]]; then
+            echo "See docs/deploy/pxed-tag-deploy.md"
+            exit 1
+          fi
+
+      - name: Configure SSH
+        env:
+          PXED_SSH_HOST: ${{ secrets.PXED_SSH_HOST }}
+          PXED_SSH_USER: ${{ secrets.PXED_SSH_USER }}
+          PXED_SSH_PORT: ${{ secrets.PXED_SSH_PORT }}
+          PXED_SSH_KEY: ${{ secrets.PXED_SSH_KEY }}
+          PXED_SSH_KNOWN_HOSTS: ${{ secrets.PXED_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$PXED_SSH_KEY" > ~/.ssh/pxed_deploy_key
+          chmod 600 ~/.ssh/pxed_deploy_key
+          PORT="${PXED_SSH_PORT:-22}"
+          if [[ -n "${PXED_SSH_KNOWN_HOSTS:-}" ]]; then
+            printf '%s\n' "$PXED_SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          else
+            ssh-keyscan -p "$PORT" -H "$PXED_SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+          fi
+          chmod 644 ~/.ssh/known_hosts
+          cat > ~/.ssh/config <<EOF
+          Host pxed-deploy
+            HostName ${PXED_SSH_HOST}
+            User ${PXED_SSH_USER}
+            Port ${PORT}
+            IdentityFile ~/.ssh/pxed_deploy_key
+            IdentitiesOnly yes
+            StrictHostKeyChecking accept-new
+          EOF
+          chmod 600 ~/.ssh/config
+
+      - name: Upload packages + remote cutover
+        env:
+          DEPLOY_SHA: ${{ needs.gate.outputs.sha }}
+          SHORT_SHA: ${{ needs.gate.outputs.short_sha }}
+          COMPONENTS: ${{ needs.gate.outputs.components }}
+        run: |
+          set -euo pipefail
+          SHA="$SHORT_SHA"
+          REMOTE_DIR="/tmp/ainovel-gh-deploy-${SHA}-$$"
+          SERVER_TGZ="/tmp/ainovel-deploy/server-dist-${SHA}.tgz"
+          SHARED_TGZ="/tmp/ainovel-deploy/shared-dist-${SHA}.tgz"
+          CLIENT_TGZ="/tmp/ainovel-deploy/client-dist-${SHA}.tgz"
+          test -f "$SERVER_TGZ"
+          test -f "$SHARED_TGZ"
+          test -f scripts/deploy/pxed-remote-cutover.sh
+
+          ssh pxed-deploy "mkdir -p '$REMOTE_DIR'"
+          scp "$SERVER_TGZ" "$SHARED_TGZ" scripts/deploy/pxed-remote-cutover.sh \
+            "pxed-deploy:$REMOTE_DIR/"
+          ssh pxed-deploy "chmod +x '$REMOTE_DIR/pxed-remote-cutover.sh'"
+
+          CLIENT_ARG=""
+          if [[ "$COMPONENTS" != "server" ]]; then
+            test -f "$CLIENT_TGZ"
+            scp "$CLIENT_TGZ" "pxed-deploy:$REMOTE_DIR/"
+            CLIENT_ARG="CLIENT_TGZ=$REMOTE_DIR/$(basename "$CLIENT_TGZ")"
+          fi
+
+          # shellcheck disable=SC2029
+          ssh pxed-deploy "env \
+            DEPLOY_SHA='$DEPLOY_SHA' \
+            DEPLOY_COMPONENTS='$COMPONENTS' \
+            SERVER_TGZ='$REMOTE_DIR/$(basename "$SERVER_TGZ")' \
+            SHARED_TGZ='$REMOTE_DIR/$(basename "$SHARED_TGZ")' \
+            $CLIENT_ARG \
+            bash '$REMOTE_DIR/pxed-remote-cutover.sh'"
+
+          ssh pxed-deploy "rm -rf '$REMOTE_DIR'" || true
+
+      - name: Public health check
+        run: |
+          set -euo pipefail
+          for i in 1 2 3 4 5; do
+            if curl -fsS "https://ainovel.mangoqwq.com/api/health" | head -c 300; then
+              echo
+              curl -fsS "https://ainovel.mangoqwq.com/api/health/ready" | head -c 300
+              echo
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "::error::public health failed after cutover"
+          exit 1
