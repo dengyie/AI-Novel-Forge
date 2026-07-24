@@ -68,20 +68,24 @@ GitHub 仓库 → Settings → Environments → 新建 **`pxed-production`**
 
 | Secret | 示例 / 说明 |
 |---|---|
-| `PXED_SSH_HOST` | `ssh-pxed.mangoqwq.com`（与 `ssh pxed` 一致） |
+| `PXED_SSH_HOST` | **Bohrium 直连主机名**，如 `pxed1497962.bohrium.tech`（**不要**用 `ssh-pxed.mangoqwq.com`：那条链路要 Cloudflare Access / `cloudflared`，GitHub runner 走不通） |
 | `PXED_SSH_USER` | `root` |
-| `PXED_SSH_KEY` | 私钥全文（建议**单独 deploy key**，不要复用日常笔记本密钥进日志习惯；权限仅 SSH 登录 pxed） |
+| `PXED_SSH_KEY` | 专用 deploy 私钥全文（本机 `~/.ssh/pxed_gh_actions_deploy_ed25519`；公钥已在 pxed `authorized_keys`） |
 | `PXED_SSH_PORT` | 可选，默认 `22` |
-| `PXED_SSH_KNOWN_HOSTS` | 可选；不设则 `ssh-keyscan`（有 TOFU 风险，生产建议钉死） |
+| `PXED_SSH_KNOWN_HOSTS` | 对该 **直连 host** 的 `ssh-keyscan` 结果（建议钉死） |
+
+> **主机名会变**：Bohrium 容器重建后 `pxedNNNN.bohrium.tech` 可能换名/换 IP。重建后更新 `PXED_SSH_HOST` + `PXED_SSH_KNOWN_HOSTS`，并确认公钥仍在 `authorized_keys`。日常人肉运维仍用 `ssh pxed`（CF Access）。
 
 生成专用 key 示例：
 
 ```bash
-ssh-keygen -t ed25519 -f ./pxed-gh-deploy -C "github-actions-pxed-deploy" -N ""
-# 公钥写入 pxed: /root/.ssh/authorized_keys
-# 私钥内容 → secret PXED_SSH_KEY
-ssh-keyscan -H ssh-pxed.mangoqwq.com > known_hosts_snip
-# known_hosts_snip → PXED_SSH_KNOWN_HOSTS
+ssh-keygen -t ed25519 -f ~/.ssh/pxed_gh_actions_deploy_ed25519 -C "github-actions-pxed-deploy" -N ""
+# 公钥写入 pxed authorized_keys（经 ssh pxed）
+# 私钥 → secret PXED_SSH_KEY
+HOST=pxed1497962.bohrium.tech   # 以机上/控制台当前直连名为准
+ssh-keyscan -t ed25519,ecdsa,rsa "$HOST" > /tmp/pxed_kh
+# /tmp/pxed_kh → PXED_SSH_KNOWN_HOSTS
+# PXED_SSH_HOST=$HOST
 ```
 
 ### 3. pxed 机上前提
