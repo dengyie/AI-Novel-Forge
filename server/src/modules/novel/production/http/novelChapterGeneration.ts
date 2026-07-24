@@ -31,6 +31,10 @@ export function registerNovelChapterGenerationRoutes(input: RegisterNovelChapter
     async (req, res, next) => {
       try {
         const { id, chapterId } = req.params as z.infer<typeof chapterParamsSchema>;
+        // F6：客户端断连时触发 abort，传到 chapter_execution step 的 SSE 中断信号，
+        // 让 streamTextPrompt/captureStreamOutput 尽快 settle/reject，释放章节锁。
+        const controller = new AbortController();
+        res.on("close", () => controller.abort(new Error("client disconnected")));
         const { stream, onDone } = await stepModuleRunner.runStep<ChapterStreamResult>(
           DIRECTOR_EXECUTION_STEP_IDS.chapter_execution,
           {
@@ -42,9 +46,10 @@ export function registerNovelChapterGenerationRoutes(input: RegisterNovelChapter
               options: req.body as z.infer<typeof chapterRuntimeRequestSchema>,
               runtimeStream: true,
             },
+            signal: controller.signal,
           },
         );
-        await streamToSSE(res, stream, onDone);
+        await streamToSSE(res, stream, onDone, { signal: controller.signal });
       } catch (error) {
         if (forwardBusinessError(error, next)) {
           return;
@@ -60,6 +65,8 @@ export function registerNovelChapterGenerationRoutes(input: RegisterNovelChapter
     async (req, res, next) => {
       try {
         const { id, chapterId } = req.params as z.infer<typeof chapterParamsSchema>;
+        const controller = new AbortController();
+        res.on("close", () => controller.abort(new Error("client disconnected")));
         const { stream, onDone } = await stepModuleRunner.runStep<ChapterStreamResult>(
           DIRECTOR_EXECUTION_STEP_IDS.chapter_execution,
           {
@@ -68,9 +75,10 @@ export function registerNovelChapterGenerationRoutes(input: RegisterNovelChapter
             targetType: "chapter",
             targetChapterId: chapterId,
             stepInput: req.body as z.infer<typeof chapterRuntimeRequestSchema>,
+            signal: controller.signal,
           },
         );
-        await streamToSSE(res, stream, onDone);
+        await streamToSSE(res, stream, onDone, { signal: controller.signal });
       } catch (error) {
         if (forwardBusinessError(error, next)) {
           return;

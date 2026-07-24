@@ -131,7 +131,11 @@ export class ChapterStreamGenerationOrchestrator {
           lengthControl: normalized?.lengthControl,
           runId: traceRunId,
           startMs,
+          // 流式路径无独立 syncFinalChapterArtifacts 步骤：延迟的后台同步由 finalize 内部
+          // 的 deferArtifactBackgroundSync 分支统一调度（scheduleDeferred=true 显式声明，
+          // 与 pipeline 适配器的 false 对称，避免隐式默认造成歧义）。
           deferArtifactBackgroundSync: true,
+          scheduleDeferredArtifactBackgroundSync: true,
         });
         // 流式定稿不经 pipeline：finalize 只拍平列，此处写终态 QualityReport 一行。
         // 直接调 persist（writeReport:true），避免经 novelCoreReviewService 造成循环依赖。
@@ -214,6 +218,7 @@ export class ChapterStreamGenerationOrchestrator {
     request: ChapterRuntimeRequestInput;
     assembled: AssembledRuntimeChapter;
     signal?: AbortSignal;
+    emptyContentAttempt?: number;
   }): Promise<{
     content: string;
     lengthControl?: ChapterRuntimePackage["lengthControl"];
@@ -234,15 +239,28 @@ export class ChapterStreamGenerationOrchestrator {
     });
 
     let fullContent = "";
-    for await (const chunk of writerResult.stream) {
-      throwIfChapterGenerationAborted(input.signal, "章节生成已取消。");
-      fullContent += toText(chunk.content);
+    try {
+      for await (const chunk of writerResult.stream) {
+        throwIfChapterGenerationAborted(input.signal, "章节生成已取消。");
+        fullContent += toText(chunk.content);
+      }
+    } catch (error) {
+      // 流迭代器在 abort 命中在途 fetch 时 reject 通用 AbortError、丢失 signal.reason（lease-lost/
+      // PIPELINE_CANCELLED 文案）。reason 存在时优先还原，让外层outer catch 正确归因（lease-lost
+      // 静默早退 / cancel 收口），不误判为瞬时传输失败或把截断章定稿。无 reason → 退回原 error。
+      if (input.signal?.aborted && input.signal.reason instanceof Error) {
+        throw input.signal.reason;
+      }
+      throw error;
     }
     const normalized = await writerResult.onDone(fullContent);
     const content = assertChapterContentNotEmpty(normalized?.finalContent ?? fullContent, {
       novelId: input.novelId,
       chapterId: input.chapterId,
       chapterOrder: input.assembled.chapter.order,
+      // 空内容遥测带上 attempt：区分首次与重试轮次（retry 路由经 resolveWriterResultWithEmptyRetry）。
+      // 首次默认为 1，避免 undefined 导致日志无法定位是第几轮失败。
+      attempt: input.emptyContentAttempt ?? 1,
       source: "chapter_runtime_writer",
     });
     return {
@@ -344,6 +362,9 @@ export class ChapterStreamGenerationOrchestrator {
           request: input.request,
           assembled: assembledForAttempt,
           signal: input.signal,
+          // retry 轮：把当前已累计的空内容 attempt（含本轮）透传给底层 assert，
+          // 错误 details.attempt 即可标明是第几次重试仍空。
+          emptyContentAttempt: emptyAttempt + 1,
         });
         return {
           finalContent: retryDraft.content,

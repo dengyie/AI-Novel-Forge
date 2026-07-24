@@ -654,7 +654,11 @@ export class ChapterWritingGraph {
       onDone: async (fullContent: string) => {
         // 已取消：禁止 onDone 路径继续定稿/落库（避免 partial final publish）
         throwIfChapterGenerationAborted(input.options.signal);
-        const completed = await streamed.complete.catch(() => null);
+        // 不吞 streamed.complete 的 reject：writer 无 postValidate，成功时 output===fullContent；
+        // reject 只来自超时/abort/iterator error，此时若回退 partial buffer 落库，会把截断章
+        // 冒充成功定稿。直接 await 让 reject 冒泡 → resolveWriterResultWithEmptyRetry 原样上抛
+        // → 任务失败（可恢复），不再静默持久化半截正文。?? fullContent 仅兜 resolve 后空值边界。
+        const completed = await streamed.complete;
         const rawContent = completed?.output ?? fullContent;
         const normalized = await this.continuityNode(
           input.novelId,

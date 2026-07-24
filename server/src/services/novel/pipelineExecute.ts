@@ -55,7 +55,14 @@ import {
   PIPELINE_JOB_TRANSPORT_AUTO_RETRY_MAX,
   shouldAutoRetryPipelineJob,
 } from "./pipelineJobAutoRetry";
-import { buildPipelineJobAutoRequeueCasWhere } from "./pipelineJobTerminalGuard";
+import {
+  buildPipelineJobAutoRequeueCasWhere,
+  buildPipelineJobLeaseOwnedCasWhere,
+  buildPipelineJobSuccessTerminalCasWhere,
+  classifyNonTerminalCasMiss,
+  isPipelineLeaseLostError,
+  PIPELINE_LEASE_LOST_MESSAGE,
+} from "./pipelineJobTerminalGuard";
 import {
   buildPipelineCurrentItemLabel,
   buildPipelineStageProgress,
@@ -79,6 +86,13 @@ export interface PipelineExecuteHost {
   schedulePipelineExecution(jobId: string, novelId: string, options: PipelineRunOptions): void;
   chapterRuntimeCoordinator: ChapterRuntimeCoordinator;
   activeChapterAborts: Map<string, AbortController>;
+  /**
+   * 本进程持有的租约 owner（`pipeline-${pid}`）。null = lease disabled 或未认领：
+   * 关键 job 行写退化为「仅 status=running」CAS，与旧路径兼容。
+   * 传入非空值时，心跳/进度/finalizing/success CAS 在 where 里追加 leaseOwner，
+   * count=0 → 抛 PIPELINE_LEASE_LOST，outer catch 静默早退（避免盖新 owner 的进度）。
+   */
+  leaseOwner: string | null;
 }
 
 export async function executePipelineJob(
@@ -156,6 +170,9 @@ export async function executePipelineJob(
         heartbeatAt: new Date(),
         leaseExpiresAt: new Date(Date.now() + PIPELINE_LEASE_TTL_MS),
         currentStage: "generating_chapters",
+        // running 行永不带 finishedAt：即便先前竞态分支误写过 finishedAt，此处显式清零，
+        // 保住 watchdog/startup-resume 的 finishedAt:null 可恢复谓词，杜绝 crash 后僵尸不可见。
+        finishedAt: null,
       });
       logPipelineInfo("任务开始执行", {
         jobId,
@@ -350,25 +367,44 @@ export async function executePipelineJob(
         if (genreGateBeforeLoop.shouldPause) {
           recordGenreBeatPause(genreGateBeforeLoop.snapshot, null);
           const finalStatus: "succeeded" = "succeeded";
-          await host.updateJobSafe(jobId, {
-            status: finalStatus,
-            error: null,
-            heartbeatAt: null,
-            currentStage: null,
-            currentItemKey: null,
-            currentItemLabel: null,
-            cancelRequestedAt: null,
-            finishedAt: new Date(),
-            payload: host.stringifyPipelinePayload({
-              ...runtimePayload,
-              qualityAlertDetails,
-              replanAlertDetails,
-              genreBeatAlertDetails,
-              recoverableRepairDetails,
-              // 终态清零：避免成功/熔断暂停后 UI 仍显示瞬时重试预算
-              jobTransportAutoRetryCount: 0,
-            }),
+          // CAS：仅 running 且本进程持租约且未请求 cancel 才允许写 succeeded；
+          // count=0 说明并发 cancel 已入库、被推离 running 或本进程已丢租约（另一进程接管）。
+          // 后两者按已丢租约处理：外层 CAS 复检若 DB 带 cancelRequestedAt → 抛 PIPELINE_CANCELLED
+          // 走 cancelled 收口；否则抛 PIPELINE_LEASE_LOST 静默早退。
+          const genreBeatCasWhere = buildPipelineJobSuccessTerminalCasWhere(jobId, host.leaseOwner);
+          const casResult = await prisma.generationJob.updateMany({
+            where: genreBeatCasWhere,
+            data: {
+              status: finalStatus,
+              error: null,
+              heartbeatAt: null,
+              currentStage: null,
+              currentItemKey: null,
+              currentItemLabel: null,
+              cancelRequestedAt: null,
+              finishedAt: new Date(),
+              payload: host.stringifyPipelinePayload({
+                ...runtimePayload,
+                qualityAlertDetails,
+                replanAlertDetails,
+                genreBeatAlertDetails,
+                recoverableRepairDetails,
+                // 终态清零：避免成功/熔断暂停后 UI 仍显示瞬时重试预算
+                jobTransportAutoRetryCount: 0,
+              }),
+            },
           });
+          if (casResult.count === 0) {
+            // 区分 cancel vs lease-lost：带 cancelRequestedAt → cancelled 收口；否则 lease-lost。
+            const latest = await prisma.generationJob.findUnique({
+              where: { id: jobId },
+              select: { status: true, cancelRequestedAt: true },
+            });
+            if (latest?.cancelRequestedAt || latest?.status === "cancelled") {
+              throw new Error("PIPELINE_CANCELLED");
+            }
+            throw new Error(PIPELINE_LEASE_LOST_MESSAGE);
+          }
           logPipelineInfo("任务执行结束", {
             jobId,
             status: finalStatus,
@@ -399,17 +435,27 @@ export async function executePipelineJob(
         let activeStage: PipelineActiveStage = "generating_chapters";
         const applyChapterStage = async (stage: PipelineActiveStage) => {
           activeStage = stage;
-          await host.updateJobSafe(jobId, {
-            heartbeatAt: new Date(),
-            currentStage: stage,
-            currentItemKey: chapter.id,
-            currentItemLabel,
-            progress: buildPipelineStageProgress({
-              completedCount: completed,
-              totalCount,
-              stage,
-            }),
+          // owner-CAS：仅本进程持租约时才允许推进 stage/进度。count=0 → 另一进程已认领，
+          // 本进程立刻抛 PIPELINE_LEASE_LOST 由 outer catch 静默早退，避免盖对方的合法进度。
+          const staged = await prisma.generationJob.updateMany({
+            where: buildPipelineJobLeaseOwnedCasWhere(jobId, host.leaseOwner),
+            data: {
+              heartbeatAt: new Date(),
+              currentStage: stage,
+              currentItemKey: chapter.id,
+              currentItemLabel,
+              progress: buildPipelineStageProgress({
+                completedCount: completed,
+                totalCount,
+                stage,
+              }),
+            },
           });
+          if (staged.count === 0) {
+            // lease enabled → lease-lost（静默早退）；lease disabled → 并发已离开 running，cancel 收口。
+            const miss = classifyNonTerminalCasMiss(host.leaseOwner);
+            throw new Error(miss.sentinel === "lease-lost" ? PIPELINE_LEASE_LOST_MESSAGE : "PIPELINE_CANCELLED");
+          }
         };
 
         await applyChapterStage("generating_chapters");
@@ -423,17 +469,29 @@ export async function executePipelineJob(
         const chapterAbort = new AbortController();
         host.activeChapterAborts.set(jobId, chapterAbort);
         const heartbeatTimer = setInterval(() => {
-          void host.updateJobSafe(jobId, {
-            heartbeatAt: new Date(),
-            leaseExpiresAt: new Date(Date.now() + PIPELINE_LEASE_TTL_MS),
-            currentStage: activeStage,
-            currentItemKey: chapter.id,
-            currentItemLabel,
-            progress: buildPipelineStageProgress({
-              completedCount: completed,
-              totalCount,
-              stage: activeStage,
-            }),
+          // owner-CAS 心跳：仅本进程持租约才续期。count=0 → 旧进程残留场景下另一进程已顶替
+          // 认领；此时立刻 abort chapterAbort，让当前章短路，外层随后再次写入时命中 lease-lost。
+          // 关键差异：以前直写 updateJobSafe 会覆盖新 owner 的 leaseExpiresAt 让旧进程无声续命。
+          void prisma.generationJob.updateMany({
+            where: buildPipelineJobLeaseOwnedCasWhere(jobId, host.leaseOwner),
+            data: {
+              heartbeatAt: new Date(),
+              leaseExpiresAt: new Date(Date.now() + PIPELINE_LEASE_TTL_MS),
+              currentStage: activeStage,
+              currentItemKey: chapter.id,
+              currentItemLabel,
+              progress: buildPipelineStageProgress({
+                completedCount: completed,
+                totalCount,
+                stage: activeStage,
+              }),
+            },
+          }).then((result) => {
+            if (result.count === 0 && !chapterAbort.signal.aborted) {
+              chapterAbort.abort(new Error(PIPELINE_LEASE_LOST_MESSAGE));
+            }
+          }).catch(() => {
+            // 心跳写库瞬时错误不 abort 章循环；下次心跳自愈或最终外层 CAS 兜底。
           });
           // 心跳间隙轮询取消（跨进程/无 live map 时的兜底）
           void host.ensurePipelineNotCancelled(jobId).catch((error) => {
@@ -867,19 +925,29 @@ export async function executePipelineJob(
         }
 
         completed += 1;
-        await host.updateJobSafe(jobId, {
-          completedCount: completed,
-          progress: Number((completed / totalCount).toFixed(4)),
-          retryCount: totalRetryCount,
-          heartbeatAt: new Date(),
-          payload: host.stringifyPipelinePayload({
-            ...runtimePayload,
-            qualityAlertDetails,
-            replanAlertDetails,
-            genreBeatAlertDetails,
-            recoverableRepairDetails,
-          }),
+        // owner-CAS：per-chapter 进度写只允许持租进程回写。旧进程残留若仍在章循环里，
+        // 到这里 count=0 → 立即抛 lease-lost，避免旧进程写脏 completedCount / payload。
+        const progressCasResult = await prisma.generationJob.updateMany({
+          where: buildPipelineJobLeaseOwnedCasWhere(jobId, host.leaseOwner),
+          data: {
+            completedCount: completed,
+            progress: Number((completed / totalCount).toFixed(4)),
+            retryCount: totalRetryCount,
+            heartbeatAt: new Date(),
+            payload: host.stringifyPipelinePayload({
+              ...runtimePayload,
+              qualityAlertDetails,
+              replanAlertDetails,
+              genreBeatAlertDetails,
+              recoverableRepairDetails,
+            }),
+          },
         });
+        if (progressCasResult.count === 0) {
+          // lease enabled → lease-lost；lease disabled → 并发已离开 running，cancel 收口补终态。
+          const progressMiss = classifyNonTerminalCasMiss(host.leaseOwner);
+          throw new Error(progressMiss.sentinel === "lease-lost" ? PIPELINE_LEASE_LOST_MESSAGE : "PIPELINE_CANCELLED");
+        }
         logPipelineInfo("任务进度更新", {
           jobId,
           completed,
@@ -899,37 +967,77 @@ export async function executePipelineJob(
         }
       }
 
+      // 循环退出后终写前复检 cancel：心跳轮询把 chapterAbort abort 掉，最后一章 finally 仍
+      // 可能走完落库，若不复检就会盖 succeeded 吞掉取消请求。命中则抛 PIPELINE_CANCELLED
+      // 交外层 cancel 收口分支。
+      await host.ensurePipelineNotCancelled(jobId);
+
       const finalStatus: "succeeded" = "succeeded";
-      await host.updateJobSafe(jobId, {
-        heartbeatAt: new Date(),
-        currentStage: "finalizing",
-        currentItemKey: null,
-        currentItemLabel: "正在收尾章节流水线任务",
-        progress: buildPipelineStageProgress({
-          completedCount: completed,
-          totalCount,
-          stage: "finalizing",
-        }),
+      // finalizing 心跳：CAS 附带 leaseOwner，count=0 → 本进程已丢租约，抛 lease-lost 早退。
+      const finalizingHeartbeat = await prisma.generationJob.updateMany({
+        where: buildPipelineJobLeaseOwnedCasWhere(jobId, host.leaseOwner),
+        data: {
+          heartbeatAt: new Date(),
+          leaseExpiresAt: new Date(Date.now() + PIPELINE_LEASE_TTL_MS),
+          currentStage: "finalizing",
+          currentItemKey: null,
+          currentItemLabel: "正在收尾章节流水线任务",
+          progress: buildPipelineStageProgress({
+            completedCount: completed,
+            totalCount,
+            stage: "finalizing",
+          }),
+        },
       });
-      await host.updateJobSafe(jobId, {
-        status: finalStatus,
-        error: null,
-        heartbeatAt: null,
-        currentStage: null,
-        currentItemKey: null,
-        currentItemLabel: null,
-        cancelRequestedAt: null,
-        finishedAt: new Date(),
-        payload: host.stringifyPipelinePayload({
-          ...runtimePayload,
-          qualityAlertDetails,
-          replanAlertDetails,
-          genreBeatAlertDetails,
-          recoverableRepairDetails,
-          // 终态清零：避免成功后 payload 残留自动重试计数
-          jobTransportAutoRetryCount: 0,
-        }),
+      if (finalizingHeartbeat.count === 0) {
+        // lease enabled → lease-lost；lease disabled → 并发已离开 running，cancel 收口补终态。
+        const finalizingMiss = classifyNonTerminalCasMiss(host.leaseOwner);
+        throw new Error(finalizingMiss.sentinel === "lease-lost" ? PIPELINE_LEASE_LOST_MESSAGE : "PIPELINE_CANCELLED");
+      }
+      // CAS：仅 running 且未请求 cancel 才写 succeeded；count=0 → cancel 已入库、已推离 running
+      // 或本进程已丢租约（另一进程接管）。与 ensurePipelineNotCancelled 复检互补：前者截断已
+      // 入库的 cancel，CAS 兜底 finalizing→终写期间的窄窗竞态与 lease 转手。count=0 时若 DB
+      // 已带 cancelRequestedAt → cancelled 分支；否则视为 lease-lost，静默早退不写终态。
+      const finalCasResult = await prisma.generationJob.updateMany({
+        where: buildPipelineJobSuccessTerminalCasWhere(jobId, host.leaseOwner),
+        data: {
+          status: finalStatus,
+          error: null,
+          heartbeatAt: null,
+          currentStage: null,
+          currentItemKey: null,
+          currentItemLabel: null,
+          cancelRequestedAt: null,
+          finishedAt: new Date(),
+          payload: host.stringifyPipelinePayload({
+            ...runtimePayload,
+            qualityAlertDetails,
+            replanAlertDetails,
+            genreBeatAlertDetails,
+            recoverableRepairDetails,
+            // 终态清零：避免成功后 payload 残留自动重试计数
+            jobTransportAutoRetryCount: 0,
+          }),
+        },
       });
+      if (finalCasResult.count === 0) {
+        // 区分 cancel vs lease-lost / 已终态（同 genre-beat 路径 396-405 的口径）：
+        //   - cancelRequestedAt 已设 / status 已 cancelled → cancel 收口（throw PIPELINE_CANCELLED）
+        //   - lease enabled 且未终态 → 另一进程接管租约 → lease-lost 静默早退（不盖新 owner）
+        //   - lease disabled 且未 cancel：成功 CAS 未命中只可能是并发已离开 running（auto-requeue
+        //     排回 queued / 兜底已终态化 / 或并发 cancel 的极窄读窗）。此时另一端已处置本 job，
+        //     抛 lease-lost 静默早退（裸 update 会盖掉对方写好的终态），不再追加 cancelled。
+        // 不能无条件抛 PIPELINE_CANCELLED：否则会用裸 update（无 status 守卫）写 cancelled，
+        // 覆盖对方正在跑或已写好的终态，造成"盖新 owner 进度"的僵尸窗口。
+        const finalLatest = await prisma.generationJob.findUnique({
+          where: { id: jobId },
+          select: { status: true, cancelRequestedAt: true },
+        });
+        if (finalLatest?.cancelRequestedAt || finalLatest?.status === "cancelled") {
+          throw new Error("PIPELINE_CANCELLED");
+        }
+        throw new Error(PIPELINE_LEASE_LOST_MESSAGE);
+      }
       logPipelineInfo("任务执行结束", {
         jobId,
         status: finalStatus,
@@ -942,6 +1050,17 @@ export async function executePipelineJob(
       }).catch(() => {});
     });
   } catch (error) {
+    // lease-lost：另一进程已接管本 job（旧进程残留心跳被 owner-CAS 截断）。
+    // 本进程不得写任何终态（会盖对方合法的 running/进度），仅记录后静默早退，
+    // 交新 owner 继续推进。必须在 cancellation 判定之前，避免被误当取消收口。
+    if (isPipelineLeaseLostError(error)) {
+      logPipelineWarn("流水线租约已丢失，另一进程已接管，本进程静默退出", {
+        jobId,
+        novelId,
+        ownerId: host.leaseOwner ?? null,
+      });
+      return;
+    }
     // 取消文案 / AbortError 统一落 cancelled，禁止 auto-requeue（见 isPipelineCancellationError）。
     if (isPipelineCancellationError(error)) {
       await host.updateJobSafe(jobId, {

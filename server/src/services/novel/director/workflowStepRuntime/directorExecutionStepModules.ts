@@ -132,9 +132,17 @@ function createChapterDraftExecutableModule(
 
   return createWorkflowStepModule(
     descriptor,
-    async (input) => {
+    async (input, context) => {
       if (input.mode === "manual") {
-        return getDirectorCoreStepRuntime().executeManualChapterDraftStep(input);
+        // F6：把 SSE 调用方的中断信号注入 options.signal，让 streamTextPrompt /
+        // captureStreamOutput 感知客户端断连 → streamed.complete reject → 释放锁。
+        const optionsWithSignal = context.signal
+          ? { ...(input.options ?? {}), signal: context.signal }
+          : input.options;
+        return getDirectorCoreStepRuntime().executeManualChapterDraftStep({
+          ...input,
+          options: optionsWithSignal,
+        });
       }
       return getDirectorCoreStepRuntime().executeChapterDraftStep(input);
     },

@@ -1,5 +1,5 @@
 import type { NovelControlPolicy } from "@ai-novel/shared/types/canonicalState";
-import type { ChapterRuntimeRequestInput } from "../runtime/chapterRuntimeSchema";
+import type { ChapterRuntimeCallOptions } from "../runtime/chapterRuntimeSchema";
 import { ChapterRuntimeCoordinator } from "../runtime/ChapterRuntimeCoordinator";
 import type { PipelineRunOptions } from "../novelCoreShared";
 import type { NovelCoreService } from "../NovelCoreService";
@@ -13,7 +13,9 @@ import {
 interface ChapterExecutionSingleChapterPayload {
   mode: "single_chapter_stream";
   chapterId: string;
-  options?: ChapterRuntimeRequestInput;
+  // 单章流走 in-memory payload（runStage 不做 JSON 序列化），因此保留 signal：
+  // F6 SSE 断连注入的 AbortSignal 必须原样带到 orchestrator → chapterWritingGraph → streamTextPrompt。
+  options?: ChapterRuntimeCallOptions;
   includeRuntimePackage?: boolean;
 }
 

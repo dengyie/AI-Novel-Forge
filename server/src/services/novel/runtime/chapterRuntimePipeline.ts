@@ -161,6 +161,7 @@ interface RunPipelineChapterDeps {
     request: ChapterRuntimeRequestInput;
     assembled: AssembledRuntimeChapter;
     signal?: AbortSignal;
+    emptyContentAttempt?: number;
   }) => Promise<{
     content: string;
     lengthControl?: ChapterRuntimePackage["lengthControl"];
@@ -594,6 +595,15 @@ async function generateNonEmptyDraftFromWriter(input: {
           || error.message.includes("章节生成已取消")
         ));
       if (cancelled || !isTransientTransportError(error)) {
+        // 信号 abort 时抛 signal.reason（而非 fetch 的 AbortError）：心跳 owner-CAS 失败
+        // 时 chapterAbort.abort(new Error(PIPELINE_LEASE_LOST_MESSAGE))，但若 abort 命中在途
+        // fetch，reject 的是通用 AbortError、reason 丢失。这里优先还原 reason：
+        //   - reason 是 lease-lost Error → 透传，外层 outer catch 走静默早退，不误盖新 owner
+        //   - reason 是 PIPELINE_CANCELLED → 走取消收口
+        //   - 无 reason（裸 abort）→ 退回原 error（保持旧行为）
+        if (input.signal?.aborted && input.signal.reason instanceof Error) {
+          throw input.signal.reason;
+        }
         throw error;
       }
       transportAttempt += 1;

@@ -336,7 +336,7 @@ export class DirectorCoreStepModuleRuntime {
   async executeManualChapterDraftStep(input: {
     novelId: string;
     chapterId: string;
-    options?: ChapterRuntimeRequestInput;
+    options?: ChapterRuntimeRequestInput & { signal?: AbortSignal };
     useRuntimeStream?: boolean;
   }) {
     if (input.useRuntimeStream) {

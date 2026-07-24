@@ -4,7 +4,7 @@ import { BOOK_ANALYSIS_STRUCTURED_FIELD_LABELS } from "@ai-novel/shared/types/bo
 import { prisma } from "../../db/prisma";
 import { runTextPrompt } from "../../prompting/core/promptRunner";
 import { novelContinuationRewritePrompt } from "../../prompting/prompts/novel/continuation.prompts";
-import { buildNGramSet, jaccardSimilarity } from "@ai-novel/shared/utils/textSimilarity";
+import { buildNGramSet, hasSufficientSimilarityLength, jaccardSimilarity } from "@ai-novel/shared/utils/textSimilarity";
 
 const CONTINUATION_SIMILARITY_THRESHOLD = 0.3;
 const CONTINUATION_ANALYSIS_SECTION_KEYS: BookAnalysisSectionKey[] = [
@@ -410,7 +410,7 @@ export class NovelContinuationService {
       include: {
         characters: { orderBy: { createdAt: "asc" }, take: 12 },
         chapterSummaries: {
-          orderBy: { createdAt: "desc" },
+          orderBy: { chapter: { order: "desc" } },
           include: { chapter: { select: { order: true, title: true } } },
           take: 8,
         },
@@ -594,7 +594,9 @@ ${summaryBlock || "暂无"}`;
     let maxSimilarity = 0;
     let mostSimilarSnippet = "";
     for (const snippet of continuationPack.antiCopyCorpus) {
-      if (snippet.length < 24) {
+      // 同源 length 过滤（与改写后复检同口径）：归一化后过短的 snippet 会被压成单 gram，
+      // jaccard 极易虚高，不参与比较——避免短标点/数字/人名偶同导致误判复刻。
+      if (!hasSufficientSimilarityLength(snippet)) {
         continue;
       }
       const similarity = jaccardSimilarity(targetNgrams, buildNGramSet(snippet));
@@ -652,6 +654,11 @@ ${summaryBlock || "暂无"}`;
       }
 
       const rewrittenSimilarity = continuationPack.antiCopyCorpus.reduce((max, snippet) => {
+        // 与原检测同口径：归一化过短的 snippet 不参与复检，否则短串偶同会让改写后仍
+        // 被判高相似而错误回退原文。
+        if (!hasSufficientSimilarityLength(snippet)) {
+          return max;
+        }
         const similarity = jaccardSimilarity(buildNGramSet(rewrittenText), buildNGramSet(snippet));
         return Math.max(max, similarity);
       }, 0);

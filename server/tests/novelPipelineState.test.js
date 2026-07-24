@@ -126,6 +126,7 @@ test("executePipeline skips chapters already marked for deferred continue when s
   const original = {
     generationFindUnique: prisma.generationJob.findUnique,
     generationUpdate: prisma.generationJob.update,
+    generationUpdateMany: prisma.generationJob.updateMany,
     novelFindUnique: prisma.novel.findUnique,
     chapterFindMany: prisma.chapter.findMany,
     createQualityReport: reviewService.createQualityReport,
@@ -165,6 +166,12 @@ test("executePipeline skips chapters already marked for deferred continue when s
   prisma.generationJob.update = async (input) => {
     updates.push(input);
     return input;
+  };
+  // CAS 写入（p2 终态/心跳/进度 owner-CAS）经 updateMany：单进程单 owner 场景恒命中，
+  // 返回 count:1 即成功，让既有 .update 断言（updates 数组）保持对历史终态写入的语义不变。
+  prisma.generationJob.updateMany = async (input) => {
+    updates.push(input);
+    return { count: 1 };
   };
   prisma.novel.findUnique = async () => ({
     id: "novel-1",
@@ -230,6 +237,7 @@ test("executePipeline skips chapters already marked for deferred continue when s
   } finally {
     prisma.generationJob.findUnique = original.generationFindUnique;
     prisma.generationJob.update = original.generationUpdate;
+    prisma.generationJob.updateMany = original.generationUpdateMany;
     prisma.novel.findUnique = original.novelFindUnique;
     prisma.chapter.findMany = original.chapterFindMany;
     reviewService.createQualityReport = original.createQualityReport;
@@ -308,6 +316,7 @@ test("executePipeline stops remaining chapters after a replan recommendation", a
   const original = {
     generationFindUnique: prisma.generationJob.findUnique,
     generationUpdate: prisma.generationJob.update,
+    generationUpdateMany: prisma.generationJob.updateMany,
     novelFindUnique: prisma.novel.findUnique,
     chapterFindMany: prisma.chapter.findMany,
     createQualityReport: reviewService.createQualityReport,
@@ -347,6 +356,12 @@ test("executePipeline stops remaining chapters after a replan recommendation", a
   prisma.generationJob.update = async (input) => {
     updates.push(input);
     return input;
+  };
+  // CAS 写入（p2 终态/心跳/进度 owner-CAS）经 updateMany：单进程单 owner 场景恒命中，
+  // 返回 count:1 即成功，让既有 .update 断言（updates 数组）保持对历史终态写入的语义不变。
+  prisma.generationJob.updateMany = async (input) => {
+    updates.push(input);
+    return { count: 1 };
   };
   prisma.novel.findUnique = async () => ({
     id: "novel-1",
@@ -412,6 +427,7 @@ test("executePipeline stops remaining chapters after a replan recommendation", a
   } finally {
     prisma.generationJob.findUnique = original.generationFindUnique;
     prisma.generationJob.update = original.generationUpdate;
+    prisma.generationJob.updateMany = original.generationUpdateMany;
     prisma.novel.findUnique = original.novelFindUnique;
     prisma.chapter.findMany = original.chapterFindMany;
     reviewService.createQualityReport = original.createQualityReport;
@@ -423,6 +439,7 @@ test("executePipeline stops remaining chapters when range replan quality debt re
   const original = {
     generationFindUnique: prisma.generationJob.findUnique,
     generationUpdate: prisma.generationJob.update,
+    generationUpdateMany: prisma.generationJob.updateMany,
     novelFindUnique: prisma.novel.findUnique,
     chapterFindMany: prisma.chapter.findMany,
     createQualityReport: reviewService.createQualityReport,
@@ -464,6 +481,12 @@ test("executePipeline stops remaining chapters when range replan quality debt re
   prisma.generationJob.update = async (input) => {
     updates.push(input);
     return input;
+  };
+  // CAS 写入（p2 终态/心跳/进度 owner-CAS）经 updateMany：单进程单 owner 场景恒命中，
+  // 返回 count:1 即成功，让既有 .update 断言（updates 数组）保持对历史终态写入的语义不变。
+  prisma.generationJob.updateMany = async (input) => {
+    updates.push(input);
+    return { count: 1 };
   };
   prisma.novel.findUnique = async () => ({
     id: "novel-1",
@@ -563,6 +586,7 @@ test("executePipeline stops remaining chapters when range replan quality debt re
   } finally {
     prisma.generationJob.findUnique = original.generationFindUnique;
     prisma.generationJob.update = original.generationUpdate;
+    prisma.generationJob.updateMany = original.generationUpdateMany;
     prisma.novel.findUnique = original.novelFindUnique;
     prisma.chapter.findMany = original.chapterFindMany;
     reviewService.createQualityReport = original.createQualityReport;
@@ -575,6 +599,7 @@ test("executePipeline range replan gate ignores debt outside job order range", a
   const original = {
     generationFindUnique: prisma.generationJob.findUnique,
     generationUpdate: prisma.generationJob.update,
+    generationUpdateMany: prisma.generationJob.updateMany,
     novelFindUnique: prisma.novel.findUnique,
     chapterFindMany: prisma.chapter.findMany,
     createQualityReport: reviewService.createQualityReport,
@@ -612,6 +637,12 @@ test("executePipeline range replan gate ignores debt outside job order range", a
   prisma.generationJob.update = async (input) => {
     updates.push(input);
     return input;
+  };
+  // CAS 写入（p2 终态/心跳/进度 owner-CAS）经 updateMany：单进程单 owner 场景恒命中，
+  // 返回 count:1 即成功，让既有 .update 断言（updates 数组）保持对历史终态写入的语义不变。
+  prisma.generationJob.updateMany = async (input) => {
+    updates.push(input);
+    return { count: 1 };
   };
   prisma.novel.findUnique = async () => ({ id: "novel-1", title: "测试小说" });
   prisma.chapter.findMany = async (input) => {
@@ -696,6 +727,7 @@ test("executePipeline range replan gate ignores debt outside job order range", a
   } finally {
     prisma.generationJob.findUnique = original.generationFindUnique;
     prisma.generationJob.update = original.generationUpdate;
+    prisma.generationJob.updateMany = original.generationUpdateMany;
     prisma.novel.findUnique = original.novelFindUnique;
     prisma.chapter.findMany = original.chapterFindMany;
     reviewService.createQualityReport = original.createQualityReport;
@@ -708,6 +740,7 @@ test("executePipeline counts replan debt in memory when recordAssessment fails",
   const original = {
     generationFindUnique: prisma.generationJob.findUnique,
     generationUpdate: prisma.generationJob.update,
+    generationUpdateMany: prisma.generationJob.updateMany,
     novelFindUnique: prisma.novel.findUnique,
     chapterFindMany: prisma.chapter.findMany,
     createQualityReport: reviewService.createQualityReport,
@@ -745,6 +778,12 @@ test("executePipeline counts replan debt in memory when recordAssessment fails",
   prisma.generationJob.update = async (input) => {
     updates.push(input);
     return input;
+  };
+  // CAS 写入（p2 终态/心跳/进度 owner-CAS）经 updateMany：单进程单 owner 场景恒命中，
+  // 返回 count:1 即成功，让既有 .update 断言（updates 数组）保持对历史终态写入的语义不变。
+  prisma.generationJob.updateMany = async (input) => {
+    updates.push(input);
+    return { count: 1 };
   };
   prisma.novel.findUnique = async () => ({ id: "novel-1", title: "测试小说" });
   prisma.chapter.findMany = async (input) => {
@@ -824,6 +863,7 @@ test("executePipeline counts replan debt in memory when recordAssessment fails",
   } finally {
     prisma.generationJob.findUnique = original.generationFindUnique;
     prisma.generationJob.update = original.generationUpdate;
+    prisma.generationJob.updateMany = original.generationUpdateMany;
     prisma.novel.findUnique = original.novelFindUnique;
     prisma.chapter.findMany = original.chapterFindMany;
     reviewService.createQualityReport = original.createQualityReport;
@@ -836,6 +876,7 @@ test("executePipeline records local patch recommendations as quality debt and co
   const original = {
     generationFindUnique: prisma.generationJob.findUnique,
     generationUpdate: prisma.generationJob.update,
+    generationUpdateMany: prisma.generationJob.updateMany,
     novelFindUnique: prisma.novel.findUnique,
     chapterFindMany: prisma.chapter.findMany,
     createQualityReport: reviewService.createQualityReport,
@@ -875,6 +916,12 @@ test("executePipeline records local patch recommendations as quality debt and co
   prisma.generationJob.update = async (input) => {
     updates.push(input);
     return input;
+  };
+  // CAS 写入（p2 终态/心跳/进度 owner-CAS）经 updateMany：单进程单 owner 场景恒命中，
+  // 返回 count:1 即成功，让既有 .update 断言（updates 数组）保持对历史终态写入的语义不变。
+  prisma.generationJob.updateMany = async (input) => {
+    updates.push(input);
+    return { count: 1 };
   };
   prisma.novel.findUnique = async () => ({
     id: "novel-1",
@@ -942,6 +989,7 @@ test("executePipeline records local patch recommendations as quality debt and co
   } finally {
     prisma.generationJob.findUnique = original.generationFindUnique;
     prisma.generationJob.update = original.generationUpdate;
+    prisma.generationJob.updateMany = original.generationUpdateMany;
     prisma.novel.findUnique = original.novelFindUnique;
     prisma.chapter.findMany = original.chapterFindMany;
     reviewService.createQualityReport = original.createQualityReport;
@@ -954,6 +1002,7 @@ test("executePipeline preserves persisted quality alerts across resume", async (
   const original = {
     generationFindUnique: prisma.generationJob.findUnique,
     generationUpdate: prisma.generationJob.update,
+    generationUpdateMany: prisma.generationJob.updateMany,
     novelFindUnique: prisma.novel.findUnique,
     chapterFindMany: prisma.chapter.findMany,
     createQualityReport: reviewService.createQualityReport,
@@ -993,6 +1042,12 @@ test("executePipeline preserves persisted quality alerts across resume", async (
   prisma.generationJob.update = async (input) => {
     updates.push(input);
     return input;
+  };
+  // CAS 写入（p2 终态/心跳/进度 owner-CAS）经 updateMany：单进程单 owner 场景恒命中，
+  // 返回 count:1 即成功，让既有 .update 断言（updates 数组）保持对历史终态写入的语义不变。
+  prisma.generationJob.updateMany = async (input) => {
+    updates.push(input);
+    return { count: 1 };
   };
   prisma.novel.findUnique = async () => ({
     id: "novel-1",
@@ -1044,6 +1099,7 @@ test("executePipeline preserves persisted quality alerts across resume", async (
   } finally {
     prisma.generationJob.findUnique = original.generationFindUnique;
     prisma.generationJob.update = original.generationUpdate;
+    prisma.generationJob.updateMany = original.generationUpdateMany;
     prisma.novel.findUnique = original.novelFindUnique;
     prisma.chapter.findMany = original.chapterFindMany;
     reviewService.createQualityReport = original.createQualityReport;
@@ -1181,6 +1237,7 @@ test("executePipeline records empty chapter output in failed job notice payload 
   const original = {
     generationFindUnique: prisma.generationJob.findUnique,
     generationUpdate: prisma.generationJob.update,
+    generationUpdateMany: prisma.generationJob.updateMany,
     novelFindUnique: prisma.novel.findUnique,
     chapterFindMany: prisma.chapter.findMany,
     emit: novelEventBus.emit,
@@ -1219,6 +1276,12 @@ test("executePipeline records empty chapter output in failed job notice payload 
   prisma.generationJob.update = async (input) => {
     updates.push(input);
     return input;
+  };
+  // CAS 写入（p2 终态/心跳/进度 owner-CAS）经 updateMany：单进程单 owner 场景恒命中，
+  // 返回 count:1 即成功，让既有 .update 断言（updates 数组）保持对历史终态写入的语义不变。
+  prisma.generationJob.updateMany = async (input) => {
+    updates.push(input);
+    return { count: 1 };
   };
   prisma.novel.findUnique = async () => ({
     id: "novel-1",
@@ -1288,6 +1351,7 @@ test("executePipeline records empty chapter output in failed job notice payload 
   } finally {
     prisma.generationJob.findUnique = original.generationFindUnique;
     prisma.generationJob.update = original.generationUpdate;
+    prisma.generationJob.updateMany = original.generationUpdateMany;
     prisma.novel.findUnique = original.novelFindUnique;
     prisma.chapter.findMany = original.chapterFindMany;
     novelEventBus.emit = original.emit;
@@ -1328,6 +1392,12 @@ function mockPipelineJobBasics(input) {
     updates.push(query);
     return query;
   };
+  // CAS 写入（p2 终态/心跳/进度/requeue owner-CAS）经 updateMany：单进程单 owner 恒命中，
+  // 返回 count:1 让既有 .update 断言（updates 数组）继续锁定终态写入语义。
+  prisma.generationJob.updateMany = async (query) => {
+    updates.push(query);
+    return { count: 1 };
+  };
   prisma.novel.findUnique = async () => ({
     id: "novel-1",
     title: "测试小说",
@@ -1343,6 +1413,7 @@ test("executePipeline marks 章节生成已取消 as cancelled and does not auto
   const original = {
     generationFindUnique: prisma.generationJob.findUnique,
     generationUpdate: prisma.generationJob.update,
+    generationUpdateMany: prisma.generationJob.updateMany,
     novelFindUnique: prisma.novel.findUnique,
     chapterFindMany: prisma.chapter.findMany,
     emit: novelEventBus.emit,
@@ -1376,6 +1447,7 @@ test("executePipeline marks 章节生成已取消 as cancelled and does not auto
   } finally {
     prisma.generationJob.findUnique = original.generationFindUnique;
     prisma.generationJob.update = original.generationUpdate;
+    prisma.generationJob.updateMany = original.generationUpdateMany;
     prisma.novel.findUnique = original.novelFindUnique;
     prisma.chapter.findMany = original.chapterFindMany;
     novelEventBus.emit = original.emit;
@@ -1386,6 +1458,7 @@ test("executePipeline marks AbortError Request aborted as cancelled not requeued
   const original = {
     generationFindUnique: prisma.generationJob.findUnique,
     generationUpdate: prisma.generationJob.update,
+    generationUpdateMany: prisma.generationJob.updateMany,
     novelFindUnique: prisma.novel.findUnique,
     chapterFindMany: prisma.chapter.findMany,
     emit: novelEventBus.emit,
@@ -1416,6 +1489,7 @@ test("executePipeline marks AbortError Request aborted as cancelled not requeued
   } finally {
     prisma.generationJob.findUnique = original.generationFindUnique;
     prisma.generationJob.update = original.generationUpdate;
+    prisma.generationJob.updateMany = original.generationUpdateMany;
     prisma.novel.findUnique = original.novelFindUnique;
     prisma.chapter.findMany = original.chapterFindMany;
     novelEventBus.emit = original.emit;
@@ -1426,6 +1500,7 @@ test("executePipeline clears jobTransportAutoRetryCount on success and error on 
   const original = {
     generationFindUnique: prisma.generationJob.findUnique,
     generationUpdate: prisma.generationJob.update,
+    generationUpdateMany: prisma.generationJob.updateMany,
     novelFindUnique: prisma.novel.findUnique,
     chapterFindMany: prisma.chapter.findMany,
     emit: novelEventBus.emit,
@@ -1472,6 +1547,7 @@ test("executePipeline clears jobTransportAutoRetryCount on success and error on 
   } finally {
     prisma.generationJob.findUnique = original.generationFindUnique;
     prisma.generationJob.update = original.generationUpdate;
+    prisma.generationJob.updateMany = original.generationUpdateMany;
     prisma.novel.findUnique = original.novelFindUnique;
     prisma.chapter.findMany = original.chapterFindMany;
     novelEventBus.emit = original.emit;

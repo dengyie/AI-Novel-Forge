@@ -477,6 +477,38 @@ export class GenerationContextAssembler {
         presenceImpression: item.presenceImpression ?? null,
       };
     });
+    // Union：canonical state 可能含 batchContextCache 缓存窗口内新增的角色，
+    // novel.characters（缓存）尚未包含。把缺失角色以 canonical 最小信息补入 roster，
+    // 避免新建角色在下一次缓存刷新前被写作引擎完全忽视。
+    const rosterIdSet = new Set(mappedCharacterRoster.map((item) => item.id));
+    for (const canonical of canonicalState.characters) {
+      if (!rosterIdSet.has(canonical.characterId)) {
+        mappedCharacterRoster.push({
+          id: canonical.characterId,
+          name: canonical.name,
+          role: canonical.role ?? "unknown",
+          personality: null,
+          background: null,
+          development: null,
+          identityLabel: null,
+          factionLabel: null,
+          stanceLabel: null,
+          powerLevel: null,
+          realm: null,
+          currentLocation: null,
+          availability: null,
+          prohibitions: [],
+          currentState: canonical.currentState ?? null,
+          currentGoal: canonical.currentGoal ?? null,
+          appearance: null,
+          physique: null,
+          attireStyle: null,
+          signatureDetail: null,
+          voiceTexture: null,
+          presenceImpression: null,
+        });
+      }
+    }
     const mappedCharacterHardFacts = buildRuntimeCharacterHardFactsList(
       mappedCharacterRoster,
       pendingCharacterHardFactReviews,
@@ -531,7 +563,26 @@ export class GenerationContextAssembler {
       antiCopyCorpus: continuationPack.antiCopyCorpus,
     } satisfies GenerationContextPackage["continuation"];
 
-    const previousChapterTail = extractChapterTail(recentChapters[0]?.content);
+    const nearestPriorChapter = recentChapters[0];
+    const rawPreviousChapterTail = extractChapterTail(nearestPriorChapter?.content);
+    let previousChapterTail: string | null = rawPreviousChapterTail || null;
+    // needs_repair 过滤后，最近合格前章可能不是 N-1；prompt block 文案硬写「上一章实际尾段」
+    // 且要求「本章开头必须直接承接」，若把 N-2 甚至更早的尾段当直接上一章喂给 writer，会把
+    // 跨章尾段误锚 → 承接错位。此处在内容首段前缀元信息，明确实际章号与跨越区间，chapter
+    // 摘要/任务单负责复原被跳过章的进度；prompt block 结构与 schema 均保持不变。
+    if (
+      previousChapterTail &&
+      nearestPriorChapter &&
+      nearestPriorChapter.order !== chapter.order - 1
+    ) {
+      const missingChapterOrder = chapter.order - 1;
+      const anchorChapterOrder = nearestPriorChapter.order;
+      const gapChapterCount = missingChapterOrder - anchorChapterOrder;
+      previousChapterTail = [
+        `（元信息：第 ${missingChapterOrder} 章尚待修复未纳入正文承接；以下引用第 ${anchorChapterOrder} 章尾段作为参考锚点，中间跨越 ${gapChapterCount} 章。本章开头承接以此为准，被跳过章的推进请通过章节摘要与任务单复原，不得直接沿用第 ${missingChapterOrder} 章尾段设定。）`,
+        rawPreviousChapterTail,
+      ].join("\n\n");
+    }
     if (!previousChapterTail && chapter.order > 1) {
       // lookback 内无合格章：承接锚点空，续写只能靠摘要/任务单，可观测告警
       console.warn("[context-assembler] previous_chapter_tail empty after needs_repair filter", {

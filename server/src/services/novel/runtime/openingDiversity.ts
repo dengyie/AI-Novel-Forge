@@ -1,6 +1,6 @@
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
-import { buildNGramSet, jaccardSimilarity } from "@ai-novel/shared/utils/textSimilarity";
+import { buildNGramSet, hasSufficientSimilarityLength, jaccardSimilarity } from "@ai-novel/shared/utils/textSimilarity";
 import { prisma } from "../../../db/prisma";
 import { runTextPrompt } from "../../../prompting/core/promptRunner";
 import type { PromptAsset } from "../../../prompting/core/promptTypes";
@@ -61,7 +61,6 @@ interface RewriteOptions {
 const DEFAULT_RECENT_WINDOW = 5;
 const DEFAULT_OPENING_CHARS = 300;
 const DEFAULT_SIMILARITY_THRESHOLD = 0.3;
-const MIN_CORPUS_SNIPPET_LEN = 24;
 const MIN_OPENING_CHARS = 32;
 
 function sliceOpening(content: string | null | undefined, openingChars: number): string {
@@ -184,7 +183,7 @@ export function createDefaultOpeningDiversityGuard(
 
     const corpus = recentChapters
       .map((row) => sliceOpening(row.content, openingChars))
-      .filter((snippet) => snippet.length >= MIN_CORPUS_SNIPPET_LEN);
+      .filter((snippet) => hasSufficientSimilarityLength(snippet));
 
     if (corpus.length === 0) {
       return { content, rewritten: false, maxSimilarity: 0 };

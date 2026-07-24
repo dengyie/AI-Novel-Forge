@@ -505,8 +505,11 @@ export class NovelCorePipelineService {
       liveAbort.abort(new Error("PIPELINE_CANCELLED"));
     }
     if (job.status === "queued") {
-      return prisma.generationJob.update({
-        where: { id: jobId },
+      // 原子取消：仅当仍为 queued 才直接终态化。若在 findUnique 与此处之间已被
+      // dispatcher 租约认领转 running，updateMany count===0，落到下方 running 分支请求取消，
+      // 避免"读到 queued→写终态 finishedAt→running pipeline 继续心跳"的僵尸窗口。
+      const cancelled = await prisma.generationJob.updateMany({
+        where: { id: jobId, status: "queued" },
         data: {
           status: "cancelled",
           cancelRequestedAt: null,
@@ -518,7 +521,20 @@ export class NovelCorePipelineService {
           finishedAt: new Date(),
         },
       });
+      if (cancelled.count > 0) {
+        return prisma.generationJob.findUnique({ where: { id: jobId } });
+      }
+      // 竞态穿透：已离开 queued（多半转 running），复核终态后落 running 分支。
+      const latest = await prisma.generationJob.findUnique({ where: { id: jobId } });
+      if (
+        latest
+        && (latest.status === "succeeded" || latest.status === "failed" || latest.status === "cancelled")
+      ) {
+        throw new Error("仅排队中或运行中的任务可取消。");
+      }
     }
+    // running 分支：仅置取消请求标志，由 pipeline 自身在检查点终态化；finishedAt 保持 null，
+    // 让 running 行永不带 finishedAt，保住 watchdog/startup-resume 的可恢复性。
     return prisma.generationJob.update({
       where: { id: jobId },
       data: {
@@ -695,6 +711,9 @@ export class NovelCorePipelineService {
       if (!leaseEnabled) {
         warnGenerationJobLeaseDisabledOnce();
       }
+      // owner 先算（lease disabled 时为 null），认领成功与否都用它灌进 executePipeline，
+      // 让 executePipelineJob 的心跳/终写 CAS 带 leaseOwner，count=0 → 抛 lease-lost 早退。
+      const leaseOwner = leaseEnabled ? `pipeline-${process.pid}` : null;
       if (leaseEnabled) {
         try {
           const claimed = await prisma.generationJob.updateMany({
@@ -703,7 +722,7 @@ export class NovelCorePipelineService {
               status: "running",
               // 清掉 auto-requeue 残留的 error，避免 running 期间仍展示失败文案
               error: null,
-              leaseOwner: `pipeline-${process.pid}`,
+              leaseOwner,
               leaseExpiresAt: new Date(Date.now() + PIPELINE_LEASE_TTL_MS),
             },
           });
@@ -723,7 +742,7 @@ export class NovelCorePipelineService {
           return;
         }
       }
-      await this.executePipeline(jobId, novelId, options)
+      await this.executePipeline(jobId, novelId, options, leaseOwner)
         .catch(async (error) => {
           // 防止未处理 rejection 拖垮进程；并保证 job 不永久卡在 running。
           await this.ensurePipelineJobTerminalAfterUnhandledError(jobId, error);
@@ -734,7 +753,16 @@ export class NovelCorePipelineService {
     })();
   }
 
-  private async executePipeline(jobId: string, novelId: string, options: PipelineRunOptions) {
+  private async executePipeline(
+    jobId: string,
+    novelId: string,
+    options: PipelineRunOptions,
+    /**
+     * 本进程持有的租约 owner（`pipeline-${pid}`）。null = lease disabled 或本次调度未认领：
+     * executePipelineJob 内部关键 job 行写用此值做 owner-CAS，count=0 → 抛 lease-lost 早退。
+     */
+    leaseOwner: string | null,
+  ) {
     await executePipelineJob({
       parsePipelinePayload: (payload) => this.parsePipelinePayload(payload),
       stringifyPipelinePayload: (input) => this.stringifyPipelinePayload(input),
@@ -743,6 +771,7 @@ export class NovelCorePipelineService {
       schedulePipelineExecution: (id, nId, opts) => this.schedulePipelineExecution(id, nId, opts),
       chapterRuntimeCoordinator: this.chapterRuntimeCoordinator,
       activeChapterAborts: NovelCorePipelineService.activeChapterAborts,
+      leaseOwner,
     }, jobId, novelId, options);
   }
 }

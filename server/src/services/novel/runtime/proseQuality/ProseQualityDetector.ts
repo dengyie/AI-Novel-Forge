@@ -88,7 +88,7 @@ export const PROSE_PRONOUN_DENSITY_MIN_SENTENCES = 8;
 const PRONOUN_FIX_SUGGESTION =
   "改用专名、动作主语或环境起句打破句首他/她堆叠；禁止循环换称（主角/少年/男人）。";
 
-const TERMINAL_PUNCTUATION = /[。！？!?”"」』）)】》…]$/u;
+const TERMINAL_PUNCTUATION = /(?:[。！？!?”"」』）)】》…]|——?|\.{3,})$/u;
 const NEGATIVE_FLIP_PATTERN = /(?:不是|并非|并不是|不算|不能说是|没有|不再是)[^。！？；;\n]{1,36}?[，,、]?\s*(?:而是|却是|反而是|更像是|只是)[^。！？；;\n]{1,36}/gu;
 const DASH_OR_ELLIPSIS_PATTERN = /——|—|--|……|…{2,}|\.{3,}/gu;
 const AI_SELF_REFERENCE_PATTERN = /作为(?:一名|一个)?(?:AI|人工智能|语言模型)|我是(?:AI|人工智能|语言模型)|我无法(?:继续)?(?:创作|生成|提供|完成)|我不能(?:继续)?(?:创作|生成|提供|完成)|无法满足(?:该|这个)?请求|不能协助|as an AI|I (?:am|cannot|can't)[^。！？.!?\n]{0,40}AI/iu;
@@ -565,12 +565,12 @@ function scanDashOrEllipsisDensity(
 
   for (const segment of sampleSegments) {
     DASH_OR_ELLIPSIS_PATTERN.lastIndex = 0;
-    const match = segment.text.match(DASH_OR_ELLIPSIS_PATTERN);
+    const matchIndex = segment.text.search(DASH_OR_ELLIPSIS_PATTERN);
     addFinding({
       code: "prose_dash_or_ellipsis",
       severity,
       line: segment.line,
-      column: (match?.index ?? 0) + 1,
+      column: (matchIndex >= 0 ? matchIndex : 0) + 1,
       message: highDensity
         ? `破折号/省略号密度偏高（约 ${density.perThousand.toFixed(1)}/千字），容易形成模型化停顿。`
         : "正文使用破折号或省略号，可改写为更自然的停顿（轻量提示）。",
@@ -988,22 +988,33 @@ function stripQuotedText(text: string): string {
 }
 
 function isInsideQuote(text: string, index: number): boolean {
-  const pairs: Array<[string, string]> = [
+  // 非对称引号对：open ≠ close，用 lastIndexOf 回溯即可。
+  const asymmetricPairs: Array<[string, string]> = [
     ["「", "」"],
     ["『", "』"],
     ["“", "”"],
-    ["\"", "\""],
-    ["'", "'"],
   ];
-  return pairs.some(([open, close]) => {
+  for (const [open, close] of asymmetricPairs) {
     const before = text.slice(0, index);
     const openIndex = before.lastIndexOf(open);
-    if (openIndex < 0) {
-      return false;
-    }
+    if (openIndex < 0) continue;
     const closeIndex = text.indexOf(close, openIndex + open.length);
-    return closeIndex >= index;
-  });
+    if (closeIndex >= index) return true;
+  }
+  // 对称引号（open === close）：从头到 index 计出现次数，奇数 = 在引号内。
+  const symmetricQuotes = ["\"", "'"];
+  for (const q of symmetricQuotes) {
+    let count = 0;
+    let pos = 0;
+    while (pos < index) {
+      const found = text.indexOf(q, pos);
+      if (found < 0 || found >= index) break;
+      count++;
+      pos = found + q.length;
+    }
+    if (count % 2 === 1) return true;
+  }
+  return false;
 }
 
 function lineLooksLikeDialogue(text: string): boolean {
