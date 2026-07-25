@@ -79,10 +79,37 @@ test("decideRepairContentAdoption discards candidate that introduces prose_syste
   assert.deepEqual(result.introducedBlockingCodes, ["prose_system_hud"]);
 });
 
-test("decideRepairContentAdoption discards newly introduced L1 blocking codes", () => {
+test("decideRepairContentAdoption discards when baseline L1 count grows, overall flat, no improvement", () => {
   const {
     fingerprintReviewIssuesAsL1BlockingCodes,
   } = require("@ai-novel/shared/types/repairAdoptDecision");
+  // baseline 已有 1 个 L1（coherence），候选类目膨胀 1->2 引入 logic 新类，
+  // 且 overall 未升、未过文学门、无门槛维提升 → 仍判回归（保留 anti-regression 兜底）。
+  const baselineL1 = fingerprintReviewIssuesAsL1BlockingCodes([
+    { severity: "high", category: "coherence", evidence: "义务A未兑现" },
+  ]);
+  const candidateL1 = fingerprintReviewIssuesAsL1BlockingCodes([
+    { severity: "high", category: "coherence", evidence: "义务A未兑现（措辞抖动版）" },
+    { severity: "critical", category: "logic", evidence: "义务B新增缺口" },
+  ]);
+  const result = decideRepairContentAdoption({
+    baselineScore: score({ overall: 70, coherence: 70, repetition: 70, engagement: 70 }),
+    candidateScore: score({ overall: 70, coherence: 70, repetition: 70, engagement: 70 }),
+    baselineBlockingCodes: [],
+    candidateBlockingCodes: [],
+    baselineBlockingL1Codes: baselineL1,
+    candidateBlockingL1Codes: candidateL1,
+  });
+  assert.equal(result.decision, "discard");
+  assert.match(result.reason, /L1|类目膨胀/);
+  assert.ok(result.introducedBlockingL1Codes.length >= 1);
+});
+
+test("decideRepairContentAdoption adopts when new L1 category appears but overall rises substantially", () => {
+  const {
+    fingerprintReviewIssuesAsL1BlockingCodes,
+  } = require("@ai-novel/shared/types/repairAdoptDecision");
+  // baseline 已有 L1，候选引入新类目 logic，但 overall 大幅上升 → 不应被一条新类硬否决（Part D 修正语义）。
   const baselineL1 = fingerprintReviewIssuesAsL1BlockingCodes([
     { severity: "high", category: "coherence", evidence: "义务A未兑现" },
   ]);
@@ -96,6 +123,26 @@ test("decideRepairContentAdoption discards newly introduced L1 blocking codes", 
     baselineBlockingCodes: [],
     candidateBlockingCodes: [],
     baselineBlockingL1Codes: baselineL1,
+    candidateBlockingL1Codes: candidateL1,
+  });
+  assert.equal(result.decision, "adopt");
+  assert.ok(result.introducedBlockingL1Codes.length >= 1);
+});
+
+test("decideRepairContentAdoption discards any new L1 when baseline has zero L1 (strict)", () => {
+  const {
+    fingerprintReviewIssuesAsL1BlockingCodes,
+  } = require("@ai-novel/shared/types/repairAdoptDecision");
+  // baseline 本就无任何 L1 硬伤 → 候选不得新引入任何类目（正回归，硬拒绝）。
+  const candidateL1 = fingerprintReviewIssuesAsL1BlockingCodes([
+    { severity: "critical", category: "logic", evidence: "义务B新增缺口" },
+  ]);
+  const result = decideRepairContentAdoption({
+    baselineScore: score({ overall: 70, coherence: 70, repetition: 70, engagement: 70 }),
+    candidateScore: score({ overall: 92, coherence: 92, repetition: 92, engagement: 92 }),
+    baselineBlockingCodes: [],
+    candidateBlockingCodes: [],
+    baselineBlockingL1Codes: [],
     candidateBlockingL1Codes: candidateL1,
   });
   assert.equal(result.decision, "discard");

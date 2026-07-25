@@ -252,6 +252,12 @@ export class ChapterRepairStreamRuntime {
         repairContext: repairContextPackage.chapterRepairContext,
         bibleContent: bible?.rawContent ?? "",
         forceFullRewrite: patchAvoid.avoided,
+        // streaming repair 无完整 ChapterRuntimePackage（避免重跑 audit 烧 600s），
+        // 但 assembled ContextPackage.openAuditIssues 的 code 集合可透传，让 heavy 候选
+        // 见到精确硬伤 code（OBLIGATION_UNMET/LENGTH_* 等），定向修而非漂移重写。
+        auditOpenIssueCodes: (assembledContextPackage.openAuditIssues ?? [])
+          .map((item) => item?.code)
+          .filter((code): code is string => typeof code === "string" && code.trim().length > 0),
         options: {
           provider: options.provider,
           model: options.model,
@@ -340,7 +346,11 @@ export class ChapterRepairStreamRuntime {
       }));
     }
 
-    const fallbackReview = await this.deps.reviewChapterAfterRepair(novelId, chapterId, options);
+    // repair 取 issues 不得阻塞在 payoff_ledger.sync（transport 重试可达 5×600s）
+    const fallbackReview = await this.deps.reviewChapterAfterRepair(novelId, chapterId, {
+      ...options,
+      skipPayoffLedgerSync: true,
+    });
     return fallbackReview.issues;
   }
 

@@ -359,8 +359,10 @@ export class VolumeReadinessService {
 
     const actionFilter = (request.actionFilter && request.actionFilter.length > 0)
       ? request.actionFilter
-      // 默认不含 needs_heavy（激进须显式）与 needs_polish（policy 当前不产出；executor 仍支持显式）
-      : (["needs_re_review", "needs_patch"] as VolumeReadinessActionFilter[]);
+      // 默认含 needs_heavy：v2 现状大量假 approved 经真 review 后升 needs_heavy，
+      // 不含则这些章永远只进 re_review 而 executor 链不到 heavy。needs_polish 仍须显式
+      // （policy 当前不产出；executor 仍支持显式）。API 仍可显式覆盖。
+      : (["needs_re_review", "needs_patch", "needs_heavy"] as VolumeReadinessActionFilter[]);
 
     const actionable = filterPlansByAction(report.chapters, actionFilter);
     const budgetDefaults = volumeReadinessConfig.budget;

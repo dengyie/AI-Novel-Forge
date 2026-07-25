@@ -28,6 +28,8 @@ export interface ChapterRepairPromptInput {
   issuesJson: string;
   ragContext: string;
   modeHint?: string;
+  /** 本次修文模式（heavy_repair / light_repair / continuity_only / …）。仅用于 system 文案分支。 */
+  repairMode?: string;
 }
 
 export const chapterSummaryPrompt: PromptAsset<
@@ -202,18 +204,23 @@ export const chapterRepairPrompt: PromptAsset<ChapterRepairPromptInput, string, 
       placeholderHint: "例如：修复时禁止改动对话内容；只允许压缩重复句式，不得引入新信息……",
     },
   ],
-  render: (input, context) => [
+  render: (input, context) => {
+    const isHeavy = input.repairMode === "heavy_repair";
+    const rewriteBoundary = isHeavy
+      ? "必要时可重写句段乃至重组段落次序，但保持剧情方向、核心事件次序与角色状态不变；优先复用原章有效推进，不要凭空发明新主线。"
+      : "修文以‘最小必要修改’为原则，不要无关重写，不要把原章整体推翻重来。";
+    return [
     new SystemMessage([
       "你是资深网络小说修文编辑。",
       "你的任务是根据问题清单与分层上下文，对当前章节进行最小必要修复，使其更符合任务要求、结构要求与阅读体验。",
       "",
       "【任务边界】",
       "只输出修复后的完整章节正文，不要输出解释、提纲、注释或任何额外文本。",
-      "修文以‘最小必要修改’为原则，不要无关重写，不要把原章整体推翻重来。",
+      rewriteBoundary,
       "不得引入新的核心角色、重大设定、主线转向或与上下文冲突的内容。",
       "",
       "【修复原则】",
-      "1. 优先修复 issuesJson 中明确指出的关键问题。",
+      "1. 优先修复 issuesJson 中明确指出的关键问题；若 issuesJson 含 missingObligations / blockingIssueCodes，先按其精确义务与硬伤 code 定向补修，不要泛泛重写。",
       "2. 优先保证 chapter_mission、repair_boundaries、world_rules 的约束被满足。",
       "3. 保留原章已经有效的推进、情绪、细节与角色状态，不要把有用内容一起洗掉。",
       "4. 若多个问题冲突，优先修复影响主线推进、逻辑连贯和阅读节奏的问题。",
@@ -259,5 +266,6 @@ export const chapterRepairPrompt: PromptAsset<ChapterRepairPromptInput, string, 
       "",
       "请直接输出修复后的完整章节正文。",
     ].join("\n")),
-  ],
+  ];
+  },
 };

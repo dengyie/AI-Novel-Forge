@@ -27,6 +27,9 @@ export interface PrepareChapterRepairExecutionInput {
   content: string;
   issues: ReviewIssue[];
   runtimePackage?: ChapterRuntimePackage | null;
+  /** 审计层开放硬伤 code（来自 assembled ContextPackage.openAuditIssues，非 LLM 重跑）。
+   * streaming repair 无完整 runtimePackage，但可据此让 heavy 候选见到精确硬伤 code。 */
+  auditOpenIssueCodes?: string[] | null;
   repairContext?: ChapterRepairContext | null;
   bibleContent?: string | null;
   forceFullRewrite?: boolean;
@@ -42,6 +45,8 @@ export interface ChapterHeavyRepairPromptRequest {
     issuesJson: string;
     ragContext: string;
     modeHint: string;
+    /** heavy_repair / light_repair — 让 prompt.render 走差异化改写边界（heavy 允许重写句段）。 */
+    repairMode?: string;
   };
   contextBlocks?: ReturnType<typeof buildChapterRepairContextBlocks>;
   options: {
@@ -110,27 +115,40 @@ function resolveIssueCodes(runtimePackage: ChapterRuntimePackage | null | undefi
  *  - missingObligations：本章未兑现的义务（kind/summary/evidence），修复器可据此定向补写
  *  - blockingIssueCodes：审计层给出的精确 code（如 OBLIGATION_UNMET / LENGTH_OVER_HARD_MAX），
  *    避免修复器只看压扁文本猜问题类型
+ *
+ * streaming repair 路径无完整 ChapterRuntimePackage（避免重跑 audit 烧 600s），
+ * 但可透传 assembledContextPackage.openAuditIssues 的 code 集合作 auditOpenIssueCodes，
+ * 仍让 heavy 候选见到精确硬伤 code（定向修而非漂移重写）。
  */
 function buildRepairIssuesPayload(
   issues: ReviewIssue[],
   runtimePackage: ChapterRuntimePackage | null | undefined,
+  auditOpenIssueCodes?: string[] | null,
 ): string {
   const missingObligations = runtimePackage?.obligationCoverage?.missing ?? [];
-  const blockingIssueCodes = resolveIssueCodes(runtimePackage);
+  const blockingIssueCodes = [
+    ...resolveIssueCodes(runtimePackage),
+    ...(Array.isArray(auditOpenIssueCodes) ? auditOpenIssueCodes.filter(Boolean) : []),
+  ];
+  const extraCodes = Array.from(new Set(blockingIssueCodes));
 
-  if (missingObligations.length === 0 && blockingIssueCodes.length === 0) {
+  if (missingObligations.length === 0 && extraCodes.length === 0) {
     return JSON.stringify(issues, null, 2);
   }
 
   return JSON.stringify(
     {
       issues,
-      missingObligations: missingObligations.map((o) => ({
-        kind: o.kind,
-        summary: o.summary,
-        ...(o.evidence ? { evidence: o.evidence } : {}),
-      })),
-      blockingIssueCodes,
+      ...(missingObligations.length > 0
+        ? {
+          missingObligations: missingObligations.map((o) => ({
+            kind: o.kind,
+            summary: o.summary,
+            ...(o.evidence ? { evidence: o.evidence } : {}),
+          })),
+        }
+        : {}),
+      ...(extraCodes.length > 0 ? { blockingIssueCodes: extraCodes } : {}),
     },
     null,
     2,
@@ -295,9 +313,10 @@ export async function prepareChapterRepairExecution(
             bibleContent: resolveBibleContent(input),
             chapterTitle: input.chapterTitle,
             chapterContent: input.content,
-            issuesJson: buildRepairIssuesPayload(issues, input.runtimePackage),
+            issuesJson: buildRepairIssuesPayload(issues, input.runtimePackage, input.auditOpenIssueCodes),
             ragContext: buildRepairRagContext(input),
             modeHint,
+            repairMode: activeRepairMode,
           },
           contextBlocks: resolveRepairContext(input)
             ? buildChapterRepairContextBlocks(resolveRepairContext(input) as ChapterRepairContext)
@@ -331,9 +350,10 @@ export async function prepareChapterRepairExecution(
         bibleContent: resolveBibleContent(input),
         chapterTitle: input.chapterTitle,
         chapterContent: input.content,
-        issuesJson: buildRepairIssuesPayload(issues, input.runtimePackage),
+        issuesJson: buildRepairIssuesPayload(issues, input.runtimePackage, input.auditOpenIssueCodes),
         ragContext: buildRepairRagContext(input),
         modeHint,
+        repairMode: activeRepairMode,
       },
       contextBlocks: resolveRepairContext(input)
         ? buildChapterRepairContextBlocks(resolveRepairContext(input) as ChapterRepairContext)
@@ -427,7 +447,7 @@ export function getRepairModeHint(
     case "ending_only":
       return "优先修章节收束、钩子和结尾决断感，让章节尾部更有拉力。";
     case "heavy_repair":
-      return "允许较大幅度重写句段，只要剧情方向不变即可。";
+      return "允许较大幅度重写句段，只要剧情方向不变即可；以 issuesJson/missingObligations/blockingIssueCodes 定向修复硬伤为先，不要凭空新增与原问题无关的新冲突或硬伤。";
     case "light_repair":
     default:
       return "以轻修为主，优先保持原有内容框架和事件顺序。";

@@ -283,6 +283,37 @@ export class VolumeReadinessExecutor {
           continue;
         }
 
+        // 章前 re-assess：plan 快照可能过期（中途人工/上一轮已修好）
+        // dryRun 保持 plan 原样便于预览；live 跳过已 publish_ready 的章，避免白烧 heavy。
+        if (!initial.dryRun) {
+          try {
+            const preReport = await volumeReadinessService.assess(initial.novelId, {
+              fromOrder: planItem.chapterOrder,
+              toOrder: planItem.chapterOrder,
+              refresh: false,
+            });
+            const pre = preReport.chapters.find((c) => c.chapterId === planItem.chapterId);
+            if (pre?.verdict === "publish_ready") {
+              appendVolumeReadinessChapterResult(runId, {
+                chapterId: planItem.chapterId,
+                chapterOrder: planItem.chapterOrder,
+                title: planItem.title,
+                verdictBefore: planItem.verdict,
+                verdictAfter: "publish_ready",
+                outcome: "already_done",
+                message: `pre-assess publish_ready（plan 原 verdict=${planItem.verdict}，跳过动作）`,
+                startedAt: new Date().toISOString(),
+                finishedAt: new Date().toISOString(),
+              }, { llmCallsUsed, heavyRewritesUsed, chaptersActed });
+              updateVolumeReadinessRun(runId, { wallMsUsed: wallUsedMs() });
+              actedChapterIds.add(planItem.chapterId);
+              continue;
+            }
+          } catch {
+            // re-assess 失败不阻断：按原 plan 继续
+          }
+        }
+
         // incomplete 次数达上限 → 不再自动动作，记 kept（人工）
         const incompleteAttempts = countIncompleteAttemptsForChapter(
           live.results,
@@ -383,7 +414,17 @@ export class VolumeReadinessExecutor {
 
         try {
           if (planItem.verdict === "needs_re_review") {
-            await novelService.reviewChapter(initial.novelId, planItem.chapterId, {});
+            // 心跳：章开始即刷 wall，避免 API 长时间 acted=0 像假死
+            updateVolumeReadinessRun(runId, {
+              llmCallsUsed,
+              heavyRewritesUsed,
+              chaptersActed,
+              wallMsUsed: wallUsedMs(),
+            });
+            // readiness 热路径跳过阻塞 ledger sync（仍走真 dual-gate review）
+            await novelService.reviewChapter(initial.novelId, planItem.chapterId, {
+              skipPayoffLedgerSync: true,
+            });
             llmCallsUsed += estimateLlmCallsForAction("needs_re_review");
             chaptersActed += 1;
             outcome = "re_reviewed";
@@ -436,6 +477,18 @@ export class VolumeReadinessExecutor {
               }
             }
 
+            updateVolumeReadinessRun(runId, {
+              llmCallsUsed,
+              heavyRewritesUsed,
+              chaptersActed,
+              wallMsUsed: wallUsedMs(),
+            });
+            updateVolumeReadinessRun(runId, {
+              llmCallsUsed,
+              heavyRewritesUsed,
+              chaptersActed,
+              wallMsUsed: wallUsedMs(),
+            });
             const streamResult = await novelService.createRepairStream(
               initial.novelId,
               planItem.chapterId,
@@ -484,6 +537,106 @@ export class VolumeReadinessExecutor {
           });
           const after = report.chapters.find((c) => c.chapterId === planItem.chapterId);
           verdictAfter = after?.verdict ?? null;
+
+          // Part A：同章链式 re_review→repair
+          // 真 review 后 verdict 落到 needs_heavy/needs_patch，且 actionFilter 允许 + 预算允许
+          // → 立刻同章接入 repair 消化，避免每章只做一步、20 章仅 1 章 publish_ready 的空转。
+          // 保留原 re_reviewed 结果的 pad 定向/预算/wall 判定，覆盖 outcome/message，再 re-assess。
+          if (
+            outcome === "re_reviewed"
+            && (verdictAfter === "needs_heavy" || verdictAfter === "needs_patch")
+            && initial.actionFilter.includes(verdictAfter)
+          ) {
+            const chainVerdict: "needs_heavy" | "needs_patch" = verdictAfter;
+            const chainMode: NonNullable<RepairOptions["repairMode"]> = chainVerdict === "needs_heavy"
+              ? "heavy_repair"
+              : "light_repair";
+            const heavyBlocked = chainMode === "heavy_repair"
+              && heavyRewritesUsed >= initial.budget.maxHeavyRewrites;
+            const chainEstimated = estimateLlmCallsForAction(chainVerdict);
+            const llmBlocked = llmCallsUsed + chainEstimated > initial.budget.maxLlmCalls;
+            const wallBlocked = wallUsedMs() > deadlineMs;
+
+            if (!heavyBlocked && !llmBlocked && !wallBlocked) {
+              // pad 定向：复用主分支判定（light 且垫长为主、style/l0 已清）
+              const padHitsChain = typeof planItem.signals?.padHitCount === "number"
+                ? planItem.signals.padHitCount
+                : 0;
+              const styleOkChain = planItem.signals?.styleClear !== false;
+              const l0OkChain = planItem.signals?.l0Clear !== false;
+              const injectPadOnlyChain = chainMode === "light_repair"
+                && padHitsChain > 0
+                && styleOkChain
+                && l0OkChain;
+
+              let padIssueCountChain = 0;
+              const repairOptionsChain: RepairOptions = { repairMode: chainMode };
+              if (injectPadOnlyChain) {
+                const contentChain = await loadChapterContent(planItem.chapterId);
+                const padIssuesChain = buildPadReviewIssuesFromContent(contentChain);
+                padIssueCountChain = padIssuesChain.length;
+                if (padIssuesChain.length > 0) {
+                  repairOptionsChain.reviewIssues = padIssuesChain;
+                }
+              }
+
+              updateVolumeReadinessRun(runId, {
+                llmCallsUsed,
+                heavyRewritesUsed,
+                chaptersActed,
+                wallMsUsed: wallUsedMs(),
+              });
+
+              const chainStream = await novelService.createRepairStream(
+                initial.novelId,
+                planItem.chapterId,
+                repairOptionsChain,
+              );
+              const chainDrained = await drainRepairStream({
+                stream: chainStream.stream,
+                onDone: chainStream.onDone,
+              });
+              llmCallsUsed += chainEstimated;
+              if (chainMode === "heavy_repair") {
+                heavyRewritesUsed += 1;
+              }
+              const chainMapped = mapRepairOutcomeFromFrames(chainDrained.frames);
+              // 链式动作覆盖 re_reviewed 结果；chaptersActed 不重复计数（同章）
+              outcome = chainMapped.outcome;
+              const chainSuffix = padIssueCountChain > 0
+                ? ` padIssues=${padIssueCountChain}`
+                : "";
+              const chainMsg = chainMapped.message ? ` | ${chainMapped.message}` : "";
+              message = `re_review→${chainMode}${chainSuffix}${chainMsg}`;
+
+              // 链式后再 re-assess，取最终 verdictAfter；失败保守回退到链式前值
+              try {
+                const chainReport = await volumeReadinessService.assess(initial.novelId, {
+                  fromOrder: planItem.chapterOrder,
+                  toOrder: planItem.chapterOrder,
+                  refresh: false,
+                });
+                const chainAfter = chainReport.chapters.find(
+                  (c) => c.chapterId === planItem.chapterId,
+                );
+                verdictAfter = chainAfter?.verdict ?? verdictAfter;
+              } catch {
+                // re-assess 失败不阻断链式结果
+              }
+            } else {
+              const blockers: string[] = [];
+              if (heavyBlocked) {
+                blockers.push(`heavy=${heavyRewritesUsed}/${initial.budget.maxHeavyRewrites}`);
+              }
+              if (llmBlocked) {
+                blockers.push(`llm=${llmCallsUsed}+${chainEstimated}>${initial.budget.maxLlmCalls}`);
+              }
+              if (wallBlocked) {
+                blockers.push("wall exhausted");
+              }
+              message = `${message ?? "re_reviewed"} | chain→${chainVerdict} blocked: ${blockers.join(", ")}`;
+            }
+          }
 
           // outcome 以 re-assess 为准：动作跑了但未 publish_ready → incomplete（可 resume）
           if (

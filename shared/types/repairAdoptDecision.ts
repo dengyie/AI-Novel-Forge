@@ -87,6 +87,11 @@ export function decideRepairContentAdoption(
     input.baselineBlockingL1Codes ?? [],
     input.candidateBlockingL1Codes ?? [],
   );
+  // L1 计数比较（codeless 指 category 级）：容忍同类硬伤的 evidence 抖动与小幅浮增，
+  // 仅当候选硬伤类目数明显膨胀时作为回归信号。baseline 无硬伤时仍严格（见下）。
+  const baselineL1Count = (input.baselineBlockingL1Codes ?? []).length;
+  const candidateL1Count = (input.candidateBlockingL1Codes ?? []).length;
+  const l1CountGrew = candidateL1Count > baselineL1Count;
 
   const fail = (reason: string): RepairContentAdoptResult => {
     const nextNoImprove = consecutiveNoImprove + 1;
@@ -112,10 +117,30 @@ export function decideRepairContentAdoption(
     );
   }
 
-  if (!input.skipL1Check && introducedBlockingL1Codes.length > 0) {
-    return fail(
-      `候选引入新的 L1 义务/审校硬伤：${introducedBlockingL1Codes.slice(0, 6).join(",")}`,
-    );
+  if (!input.skipL1Check) {
+    // baseline 本就无 L1 硬伤 → 候选不得新引入任何类别（正回归，硬拒绝）。
+    if (baselineL1Count === 0 && introducedBlockingL1Codes.length > 0) {
+      return fail(
+        `候选引入新的 L1 义务/审校硬伤：${introducedBlockingL1Codes.slice(0, 6).join(",")}`,
+      );
+    }
+    // baseline 有 L1 硬伤：容忍同类硬伤 evidence 抖动；仅当候选硬伤类目数明显膨胀
+    // 且 overall 未升、亦无文学门/维度改进时才判回归（保留 anti-regression，不无谓 discard）。
+    if (l1CountGrew && scoreDelta.overall <= 0 && !candidateLiteraryPass) {
+      const improvedDimension = (
+        input.baselineScore.coherence < threshold.coherence
+          && input.candidateScore.coherence > input.baselineScore.coherence
+        || input.baselineScore.repetition < threshold.repetition
+          && input.candidateScore.repetition > input.baselineScore.repetition
+        || input.baselineScore.engagement < threshold.engagement
+          && input.candidateScore.engagement > input.baselineScore.engagement
+      );
+      if (!improvedDimension) {
+        return fail(
+          `候选 L1 硬伤类目膨胀 ${baselineL1Count}->${candidateL1Count}（新增 ${introducedBlockingL1Codes.slice(0, 6).join(",")}）且 overall 未升，拒绝采纳`,
+        );
+      }
+    }
   }
 
   if (input.candidateScore.overall < input.baselineScore.overall - overallDelta) {
@@ -156,8 +181,17 @@ export function decideRepairContentAdoption(
 }
 
 /**
- * 将 ReviewIssue 中 high/critical 压成 L1 稳定指纹（无独立 code 字段时用 category+证据摘要）。
+ * 将 ReviewIssue 中 high/critical 压成 L1 稳定指纹。
  * 供修文 adopt 判定「义务/审校硬伤是否恶化」。
+ *
+ * 指纹口径：有稳定 code 用 `l1:${code}`；无 code 时用 `l1:${category}`
+ * （**不再**把 evidence 全文塞进指纹）。原因：heavy 重写候选 re-review 时，
+ * 同一硬伤类别（如 coherence）的 evidence 措辞必然抖动，若用 evidence 摘要作指纹，
+ * 则「baseline 写 A 证据、候选 re-review 写 A' 证据」便被误判为候选引入新硬伤，
+ * 导致几乎所有 heavy 候选无谓 discard、baseline 永远停在 needs_heavy。
+ * 改用 category 作 codeless 指纹后，set-diff 只在「候选出现 baseline 缺失的硬伤类别」
+ * 时判 intro——更符合「同类硬伤是否在数量/严重上恶化」的语义，细节严重度由
+ * decideRepairContentAdoption 的计数比较兜底。
  */
 export function fingerprintReviewIssuesAsL1BlockingCodes(
   issues: Array<{
@@ -185,13 +219,8 @@ export function fingerprintReviewIssuesAsL1BlockingCodes(
       continue;
     }
     const category = String(issue.category ?? "unknown").trim() || "unknown";
-    const evidence = String(issue.evidence ?? "")
-      .replace(/\s+/g, " ")
-      .trim()
-      .slice(0, 64);
-    const key = code
-      ? `l1:${code}`
-      : `l1:${category}:${evidence || "no-evidence"}`;
+    // 有稳定 code 用精确 l1:${code}；无 code 用 l1:${category}（不掺 evidence 抖动）
+    const key = code ? `l1:${code}` : `l1:${category}`;
     if (seen.has(key)) {
       continue;
     }
