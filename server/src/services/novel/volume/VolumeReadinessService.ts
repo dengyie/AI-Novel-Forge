@@ -397,6 +397,8 @@ export class VolumeReadinessService {
    * resume re-enter：清 budget_skipped（可再跑）、保留其它 results 作断点，
    * 可选抬高 maxWallMinutes / 其它 budget（只升不降，避免 resume 缩预算）。
    * wallMsUsed 保留跨 resume 累加（防无限 wall thrash）。
+   * 若 wall 已耗尽且本次未抬高 maxWallMinutes 到 used 之上 → 400，
+   * 避免 reopen 后立刻全量 budget_skipped 空转。
    */
   private reopenReadinessRunForResume(
     existing: VolumeReadinessRunRecord,
@@ -417,6 +419,17 @@ export class VolumeReadinessService {
       if (typeof request.budget.maxLlmCalls === "number" && request.budget.maxLlmCalls > nextBudget.maxLlmCalls) {
         nextBudget.maxLlmCalls = request.budget.maxLlmCalls;
       }
+    }
+    const wallUsedMs = typeof existing.wallMsUsed === "number" ? existing.wallMsUsed : 0;
+    const nextDeadlineMs = nextBudget.maxWallMinutes * 60 * 1000;
+    if (wallUsedMs > 0 && wallUsedMs >= nextDeadlineMs) {
+      const usedMin = Math.ceil(wallUsedMs / 60_000);
+      const suggest = Math.max(nextBudget.maxWallMinutes + 120, usedMin + 60);
+      throw new AppError(
+        `wall 已耗尽（used ~${usedMin}m ≥ maxWallMinutes=${nextBudget.maxWallMinutes}m）。` +
+          `resume 请抬高 budget.maxWallMinutes（建议 ≥ ${suggest}），否则会立刻再 budget_skip 剩余章。`,
+        400,
+      );
     }
     return updateVolumeReadinessRun(existing.runId, {
       status: "planned",

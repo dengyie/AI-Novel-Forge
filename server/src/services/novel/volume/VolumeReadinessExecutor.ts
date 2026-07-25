@@ -232,6 +232,28 @@ export class VolumeReadinessExecutor {
       }) ?? initial;
     }
 
+    // live：wall 已耗尽不得 claim/execute——否则第一圈就全量 budget_skipped 空转。
+    // 须 resume + 抬 maxWallMinutes；auto-resume 侧也会跳过此类 planned。
+    const priorWallMsGuard = typeof initial.wallMsUsed === "number" ? initial.wallMsUsed : 0;
+    const deadlineMsGuard = initial.budget.maxWallMinutes * 60 * 1000;
+    if (!initial.dryRun && priorWallMsGuard > 0 && priorWallMsGuard >= deadlineMsGuard) {
+      const usedMin = Math.ceil(priorWallMsGuard / 60_000);
+      console.warn("[volume.readiness] refuse execute: wall already exhausted", {
+        runId,
+        novelId: initial.novelId,
+        wallMsUsed: priorWallMsGuard,
+        maxWallMinutes: initial.budget.maxWallMinutes,
+      });
+      return updateVolumeReadinessRun(runId, {
+        status: "failed",
+        finishedAt: new Date().toISOString(),
+        error:
+          `wall already exhausted (used ~${usedMin}m ≥ maxWallMinutes=${initial.budget.maxWallMinutes}m); ` +
+          `resume with higher budget.maxWallMinutes`,
+        wallMsUsed: priorWallMsGuard,
+      }) ?? initial;
+    }
+
     // live run：同 novel 单 flight
     if (!initial.dryRun) {
       const claimed = tryClaimNovelRunFlight(initial.novelId, runId);
@@ -477,12 +499,6 @@ export class VolumeReadinessExecutor {
               }
             }
 
-            updateVolumeReadinessRun(runId, {
-              llmCallsUsed,
-              heavyRewritesUsed,
-              chaptersActed,
-              wallMsUsed: wallUsedMs(),
-            });
             updateVolumeReadinessRun(runId, {
               llmCallsUsed,
               heavyRewritesUsed,

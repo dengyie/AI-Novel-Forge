@@ -333,10 +333,29 @@ export function findOpenLiveRunForNovel(novelId: string): VolumeReadinessRunReco
 }
 
 /**
+ * wall 是否已用尽（含跨 resume 累加的 wallMsUsed）。
+ * auto-resume / reopen 用：耗尽后不得静默再 execute（会立刻全量 budget_skipped）。
+ */
+export function isWallBudgetExhausted(run: VolumeReadinessRunRecord): boolean {
+  const maxMinutes = typeof run.budget?.maxWallMinutes === "number" ? run.budget.maxWallMinutes : 0;
+  if (maxMinutes <= 0) {
+    return false;
+  }
+  const usedMs = typeof run.wallMsUsed === "number" ? run.wallMsUsed : 0;
+  return usedMs >= maxMinutes * 60 * 1000;
+}
+
+/**
  * 进程重启 hydrate 后：所有 live planned 且未 cancel 的 run（可 auto re-execute）。
  * 同 novel 多 planned 时都返回；executor 侧 tryClaim 保证单 flight。
+ * 不含 wall 已耗尽的 planned：那些必须显式 resume 并抬 maxWallMinutes，
+ * 否则 auto-resume 会立刻再 budget_skip 全卷（上次真跑 ch3–20 事故复现）。
  */
-export function listPlannedLiveReadinessRuns(): VolumeReadinessRunRecord[] {
+export function listPlannedLiveReadinessRuns(options?: {
+  /** 默认 true：跳过 wall 已耗尽的 planned */
+  skipWallExhausted?: boolean;
+}): VolumeReadinessRunRecord[] {
+  const skipWallExhausted = options?.skipWallExhausted !== false;
   const out: VolumeReadinessRunRecord[] = [];
   for (const run of runsById.values()) {
     if (run.dryRun) {
@@ -346,6 +365,9 @@ export function listPlannedLiveReadinessRuns(): VolumeReadinessRunRecord[] {
       continue;
     }
     if (run.cancelRequested) {
+      continue;
+    }
+    if (skipWallExhausted && isWallBudgetExhausted(run)) {
       continue;
     }
     out.push(cloneRun(run));

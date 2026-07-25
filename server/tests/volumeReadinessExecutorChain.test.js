@@ -251,3 +251,81 @@ test("bypasses chain when heavy budget exhausted → budget-skipped annotation, 
     }
   });
 });
+
+test("executor refuses execute when wall already exhausted (no silent re-budget_skip)", () => {
+  return withEnv({
+    VOLUME_READINESS_RUN_PERSIST: "0",
+    VOLUME_READINESS_RUN_DIR: STORE_DIR,
+  }, async () => {
+    resetVolumeReadinessRunStoreForTests();
+    _resetSharedNovelServicesForTest();
+
+    const {
+      updateVolumeReadinessRun,
+      getVolumeReadinessRun,
+    } = require("../dist/services/novel/volume/volumeReadinessRunStore.js");
+
+    let repairCalls = 0;
+    const services = getSharedNovelServices();
+    services.reviewChapter = async () => {
+      throw new Error("should not review when wall exhausted");
+    };
+    services.createRepairStream = async () => {
+      repairCalls += 1;
+      return makeAdoptStream();
+    };
+
+    const run = createVolumeReadinessRun({
+      novelId: "novel-wall-exh",
+      volumeOrder: 1,
+      fromOrder: 1,
+      toOrder: 2,
+      dryRun: false,
+      actionFilter: ["needs_heavy"],
+      budget: {
+        maxChapters: 10,
+        maxHeavyRewrites: 3,
+        maxLlmCalls: 100,
+        maxWallMinutes: 180,
+      },
+      plan: [
+        {
+          chapterId: "c1",
+          chapterOrder: 1,
+          title: "一",
+          verdict: "needs_heavy",
+          reasons: ["hard debt"],
+          signals: { chapterId: "c1", chapterOrder: 1 },
+        },
+        {
+          chapterId: "c2",
+          chapterOrder: 2,
+          title: "二",
+          verdict: "needs_heavy",
+          reasons: ["hard debt"],
+          signals: { chapterId: "c2", chapterOrder: 2 },
+        },
+      ],
+      planSummary: {
+        total: 2, publishReady: 0, needsReReview: 0,
+        needsPatch: 0, needsPolish: 0, needsHeavy: 2, needsManual: 0, publishReadyRatio: 0,
+      },
+    });
+    // 模拟上次真跑 wall 耗尽后 hydrate 降为 planned
+    updateVolumeReadinessRun(run.runId, {
+      wallMsUsed: 185 * 60 * 1000,
+    });
+
+    const finished = await volumeReadinessExecutor.execute(run.runId);
+    assert.equal(finished.status, "failed");
+    assert.match(finished.error || "", /wall already exhausted/i);
+    assert.equal(repairCalls, 0, "不得触发任何 repair");
+    // 不得写入新的 budget_skipped 结果（空转）
+    const live = getVolumeReadinessRun(run.runId);
+    assert.equal(
+      (live.results || []).filter((r) => r.outcome === "budget_skipped").length,
+      0,
+      "refuse 路径不得再写 budget_skipped",
+    );
+  });
+});

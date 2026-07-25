@@ -320,9 +320,20 @@ function initializeBackgroundServices(): BackgroundServicesHandle {
   taskRetentionService.start();
   // hydrate 后自动 re-execute 因进程重启降为 planned 的 live run（避免静默卡死）。
   // VOLUME_READINESS_SCHEDULE 只控制 dry-run 巡检；auto-resume 始终开启。
+  // listPlannedLiveReadinessRuns 默认跳过 wall 已耗尽的 planned（须显式抬 wall 再 resume）。
   void ensureVolumeReadinessRunsHydrated()
     .then(() => {
-      const planned = listPlannedLiveReadinessRuns();
+      const planned = listPlannedLiveReadinessRuns({ skipWallExhausted: true });
+      const wallBlocked = listPlannedLiveReadinessRuns({ skipWallExhausted: false })
+        .filter((run) => !planned.some((p) => p.runId === run.runId));
+      for (const run of wallBlocked) {
+        console.warn("[volume.readiness] skip auto-resume: wall already exhausted", {
+          runId: run.runId,
+          novelId: run.novelId,
+          wallMsUsed: run.wallMsUsed,
+          maxWallMinutes: run.budget.maxWallMinutes,
+        });
+      }
       for (const run of planned) {
         console.log("[volume.readiness] auto-resume planned run after hydrate", {
           runId: run.runId,

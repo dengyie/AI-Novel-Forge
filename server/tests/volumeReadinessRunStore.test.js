@@ -291,3 +291,55 @@ test("budget_skipped is not terminal so resume can re-act after wall raise", () 
   assert.equal(done.has("acted"), false, "incomplete still retriable");
   assert.equal(done.has("skipped"), false, "budget_skipped must resume after wall raise");
 });
+
+test("isWallBudgetExhausted + listPlannedLiveReadinessRuns skip wall-exhausted", () => {
+  process.env.VOLUME_READINESS_RUN_PERSIST = "0";
+  resetVolumeReadinessRunStoreForTests();
+  const {
+    isWallBudgetExhausted,
+    listPlannedLiveReadinessRuns,
+  } = require("../dist/services/novel/volume/volumeReadinessRunStore.js");
+
+  const run = createVolumeReadinessRun({
+    novelId: "n-wall-exh",
+    volumeOrder: 1,
+    fromOrder: 1,
+    toOrder: 2,
+    dryRun: false,
+    actionFilter: ["needs_heavy"],
+    budget: {
+      maxChapters: 5,
+      maxHeavyRewrites: 3,
+      maxLlmCalls: 60,
+      maxWallMinutes: 180,
+    },
+    plan: [],
+    planSummary: {
+      total: 0,
+      publishReady: 0,
+      needsReReview: 0,
+      needsPatch: 0,
+      needsPolish: 0,
+      needsHeavy: 0,
+      needsManual: 0,
+      publishReadyRatio: 0,
+    },
+  });
+  assert.equal(isWallBudgetExhausted(getVolumeReadinessRun(run.runId)), false);
+  // planned 且 wall 未耗尽 → auto-resume 列表包含
+  const listedFresh = listPlannedLiveReadinessRuns();
+  assert.ok(listedFresh.some((r) => r.runId === run.runId));
+
+  // 模拟 wall 耗尽（185m used / 180m max）
+  updateVolumeReadinessRun(run.runId, {
+    wallMsUsed: 185 * 60 * 1000,
+  });
+  const exhausted = getVolumeReadinessRun(run.runId);
+  assert.equal(isWallBudgetExhausted(exhausted), true);
+  // 默认跳过 wall-exhausted planned（防 auto-resume 立刻再 budget_skip）
+  const listedDefault = listPlannedLiveReadinessRuns();
+  assert.equal(listedDefault.some((r) => r.runId === run.runId), false);
+  // 显式 include
+  const listedAll = listPlannedLiveReadinessRuns({ skipWallExhausted: false });
+  assert.ok(listedAll.some((r) => r.runId === run.runId));
+});
