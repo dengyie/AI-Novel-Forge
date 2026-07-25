@@ -115,7 +115,8 @@ export function isTimeoutDrivenAbortError(error: unknown): boolean {
 
 /**
  * 取消 / abort 形态：transport 层不得当瞬时重试，也不得走 multi-hop fallback。
- * 与 pipelineJobAutoRetry.isPipelineCancellationError 口径对齐（不必 import 以免 llm↔novel 环依赖）。
+ * 权威实现：pipelineJobAutoRetry.isPipelineCancellationError 直接委托本函数
+ * （novel→llm 单向依赖，无环）。
  *
  * 注意：泛化 AbortError("Request was aborted.") 在墙钟超时路径极常见，
  * 不得再当 cancellation（否则 cascade 被掐、错误表面成 Abort thrash）。
@@ -197,6 +198,7 @@ export function isTransientTransportError(error: unknown): boolean {
     return false;
   }
   // 超时 / timeout-driven abort：瞬时（有 fallback 时 resolveStructuredTransportMaxAttempts 会限次）
+  // TimeoutError 已含在 isTimeoutLikeTransportError 内，勿再单独分支。
   if (isTimeoutLikeTransportError(error)) {
     return true;
   }
@@ -209,9 +211,6 @@ export function isTransientTransportError(error: unknown): boolean {
     return false;
   }
   const lower = message.toLowerCase();
-  if (error instanceof Error && error.name === "TimeoutError") {
-    return true;
-  }
   return TRANSIENT_TRANSPORT_ERROR_PATTERNS.some((pattern) => lower.includes(pattern));
 }
 

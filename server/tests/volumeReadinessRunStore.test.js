@@ -158,7 +158,12 @@ test("getCompletedChapterIds skips failed for resume retry", () => {
   assert.equal(tryClaimNovelRunFlight("n2", run.runId), true);
   updateVolumeReadinessRun(run.runId, { status: "running" });
   assert.equal(findActiveLiveRunForNovel("n2")?.runId, run.runId);
+  // 同 runId 已 claim → 拒绝（防 auto-resume + HTTP 双 execute）
+  assert.equal(tryClaimNovelRunFlight("n2", run.runId), false);
   assert.equal(tryClaimNovelRunFlight("n2", "other"), false);
+  releaseNovelRunFlight("n2", run.runId);
+  // release 后可再 claim 同 run
+  assert.equal(tryClaimNovelRunFlight("n2", run.runId), true);
   releaseNovelRunFlight("n2", run.runId);
 });
 

@@ -1,6 +1,10 @@
 import { isChapterEmptyContentError } from "./runtime/chapterEmptyContentError";
 import { isChapterChineseProseGateError } from "./runtime/chapterChineseProseGateError";
-import { isTransientTransportError } from "../../llm/transportRetry";
+import {
+  isCancellationLikeTransportError,
+  isTimeoutDrivenAbortError,
+  isTransientTransportError,
+} from "../../llm/transportRetry";
 
 /**
  * Job 层瞬时 auto-requeue 与跨进程 resume 契约（P1-2）：
@@ -74,107 +78,18 @@ export function normalizeJobTransportAutoRetryCount(value: unknown): number {
 
 /**
  * 用户/流水线取消（不可 auto-requeue，应落 cancelled 而非 failed）。
- * 与章节层 cancel 文案、abort(reason=PIPELINE_CANCELLED) 对齐；
- * 与 transport `isCancellationLikeTransportError` 口径对齐（避免 llm↔novel 环依赖故双份）。
+ * 权威判据在 transportRetry（isCancellationLikeTransportError /
+ * isTimeoutDrivenAbortError）：job 层直接复用，禁止再双份维护。
+ * pipelineJobAutoRetry 本就可 import llm/transportRetry（已用 isTransient），
+ * 不存在环依赖。
  *
  * - 显式 PIPELINE_CANCELLED / 章节生成已取消 / user cancelled → 取消
  * - AbortError 带 cancel 语义或空 message → 取消
  * - sleep/signal 透传 Error("aborted")（无 AbortError name）→ 取消
  * - TimeoutError / 墙钟 timeout 驱动的泛化 AbortError("Request was aborted.") → 非取消
- *   （与 isTimeoutDrivenAbortError 对齐；否则 job 把超时落 cancelled、阻断 auto-requeue）
  */
 export function isPipelineCancellationError(error: unknown): boolean {
-  if (!error) {
-    return false;
-  }
-  // TimeoutError 永远不是取消
-  if (error instanceof Error && error.name === "TimeoutError") {
-    return false;
-  }
-  // 与 transport isTimeoutDrivenAbortError 同口径（双份，避环依赖）
-  if (isPipelineTimeoutDrivenAbortError(error)) {
-    return false;
-  }
-  const msg = error instanceof Error
-    ? error.message
-    : typeof error === "string"
-      ? error
-      : String(error);
-  if (
-    msg === "PIPELINE_CANCELLED"
-    || (msg && msg.includes("PIPELINE_CANCELLED"))
-    || (msg && msg.includes("章节生成已取消"))
-    || (msg && msg.includes("任务仍在取消"))
-  ) {
-    return true;
-  }
-  if (error instanceof Error && error.name === "AbortError") {
-    if (!msg || !msg.trim()) {
-      return true;
-    }
-    const lower = msg.toLowerCase();
-    if (lower.includes("cancel") || lower.includes("取消")) {
-      return true;
-    }
-    // 非 generic timeout-driven 的 AbortError：保守当取消
-    return true;
-  }
-  if (!msg) {
-    return false;
-  }
-  const lower = msg.toLowerCase();
-  // reason 丢失后的取消透传（含 sleep abort → new Error("aborted")）
-  return lower === "aborted"
-    || lower.includes("request aborted")
-    || lower.includes("the operation was aborted")
-    || lower.includes("user cancelled")
-    || lower.includes("cancelled mid-flight");
-}
-
-/** 与 transportRetry.isTimeoutDrivenAbortError 双份对齐（llm↔novel 无环依赖）。 */
-function isPipelineTimeoutDrivenAbortError(error: unknown): boolean {
-  if (!error) {
-    return false;
-  }
-  if (error instanceof Error && error.name === "TimeoutError") {
-    return true;
-  }
-  const msg = error instanceof Error
-    ? error.message
-    : typeof error === "string"
-      ? error
-      : String(error);
-  if (!msg) {
-    return false;
-  }
-  if (
-    msg === "PIPELINE_CANCELLED"
-    || msg.includes("PIPELINE_CANCELLED")
-    || msg.includes("章节生成已取消")
-    || msg.includes("任务仍在取消")
-  ) {
-    return false;
-  }
-  const lower = msg.toLowerCase();
-  if (lower.includes("user cancelled") || lower.includes("cancelled mid-flight") || lower.includes("cancel") || lower.includes("取消")) {
-    return false;
-  }
-  if (lower.includes("timed out") || lower.includes("timeout")) {
-    return true;
-  }
-  if (!(error instanceof Error) || error.name !== "AbortError") {
-    return false;
-  }
-  return lower === "aborted"
-    || lower === "request aborted."
-    || lower === "request aborted"
-    || lower === "request was aborted."
-    || lower === "request was aborted"
-    || lower === "the operation was aborted."
-    || lower === "the operation was aborted"
-    || lower.includes("request was aborted")
-    || lower.includes("the operation was aborted")
-    || lower.includes("request aborted");
+  return isCancellationLikeTransportError(error);
 }
 
 /**
@@ -184,7 +99,7 @@ function isPipelineTimeoutDrivenAbortError(error: unknown): boolean {
  * - 中文硬门失败（章节内 gate 重试已耗尽时，常为模型 meta 泄漏）
  * - 取消 / AbortError / 业务错误 → false
  *
- * transport 层 isTransientTransportError 已排除 AbortError/取消文案；
+ * transport 层 isTransientTransportError 已排除取消文案；
  * job 层仍先硬挡 isPipelineCancellationError，双层保险。
  */
 export function isPipelineJobAutoRetryableError(error: unknown): boolean {
@@ -198,7 +113,7 @@ export function isPipelineJobAutoRetryableError(error: unknown): boolean {
   if (
     error instanceof Error
     && error.name === "AbortError"
-    && !isPipelineTimeoutDrivenAbortError(error)
+    && !isTimeoutDrivenAbortError(error)
   ) {
     return false;
   }

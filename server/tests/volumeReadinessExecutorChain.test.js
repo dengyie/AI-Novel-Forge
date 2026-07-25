@@ -329,3 +329,40 @@ test("executor refuses execute when wall already exhausted (no silent re-budget_
     );
   });
 });
+
+test("second concurrent execute of same runId does not mark failed (flight race)", () => {
+  return withEnv({
+    VOLUME_READINESS_RUN_PERSIST: "0",
+    VOLUME_READINESS_RUN_DIR: STORE_DIR,
+  }, async () => {
+    resetVolumeReadinessRunStoreForTests();
+    _resetSharedNovelServicesForTest();
+
+    const {
+      tryClaimNovelRunFlight,
+      releaseNovelRunFlight,
+      getVolumeReadinessRun,
+      updateVolumeReadinessRun,
+    } = require("../dist/services/novel/volume/volumeReadinessRunStore.js");
+
+    const run = makeBaseRun();
+    // 模拟第一路 execute 已 claim 且 running
+    assert.equal(tryClaimNovelRunFlight(run.novelId, run.runId), true);
+    updateVolumeReadinessRun(run.runId, { status: "running" });
+
+    // 第二路 execute（auto-resume 或重复 HTTP）应返回 live，不标 failed
+    const second = await volumeReadinessExecutor.execute(run.runId);
+    assert.equal(second.runId, run.runId);
+    assert.equal(second.status, "running");
+    assert.notEqual(second.status, "failed");
+    assert.equal(second.error, null);
+
+    releaseNovelRunFlight(run.novelId, run.runId);
+    // 清理：标 completed 以免污染
+    updateVolumeReadinessRun(run.runId, {
+      status: "completed",
+      finishedAt: new Date().toISOString(),
+    });
+    assert.equal(getVolumeReadinessRun(run.runId)?.status, "completed");
+  });
+});

@@ -377,8 +377,18 @@ export function listPlannedLiveReadinessRuns(options?: {
   return out;
 }
 
+/**
+ * 同 novel 单 flight claim。
+ * - 已有其它 runId 且仍 running → false
+ * - **同一 runId 已 claim** → false（防 auto-resume 与 HTTP resume 双 execute 同章）
+ * - 其它 → set 并 true
+ */
 export function tryClaimNovelRunFlight(novelId: string, runId: string): boolean {
   const existing = activeNovelRuns.get(novelId);
+  if (existing === runId) {
+    // 同 run 已在本进程 flight 中：第二路 execute 不得再进
+    return false;
+  }
   if (existing && existing !== runId) {
     const other = runsById.get(existing);
     if (other && other.status === "running" && !other.dryRun) {

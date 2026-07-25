@@ -55,6 +55,7 @@ import { taskRetentionService } from "./services/task/TaskRetentionService";
 import { volumeReadinessScheduler } from "./services/novel/volume/VolumeReadinessScheduler";
 import {
   ensureVolumeReadinessRunsHydrated,
+  isWallBudgetExhausted,
   listPlannedLiveReadinessRuns,
 } from "./services/novel/volume/volumeReadinessRunStore";
 import { volumeReadinessExecutor } from "./services/novel/volume/VolumeReadinessExecutor";
@@ -323,10 +324,12 @@ function initializeBackgroundServices(): BackgroundServicesHandle {
   // listPlannedLiveReadinessRuns 默认跳过 wall 已耗尽的 planned（须显式抬 wall 再 resume）。
   void ensureVolumeReadinessRunsHydrated()
     .then(() => {
-      const planned = listPlannedLiveReadinessRuns({ skipWallExhausted: true });
-      const wallBlocked = listPlannedLiveReadinessRuns({ skipWallExhausted: false })
-        .filter((run) => !planned.some((p) => p.runId === run.runId));
-      for (const run of wallBlocked) {
+      const allPlanned = listPlannedLiveReadinessRuns({ skipWallExhausted: false });
+      const planned = allPlanned.filter((run) => !isWallBudgetExhausted(run));
+      for (const run of allPlanned) {
+        if (!isWallBudgetExhausted(run)) {
+          continue;
+        }
         console.warn("[volume.readiness] skip auto-resume: wall already exhausted", {
           runId: run.runId,
           novelId: run.novelId,

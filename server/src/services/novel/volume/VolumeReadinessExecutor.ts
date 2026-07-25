@@ -254,10 +254,21 @@ export class VolumeReadinessExecutor {
       }) ?? initial;
     }
 
-    // live run：同 novel 单 flight
+    // live run：同 novel 单 flight（含同 runId 防双 execute）
     if (!initial.dryRun) {
       const claimed = tryClaimNovelRunFlight(initial.novelId, runId);
       if (!claimed) {
+        // 同 run 已在 flight：返回 live，勿标 failed（auto-resume ↔ HTTP resume 竞态）
+        const liveSame = getVolumeReadinessRun(runId);
+        if (liveSame && (liveSame.status === "running" || liveSame.status === "planned")) {
+          console.warn("[volume.readiness] execute skipped: run already in flight", {
+            runId,
+            novelId: initial.novelId,
+            status: liveSame.status,
+          });
+          return liveSame;
+        }
+        // 其它 run 占 flight：才标 failed
         return updateVolumeReadinessRun(runId, {
           status: "failed",
           finishedAt: new Date().toISOString(),
