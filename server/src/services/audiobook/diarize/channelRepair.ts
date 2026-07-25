@@ -13,6 +13,7 @@ import type {
   AudiobookNarratorConfig,
   AudiobookSegmentKind,
 } from "@ai-novel/shared/types/audiobook";
+import { peelCompiledDeliveryMarks } from "../deliveryStyle";
 import { spanCoveredBySegments } from "./diarizeQualityGate";
 import { defaultRenderPolicyForKind } from "./renderPolicy";
 import { runRuleSpanPass, type RuleSpan } from "./ruleSpanPass";
@@ -60,7 +61,7 @@ export function repairFalseChannelSkips(
   if (spoken.length === 0) return segments;
 
   const narrVoice = narrator?.voice ?? "茉莉";
-  const narrStyle = narrator?.style ?? null;
+  const narrStyle = peelCompiledDeliveryMarks(narrator?.style ?? null);
 
   return segments.map((seg) => {
     const kind = seg.segmentKind;
@@ -111,17 +112,21 @@ export function repairFalseChannelSkips(
         ? (seg.voice || narrVoice)
         : (useGuest ? guestVoice : narrVoice),
       style: seg.characterId
-        ? (seg.style ?? narrStyle ?? null)
+        ? peelCompiledDeliveryMarks(seg.baseStyle ?? seg.style ?? narrStyle ?? null)
         : (useGuest
           ? guestStyleForUnresolvedName(span.speakerHint)
-          : (narrStyle ?? seg.style)),
+          : peelCompiledDeliveryMarks(narrStyle ?? seg.style)),
       baseStyle: seg.characterId
-        ? (seg.baseStyle ?? seg.style ?? narrStyle ?? null)
+        ? peelCompiledDeliveryMarks(seg.baseStyle ?? seg.style ?? narrStyle ?? null)
         : (useGuest
           ? guestStyleForUnresolvedName(span.speakerHint)
-          : (narrStyle ?? seg.baseStyle)),
-      baseDesignPrompt: seg.characterId ? (seg.baseDesignPrompt ?? null) : null,
-      designPrompt: seg.characterId ? (seg.designPrompt ?? null) : null,
+          : peelCompiledDeliveryMarks(narrStyle ?? seg.baseStyle)),
+      baseDesignPrompt: seg.characterId
+        ? peelCompiledDeliveryMarks(seg.baseDesignPrompt ?? null)
+        : null,
+      designPrompt: seg.characterId
+        ? peelCompiledDeliveryMarks(seg.baseDesignPrompt ?? seg.designPrompt ?? null)
+        : null,
       delivery: null,
       deliveryMergeKey: "none",
       quoteSpanIds: Array.from(
@@ -177,6 +182,10 @@ function buildSpeechFromSpan(input: {
   if (matched) {
     const mode = matched.ttsMode?.trim() || "preset";
     const ttsMode = mode === "design" || mode === "clone" ? mode : "preset";
+    const cleanStyle = peelCompiledDeliveryMarks(
+      (matched.ttsStyle ?? input.narrator.style) || null,
+    );
+    const cleanDesign = peelCompiledDeliveryMarks(matched.ttsDesignPrompt ?? null);
     return {
       index: input.index,
       speakerKind: "character",
@@ -189,10 +198,10 @@ function buildSpeechFromSpan(input: {
       quoteSpanIds: [input.span.id],
       ttsMode,
       voice: matched.ttsVoice?.trim() || "",
-      style: matched.ttsStyle ?? input.narrator.style,
-      baseStyle: matched.ttsStyle ?? input.narrator.style,
-      baseDesignPrompt: matched.ttsDesignPrompt ?? null,
-      designPrompt: matched.ttsDesignPrompt ?? null,
+      style: cleanStyle,
+      baseStyle: cleanStyle,
+      baseDesignPrompt: cleanDesign,
+      designPrompt: cleanDesign,
       refAudioPath: matched.ttsRefAudioPath ?? null,
       delivery: null,
       deliveryMergeKey: "none",
@@ -202,6 +211,8 @@ function buildSpeechFromSpan(input: {
 
   const guestVoice = pickGuestPresetVoice(hint, input.narrator.voice);
   const useGuest = Boolean(hint);
+  const cleanNarratorStyle = peelCompiledDeliveryMarks(input.narrator.style);
+  const guestStyle = useGuest ? guestStyleForUnresolvedName(hint) : cleanNarratorStyle;
   return {
     index: input.index,
     speakerKind: "narrator",
@@ -214,12 +225,8 @@ function buildSpeechFromSpan(input: {
     quoteSpanIds: [input.span.id],
     ttsMode: "preset",
     voice: useGuest ? guestVoice : input.narrator.voice,
-    style: useGuest
-      ? guestStyleForUnresolvedName(hint)
-      : input.narrator.style,
-    baseStyle: useGuest
-      ? guestStyleForUnresolvedName(hint)
-      : input.narrator.style,
+    style: guestStyle,
+    baseStyle: guestStyle,
     delivery: null,
     deliveryMergeKey: "none",
     speakerUnresolved: true,

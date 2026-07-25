@@ -10,6 +10,7 @@ import type {
   AudiobookSegmentKind,
   AudiobookRenderPolicy,
 } from "@ai-novel/shared/types/audiobook";
+import { peelCompiledDeliveryMarks } from "../deliveryStyle";
 import { defaultRenderPolicyForKind } from "./renderPolicy";
 import {
   guestStyleForUnresolvedName,
@@ -101,6 +102,7 @@ function pushNarration(
   if (!t.trim()) return;
   // 按段落切开，避免单段过大
   const parts = t.split(/\n{2,}/);
+  const cleanStyle = peelCompiledDeliveryMarks(narrator.style);
   for (const part of parts) {
     const piece = part.trim();
     if (!piece) continue;
@@ -115,8 +117,8 @@ function pushNarration(
       channelHint: null,
       ttsMode: "preset",
       voice: narrator.voice,
-      style: narrator.style,
-      baseStyle: narrator.style,
+      style: cleanStyle,
+      baseStyle: cleanStyle,
       delivery: null,
       deliveryMergeKey: "none",
     });
@@ -134,6 +136,8 @@ function pushSpanSegment(
   const segmentKind = kindFromSpan(span);
   const renderPolicy: AudiobookRenderPolicy = defaultRenderPolicyForKind(segmentKind);
 
+  const cleanNarratorStyle = peelCompiledDeliveryMarks(narrator.style);
+
   if (renderPolicy === "skip") {
     segments.push({
       index: segments.length,
@@ -147,8 +151,8 @@ function pushSpanSegment(
       quoteSpanIds: [span.id],
       ttsMode: "preset",
       voice: narrator.voice,
-      style: narrator.style,
-      baseStyle: narrator.style,
+      style: cleanNarratorStyle,
+      baseStyle: cleanNarratorStyle,
       delivery: null,
       deliveryMergeKey: "none",
       diarizeConfidence: 0.7,
@@ -160,6 +164,10 @@ function pushSpanSegment(
   if (matched) {
     const mode = matched.ttsMode?.trim() || "preset";
     const ttsMode = mode === "design" || mode === "clone" ? mode : "preset";
+    const cleanStyle = peelCompiledDeliveryMarks(
+      (matched.ttsStyle ?? narrator.style) || null,
+    );
+    const cleanDesign = peelCompiledDeliveryMarks(matched.ttsDesignPrompt ?? null);
     segments.push({
       index: segments.length,
       speakerKind: "character",
@@ -172,10 +180,10 @@ function pushSpanSegment(
       quoteSpanIds: [span.id],
       ttsMode,
       voice: matched.ttsVoice?.trim() || "",
-      style: matched.ttsStyle ?? narrator.style,
-      baseStyle: matched.ttsStyle ?? narrator.style,
-      baseDesignPrompt: matched.ttsDesignPrompt ?? null,
-      designPrompt: matched.ttsDesignPrompt ?? null,
+      style: cleanStyle,
+      baseStyle: cleanStyle,
+      baseDesignPrompt: cleanDesign,
+      designPrompt: cleanDesign,
       refAudioPath: matched.ttsRefAudioPath ?? null,
       delivery: null,
       deliveryMergeKey: "none",
@@ -226,8 +234,8 @@ function pushSpanSegment(
     quoteSpanIds: [span.id],
     ttsMode: "preset",
     voice: narrator.voice,
-    style: narrator.style,
-    baseStyle: narrator.style,
+    style: cleanNarratorStyle,
+    baseStyle: cleanNarratorStyle,
     delivery: null,
     deliveryMergeKey: "none",
     speakerUnresolved: true,

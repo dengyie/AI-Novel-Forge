@@ -26,12 +26,15 @@ export const BASE_STYLE_PREFER_MAX = 120;
 export const MIMO_USER_MAX = 280;
 
 /**
- * 剥除已编译的表演/叙述/指令行，避免缺 baseStyle 时把「本句表演」再当 base 二次编译。
+ * 剥除已编译的表演/叙述/指令行，避免把「本句表演」再当 base 二次编译。
  *
- * 历史上住在 `AudiobookPipelineService`；M3 SynthesisBuilder 需复用，为破环（pipeline↔builder 不能互引），
- * 迁本模块作为 SoT。`AudiobookPipelineService` 现改成从这里 re-export，旧外部 importer（含单测）零改动。
+ * M9：写路径（materialize / ruleAssembly / channelRepair / reconcile）在写入 baseStyle
+ * 时即 peel，生产新段 base 默认干净。本函数仍保留作：
+ *   - 写路径入口防御（脏卡 ttsStyle / 脏旁白 style）
+ *   - 合成侧兼容旧 annotations（base 可能仍脏）
+ *   - 单测 / golden 对 dirty-base 不变量
  *
- * SoT: docs/plans/audiobook-synthesis-layering-refactor-design.md §7 M3
+ * SoT: docs/plans/audiobook-synthesis-layering-refactor-design.md §7 M3/M9
  */
 export function peelCompiledDeliveryMarks(value: string | null | undefined): string | null {
   if (value == null) return null;

@@ -15,6 +15,7 @@ import {
   applyDeliveryToSegment,
   computeDeliveryChapterStats,
   fillContinuityFrom,
+  peelCompiledDeliveryMarks,
   resolveDeliveryStyleMode,
   shouldApplyDelivery,
 } from "./deliveryStyle";
@@ -166,6 +167,7 @@ export function buildNarratorOnlyAnnotation(input: {
   error?: string | null;
 }): AudiobookChapterAnnotation {
   const text = input.chapterContent.replace(/\r\n/g, "\n").trim();
+  const cleanNarratorStyle = peelCompiledDeliveryMarks(input.narrator.style);
   const segments: AudiobookDialogueSegment[] = text
     ? [{
         index: 0,
@@ -177,8 +179,8 @@ export function buildNarratorOnlyAnnotation(input: {
         renderPolicy: "tts",
         ttsMode: "preset",
         voice: input.narrator.voice,
-        style: input.narrator.style,
-        baseStyle: input.narrator.style,
+        style: cleanNarratorStyle,
+        baseStyle: cleanNarratorStyle,
         delivery: null,
         deliveryMergeKey: "none",
       }]
@@ -289,6 +291,9 @@ function buildBaseSegment(input: {
   baseDesignPrompt: string | null;
   refAudioPath: string | null;
 }): AudiobookDialogueSegment {
+  // M9：写路径即 clean base——卡/旁白 ttsStyle 可能被误写入「本句表演」脏行。
+  const baseStyle = peelCompiledDeliveryMarks(input.baseStyle);
+  const baseDesignPrompt = peelCompiledDeliveryMarks(input.baseDesignPrompt);
   return {
     index: input.index,
     speakerKind: input.speakerKind,
@@ -297,11 +302,11 @@ function buildBaseSegment(input: {
     text: input.text,
     ttsMode: input.ttsMode,
     voice: input.voice,
-    style: input.baseStyle,
-    designPrompt: input.baseDesignPrompt,
+    style: baseStyle,
+    designPrompt: baseDesignPrompt,
     refAudioPath: input.refAudioPath,
-    baseStyle: input.baseStyle,
-    baseDesignPrompt: input.baseDesignPrompt,
+    baseStyle,
+    baseDesignPrompt,
     delivery: null,
     deliveryMergeKey: "none",
   };
@@ -356,8 +361,13 @@ export function materializeAnnotationSegments(input: {
       if (matched) {
         const mode = matched.ttsMode?.trim() || "preset";
         const ttsMode = mode === "design" || mode === "clone" ? mode : "preset";
-        const baseStyle = (matched.ttsStyle ?? input.narrator.style) || null;
-        const baseDesignPrompt = matched.ttsDesignPrompt ?? null;
+        // peel 在 buildBaseSegment；这里再取 clean 值喂 applyDelivery，避免 options 绕过
+        const baseStyle = peelCompiledDeliveryMarks(
+          (matched.ttsStyle ?? input.narrator.style) || null,
+        );
+        const baseDesignPrompt = peelCompiledDeliveryMarks(
+          matched.ttsDesignPrompt ?? null,
+        );
         const base = buildBaseSegment({
           index: segIndex++,
           speakerKind: "character",
@@ -419,7 +429,8 @@ export function materializeAnnotationSegments(input: {
       : input.narrator.voice;
     const guestStyle = useGuestVoice
       ? guestStyleForUnresolvedName(rawSpeakerName || label)
-      : input.narrator.style;
+      : peelCompiledDeliveryMarks(input.narrator.style);
+    const cleanNarratorStyle = peelCompiledDeliveryMarks(input.narrator.style);
 
     const narratorBase = buildBaseSegment({
       index: segIndex++,
@@ -429,7 +440,7 @@ export function materializeAnnotationSegments(input: {
       text,
       ttsMode: "preset",
       voice: useGuestVoice ? guestVoice : input.narrator.voice,
-      baseStyle: useGuestVoice ? guestStyle : input.narrator.style,
+      baseStyle: useGuestVoice ? guestStyle : cleanNarratorStyle,
       baseDesignPrompt: null,
       refAudioPath: null,
     });
@@ -444,21 +455,22 @@ export function materializeAnnotationSegments(input: {
       diarizeConfidence:
         typeof raw.confidence === "number" ? raw.confidence : null,
     };
+    const applyBase = useGuestVoice ? guestStyle : cleanNarratorStyle;
     let narratorSeg = unmatchedCharacterForcedNarrator || skipLike
       ? applyDeliveryToSegment(narratorWithChannel, null, {
           deliveryStyleMode: "off",
-          baseStyle: useGuestVoice ? guestStyle : input.narrator.style,
+          baseStyle: applyBase,
           baseDesignPrompt: null,
         })
       : shouldApplyDelivery(deliveryStyleMode, "narrator")
         ? applyDeliveryToSegment(narratorWithChannel, rawDelivery, {
             deliveryStyleMode,
-            baseStyle: input.narrator.style,
+            baseStyle: cleanNarratorStyle,
             baseDesignPrompt: null,
           })
         : applyDeliveryToSegment(narratorWithChannel, null, {
             deliveryStyleMode: "off",
-            baseStyle: input.narrator.style,
+            baseStyle: cleanNarratorStyle,
             baseDesignPrompt: null,
           });
     if (unmatchedCharacterForcedNarrator && !skipLike) {

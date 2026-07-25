@@ -211,10 +211,14 @@ export function getEngine(id: TtsEngineId = "mimo"): TtsEngine;
 | M5 | `VoiceResolver` 收编 reconcile/materialize 的绑定优先级，产出 `VoiceProfile` | golden：每段 mode/voice/ref 与旧绑定一致 | 旧 reconcile 留存 |
 | M6 | 指纹加 `engine.fingerprintKey`（env 灰度 `AUDIOBOOK_FP_V2`） | 一本书重合成，wav 时长/段数一致 | env 关 |
 | M7 | 瘦身 `AudiobookPipelineService.run` 为纯编排（删已搬走的内联逻辑） | 全链 e2e：源世界 ch1 前后 wav 对照 | git revert |
+| **M8** | 预览路径迁 `buildChunkSynthesisRequest`；删 `engine/legacyRequestBridge.ts` | `audiobookPreviewBuilderGolden` + 既有 preview 门 | revert commit |
+| **M9** | **clean-base 写契约**：materialize / ruleAssembly / channelRepair / reconcile 写 base 时 peel；builder **信任 base**（缺 base 时兼容 peel 脏 style）；小范围已删 `resolveChunkSynthesizeFields` 死别名 | fingerprint / unresolved / synthesisBuilder golden / delivery pipeline | revert；peel 函数保留作写路径防御与旧 annotations 兼容 |
+
+**状态（2026-07-26）**：M1–M9 **代码侧完成**。M8/M9 小范围已合 main（`cbe241b` / `2ece730` / `eb76582`）；大范围 M9 clean-base 写路径 + builder 信任 base 本轮落地。`peelCompiledDeliveryMarks` **不删**：仍是写路径入口防御与旧脏 annotations 的兼容网，生产新段 base 默认干净。
 
 **golden 对照法**：M2–M5 每步在改造函数旁临时保留旧函数，跑 assert「新旧输出等价」，绿了再删旧的。这是把「行为不变」变成可测断言，而不是口头保证。
 
-**与 diarize P0 主链的关系**：本重构**不碰** L0 diarize / annotate 的 LLM 语义与通道规则（`renderPolicy`/`overlayChannelSkips`/`channelRepair` 原样），只重排 annotate **之后** 的合成侧。刚 live 的 `f4a6128` 行为不受影响。
+**与 diarize P0 主链的关系**：本重构**不改** L0 diarize / annotate 的 LLM 语义与通道规则；M9 仅在写 baseStyle 时 peel 脏标记，不改变 speaker/channel 决策。
 
 ---
 
