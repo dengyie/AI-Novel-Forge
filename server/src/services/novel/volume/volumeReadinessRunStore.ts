@@ -332,6 +332,29 @@ export function findOpenLiveRunForNovel(novelId: string): VolumeReadinessRunReco
   return null;
 }
 
+/**
+ * 进程重启 hydrate 后：所有 live planned 且未 cancel 的 run（可 auto re-execute）。
+ * 同 novel 多 planned 时都返回；executor 侧 tryClaim 保证单 flight。
+ */
+export function listPlannedLiveReadinessRuns(): VolumeReadinessRunRecord[] {
+  const out: VolumeReadinessRunRecord[] = [];
+  for (const run of runsById.values()) {
+    if (run.dryRun) {
+      continue;
+    }
+    if (run.status !== "planned") {
+      continue;
+    }
+    if (run.cancelRequested) {
+      continue;
+    }
+    out.push(cloneRun(run));
+  }
+  // 较新的优先（updatedAt desc）
+  out.sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""));
+  return out;
+}
+
 export function tryClaimNovelRunFlight(novelId: string, runId: string): boolean {
   const existing = activeNovelRuns.get(novelId);
   if (existing && existing !== runId) {
@@ -369,6 +392,7 @@ export function updateVolumeReadinessRun(
       | "planSummary"
       | "wallMsUsed"
       | "rangeSource"
+      | "budget"
     >
   >,
 ): VolumeReadinessRunRecord | null {
@@ -377,6 +401,9 @@ export function updateVolumeReadinessRun(
     return null;
   }
   Object.assign(run, patch, { updatedAt: nowIso() });
+  if (patch.budget) {
+    run.budget = { ...patch.budget };
+  }
   if (patch.planSummary) {
     run.planSummary = normalizePlanSummary(patch.planSummary);
   }
@@ -442,9 +469,11 @@ export function appendVolumeReadinessChapterResult(
   return cloneRun(run);
 }
 
-/** 已有终态 outcome 的章（resume 跳过）。failed 可重试。 */
+/** 已有终态 outcome 的章（resume 跳过）。failed / incomplete / budget_skipped 可重试。 */
 export function getCompletedChapterIds(run: VolumeReadinessRunRecord): Set<string> {
-  // incomplete / skipped_locked / failed 可 resume 重试；discard/plateau/budget 终态
+  // incomplete / skipped_locked / failed / budget_skipped 可 resume 重试；
+  // discard/plateau/kept/adopted 终态。budget_skipped 在 wall 耗尽时批量写入，
+  // 若不从 terminal 剔除，ops 加大 maxWallMinutes 后 resume 仍会跳过整尾卷。
   const terminal = new Set([
     "kept",
     "re_reviewed",
@@ -452,7 +481,6 @@ export function getCompletedChapterIds(run: VolumeReadinessRunRecord): Set<strin
     "repair_discarded",
     "repair_plateau",
     "polished",
-    "budget_skipped",
     "dry_run",
     "already_done",
   ]);

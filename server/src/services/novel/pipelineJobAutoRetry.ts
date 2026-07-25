@@ -77,16 +77,66 @@ export function normalizeJobTransportAutoRetryCount(value: unknown): number {
  * 与章节层 cancel 文案、abort(reason=PIPELINE_CANCELLED) 对齐；
  * 与 transport `isCancellationLikeTransportError` 口径对齐（避免 llm↔novel 环依赖故双份）。
  *
- * - 任意 AbortError → 取消（含空 message / 无 abort 关键词）
- * - sleep/signal 透传的普通 Error("aborted") 等文案 → 取消
- * - PIPELINE_CANCELLED / 章节生成已取消 等 → 取消
+ * - 显式 PIPELINE_CANCELLED / 章节生成已取消 / user cancelled → 取消
+ * - AbortError 带 cancel 语义或空 message → 取消
+ * - sleep/signal 透传 Error("aborted")（无 AbortError name）→ 取消
+ * - TimeoutError / 墙钟 timeout 驱动的泛化 AbortError("Request was aborted.") → 非取消
+ *   （与 isTimeoutDrivenAbortError 对齐；否则 job 把超时落 cancelled、阻断 auto-requeue）
  */
 export function isPipelineCancellationError(error: unknown): boolean {
   if (!error) {
     return false;
   }
-  // 与 transport 一致：AbortError 一律非瞬时、job 层一律 cancelled
+  // TimeoutError 永远不是取消
+  if (error instanceof Error && error.name === "TimeoutError") {
+    return false;
+  }
+  // 与 transport isTimeoutDrivenAbortError 同口径（双份，避环依赖）
+  if (isPipelineTimeoutDrivenAbortError(error)) {
+    return false;
+  }
+  const msg = error instanceof Error
+    ? error.message
+    : typeof error === "string"
+      ? error
+      : String(error);
+  if (
+    msg === "PIPELINE_CANCELLED"
+    || (msg && msg.includes("PIPELINE_CANCELLED"))
+    || (msg && msg.includes("章节生成已取消"))
+    || (msg && msg.includes("任务仍在取消"))
+  ) {
+    return true;
+  }
   if (error instanceof Error && error.name === "AbortError") {
+    if (!msg || !msg.trim()) {
+      return true;
+    }
+    const lower = msg.toLowerCase();
+    if (lower.includes("cancel") || lower.includes("取消")) {
+      return true;
+    }
+    // 非 generic timeout-driven 的 AbortError：保守当取消
+    return true;
+  }
+  if (!msg) {
+    return false;
+  }
+  const lower = msg.toLowerCase();
+  // reason 丢失后的取消透传（含 sleep abort → new Error("aborted")）
+  return lower === "aborted"
+    || lower.includes("request aborted")
+    || lower.includes("the operation was aborted")
+    || lower.includes("user cancelled")
+    || lower.includes("cancelled mid-flight");
+}
+
+/** 与 transportRetry.isTimeoutDrivenAbortError 双份对齐（llm↔novel 无环依赖）。 */
+function isPipelineTimeoutDrivenAbortError(error: unknown): boolean {
+  if (!error) {
+    return false;
+  }
+  if (error instanceof Error && error.name === "TimeoutError") {
     return true;
   }
   const msg = error instanceof Error
@@ -103,19 +153,28 @@ export function isPipelineCancellationError(error: unknown): boolean {
     || msg.includes("章节生成已取消")
     || msg.includes("任务仍在取消")
   ) {
-    return true;
-  }
-  // TimeoutError 另走瞬时失败，不在此匹配
-  if (error instanceof Error && error.name === "TimeoutError") {
     return false;
   }
   const lower = msg.toLowerCase();
-  // reason 丢失后的取消透传（含 sleep abort → new Error("aborted")）；与 transport 文案表对齐
+  if (lower.includes("user cancelled") || lower.includes("cancelled mid-flight") || lower.includes("cancel") || lower.includes("取消")) {
+    return false;
+  }
+  if (lower.includes("timed out") || lower.includes("timeout")) {
+    return true;
+  }
+  if (!(error instanceof Error) || error.name !== "AbortError") {
+    return false;
+  }
   return lower === "aborted"
-    || lower.includes("request aborted")
+    || lower === "request aborted."
+    || lower === "request aborted"
+    || lower === "request was aborted."
+    || lower === "request was aborted"
+    || lower === "the operation was aborted."
+    || lower === "the operation was aborted"
+    || lower.includes("request was aborted")
     || lower.includes("the operation was aborted")
-    || lower.includes("user cancelled")
-    || lower.includes("cancelled mid-flight");
+    || lower.includes("request aborted");
 }
 
 /**
@@ -135,8 +194,12 @@ export function isPipelineJobAutoRetryableError(error: unknown): boolean {
   if (isPipelineCancellationError(error)) {
     return false;
   }
-  // 双保险：即使 transport 分类漂移，AbortError 也不 requeue
-  if (error instanceof Error && error.name === "AbortError") {
+  // 双保险：显式取消形态的 AbortError 不 requeue；timeout-driven abort 可走瞬时
+  if (
+    error instanceof Error
+    && error.name === "AbortError"
+    && !isPipelineTimeoutDrivenAbortError(error)
+  ) {
     return false;
   }
   if (isChapterEmptyContentError(error)) {

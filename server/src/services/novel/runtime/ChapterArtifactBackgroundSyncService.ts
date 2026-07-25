@@ -94,6 +94,9 @@ export class ChapterArtifactBackgroundSyncService {
         artifactSyncMode,
         error: error instanceof Error ? error.message : String(error),
       });
+      // 必须 rethrow：awaitArtifactDelta:true 调用方（finalization / pipeline）依赖失败信号；
+      // scheduleChapterSync 用 void 吞掉 rejection，fire-and-forget 语义不变。
+      throw error;
     } finally {
       this.activeSyncKeys.delete(syncKey);
     }

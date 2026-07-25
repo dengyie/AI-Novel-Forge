@@ -840,7 +840,9 @@ test("createRepairStream escalates patch schema failures to a single heavy repai
     ]);
     assert.equal(syncCalls.length, 1);
     assert.equal(syncCalls[0][2], "全文修复后的正文");
-    assert.equal(syncCalls[0][3].awaitArtifactDelta, true);
+    // post-adopt 不 await artifact_delta（避免 600s×N thrash 烧 wall）；后台 schedule
+    assert.equal(syncCalls[0][3].awaitArtifactDelta, false);
+    assert.equal(syncCalls[0][3].scheduleBackgroundSync, true);
     assert.equal(syncCalls[0][3].skipLegacySummaryAndFacts, true);
     assert.deepEqual(resolvedIssues, [["issue-1"]]);
     assert.deepEqual(chapterUpdates.map((item) => item.generationState), ["repaired", "approved"]);

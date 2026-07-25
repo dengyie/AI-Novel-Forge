@@ -237,3 +237,57 @@ test("repair_incomplete / polish_incomplete / skipped_locked are not terminal (r
   assert.equal(done.has("c"), false);
   assert.equal(done.has("d"), true);
 });
+
+test("budget_skipped is not terminal so resume can re-act after wall raise", () => {
+  process.env.VOLUME_READINESS_RUN_PERSIST = "0";
+  resetVolumeReadinessRunStoreForTests();
+  const run = createVolumeReadinessRun({
+    novelId: "n-budget-skip",
+    volumeOrder: 1,
+    fromOrder: 1,
+    toOrder: 2,
+    dryRun: false,
+    actionFilter: ["needs_heavy"],
+    budget: {
+      maxChapters: 5,
+      maxHeavyRewrites: 3,
+      maxLlmCalls: 60,
+      maxWallMinutes: 180,
+    },
+    plan: [],
+    planSummary: {
+      total: 0,
+      publishReady: 0,
+      needsReReview: 0,
+      needsPatch: 0,
+      needsPolish: 0,
+      needsHeavy: 0,
+      needsManual: 0,
+      publishReadyRatio: 0,
+    },
+  });
+  appendVolumeReadinessChapterResult(run.runId, {
+    chapterId: "acted",
+    chapterOrder: 1,
+    title: null,
+    verdictBefore: "needs_heavy",
+    verdictAfter: "needs_heavy",
+    outcome: "repair_incomplete",
+    startedAt: new Date().toISOString(),
+    finishedAt: new Date().toISOString(),
+  });
+  appendVolumeReadinessChapterResult(run.runId, {
+    chapterId: "skipped",
+    chapterOrder: 2,
+    title: null,
+    verdictBefore: "needs_heavy",
+    verdictAfter: null,
+    outcome: "budget_skipped",
+    message: "wall time budget 180m exhausted",
+    startedAt: new Date().toISOString(),
+    finishedAt: new Date().toISOString(),
+  });
+  const done = getCompletedChapterIds(getVolumeReadinessRun(run.runId));
+  assert.equal(done.has("acted"), false, "incomplete still retriable");
+  assert.equal(done.has("skipped"), false, "budget_skipped must resume after wall raise");
+});

@@ -312,29 +312,21 @@ export class VolumeReadinessService {
       if (!existing || existing.novelId !== novelId) {
         throw new AppError("resume 的 readiness run 不存在。", 404);
       }
-      if (existing.status === "completed" || existing.status === "cancelled") {
+      if (existing.status === "cancelled") {
         return existing;
       }
-      // dead running / planned / failed→允许 re-enter（failed 由调用方新开更常见）
+      // completed 也可 re-enter：清 budget_skipped、可选抬 wall，续跑未终态章
+      // （wall 耗尽后 ch3–20 全 budget_skipped 的典型恢复路径）。
+      if (existing.status === "completed" || existing.status === "failed" || existing.status === "planned") {
+        return this.reopenReadinessRunForResume(existing, request);
+      }
+      // dead running →允许 re-enter；若仍在本进程 flight 中则返回 live
       if (existing.status === "running") {
-        // 若 flight 已释放（进程挂了），允许 re-execute；若仍在本进程 flight 中则返回 live
         const active = findActiveLiveRunForNovel(novelId);
         if (active && active.runId === existing.runId) {
           return existing;
         }
-        // 降为 planned 供 executor 从 results 断点续跑
-        return updateVolumeReadinessRun(existing.runId, {
-          status: "planned",
-          startedAt: null,
-          error: null,
-        }) ?? existing;
-      }
-      if (existing.status === "failed") {
-        return updateVolumeReadinessRun(existing.runId, {
-          status: "planned",
-          finishedAt: null,
-          error: null,
-        }) ?? existing;
+        return this.reopenReadinessRunForResume(existing, request);
       }
       return existing;
     }
@@ -399,6 +391,42 @@ export class VolumeReadinessService {
   async listRuns(novelId: string, limit = 20): Promise<VolumeReadinessRunRecord[]> {
     await ensureVolumeReadinessRunsHydrated();
     return listVolumeReadinessRuns(novelId, limit);
+  }
+
+  /**
+   * resume re-enter：清 budget_skipped（可再跑）、保留其它 results 作断点，
+   * 可选抬高 maxWallMinutes / 其它 budget（只升不降，避免 resume 缩预算）。
+   * wallMsUsed 保留跨 resume 累加（防无限 wall thrash）。
+   */
+  private reopenReadinessRunForResume(
+    existing: VolumeReadinessRunRecord,
+    request: VolumeReadinessRunRequest,
+  ): VolumeReadinessRunRecord {
+    const clearedResults = existing.results.filter((r) => r.outcome !== "budget_skipped");
+    const nextBudget: VolumeReadinessRunBudget = { ...existing.budget };
+    if (request.budget) {
+      if (typeof request.budget.maxWallMinutes === "number" && request.budget.maxWallMinutes > nextBudget.maxWallMinutes) {
+        nextBudget.maxWallMinutes = request.budget.maxWallMinutes;
+      }
+      if (typeof request.budget.maxChapters === "number" && request.budget.maxChapters > nextBudget.maxChapters) {
+        nextBudget.maxChapters = request.budget.maxChapters;
+      }
+      if (typeof request.budget.maxHeavyRewrites === "number" && request.budget.maxHeavyRewrites > nextBudget.maxHeavyRewrites) {
+        nextBudget.maxHeavyRewrites = request.budget.maxHeavyRewrites;
+      }
+      if (typeof request.budget.maxLlmCalls === "number" && request.budget.maxLlmCalls > nextBudget.maxLlmCalls) {
+        nextBudget.maxLlmCalls = request.budget.maxLlmCalls;
+      }
+    }
+    return updateVolumeReadinessRun(existing.runId, {
+      status: "planned",
+      startedAt: null,
+      finishedAt: null,
+      error: null,
+      finalSummary: null,
+      results: clearedResults,
+      budget: nextBudget,
+    }) ?? existing;
   }
 }
 

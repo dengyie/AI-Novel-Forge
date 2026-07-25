@@ -28,18 +28,27 @@ const {
   buildStaleRecoverablePipelineJobWhere,
 } = require("../dist/services/novel/pipelineJobDedup.js");
 
-test("isPipelineCancellationError covers cancel messages and AbortError abort text", () => {
+test("isPipelineCancellationError covers cancel messages; generic AbortError is timeout-driven", () => {
   assert.equal(isPipelineCancellationError(new Error("PIPELINE_CANCELLED")), true);
   assert.equal(isPipelineCancellationError(new Error("章节生成已取消。")), true);
   assert.equal(isPipelineCancellationError(new Error("章节生成已取消，跳过正文定稿。")), true);
   assert.equal(isPipelineCancellationError(new Error("任务仍在取消中")), true);
+  // 墙钟 timeout 表象：AbortError("Request was aborted.") → 非取消
   assert.equal(
     isPipelineCancellationError(Object.assign(new Error("Request aborted."), { name: "AbortError" })),
+    false,
+  );
+  assert.equal(
+    isPipelineCancellationError(Object.assign(new Error("Request was aborted."), { name: "AbortError" })),
+    false,
+  );
+  // 显式取消 AbortError / plain aborted 透传 → 取消
+  assert.equal(
+    isPipelineCancellationError(Object.assign(new Error("user cancelled"), { name: "AbortError" })),
     true,
   );
-  // 任意 AbortError（含无 abort 关键词）与 plain "aborted" → 取消
   assert.equal(
-    isPipelineCancellationError(Object.assign(new Error("wall clock"), { name: "AbortError" })),
+    isPipelineCancellationError(Object.assign(new Error("wall clock cancel"), { name: "AbortError" })),
     true,
   );
   assert.equal(isPipelineCancellationError(new Error("aborted")), true);
@@ -75,12 +84,14 @@ test("isPipelineJobAutoRetryableError accepts transport and empty content", () =
   );
   assert.equal(isPipelineJobAutoRetryableError(new Error("PIPELINE_CANCELLED")), false);
   assert.equal(isPipelineJobAutoRetryableError(new Error("章节生成已取消。")), false);
+  // timeout-driven generic AbortError → 可 auto-retry（限次；与 transport timeout 对齐）
   assert.equal(
     isPipelineJobAutoRetryableError(Object.assign(new Error("Request aborted."), { name: "AbortError" })),
-    false,
+    true,
   );
+  // 显式取消 AbortError 仍不可 retry
   assert.equal(
-    isPipelineJobAutoRetryableError(Object.assign(new Error("wall clock"), { name: "AbortError" })),
+    isPipelineJobAutoRetryableError(Object.assign(new Error("user cancelled"), { name: "AbortError" })),
     false,
   );
   assert.equal(isPipelineJobAutoRetryableError(new Error("invalid_api_key")), false);
@@ -96,8 +107,14 @@ test("shouldAutoRetryPipelineJob respects budget", () => {
     usedCount: 0,
     maxCount: 2,
   }), false);
+  // timeout-driven AbortError 可 auto-retry
   assert.equal(shouldAutoRetryPipelineJob({
     error: Object.assign(new Error("Request aborted."), { name: "AbortError" }),
+    usedCount: 0,
+    maxCount: 2,
+  }), true);
+  assert.equal(shouldAutoRetryPipelineJob({
+    error: Object.assign(new Error("user cancelled"), { name: "AbortError" }),
     usedCount: 0,
     maxCount: 2,
   }), false);

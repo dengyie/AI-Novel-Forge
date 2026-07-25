@@ -512,6 +512,11 @@ export class ChapterRepairStreamRuntime {
         ...contentRevisionBumpData(),
       },
     });
+    // Post-adopt artifact_delta 不得阻塞 repair 完成路径：
+    // awaitArtifactDelta:true 会同步跑 extract（常 600s×多 hop thrash），
+    // 把 Volume Readiness 的 wall 烧光并拖死整卷。正文已落库；delta 后台补齐即可。
+    // recheck 走正文 evaluateOnly，不依赖本次 delta 成功。
+    // 调度失败不标 needs_repair 假降级——content 已 adopt，由后台 sync 自行重试/告警。
     try {
       await this.deps.artifactSyncService.syncChapterArtifacts(
         input.novelId,
@@ -519,22 +524,18 @@ export class ChapterRepairStreamRuntime {
         repairedContent,
         {
           scheduleBackgroundSync: true,
-          awaitArtifactDelta: true,
+          awaitArtifactDelta: false,
           skipLegacySummaryAndFacts: true,
           provider: input.options.provider,
           model: input.options.model,
         },
       );
     } catch (error) {
-      await this.markPostAdoptNeedsRepair({
+      logPipelineError("Artifact sync schedule failed after repair adopt; content kept, continuing recheck.", {
         novelId: input.novelId,
         chapterId: input.chapterId,
-        helpers: input.helpers,
-        logMessage: "Artifact sync failed after repair adopt; content kept, marking needs_repair.",
-        userMessage: "修复候选已采纳，但 artifacts 同步失败，已标 needs_repair。",
-        error,
+        error: error instanceof Error ? error.message : String(error),
       });
-      return;
     }
 
     // 采纳后正式 recheck（写 QualityReport / qualityLoop / 状态）

@@ -95,11 +95,22 @@ export async function runWithEnforcedTimeout<T>(input: {
   try {
     return await Promise.race(raceCandidates);
   } catch (error) {
+    // 墙钟先到：无论 workPromise 以 AbortError("Request was aborted.") 还是
+    // 其它形态抢先 settle，一律表面为 TimeoutError，供 transport cascade/限次重试
+    // （避免 isCancellationLike 把超时误判成取消、掐掉 fallback 或反向 thrash）。
     if (timedOut) {
       throw createTimeoutError(timeoutMs ?? 0, input.label);
     }
     if (upstreamSignal?.aborted) {
-      throw createAbortError(upstreamSignal.reason);
+      // upstream 若因墙钟而 abort（少见；主路径走 timedOut），仍映射 Timeout
+      const reason = upstreamSignal.reason;
+      if (
+        (reason instanceof Error && reason.name === "TimeoutError")
+        || (reason instanceof Error && /timed out|timeout/i.test(reason.message))
+      ) {
+        throw createTimeoutError(timeoutMs ?? 0, input.label);
+      }
+      throw createAbortError(reason);
     }
     throw error;
   } finally {

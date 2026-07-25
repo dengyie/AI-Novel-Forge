@@ -53,7 +53,11 @@ import { NovelPipelineRuntimeService } from "./services/novel/NovelPipelineRunti
 import { recoveryTaskService } from "./services/task/RecoveryTaskService";
 import { taskRetentionService } from "./services/task/TaskRetentionService";
 import { volumeReadinessScheduler } from "./services/novel/volume/VolumeReadinessScheduler";
-import { ensureVolumeReadinessRunsHydrated } from "./services/novel/volume/volumeReadinessRunStore";
+import {
+  ensureVolumeReadinessRunsHydrated,
+  listPlannedLiveReadinessRuns,
+} from "./services/novel/volume/volumeReadinessRunStore";
+import { volumeReadinessExecutor } from "./services/novel/volume/VolumeReadinessExecutor";
 import {
   ensureSystemResourceStarterData,
   hasSystemResourceBootstrapChanges,
@@ -314,10 +318,27 @@ function initializeBackgroundServices(): BackgroundServicesHandle {
   ragServices.ragWorker.start();
   ragServices.ragRetrievalTraceRetention.start();
   taskRetentionService.start();
-  // 默认关；VOLUME_READINESS_SCHEDULE=1 时才真正注册 dry-run 巡检。
-  void ensureVolumeReadinessRunsHydrated().catch((error) => {
-    console.warn("[volume.readiness] hydrate runs failed", error);
-  });
+  // hydrate 后自动 re-execute 因进程重启降为 planned 的 live run（避免静默卡死）。
+  // VOLUME_READINESS_SCHEDULE 只控制 dry-run 巡检；auto-resume 始终开启。
+  void ensureVolumeReadinessRunsHydrated()
+    .then(() => {
+      const planned = listPlannedLiveReadinessRuns();
+      for (const run of planned) {
+        console.log("[volume.readiness] auto-resume planned run after hydrate", {
+          runId: run.runId,
+          novelId: run.novelId,
+        });
+        void volumeReadinessExecutor.execute(run.runId).catch((error) => {
+          console.error("[volume.readiness] auto-resume execute failed", {
+            runId: run.runId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+      }
+    })
+    .catch((error) => {
+      console.warn("[volume.readiness] hydrate runs failed", error);
+    });
   volumeReadinessScheduler.start();
   novelSideEffectWorker.start();
   // Prevent zombie chapterArtifactSyncCheckpoint rows from blocking writer claim paths.

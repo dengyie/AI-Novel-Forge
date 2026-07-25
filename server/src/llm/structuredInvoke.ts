@@ -34,6 +34,8 @@ import {
   sleep,
   TRANSPORT_RETRY_BACKOFF_BASE_MS,
   TRANSPORT_RETRY_MAX_ATTEMPTS,
+  resolveStructuredTransportMaxAttempts,
+  isTimeoutLikeTransportError,
 } from "./transportRetry";
 import {
   buildStructuredError,
@@ -55,6 +57,8 @@ export {
 export {
   isCancellationLikeTransportError,
   isTransientTransportError,
+  isTimeoutLikeTransportError,
+  resolveStructuredTransportMaxAttempts,
   runWithTransportRetry,
   TRANSPORT_RETRY_MAX_ATTEMPTS,
   TRANSPORT_RETRY_BACKOFF_BASE_MS,
@@ -335,10 +339,14 @@ async function tryStructuredStrategies<T>(input: {
   let lastError: StructuredOutputError | null = null;
   for (let index = 0; index < preferredSequence.length; index += 1) {
     const strategy = preferredSequence[index]!;
-    // transport_error 为瞬时故障时同策略内有限重试吸收代理抖动/渠道切换。只重试
-    // 确属瞬时的错误（isTransientTransportError），持续性错误直接 fast-fail，避免
-    // 拖延。其它类别（schema_mismatch/malformed_json 等）与调用本身有关，不重试。
-    const maxAttempts = TRANSPORT_RETRY_MAX_ATTEMPTS + 1;
+    // transport_error 为瞬时故障时同策略内有限重试吸收代理抖动/渠道切换。
+    // 有 fallback 时：其它瞬时最多 2 次；timeout 见 resolveStructuredTransportMaxAttempts（1 次后 cascade）。
+    // 无 fallback 时：非 timeout 仍用完整 TRANSPORT_RETRY_MAX_ATTEMPTS+1；timeout 同样 1 次交回业务层。
+    // 持续性错误（schema_mismatch/malformed_json 等）不重试。
+    let maxAttempts = TRANSPORT_RETRY_MAX_ATTEMPTS + 1;
+    if (input.fallbackAvailable) {
+      maxAttempts = Math.min(maxAttempts, 2);
+    }
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
         return await invokeStructuredAttempt({
@@ -357,6 +365,12 @@ async function tryStructuredStrategies<T>(input: {
           profile: input.target.profile,
           fallbackAvailable: input.fallbackAvailable,
           fallbackUsed: input.fallbackUsed,
+        });
+        // 墙钟 timeout：无论有无 fallback 都收成 1（不重烧同模型）；其它瞬时沿用上面预算
+        maxAttempts = resolveStructuredTransportMaxAttempts({
+          fallbackAvailable: input.fallbackAvailable,
+          error,
+          defaultMaxAttempts: maxAttempts,
         });
         const shouldRetry = lastError.category === "transport_error"
           && isTransientTransportError(error)

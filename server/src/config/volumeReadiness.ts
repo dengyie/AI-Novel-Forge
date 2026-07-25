@@ -44,9 +44,14 @@ export const VOLUME_READINESS_DEFAULT_MAX_LLM_CALLS = asInt(
   1,
   2000,
 );
+/**
+ * 默认 wall：v2 单卷 20 章 ×（re_review + 可能 heavy）常超 45m。
+ * 180m 与生产真跑常用预算对齐；仍可用 env / request.budget 覆盖。
+ * 单章 thrash 不得靠无限 wall 掩盖——post-adopt 已 fail-soft artifact。
+ */
 export const VOLUME_READINESS_DEFAULT_MAX_WALL_MINUTES = asInt(
   process.env.VOLUME_READINESS_MAX_WALL_MINUTES,
-  45,
+  180,
   1,
   24 * 60,
 );
@@ -73,10 +78,12 @@ export const VOLUME_READINESS_SIGNAL_STALE_HOURS = asInt(
 /**
  * 同章 incomplete（re_review/repair/polish）最多自动重试次数；
  * 超过后 escalate 为 kept（manual），避免 resume 空转烧预算。
+ * 默认 3：heavy adopt 后 quality 仍 needs_heavy 很常见，需至少 2 次同章 follow-up
+ * 才 escalate；生产曾用 1 导致 adopt 一次即 kept。
  */
 export const VOLUME_READINESS_MAX_INCOMPLETE_RETRIES = asInt(
   process.env.VOLUME_READINESS_MAX_INCOMPLETE_RETRIES,
-  2,
+  3,
   1,
   10,
 );
