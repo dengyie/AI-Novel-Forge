@@ -293,6 +293,12 @@ export interface ReviewOptions extends LLMGenerateOptions {
    * 用于修文 candidate 采纳前评估（evaluate → adopt|discard）。
    */
   evaluateOnly?: boolean;
+  /**
+   * true：audit 后不阻塞等待 payoff ledger sync。
+   * evaluateOnly 默认等价 true；repair/readiness 热路径也应显式打开，
+   * 避免 novel.payoff_ledger.sync 的 transport 重试把整章墙钟拖到小时级。
+   */
+  skipPayoffLedgerSync?: boolean;
 }
 
 export interface RepairOptions extends LLMGenerateOptions {

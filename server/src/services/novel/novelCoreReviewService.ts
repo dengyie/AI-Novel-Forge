@@ -207,9 +207,12 @@ export class NovelCoreReviewService {
     options: ReviewOptions = {},
   ) {
     const contextPackage = await this.assembleAuditContextPackage(novelId, chapterId, options, "audit");
+    const skipPayoffLedgerSync = options.skipPayoffLedgerSync === true
+      || options.evaluateOnly === true;
     return auditService.auditChapter(novelId, chapterId, scope, {
       ...options,
       contextPackage,
+      skipPayoffLedgerSync,
     });
   }
 
@@ -345,12 +348,16 @@ export class NovelCoreReviewService {
 
     if (novelId && chapterId) {
       const contextPackage = await this.assembleAuditContextPackage(novelId, chapterId, options, "review");
+      // evaluateOnly / 显式 skip：不阻塞 ledger（ledger 已有 background reconcile 路径）
+      const skipPayoffLedgerSync = options.skipPayoffLedgerSync === true
+        || options.evaluateOnly === true;
       const auditResult = await auditService.auditChapter(novelId, chapterId, "full", {
         provider: options.provider,
         model: options.model,
         temperature: options.temperature,
         content,
         contextPackage,
+        skipPayoffLedgerSync,
       });
       return {
         ...auditResult,
