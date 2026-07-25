@@ -1454,7 +1454,7 @@ test("executePipeline marks 章节生成已取消 as cancelled and does not auto
   }
 });
 
-test("executePipeline marks AbortError Request aborted as cancelled not requeued", async () => {
+test("executePipeline treats timeout-driven AbortError Request aborted as requeueable not cancelled", async () => {
   const original = {
     generationFindUnique: prisma.generationJob.findUnique,
     generationUpdate: prisma.generationJob.update,
@@ -1466,10 +1466,11 @@ test("executePipeline marks AbortError Request aborted as cancelled not requeued
   const updates = mockPipelineJobBasics({});
   const service = new NovelCorePipelineService();
   service.chapterRuntimeCoordinator.runPipelineChapter = async () => {
+    // 墙钟 timeout 表象：AbortError("Request aborted.") → 瞬时可 auto-requeue，不得当取消
     throw Object.assign(new Error("Request aborted."), { name: "AbortError" });
   };
   try {
-    await service.executePipeline("job-cancel-abort", "novel-1", {
+    await service.executePipeline("job-timeout-abort", "novel-1", {
       startOrder: 1,
       endOrder: 1,
       provider: "deepseek",
@@ -1484,8 +1485,10 @@ test("executePipeline marks AbortError Request aborted as cancelled not requeued
       maxRetries: 1,
     });
     const finalUpdate = updates[updates.length - 1];
-    assert.equal(finalUpdate.data.status, "cancelled");
-    assert.notEqual(finalUpdate.data.status, "queued");
+    // 有 transport auto-retry 预算 → requeue queued；不得落 cancelled
+    assert.equal(finalUpdate.data.status, "queued");
+    assert.notEqual(finalUpdate.data.status, "cancelled");
+    assert.match(String(finalUpdate.data.error ?? ""), /自动重试|Request aborted/i);
   } finally {
     prisma.generationJob.findUnique = original.generationFindUnique;
     prisma.generationJob.update = original.generationUpdate;

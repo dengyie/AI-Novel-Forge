@@ -46,14 +46,15 @@ test("resolveUnhandledPipelineFailureTerminalUpdate cancels when cancel flag or 
     }),
     { status: "cancelled", error: null },
   );
+  // 墙钟 timeout 表象 AbortError("Request aborted.") → 非取消，落 failed（可上层 requeue）
   assert.deepEqual(
     resolveUnhandledPipelineFailureTerminalUpdate({
       status: "running",
       error: Object.assign(new Error("Request aborted."), { name: "AbortError" }),
     }),
-    { status: "cancelled", error: null },
+    { status: "failed", error: "Request aborted." },
   );
-  // plain Error("aborted") / bare AbortError → cancelled（与 transport 对齐）
+  // plain Error("aborted") / 显式 cancel AbortError → cancelled（与 transport 对齐）
   assert.deepEqual(
     resolveUnhandledPipelineFailureTerminalUpdate({
       status: "running",
@@ -61,6 +62,14 @@ test("resolveUnhandledPipelineFailureTerminalUpdate cancels when cancel flag or 
     }),
     { status: "cancelled", error: null },
   );
+  assert.deepEqual(
+    resolveUnhandledPipelineFailureTerminalUpdate({
+      status: "running",
+      error: Object.assign(new Error("user cancelled"), { name: "AbortError" }),
+    }),
+    { status: "cancelled", error: null },
+  );
+  // 非 generic AbortError 文案仍保守当取消
   assert.deepEqual(
     resolveUnhandledPipelineFailureTerminalUpdate({
       status: "running",
