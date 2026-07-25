@@ -1,17 +1,20 @@
 name: Deploy pxed
 
-# CI 自动测（server-test）+ 人工/审批触发部署。
+# CI 门禁通过后自动 cutover 生产（pxed）。
 # 触发：
-#   - push tag deploy/*（推荐：git tag deploy/<shortsha> && git push origin deploy/<shortsha>）
-#   - workflow_dispatch（Actions 页手动）
+#   - push 到 main（PR 合入 / 直推 main → 自动部署，无需人工审批）
+#   - push tag deploy/*（可选：定点回放某 sha；同样免审批）
+#   - workflow_dispatch（Actions 页手动选 components/ref）
 # 门禁：
 #   - 仅允许 main 祖先 commit（防野分支误上生产）
 #   - 本 workflow 内重跑 generate + typecheck + fast tests
-#   - GitHub Environment `pxed-production` required reviewers（审批后才 SSH）
-# 不做：每个 main push 裸 auto-deploy；不在 pxed 上 tsc；不设 NODE_ENV=production
+#   - Environment `pxed-production` 仅挂 secrets / branch policy，**无 required reviewers**
+# 不做：在 pxed 上 tsc；不设 NODE_ENV=production；失败不自动回滚
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "deploy/**"
   workflow_dispatch:
@@ -61,9 +64,9 @@ jobs:
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             COMPONENTS="${{ inputs.components }}"
           else
-            # tag 默认 server-client。
+            # main / tag 默认 server-client。
             # 覆盖来源（任一命中）：annotated tag 注解、tag 名后缀、commit message。
-            # 例：git tag -a deploy/<sha12> -m "prod #server" && git push origin deploy/<sha12>
+            # 例：commit/tag 含独立词 #server / #all
             # 或：deploy/<sha12>-server / deploy/<sha12>-all
             COMPONENTS="server-client"
             MSG="$(git show -s --format=%B "$SHA" 2>/dev/null || true)"
@@ -89,7 +92,7 @@ jobs:
           echo "sha=$SHA" >>"$GITHUB_OUTPUT"
           echo "short_sha=$SHORT" >>"$GITHUB_OUTPUT"
           echo "components=$COMPONENTS" >>"$GITHUB_OUTPUT"
-          echo "Deploy target sha=$SHA components=$COMPONENTS"
+          echo "Deploy target sha=$SHA components=$COMPONENTS event=${{ github.event_name }} ref=${{ github.ref }}"
 
       - name: Require commit is ancestor of origin/main
         run: |
@@ -207,10 +210,11 @@ jobs:
           retention-days: 14
 
   deploy:
-    name: Approve + cutover pxed
+    name: Cutover pxed
     needs: [gate, build-artifacts]
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Environment 仅用于 secrets + branch/tag policy；无 required reviewers（main 合入直部署）
     environment:
       name: pxed-production
       url: https://ainovel.mangoqwq.com
@@ -314,7 +318,7 @@ jobs:
 
           # shellcheck disable=SC2029
           # 不自动回滚：失败时保留 snap 目录，人工按脚本日志 rollback hint 处理。
-          # 有运行中的导演/TTS 长任务时请先 drain 再 Approve。
+          # 有运行中的导演/TTS 长任务时请先 drain 再合入/部署。
           ssh pxed-deploy "env \
             DEPLOY_SHA='$DEPLOY_SHA' \
             DEPLOY_COMPONENTS='$COMPONENTS' \
