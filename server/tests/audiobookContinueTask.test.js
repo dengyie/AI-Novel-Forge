@@ -205,6 +205,70 @@ test("continuing 父取消契约：源码须 cascade + reconcile + 强制 cancel
   assert.equal(isContinuingParent, true);
 });
 
+test("cancel 归因契约：service/route/adapter 须透传 source 并打 [audiobook.cancel]", () => {
+  const serviceSrc = fs.readFileSync(
+    path.join(__dirname, "../src/services/audiobook/AudiobookTaskService.ts"),
+    "utf8",
+  );
+  const routeSrc = fs.readFileSync(
+    path.join(__dirname, "../src/modules/novel/production/http/novelAudiobookRoutes.ts"),
+    "utf8",
+  );
+  const adapterSrc = fs.readFileSync(
+    path.join(__dirname, "../src/services/task/adapters/AudiobookTaskAdapter.ts"),
+    "utf8",
+  );
+  const tasksRouteSrc = fs.readFileSync(
+    path.join(__dirname, "../src/routes/tasks.ts"),
+    "utf8",
+  );
+  assert.match(
+    serviceSrc,
+    /async cancelTask\(\s*taskId:\s*string,\s*source\?:/,
+    "cancelTask 须接受 source 归因参数",
+  );
+  assert.match(
+    serviceSrc,
+    /console\.warn\("\[audiobook\.cancel\]"/,
+    "cancelTask 须打 [audiobook.cancel] 归因日志",
+  );
+  assert.match(
+    routeSrc,
+    /cancelTask\(taskId,\s*\{[\s\S]{0,200}?route:\s*"novel\.audiobook\.cancel"/,
+    "novel 面板 cancel 路由须标注 route",
+  );
+  assert.match(
+    routeSrc,
+    /x-cancel-via/,
+    "novel 面板 cancel 路由须读 x-cancel-via",
+  );
+  assert.match(
+    adapterSrc,
+    /cancelTask\(id,\s*\{[\s\S]{0,200}?route:\s*source\?\.route\s*\?\?\s*"task_center\.cancel"/,
+    "task-center adapter 须透传 source 到 cancelTask",
+  );
+  assert.match(
+    serviceSrc,
+    /console\.warn\("\[audiobook\.cancel\.rejected\]"/,
+    "终态二次 cancel 须打 [audiobook.cancel.rejected]",
+  );
+  assert.match(
+    tasksRouteSrc,
+    /console\.warn\("\[task_center\.cancel\]"/,
+    "任务中心 cancel 路由须打 [task_center.cancel]",
+  );
+  assert.match(
+    tasksRouteSrc,
+    /resolveClientIp\(req\)/,
+    "任务中心 cancel 须用 resolveClientIp（反代友好）",
+  );
+  assert.match(
+    tasksRouteSrc,
+    /cancelTask\(kind,\s*id,\s*source\)/,
+    "任务中心 cancel 须把 source 传给 TaskCenterService",
+  );
+});
+
 test("resynthesize wipe 契约：wipe 目标章后 chapter.wav 与 full-book 消失（强制重合成）", () => {
   withTempDataRoot((tmpRoot) => {
     const {

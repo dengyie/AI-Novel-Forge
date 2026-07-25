@@ -690,6 +690,10 @@ function RecentAudiobookTaskCard(props: {
                   onClick={(event) => {
                     event.preventDefault();
                     event.stopPropagation();
+                    // 有声书 synth 可达 15–20 分钟；误点取消会打断且需整章重跑。
+                    if (!window.confirm("确认取消该有声书任务？进行中的合成进度将丢失。")) {
+                      return;
+                    }
                     onCancel(task.id);
                   }}
                 >

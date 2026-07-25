@@ -30,6 +30,7 @@ import {
   type ListTasksFilters,
 } from "./taskCenter.shared";
 import { getArchivedTaskIdsByKind } from "./taskArchive";
+import type { TaskCancelSource } from "./taskSupport";
 
 async function safeAudiobookOverviewGroupBy(archivedAudiobookIds: string[]) {
   try {
@@ -458,7 +459,11 @@ export class TaskCenterService {
     throw new AppError(`Unsupported task kind: ${kind}`, 400);
   }
 
-  async cancelTask(kind: TaskKind, id: string): Promise<UnifiedTaskDetail> {
+  async cancelTask(
+    kind: TaskKind,
+    id: string,
+    source?: TaskCancelSource,
+  ): Promise<UnifiedTaskDetail> {
     if (kind === "book_analysis") {
       return this.bookAdapter.cancel(id);
     }
@@ -481,7 +486,7 @@ export class TaskCenterService {
       return this.styleExtractionAdapter.cancel(id);
     }
     if (kind === "novel_audiobook") {
-      return this.audiobookAdapter.cancel(id);
+      return this.audiobookAdapter.cancel(id, source);
     }
     throw new AppError(`Unsupported task kind: ${kind}`, 400);
   }

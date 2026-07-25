@@ -1334,7 +1334,7 @@ export default function NovelEdit() {
       if (!taskId) {
         throw new Error("当前没有可取消的自动导演任务。");
       }
-      return cancelTask("novel_workflow", taskId);
+      return cancelTask("novel_workflow", taskId, { via: "novel_edit_auto_director" });
     },
     onSuccess: async (response, targetTaskId) => {
       setIsDirectorExitActionExpanded(false);

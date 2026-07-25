@@ -2,6 +2,7 @@ import { Router } from "express";
 import type { ApiResponse } from "@ai-novel/shared/types/api";
 import type { TaskKind, TaskStatus } from "@ai-novel/shared/types/task";
 import { z } from "zod";
+import { resolveClientIp, truncateMeta } from "../http/clientIp";
 import { llmProviderSchema } from "../llm/providerSchema";
 import { authMiddleware } from "../middleware/auth";
 import { validate } from "../middleware/validate";
@@ -229,7 +230,17 @@ router.post("/:kind/:id/retry", validate({ params: taskParamsSchema, body: retry
 router.post("/:kind/:id/cancel", validate({ params: taskParamsSchema }), async (req, res, next) => {
   try {
     const { kind, id } = req.params as z.infer<typeof taskParamsSchema>;
-    const data = await taskCenterService.cancelTask(kind, id);
+    const via = typeof req.get("x-cancel-via") === "string" ? req.get("x-cancel-via") : null;
+    const source = {
+      route: "task_center.cancel",
+      via,
+      ip: resolveClientIp(req),
+      userAgent: truncateMeta(req.get("user-agent")),
+      referer: truncateMeta(req.get("referer") ?? req.get("referrer")),
+    };
+    // 归因：有声书等长任务曾被无来源 cancel 打断；入口级 attempt 日志覆盖 400 二次 cancel。
+    console.warn("[task_center.cancel]", { kind, id, ...source });
+    const data = await taskCenterService.cancelTask(kind, id, source);
     res.status(200).json({
       success: true,
       data,

@@ -429,6 +429,12 @@ export async function getAudiobookTask(novelId: string, taskId: string) {
 export async function cancelAudiobookTask(novelId: string, taskId: string) {
   const { data } = await apiClient.post<ApiResponse<AudiobookTaskDetail>>(
     `/novels/${novelId}/audiobook/tasks/${taskId}/cancel`,
+    {},
+    {
+      headers: {
+        "x-cancel-via": "novel_audiobook_panel",
+      },
+    },
   );
   return data;
 }

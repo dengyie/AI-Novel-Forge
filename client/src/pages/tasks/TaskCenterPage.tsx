@@ -241,7 +241,8 @@ export default function TaskCenterPage() {
   });
 
   const cancelMutation = useMutation({
-    mutationFn: (payload: { kind: TaskKind; id: string }) => cancelTask(payload.kind, payload.id),
+    mutationFn: (payload: { kind: TaskKind; id: string }) =>
+      cancelTask(payload.kind, payload.id, { via: "task_center_ui" }),
     onSuccess: async () => {
       await invalidateTaskQueries();
       toast.success("任务取消请求已提交");
@@ -652,11 +653,18 @@ export default function TaskCenterPage() {
                     <Button
                       size="sm"
                       variant="outline"
-                      onClick={() =>
+                      onClick={() => {
+                        const confirmMessage = selectedTask.kind === "novel_audiobook"
+                          ? "确认取消该有声书任务？进行中的合成进度将丢失。"
+                          : "确认取消该任务？";
+                        if (!window.confirm(confirmMessage)) {
+                          return;
+                        }
                         cancelMutation.mutate({
                           kind: selectedTask.kind,
                           id: selectedTask.id,
-                        })}
+                        });
+                      }}
                       disabled={cancelMutation.isPending}
                       >
                       取消

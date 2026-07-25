@@ -199,7 +199,10 @@ export const taskToolDefinitions: Partial<
     outputSchema: taskMutationOutputSchema,
     execute: async (_context, rawInput) => {
       const input = taskIdentityInputSchema.parse(rawInput);
-      const detail = await taskCenterService.cancelTask(input.kind, input.id);
+      const detail = await taskCenterService.cancelTask(input.kind, input.id, {
+        route: "agent.cancel_task",
+        via: "agent_tool",
+      });
       return taskMutationOutputSchema.parse({
         kind: detail.kind,
         id: detail.id,

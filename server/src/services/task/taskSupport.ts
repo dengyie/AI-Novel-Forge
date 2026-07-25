@@ -4,6 +4,18 @@ import {
 } from "../../llm/structuredOutput";
 import { summarizeStructuredOutputFailure } from "../../llm/structuredInvoke";
 
+/**
+ * 任务取消归因（仅日志；不改变取消语义）。
+ * route = 入口逻辑名；via = 调用方自报（UI header / agent / curl）。
+ */
+export type TaskCancelSource = {
+  route?: string;
+  ip?: string | null;
+  userAgent?: string | null;
+  referer?: string | null;
+  via?: string | null;
+};
+
 export function normalizeFailureSummary(summary?: string | null, fallback = "当前没有明确失败记录。"): string {
   return summary?.trim() || fallback;
 }

@@ -13,6 +13,7 @@ import {
   isArchivableTaskStatus,
   normalizeFailureSummary,
   resolveStructuredFailureSummary,
+  type TaskCancelSource,
 } from "../taskSupport";
 import { toTaskTokenUsageSummary } from "../taskTokenUsageSummary";
 import {
@@ -241,11 +242,17 @@ export class AudiobookTaskAdapter {
     return detail;
   }
 
-  async cancel(id: string): Promise<UnifiedTaskDetail> {
+  async cancel(id: string, source?: TaskCancelSource): Promise<UnifiedTaskDetail> {
     if (await isTaskArchived("novel_audiobook", id)) {
       throw new AppError("Task not found.", 404);
     }
-    const task = await audiobookTaskService.cancelTask(id);
+    const task = await audiobookTaskService.cancelTask(id, {
+      route: source?.route ?? "task_center.cancel",
+      via: source?.via ?? "task_center_adapter",
+      ip: source?.ip ?? null,
+      userAgent: source?.userAgent ?? null,
+      referer: source?.referer ?? null,
+    });
     const detail = await this.detail(task.id);
     if (!detail) {
       throw new AppError("Task not found after cancellation.", 404);

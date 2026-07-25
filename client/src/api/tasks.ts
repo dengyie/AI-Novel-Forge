@@ -81,8 +81,24 @@ export async function retryTask(
   return data;
 }
 
-export async function cancelTask(kind: TaskKind, id: string) {
-  const { data } = await apiClient.post<ApiResponse<UnifiedTaskDetail>>(`/tasks/${kind}/${id}/cancel`, {});
+export async function cancelTask(
+  kind: TaskKind,
+  id: string,
+  options?: {
+    /** 归因：谁发起的取消（落到服务端 x-cancel-via / [task_center.cancel].via） */
+    via?: string;
+  },
+) {
+  const via = options?.via?.trim() || "unknown";
+  const { data } = await apiClient.post<ApiResponse<UnifiedTaskDetail>>(
+    `/tasks/${kind}/${id}/cancel`,
+    {},
+    {
+      headers: {
+        "x-cancel-via": via,
+      },
+    },
+  );
   return data;
 }
 

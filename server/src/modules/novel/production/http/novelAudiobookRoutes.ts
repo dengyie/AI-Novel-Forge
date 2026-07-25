@@ -19,6 +19,7 @@ import {
   type CreateAudiobookTaskInput,
 } from "@ai-novel/shared/types/audiobook";
 import { z } from "zod";
+import { resolveClientIp, truncateMeta } from "../../../../http/clientIp";
 import { llmProviderSchema } from "../../../../llm/providerSchema";
 import { resolveAuthMode, type RequestWithApiAuth } from "../../../../middleware/auth";
 import { AppError } from "../../../../middleware/errorHandler";
@@ -1251,7 +1252,13 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
           } satisfies ApiResponse<null>);
           return;
         }
-        const data = await audiobookTaskService.cancelTask(taskId);
+        const data = await audiobookTaskService.cancelTask(taskId, {
+          route: "novel.audiobook.cancel",
+          via: typeof req.get("x-cancel-via") === "string" ? req.get("x-cancel-via") : null,
+          ip: resolveClientIp(req),
+          userAgent: truncateMeta(req.get("user-agent")),
+          referer: truncateMeta(req.get("referer") ?? req.get("referrer")),
+        });
         res.status(200).json({
           success: true,
           data,

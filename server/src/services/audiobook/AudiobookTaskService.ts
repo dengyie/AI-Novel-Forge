@@ -14,6 +14,7 @@ import type { LLMProvider } from "@ai-novel/shared/types/llm";
 import { prisma } from "../../db/prisma";
 import { AppError } from "../../middleware/errorHandler";
 import { toTaskTokenUsageSummary } from "../task/taskTokenUsageSummary";
+import type { TaskCancelSource } from "../task/taskSupport";
 import { isMissingAudiobookTaskTableError } from "./audiobookErrors";
 import { parseSpeakerAliases } from "./audiobookSpeakerAliases";
 export { parseSpeakerAliases } from "./audiobookSpeakerAliases";
@@ -632,14 +633,45 @@ export class AudiobookTaskService {
     }
   }
 
-  async cancelTask(taskId: string): Promise<AudiobookTaskDetail> {
+  /**
+   * 取消有声书任务。
+   * source 仅用于归因日志（UI / task-center / agent / ops curl），不改变取消语义。
+   */
+  async cancelTask(
+    taskId: string,
+    source?: TaskCancelSource,
+  ): Promise<AudiobookTaskDetail> {
     const task = await prisma.audiobookTask.findUnique({ where: { id: taskId } });
     if (!task) {
       throw new AppError("有声书任务不存在。", 404);
     }
+
+    const attribution = {
+      taskId,
+      novelId: task.novelId,
+      status: task.status,
+      progress: task.progress,
+      currentStage: task.currentStage,
+      currentItemLabel: task.currentItemLabel,
+      cancelRequestedAt: task.cancelRequestedAt?.toISOString() ?? null,
+      route: source?.route ?? "unknown",
+      via: source?.via ?? null,
+      ip: source?.ip ?? null,
+      userAgent: source?.userAgent ? String(source.userAgent).slice(0, 200) : null,
+      referer: source?.referer ? String(source.referer).slice(0, 200) : null,
+    };
+
+    // 归因：双路径 cancel 的第二枪常为 400；attempt 也要落日志，否则只见 morgan 无 source。
     if (task.status === "succeeded" || task.status === "failed" || task.status === "cancelled") {
+      console.warn("[audiobook.cancel.rejected]", {
+        ...attribution,
+        reason: "already_terminal",
+      });
       throw new AppError("仅排队中或运行中的有声书任务可取消。", 400);
     }
+
+    // 归因：ch1 synth 曾被「双路径 POST cancel」打断；日志须区分 novel 面板 / 任务中心 / agent / curl。
+    console.warn("[audiobook.cancel]", attribution);
 
     const isContinueChild = Boolean(readParentTaskIdFromProgress(task.progressJson));
     const isContinuingParent = !isContinueChild && task.currentStage === "continuing";
