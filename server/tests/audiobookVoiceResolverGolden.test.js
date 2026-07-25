@@ -22,13 +22,40 @@ const {
 const { buildChunkSynthesisRequest } = require("../dist/services/audiobook/frontend/synthesisBuilder.js");
 const { synthesisRequestToMimoInput } = require("../dist/services/audiobook/engine/mimoTtsEngine.js");
 
-// 旧的冻结映射（从 M3 之前 AudiobookPipelineService/builder 的 ad-hoc 推断逐行拷贝）：
-//   - narrator → "narrator"
-//   - speakerUnresolved → "guest"
+// 绑定源映射契约（guest 有名优先；nameless orphan 虽 unresolved 但声=旁白 → narrator）：
+//   - named guest（speakerUnresolved + 有效角色名）→ "guest"
+//   - narrator kind / nameless quote orphan → "narrator"
+//   - 其它 unresolved 脏态 → "guest"（保守）
 //   - else → "card"
+// 与 resolveVoiceProfileSource / namedGuestSpeakerName 对齐（非 M5 前旧字节冻结）。
+function isNarratorLikeLabel(raw) {
+  const t = (raw ?? "").trim();
+  return !t || t === "旁白" || t === "narrator";
+}
+function namedGuestName(segment) {
+  if (!segment.speakerUnresolved) return null;
+  const rawName = (segment.unresolvedSpeakerName ?? "").trim();
+  if (rawName && !isNarratorLikeLabel(rawName)) return rawName;
+  const label = (segment.speakerLabel ?? "").trim();
+  if (label && !isNarratorLikeLabel(label)) return label;
+  return null;
+}
 function legacyInferSource(segment) {
+  if (namedGuestName(segment)) return "guest";
   if (segment.speakerKind === "narrator") return "narrator";
-  return segment.speakerUnresolved ? "guest" : "card";
+  // nameless: unresolved + 旁白类 label → narrator（与 isNamelessQuoteOrphan 一致）
+  if (segment.speakerUnresolved) {
+    const rawName = (segment.unresolvedSpeakerName ?? "").trim();
+    const label = (segment.speakerLabel ?? "").trim();
+    if (
+      (!rawName || isNarratorLikeLabel(rawName))
+      && isNarratorLikeLabel(label)
+    ) {
+      return "narrator";
+    }
+    return "guest";
+  }
+  return "card";
 }
 
 function legacyNormalizeTtsMode(raw) {
@@ -79,6 +106,11 @@ const CASES = [
   { name: "character card clone", s: seg({ ttsMode: "clone", voice: "", refAudioPath: "/audio/ref.wav", baseStyle: "克隆基线" }) },
   { name: "guest unresolved preset", s: seg({ speakerKind: "character", characterId: null, speakerLabel: "远哥", speakerUnresolved: true, voice: "苏打", baseStyle: "路人基线" }) },
   { name: "narrator orphan (forced degrade)", s: seg({ speakerKind: "narrator", characterId: null, speakerLabel: "旁白", voice: "茉莉", baseStyle: "旁白基线" }) },
+  // 生产关键场景：未匹配路人以 narrator kind + speakerUnresolved 承载（见 materialize/ruleAssembly）。
+  // 旧映射 narrator 优先会误报 "narrator"；修复后必须先判有名 unresolved → "guest"。
+  { name: "narrator kind + unresolved name → guest", s: seg({ speakerKind: "narrator", characterId: null, speakerLabel: "苏打", speakerUnresolved: true, unresolvedSpeakerName: "远哥", voice: "苏打", baseStyle: "路人基线" }) },
+  // 无名 quote orphan：旁白声 + unresolved 进 cast 分母，source 仍是 narrator（不是 guest）
+  { name: "nameless orphan unresolved → narrator source", s: seg({ speakerKind: "narrator", characterId: null, speakerLabel: "旁白", speakerUnresolved: true, unresolvedSpeakerName: null, voice: "茉莉", baseStyle: "旁白基线" }) },
   { name: "ttsMode null → preset", s: seg({ ttsMode: null }) },
   { name: "ttsMode ' design ' → design", s: seg({ ttsMode: " design ", voice: "", baseDesignPrompt: "x" }) },
   { name: "ttsMode 'garbage' → preset", s: seg({ ttsMode: "garbage" }) },

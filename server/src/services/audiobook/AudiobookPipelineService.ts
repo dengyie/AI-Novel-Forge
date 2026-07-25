@@ -62,6 +62,12 @@ import {
   resolveDeliveryStyleMode,
   shouldApplyDelivery,
 } from "./deliveryStyle";
+import {
+  guestStyleForUnresolvedName,
+  isNamelessQuoteOrphanUnresolved,
+  namedGuestSpeakerName,
+  pickGuestPresetVoice,
+} from "./diarize/guestVoice";
 
 /**
  * resume 是否应丢弃缓存标注并 reannotate。
@@ -115,11 +121,30 @@ export type ReconcileAnnotationSegmentsResult = {
 // audiobookUnresolvedSpeaker 等单测 from dist）零改动。M5 删 peel 时连 re-export 一起清。
 export { peelCompiledDeliveryMarks };
 
+function noteOrphanCharacter(
+  characterId: string,
+  speakerLabel: string | null | undefined,
+  orphanSeen: Set<string>,
+  orphanCharacterIds: string[],
+  orphanSpeakerLabels: string[],
+): void {
+  if (orphanSeen.has(characterId)) return;
+  orphanSeen.add(characterId);
+  orphanCharacterIds.push(characterId);
+  orphanSpeakerLabels.push(speakerLabel || characterId);
+}
+
 /**
  * 合成前用任务当前 characterVoices / narrator 覆盖段绑定。
  * 标注冻结 speaker/text/delivery；音色/mode/ref/base 以卡为准，有 delivery 则按 base 重 apply。
  * 改卡后 resume 不必 reannotate 也能换声线（layout fingerprint 会变）。
  * 角色卡已删除：强制旁白 + 登记 orphan（禁止 silent 继续用旧 clone/脏 voice）。
+ * 未匹配路人（speakerUnresolved + 有名）：保留/自愈 guest 预置声，禁止洗成旁白。
+ *
+ * 优先级：
+ *   1) 有 characterId 且卡仍在 → 角色卡匹配（清 unresolved）
+ *   2) 有名 unresolved 且无卡 → guest 保留/重选（过期 characterId 仍登记 orphan）
+ *   3) 无名 quote orphan / 真旁白 → 旁白声（orphan 保留 unresolved 供门禁分母）
  */
 export function reconcileAnnotationSegmentsWithVoices(
   segments: AudiobookDialogueSegment[],
@@ -136,11 +161,72 @@ export function reconcileAnnotationSegmentsWithVoices(
   const orphanCharacterIds: string[] = [];
   const orphanSpeakerLabels: string[] = [];
   const orphanSeen = new Set<string>();
+  const narratorBaseStyle = peelCompiledDeliveryMarks(input.narrator.style || null);
+  const narratorVoice = (input.narrator.voice ?? "").trim();
 
   const nextSegments = segments.map((seg) => {
+    // 有名未匹配路人：materialize/ruleAssembly 已点 guest 预置。
+    // 旧 bug 会在此分支洗成旁白；现保留 guest，并对「声=旁白」的脏标注自愈重点。
+    // 仅当没有对账到角色卡时走 guest：带 characterId 且卡仍在时优先匹配清 unresolved。
+    const staleCharacterId = (seg.characterId ?? "").trim() || null;
+    const hasMatchingCard =
+      Boolean(staleCharacterId) && byId.has(staleCharacterId as string);
+    const namedGuest = namedGuestSpeakerName(seg);
+    if (namedGuest && !hasMatchingCard) {
+      // 过期 characterId + unresolved：仍登记 orphan，再走 guest（不清成旁白）
+      if (staleCharacterId) {
+        noteOrphanCharacter(
+          staleCharacterId,
+          seg.speakerLabel || namedGuest,
+          orphanSeen,
+          orphanCharacterIds,
+          orphanSpeakerLabels,
+        );
+      }
+      const guestName = namedGuest;
+      const existingVoice = (seg.voice ?? "").trim();
+      const existingBase = peelCompiledDeliveryMarks(
+        seg.baseStyle || seg.style || null,
+      );
+      const needsGuestRepick = !existingVoice || existingVoice === narratorVoice;
+      const needsStyleRepick = !existingBase
+        || existingBase === narratorBaseStyle;
+      const guestVoice = needsGuestRepick
+        ? pickGuestPresetVoice(guestName, input.narrator.voice)
+        : existingVoice;
+      const guestStyle = needsStyleRepick
+        ? guestStyleForUnresolvedName(guestName)
+        : existingBase;
+      const base: AudiobookDialogueSegment = {
+        ...seg,
+        // 生产约定：未匹配对白以 narrator kind + unresolved 承载（见 materialize/ruleAssembly）
+        speakerKind: "narrator",
+        characterId: null,
+        speakerLabel: seg.speakerLabel?.trim() || guestName,
+        ttsMode: "preset",
+        voice: guestVoice,
+        refAudioPath: null,
+        baseStyle: guestStyle,
+        baseDesignPrompt: null,
+        style: guestStyle,
+        designPrompt: null,
+        speakerUnresolved: true,
+        unresolvedSpeakerName: (seg.unresolvedSpeakerName ?? guestName) || null,
+        // 路人不定制表演，避免旁白/串戏 delivery
+        delivery: null,
+        deliveryMergeKey: "none",
+      };
+      return applyDeliveryToSegment(base, null, {
+        deliveryStyleMode: "off",
+        baseStyle: guestStyle,
+        baseDesignPrompt: null,
+      });
+    }
+
     if (seg.speakerKind === "narrator" || !seg.characterId) {
-      // 与 synth SoT 一致：卡/旁白 base 先剥编译标记，避免指纹与 TTS 双路径
-      const baseStyle = peelCompiledDeliveryMarks(input.narrator.style || null);
+      // 真旁白 / 无名 quote orphan：覆盖为任务当前旁白绑定
+      const baseStyle = narratorBaseStyle;
+      const isNamelessOrphan = isNamelessQuoteOrphanUnresolved(seg);
       const base: AudiobookDialogueSegment = {
         ...seg,
         speakerKind: "narrator",
@@ -152,8 +238,26 @@ export function reconcileAnnotationSegmentsWithVoices(
         baseDesignPrompt: null,
         style: baseStyle,
         designPrompt: null,
+        // 无名 orphan：保留 unresolved 供 cast 分母，规范化 label/name
+        // 真旁白：清可能脏的 unresolved 标记
+        ...(isNamelessOrphan
+          ? {
+              speakerUnresolved: true as const,
+              unresolvedSpeakerName: null,
+              speakerLabel: "旁白",
+              delivery: null,
+              deliveryMergeKey: "none" as const,
+            }
+          : {
+              speakerUnresolved: false as const,
+              unresolvedSpeakerName: null,
+            }),
       };
-      if (seg.delivery && shouldApplyDelivery(mode, "narrator")) {
+      if (
+        !isNamelessOrphan
+        && seg.delivery
+        && shouldApplyDelivery(mode, "narrator")
+      ) {
         return applyDeliveryToSegment(base, seg.delivery, {
           deliveryStyleMode: mode,
           baseStyle,
@@ -170,12 +274,14 @@ export function reconcileAnnotationSegmentsWithVoices(
     const matched = byId.get(seg.characterId);
     if (!matched) {
       // 角色卡已移除：禁止沿用旧 voice/ref；强制旁白并记录 orphan
-      if (!orphanSeen.has(seg.characterId)) {
-        orphanSeen.add(seg.characterId);
-        orphanCharacterIds.push(seg.characterId);
-        orphanSpeakerLabels.push(seg.speakerLabel || seg.characterId);
-      }
-      const baseStyle = peelCompiledDeliveryMarks(input.narrator.style || null);
+      noteOrphanCharacter(
+        seg.characterId,
+        seg.speakerLabel,
+        orphanSeen,
+        orphanCharacterIds,
+        orphanSpeakerLabels,
+      );
+      const baseStyle = narratorBaseStyle;
       const base: AudiobookDialogueSegment = {
         ...seg,
         speakerKind: "narrator",
@@ -191,6 +297,8 @@ export function reconcileAnnotationSegmentsWithVoices(
         // 身份丢失时不保留角色表演，避免旁白串戏
         delivery: null,
         deliveryMergeKey: "none",
+        speakerUnresolved: false,
+        unresolvedSpeakerName: null,
       };
       return applyDeliveryToSegment(base, null, {
         deliveryStyleMode: "off",
@@ -516,8 +624,11 @@ function collectQualityWarnings(annotations: AudiobookChapterAnnotation[]): stri
       const nameHint = names.length
         ? `：${names.slice(0, 6).join("、")}${names.length > 6 ? "…" : ""}`
         : "";
+      // 有名 unresolved → 路人预置声；count 仍可能含无名 quote orphan（旁白声进分母）
       warnings.push(
-        `第 ${annotation.chapterOrder} 章：${unresolved} 段角色名未匹配卡表已用旁白音色${nameHint}（请补 speaker 别名后重标）`,
+        names.length > 0
+          ? `第 ${annotation.chapterOrder} 章：${unresolved} 段未匹配角色卡（路人预置音色）${nameHint}（请补 speaker 别名后重标）`
+          : `第 ${annotation.chapterOrder} 章：${unresolved} 段未匹配说话人（含未命名对白/旁白声回退，请检查 diarize）`,
       );
     }
   }

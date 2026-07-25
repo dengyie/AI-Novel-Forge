@@ -22,6 +22,10 @@
 import type { AudiobookTtsMode } from "@ai-novel/shared/types/audiobook";
 import type { AudiobookDialogueSegment } from "@ai-novel/shared/types/audiobook";
 import { speakerKeyFromSegment } from "../audiobookGap";
+import {
+  isNamelessQuoteOrphanUnresolved,
+  namedGuestSpeakerName,
+} from "../diarize/guestVoice";
 import type { VoiceProfile, VoiceProfileSource } from "./voiceProfile";
 
 /** normalize 段 ttsMode 到合法 AudiobookTtsMode（与旧链路一致：缺省 preset）。 */
@@ -33,18 +37,26 @@ function normalizeTtsMode(raw: string | null | undefined): AudiobookTtsMode {
 /**
  * 绑定优先级 → VoiceProfileSource 的显式映射。
  *
- * 优先序（对齐旧 materialize/reconcile 的隐式约定）：
- *   1) narrator：`speakerKind === "narrator"` → source `"narrator"`
- *      （旁白恒 preset；orphan 角色在 reconcile 阶段已被强制降级为 narrator，故走此分支）
- *   2) guest：未对账到角色卡的 `character` 段（`speakerUnresolved === true`）→ source `"guest"`
- *      （materialize 阶段点路人预置音色；style 亦为路人基线）
+ * 优先序（对齐 materialize/reconcile 的绑定约定）：
+ *   1) guest：有名 `speakerUnresolved` → source `"guest"`
+ *      —— 生产实测未匹配路人常以 `speakerKind: "narrator"` + `speakerUnresolved`
+ *      承载（materialize/ruleAssembly 点 guest 预置声）；`guest` 必须先于 narrator
+ *      判定，否则会误报为 narrator 并让 cast 面板/quality gate 漏计路人。
+ *      无名 quote orphan（旁白声 + unresolved 进 cast 分母）**不算** guest source，
+ *      走 narrator，避免「声是旁白、标签是 guest」的元数据漂移。
+ *   2) narrator：`speakerKind === "narrator"`（含 nameless orphan）→ source `"narrator"`
  *   3) card：对账到角色卡的 `character` 段 → source `"card"`
  *   （`"library"` 预留给未来 VoiceLibrary 注入的 clone ref；现链路暂无生产 caller）
  */
 function resolveVoiceProfileSource(segment: AudiobookDialogueSegment): VoiceProfileSource {
-  if (segment.speakerKind === "narrator") {
+  // 有名 guest only；nameless orphan 虽 unresolved 但声线=旁白 → narrator
+  if (namedGuestSpeakerName(segment)) {
+    return "guest";
+  }
+  if (segment.speakerKind === "narrator" || isNamelessQuoteOrphanUnresolved(segment)) {
     return "narrator";
   }
+  // 脏：character kind + unresolved 但无有效名 → 仍标 guest（保守，进 cast）
   if (segment.speakerUnresolved) {
     return "guest";
   }

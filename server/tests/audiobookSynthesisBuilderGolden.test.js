@@ -418,7 +418,8 @@ test("buildChunkSynthesisRequest speakerUnresolved → source guest", () => {
   const req = buildChunkSynthesisRequest({ segment, text: "你走吧。" });
 
   assert.equal(req.voiceProfile.source, "guest");
-  assert.equal(req.voiceProfile.speakerKey, "label:远哥");
+  // 有名 guest：speakerKey = guest:<name>（与真旁白 narrator 区分，改善 gap）
+  assert.equal(req.voiceProfile.speakerKey, "guest:远哥");
 });
 
 test("buildChunkSynthesisRequest normalizes ttsMode edge cases", () => {

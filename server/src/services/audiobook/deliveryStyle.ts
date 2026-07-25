@@ -16,6 +16,7 @@ import {
   type DeliveryStyleMode,
   type DeliveryVocalEffort,
 } from "@ai-novel/shared/types/audiobook";
+import { isNarratorLikeSpeakerLabel } from "./diarize/guestVoice";
 
 export const STABILITY_GUARD =
   "保持该角色声线与身份一致，吐字清楚，不要模仿旁白腔，不要唱歌，不要串戏到其他角色。";
@@ -776,8 +777,15 @@ export function computeDeliveryChapterStats(
     }
     if (seg.speakerUnresolved) {
       unresolvedSpeakerCount += 1;
+      // 排除「旁白」类无意义标签：真旁白 / 无名 quote orphan 并非需要补 alias 的未匹配角色。
+      // 否则 high_unresolved 警告文案会把「旁白」当成角色名误导用户。
+      // SoT: isNarratorLikeSpeakerLabel / namedGuestSpeakerName（guestVoice.ts）
       const raw = (seg.unresolvedSpeakerName || seg.speakerLabel || "").trim();
-      if (raw && !unresolvedNameSeen.has(raw)) {
+      if (
+        raw
+        && !isNarratorLikeSpeakerLabel(raw)
+        && !unresolvedNameSeen.has(raw)
+      ) {
         unresolvedNameSeen.add(raw);
         if (unresolvedNameOrder.length < 8) {
           unresolvedNameOrder.push(raw);

@@ -59,6 +59,44 @@ test("computeDeliveryChapterStats counts unresolved speakers", () => {
   assert.equal(stats.characterDeliveryApplied, 1);
 });
 
+test("computeDeliveryChapterStats excludes 旁白/narrator labels from name list but keeps count", () => {
+  // 无名 quote orphan：speakerLabel="旁白"、unresolvedSpeakerName 缺省。
+  // 计数仍计入（门禁分母分子同域），但名字清单不得把「旁白」当角色名误导用户。
+  const stats = computeDeliveryChapterStats([
+    {
+      index: 0,
+      speakerKind: "narrator",
+      speakerLabel: "旁白",
+      text: "一段旁白。",
+      voice: "茉莉",
+      speakerUnresolved: true,
+      unresolvedSpeakerName: null,
+    },
+    {
+      index: 1,
+      speakerKind: "narrator",
+      speakerLabel: "narrator",
+      text: "另一段。",
+      voice: "茉莉",
+      speakerUnresolved: true,
+      unresolvedSpeakerName: "narrator",
+    },
+    {
+      index: 2,
+      speakerKind: "narrator",
+      speakerLabel: "远哥",
+      text: "别急。",
+      voice: "苏打",
+      speakerUnresolved: true,
+      unresolvedSpeakerName: "远哥",
+    },
+  ]);
+  // 计数保留（进 cast 分母，high_unresolved 语义不变）
+  assert.equal(stats.unresolvedSpeakerCount, 3);
+  // 名字清单只留真实未匹配角色名，排除旁白类标签
+  assert.deepEqual(stats.unresolvedSpeakerNames, ["远哥"]);
+});
+
 test("resolveChunkSynthesizeFields without delivery peels dirty marks to base", () => {
   const synth = resolveChunkSynthesizeFields({
     index: 0,
@@ -273,4 +311,167 @@ test("reconcile peels dirty card style and clears speakerUnresolved on match", (
   const fp = chunkLayoutFingerprint([{ text: seg.text, segment: seg }]);
   assert.equal(typeof fp, "string");
   assert.equal(fp.length, 16);
+});
+
+test("reconcile preserves named guest voice and does not wipe to narrator", () => {
+  // 生产 bug：有名 unresolved 被 narrator||!characterId 洗成旁白「茉莉」
+  const result = reconcileAnnotationSegmentsWithVoices(
+    [
+      {
+        index: 0,
+        speakerKind: "narrator",
+        characterId: null,
+        speakerLabel: "远哥",
+        text: "别急。",
+        ttsMode: "preset",
+        voice: "苏打",
+        baseStyle: "路人角色「远哥」，吐字清楚，语速中等，与旁白可辨，不做主角声。",
+        style: "路人角色「远哥」，吐字清楚，语速中等，与旁白可辨，不做主角声。",
+        speakerUnresolved: true,
+        unresolvedSpeakerName: "远哥",
+      },
+    ],
+    {
+      characterVoices: [],
+      narrator: { voice: "茉莉", style: "旁白基线" },
+      deliveryStyleMode: "characters",
+    },
+  );
+  const seg = result.segments[0];
+  assert.equal(seg.speakerUnresolved, true);
+  assert.equal(seg.unresolvedSpeakerName, "远哥");
+  assert.equal(seg.voice, "苏打");
+  assert.notEqual(seg.voice, "茉莉");
+  assert.equal(seg.characterId, null);
+  assert.equal(seg.speakerKind, "narrator");
+  assert.equal(seg.delivery, null);
+});
+
+test("reconcile repicks guest when dirty voice equals narrator", () => {
+  const result = reconcileAnnotationSegmentsWithVoices(
+    [
+      {
+        index: 0,
+        speakerKind: "narrator",
+        characterId: null,
+        speakerLabel: "远哥",
+        text: "别急。",
+        ttsMode: "preset",
+        voice: "茉莉", // 脏：已被洗成旁白
+        baseStyle: "旁白基线",
+        style: "旁白基线",
+        speakerUnresolved: true,
+        unresolvedSpeakerName: "远哥",
+      },
+    ],
+    {
+      characterVoices: [],
+      narrator: { voice: "茉莉", style: "旁白基线" },
+      deliveryStyleMode: "off",
+    },
+  );
+  const seg = result.segments[0];
+  assert.equal(seg.speakerUnresolved, true);
+  assert.equal(seg.unresolvedSpeakerName, "远哥");
+  assert.notEqual(seg.voice, "茉莉");
+  assert.ok(seg.voice && seg.voice.length > 0);
+  assert.match(seg.baseStyle || "", /路人角色/);
+});
+
+test("reconcile keeps nameless 旁白 orphan on narrator voice", () => {
+  // 无名 quote orphan：speakerLabel=旁白、无 unresolvedSpeakerName → 真旁白声
+  const result = reconcileAnnotationSegmentsWithVoices(
+    [
+      {
+        index: 0,
+        speakerKind: "narrator",
+        characterId: null,
+        speakerLabel: "旁白",
+        text: "一段叙述。",
+        ttsMode: "preset",
+        voice: "旧旁白",
+        baseStyle: "旧基线",
+        style: "旧基线",
+        speakerUnresolved: true,
+        unresolvedSpeakerName: null,
+      },
+    ],
+    {
+      characterVoices: [],
+      narrator: { voice: "茉莉", style: "旁白基线" },
+      deliveryStyleMode: "off",
+    },
+  );
+  const seg = result.segments[0];
+  assert.equal(seg.voice, "茉莉");
+  assert.equal(seg.speakerKind, "narrator");
+  assert.equal(seg.characterId, null);
+  assert.equal(seg.baseStyle, "旁白基线");
+  // 保留 unresolved 进 cast 分母；规范化 name/label
+  assert.equal(seg.speakerUnresolved, true);
+  assert.equal(seg.unresolvedSpeakerName, null);
+  assert.equal(seg.speakerLabel, "旁白");
+});
+
+test("reconcile treats unresolvedSpeakerName=旁白 as nameless orphan", () => {
+  const result = reconcileAnnotationSegmentsWithVoices(
+    [
+      {
+        index: 0,
+        speakerKind: "narrator",
+        characterId: null,
+        speakerLabel: "旁白",
+        text: "一句。",
+        ttsMode: "preset",
+        voice: "苏打",
+        baseStyle: "路人",
+        style: "路人",
+        speakerUnresolved: true,
+        unresolvedSpeakerName: "旁白",
+      },
+    ],
+    {
+      characterVoices: [],
+      narrator: { voice: "茉莉", style: "旁白基线" },
+      deliveryStyleMode: "off",
+    },
+  );
+  const seg = result.segments[0];
+  assert.equal(seg.voice, "茉莉");
+  assert.equal(seg.speakerUnresolved, true);
+  assert.equal(seg.unresolvedSpeakerName, null);
+});
+
+test("reconcile stale characterId + named unresolved notes orphan and keeps guest", () => {
+  // 过期 id 且仍标 unresolved：登记 orphan 运维可见，声线走 guest 不洗旁白
+  const result = reconcileAnnotationSegmentsWithVoices(
+    [
+      {
+        index: 0,
+        speakerKind: "character",
+        characterId: "deleted-c9",
+        speakerLabel: "远哥",
+        text: "别急。",
+        ttsMode: "preset",
+        voice: "苏打",
+        baseStyle: "路人角色「远哥」，吐字清楚，语速中等，与旁白可辨，不做主角声。",
+        style: "路人角色「远哥」，吐字清楚，语速中等，与旁白可辨，不做主角声。",
+        speakerUnresolved: true,
+        unresolvedSpeakerName: "远哥",
+      },
+    ],
+    {
+      characterVoices: [],
+      narrator: { voice: "茉莉", style: "旁白基线" },
+      deliveryStyleMode: "off",
+    },
+  );
+  const seg = result.segments[0];
+  assert.equal(seg.speakerUnresolved, true);
+  assert.equal(seg.unresolvedSpeakerName, "远哥");
+  assert.equal(seg.voice, "苏打");
+  assert.notEqual(seg.voice, "茉莉");
+  assert.equal(seg.characterId, null);
+  assert.deepEqual(result.orphanCharacterIds, ["deleted-c9"]);
+  assert.ok(result.orphanSpeakerLabels.includes("远哥"));
 });

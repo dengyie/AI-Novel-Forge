@@ -1,5 +1,6 @@
 import { AUDIOBOOK_GAP_MS } from "@ai-novel/shared/types/audiobook";
 import type { AudiobookDialogueSegment } from "@ai-novel/shared/types/audiobook";
+import { namedGuestSpeakerName } from "./diarize/guestVoice";
 
 export type AudiobookGapKind =
   | "same_speaker"
@@ -8,7 +9,11 @@ export type AudiobookGapKind =
   | "between_chapters";
 
 export interface AudiobookChunkSpeakerRef {
-  /** 旁白用固定键；角色优先 characterId，否则 speakerLabel */
+  /**
+   * 旁白用固定键 `narrator`；
+   * 有名 guest：`guest:<name>`（生产以 narrator kind + unresolved 承载）；
+   * 角色优先 characterId，否则 speakerLabel。
+   */
   speakerKey: string;
   speakerKind: "narrator" | "character";
   text: string;
@@ -16,8 +21,17 @@ export interface AudiobookChunkSpeakerRef {
 
 export function speakerKeyFromSegment(segment: Pick<
   AudiobookDialogueSegment,
-  "speakerKind" | "characterId" | "speakerLabel"
+  | "speakerKind"
+  | "characterId"
+  | "speakerLabel"
+  | "speakerUnresolved"
+  | "unresolvedSpeakerName"
 >): string {
+  // 有名未匹配路人：独立 key，避免与真旁白 / 其他路人被判 same_speaker（气口过短）
+  const guestName = namedGuestSpeakerName(segment);
+  if (guestName) {
+    return `guest:${guestName}`;
+  }
   if (segment.speakerKind === "narrator") {
     return "narrator";
   }

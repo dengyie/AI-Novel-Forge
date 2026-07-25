@@ -493,6 +493,47 @@ test("speakerKeyFromSegment distinguishes narrator and characters", () => {
   );
 });
 
+test("speakerKeyFromSegment named guest is guest:name not narrator", () => {
+  // 生产：有名 unresolved 以 narrator kind 承载；key 必须独立，避免与旁白 same_speaker
+  assert.equal(
+    speakerKeyFromSegment({
+      speakerKind: "narrator",
+      characterId: null,
+      speakerLabel: "远哥",
+      speakerUnresolved: true,
+      unresolvedSpeakerName: "远哥",
+    }),
+    "guest:远哥",
+  );
+  // 无名 orphan 仍是 narrator
+  assert.equal(
+    speakerKeyFromSegment({
+      speakerKind: "narrator",
+      characterId: null,
+      speakerLabel: "旁白",
+      speakerUnresolved: true,
+      unresolvedSpeakerName: null,
+    }),
+    "narrator",
+  );
+  // 不同路人不同 key → gap 不致 same_speaker
+  const a = speakerKeyFromSegment({
+    speakerKind: "narrator",
+    speakerLabel: "甲",
+    speakerUnresolved: true,
+    unresolvedSpeakerName: "甲",
+  });
+  const b = speakerKeyFromSegment({
+    speakerKind: "narrator",
+    speakerLabel: "乙",
+    speakerUnresolved: true,
+    unresolvedSpeakerName: "乙",
+  });
+  assert.equal(a, "guest:甲");
+  assert.equal(b, "guest:乙");
+  assert.notEqual(a, b);
+});
+
 test("resolveInterChunkGapMs applies semantic pause table and short-utterance bonus", () => {
   const narrator = { speakerKey: "narrator", speakerKind: "narrator", text: "他走进教室。" + "甲".repeat(40) };
   const heYu = { speakerKey: "character:c1", speakerKind: "character", text: "赵助教。" };
