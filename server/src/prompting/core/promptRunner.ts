@@ -15,7 +15,6 @@ import {
 } from "../../llm/structuredOutput";
 import {
   extractLlmTokenUsage,
-  mergeStreamTokenUsage,
   type LlmTokenUsageSnapshot,
 } from "../../llm/usageTracking";
 import { logMemoryUsage } from "../../runtime/memoryTelemetry";
@@ -39,7 +38,7 @@ import type {
   PromptStreamRunResult,
 } from "./promptTypes";
 import { beginLlmLiveSession, safeLiveCall } from "../../llm/live/llmLiveSession";
-import type { LlmLiveSession } from "../../llm/live/LlmLiveBroker";
+import { capturePromptStream } from "../streaming/PromptStreamCapture";
 
 type PromptRunnerLLMFactory = typeof getLLM;
 type PromptRunnerStructuredInvoker = typeof invokeStructuredLlmDetailed;
@@ -426,202 +425,6 @@ function recordPromptFailure(input: {
     semanticRetryAttempts: input.invocation.semanticRetryAttempts,
     failureKind: classifyPromptQualityFailure(input.error),
   });
-}
-
-function createStreamTimeoutError(timeoutMs: number, label?: string): Error {
-  const error = new Error(
-    label?.trim()
-      ? `[${label}] Request timed out after ${timeoutMs}ms.`
-      : `Request timed out after ${timeoutMs}ms.`,
-  );
-  error.name = "TimeoutError";
-  return error;
-}
-
-/**
- * 流式 body 墙钟：对 iterator.next() 做 Promise.race，即使 provider 半道不再 yield
- * 也能在 deadline 到点后打断消费（纯 for-await 在无 chunk 时不会醒来）。
- * 支持绝对 deadlineAt（与建流共享单预算）或相对 timeoutMs。
- */
-function captureStreamOutput(
-  rawStream: AsyncIterable<BaseMessageChunk>,
-  options?: {
-    label?: string;
-    /** 相对超时（毫秒）；若同时给 deadlineAt，以 deadlineAt 为准 */
-    timeoutMs?: number;
-    /** 绝对截止时间（Date.now() 毫秒），与建流阶段共享单墙钟预算 */
-    deadlineAt?: number;
-    signal?: AbortSignal;
-    /** Live 旁路：不得影响生成主路径 */
-    liveSession?: LlmLiveSession | null;
-  },
-): {
-  stream: AsyncIterable<BaseMessageChunk>;
-  completedText: Promise<string>;
-  completedUsage: Promise<LlmTokenUsageSnapshot | null>;
-} {
-  let resolveText!: (value: string) => void;
-  let rejectText!: (reason?: unknown) => void;
-  let resolveUsage!: (value: LlmTokenUsageSnapshot | null) => void;
-  let rejectUsage!: (reason?: unknown) => void;
-  const completedText = new Promise<string>((resolve, reject) => {
-    resolveText = resolve;
-    rejectText = reject;
-  });
-  const completedUsage = new Promise<LlmTokenUsageSnapshot | null>((resolve, reject) => {
-    resolveUsage = resolve;
-    rejectUsage = reject;
-  });
-
-  const label = options?.label;
-  const budgetMs = resolveEnforcedTimeoutMs(options?.timeoutMs);
-  const deadlineAt = typeof options?.deadlineAt === "number" && Number.isFinite(options.deadlineAt)
-    ? Math.floor(options.deadlineAt)
-    : Date.now() + budgetMs;
-  // 用于错误消息展示的「配置预算」；实际剩余由 deadlineAt 决定
-  const timeoutMsForMessage = budgetMs;
-  let settled = false;
-  let timedOut = false;
-  const settleReject = (error: unknown) => {
-    if (settled) {
-      return;
-    }
-    settled = true;
-    rejectText(error);
-    rejectUsage(error);
-  };
-  const settleResolve = (text: string, usage: LlmTokenUsageSnapshot | null) => {
-    if (settled) {
-      return;
-    }
-    settled = true;
-    resolveText(text);
-    resolveUsage(usage);
-  };
-
-  const remainingMs = () => Math.max(0, deadlineAt - Date.now());
-  const makeTimeoutError = () => createStreamTimeoutError(timeoutMsForMessage, label);
-
-  // 到点后 reject completed*，并标记 timedOut；iterator race 会立刻看到
-  let timeoutHandle: ReturnType<typeof setTimeout> | null = setTimeout(() => {
-    timedOut = true;
-    settleReject(makeTimeoutError());
-  }, Math.max(1, remainingMs()));
-  const clearStreamTimeout = () => {
-    if (timeoutHandle) {
-      clearTimeout(timeoutHandle);
-      timeoutHandle = null;
-    }
-  };
-
-  const upstreamSignal = options?.signal;
-  const onUpstreamAbort = () => {
-    clearStreamTimeout();
-    const reason = upstreamSignal?.reason;
-    const error = reason instanceof Error
-      ? reason
-      : Object.assign(new Error(typeof reason === "string" && reason.trim() ? reason.trim() : "Request aborted."), { name: "AbortError" });
-    settleReject(error);
-  };
-  if (upstreamSignal) {
-    if (upstreamSignal.aborted) {
-      onUpstreamAbort();
-    } else {
-      upstreamSignal.addEventListener("abort", onUpstreamAbort, { once: true });
-    }
-  }
-
-  const stream = {
-    async *[Symbol.asyncIterator]() {
-      const chunks: string[] = [];
-      let usage: LlmTokenUsageSnapshot | null = null;
-      const iterator = rawStream[Symbol.asyncIterator]();
-      try {
-        if (timedOut || remainingMs() <= 0) {
-          throw makeTimeoutError();
-        }
-        if (upstreamSignal?.aborted) {
-          const reason = upstreamSignal.reason;
-          throw reason instanceof Error
-            ? reason
-            : Object.assign(new Error("Request aborted."), { name: "AbortError" });
-        }
-
-        while (true) {
-          const left = remainingMs();
-          if (timedOut || left <= 0) {
-            throw makeTimeoutError();
-          }
-          if (upstreamSignal?.aborted) {
-            const reason = upstreamSignal.reason;
-            throw reason instanceof Error
-              ? reason
-              : Object.assign(new Error("Request aborted."), { name: "AbortError" });
-          }
-
-          // 关键：对 next() 做墙钟 race——body 静默不再 yield 时也能在 deadline 打断
-          let timeoutRaceHandle: ReturnType<typeof setTimeout> | null = null;
-          const nextResult = await new Promise<IteratorResult<BaseMessageChunk>>((resolve, reject) => {
-            timeoutRaceHandle = setTimeout(() => {
-              timedOut = true;
-              reject(makeTimeoutError());
-            }, left);
-            Promise.resolve(iterator.next()).then(
-              (value) => {
-                if (timeoutRaceHandle) {
-                  clearTimeout(timeoutRaceHandle);
-                  timeoutRaceHandle = null;
-                }
-                resolve(value);
-              },
-              (error) => {
-                if (timeoutRaceHandle) {
-                  clearTimeout(timeoutRaceHandle);
-                  timeoutRaceHandle = null;
-                }
-                reject(error);
-              },
-            );
-          });
-
-          if (nextResult.done) {
-            break;
-          }
-          const chunk = nextResult.value;
-          const chunkText = toText(chunk.content);
-          chunks.push(chunkText);
-          usage = mergeStreamTokenUsage(usage, extractLlmTokenUsage(chunk));
-          if (chunkText && options?.liveSession) {
-            safeLiveCall(() => options.liveSession!.delta(chunkText));
-          }
-          yield chunk;
-        }
-
-        clearStreamTimeout();
-        settleResolve(chunks.join(""), usage);
-      } catch (error) {
-        clearStreamTimeout();
-        settleReject(error);
-        throw error;
-      } finally {
-        if (upstreamSignal) {
-          upstreamSignal.removeEventListener("abort", onUpstreamAbort);
-        }
-        // 尽量释放底层 iterator（若 provider 支持 return）
-        try {
-          await iterator.return?.();
-        } catch {
-          // ignore cleanup errors
-        }
-      }
-    },
-  };
-
-  return {
-    stream,
-    completedText,
-    completedUsage,
-  };
 }
 
 function buildPromptRunResult<T>(input: {
@@ -1141,7 +944,7 @@ export async function streamTextPrompt<I>(input: {
     novelId: input.options?.novelId,
   });
   const renderedPromptChars = estimateRenderedPromptChars(messages);
-  let captured: ReturnType<typeof captureStreamOutput>;
+  let captured: ReturnType<typeof capturePromptStream>;
   const streamLabel = `${input.asset.id}@${input.asset.version}`;
   const liveSession = beginLlmLiveSession({
     label: streamLabel,
@@ -1193,7 +996,7 @@ export async function streamTextPrompt<I>(input: {
         },
       },
     );
-    captured = captureStreamOutput(rawStream as AsyncIterable<BaseMessageChunk>, {
+    captured = capturePromptStream(rawStream as AsyncIterable<BaseMessageChunk>, {
       label: streamLabel,
       timeoutMs: streamBudgetMs,
       deadlineAt: streamDeadlineAt,
@@ -1218,7 +1021,7 @@ export async function streamTextPrompt<I>(input: {
 
   return {
     stream: captured.stream,
-    complete: captured.completedText.then(async (content) => {
+    complete: captured.completion.then(async ({ text: content, usage }) => {
       safeLiveCall(() => liveSession.phase("validating", "正在检查文本结果"));
       const output = applyPromptPostValidate({
         asset: input.asset,
@@ -1244,7 +1047,7 @@ export async function streamTextPrompt<I>(input: {
           input.options,
         ),
         renderedPromptChars,
-        tokenUsage: await captured.completedUsage.catch(() => null),
+        tokenUsage: usage,
       });
     }).catch((error) => {
       safeLiveCall(() => liveSession.fail(error));
@@ -1288,7 +1091,7 @@ export async function streamStructuredPrompt<I, O, R = O>(input: {
   });
   const startedAt = Date.now();
   const renderedPromptChars = estimateRenderedPromptChars(prepared.messages);
-  let captured: ReturnType<typeof captureStreamOutput>;
+  let captured: ReturnType<typeof capturePromptStream>;
   let strategy!: ReturnType<typeof selectStructuredOutputStrategy>;
   let profile!: ReturnType<typeof resolveStructuredOutputProfile>;
   const liveSession = beginLlmLiveSession({
@@ -1359,7 +1162,7 @@ export async function streamStructuredPrompt<I, O, R = O>(input: {
         },
       },
     );
-    captured = captureStreamOutput(rawStream as AsyncIterable<BaseMessageChunk>, {
+    captured = capturePromptStream(rawStream as AsyncIterable<BaseMessageChunk>, {
       label: streamLabel,
       timeoutMs: streamBudgetMs,
       deadlineAt: streamDeadlineAt,
@@ -1384,7 +1187,7 @@ export async function streamStructuredPrompt<I, O, R = O>(input: {
 
   return {
     stream: captured.stream,
-    complete: captured.completedText.then(async (rawContent) => {
+    complete: captured.completion.then(async ({ text: rawContent, usage }) => {
       safeLiveCall(() => liveSession.phase("validating", "正在检查结构化结果"));
       const parsed = await parseStructuredLlmRawContentDetailed({
         rawContent,
@@ -1420,7 +1223,7 @@ export async function streamStructuredPrompt<I, O, R = O>(input: {
         latencyMs: Date.now() - startedAt,
         invocation: resolved.invocation,
         renderedPromptChars,
-        tokenUsage: await captured.completedUsage.catch(() => null),
+        tokenUsage: usage,
         postValidateFailureRecovered: resolved.postValidateFailureRecovered,
       });
       safeLiveCall(() => liveSession.complete());
