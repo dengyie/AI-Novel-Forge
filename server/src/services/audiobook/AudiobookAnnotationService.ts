@@ -582,6 +582,22 @@ const AUDIOBOOK_LLM_CONTENT_OVERLAP = parsePositiveIntEnv(
 );
 
 /**
+ * 单块 diarize/annotate 墙钟（ms）。默认 120s——有声标注失败可 rules-fill，
+ * 不得沿用全局 LLM_REQUEST_TIMEOUT_MS=600s × 多跳重试把章挂死。
+ * 下限 30s；上限 600s（仍受 structured timeout 重试 cap 约束）。
+ */
+function parseAudiobookAnnotateTimeoutMs(): number {
+  const raw = process.env.AUDIOBOOK_ANNOTATE_TIMEOUT_MS?.trim();
+  const n = raw ? Number(raw) : Number.NaN;
+  if (Number.isFinite(n) && n >= 30_000 && n <= 600_000) {
+    return Math.floor(n);
+  }
+  return 120_000;
+}
+
+export const AUDIOBOOK_ANNOTATE_TIMEOUT_MS = parseAudiobookAnnotateTimeoutMs();
+
+/**
  * 将超长章正文切成若干 ≤window 的块；块边界优先落在换行。
  * 短章返回单块 [content]。
  */
@@ -956,6 +972,8 @@ export class AudiobookAnnotationService {
       signal: input.signal,
       novelId: undefined as string | undefined,
       chapterId: input.chapterId,
+      // 显式短墙钟：失败块走 rules-fill，避免 600s×N 假 running
+      timeoutMs: AUDIOBOOK_ANNOTATE_TIMEOUT_MS,
     };
 
     const tryFinishChunkedLlm = (args: {

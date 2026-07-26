@@ -73,6 +73,7 @@ import {
   stopArtifactCheckpointHygieneScanner,
 } from "./services/novel/runtime/ChapterArtifactSyncCheckpointHygiene";
 import { registerBuiltInEngines } from "./services/audiobook/engine/registerBuiltInEngines";
+import { audiobookTaskService } from "./services/audiobook/AudiobookTaskService";
 
 getSharedNovelServices();
 registerNovelEventHandlers(novelEventBus);
@@ -395,11 +396,13 @@ function initializeBackgroundServices(): BackgroundServicesHandle {
     .then(() => {
       bookAnalysisService.startWatchdog();
       novelPipelineRuntimeService.startWatchdog();
+      audiobookTaskService.startWatchdog();
     })
     .catch((error) => {
       console.warn("Failed to prepare pending recovery candidates.", error);
       bookAnalysisService.startWatchdog();
       novelPipelineRuntimeService.startWatchdog();
+      audiobookTaskService.startWatchdog();
     });
 
   return {
