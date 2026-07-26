@@ -33,13 +33,21 @@ test("NovelService compatibility facade does not inherit the legacy service chai
   assert.equal(/class\s+NovelService\s+extends/.test(novelServiceSource), false);
 
   for (const fileName of [
-    "NovelArtifactService.ts",
     "NovelGenerationService.ts",
-    "NovelReviewService.ts",
     "NovelPipelineService.ts",
   ]) {
     const source = readSource("services", "novel", fileName);
     assert.equal(source.includes("extends Novel"), false, `${fileName} must not extend another Novel service`);
+  }
+});
+
+test("unused review and artifact compatibility facades stay deleted", () => {
+  for (const fileName of ["NovelReviewService.ts", "NovelArtifactService.ts"]) {
+    assert.equal(
+      fs.existsSync(path.join(srcRoot, "services", "novel", fileName)),
+      false,
+      `${fileName} must not be restored without a real production consumer`,
+    );
   }
 });
 
@@ -73,10 +81,8 @@ test("production code gets application capabilities through the shared singleton
     path.join("services", "novel", "application", "NovelApplicationServices.ts"),
     path.join("services", "novel", "application", "sharedNovelServices.ts"),
     path.join("services", "novel", "NovelService.ts"),
-    path.join("services", "novel", "NovelArtifactService.ts"),
     path.join("services", "novel", "NovelGenerationService.ts"),
     path.join("services", "novel", "NovelPipelineService.ts"),
-    path.join("services", "novel", "NovelReviewService.ts"),
   ]);
   const offenders = walkTsFiles(srcRoot)
     .filter((file) => {
