@@ -5,6 +5,21 @@ require("../dist/app.js");
 const { NovelWorkflowTaskAdapter } = require("../dist/services/task/adapters/NovelWorkflowTaskAdapter.js");
 const { prisma } = require("../dist/db/prisma.js");
 
+const originalTaskArchiveQueries = {
+  findUnique: prisma.taskCenterArchive.findUnique,
+  findMany: prisma.taskCenterArchive.findMany,
+};
+
+test.before(() => {
+  prisma.taskCenterArchive.findUnique = async () => null;
+  prisma.taskCenterArchive.findMany = async () => [];
+});
+
+test.after(() => {
+  prisma.taskCenterArchive.findUnique = originalTaskArchiveQueries.findUnique;
+  prisma.taskCenterArchive.findMany = originalTaskArchiveQueries.findMany;
+});
+
 test("task detail exposes candidate-stage bound model before directorInput exists", async () => {
   const originals = {
     findUnique: prisma.novelWorkflowTask.findUnique,

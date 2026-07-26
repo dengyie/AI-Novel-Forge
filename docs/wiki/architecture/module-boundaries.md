@@ -29,6 +29,8 @@ Wiki 记录稳定规则，计划和检查点保留历史语境。模块治理以
 - checkpoint 恢复数据应通过共享 helper 组装，避免 `healing` 和 `application` 各自复制恢复逻辑。
 - `server/src/services/novel/director` 应继续向 `commands`、`runtime`、`state`、`automation`、`projections`、`recovery`、`phases` 等责任边界收敛。
 - `server/src/services/novel/director/` 根目录只保留稳定门面和兼容桥接。命令执行进入 `commands/`，任务状态进入 `state/`，事实摘要/运行投影/展示快照进入 `projections/`，恢复与回填进入 `recovery/`，阶段节点与阶段策略进入 `phases/`，接管/确认/候选/运行编排进入 `runtime/`，HTTP 映射进入 `http/`。
+- 自动导演跨端契约由 `shared/types/director/` 按 artifacts、runtime、projections、dashboard、commands、workspace 分区拥有；`shared/types/directorRuntime.ts` 只保留稳定 re-export。类型只能在责任文件中定义一次，server 和 client 继续从公开 facade 消费，禁止各自复制序列化形状或深链另一端内部类型。
+- 小说编辑页只负责组合视图。workspace 查询、pipeline、导演任务、任务抽屉和展示模型分别由 `client/src/pages/novels/hooks/novelEdit/` 内的控制器拥有；导演任务选择规则由 `automation/directorTaskSelection.ts` 单点拥有。其事实源只允许显式 URL 导演任务、当前活动导演任务和书级导演投影，手动 workspace lane 的 `workspaceTaskId` 不能作为导演任务 id 兜底。
 - `server/src/routes/` 只保留尚未迁移的传统 HTTP 入口。小说主链、自动导演、小说导出和世界设定的 HTTP 映射必须进入对应业务模块的 `http/` 目录，并由 `app.ts` 直接挂载模块入口；不要在 `routes/` 根目录保留 re-export shim。
 - 小说业务应用入口应通过 `server/src/services/novel/application/` 的 capability 层组合。`NovelService` 只作为兼容 facade，路由和后台服务不得重新依赖完整 God Object。
 - `ChapterRuntimeCoordinator` 是章节 runtime 的外部稳定门面；流编排、质量门禁、终稿定稿、pipeline 适配和 runtime package 构建只能在 `server/src/services/novel/runtime/` 内部模块中协作，外部不得深链到这些内部服务。
@@ -40,6 +42,7 @@ Wiki 记录稳定规则，计划和检查点保留历史语境。模块治理以
 - 小说导出属于独立业务模块：`server/src/modules/export/` 只负责读取现有小说生产数据、转换导出 DTO、生成 TXT/Markdown/JSON 内容和导出文件名。它不拥有小说、章节、角色、时间线或质量修复事实源，也不在导出过程中写回生产状态。
 - 时间线约束层属于独立业务模块：`server/src/modules/timeline/` 只管理时间线事件、章节时间锚点、钩子、约束和检测报告。它不替代 `StoryStateSnapshot`、`ConsistencyFact` 或 `CharacterTimeline`，也不直接调用章节 writer 改正文。
 - 章节生成、Prompt Registry 和任务中心只能通过时间线模块 facade 获取时间线上下文或检测报告，不应在 writer、route 或 UI 中直接拼接 timeline 表查询规则。
+- Prisma schema 与迁移历史必须保持双引擎一致：任何小说生产表或字段都必须同时提供 PostgreSQL `migrations/` 与 SQLite `migrations.sqlite/` 的增量迁移。只修改 schema 会让新部署在运行时静默降级或恢复失败；涉及章节事实、任务租约或恢复字段时，验证必须从空 SQLite 数据库按顺序应用全部迁移，并检查真实表/列，而不能只依赖已存在的开发库。
 
 ## 示例
 

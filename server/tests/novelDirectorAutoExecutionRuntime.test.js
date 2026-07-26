@@ -1,5 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { prisma } = require("../dist/db/prisma.js");
 
 const {
   NovelDirectorAutoExecutionRuntime,
@@ -12,6 +13,16 @@ const {
   buildDirectorQualityLoopIssueSignature,
   recordDirectorQualityLoopBudgetAttempt,
 } = require("../dist/services/novel/director/runtime/DirectorQualityLoopBudgetLedgerService.js");
+
+const originalUsageFindMany = prisma.directorLlmUsageRecord.findMany;
+
+test.before(() => {
+  prisma.directorLlmUsageRecord.findMany = async () => [];
+});
+
+test.after(() => {
+  prisma.directorLlmUsageRecord.findMany = originalUsageFindMany;
+});
 
 function buildRequest(overrides = {}) {
   return {

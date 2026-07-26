@@ -40,10 +40,10 @@ test("mapQualityScoreToChapterColumns clamps out-of-range and non-finite", () =>
   assert.equal(columns.pacingScore, 0);
 });
 
-test("finalize owns column-only persist; pipeline/manual/stream owns QualityReport write", () => {
-  // 所有权契约：避免 finalize 与 createQualityReport 双写报告行。
-  const finalizeSrc = fs.readFileSync(
-    path.join(__dirname, "../src/services/novel/runtime/ChapterContentFinalizationService.ts"),
+test("quality projection owns column-only persist; pipeline/manual/stream owns QualityReport write", () => {
+  // 所有权契约：直接检查拆分后的真实投影模块，避免 facade 与 createQualityReport 双写报告行。
+  const qualityProjectionSrc = fs.readFileSync(
+    path.join(__dirname, "../src/services/novel/runtime/finalization/ChapterQualityProjectionService.ts"),
     "utf8",
   );
   const reviewSrc = fs.readFileSync(
@@ -54,8 +54,8 @@ test("finalize owns column-only persist; pipeline/manual/stream owns QualityRepo
     path.join(__dirname, "../src/services/novel/runtime/ChapterStreamGenerationOrchestrator.ts"),
     "utf8",
   );
-  assert.match(finalizeSrc, /writeReport:\s*false/);
-  assert.doesNotMatch(finalizeSrc, /writeReport:\s*true/);
+  assert.match(qualityProjectionSrc, /writeReport:\s*false/);
+  assert.doesNotMatch(qualityProjectionSrc, /writeReport:\s*true/);
   assert.match(reviewSrc, /writeReport:\s*true/);
   assert.match(reviewSrc, /createQualityReport/);
   assert.match(streamSrc, /writeReport:\s*true/);

@@ -147,8 +147,14 @@ test("ChapterWritingGraph onDone throws when signal aborted and does not save dr
         rewritten: false,
         maxSimilarity: 0,
       }),
-      saveDraftAndArtifacts: async () => {
+      saveDraftAndArtifacts: async (novelId, chapterId, content) => {
         saveCalls += 1;
+        return {
+          novelId,
+          chapterId,
+          content,
+          contentRevision: 1,
+        };
       },
       logInfo: () => {},
       logWarn: () => {},
@@ -207,8 +213,14 @@ test("ChapterWritingGraph onDone proceeds when signal is live", async () => {
         rewritten: false,
         maxSimilarity: 0,
       }),
-      saveDraftAndArtifacts: async () => {
+      saveDraftAndArtifacts: async (novelId, chapterId, content) => {
         saveCalls += 1;
+        return {
+          novelId,
+          chapterId,
+          content,
+          contentRevision: 1,
+        };
       },
       logInfo: () => {},
       logWarn: () => {},

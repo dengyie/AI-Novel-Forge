@@ -22,15 +22,27 @@ process.env.AI_NOVEL_DB_ENGINE = "memory";
 
 const { patrolAgent } = require("../dist/services/audiobook/ops/agents/PatrolAgent");
 const { resolveGlobalVoiceLibraryRoot } = require("../dist/services/audiobook/audiobookPaths");
+const { prisma } = require("../dist/db/prisma.js");
+
+const originalAudiobookTaskFindMany = prisma.audiobookTask.findMany;
 
 function wipeLibrary() {
   fs.rmSync(resolveGlobalVoiceLibraryRoot(), { recursive: true, force: true });
 }
 
 describe("patrolAgent smoke (阶段 3)", () => {
+  before(() => {
+    prisma.audiobookTask.findMany = async () => {
+      const error = new Error("AudiobookTask table is unavailable in the memory-engine scenario");
+      error.code = "P2021";
+      throw error;
+    };
+  });
+
   beforeEach(wipeLibrary);
 
   after(() => {
+    prisma.audiobookTask.findMany = originalAudiobookTaskFindMany;
     try { fs.rmSync(TMP_ROOT, { recursive: true, force: true }); } catch {}
   });
 
