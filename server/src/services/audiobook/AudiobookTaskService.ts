@@ -67,7 +67,7 @@ const AUDIOBOOK_WATCHDOG_INTERVAL_MS = Math.max(
 );
 const AUDIOBOOK_WATCHDOG_STALL_PERIODS = Math.max(
   2,
-  Number(process.env.AUDIOBOOK_WATCHDOG_STALL_PERIODS ?? 5) || 5,
+  Number(process.env.AUDIOBOOK_WATCHDOG_STALL_PERIODS ?? 10) || 10,
 );
 
 const DEFAULT_MAX_RETRIES = 1;
@@ -2089,6 +2089,7 @@ export class AudiobookTaskService {
           currentItemLabel: "有声书生成完成（reconcile 兜底）",
           error: null,
           finishedAt: new Date(),
+          heartbeatAt: new Date(),
         },
       });
     } else {
@@ -2116,6 +2117,7 @@ export class AudiobookTaskService {
           currentItemLabel: failureLabel,
           error: failureLabel,
           finishedAt: new Date(),
+          heartbeatAt: new Date(),
         },
       });
     }

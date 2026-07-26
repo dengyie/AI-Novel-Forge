@@ -457,11 +457,11 @@ const AUDIOBOOK_CHAPTER_BUDGET_MS = Math.max(
  */
 export function makeChapterBudgetGuard(
   budgetMs: number,
-  startedAtAt: number,
+  startedAt: number,
   label: () => string,
 ): () => Promise<void> {
   return async () => {
-    if (Date.now() - startedAtAt > budgetMs) {
+    if (Date.now() - startedAt > budgetMs) {
       throw new AppError(
         `章节墙钟超限（${Math.round(budgetMs / 60_000)}min）：${label()}`,
         408,
