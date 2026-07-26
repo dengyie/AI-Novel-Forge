@@ -22,6 +22,10 @@ function createPromptAssetLoaderRegistry(entries: PromptAssetLoaderEntry[]): Map
 
 const promptAssetLoaderEntries: PromptAssetLoaderEntry[] = [
   {
+    key: "audiobook.voice_design.rewrite@v1",
+    load: () => require("./prompts/audiobook/voiceDesignRewrite.prompts").voiceDesignRewritePrompt as UnknownPromptAsset,
+  },
+  {
     key: "planner.intent.parse@v1",
     load: () => require("./prompts/agent/plannerIntent.prompt").plannerIntentPrompt as UnknownPromptAsset,
   },
@@ -380,6 +384,10 @@ const promptAssetLoaderEntries: PromptAssetLoaderEntry[] = [
   {
     key: "novel.chapter.writer@v5",
     load: () => require("./prompts/novel/chapterWriter.prompts").chapterWriterPrompt as UnknownPromptAsset,
+  },
+  {
+    key: "novel.chapter.opening_diversity_rewrite@v1",
+    load: () => require("./prompts/novel/openingDiversity.prompts").openingDiversityRewritePrompt as UnknownPromptAsset,
   },
   {
     key: "novel.timeline.extractor@v1",

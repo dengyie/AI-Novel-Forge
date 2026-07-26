@@ -171,6 +171,21 @@ test("prompt governance keeps registered prompt assets auditable", () => {
   assert.deepEqual(incomplete, []);
 });
 
+test("novel opening diversity and audiobook voice rewrite resolve through the prompt registry", () => {
+  const registeredKeys = new Set(
+    listRegisteredPromptAssets().map((asset) => `${asset.id}@${asset.version}`),
+  );
+
+  assert.equal(
+    registeredKeys.has("novel.chapter.opening_diversity_rewrite@v1"),
+    true,
+  );
+  assert.equal(
+    registeredKeys.has("audiobook.voice_design.rewrite@v1"),
+    true,
+  );
+});
+
 test("core prompt management surfaces expose context and low-risk slot metadata", () => {
   const assets = new Map(listRegisteredPromptAssets().map((asset) => [asset.id, asset]));
   const missingContext = CORE_AUDIT_PROMPTS

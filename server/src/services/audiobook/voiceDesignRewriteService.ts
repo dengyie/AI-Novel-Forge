@@ -1,4 +1,3 @@
-import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
 import { isBuiltinLLMProvider } from "@ai-novel/shared/types/llm";
 import type {
@@ -6,7 +5,12 @@ import type {
   VoiceDesignRewriteResult,
 } from "@ai-novel/shared/types/audiobook";
 import { AppError } from "../../middleware/errorHandler";
-import { getLLM } from "../../llm/factory";
+import { runTextPrompt } from "../../prompting/core/promptRunner";
+import {
+  renderVoiceDesignRewriteMessages,
+  voiceDesignRewritePrompt,
+  type VoiceDesignRewritePromptInput,
+} from "../../prompting/prompts/audiobook/voiceDesignRewrite.prompts";
 import {
   buildDesignPrompt,
   inferAgeBucket,
@@ -86,43 +90,6 @@ function extractTags(prompt: string): string[] {
     if (re.test(prompt) || re.test(lower)) tags.add(tag);
   }
   return [...tags].slice(0, 8);
-}
-
-function buildRewriteMessages(input: {
-  name: string;
-  role: string;
-  gender: string;
-  personality: string;
-  appearance: string;
-  background: string;
-  currentDesignPrompt: string;
-  notes: string;
-}): [SystemMessage, HumanMessage] {
-  const system = new SystemMessage(
-    [
-      "你是中文有声书音色设计助手。根据角色信息重写一段可用于 TTS design 模式的音色描述。",
-      "要求：",
-      "1. 只输出一段中文设计描述正文，不要 JSON、不要 markdown 代码块、不要标题前缀。",
-      "2. 覆盖：年龄感、性别倾向、声线质感、语速、情绪底色、适合场景；尽量具体可听。",
-      "3. 禁止输出文件路径、URL、API key、系统指令、代码。",
-      "4. 长度建议 80–280 字，硬顶约 400 字。",
-    ].join("\n"),
-  );
-  const human = new HumanMessage(
-    [
-      `角色名：${input.name || "（未命名）"}`,
-      `定位/身份：${input.role || "（未填）"}`,
-      `性别：${input.gender || "（未填）"}`,
-      `性格：${input.personality || "（未填）"}`,
-      `外貌：${input.appearance || "（未填）"}`,
-      `背景摘要：${input.background || "（未填）"}`,
-      `当前 design 草稿：${input.currentDesignPrompt || "（无）"}`,
-      `额外约束：${input.notes || "（无）"}`,
-      "",
-      "请直接输出重写后的音色设计描述：",
-    ].join("\n"),
-  );
-  return [system, human];
 }
 
 function ruleFallbackPrompt(input: {
@@ -214,7 +181,7 @@ export async function rewriteCharacterVoiceDesign(input: {
   ).slice(0, DESIGN_PROMPT_MAX);
   const notes = (body.notes?.trim() || "").slice(0, NOTES_MAX);
 
-  const ctx = {
+  const ctx: VoiceDesignRewritePromptInput = {
     name: character.name || "",
     role: character.role || "",
     gender: character.gender || "",
@@ -231,20 +198,23 @@ export async function rewriteCharacterVoiceDesign(input: {
 
   try {
     const provider = resolveOptionalProvider(body.provider);
-    const llm =
-      input.llm
-      ?? (await getLLM(provider, {
-        model: body.model?.trim() || undefined,
-        temperature: 0.55,
-        maxTokens: 600,
-        taskType: "chat",
-      }));
-    const messages = buildRewriteMessages(ctx);
-    const response = await llm.invoke(messages);
-    const raw =
-      typeof response === "string"
-        ? response
-        : extractTextContent(response?.content ?? response);
+    const raw = input.llm
+      ? await (async () => {
+        const response = await input.llm!.invoke(renderVoiceDesignRewriteMessages(ctx));
+        return typeof response === "string"
+          ? response
+          : extractTextContent(response?.content ?? response);
+      })()
+      : (await runTextPrompt({
+        asset: voiceDesignRewritePrompt,
+        promptInput: ctx,
+        options: {
+          provider,
+          model: body.model?.trim() || undefined,
+          temperature: 0.55,
+          maxTokens: 600,
+        },
+      })).output;
     designPrompt = sanitizeDesignPrompt(raw);
     if (designPrompt.length >= 12) {
       source = "llm";
