@@ -217,28 +217,43 @@ export function computeWatchdogDecision(input: {
   return { signal: curr, stallCount: 0, fail: false };
 }
 
-/** 把失败章合并进父 progressJson 的 failedContinueChapters（去重，整串写一次）。 */
+/**
+ * 把失败章合并进父 progressJson 的 failedContinueChapters（去重，整串写一次）。
+ *
+ * 乐观 CAS：where 带上读到的 progressJson 原值，别的写者（reconcileParent / onProgress）
+ * 若在读写窗口内改过整串 blob，本次写落空并重读重试。无 CAS 时后写覆盖先写，
+ * 失败章列表会静默丢失，前端对照 list 不再标黄，用户无从重试那些章。
+ */
 async function appendFailedContinueChapters(
   parentTaskId: string,
   failedChapterIds: string[],
 ): Promise<void> {
-  const parent = await prisma.audiobookTask.findUnique({
-    where: { id: parentTaskId },
-    select: { progressJson: true },
-  });
-  if (!parent) return;
-  const progress = parseProgressJson(parent.progressJson);
-  const existing = readFailedContinueChapters(parent.progressJson);
-  const merged = Array.from(new Set([...existing, ...failedChapterIds]));
-  const nextProgress: Record<string, unknown> = {
-    ...progress,
-    deliveryStyleMode: progress.deliveryStyleMode ?? null,
-    failedContinueChapters: merged,
-  };
-  await prisma.audiobookTask.update({
-    where: { id: parentTaskId },
-    data: { progressJson: JSON.stringify(nextProgress) },
-  });
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const parent = await prisma.audiobookTask.findUnique({
+      where: { id: parentTaskId },
+      select: { progressJson: true },
+    });
+    if (!parent) return;
+    const progress = parseProgressJson(parent.progressJson);
+    const existing = readFailedContinueChapters(parent.progressJson);
+    const merged = Array.from(new Set([...existing, ...failedChapterIds]));
+    if (merged.length === existing.length) return;
+    const nextProgress: Record<string, unknown> = {
+      ...progress,
+      deliveryStyleMode: progress.deliveryStyleMode ?? null,
+      failedContinueChapters: merged,
+    };
+    const claimed = await prisma.audiobookTask.updateMany({
+      where: { id: parentTaskId, progressJson: parent.progressJson },
+      data: { progressJson: JSON.stringify(nextProgress) },
+    });
+    if (claimed.count > 0) return;
+  }
+  console.warn(
+    "[audiobook] appendFailedContinueChapters 连续 5 次 CAS 落空，失败章未记录",
+    parentTaskId,
+    failedChapterIds,
+  );
 }
 
 type ChapterProgressEntry = {
@@ -812,6 +827,7 @@ export class AudiobookTaskService {
 
     // 无论 queued/running：先从内存队列剔除，并写 cancelRequestedAt + abort
     this.removeFromQueue(taskId);
+    const controller = this.activeControllers.get(taskId);
     await prisma.audiobookTask.update({
       where: { id: taskId },
       data: {
@@ -819,11 +835,34 @@ export class AudiobookTaskService {
         heartbeatAt: new Date(),
       },
     });
-    this.activeControllers.get(taskId)?.abort();
+    controller?.abort();
 
     if (task.status === "queued") {
       // CAS：仅当仍为 queued 时终态 cancelled，避免与已进入 execute 的 running 打架
       await this.markCancelledIfActive(taskId, task.progress, ["queued"]);
+    } else if (!controller) {
+      // running 但本进程没有活控制器 = 无人会 ack 这次取消（执行器已随重启消失，或
+      // cancel 落在执行器最后一次 isCancelRequested() 与终态 CAS 之间导致那次写落空）。
+      // 此时三条路同时关闭：终态 CAS 要求 cancelRequestedAt=null、watchdog 查询排除
+      // cancelRequestedAt 非空的行、markCancelledIfActive 又只在 queued 时调用——行会永久
+      // 停在 running。既然没有执行器可 ack，就在此直接落 cancelled 终态。
+      console.warn("[audiobook.cancel] running 任务无活控制器，直接落 cancelled", {
+        taskId,
+        stage: task.currentStage,
+      });
+      await this.markCancelledIfActive(taskId, task.progress, ["running"]);
+      // 该行若是续生成子任务，父同样需要收口，否则父卡 continuing
+      if (isContinueChild) {
+        try {
+          await this.finalizeContinueChild(taskId, true);
+        } catch (error) {
+          console.warn(
+            "[audiobook.cancel] 无控制器子任务收口父失败",
+            taskId,
+            error instanceof Error ? error.message : error,
+          );
+        }
+      }
     }
 
     const detail = await this.getTask(taskId);
@@ -1026,6 +1065,57 @@ export class AudiobookTaskService {
     }
 
     const parentOutputDir = parent.outputDir?.trim() || resolveAudiobookTaskDir(parent.novelId, parent.id);
+
+    // 先抢占父（CAS succeeded/failed → running+continuing），再做破坏性 wipe / 建子任务。
+    // 原顺序把 CAS 放最后：:996 的读闸与 CAS 之间隔着 await precheck，双提交下两个请求都能过读闸，
+    // 各自 wipe 同一批章的 wav（可能删掉另一个已产出的音频）并各建一个子任务，只有一个 CAS 命中，
+    // 但两个子任务都被 enqueue。抢占前置后，第二枪 CAS 落空即 409，不动磁盘、不建子。
+    const claimedParent = await prisma.audiobookTask.updateMany({
+      where: { id: parent.id, status: { in: ["succeeded", "failed"] } },
+      data: {
+        status: "running",
+        currentStage: "continuing",
+        currentItemLabel: `续生成 ${precheck.chapterCount} 章`,
+        fullAudioPath: null,
+        resultJson: null,
+        cancelRequestedAt: null,
+        finishedAt: null,
+        heartbeatAt: new Date(),
+      },
+    });
+    if (claimedParent.count === 0) {
+      throw new AppError(
+        "父任务已被其它续生成请求占用或状态已变更，无法续生成。请刷新后重试。",
+        409,
+      );
+    }
+
+    // 抢占成功后父已是 running+continuing：此后任一步失败都必须把父放回原终态，
+    // 否则父卡 continuing（watchdog 跳过 + resume 跳过 + 续生成 409，三条自愈路径同时关闭）。
+    const releaseParentOnFailure = async (reason: string): Promise<void> => {
+      try {
+        await prisma.audiobookTask.updateMany({
+          where: { id: parent.id, status: "running", currentStage: "continuing" },
+          data: {
+            status: parent.status,
+            currentStage: parent.currentStage,
+            currentItemLabel: parent.currentItemLabel,
+            progress: parent.progress,
+            fullAudioPath: parent.fullAudioPath,
+            error: `续生成启动失败：${reason}`.slice(0, 500),
+            finishedAt: new Date(),
+            heartbeatAt: new Date(),
+          },
+        });
+      } catch (releaseError) {
+        console.warn(
+          "[audiobook] continueParentTask 回滚父状态失败（父可能卡 continuing）",
+          parent.id,
+          releaseError instanceof Error ? releaseError.message : releaseError,
+        );
+      }
+    };
+
     // mode=resynthesize：强制 wipe 目标章音频 + 全书，避免 layout fingerprint cache-hit 跳过
     if (input.mode === "resynthesize") {
       for (const chapterId of requestedIds) {
@@ -1059,46 +1149,48 @@ export class AudiobookTaskService {
       ? Math.max(2, Math.min(95, Math.round((parentReadyBaseline / parentChapterIds.length) * 100)))
       : 2;
 
-    const child = await prisma.audiobookTask.create({
-      data: {
-        novelId: parent.novelId,
-        title,
-        scopeMode: precheck.scopeMode,
-        chapterIdsJson: JSON.stringify(precheck.chapterIds),
-        chapterCount: precheck.chapterCount,
-        completedChapterCount: 0,
-        narratorVoice: parent.narratorVoice,
-        narratorStyle: parent.narratorStyle,
-        provider: parent.provider,
-        model: parent.model,
-        temperature: parent.temperature,
-        status: "queued",
-        progress: 0,
-        currentStage: "queued",
-        currentItemLabel: "排队：续生成缺失章",
-        maxRetries: DEFAULT_MAX_RETRIES,
-        outputDir: parentOutputDir,
-        progressJson: JSON.stringify({
-          deliveryStyleMode: parentDeliveryMode,
-          hidden: true,
-          parentTaskId: parent.id,
-          mode: input.mode ?? null,
-        }),
-      },
-      include: { novel: { select: { id: true, title: true } } },
-    });
+    let child;
+    try {
+      child = await prisma.audiobookTask.create({
+        data: {
+          novelId: parent.novelId,
+          title,
+          scopeMode: precheck.scopeMode,
+          chapterIdsJson: JSON.stringify(precheck.chapterIds),
+          chapterCount: precheck.chapterCount,
+          completedChapterCount: 0,
+          narratorVoice: parent.narratorVoice,
+          narratorStyle: parent.narratorStyle,
+          provider: parent.provider,
+          model: parent.model,
+          temperature: parent.temperature,
+          status: "queued",
+          progress: 0,
+          currentStage: "queued",
+          currentItemLabel: "排队：续生成缺失章",
+          maxRetries: DEFAULT_MAX_RETRIES,
+          outputDir: parentOutputDir,
+          progressJson: JSON.stringify({
+            deliveryStyleMode: parentDeliveryMode,
+            hidden: true,
+            parentTaskId: parent.id,
+            mode: input.mode ?? null,
+          }),
+        },
+        include: { novel: { select: { id: true, title: true } } },
+      });
+    } catch (createError) {
+      // 子任务没建成 = 父的 continuing 永远等不到收口者，必须立刻放回终态
+      await releaseParentOnFailure(
+        createError instanceof Error ? createError.message : String(createError),
+      );
+      throw createError;
+    }
 
-    // 父置回 running：前端 4s 轮询见父 status=running + currentItemLabel=续生成
+    // 父 progress 基线（章 ready 占比）：抢占时未知 baseline，此处补写
     await prisma.audiobookTask.updateMany({
-      where: { id: parent.id, status: { in: ["succeeded", "failed"] } },
-      data: {
-        status: "running",
-        currentStage: "continuing",
-        currentItemLabel: `续生成 ${precheck.chapterCount} 章`,
-        progress: parentProgressBaseline,
-        fullAudioPath: null,
-        resultJson: null,
-      },
+      where: { id: parent.id, status: "running", currentStage: "continuing" },
+      data: { progress: parentProgressBaseline },
     });
 
     this.enqueueTask(child.id);
@@ -1175,8 +1267,11 @@ export class AudiobookTaskService {
         : fullAudioReady
           ? "有声书生成完成（m4b 后台封装中）"
           : "有声书生成完成";
-      await prisma.audiobookTask.update({
-        where: { id: parent.id },
+      // CAS `status in (running, queued)`：reconcileParent 会被 cancelTask / finalizeContinueChild /
+      // 恢复路径并发调用。无 CAS 时被取消的父会被迟到的子回调覆写成 succeeded/failed
+      //（用户取消的任务谎报「生成完成」）。终态一旦落定即不可再被本函数改写。
+      const claimed = await prisma.audiobookTask.updateMany({
+        where: { id: parent.id, status: { in: ["running", "queued"] } },
         data: {
           progressJson: JSON.stringify(nextProgress),
           progress: 100,
@@ -1187,8 +1282,12 @@ export class AudiobookTaskService {
           currentItemLabel: successLabel,
           error: null,
           finishedAt: new Date(),
+          heartbeatAt: new Date(),
         },
       });
+      if (claimed.count === 0) {
+        return;
+      }
       if (fullAudioReady && !m4bAlreadyReady) {
         this.scheduleBackgroundM4bEncode({
           parentTaskId: parent.id,
@@ -1210,8 +1309,9 @@ export class AudiobookTaskService {
     const failureLabel = prunedFailed.length > 0
       ? `续生成后有 ${prunedFailed.length} 章失败，可在对照 list 逐章重试`
       : `续生成未完成，已就绪 ${readyChapterIds.length}/${chapterIds.length} 章`;
-    await prisma.audiobookTask.update({
-      where: { id: parent.id },
+    // 同上 CAS：cancelTask 先落的 cancelled 不得被迟到的子回调改写成 failed。
+    await prisma.audiobookTask.updateMany({
+      where: { id: parent.id, status: { in: ["running", "queued"] } },
       data: {
         progressJson: JSON.stringify(nextProgress),
         progress: parentProgress,
@@ -1223,6 +1323,7 @@ export class AudiobookTaskService {
         currentItemLabel: failureLabel,
         error: failureLabel,
         finishedAt: new Date(),
+        heartbeatAt: new Date(),
       },
     });
   }
@@ -1372,24 +1473,35 @@ export class AudiobookTaskService {
   }
 
 
+  /**
+   * 重启后把在途任务挂起等人工恢复（不自动重跑）。
+   *
+   * 当前 audiobook 走的是自动恢复（RecoveryTaskService → resumePendingTasks），本方法暂无调用者，
+   * 保留作为「需人工确认再跑」运维模式的入口。已请求取消的行必须排除：把它们改回 queued 并清
+   * cancelRequestedAt 等于让用户取消过的任务在人工恢复时复活。
+   */
   async markPendingTasksForManualRecovery(): Promise<void> {
     try {
       const rows = await prisma.audiobookTask.findMany({
         where: {
           status: { in: ["queued", "running"] },
           pendingManualRecovery: false,
+          cancelRequestedAt: null,
         },
-        select: { id: true, status: true },
+        select: { id: true, status: true, currentStage: true },
         orderBy: { createdAt: "asc" },
       });
       if (rows.length === 0) {
         return;
       }
 
-      const runningIds = rows.filter((item) => item.status === "running").map((item) => item.id);
+      // continuing 父不能被改成 queued：它没有自己的流水线，人工恢复会让它当普通任务重跑全书。
+      const runningIds = rows
+        .filter((item) => item.status === "running" && item.currentStage !== "continuing")
+        .map((item) => item.id);
       if (runningIds.length > 0) {
         await prisma.audiobookTask.updateMany({
-          where: { id: { in: runningIds } },
+          where: { id: { in: runningIds }, cancelRequestedAt: null },
           data: {
             status: "queued",
             pendingManualRecovery: true,
@@ -1397,7 +1509,6 @@ export class AudiobookTaskService {
             heartbeatAt: null,
             currentStage: "queued",
             currentItemKey: null,
-            cancelRequestedAt: null,
           },
         });
       }
@@ -1405,12 +1516,11 @@ export class AudiobookTaskService {
       const queuedIds = rows.filter((item) => item.status === "queued").map((item) => item.id);
       if (queuedIds.length > 0) {
         await prisma.audiobookTask.updateMany({
-          where: { id: { in: queuedIds } },
+          where: { id: { in: queuedIds }, cancelRequestedAt: null },
           data: {
             pendingManualRecovery: true,
             error: "服务重启后，有声书任务已暂停，等待手动恢复。",
             heartbeatAt: null,
-            cancelRequestedAt: null,
           },
         });
       }
@@ -1426,19 +1536,60 @@ export class AudiobookTaskService {
     try {
       const rows = await prisma.audiobookTask.findMany({
         where: { status: { in: ["queued", "running"] } },
-        select: { id: true, progressJson: true, currentStage: true },
+        select: {
+          id: true,
+          progress: true,
+          progressJson: true,
+          currentStage: true,
+          cancelRequestedAt: true,
+        },
         orderBy: { createdAt: "asc" },
       });
       if (rows.length === 0) {
         return;
       }
+
+      // 带 cancelRequestedAt 的行：用户已请求取消，执行器在重启中丢失，无人 ack。
+      // 原实现把 cancelRequestedAt 一并清空再重排队 = 把用户取消过的任务复活重跑。
+      // 正确做法是替执行器完成 ack，落 cancelled 终态。
+      const cancelRequested = rows.filter((row) => Boolean(row.cancelRequestedAt));
+      for (const row of cancelRequested) {
+        try {
+          await this.markCancelledIfActive(row.id, row.progress ?? 0, ["queued", "running"]);
+        } catch (error) {
+          console.warn(
+            "[audiobook] resumePendingTasks 收口已请求取消的任务失败",
+            row.id,
+            error instanceof Error ? error.message : error,
+          );
+        }
+      }
+
       // 续生成期间：父任务 status=running + currentStage="continuing"（仅子任务干活）不可重入父流水线，
       // 否则重启会把父当正常 running 重跑全书、覆盖 currentStage/annotationsJson/resultJson，并与子任务抢队列。
       // 续生成子任务（progressJson.parentTaskId 非空）正常恢复。
-      const resumables = rows.filter((row) => {
-        if (row.currentStage === "continuing") return false;
-        return true;
-      });
+      const pending = rows.filter((row) => !row.cancelRequestedAt);
+      const continuingParents = pending.filter((row) => row.currentStage === "continuing");
+      const resumables = pending.filter((row) => row.currentStage !== "continuing");
+
+      // continuing 父不重入流水线，但也不能放着不管：若它的子任务已不在 queued/running
+      //（进程被杀时子任务连同队列一起消失），父就成了孤儿——watchdog 跳过 continuing、
+      // 续生成因父非终态 409，永远卡 running。此处按磁盘 ready 强制收口。
+      for (const parentRow of continuingParents) {
+        try {
+          const liveChildren = await this.countLiveContinueChildren(parentRow.id);
+          if (liveChildren > 0) continue;
+          await this.reconcileParent(parentRow.id);
+          await this.forceContinueParentTerminal(parentRow.id);
+        } catch (error) {
+          console.warn(
+            "[audiobook] resumePendingTasks 收口孤儿 continuing 父失败",
+            parentRow.id,
+            error instanceof Error ? error.message : error,
+          );
+        }
+      }
+
       if (resumables.length === 0) {
         return;
       }
@@ -1452,7 +1603,6 @@ export class AudiobookTaskService {
           heartbeatAt: null,
           currentStage: "queued",
           currentItemKey: null,
-          cancelRequestedAt: null,
         },
       });
       for (const id of ids) {
@@ -1466,16 +1616,37 @@ export class AudiobookTaskService {
     }
   }
 
+  /** 挂在该父上、仍在 queued/running 的续生成子任务数（用于判断 continuing 父是否成孤儿） */
+  private async countLiveContinueChildren(parentTaskId: string): Promise<number> {
+    const rows = await prisma.audiobookTask.findMany({
+      where: { status: { in: ["queued", "running"] } },
+      select: { id: true, progressJson: true },
+      take: 2000,
+    });
+    return rows.filter(
+      (row) => row.id !== parentTaskId && readParentTaskIdFromProgress(row.progressJson) === parentTaskId,
+    ).length;
+  }
+
   async resumeTask(taskId: string): Promise<AudiobookTaskDetail> {
     const task = await prisma.audiobookTask.findUnique({
       where: { id: taskId },
-      select: { status: true },
+      select: { status: true, currentStage: true, cancelRequestedAt: true },
     });
     if (!task) {
       throw new AppError("有声书任务不存在。", 404);
     }
     if (task.status !== "queued" && task.status !== "running") {
       throw new AppError("仅排队中或运行中的有声书任务可恢复。", 400);
+    }
+    // 已请求取消的任务不得被 resume 复活：清 cancelRequestedAt 会让执行器的终态 CAS
+    //（where cancelRequestedAt=null）与 resume 的重排队互相打架，跑完的结果被丢弃。
+    if (task.cancelRequestedAt) {
+      throw new AppError("该任务已请求取消，无法恢复。请等待取消完成后重试。", 409);
+    }
+    // continuing 父没有自己的流水线，重排队会让它当普通任务重跑全书、覆盖 annotationsJson。
+    if (task.currentStage === "continuing") {
+      throw new AppError("续生成进行中的父任务不可恢复，请等待续生成子任务结束。", 409);
     }
 
     await prisma.audiobookTask.update({
@@ -1484,7 +1655,6 @@ export class AudiobookTaskService {
         status: "queued",
         pendingManualRecovery: false,
         heartbeatAt: null,
-        cancelRequestedAt: null,
         error: null,
         currentStage: "queued",
         currentItemLabel: "排队中",
@@ -2171,8 +2341,9 @@ export class AudiobookTaskService {
     });
   }
 
-  private async markFailedIfRunning(taskId: string, message: string): Promise<void> {
-    await prisma.audiobookTask.updateMany({
+  /** @returns 实际翻 failed 的行数（0 = CAS 未命中，任务已被别的路径终态化） */
+  private async markFailedIfRunning(taskId: string, message: string): Promise<number> {
+    const claimed = await prisma.audiobookTask.updateMany({
       where: {
         id: taskId,
         status: "running",
@@ -2187,6 +2358,7 @@ export class AudiobookTaskService {
         heartbeatAt: new Date(),
       },
     });
+    return claimed.count;
   }
 
   /**
@@ -2283,10 +2455,17 @@ export class AudiobookTaskService {
           },
         );
         try {
-          await this.markFailedIfRunning(
+          const failedCount = await this.markFailedIfRunning(
             row.id,
             `watchdog: 任务 ${stalledSeconds}s 未推进，判定假 running 已终止。`,
           );
+          // 关键：续生成子任务被 watchdog 翻 fail 时，executeTask 的 finalizeContinueChild
+          // 钩子不会触发（那 9 个调用点全在 executeTask 内）。若不在此显式收口，
+          // 父会永久卡 running+continuing——watchdog 跳过它、resumePendingTasks 跳过它、
+          // continueParentTask 因父非终态 409 拒绝重试，三条自愈路径同时关闭。
+          if (failedCount > 0 && readParentTaskIdFromProgress(row.progressJson)) {
+            await this.finalizeContinueChild(row.id, true);
+          }
         } catch (error) {
           console.warn("[audiobook.watchdog] markFailedIfRunning failed", {
             taskId: row.id,

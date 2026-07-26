@@ -42,7 +42,16 @@ export class PatrolAgent {
     const findings: PatrolFinding[] = [];
     const autoFix = input.autoFix === true && input.dryRun !== true;
 
-    let tasks: { id: string; novelId: string | null; status: string; heartbeatAt: Date | null; chapterIdsJson: string | null; progressJson: string | null }[] = [];
+    let tasks: {
+      id: string;
+      novelId: string | null;
+      status: string;
+      heartbeatAt: Date | null;
+      chapterIdsJson: string | null;
+      progressJson: string | null;
+      annotationsJson: string | null;
+      outputDir: string | null;
+    }[] = [];
     try {
       const where: { id?: string; novelId?: string } = {};
       if (input.taskId) where.id = input.taskId;
@@ -56,6 +65,8 @@ export class PatrolAgent {
           heartbeatAt: true,
           chapterIdsJson: true,
           progressJson: true,
+          annotationsJson: true,
+          outputDir: true,
         },
         orderBy: { createdAt: "desc" },
         take: 50,
@@ -77,7 +88,10 @@ export class PatrolAgent {
     let checkedChapters = 0;
 
     for (const task of tasks) {
-      // P1: running 超时无心跳
+      // P1: running 超时无心跳。
+      // 注意心跳只证明「进程还在」：startTaskHeartbeat 是独立 10s timer，即便流水线
+      // 卡在某个 LLM 调用上也照常刷新。所以本判据只能抓「进程已死但行留 running」，
+      // 抓不到进程存活的假 running —— 后者由 AudiobookTaskService 的推进信号 watchdog 负责。
       if (task.status === "running") {
         const heartbeat = task.heartbeatAt ? task.heartbeatAt.getTime() : 0;
         if (now - heartbeat > STALE_HEARTBEAT_MS) {
@@ -85,7 +99,7 @@ export class PatrolAgent {
             id: "P1",
             target: { novelId: task.novelId ?? null, taskId: task.id, chapterId: null },
             severity: "warn",
-            message: `任务 running 但 heartbeat 超过 ${Math.round(STALE_HEARTBEAT_MS / 60000)}min 无更新（疑似卡死）`,
+            message: `任务 running 但 heartbeat 超过 ${Math.round(STALE_HEARTBEAT_MS / 60000)}min 无更新（疑似进程已退出）`,
             autoFixed: false,
           });
         }
@@ -97,24 +111,32 @@ export class PatrolAgent {
       // P3: chapterProgress=ready 但磁盘缺 chapter.wav
       const progress = parseProgressJson(task.progressJson);
       const chapterProgressArr = Array.isArray(progress.chapterProgress) ? progress.chapterProgress : [];
-      const dir = resolveAudiobookTaskDir(task.novelId ?? "_unknown", task.id);
-      let unresolvedCount = 0;
+      // 续生成子任务 outputDir 指向父目录（章 wav 写在父目录下），按 taskId 推目录会全章假阳性。
+      // 与 AudiobookTaskService 的取址一致：outputDir 优先，缺省才回退默认布局。
+      const dir = task.outputDir?.trim() || resolveAudiobookTaskDir(task.novelId ?? "_unknown", task.id);
 
+      // P2: speakerUnresolved 的真源是 annotationsJson 列里的 segments[].speakerUnresolved。
+      // 旧实现读 progressJson.chapterAnnotations —— 全仓无任何写入方，该检查恒不触发，
+      // 说话人归属整本失败也会报告 clean。
+      const annotationsByChapter = parseAnnotations(task.annotationsJson);
+      let unresolvedCount = 0;
+      let annotatedChapters = 0;
       for (const cid of chapterIds) {
         checkedChapters += 1;
-        // P2: speakerUnresolved 通过 annotations 文件判断成本较高，此处先简化为：
-        //     progressJson.chapterAnnotations[].speakerUnresolved 设为 true
-        const ann = findAnnotation(progress, cid);
-        if (ann?.speakerUnresolved === true) unresolvedCount += 1;
+        const segments = annotationsByChapter.get(cid);
+        if (!segments) continue;
+        annotatedChapters += 1;
+        if (segments.some((seg) => seg.speakerUnresolved === true)) unresolvedCount += 1;
       }
 
-      const unresolvedRatio = checkedChapters > 0 ? unresolvedCount / checkedChapters : 0;
-      if (unresolvedRatio >= SPEAKER_UNRESOLVED_RATIO_WARN) {
+      // 分母用本任务已标注的章数，不是跨任务累加的 checkedChapters
+      const unresolvedRatio = annotatedChapters > 0 ? unresolvedCount / annotatedChapters : 0;
+      if (annotatedChapters > 0 && unresolvedRatio >= SPEAKER_UNRESOLVED_RATIO_WARN) {
         findings.push({
           id: "P2",
           target: { novelId: task.novelId ?? null, taskId: task.id, chapterId: null },
           severity: "warn",
-          message: `speakerUnresolved 比例 ${(unresolvedRatio * 100).toFixed(0)}% 偏高（${unresolvedCount}/${chapterIds.length}）`,
+          message: `speakerUnresolved 比例 ${(unresolvedRatio * 100).toFixed(0)}% 偏高（${unresolvedCount}/${annotatedChapters}）`,
           autoFixed: false,
         });
       }
@@ -209,16 +231,33 @@ function parseProgressJson(json: string | null): Record<string, unknown> {
   }
 }
 
-function findAnnotation(progress: Record<string, unknown>, chapterId: string): { speakerUnresolved?: boolean } | null {
-  const annotations = progress.chapterAnnotations ?? progress.annotations;
-  if (!Array.isArray(annotations)) return null;
-  for (const ann of annotations as Array<Record<string, unknown>>) {
-    if (typeof ann !== "object" || ann === null) continue;
-    if ((ann.chapterId as string) === chapterId || (ann.id as string) === chapterId) {
-      return { speakerUnresolved: ann.speakerUnresolved === true };
-    }
+/**
+ * 解析 audiobookTask.annotationsJson → chapterId → segments。
+ * 这是 speakerUnresolved 的唯一权威落点（由 AudiobookPipelineService 写回）。
+ * 导出供 P2 契约回归测。
+ */
+export function parseAnnotations(
+  annotationsJson: string | null,
+): Map<string, Array<{ speakerUnresolved?: boolean }>> {
+  const byChapter = new Map<string, Array<{ speakerUnresolved?: boolean }>>();
+  if (!annotationsJson?.trim()) return byChapter;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(annotationsJson);
+  } catch {
+    return byChapter;
   }
-  return null;
+  if (!Array.isArray(parsed)) return byChapter;
+  for (const item of parsed as Array<Record<string, unknown>>) {
+    if (typeof item !== "object" || item === null) continue;
+    const chapterId = typeof item.chapterId === "string" ? item.chapterId : null;
+    if (!chapterId) continue;
+    const segments = Array.isArray(item.segments)
+      ? (item.segments as Array<{ speakerUnresolved?: boolean }>)
+      : [];
+    byChapter.set(chapterId, segments);
+  }
+  return byChapter;
 }
 
 export const patrolAgent = new PatrolAgent();
