@@ -57,7 +57,17 @@ export class ChapterArtifactBackgroundSyncService {
       artifactSyncMode,
     };
     const run = () => {
-      void this.runChapterSyncNow(novelId, chapterId, content, runOptions);
+      // 必须 .catch：void 不吞 rejection；artifact_delta transport_error 会变成
+      // unhandledRejection 直接杀 novel-server（生产 readiness 真跑被反复踢）。
+      // runChapterSyncNow 仍 rethrow 给 await 调用方（finalization / pipeline）。
+      void this.runChapterSyncNow(novelId, chapterId, content, runOptions).catch((error) => {
+        console.warn("[chapter-artifact-background-sync] scheduleChapterSync swallowed", {
+          novelId,
+          chapterId,
+          artifactSyncMode,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
     };
     if (delayMs > 0) {
       setTimeout(run, delayMs).unref?.();
