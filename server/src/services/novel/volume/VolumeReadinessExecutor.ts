@@ -221,7 +221,24 @@ function createChapterTimeoutClock(deadlineMs: number, budgetMs: number): {
   const startedAt = Date.now();
   const absoluteDeadline = startedAt + timeoutMs;
   const controller = new AbortController();
-  const abortTimer = setTimeout(() => controller.abort(), timeoutMs);
+  // abort() 本身不抛，但 signal 监听方若同步 throw / 未捕获 AbortError 的
+  // unhandledRejection 可能顶穿进程（生产曾见 DOMException AbortError 打挂
+  // novel-server）。定时器与 gate 内都包 try，并优先 reason 便于日志归因。
+  const fireAbort = (reason: string): void => {
+    try {
+      if (!controller.signal.aborted) {
+        controller.abort(reason);
+      }
+    } catch {
+      // ignore — abort 路径不得打挂 executor 进程
+    }
+  };
+  const abortTimer = setTimeout(
+    () => fireAbort(`readiness chapter wall ${Math.round(timeoutMs / 1000)}s`),
+    timeoutMs,
+  );
+  // unref：章级 abort 定时器不得单独撑住进程退出
+  abortTimer.unref?.();
   const dispose = (): void => {
     clearTimeout(abortTimer);
   };
@@ -236,10 +253,9 @@ function createChapterTimeoutClock(deadlineMs: number, budgetMs: number): {
     const gate = new Promise<never>((_, reject) => {
       gateTimer = setTimeout(
         () => {
-          controller.abort();
-          reject(new Error(
-            `readiness chapter step timeout after ${Math.round(timeoutMs / 1000)}s${stepLabel ? `: ${stepLabel}` : ""}`,
-          ));
+          const msg = `readiness chapter step timeout after ${Math.round(timeoutMs / 1000)}s${stepLabel ? `: ${stepLabel}` : ""}`;
+          fireAbort(msg);
+          reject(new Error(msg));
         },
         remaining,
       );
