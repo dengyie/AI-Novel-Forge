@@ -45,6 +45,7 @@ interface QualityDebtAttribution {
 - `contentProvenance = "debt"`：章节内容可继续用于后续自动生成，但从该正文提取出的角色状态、角色资源等提案统一带 `sourceQuality = "debt"` 和 `source_quality:debt` 校验标记。
 - 带债务来源的提案不得走自动提交白名单，即使原本是低风险 `character_state_update` 或后台提取出的中风险 `character_resource_update`，也必须进入 `pending_review`。
 - malformed 提案仍然拒绝入库，例如缺少 `summary`、缺少角色 ID、角色资源 payload 无效或没有证据时，不因为 debt 来源而进入待审。
+- 质量债章节数量不构成全书停止条件。只要正文可用、结构化动作不是 `stop_for_replan`，导演应保存债务并推进章节游标；连续债务数量仅用于报表和后续回收优先级。真正的安全停止依据是章节游标与剩余量连续多次没有变化，或明确的重规划/运行时完整性信号。
 
 这样做的目标是把“自动生成不断链”和“硬事实不喂错”分开：章节可以继续生成，但未确认的状态/资源变化不会直接污染角色硬事实、资源账本和后续章节上下文。
 

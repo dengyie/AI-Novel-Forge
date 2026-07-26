@@ -9,6 +9,7 @@ import { ragServices } from "../rag";
 import { auditService } from "../audit/AuditService";
 import { payoffLedgerSyncService } from "../payoff/PayoffLedgerSyncService";
 import { plannerService } from "../planner/PlannerService";
+import { shouldExecutePlannerReplan } from "../planner/shouldExecutePlannerReplan";
 import { stateService } from "../state/StateService";
 import {
   isPass,
@@ -125,7 +126,11 @@ export class NovelCoreReviewService {
       ledgerSummary: review.contextPackage?.ledgerSummary ?? null,
       contextPackage: review.contextPackage ?? null,
     });
-    if ((review.auditReports?.length ?? 0) > 0 && replanRecommendation.recommended) {
+    if (
+      (review.auditReports?.length ?? 0) > 0
+      && replanRecommendation.recommended
+      && shouldExecutePlannerReplan(replanRecommendation)
+    ) {
       await plannerService.replan(novelId, {
         chapterId,
         triggerType: "audit_failure",
@@ -134,7 +139,7 @@ export class NovelCoreReviewService {
         provider: options.provider,
         model: options.model,
         temperature: options.temperature,
-      }).catch(() => null);
+      });
     }
 
     return review;
