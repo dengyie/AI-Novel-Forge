@@ -516,9 +516,13 @@ export function getCompletedChapterIds(run: VolumeReadinessRunRecord): Set<strin
   // incomplete / skipped_locked / failed / budget_skipped 可 resume 重试；
   // discard/plateau/kept/adopted 终态。budget_skipped 在 wall 耗尽时批量写入，
   // 若不从 terminal 剔除，ops 加大 maxWallMinutes 后 resume 仍会跳过整尾卷。
+  // I2：re_reviewed 不是终态——assess 失败/verdictAfter 空时会停在 re_reviewed，
+  // 若当 terminal 则 resume 永久跳过该章。executor 正常会降 re_review_incomplete；
+  // 这里再 fail-open 剔除，双保险。polished 同理：仅 publish_ready 才应 already_done，
+  // 但 polished 在 assess 成功且过门时才会保留；若 assess 缺失 executor 已降 incomplete。
+  // 仍保留 polished 为 terminal（成功 polish 过门语义），re_reviewed 必须剔除。
   const terminal = new Set([
     "kept",
-    "re_reviewed",
     "repair_adopted",
     "repair_discarded",
     "repair_plateau",

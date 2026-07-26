@@ -585,13 +585,11 @@ export class NovelCorePipelineService {
     finishedAt?: Date | null;
     payload?: string | null;
   }) {
-    const isTerminal = data.status === "succeeded"
-      || data.status === "failed"
-      || data.status === "cancelled";
     // #9：非 terminal（heartbeat / lease / progress）也要重试——旧 maxAttempts=1
     // 一次写库失败即静默，随后 updateMany lease CAS 判 PIPELINE_LEASE_LOST，
-    // 任务要等 ACTIVE_JOB_STALE_GRACE（默认 10m）才被 watchdog 捞起，UI 像卡住。
-    const maxAttempts = isTerminal ? 3 : 3;
+    // 任务要等 ACTIVE_JOB_STALE_GRACE 才被 watchdog 捞起，UI 像卡住。
+    // terminal / non-terminal 统一 3 次（M1：去掉 isTerminal ? 3 : 3 死分支）。
+    const maxAttempts = 3;
     let lastError: unknown;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {

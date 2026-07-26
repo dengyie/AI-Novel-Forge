@@ -70,7 +70,9 @@ export class VolumeReadinessScheduler {
           break;
         }
         try {
+          // I3：timeout gate 必须 clear，避免 assess 先完成 timer 仍触发无意义 reject/泄漏
           const remaining = Math.max(1_000, tickDeadline - Date.now());
+          let gateTimer: ReturnType<typeof setTimeout> | null = null;
           const report = await Promise.race([
             volumeReadinessService.assess(novel.id, {
               fromOrder: 1,
@@ -78,12 +80,16 @@ export class VolumeReadinessScheduler {
               refresh: false,
             }),
             new Promise<never>((_, reject) => {
-              setTimeout(
+              gateTimer = setTimeout(
                 () => reject(new Error(`scheduler assess timeout after ${Math.round(remaining / 1000)}s`)),
                 remaining,
               );
             }),
-          ]);
+          ]).finally(() => {
+            if (gateTimer) {
+              clearTimeout(gateTimer);
+            }
+          });
           console.info("[volume.readiness.scheduler] dry report", {
             novelId: novel.id,
             title: novel.title,
