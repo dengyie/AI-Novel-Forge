@@ -54,22 +54,6 @@ const AUDIOBOOK_HEARTBEAT_INTERVAL_MS = Math.max(
   Number(process.env.AUDIOBOOK_TASK_HEARTBEAT_INTERVAL_MS ?? 10_000) || 10_000,
 );
 
-/**
- * 运行期 watchdog：周期扫 status=running 任务，对比「推进信号」跨周期。
- * 心跳（startTaskHeartbeat）只刷 heartbeatAt、与是否真推进解耦——卡死任务
- * 心跳照活、PatrolAgent P1 判据 ` heartbeat > 30min` 永不命中。watchdog
- * 比较 (progress/stage/itemKey/completedChapters/completedChunks) 五元组，
- * 连续 stallPeriods 个周期无变化即 CAS markFailedIfRunning，把假 running 翻终态。
- */
-const AUDIOBOOK_WATCHDOG_INTERVAL_MS = Math.max(
-  30_000,
-  Number(process.env.AUDIOBOOK_WATCHDOG_INTERVAL_MS ?? 60_000) || 60_000,
-);
-const AUDIOBOOK_WATCHDOG_STALL_PERIODS = Math.max(
-  2,
-  Number(process.env.AUDIOBOOK_WATCHDOG_STALL_PERIODS ?? 5) || 5,
-);
-
 const DEFAULT_MAX_RETRIES = 1;
 
 /** listByNovel 可见条数上限（API take 钳制后）。 */
@@ -149,72 +133,6 @@ export function readFailedContinueChapters(json: string | null | undefined): str
   return Array.isArray(val)
     ? val.filter((x): x is string => typeof x === "string" && x.trim().length > 0)
     : [];
-}
-
-/**
- * watchdog 推进信号快照。心跳只刷 heartbeatAt 不算推进，故显式取 onProgress 实际会写的
- * 五元组：progress / currentStage / currentItemKey / completedChapterCount / completedChunks
- * （completedChunks 取自 progressJson）。slice 截断防超长 label 让 key 失稳。
- */
-export interface AudiobookWatchdogSignal {
-  progress: number;
-  stage: string | null;
-  itemKey: string | null;
-  completedChapters: number;
-  completedChunks: number;
-}
-
-/** 从 audiobookTask running 行投影出推进信号。纯函数便于单测。 */
-export function projectWatchdogSignal(row: {
-  progress: number | null;
-  currentStage: string | null;
-  currentItemKey: string | null;
-  completedChapterCount: number | null;
-  progressJson: string | null;
-}): AudiobookWatchdogSignal {
-  const progressJson = parseProgressJson(row.progressJson);
-  const completedChunksRaw = progressJson.completedChunks;
-  return {
-    progress: typeof row.progress === "number" ? row.progress : 0,
-    stage: (row.currentStage ?? "").slice(0, 32) || null,
-    itemKey: (row.currentItemKey ?? "").slice(0, 40) || null,
-    completedChapters: typeof row.completedChapterCount === "number" ? row.completedChapterCount : 0,
-    completedChunks: typeof completedChunksRaw === "number" && Number.isFinite(completedChunksRaw)
-      ? completedChunksRaw
-      : 0,
-  };
-}
-
-/** 两个推进信号是否相等（无变化即一个 stall 周期）。 */
-export function watchdogSignalEqual(a: AudiobookWatchdogSignal, b: AudiobookWatchdogSignal): boolean {
-  return a.progress === b.progress
-    && a.stage === b.stage
-    && a.itemKey === b.itemKey
-    && a.completedChapters === b.completedChapters
-    && a.completedChunks === b.completedChunks;
-}
-
-/**
- * watchdog 单 tick 决策（纯函数）。
- *
- * - 信号变化 → 重置 stallCount=0，存新信号
- * - 信号相等 → stallCount + 1
- * - stallCount >= stallPeriods → 返回 fail=true（调用方 CAS markFailedIfRunning）
- *
- * continuing 父由调用方在传入前过滤（父无自身 pipeline，推进信号无意义）；
- * 此函数只做信号对比，不臆测 stage 语义。
- */
-export function computeWatchdogDecision(input: {
-  prev: { signal: AudiobookWatchdogSignal; stallCount: number } | null;
-  curr: AudiobookWatchdogSignal;
-  stallPeriods: number;
-}): { signal: AudiobookWatchdogSignal; stallCount: number; fail: boolean } {
-  const { curr, stallPeriods } = input;
-  if (input.prev && watchdogSignalEqual(input.prev.signal, curr)) {
-    const stallCount = input.prev.stallCount + 1;
-    return { signal: input.prev.signal, stallCount, fail: stallCount >= stallPeriods };
-  }
-  return { signal: curr, stallCount: 0, fail: false };
 }
 
 /** 把失败章合并进父 progressJson 的 failedContinueChapters（去重，整串写一次）。 */
@@ -593,17 +511,6 @@ export class AudiobookTaskService {
   private readonly activeControllers = new Map<string, AbortController>();
 
   private processing = false;
-
-  /**
-   * Watchdog：任务 id → 上一周期观测的推进信号 + 连续停滞周期计数。
-   * 键随 markFailedIfRunning/reconcile 自然消退——runWatchdogTick 每轮用当前 running 集重建。
-   */
-  private readonly watchdogStallState = new Map<
-    string,
-    { signal: AudiobookWatchdogSignal; stallCount: number }
-  >();
-
-  private watchdogTimer: NodeJS.Timeout | null = null;
 
   async precheck(input: CreateAudiobookTaskInput) {
     return audiobookPrecheckService.precheck(input);
@@ -1303,23 +1210,6 @@ export class AudiobookTaskService {
           parentTaskId,
           error instanceof Error ? error.message : error,
         );
-        // R5：终极 catch 也必须收 label，否则父 succeeded 但 label 久留「m4b 后台封装中」假象
-        try {
-          const errMsg = (error instanceof Error ? error.message : String(error)).slice(0, 120);
-          await prisma.audiobookTask.updateMany({
-            where: {
-              id: parentTaskId,
-              status: "succeeded",
-              currentItemLabel: "有声书生成完成（m4b 后台封装中）",
-            },
-            data: {
-              currentItemLabel: `有声书生成完成；m4b 失败（${errMsg}）`,
-              heartbeatAt: new Date(),
-            },
-          });
-        } catch (labelError) {
-          console.warn("[audiobook] m4b failure label update failed", parentTaskId, labelError);
-        }
       }
     })();
   }
@@ -2020,104 +1910,6 @@ export class AudiobookTaskService {
         parentTaskId,
         error instanceof Error ? error.message : error,
       );
-      // R4 兜底：reconcile 抛错时父仍卡 running/continuing——按磁盘 ready 强制翻终态
-      try {
-        await this.forceContinueParentTerminal(parentTaskId);
-      } catch (fallbackError) {
-        console.warn(
-          "[audiobook] forceContinueParentTerminal fallback failed",
-          parentTaskId,
-          fallbackError instanceof Error ? fallbackError.message : fallbackError,
-        );
-      }
-    }
-  }
-
-  /**
-   * R4 兜底：reconcileParent 失败时强制把父从 running/continuing 翻终态。
-   *
-   * 不重复 reconcileParent 全流程——只按磁盘 ready 判最终状态：
-   * - 全 ready → succeeded（best-effort 重拼，失败则 fullAudioPath=null）
-   * - 否则 → failed + 写 failedContinueChapters
-   * CAS where `status in (running, queued)` 保证 cancelled 等先到的终态不被覆盖。
-   */
-  private async forceContinueParentTerminal(parentTaskId: string): Promise<void> {
-    const parent = await prisma.audiobookTask.findUnique({
-      where: { id: parentTaskId },
-      select: {
-        id: true,
-        novelId: true,
-        outputDir: true,
-        chapterIdsJson: true,
-        progressJson: true,
-      },
-    });
-    if (!parent) return;
-    const chapterIds = parseChapterIds(parent.chapterIdsJson);
-    const taskDir = parent.outputDir?.trim() || resolveAudiobookTaskDir(parent.novelId, parent.id);
-    let readyChapterIds: string[] = [];
-    try {
-      readyChapterIds = listReadyChapterAudioIds(taskDir, chapterIds);
-    } catch {
-      readyChapterIds = [];
-    }
-    const allReady = chapterIds.length > 0 && readyChapterIds.length === chapterIds.length;
-
-    if (allReady) {
-      // 全章已就绪：best-effort 重拼全书，翻 succeeded
-      let fullAudioReady = false;
-      try {
-        if (!isFullBookAudioReady(taskDir)) {
-          const chapterPaths = chapterIds.map((id) => resolveChapterAudioPath(taskDir, id));
-          const gaps = chapterPaths.length > 1
-            ? Array.from({ length: chapterPaths.length - 1 }, () => resolveBetweenChapterGapMs())
-            : [];
-          concatWavFiles(chapterPaths, resolveFullBookAudioPath(taskDir), gaps);
-        }
-        fullAudioReady = isFullBookAudioReady(taskDir);
-      } catch {
-        fullAudioReady = false;
-      }
-      await prisma.audiobookTask.updateMany({
-        where: { id: parentTaskId, status: { in: ["running", "queued"] } },
-        data: {
-          status: "succeeded",
-          progress: 100,
-          completedChapterCount: readyChapterIds.length,
-          fullAudioPath: fullAudioReady ? "full-book.wav" : null,
-          currentStage: "finalizing",
-          currentItemLabel: "有声书生成完成（reconcile 兜底）",
-          error: null,
-          finishedAt: new Date(),
-        },
-      });
-    } else {
-      // 部分/全部未就绪：翻 failed + 记失败章
-      const readySet = new Set(readyChapterIds);
-      const failedChapters = chapterIds.filter((id) => !readySet.has(id));
-      if (failedChapters.length > 0) {
-        try {
-          await appendFailedContinueChapters(parentTaskId, failedChapters);
-        } catch {
-          // 兜底层：追加失败章也失败时不抛——翻终态优先
-        }
-      }
-      const failureLabel = `reconcile 异常兜底，已就绪 ${readyChapterIds.length}/${chapterIds.length} 章`;
-      await prisma.audiobookTask.updateMany({
-        where: { id: parentTaskId, status: { in: ["running", "queued"] } },
-        data: {
-          status: "failed",
-          progress: Math.max(2, Math.min(99, Math.round(
-            (readyChapterIds.length / Math.max(1, chapterIds.length)) * 100,
-          ))),
-          completedChapterCount: readyChapterIds.length,
-          fullAudioPath: null,
-          currentStage: "failed",
-          currentItemLabel: failureLabel,
-          error: failureLabel,
-          finishedAt: new Date(),
-        },
-      });
     }
   }
 
@@ -2185,120 +1977,6 @@ export class AudiobookTaskService {
         heartbeatAt: new Date(),
       },
     });
-  }
-
-  /**
-   * 启动 watchdog（幂等）。app.ts 启动阶段调一次即可；重复调用是安全的。
-   * 内部 setInterval 用 unref() 不阻塞进程退出。
-   */
-  startWatchdog(): void {
-    if (this.watchdogTimer) return;
-    const tick = () => {
-      this.runWatchdogTick().catch((error) => {
-        console.warn("[audiobook.watchdog] tick failed", error);
-      });
-    };
-    this.watchdogTimer = setInterval(tick, AUDIOBOOK_WATCHDOG_INTERVAL_MS);
-    if (typeof this.watchdogTimer.unref === "function") {
-      this.watchdogTimer.unref();
-    }
-  }
-
-  stopWatchdog(): void {
-    if (this.watchdogTimer) {
-      clearInterval(this.watchdogTimer);
-      this.watchdogTimer = null;
-    }
-    this.watchdogStallState.clear();
-  }
-
-  /**
-   * Watchdog 单周期：
-   * 1. 找出全部 running 任务（跳过 currentStage="continuing" 的父任务——它们的推进由子任务承担，本身不动）
-   * 2. 与 watchdogStallState 上一轮信号对比，用 computeWatchdogDecision 判定
-   * 3. fail=true 则 CAS markFailedIfRunning，把假 running 翻终态
-   * 4. 用当前 running 集重建 map，防止长期泄漏
-   */
-  private async runWatchdogTick(): Promise<void> {
-    let rows: Array<{
-      id: string;
-      progress: number | null;
-      currentStage: string | null;
-      currentItemKey: string | null;
-      completedChapterCount: number | null;
-      progressJson: string | null;
-    }>;
-    try {
-      rows = await prisma.audiobookTask.findMany({
-        where: { status: "running", cancelRequestedAt: null },
-        select: {
-          id: true,
-          progress: true,
-          currentStage: true,
-          currentItemKey: true,
-          completedChapterCount: true,
-          progressJson: true,
-        },
-      });
-    } catch (error) {
-      if (isMissingAudiobookTaskTableError(error)) return;
-      throw error;
-    }
-
-    const alive = new Set<string>();
-    for (const row of rows) {
-      // 续生成父：currentStage="continuing"，父身不动——推进由 child 承担，跳过判定
-      if ((row.currentStage ?? "") === "continuing") {
-        this.watchdogStallState.delete(row.id);
-        continue;
-      }
-      alive.add(row.id);
-      const curr = projectWatchdogSignal(row);
-      const prev = this.watchdogStallState.get(row.id) ?? null;
-      const decision = computeWatchdogDecision({
-        prev,
-        curr,
-        stallPeriods: AUDIOBOOK_WATCHDOG_STALL_PERIODS,
-      });
-      this.watchdogStallState.set(row.id, {
-        signal: decision.signal,
-        stallCount: decision.stallCount,
-      });
-      if (decision.fail) {
-        const stalledSeconds = Math.round(
-          (AUDIOBOOK_WATCHDOG_INTERVAL_MS * decision.stallCount) / 1000,
-        );
-        console.warn(
-          "[audiobook.watchdog] stall detected → markFailedIfRunning",
-          {
-            taskId: row.id,
-            stage: curr.stage,
-            itemKey: curr.itemKey,
-            progress: curr.progress,
-            completedChapters: curr.completedChapters,
-            completedChunks: curr.completedChunks,
-            stalledSeconds,
-          },
-        );
-        try {
-          await this.markFailedIfRunning(
-            row.id,
-            `watchdog: 任务 ${stalledSeconds}s 未推进，判定假 running 已终止。`,
-          );
-        } catch (error) {
-          console.warn("[audiobook.watchdog] markFailedIfRunning failed", {
-            taskId: row.id,
-            error,
-          });
-        }
-        this.watchdogStallState.delete(row.id);
-      }
-    }
-
-    // GC：任何不再 running 的 id 从 stall map 清除
-    for (const id of Array.from(this.watchdogStallState.keys())) {
-      if (!alive.has(id)) this.watchdogStallState.delete(id);
-    }
   }
 }
 

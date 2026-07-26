@@ -438,38 +438,6 @@ async function throwIfCancelled(
   }
 }
 
-/**
- * R2：单章墙钟预算。默认 20min/章，env `AUDIOBOOK_CHAPTER_BUDGET_MS` 可调。
- *
- * 痛点：全局串行队列被超长章独占——pipeline 每章串行跑 annotate 两轮 + N chunk × 120s，
- * 无单章总墙钟时超长章可数小时堵死全队列。墙钟把「无限期」压成「≤budget」，
- * 超限抛 AppError(408) → executeTask catch 走 markFailedIfRunning 翻终态、释放队列。
- */
-const AUDIOBOOK_CHAPTER_BUDGET_MS = Math.max(
-  60_000,
-  Number(process.env.AUDIOBOOK_CHAPTER_BUDGET_MS ?? 20 * 60_000) || 20 * 60_000,
-);
-
-/**
- * 单章墙钟守卫工厂：返回 `() => Promise<void>`，超限抛 AppError(408)。
- * 与 `throwIfCancelled` 同型签名（无参 → 可 await），插入章循环三处检查点。
- * 纯函数、无 prisma 依赖，便于单测直接 require。
- */
-export function makeChapterBudgetGuard(
-  budgetMs: number,
-  startedAtAt: number,
-  label: () => string,
-): () => Promise<void> {
-  return async () => {
-    if (Date.now() - startedAtAt > budgetMs) {
-      throw new AppError(
-        `章节墙钟超限（${Math.round(budgetMs / 60_000)}min）：${label()}`,
-        408,
-      );
-    }
-  };
-}
-
 function loadExistingAnnotations(annotationsJson: string | null | undefined): AudiobookChapterAnnotation[] {
   if (!annotationsJson?.trim()) {
     return [];
@@ -800,14 +768,6 @@ export class AudiobookPipelineService {
     for (let chapterIndex = 0; chapterIndex < orderedChapters.length; chapterIndex += 1) {
       await throwIfCancelled(input.signal, input.isCancelRequested);
       const chapter = orderedChapters[chapterIndex];
-
-      // R2：单章墙钟预算——标注+合成+合并全程不得超 AUDIOBOOK_CHAPTER_BUDGET_MS
-      const chapterBudgetGuard = makeChapterBudgetGuard(
-        AUDIOBOOK_CHAPTER_BUDGET_MS,
-        Date.now(),
-        () => `第 ${chapter.order} 章：${chapter.title}`,
-      );
-
       let annotation = annotationsByChapter.get(chapter.id) ?? readAnnotationFile(taskDir, chapter.id);
 
       // 无段 / 空段 / mode 不一致 / 正文漂移 / 旧脏 delivery → 重标（防 resume 盲用旧音）
@@ -887,7 +847,6 @@ export class AudiobookPipelineService {
 
       // ── 合成 + 章合并（逐章：标注完即合成该章，chapter.wav 提前落盘供前端逐章交付）──
       await throwIfCancelled(input.signal, input.isCancelRequested);
-      await chapterBudgetGuard();
 
       const chapterWavPath = resolveChapterAudioPath(taskDir, chapter.id);
       // 合成侧对账：标注保留 speaker/text/delivery；绑定以当前角色卡为准
@@ -988,7 +947,6 @@ export class AudiobookPipelineService {
 
       for (let i = nextChunkIndex; i < chunkJobs.length; i += 1) {
         await throwIfCancelled(input.signal, input.isCancelRequested);
-        await chapterBudgetGuard();
         const job = chunkJobs[i];
         chapterProgress[chapterIndex].status = "synthesizing";
         chapterProgress[chapterIndex].completedChunks = i;
