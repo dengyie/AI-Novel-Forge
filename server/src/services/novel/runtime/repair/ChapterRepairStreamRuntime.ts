@@ -99,6 +99,11 @@ export function getChapterRepairLockTableSizeForTests(): number {
   return chapterRepairLocks.size;
 }
 
+/** 测试：清空锁表，避免用例间泄漏。 */
+export function resetChapterRepairLocksForTests(): void {
+  chapterRepairLocks.clear();
+}
+
 interface RepairReviewResult {
   score: QualityScore;
   issues: ReviewIssue[];
@@ -209,13 +214,25 @@ export class ChapterRepairStreamRuntime {
     // releaseRepairLock 永不触发 → 该 chapterId 后续所有 repair 都 await 一个
     // 永不 resolve 的锁链 → 进程内该章永久 hang（"卡住不动"最主要根因）。
     // 用 settled 幂等 + guardStream 在 stream 异常终止时兜底释放。
+    //
+    // C1：prepare/DB/assemble/streamTextPrompt 返回前若调用方 clock.race 已 abort，
+    // 底层 promise 仍可能稍后 resolve 出 {stream,onDone}——若直接 handoff 而无人
+    // 消费，guardStream/onDone 永不跑 → 锁 orphan。对策：
+    // 1) 各 await 后检查 signal；2) return 前若 aborted 则 release 并抛错，不 handoff；
+    // 3) catch 仅在尚未 handoff 时 release（handoff 后由 stream/onDone 负责）。
     let settled = false;
+    let handedToCaller = false;
     const releaseOnce = (): void => {
       if (settled) {
         return;
       }
       settled = true;
       releaseRepairLock();
+    };
+    const assertRepairSignal = (step: string): void => {
+      if (options.signal?.aborted) {
+        throw new Error(`repair aborted (signal) at ${step}`);
+      }
     };
     /**
      * 包裹返回给调用方的 stream：仅当迭代"自然读完全部 chunk"时把释放留给
@@ -237,17 +254,41 @@ export class ChapterRepairStreamRuntime {
         }
       }
     })();
+    const handoff = (
+      stream: AsyncIterable<BaseMessageChunk>,
+      onDone: (fullContent: string, helpers: StreamDoneHelpers) => Promise<void>,
+    ): {
+      stream: AsyncIterable<BaseMessageChunk>;
+      onDone: (fullContent: string, helpers: StreamDoneHelpers) => Promise<void>;
+    } => {
+      // return 前最后一道：race 已 abort 则绝不交出 stream，避免无人消费的 orphan 锁
+      assertRepairSignal("handoff");
+      handedToCaller = true;
+      return {
+        stream: guardStream(stream),
+        onDone: async (fullContent, helpers) => {
+          try {
+            await onDone(fullContent, helpers);
+          } finally {
+            releaseOnce();
+          }
+        },
+      };
+    };
     try {
+      assertRepairSignal("acquire");
       const [novel, chapter, bible] = await Promise.all([
         prisma.novel.findUnique({ where: { id: novelId } }),
         prisma.chapter.findFirst({ where: { id: chapterId, novelId } }),
         prisma.novelBible.findUnique({ where: { novelId } }),
       ]);
+      assertRepairSignal("load-entities");
       if (!novel || !chapter) {
         throw new Error("小说或章节不存在");
       }
 
       const issues = await this.resolveRepairIssues(novelId, chapterId, options);
+      assertRepairSignal("resolve-issues");
       const assembledContextPackage = await assembleChapterAuditContextPackage({
         assembler: this.deps.assembler,
         novelId,
@@ -255,6 +296,7 @@ export class ChapterRepairStreamRuntime {
         options,
         operation: "repair",
       });
+      assertRepairSignal("assemble-context");
       const repairContextPackage = withChapterRepairContext(assembledContextPackage, issues);
       if (!repairContextPackage.chapterRepairContext) {
         const error = new Error("chapterRepairContext missing after successful context assembly");
@@ -308,52 +350,49 @@ export class ChapterRepairStreamRuntime {
           signal: options.signal,
         },
       });
+      assertRepairSignal("prepare");
 
       if (prepared.kind === "patched") {
-        return {
-          stream: guardStream(createSingleChunkStream(prepared.content)),
-          onDone: async (fullContent: string, helpers: StreamDoneHelpers) => {
-            try {
-              // F8: prepared.content 已过 applyPromptPostValidate；若 postValidate
-              // 清洗非法段后返回空串，禁止回退到未清洗的原始 fullContent（会绕过
-              // SoT banned-term / structured 校验写进 chapter.content）。空 = 失败，
-              // finalize 内部的空检查会抛 ChapterPatchRepairFailedError。
-              await this.finalizeRepairResult({
-                novelId,
-                chapterId,
-                options,
-                content: prepared.content,
-                helpers,
-              });
-            } finally {
-              releaseOnce();
-            }
-          },
-        };
-      }
-
-      const streamed = await streamTextPrompt(createHeavyRepairPromptExecution(prepared));
-      return {
-        stream: guardStream(streamed.stream as AsyncIterable<BaseMessageChunk>),
-        onDone: async (fullContent: string, helpers: StreamDoneHelpers) => {
-          try {
-            // F8: completed.output 已过 applyPromptPostValidate；trim 后为空即代表
-            // postValidate 拒绝了候选，禁止回退到未清洗的 fullContent（绕过校验）。
-            const completed = await streamed.complete;
+        // F8: prepared.content 已过 applyPromptPostValidate；若 postValidate
+        // 清洗非法段后返回空串，禁止回退到未清洗的原始 fullContent（会绕过
+        // SoT banned-term / structured 校验写进 chapter.content）。空 = 失败，
+        // finalize 内部的空检查会抛 ChapterPatchRepairFailedError。
+        return handoff(
+          createSingleChunkStream(prepared.content),
+          async (_fullContent, helpers) => {
             await this.finalizeRepairResult({
               novelId,
               chapterId,
               options,
-              content: completed.output,
+              content: prepared.content,
               helpers,
             });
-          } finally {
-            releaseOnce();
-          }
+          },
+        );
+      }
+
+      const streamed = await streamTextPrompt(createHeavyRepairPromptExecution(prepared));
+      assertRepairSignal("stream-open");
+      // F8: completed.output 已过 applyPromptPostValidate；trim 后为空即代表
+      // postValidate 拒绝了候选，禁止回退到未清洗的 fullContent（绕过校验）。
+      return handoff(
+        streamed.stream as AsyncIterable<BaseMessageChunk>,
+        async (_fullContent, helpers) => {
+          const completed = await streamed.complete;
+          await this.finalizeRepairResult({
+            novelId,
+            chapterId,
+            options,
+            content: completed.output,
+            helpers,
+          });
         },
-      };
+      );
     } catch (error) {
-      releaseOnce();
+      // handoff 成功后 stream/onDone 拥有锁；此处再 release 会与并发 finalize 竞态
+      if (!handedToCaller) {
+        releaseOnce();
+      }
       throw error;
     }
   }

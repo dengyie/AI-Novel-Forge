@@ -335,6 +335,61 @@ test("budget_skipped is not terminal so resume can re-act after wall raise", () 
   assert.equal(done.has("skipped"), false, "budget_skipped must resume after wall raise");
 });
 
+
+test("re_reviewed is not terminal so resume can re-act (I2)", () => {
+  process.env.VOLUME_READINESS_RUN_PERSIST = "0";
+  resetVolumeReadinessRunStoreForTests();
+  const run = createVolumeReadinessRun({
+    novelId: "n-re-reviewed",
+    volumeOrder: 1,
+    fromOrder: 1,
+    toOrder: 2,
+    dryRun: false,
+    actionFilter: ["needs_re_review"],
+    budget: {
+      maxChapters: 5,
+      maxHeavyRewrites: 1,
+      maxLlmCalls: 10,
+      maxWallMinutes: 15,
+    },
+    plan: [],
+    planSummary: {
+      total: 0,
+      publishReady: 0,
+      needsReReview: 0,
+      needsPatch: 0,
+      needsPolish: 0,
+      needsHeavy: 0,
+      needsManual: 0,
+      publishReadyRatio: 0,
+    },
+  });
+  appendVolumeReadinessChapterResult(run.runId, {
+    chapterId: "stuck-re-reviewed",
+    chapterOrder: 1,
+    title: null,
+    verdictBefore: "needs_re_review",
+    verdictAfter: null,
+    outcome: "re_reviewed",
+    message: "assess missing",
+    startedAt: new Date().toISOString(),
+    finishedAt: new Date().toISOString(),
+  });
+  appendVolumeReadinessChapterResult(run.runId, {
+    chapterId: "done-adopted",
+    chapterOrder: 2,
+    title: null,
+    verdictBefore: "needs_patch",
+    verdictAfter: "publish_ready",
+    outcome: "repair_adopted",
+    startedAt: new Date().toISOString(),
+    finishedAt: new Date().toISOString(),
+  });
+  const done = getCompletedChapterIds(getVolumeReadinessRun(run.runId));
+  assert.equal(done.has("stuck-re-reviewed"), false, "re_reviewed must resume");
+  assert.equal(done.has("done-adopted"), true);
+});
+
 test("isWallBudgetExhausted + listPlannedLiveReadinessRuns skip wall-exhausted", () => {
   process.env.VOLUME_READINESS_RUN_PERSIST = "0";
   resetVolumeReadinessRunStoreForTests();

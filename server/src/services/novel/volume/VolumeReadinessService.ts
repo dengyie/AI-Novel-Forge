@@ -264,24 +264,30 @@ export class VolumeReadinessService {
         try {
           // #13：refresh 路径 per-chapter 硬超时，避免 HTTP createRun 因单章
           // evaluateOnly silent-hang 整请求挂死；超时后保留旧 signals 继续 classify。
+          // I3：gate timer 必须 clear，assess 先完成也不留悬挂 timer。
           const refreshTimeoutMs = Math.min(
             volumeReadinessConfig.perChapterTimeoutMs,
             5 * 60 * 1000,
           );
+          let refreshGateTimer: ReturnType<typeof setTimeout> | null = null;
           const reviewResult = await Promise.race([
             novelService.reviewChapter(novelId, chapter.id, {
               evaluateOnly: true,
               skipPayoffLedgerSync: true,
             }),
             new Promise<never>((_, reject) => {
-              setTimeout(
+              refreshGateTimer = setTimeout(
                 () => reject(new Error(
                   `evaluateOnly refresh timeout after ${Math.round(refreshTimeoutMs / 1000)}s`,
                 )),
                 refreshTimeoutMs,
               );
             }),
-          ]);
+          ]).finally(() => {
+            if (refreshGateTimer) {
+              clearTimeout(refreshGateTimer);
+            }
+          });
           // evaluateOnly 不写库：用返回值合成 signals，禁止 re-read riskFlags 空转。
           if (isEvaluateOnlyReview(reviewResult)) {
             signals = synthesizeSignalsFromEvaluateOnly({

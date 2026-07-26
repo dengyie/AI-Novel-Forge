@@ -379,6 +379,8 @@ export class VolumeReadinessExecutor {
       wallHeartbeatTimer = setInterval(() => {
         updateVolumeReadinessRun(runId, { wallMsUsed: wallUsedMs() });
       }, heartbeatMs);
+      // M3：不拖住 process 优雅退出（Node 默认 interval 是 ref）
+      wallHeartbeatTimer.unref?.();
 
       for (const planItem of initial.plan) {
         const live = getVolumeReadinessRun(runId);
@@ -667,11 +669,17 @@ export class VolumeReadinessExecutor {
             message = "publish_ready kept";
           }
 
-          const report = await volumeReadinessService.assess(initial.novelId, {
-            fromOrder: planItem.chapterOrder,
-            toOrder: planItem.chapterOrder,
-            refresh: false,
-          });
+          // I1：re-assess 也必须受章级 clock 约束——旧实现对 review/repair race
+          // 后裸 await assess，DB/信号合成 hang 会卡死整卷且 abort timer 已
+          // dispose 在 finally 清掉但 await 仍挂着。
+          const report = await clock.race(
+            () => volumeReadinessService.assess(initial.novelId, {
+              fromOrder: planItem.chapterOrder,
+              toOrder: planItem.chapterOrder,
+              refresh: false,
+            }),
+            "assess",
+          );
           const after = report.chapters.find((c) => c.chapterId === planItem.chapterId);
           verdictAfter = after?.verdict ?? null;
 
@@ -755,11 +763,14 @@ export class VolumeReadinessExecutor {
 
               // 链式后再 re-assess，取最终 verdictAfter；失败保守回退到链式前值
               try {
-                const chainReport = await volumeReadinessService.assess(initial.novelId, {
-                  fromOrder: planItem.chapterOrder,
-                  toOrder: planItem.chapterOrder,
-                  refresh: false,
-                });
+                const chainReport = await clock.race(
+                  () => volumeReadinessService.assess(initial.novelId, {
+                    fromOrder: planItem.chapterOrder,
+                    toOrder: planItem.chapterOrder,
+                    refresh: false,
+                  }),
+                  "chain.assess",
+                );
                 const chainAfter = chainReport.chapters.find(
                   (c) => c.chapterId === planItem.chapterId,
                 );
@@ -799,6 +810,16 @@ export class VolumeReadinessExecutor {
               outcome = "re_review_incomplete";
               message = `${message ?? "re_review"} → verdictAfter=${verdictAfter}`;
             }
+          }
+          // I2：assess 失败 / verdictAfter 空时 re_reviewed/polished 不得当终态——
+          // getCompletedChapterIds 已不认 re_reviewed；此处再降 incomplete 可 resume。
+          if (outcome === "re_reviewed" && verdictAfter == null) {
+            outcome = "re_review_incomplete";
+            message = `${message ?? "re_review"} → verdictAfter=null (assess missing)`;
+          }
+          if (outcome === "polished" && verdictAfter == null) {
+            outcome = "polish_incomplete";
+            message = `${message ?? "polish"} → verdictAfter=null (assess missing)`;
           }
 
           if (INCOMPLETE_OUTCOMES.has(outcome)) {
