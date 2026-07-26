@@ -29,6 +29,7 @@
 - 正文 writer、接收闸门、patch repair、heavy repair、保存正文、资产同步、复审和状态推进必须复用同一套 runtime 规则，不允许 route、旧 service 或导演分支各自再维护第二套正文执行实现。
 - **已提交正文快照是所有章节投影的唯一事实源**：草稿保存必须返回 `content + contentRevision`；style rewrite 和 repair adopt 必须以生成开始时的 revision 做 CAS。只有 CAS 成功返回的 committed snapshot 才能进入 acceptance、质量分数、时间线、事实账本和 artifact delta。提交失败或 revision 冲突时必须在任何投影前停止；禁止把未落库候选继续下发为终稿或用于生成衍生事实。
 - finalization 的顺序固定为 `draft commit -> optional style rewrite CAS -> quality projection -> timeline/fact/artifact projection`。pipeline 不得在 finalization 之后再次无条件保存同一终稿；这既会制造 revision 跳号，也会扩大覆盖人工编辑的竞态窗口。
+- **pipeline 取消是受租约约束的状态动作**：排队任务只能用 `status=queued` CAS 进入取消终态；运行任务只能用 `status=running` 加当前 `leaseOwner`（启用租约时）CAS 写入取消请求。CAS 未命中必须重读 canonical job 并返回数据库现状，禁止再用无条件 update 覆盖并发成功、失败、重排队或新 owner。等待运行器收口的取消行保持 `finishedAt=null`，只有真正进入终态的写入才设置完成时间。
 - `NovelGenerationService.createChapterStream`、`NovelService.createRepairStream`、`startPipelineJob / resumePipelineJob` 只是不同控制入口；它们的业务执行面必须继续汇入同一 coordinator，而不是按入口复制 writer 或修文逻辑。
 - 默认 writer 继续整章一次性生成，不把 sceneCards、章节合同或分场景多轮写作重新接入正文热路径。
 - 章节合同和 sceneCards 可作为规划、审校、诊断和局部修复辅助资产，不驱动默认正文生成。

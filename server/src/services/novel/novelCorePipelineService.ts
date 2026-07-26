@@ -7,7 +7,7 @@ import {
   type PipelineRunOptions,
 } from "./novelCoreShared";
 import { ensureNovelCharacters } from "./novelCoreSupport";
-import { buildPipelineLeaseClaimWhere, buildStaleRecoverablePipelineJobWhere, selectPrimaryPipelineJob } from "./pipelineJobDedup";
+import { buildStaleRecoverablePipelineJobWhere, selectPrimaryPipelineJob } from "./pipelineJobDedup";
 import {
   isPipelineCancellationError,
   normalizeJobTransportAutoRetryCount,
@@ -37,6 +37,8 @@ import {
   warnGenerationJobLeaseDisabledOnce,
 } from "./pipelineExecutionHelpers";
 import { executePipelineJob } from "./pipelineExecute";
+import { PipelineJobCancellationService } from "./pipeline/state/PipelineJobCancellationService";
+import { PipelineJobLeaseService } from "./pipeline/state/PipelineJobLeaseService";
 
 export { buildPipelineCurrentItemLabel, buildPipelineStageProgress } from "./pipelineJobState";
 export {
@@ -59,6 +61,8 @@ export class NovelCorePipelineService {
   /** 运行中章节的 AbortController：cancel API 可即时 abort，不必等心跳轮询 */
   private static readonly activeChapterAborts = new Map<string, AbortController>();
   private readonly chapterRuntimeCoordinator = new ChapterRuntimeCoordinator();
+  private readonly pipelineJobCancellationService = new PipelineJobCancellationService();
+  private readonly pipelineJobLeaseService = new PipelineJobLeaseService();
   private decoratePipelineJob<T extends PipelineJobLike | null>(
     job: T,
   ): T extends null ? null : DecoratedPipelineJob<Extract<T, PipelineJobLike>> {
@@ -490,59 +494,11 @@ export class NovelCorePipelineService {
   }
 
   async cancelPipelineJob(jobId: string) {
-    const job = await prisma.generationJob.findUnique({
-      where: { id: jobId },
-    });
-    if (!job) {
-      throw new Error("任务不存在。");
-    }
-    if (job.status === "succeeded" || job.status === "failed" || job.status === "cancelled") {
-      throw new Error("仅排队中或运行中的任务可取消。");
-    }
-    // 即时穿透：本进程内正在生成的章节立刻 abort LLM/stream，不依赖 15s 心跳
-    const liveAbort = NovelCorePipelineService.activeChapterAborts.get(jobId);
-    if (liveAbort && !liveAbort.signal.aborted) {
-      liveAbort.abort(new Error("PIPELINE_CANCELLED"));
-    }
-    if (job.status === "queued") {
-      // 原子取消：仅当仍为 queued 才直接终态化。若在 findUnique 与此处之间已被
-      // dispatcher 租约认领转 running，updateMany count===0，落到下方 running 分支请求取消，
-      // 避免"读到 queued→写终态 finishedAt→running pipeline 继续心跳"的僵尸窗口。
-      const cancelled = await prisma.generationJob.updateMany({
-        where: { id: jobId, status: "queued" },
-        data: {
-          status: "cancelled",
-          cancelRequestedAt: null,
-          heartbeatAt: null,
-          error: null,
-          currentStage: null,
-          currentItemKey: null,
-          currentItemLabel: null,
-          finishedAt: new Date(),
-        },
-      });
-      if (cancelled.count > 0) {
-        return prisma.generationJob.findUnique({ where: { id: jobId } });
+    return this.pipelineJobCancellationService.cancel(jobId, () => {
+      const liveAbort = NovelCorePipelineService.activeChapterAborts.get(jobId);
+      if (liveAbort && !liveAbort.signal.aborted) {
+        liveAbort.abort(new Error("PIPELINE_CANCELLED"));
       }
-      // 竞态穿透：已离开 queued（多半转 running），复核终态后落 running 分支。
-      const latest = await prisma.generationJob.findUnique({ where: { id: jobId } });
-      if (
-        latest
-        && (latest.status === "succeeded" || latest.status === "failed" || latest.status === "cancelled")
-      ) {
-        throw new Error("仅排队中或运行中的任务可取消。");
-      }
-    }
-    // running 分支：仅置取消请求标志，由 pipeline 自身在检查点终态化；finishedAt 保持 null，
-    // 让 running 行永不带 finishedAt，保住 watchdog/startup-resume 的可恢复性。
-    return prisma.generationJob.update({
-      where: { id: jobId },
-      data: {
-        status: "cancelled",
-        cancelRequestedAt: new Date(),
-        heartbeatAt: new Date(),
-        finishedAt: null,
-      },
     });
   }
 
@@ -715,18 +671,9 @@ export class NovelCorePipelineService {
       // owner 先算（lease disabled 时为 null），认领成功与否都用它灌进 executePipeline，
       // 让 executePipelineJob 的心跳/终写 CAS 带 leaseOwner，count=0 → 抛 lease-lost 早退。
       const leaseOwner = leaseEnabled ? `pipeline-${process.pid}` : null;
-      if (leaseEnabled) {
+      if (leaseOwner) {
         try {
-          const claimed = await prisma.generationJob.updateMany({
-            where: buildPipelineLeaseClaimWhere({ jobId, now: new Date() }),
-            data: {
-              status: "running",
-              // 清掉 auto-requeue 残留的 error，避免 running 期间仍展示失败文案
-              error: null,
-              leaseOwner,
-              leaseExpiresAt: new Date(Date.now() + PIPELINE_LEASE_TTL_MS),
-            },
-          });
+          const claimed = await this.pipelineJobLeaseService.claim(jobId, leaseOwner);
           if (claimed.count === 0) {
             // 已被其它实例认领或租约未过期——不重复调度。
             NovelCorePipelineService.activeJobIds.delete(jobId);
@@ -776,4 +723,3 @@ export class NovelCorePipelineService {
     }, jobId, novelId, options);
   }
 }
-
