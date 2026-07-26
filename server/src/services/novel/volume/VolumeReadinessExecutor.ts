@@ -17,6 +17,7 @@ import {
   appendVolumeReadinessChapterResult,
   getCompletedChapterIds,
   getVolumeReadinessRun,
+  registerVolumeReadinessRunCancelHook,
   releaseNovelRunFlight,
   tryClaimNovelRunFlight,
   updateVolumeReadinessRun,
@@ -49,6 +50,23 @@ const INCOMPLETE_OUTCOMES = new Set<VolumeReadinessChapterOutcome>([
   "re_review_incomplete",
   "repair_incomplete",
   "polish_incomplete",
+]);
+
+/**
+ * C3：会被 resume 重跑的非终态 outcome 全集 —— 决定 attemptCount 是否累计、
+ * 以及 maxIncompleteRetries 天花板是否生效。
+ *
+ * `failed` / `skipped_locked` 此前不在任何计数集合里：`getCompletedChapterIds` 不当它们终态
+ * （resume 会重跑），`countIncompleteAttemptsForChapter` 又因为它们不属 INCOMPLETE_OUTCOMES
+ * 而返回 0，且 attemptCount 从不写入 → 同一章可无限重试，只有墙钟能停下来。配合"动作超时不计
+ * 预算"的缺陷（C2），一章能把整卷预算烧光。这里把它们并入计数域，天花板到了 escalate 成 kept。
+ *
+ * `budget_skipped` 不在此列：它是预算耗尽的被动跳过，不代表这一章尝试过，resume 时应重新开始。
+ */
+const RETRYABLE_OUTCOMES = new Set<VolumeReadinessChapterOutcome>([
+  ...INCOMPLETE_OUTCOMES,
+  "failed",
+  "skipped_locked",
 ]);
 
 /**
@@ -91,7 +109,8 @@ export function mapRepairOutcomeFromFrames(
   ) {
     return { outcome: "repair_discarded", message };
   }
-  if (text.includes("lock") || text.includes("锁") || text.includes("并发")) {
+  // Minor(b)：与 catch 路径同一判定，避免正文/评语里出现"锁"字就误记 skipped_locked
+  if (isChapterLockConflictMessage(text)) {
     return { outcome: "skipped_locked", message };
   }
 
@@ -134,19 +153,38 @@ export function mapRepairOutcomeFromFrames(
   return { outcome: "failed", message };
 }
 
+/**
+ * Minor(b)：章级并发锁冲突的确定性识别。
+ *
+ * 只匹配 repair 锁路径会产生的措辞，不再对任意含「锁 / lock」的错误文本宽匹配——
+ * 那会把 LLM 侧报错（正文里恰好出现"锁"）或下游无关的 lock 异常误记成 skipped_locked，
+ * 让真实失败在 run 报告里消失。
+ */
+export function isChapterLockConflictMessage(message: string): boolean {
+  const lower = message.toLowerCase();
+  return lower.includes("chapter repair lock")
+    || lower.includes("repair in progress")
+    || lower.includes("already in progress")
+    || lower.includes("章节修复进行中")
+    || lower.includes("并发修复");
+}
+
 /** 兼容旧 mapRepairOutcome(string) 调用面；未知默认 failed（不再默认 adopt）。 */
 export function mapRepairOutcome(message: string | null | undefined): VolumeReadinessChapterOutcome {
   return mapRepairOutcomeFromFrames([{ message: message ?? undefined, phase: "completed" }]).outcome;
 }
 
 /**
- * 同章 incomplete 累计次数。
- * results 同章只保留最后一条，故读 attemptCount（缺省 incomplete → 1）。
+ * 同章「已尝试且会被 resume 重跑」的累计次数。
+ * results 同章只保留最后一条，故读 attemptCount（缺省 retryable → 1）。
  *
  * #11：若最后一条是 terminal（kept 等）则清零——该章已 escalate 人工；
- * 若最后一条 incomplete 则读 attemptCount。中间 incomplete→kept 覆盖后
+ * 若最后一条 retryable 则读 attemptCount。中间 incomplete→kept 覆盖后
  * attemptCount 不应被「只看最后一条非 incomplete 就 0」误伤到后续新 plan 项
  * （同一章再进 plan 是新一轮，0 正确）。
+ *
+ * C3：计数域从 INCOMPLETE_OUTCOMES 扩到 RETRYABLE_OUTCOMES，把 `failed` / `skipped_locked`
+ * 一并纳入，堵住"异常章无重试上限"的无限烧预算路径。
  */
 export function countIncompleteAttemptsForChapter(
   results: Array<{
@@ -161,12 +199,12 @@ export function countIncompleteAttemptsForChapter(
     if (result.chapterId !== chapterId) {
       continue;
     }
-    if (INCOMPLETE_OUTCOMES.has(result.outcome)) {
+    if (RETRYABLE_OUTCOMES.has(result.outcome)) {
       return typeof result.attemptCount === "number" && result.attemptCount > 0
         ? result.attemptCount
         : 1;
     }
-    // 同章最后一次已非 incomplete（kept/adopted/…）：计数清零
+    // 同章最后一次已非 retryable（kept/adopted/…）：计数清零
     return 0;
   }
   return 0;
@@ -216,8 +254,13 @@ async function drainRepairStream(input: {
 function createChapterTimeoutClock(deadlineMs: number, budgetMs: number): {
   signal: AbortSignal;
   race: <T>(fn: () => Promise<T>, stepLabel?: string) => Promise<T>;
+  /** I6：外部（cancel 请求）主动提前终止本章，不等墙钟到点。 */
+  abort: (reason: string) => void;
   dispose: () => void;
 } {
+  // Minor(a)：60s 下限是刻意的——deadlineMs 逼近 0 时若不兜底，clock 会立刻 abort，
+  // 章一进来就 failed，反而制造无意义的 retry。代价是墙钟最多被超出 60s（有界，
+  // 且外层 `wallUsedMs() > deadlineMs` 检查会在下一章把剩余章全部记 budget_skipped）。
   const timeoutMs = Math.max(60_000, Math.min(deadlineMs, budgetMs));
   const startedAt = Date.now();
   const absoluteDeadline = startedAt + timeoutMs;
@@ -251,6 +294,7 @@ function createChapterTimeoutClock(deadlineMs: number, budgetMs: number): {
     }
     const remaining = Math.max(1, absoluteDeadline - Date.now());
     let gateTimer: ReturnType<typeof setTimeout> | null = null;
+    let onAbort: (() => void) | null = null;
     const gate = new Promise<never>((_, reject) => {
       gateTimer = setTimeout(
         () => {
@@ -260,6 +304,17 @@ function createChapterTimeoutClock(deadlineMs: number, budgetMs: number): {
         },
         remaining,
       );
+      // I6：外部 abort（cancel 请求）也要让 gate 立刻 reject。只靠 signal 传给 provider
+      // 不够——不认 signal 的下游会让 race 一直挂到墙钟到点，取消依旧要等满 45 分钟。
+      onAbort = () => {
+        const reason = typeof controller.signal.reason === "string"
+          ? controller.signal.reason
+          : "aborted";
+        reject(new Error(
+          `readiness chapter step aborted${stepLabel ? `: ${stepLabel}` : ""} (${reason})`,
+        ));
+      };
+      controller.signal.addEventListener("abort", onAbort, { once: true });
     });
     try {
       // 显式 Promise.race<T>：gate 是 Promise<never>，部分 TS 版本会把 race 结果 widen 成 unknown
@@ -268,28 +323,39 @@ function createChapterTimeoutClock(deadlineMs: number, budgetMs: number): {
       if (gateTimer) {
         clearTimeout(gateTimer);
       }
+      if (onAbort) {
+        controller.signal.removeEventListener("abort", onAbort);
+      }
     }
   };
-  return { signal: controller.signal, race, dispose };
+  return { signal: controller.signal, race, abort: fireAbort, dispose };
 }
 
 /**
- * light_repair ≈ 2 次 LLM 等价；heavy_repair 流式 + baseline/candidate evaluateOnly ≈ 3。
- * review 计 1。用于预算，非精确 token 计量。
+ * 每个动作的 LLM 调用等价数，用于 maxLlmCalls 预算，非精确 token 计量。
+ *
+ * I7：heavy 此前记 3，实际链路是 ——
+ *   resolveRepairIssues 的 review(1) + heavy 流式生成(1) + finalize baseline evaluateOnly(1)
+ *   + finalize candidate evaluateOnly(1) + 采纳后正式 recheck(1) + 动作后 re-assess(1) = 6。
+ * 低估一半意味着 maxLlmCalls 只有名义上一半的约束力，卷级预算实际可超支 ~2×。
+ * patch/polish 同理按实际链路上调。
  */
 function estimateLlmCallsForAction(verdict: VolumeReadinessVerdict): number {
   if (verdict === "needs_re_review") {
-    return 1;
+    // reviewChapter(1) + re-assess(1)
+    return 2;
   }
   if (verdict === "needs_patch") {
-    return 2;
+    // light_repair：resolveRepairIssues review(1) + 生成(1) + baseline/candidate evaluateOnly(2)
+    // + 采纳后 recheck(1) + re-assess(1)
+    return 6;
   }
   if (verdict === "needs_polish") {
-    // polish：跳过 writer，走 finalize/风格/双门，约 1–2 次 LLM
-    return 2;
+    // polish：跳过 writer，走 finalize/风格/双门 + re-assess
+    return 3;
   }
   if (verdict === "needs_heavy") {
-    return 3;
+    return 6;
   }
   return 0;
 }
@@ -422,12 +488,22 @@ export class VolumeReadinessExecutor {
         // 章前 re-assess：plan 快照可能过期（中途人工/上一轮已修好）
         // dryRun 保持 plan 原样便于预览；live 跳过已 publish_ready 的章，避免白烧 heavy。
         if (!initial.dryRun) {
+          // I5：pre-assess 必须与 I1 的 re-assess 同样受章级 clock 约束。旧实现在这里裸 await，
+          // 而章级 clock 要到动作分支才创建，assess 内部（DB/信号合成）一旦 hang 就没有任何
+          // 超时兜底，整卷停在第一章。用一次性短 clock 包住：剩余墙钟与每章预算取小。
+          const preClock = createChapterTimeoutClock(
+            Math.max(0, deadlineMs - wallUsedMs()),
+            perChapterTimeoutMs,
+          );
           try {
-            const preReport = await volumeReadinessService.assess(initial.novelId, {
-              fromOrder: planItem.chapterOrder,
-              toOrder: planItem.chapterOrder,
-              refresh: false,
-            });
+            const preReport = await preClock.race(
+              () => volumeReadinessService.assess(initial.novelId, {
+                fromOrder: planItem.chapterOrder,
+                toOrder: planItem.chapterOrder,
+                refresh: false,
+              }),
+              "pre-assess",
+            );
             const pre = preReport.chapters.find((c) => c.chapterId === planItem.chapterId);
             if (pre?.verdict === "publish_ready") {
               appendVolumeReadinessChapterResult(runId, {
@@ -446,11 +522,13 @@ export class VolumeReadinessExecutor {
               continue;
             }
           } catch {
-            // re-assess 失败不阻断：按原 plan 继续
+            // re-assess 失败/超时不阻断：按原 plan 继续
+          } finally {
+            preClock.dispose();
           }
         }
 
-        // incomplete 次数达上限 → 不再自动动作，记 kept（人工）
+        // 重试次数达上限 → 不再自动动作，记 kept（人工）
         const incompleteAttempts = countIncompleteAttemptsForChapter(
           live.results,
           planItem.chapterId,
@@ -463,7 +541,7 @@ export class VolumeReadinessExecutor {
             verdictBefore: planItem.verdict,
             verdictAfter: null,
             outcome: "kept",
-            message: `incomplete×${incompleteAttempts} ≥ maxIncompleteRetries=${maxIncomplete}；转人工（勿 resume 空转）`,
+            message: `attempt×${incompleteAttempts} ≥ maxIncompleteRetries=${maxIncomplete}；转人工（勿 resume 空转）`,
             startedAt: new Date().toISOString(),
             finishedAt: new Date().toISOString(),
             attemptCount: incompleteAttempts,
@@ -487,7 +565,9 @@ export class VolumeReadinessExecutor {
               message: `wall time budget ${initial.budget.maxWallMinutes}m exhausted (used ~${Math.ceil(wallUsedMs() / 60000)}m incl. prior resume)`,
               startedAt: new Date().toISOString(),
               finishedAt: new Date().toISOString(),
-            });
+              // Minor(c)：批量 budget_skipped 也要带 counters，否则这批写入会把快照里的
+              // llmCallsUsed/heavyRewritesUsed/chaptersActed 留在上一次的旧值上
+            }, { llmCallsUsed, heavyRewritesUsed, chaptersActed });
             actedChapterIds.add(item.chapterId);
           }
           break;
@@ -552,6 +632,8 @@ export class VolumeReadinessExecutor {
         // signal 尽快 settle；race 兜底抛错防止 signal 被 ignore 时 await 永不返回。
         // clock 在 try 外声明，catch 路径也能 dispose abort 定时器。
         let chapterClock: ReturnType<typeof createChapterTimeoutClock> | null = null;
+        // I6：cancel 请求进来时立即 abort 本章 clock（见 registerVolumeReadinessRunCancelHook）
+        let unregisterCancelHook: (() => void) | null = null;
         try {
           const remainingWallMs = Math.max(0, deadlineMs - wallUsedMs());
           if (remainingWallMs <= 0) {
@@ -560,6 +642,10 @@ export class VolumeReadinessExecutor {
           }
           chapterClock = createChapterTimeoutClock(remainingWallMs, perChapterTimeoutMs);
           const clock = chapterClock;
+          unregisterCancelHook = registerVolumeReadinessRunCancelHook(
+            runId,
+            () => clock.abort("run cancel requested"),
+          );
 
           if (planItem.verdict === "needs_re_review") {
             // 心跳：章开始即刷 wall，避免 API 长时间 acted=0 像假死
@@ -569,6 +655,12 @@ export class VolumeReadinessExecutor {
               chaptersActed,
               wallMsUsed: wallUsedMs(),
             });
+            // C2：预扣。计数必须发生在动作**之前**——旧实现只在成功返回后累加，
+            // 一章跑满 45 分钟章级超时后抛错，token 已经真金白银烧掉，却 llmCallsUsed=0、
+            // chaptersActed=0，于是 maxHeavyRewrites/maxLlmCalls 变成"成功次数上限"而非
+            // "成本上限"，异常章可以反复重试直到墙钟耗尽（生产曾出现 121 次 600s 超时而 acted=0）。
+            llmCallsUsed += estimateLlmCallsForAction("needs_re_review");
+            chaptersActed += 1;
             // readiness 热路径跳过阻塞 ledger sync（仍走真 dual-gate review）
             await clock.race(
               () => novelService.reviewChapter(initial.novelId, planItem.chapterId, {
@@ -577,8 +669,6 @@ export class VolumeReadinessExecutor {
               }),
               "reviewChapter",
             );
-            llmCallsUsed += estimateLlmCallsForAction("needs_re_review");
-            chaptersActed += 1;
             outcome = "re_reviewed";
             message = "true review executed (dual gate)";
           } else if (planItem.verdict === "needs_patch" || planItem.verdict === "needs_heavy") {
@@ -644,6 +734,13 @@ export class VolumeReadinessExecutor {
               chaptersActed,
               wallMsUsed: wallUsedMs(),
             });
+            // C2：预扣（同上）。heavy 一次失败的成本与一次成功相当，必须先记账，
+            // 否则 maxHeavyRewrites 只约束成功次数，超时章可无限重开 heavy。
+            llmCallsUsed += estimateLlmCallsForAction(planItem.verdict);
+            chaptersActed += 1;
+            if (repairMode === "heavy_repair") {
+              heavyRewritesUsed += 1;
+            }
             const streamResult = await clock.race<RepairStreamHandle>(
               () => novelService.createRepairStream(
                 initial.novelId,
@@ -660,11 +757,6 @@ export class VolumeReadinessExecutor {
               }),
               "drainRepairStream",
             );
-            llmCallsUsed += estimateLlmCallsForAction(planItem.verdict);
-            chaptersActed += 1;
-            if (repairMode === "heavy_repair") {
-              heavyRewritesUsed += 1;
-            }
             const mapped = mapRepairOutcomeFromFrames(drained.frames);
             outcome = mapped.outcome;
             message = mapped.message
@@ -673,6 +765,9 @@ export class VolumeReadinessExecutor {
               message = `${message} | padIssues=${padIssueCount}`;
             }
           } else if (planItem.verdict === "needs_polish") {
+            // C2：预扣（同上）
+            llmCallsUsed += estimateLlmCallsForAction("needs_polish");
+            chaptersActed += 1;
             // 已有正文：runMode=polish 跳过 writer，只走风格/验收/L0/双门 finalize
             await clock.race(
               () => novelService.runPipelineChapter(
@@ -682,8 +777,6 @@ export class VolumeReadinessExecutor {
               ),
               "runPipelineChapter(polish)",
             );
-            llmCallsUsed += estimateLlmCallsForAction("needs_polish");
-            chaptersActed += 1;
             // outcome 暂记 polished；下面 re-assess 后若未 publish_ready 降为 polish_incomplete
             outcome = "polished";
             message = "pipeline polish (skip writer, finalize dual gate)";
@@ -768,6 +861,12 @@ export class VolumeReadinessExecutor {
                 wallMsUsed: wallUsedMs(),
               });
 
+              // C2：预扣（同上）。链式 repair 抛错会被外层 catch 记 failed，
+              // 预扣保证这段成本不会从账上消失。
+              llmCallsUsed += chainEstimated;
+              if (chainMode === "heavy_repair") {
+                heavyRewritesUsed += 1;
+              }
               const chainStream = await clock.race<RepairStreamHandle>(
                 () => novelService.createRepairStream(
                   initial.novelId,
@@ -784,10 +883,6 @@ export class VolumeReadinessExecutor {
                 }),
                 "chain.drainRepairStream",
               );
-              llmCallsUsed += chainEstimated;
-              if (chainMode === "heavy_repair") {
-                heavyRewritesUsed += 1;
-              }
               const chainMapped = mapRepairOutcomeFromFrames(chainDrained.frames);
               // 链式动作覆盖 re_reviewed 结果；chaptersActed 不重复计数（同章）
               outcome = chainMapped.outcome;
@@ -858,22 +953,30 @@ export class VolumeReadinessExecutor {
             message = `${message ?? "polish"} → verdictAfter=null (assess missing)`;
           }
 
-          if (INCOMPLETE_OUTCOMES.has(outcome)) {
-            attemptCount = incompleteAttempts + 1;
-            if (attemptCount >= maxIncomplete) {
-              message = `${message ?? outcome}｜incomplete×${attemptCount} 达 maxIncompleteRetries=${maxIncomplete}，后续 resume 将 kept/人工`;
-            }
-          }
         } catch (error) {
           outcome = "failed";
           message = error instanceof Error ? error.message : String(error);
-          const lower = message.toLowerCase();
-          if (lower.includes("lock") || lower.includes("并发") || lower.includes("in progress")) {
+          // Minor(b)：只有真正的章级并发锁冲突才算 skipped_locked。此前用「message 含 锁/lock/并发」
+          // 宽匹配，会把正文里出现"锁"字的 LLM 报错、或任何带 lock 词的下游异常误分类成"没跑"，
+          // 掩盖真实失败。收紧成 repair 锁与 in-progress 冲突的确定性措辞。
+          if (isChapterLockConflictMessage(message)) {
             outcome = "skipped_locked";
           }
         } finally {
+          unregisterCancelHook?.();
+          unregisterCancelHook = null;
           chapterClock?.dispose();
           chapterClock = null;
+        }
+
+        // C3：attemptCount 对所有 retryable outcome（含 failed / skipped_locked）都要写，
+        // 否则 countIncompleteAttemptsForChapter 永远读不到累计次数，天花板形同虚设。
+        // 放在 try/catch 之外统一处理，catch 路径也能落到计数。
+        if (RETRYABLE_OUTCOMES.has(outcome)) {
+          attemptCount = incompleteAttempts + 1;
+          if (attemptCount >= maxIncomplete) {
+            message = `${message ?? outcome}｜attempt×${attemptCount} 达 maxIncompleteRetries=${maxIncomplete}，后续 resume 将 kept/人工`;
+          }
         }
 
         appendVolumeReadinessChapterResult(runId, {

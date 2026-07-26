@@ -92,7 +92,7 @@ export function decideRepairContentAdoption(
     input.candidateBlockingL1Codes ?? [],
   );
   // L1 计数比较（codeless 指 category 级）：容忍同类硬伤的 evidence 抖动与小幅浮增，
-  // 仅当候选硬伤类目数明显膨胀时作为回归信号。baseline 无硬伤时仍严格（见下）。
+  // 仅当候选硬伤类目数膨胀且分数无任何长进时才作为回归信号（I4：baseline 无硬伤时同一判据）。
   const baselineL1Count = (input.baselineBlockingL1Codes ?? []).length;
   const candidateL1Count = (input.candidateBlockingL1Codes ?? []).length;
   const l1CountGrew = candidateL1Count > baselineL1Count;
@@ -122,14 +122,15 @@ export function decideRepairContentAdoption(
   }
 
   if (!input.skipL1Check) {
-    // baseline 本就无 L1 硬伤 → 候选不得新引入任何类别（正回归，硬拒绝）。
-    if (baselineL1Count === 0 && introducedBlockingL1Codes.length > 0) {
-      return fail(
-        `候选引入新的 L1 义务/审校硬伤：${introducedBlockingL1Codes.slice(0, 6).join(",")}`,
-      );
-    }
-    // baseline 有 L1 硬伤：容忍同类硬伤 evidence 抖动；仅当候选硬伤类目数明显膨胀
-    // 且 overall 未升、亦无文学门/维度改进时才判回归（保留 anti-regression，不无谓 discard）。
+    // I4：baseline 无 L1 硬伤时曾走「候选新增任一类目即硬拒」的独立分支，这条在实践中是误伤源——
+    // baselineBlockingL1Codes 与 candidateBlockingL1Codes 来自两次**独立的** evaluateOnly LLM 采样，
+    // 而 codeless 指纹的取值域只有 6 个 category（coherence/repetition/pacing/voice/engagement/logic）。
+    // 两次采样在同一篇文本上给出不同的 high/critical 类目属于常态抖动，却会被当成"候选引入新硬伤"，
+    // 且 repair_discarded 是终态 —— 一次纯噪声就永久判死这一章本轮的修复机会（真跑 ch2 即此形态）。
+    //
+    // 改为与 baseline 有硬伤时同一套判据：只有"类目数增长 ∧ overall 未升 ∧ 未过文学门 ∧ 无门槛维改进"
+    // 才判回归。0→N 且分数毫无长进依然会被拒（真回归照样挡），但 0→N 伴随分数/维度改进不再误杀。
+    // L0 硬检查在上方已独立执行且不受此分支影响，安全网不变。
     if (l1CountGrew && scoreDelta.overall <= 0 && !candidateLiteraryPass) {
       const improvedDimension = (
         input.baselineScore.coherence < threshold.coherence
@@ -141,7 +142,7 @@ export function decideRepairContentAdoption(
       );
       if (!improvedDimension) {
         return fail(
-          `候选 L1 硬伤类目膨胀 ${baselineL1Count}->${candidateL1Count}（新增 ${introducedBlockingL1Codes.slice(0, 6).join(",")}）且 overall 未升，拒绝采纳`,
+          `候选 L1 硬伤类目膨胀 ${baselineL1Count}->${candidateL1Count}（新增 ${introducedBlockingL1Codes.slice(0, 6).join(",")}）且 overall 未升、无门槛维改进，拒绝采纳`,
         );
       }
     }

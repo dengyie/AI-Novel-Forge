@@ -98,6 +98,31 @@ const runsByNovel = new Map<string, string[]>();
 /** 同 novel 同时只允许一个 live（非 dry）run 在执行。 */
 const activeNovelRuns = new Map<string, string>();
 
+/**
+ * I6：runId → 当前在跑的章级 abort 回调。
+ *
+ * 旧实现里 cancel 只置 `cancelRequested` flag，而 executor 只在 for 循环顶端读这个 flag，
+ * 章内动作（heavy repair 最长 45 分钟）没有任何取消通道 —— 运维点了取消要等到当前章跑完
+ * 才生效，最坏 45 分钟，期间还在继续烧 token 与写库。这里让 executor 注册章级 abort，
+ * cancel 时立即触发，章内 clock.race 会即时抛错走 failed/cancelled 收口。
+ *
+ * 仅 in-process：跨进程 zombie run 仍走下面 liveFlight 的 force-cancel 分支。
+ */
+const runCancelHooks = new Map<string, () => void>();
+
+/**
+ * executor 注册章级取消钩子；返回注销函数（章结束/换章时调用）。
+ * 同 runId 后注册者覆盖前者——executor 串行处理章节，同一时刻只有一个活动 clock。
+ */
+export function registerVolumeReadinessRunCancelHook(runId: string, hook: () => void): () => void {
+  runCancelHooks.set(runId, hook);
+  return () => {
+    if (runCancelHooks.get(runId) === hook) {
+      runCancelHooks.delete(runId);
+    }
+  };
+}
+
 let hydratePromise: Promise<void> | null = null;
 
 function nowIso(): string {
@@ -423,6 +448,8 @@ export function releaseNovelRunFlight(novelId: string, runId: string): void {
   if (activeNovelRuns.get(novelId) === runId) {
     activeNovelRuns.delete(novelId);
   }
+  // I6：run 进终态后钩子必然失效，一并清理避免 Map 长期累积
+  runCancelHooks.delete(runId);
 }
 
 export function updateVolumeReadinessRun(
@@ -480,6 +507,16 @@ export function requestVolumeReadinessRunCancel(runId: string): VolumeReadinessR
   }
   run.cancelRequested = true;
   run.updatedAt = nowIso();
+  // I6：立即 abort 当前章级 clock，让章内 LLM 尽快 settle，而不是等本章跑完
+  // （heavy 最长 45 分钟）才在循环顶端读到 flag。
+  const cancelHook = runCancelHooks.get(runId);
+  if (cancelHook) {
+    try {
+      cancelHook();
+    } catch {
+      // ignore — 取消路径不得打挂调用方
+    }
+  }
   // planned：无 executor，直接 cancelled。
   // running 但本进程 flight 表没有该 runId：deploy/restart 后的 zombie，
   // 旧进程 executor 已死，再只打 flag 会永久占 open-run 互斥。
@@ -587,6 +624,7 @@ export function resetVolumeReadinessRunStoreForTests(): void {
   runsById.clear();
   runsByNovel.clear();
   activeNovelRuns.clear();
+  runCancelHooks.clear();
   hydratePromise = null;
 }
 

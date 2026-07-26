@@ -129,6 +129,21 @@ function contentFingerprint(content: string): string {
   return createHash("sha256").update(content).digest("hex");
 }
 
+/**
+ * C1：abort 断言的单一实现，createRepairStream 前置阶段与 finalizeRepairResult 落库阶段共用。
+ *
+ * 背景：readiness executor 的 per-chapter clock 用 `Promise.race` 做步骤门控，race 输掉的一方
+ * 只是被"放弃等待"，并不会被取消。finalize 阶段三次 review LLM 调用（baseline / candidate /
+ * post-adopt recheck）此前都没拿到 signal，超时后仍会跑满 LLM_REQUEST_TIMEOUT_MS 并最终
+ * `prisma.chapter.update({ content })`，用一份早已被放弃的 baseline 覆盖正文（lost update），
+ * 同时整段时间持续占着 chapter repair 锁。故 finalize 每个 LLM 边界与写库前都要断言 signal。
+ */
+function assertRepairAbortSignal(step: string, signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new Error(`repair aborted (signal) at ${step}`);
+  }
+}
+
 const REVIEW_ISSUE_SEVERITIES = new Set(["low", "medium", "high", "critical"]);
 const REVIEW_ISSUE_CATEGORIES = new Set([
   "coherence",
@@ -298,9 +313,7 @@ export class ChapterRepairStreamRuntime {
       releaseRepairLock();
     };
     const assertRepairSignal = (step: string): void => {
-      if (options.signal?.aborted) {
-        throw new Error(`repair aborted (signal) at ${step}`);
-      }
+      assertRepairAbortSignal(step, options.signal);
     };
     /**
      * 包裹返回给调用方的 stream：仅当迭代"自然读完全部 chunk"时把释放留给
@@ -589,6 +602,8 @@ export class ChapterRepairStreamRuntime {
       chapter: baselineChapter,
       options: input.options,
     });
+    // C1: 线程 signal 确保 chapter clock 超时后不再继续 finalize LLM 与写库
+    assertRepairAbortSignal("finalize-baseline-review", input.options.signal);
     const baselineScore = baselineReview.score;
     // F7：evaluateOnly 失败回退时 issues 未知，L1 指纹无意义；下游 adopt 判定必须知晓以跳过 L1 diff
     const baselineL1Degraded = baselineReview.degraded === true;
@@ -602,7 +617,10 @@ export class ChapterRepairStreamRuntime {
       temperature: input.options.temperature,
       content: repairedContent,
       evaluateOnly: true,
+      signal: input.options.signal,
     });
+    // C1: chapter clock 超时后不继续 adopt 判定与写库
+    assertRepairAbortSignal("finalize-candidate-review", input.options.signal);
     const candidateScore = candidateReview.score;
     const candidateBlockingL1Codes = fingerprintReviewIssuesAsL1BlockingCodes(candidateReview.issues);
 
@@ -669,6 +687,8 @@ export class ChapterRepairStreamRuntime {
     }
 
     // adopt：写 content + revision + artifacts + recheck（带副作用）+ 可选 approval
+    // C1: 写正文前最后一次 abort 检查 —— chapter clock 超时后禁止用已被放弃的 baseline 覆盖正文
+    assertRepairAbortSignal("finalize-adopt-write", input.options.signal);
     await prisma.chapter.update({
       where: { id: input.chapterId },
       data: {
@@ -712,6 +732,9 @@ export class ChapterRepairStreamRuntime {
         model: input.options.model,
         temperature: input.options.temperature,
         content: repairedContent,
+        // C1：正文已落库，此处 abort 走下方 catch → markPostAdoptNeedsRepair，
+        // 状态收敛到 needs_repair 可 resume，好过挂满 LLM 超时把章锁扣住。
+        signal: input.options.signal,
       });
     } catch (error) {
       await this.markPostAdoptNeedsRepair({
@@ -814,9 +837,15 @@ export class ChapterRepairStreamRuntime {
           temperature: input.options.temperature,
           content: input.baselineContent,
           evaluateOnly: true,
+          signal: input.options.signal,
         },
       );
     } catch (error) {
+      // C1：abort 是"上游主动放弃本章"，不是 baseline 评估失败；不能降级成 degraded 继续跑
+      // finalize（那会在超时后继续 candidate LLM 并最终覆盖正文）。原样抛出让 finalize 中止。
+      if (input.options.signal?.aborted) {
+        throw error;
+      }
       logPipelineError("Baseline evaluateOnly failed; falling back to columns/ruleScore.", {
         novelId: input.novelId,
         chapterId: input.chapterId,

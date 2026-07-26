@@ -171,13 +171,39 @@ test("decideRepairContentAdoption adopts when new L1 category appears but overal
   assert.ok(result.introducedBlockingL1Codes.length >= 1);
 });
 
-test("decideRepairContentAdoption discards any new L1 when baseline has zero L1 (strict)", () => {
+test("decideRepairContentAdoption discards new L1 from zero baseline when scores flat (I4)", () => {
   const {
     fingerprintReviewIssuesAsL1BlockingCodes,
   } = require("@ai-novel/shared/types/repairAdoptDecision");
-  // baseline 本就无任何 L1 硬伤 → 候选不得新引入任何类目（正回归，硬拒绝）。
+  // I4：baseline 无 L1 不再单独走「新增任一类目即硬拒」——但真回归（类目 0→1 且分数毫无长进、
+  // 未过文学门、无门槛维改进）依然必须挡住。
   const candidateL1 = fingerprintReviewIssuesAsL1BlockingCodes([
     { severity: "critical", category: "logic", evidence: "义务B新增缺口" },
+  ]);
+  const result = decideRepairContentAdoption({
+    baselineScore: score({ overall: 70, coherence: 70, repetition: 70, engagement: 70 }),
+    candidateScore: score({ overall: 70, coherence: 70, repetition: 70, engagement: 70 }),
+    baselineBlockingCodes: [],
+    candidateBlockingCodes: [],
+    baselineBlockingL1Codes: [],
+    candidateBlockingL1Codes: candidateL1,
+  });
+  assert.equal(result.decision, "discard");
+  assert.match(result.reason, /L1/);
+  assert.ok(result.introducedBlockingL1Codes.length >= 1);
+});
+
+test("decideRepairContentAdoption adopts new L1 from zero baseline when overall rises (I4)", () => {
+  const {
+    fingerprintReviewIssuesAsL1BlockingCodes,
+  } = require("@ai-novel/shared/types/repairAdoptDecision");
+  // I4 核心修复：baselineBlockingL1Codes 与 candidateBlockingL1Codes 来自两次独立的
+  // evaluateOnly LLM 采样，codeless 指纹取值域只有 6 个 category —— baseline 恰好采样到 0 个
+  // high/critical、candidate 采样到 1 个，属于常态抖动。旧实现在这种情况下硬 discard，
+  // 而 repair_discarded 是终态，等于一次噪声就永久判死本轮该章（真跑 ch2 即此形态）。
+  // 现在与 baseline 有硬伤时同一判据：分数明显改进即可采纳。
+  const candidateL1 = fingerprintReviewIssuesAsL1BlockingCodes([
+    { severity: "critical", category: "logic", evidence: "抖动出现的 logic 类目" },
   ]);
   const result = decideRepairContentAdoption({
     baselineScore: score({ overall: 70, coherence: 70, repetition: 70, engagement: 70 }),
@@ -187,9 +213,34 @@ test("decideRepairContentAdoption discards any new L1 when baseline has zero L1 
     baselineBlockingL1Codes: [],
     candidateBlockingL1Codes: candidateL1,
   });
-  assert.equal(result.decision, "discard");
-  assert.match(result.reason, /L1/);
+  assert.equal(result.decision, "adopt");
   assert.ok(result.introducedBlockingL1Codes.length >= 1);
+});
+
+test("decideRepairContentAdoption still hard-discards new L0 from zero baseline (I4 不削弱 L0)", () => {
+  // L0 安全网与 L1 判定完全独立：即使分数大幅上升，新引入 L0 硬伤一律 discard。
+  const result = decideRepairContentAdoption({
+    baselineScore: score({ overall: 70, coherence: 70, repetition: 70, engagement: 70 }),
+    candidateScore: score({ overall: 95, coherence: 95, repetition: 95, engagement: 95 }),
+    baselineBlockingCodes: [],
+    candidateBlockingCodes: ["prose_ai_self_reference"],
+    baselineBlockingL1Codes: [],
+    candidateBlockingL1Codes: [],
+  });
+  assert.equal(result.decision, "discard");
+  assert.match(result.reason, /L0/);
+});
+
+test("decideRepairContentAdoption: skipL1Check 不绕过 L0（I4 回归防护）", () => {
+  const result = decideRepairContentAdoption({
+    baselineScore: score({ overall: 70 }),
+    candidateScore: score({ overall: 95 }),
+    baselineBlockingCodes: [],
+    candidateBlockingCodes: ["sot_timeline_conflict"],
+    skipL1Check: true,
+  });
+  assert.equal(result.decision, "discard");
+  assert.match(result.reason, /L0/);
 });
 
 test("decideRepairContentAdoption plateau_stop after consecutive no-improve", () => {
