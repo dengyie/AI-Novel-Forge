@@ -73,6 +73,7 @@ import {
   stopArtifactCheckpointHygieneScanner,
 } from "./services/novel/runtime/ChapterArtifactSyncCheckpointHygiene";
 import { registerBuiltInEngines } from "./services/audiobook/engine/registerBuiltInEngines";
+import { audiobookTaskService } from "./services/audiobook/AudiobookTaskService";
 
 getSharedNovelServices();
 registerNovelEventHandlers(novelEventBus);
@@ -337,7 +338,21 @@ function initializeBackgroundServices(): BackgroundServicesHandle {
           maxWallMinutes: run.budget.maxWallMinutes,
         });
       }
-      for (const run of planned) {
+      // #4：同 novel 多 planned 时只 auto-resume 最新一条（list 已按 updatedAt desc），
+      // 其余保持 planned；flight claim 也会拒掉 sibling，避免并发 execute 竞态。
+      const seenNovels = new Set<string>();
+      const dedupedPlanned = planned.filter((run) => {
+        if (seenNovels.has(run.novelId)) {
+          console.log("[volume.readiness] skip auto-resume sibling planned (same novel)", {
+            runId: run.runId,
+            novelId: run.novelId,
+          });
+          return false;
+        }
+        seenNovels.add(run.novelId);
+        return true;
+      });
+      for (const run of dedupedPlanned) {
         console.log("[volume.readiness] auto-resume planned run after hydrate", {
           runId: run.runId,
           novelId: run.novelId,
@@ -381,11 +396,13 @@ function initializeBackgroundServices(): BackgroundServicesHandle {
     .then(() => {
       bookAnalysisService.startWatchdog();
       novelPipelineRuntimeService.startWatchdog();
+      audiobookTaskService.startWatchdog();
     })
     .catch((error) => {
       console.warn("Failed to prepare pending recovery candidates.", error);
       bookAnalysisService.startWatchdog();
       novelPipelineRuntimeService.startWatchdog();
+      audiobookTaskService.startWatchdog();
     });
 
   return {

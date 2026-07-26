@@ -9,7 +9,9 @@ const DEFAULT_STALE_THRESHOLD_MS = 3 * 60 * 1000;
  * watchdog 在宽限内跳过 resume 并补心跳；超过该时长仍失联才允许 stale 拾起，
  * 防止 lease 路径（TTL 300s > stale 180s）把健康 job 永久压在本进程。
  */
-const ACTIVE_JOB_STALE_GRACE_MS = 10 * 60 * 1000;
+// #9：本进程活跃 job 心跳写库失败宽限。旧 10m 让 UI 像卡住；
+// 3m + updateJobSafe 非 terminal 3 次重试，瞬时 DB 抖动可自愈，真死才放行 stale。
+const ACTIVE_JOB_STALE_GRACE_MS = 3 * 60 * 1000;
 
 interface PipelineRecoveryPort {
   listPendingCancellationPipelineJobs(): Promise<Array<{ id: string; status: string }>>;

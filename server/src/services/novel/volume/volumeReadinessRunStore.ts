@@ -188,8 +188,13 @@ export async function hydrateVolumeReadinessRunsFromDisk(limit = 100): Promise<n
       runsById.set(parsed.runId, parsed);
       touchNovelIndex(parsed.novelId, parsed.runId);
       loaded += 1;
-    } catch {
-      // skip corrupt
+    } catch (error) {
+      // #12：损坏 snapshot 不能静默 skip——上次 in-flight run 崩溃后 snapshot 半写入时会
+      // 悄悄消失，operator 无从追溯。至少留一条 warn，包含 fileName 与 error message。
+      console.warn("[volume.readiness] skip corrupt run snapshot", {
+        fileName,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
   return loaded;
@@ -379,9 +384,12 @@ export function listPlannedLiveReadinessRuns(options?: {
 
 /**
  * 同 novel 单 flight claim。
- * - 已有其它 runId 且仍 running → false
  * - **同一 runId 已 claim** → false（防 auto-resume 与 HTTP resume 双 execute 同章）
- * - 其它 → set 并 true
+ * - 已有其它 runId 占 flight 且仍 live（running 或 planned）→ false
+ *   （#4：旧实现只看 running，execute() 在 claim 与翻 running 之间夹着 preAssess，
+ *   A 被并发并发的 B 看到 planned 就覆盖 activeNovelRuns，两 run 并发 + flight 泄漏，
+ *   放大 chapter lock 竞争。planned 视为已被持有，B 拒绝并保持 planned/由下轮 auto-resume 接管）
+ * - 其它 runId 已终结 / 不存在 → 回收并 set 为 true
  */
 export function tryClaimNovelRunFlight(novelId: string, runId: string): boolean {
   const existing = activeNovelRuns.get(novelId);
@@ -391,9 +399,11 @@ export function tryClaimNovelRunFlight(novelId: string, runId: string): boolean 
   }
   if (existing && existing !== runId) {
     const other = runsById.get(existing);
-    if (other && other.status === "running" && !other.dryRun) {
+    if (other && !other.dryRun && (other.status === "running" || other.status === "planned")) {
       return false;
     }
+    // 其它 run 已终结（completed/failed/cancelled）或 dryRun：回收 stale flight
+    activeNovelRuns.delete(novelId);
   }
   activeNovelRuns.set(novelId, runId);
   return true;

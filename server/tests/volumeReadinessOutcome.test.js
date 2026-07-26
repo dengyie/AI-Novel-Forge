@@ -83,3 +83,22 @@ test("mapRepairOutcomeFromFrames: prefers last completed frame status", () => {
     "repair_incomplete",
   );
 });
+
+test("mapRepairOutcomeFromFrames: finalizing-only frames fail-closed (no completed)", () => {
+  // #7：旧实现会把 finalizing 文案里的「采纳」误判成 adopt
+  assert.equal(
+    mapRepairOutcomeFromFrames([{
+      phase: "finalizing",
+      status: "running",
+      message: "修复稿已生成，正在评估是否采纳（evaluate → adopt|discard）。",
+    }]).outcome,
+    "failed",
+  );
+  assert.equal(
+    mapRepairOutcomeFromFrames([
+      { phase: "streaming", status: "running", message: "streaming" },
+      { phase: "finalizing", status: "running", message: "正在评估是否采纳" },
+    ]).outcome,
+    "failed",
+  );
+});

@@ -82,15 +82,21 @@ async function acquireChapterRepairLock(chapterId: string): Promise<() => void> 
   const held = new Promise<void>((resolve) => {
     release = resolve;
   });
+  // previous 失败也继续排队，避免上游 reject 卡死整条锁链（#10 兜底）
   const chain = previous.then(() => held, () => held);
   chapterRepairLocks.set(chapterId, chain);
-  await previous;
+  await previous.catch(() => undefined);
   return () => {
     release();
     if (chapterRepairLocks.get(chapterId) === chain) {
       chapterRepairLocks.delete(chapterId);
     }
   };
+}
+
+/** 测试 / 运维：当前 in-process 锁表大小（#10 Map GC 观测）。 */
+export function getChapterRepairLockTableSizeForTests(): number {
+  return chapterRepairLocks.size;
 }
 
 interface RepairReviewResult {
@@ -197,6 +203,40 @@ export class ChapterRepairStreamRuntime {
     // F4: 章节级互斥锁，串行化同 chapterId 并发 repair 整段 lifecycle，杜绝
     // finalize 阶段 lost-update。锁在 onDone 完成 / 出错 / 创建失败时释放。
     const releaseRepairLock = await acquireChapterRepairLock(chapterId);
+    // F10：单点幂等释放。旧实现只在 onDone 的 finally 里释放锁——但 onDone 是
+    // 调用方消费完 stream 后才调的独立步骤，若底层 stream 迭代中途抛错（transport
+    // reset / provider EOF / 消费方 break / signal abort），onDone 永不执行，
+    // releaseRepairLock 永不触发 → 该 chapterId 后续所有 repair 都 await 一个
+    // 永不 resolve 的锁链 → 进程内该章永久 hang（"卡住不动"最主要根因）。
+    // 用 settled 幂等 + guardStream 在 stream 异常终止时兜底释放。
+    let settled = false;
+    const releaseOnce = (): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      releaseRepairLock();
+    };
+    /**
+     * 包裹返回给调用方的 stream：仅当迭代"自然读完全部 chunk"时把释放留给
+     * 紧随其后的 onDone；若因异常 / 消费方 break / abort 提前终止（naturalEnd=false），
+     * onDone 不会被调用，就地释放锁兜底，杜绝 #1 泄漏。
+     */
+    const guardStream = (
+      source: AsyncIterable<BaseMessageChunk>,
+    ): AsyncIterable<BaseMessageChunk> => (async function* guardedRepairStream() {
+      let naturalEnd = false;
+      try {
+        for await (const chunk of source) {
+          yield chunk;
+        }
+        naturalEnd = true;
+      } finally {
+        if (!naturalEnd) {
+          releaseOnce();
+        }
+      }
+    })();
     try {
       const [novel, chapter, bible] = await Promise.all([
         prisma.novel.findUnique({ where: { id: novelId } }),
@@ -271,7 +311,7 @@ export class ChapterRepairStreamRuntime {
 
       if (prepared.kind === "patched") {
         return {
-          stream: createSingleChunkStream(prepared.content),
+          stream: guardStream(createSingleChunkStream(prepared.content)),
           onDone: async (fullContent: string, helpers: StreamDoneHelpers) => {
             try {
               // F8: prepared.content 已过 applyPromptPostValidate；若 postValidate
@@ -286,7 +326,7 @@ export class ChapterRepairStreamRuntime {
                 helpers,
               });
             } finally {
-              releaseRepairLock();
+              releaseOnce();
             }
           },
         };
@@ -294,7 +334,7 @@ export class ChapterRepairStreamRuntime {
 
       const streamed = await streamTextPrompt(createHeavyRepairPromptExecution(prepared));
       return {
-        stream: streamed.stream as AsyncIterable<BaseMessageChunk>,
+        stream: guardStream(streamed.stream as AsyncIterable<BaseMessageChunk>),
         onDone: async (fullContent: string, helpers: StreamDoneHelpers) => {
           try {
             // F8: completed.output 已过 applyPromptPostValidate；trim 后为空即代表
@@ -308,12 +348,12 @@ export class ChapterRepairStreamRuntime {
               helpers,
             });
           } finally {
-            releaseRepairLock();
+            releaseOnce();
           }
         },
       };
     } catch (error) {
-      releaseRepairLock();
+      releaseOnce();
       throw error;
     }
   }

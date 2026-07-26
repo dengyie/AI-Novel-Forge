@@ -167,6 +167,44 @@ test("getCompletedChapterIds skips failed for resume retry", () => {
   releaseNovelRunFlight("n2", run.runId);
 });
 
+test("tryClaimNovelRunFlight rejects sibling while holder still planned (#4)", () => {
+  process.env.VOLUME_READINESS_RUN_PERSIST = "0";
+  resetVolumeReadinessRunStoreForTests();
+  const runA = createVolumeReadinessRun({
+    novelId: "n-claim-planned",
+    volumeOrder: 1,
+    fromOrder: 1,
+    toOrder: 3,
+    dryRun: false,
+    actionFilter: ["needs_re_review"],
+    budget: {
+      maxChapters: 5,
+      maxHeavyRewrites: 1,
+      maxLlmCalls: 10,
+      maxWallMinutes: 15,
+    },
+    plan: [],
+    planSummary: {
+      total: 0,
+      publishReady: 0,
+      needsReReview: 0,
+      needsPatch: 0,
+      needsPolish: 0,
+      needsHeavy: 0,
+      needsManual: 0,
+      publishReadyRatio: 0,
+    },
+  });
+  // claim 后尚未翻 running（execute 窗口）：仍 planned
+  assert.equal(tryClaimNovelRunFlight(runA.novelId, runA.runId), true);
+  assert.equal(getVolumeReadinessRun(runA.runId)?.status, "planned");
+  // sibling 不得覆盖 flight
+  assert.equal(tryClaimNovelRunFlight(runA.novelId, "sibling-run"), false);
+  releaseNovelRunFlight(runA.novelId, runA.runId);
+  assert.equal(tryClaimNovelRunFlight(runA.novelId, "sibling-run"), true);
+  releaseNovelRunFlight(runA.novelId, "sibling-run");
+});
+
 
 test("repair_incomplete / polish_incomplete / skipped_locked are not terminal (resume retry)", () => {
   process.env.VOLUME_READINESS_RUN_PERSIST = "0";

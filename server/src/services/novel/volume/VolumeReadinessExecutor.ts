@@ -35,6 +35,15 @@ interface RepairStatusFrame {
   message?: string;
 }
 
+/** createRepairStream 返回形状（NovelApplicationMethod 是 any，经 race 会 widen 成 unknown） */
+interface RepairStreamHandle {
+  stream: AsyncIterable<BaseMessageChunk>;
+  onDone: (
+    fullContent: string,
+    helpers: { writeFrame: (payload: unknown) => void },
+  ) => Promise<void>;
+}
+
 const INCOMPLETE_OUTCOMES = new Set<VolumeReadinessChapterOutcome>([
   "re_review_incomplete",
   "repair_incomplete",
@@ -45,6 +54,11 @@ const INCOMPLETE_OUTCOMES = new Set<VolumeReadinessChapterOutcome>([
  * 从 repair finalize 的 writeFrame 收集 outcome（fail-closed）。
  * 优先级：message 语义（discard/plateau/lock）→ completed 帧 status → message adopt。
  * adopt 但 status=failed（未过门 / 副作用失败）→ repair_incomplete（可 resume 重试）。
+ *
+ * #7：adopt/discard 分类只认 frame.message 来自 **completed 帧**——旧实现在对没有
+ * completed 帧时用任意带 message 的帧回退匹配，可能把 finalizing 阶段"修复稿已生成，
+ * 正在评估是否采纳"里的"采纳"误判成 adopt（候选还没评估而非已采纳）。无 completed 帧
+ * 一律 fail-closed，避免半截状态被当终态。
  */
 export function mapRepairOutcomeFromFrames(
   frames: RepairStatusFrame[],
@@ -52,11 +66,16 @@ export function mapRepairOutcomeFromFrames(
   const completedFrames = frames.filter((frame) => frame.phase === "completed");
   const completed = completedFrames.length > 0
     ? completedFrames[completedFrames.length - 1]
-    : [...frames].reverse().find((frame) => typeof frame.message === "string");
-  const fromFrames = frames.map((f) => f.message).filter(Boolean).join(" ");
-  const message = (completed?.message ?? fromFrames) || null;
+    : null;
+  // 无 completed 帧：fail-closed，不再用任意 message 帧（避免 finalizing 阶段文案被误判）
+  if (!completed) {
+    const tail = [...frames].reverse().find((frame) => typeof frame.message === "string");
+    const fallback = tail?.message ?? "repair stream ended without completed frame";
+    return { outcome: "failed", message: fallback };
+  }
+  const message = completed.message ?? null;
   const text = (message ?? "").toLowerCase();
-  const frameStatus = typeof completed?.status === "string"
+  const frameStatus = typeof completed.status === "string"
     ? completed.status.toLowerCase()
     : "";
 
@@ -122,6 +141,11 @@ export function mapRepairOutcome(message: string | null | undefined): VolumeRead
 /**
  * 同章 incomplete 累计次数。
  * results 同章只保留最后一条，故读 attemptCount（缺省 incomplete → 1）。
+ *
+ * #11：若最后一条是 terminal（kept 等）则清零——该章已 escalate 人工；
+ * 若最后一条 incomplete 则读 attemptCount。中间 incomplete→kept 覆盖后
+ * attemptCount 不应被「只看最后一条非 incomplete 就 0」误伤到后续新 plan 项
+ * （同一章再进 plan 是新一轮，0 正确）。
  */
 export function countIncompleteAttemptsForChapter(
   results: Array<{
@@ -141,6 +165,7 @@ export function countIncompleteAttemptsForChapter(
         ? result.attemptCount
         : 1;
     }
+    // 同章最后一次已非 incomplete（kept/adopted/…）：计数清零
     return 0;
   }
   return 0;
@@ -156,9 +181,10 @@ async function drainRepairStream(input: {
 }): Promise<{ fullContent: string; frames: RepairStatusFrame[] }> {
   let fullContent = "";
   const frames: RepairStatusFrame[] = [];
+  // #6：signal abort 即终止 drain，禁止拿 partial content 跑 onDone 评估/写库。
   for await (const chunk of input.stream) {
     if (input.signal?.aborted) {
-      break;
+      throw new Error("repair drain aborted (signal)");
     }
     const text = typeof chunk.content === "string"
       ? chunk.content
@@ -175,6 +201,59 @@ async function drainRepairStream(input: {
     },
   });
   return { fullContent, frames };
+}
+
+/**
+ * 每章墙钟硬超时：创建 AbortController，到点 abort + race 兜底抛错。
+ * 防 provider silent-hang / transport 半开连接导致单章 await 永不返回卡死整卷。
+ * 返回 { signal, race, dispose }。
+ * - signal：透传 review/repair/polish，provider 感知终止
+ * - race(fn)：相对**章级绝对 deadline** 剩余时间竞速；多步共享同一 deadline，
+ *   不会在第一步 finally 里清掉 abort（旧实现每 race 清 abortTimer 会让链 repair 失保）
+ * - dispose：章结束清理 abort 定时器（成功/失败都调）
+ */
+function createChapterTimeoutClock(deadlineMs: number, budgetMs: number): {
+  signal: AbortSignal;
+  race: <T>(fn: () => Promise<T>, stepLabel?: string) => Promise<T>;
+  dispose: () => void;
+} {
+  const timeoutMs = Math.max(60_000, Math.min(deadlineMs, budgetMs));
+  const startedAt = Date.now();
+  const absoluteDeadline = startedAt + timeoutMs;
+  const controller = new AbortController();
+  const abortTimer = setTimeout(() => controller.abort(), timeoutMs);
+  const dispose = (): void => {
+    clearTimeout(abortTimer);
+  };
+  const race = async <T>(fn: () => Promise<T>, stepLabel?: string): Promise<T> => {
+    if (controller.signal.aborted) {
+      throw new Error(
+        `readiness chapter step timeout${stepLabel ? `: ${stepLabel}` : ""} (already aborted)`,
+      );
+    }
+    const remaining = Math.max(1, absoluteDeadline - Date.now());
+    let gateTimer: ReturnType<typeof setTimeout> | null = null;
+    const gate = new Promise<never>((_, reject) => {
+      gateTimer = setTimeout(
+        () => {
+          controller.abort();
+          reject(new Error(
+            `readiness chapter step timeout after ${Math.round(timeoutMs / 1000)}s${stepLabel ? `: ${stepLabel}` : ""}`,
+          ));
+        },
+        remaining,
+      );
+    });
+    try {
+      // 显式 Promise.race<T>：gate 是 Promise<never>，部分 TS 版本会把 race 结果 widen 成 unknown
+      return await Promise.race<T>([fn(), gate]);
+    } finally {
+      if (gateTimer) {
+        clearTimeout(gateTimer);
+      }
+    }
+  };
+  return { signal: controller.signal, race, dispose };
 }
 
 /**
@@ -258,22 +337,17 @@ export class VolumeReadinessExecutor {
     if (!initial.dryRun) {
       const claimed = tryClaimNovelRunFlight(initial.novelId, runId);
       if (!claimed) {
-        // 同 run 已在 flight：返回 live，勿标 failed（auto-resume ↔ HTTP resume 竞态）
+        // 同 run 已在 flight，或其它 live（running/planned）run 占 flight。
+        // #4/#5：两种都返回当前 live run，**绝不标 failed**——sibling planned
+        // 若被误杀成 failed，hydrate 不会把 failed 复活成 planned，run 永久死亡
+        // 直到人工 resume。保持 planned 由下轮 auto-resume 接管。
         const liveSame = getVolumeReadinessRun(runId);
-        if (liveSame && (liveSame.status === "running" || liveSame.status === "planned")) {
-          console.warn("[volume.readiness] execute skipped: run already in flight", {
-            runId,
-            novelId: initial.novelId,
-            status: liveSame.status,
-          });
-          return liveSame;
-        }
-        // 其它 run 占 flight：才标 failed
-        return updateVolumeReadinessRun(runId, {
-          status: "failed",
-          finishedAt: new Date().toISOString(),
-          error: "another live readiness run is active for this novel",
-        }) ?? initial;
+        console.warn("[volume.readiness] execute skipped: flight busy", {
+          runId,
+          novelId: initial.novelId,
+          ourStatus: liveSame?.status ?? initial.status,
+        });
+        return liveSame ?? initial;
       }
     }
 
@@ -294,8 +368,18 @@ export class VolumeReadinessExecutor {
     const actedChapterIds = new Set(doneChapterIds);
 
     const wallUsedMs = (): number => priorWallMs + (Date.now() - sessionStartedMs);
+    const perChapterTimeoutMs = volumeReadinessConfig.perChapterTimeoutMs;
+    const heartbeatMs = volumeReadinessConfig.wallHeartbeatMs;
+    let wallHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
     try {
+      // #3：wallMsUsed 心跳落盘——旧实现只在章间刷，单章 hang 时快照停驻旧值，
+      // 进程重启后 hydrate 判 wall 未耗尽 → auto-resume 原地复现同章 hang。心跳
+      // 让 wall 真实推进，重启自愈。
+      wallHeartbeatTimer = setInterval(() => {
+        updateVolumeReadinessRun(runId, { wallMsUsed: wallUsedMs() });
+      }, heartbeatMs);
+
       for (const planItem of initial.plan) {
         const live = getVolumeReadinessRun(runId);
         if (!live || live.cancelRequested) {
@@ -445,7 +529,19 @@ export class VolumeReadinessExecutor {
         let verdictAfter: VolumeReadinessVerdict | null = null;
         let attemptCount: number | undefined;
 
+        // #2：每章 AbortController + 墙钟硬超时 race。到点 abort，provider 感知
+        // signal 尽快 settle；race 兜底抛错防止 signal 被 ignore 时 await 永不返回。
+        // clock 在 try 外声明，catch 路径也能 dispose abort 定时器。
+        let chapterClock: ReturnType<typeof createChapterTimeoutClock> | null = null;
         try {
+          const remainingWallMs = Math.max(0, deadlineMs - wallUsedMs());
+          if (remainingWallMs <= 0) {
+            // wall 已耗尽：不当 budget_skipped 全章（外层 wall 检查兜底），直接抛触发 failed
+            throw new Error("readiness chapter aborted: wall budget exhausted before step");
+          }
+          chapterClock = createChapterTimeoutClock(remainingWallMs, perChapterTimeoutMs);
+          const clock = chapterClock;
+
           if (planItem.verdict === "needs_re_review") {
             // 心跳：章开始即刷 wall，避免 API 长时间 acted=0 像假死
             updateVolumeReadinessRun(runId, {
@@ -455,9 +551,13 @@ export class VolumeReadinessExecutor {
               wallMsUsed: wallUsedMs(),
             });
             // readiness 热路径跳过阻塞 ledger sync（仍走真 dual-gate review）
-            await novelService.reviewChapter(initial.novelId, planItem.chapterId, {
-              skipPayoffLedgerSync: true,
-            });
+            await clock.race(
+              () => novelService.reviewChapter(initial.novelId, planItem.chapterId, {
+                skipPayoffLedgerSync: true,
+                signal: clock.signal,
+              }),
+              "reviewChapter",
+            );
             llmCallsUsed += estimateLlmCallsForAction("needs_re_review");
             chaptersActed += 1;
             outcome = "re_reviewed";
@@ -500,7 +600,7 @@ export class VolumeReadinessExecutor {
               && l0Ok;
 
             let padIssueCount = 0;
-            const repairOptions: RepairOptions = { repairMode };
+            const repairOptions: RepairOptions = { repairMode, signal: clock.signal };
             if (injectPadOnly) {
               const content = await loadChapterContent(planItem.chapterId);
               const padIssues = buildPadReviewIssuesFromContent(content);
@@ -516,15 +616,22 @@ export class VolumeReadinessExecutor {
               chaptersActed,
               wallMsUsed: wallUsedMs(),
             });
-            const streamResult = await novelService.createRepairStream(
-              initial.novelId,
-              planItem.chapterId,
-              repairOptions,
+            const streamResult = await clock.race<RepairStreamHandle>(
+              () => novelService.createRepairStream(
+                initial.novelId,
+                planItem.chapterId,
+                repairOptions,
+              ) as Promise<RepairStreamHandle>,
+              "createRepairStream",
             );
-            const drained = await drainRepairStream({
-              stream: streamResult.stream,
-              onDone: streamResult.onDone,
-            });
+            const drained = await clock.race(
+              () => drainRepairStream({
+                stream: streamResult.stream,
+                onDone: streamResult.onDone,
+                signal: clock.signal,
+              }),
+              "drainRepairStream",
+            );
             llmCallsUsed += estimateLlmCallsForAction(planItem.verdict);
             chaptersActed += 1;
             if (repairMode === "heavy_repair") {
@@ -539,10 +646,13 @@ export class VolumeReadinessExecutor {
             }
           } else if (planItem.verdict === "needs_polish") {
             // 已有正文：runMode=polish 跳过 writer，只走风格/验收/L0/双门 finalize
-            await novelService.runPipelineChapter(
-              initial.novelId,
-              planItem.chapterId,
-              { runMode: "polish" },
+            await clock.race(
+              () => novelService.runPipelineChapter(
+                initial.novelId,
+                planItem.chapterId,
+                { runMode: "polish", signal: clock.signal },
+              ),
+              "runPipelineChapter(polish)",
             );
             llmCallsUsed += estimateLlmCallsForAction("needs_polish");
             chaptersActed += 1;
@@ -597,7 +707,7 @@ export class VolumeReadinessExecutor {
                 && l0OkChain;
 
               let padIssueCountChain = 0;
-              const repairOptionsChain: RepairOptions = { repairMode: chainMode };
+              const repairOptionsChain: RepairOptions = { repairMode: chainMode, signal: clock.signal };
               if (injectPadOnlyChain) {
                 const contentChain = await loadChapterContent(planItem.chapterId);
                 const padIssuesChain = buildPadReviewIssuesFromContent(contentChain);
@@ -614,15 +724,22 @@ export class VolumeReadinessExecutor {
                 wallMsUsed: wallUsedMs(),
               });
 
-              const chainStream = await novelService.createRepairStream(
-                initial.novelId,
-                planItem.chapterId,
-                repairOptionsChain,
+              const chainStream = await clock.race<RepairStreamHandle>(
+                () => novelService.createRepairStream(
+                  initial.novelId,
+                  planItem.chapterId,
+                  repairOptionsChain,
+                ) as Promise<RepairStreamHandle>,
+                "chain.createRepairStream",
               );
-              const chainDrained = await drainRepairStream({
-                stream: chainStream.stream,
-                onDone: chainStream.onDone,
-              });
+              const chainDrained = await clock.race(
+                () => drainRepairStream({
+                  stream: chainStream.stream,
+                  onDone: chainStream.onDone,
+                  signal: clock.signal,
+                }),
+                "chain.drainRepairStream",
+              );
               llmCallsUsed += chainEstimated;
               if (chainMode === "heavy_repair") {
                 heavyRewritesUsed += 1;
@@ -697,6 +814,9 @@ export class VolumeReadinessExecutor {
           if (lower.includes("lock") || lower.includes("并发") || lower.includes("in progress")) {
             outcome = "skipped_locked";
           }
+        } finally {
+          chapterClock?.dispose();
+          chapterClock = null;
         }
 
         appendVolumeReadinessChapterResult(runId, {
@@ -761,6 +881,10 @@ export class VolumeReadinessExecutor {
         wallMsUsed: wallUsedMs(),
       }) ?? getVolumeReadinessRun(runId)!;
     } finally {
+      if (wallHeartbeatTimer) {
+        clearInterval(wallHeartbeatTimer);
+        wallHeartbeatTimer = null;
+      }
       if (!initial.dryRun) {
         releaseNovelRunFlight(initial.novelId, runId);
       }

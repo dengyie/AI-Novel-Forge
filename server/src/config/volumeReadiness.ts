@@ -88,6 +88,32 @@ export const VOLUME_READINESS_MAX_INCOMPLETE_RETRIES = asInt(
   10,
 );
 
+/**
+ * 单章单步 review / repair / polish 的墙钟硬超时（ms）。
+ * 防 provider silent-hang / transport 半开连接导致单章 await 永不返回，
+ * 把整卷 wall 烧干并永久卡住 executor（"卡住不动"次主因）。到点 abort 并 race
+ * 兜底抛错，outcome=failed/incomplete 可 resume 重试，不污染 chapter 日志。
+ * 默认 15 分钟：heavy streaming + baseline/candidate evaluateOnly 真实可达 12m+。
+ */
+export const VOLUME_READINESS_PER_CHAPTER_TIMEOUT_MS = asInt(
+  process.env.VOLUME_READINESS_PER_CHAPTER_TIMEOUT_MS,
+  15 * 60 * 1000,
+  60_000,
+  60 * 60 * 1000,
+);
+
+/**
+ * wallMsUsed heartbeat 落盘间隔（ms）。
+ * 旧实现只在章间刷 wallMsUsed——单章 hang 时快照永驻旧值，进程重启后 hydrate
+ * 仍判 wall 未耗尽 → auto-resume 原地复现同章 hang。心跳让 wall 真实推进，重启自愈。
+ */
+export const VOLUME_READINESS_WALL_HEARTBEAT_MS = asInt(
+  process.env.VOLUME_READINESS_WALL_HEARTBEAT_MS,
+  30_000,
+  5_000,
+  5 * 60 * 1000,
+);
+
 export interface VolumeReadinessBudgetDefaults {
   maxChapters: number;
   maxHeavyRewrites: number;
@@ -101,6 +127,8 @@ export interface VolumeReadinessConfig {
   scheduleIntervalMs: number;
   signalStaleHours: number;
   maxIncompleteRetries: number;
+  perChapterTimeoutMs: number;
+  wallHeartbeatMs: number;
 }
 
 export const volumeReadinessConfig: VolumeReadinessConfig = {
@@ -114,4 +142,6 @@ export const volumeReadinessConfig: VolumeReadinessConfig = {
   scheduleIntervalMs: VOLUME_READINESS_SCHEDULE_INTERVAL_MS,
   signalStaleHours: VOLUME_READINESS_SIGNAL_STALE_HOURS,
   maxIncompleteRetries: VOLUME_READINESS_MAX_INCOMPLETE_RETRIES,
+  perChapterTimeoutMs: VOLUME_READINESS_PER_CHAPTER_TIMEOUT_MS,
+  wallHeartbeatMs: VOLUME_READINESS_WALL_HEARTBEAT_MS,
 };

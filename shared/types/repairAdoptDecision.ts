@@ -22,9 +22,13 @@ export interface RepairContentAdoptInput {
   candidateBlockingL1Codes?: string[];
   /** 本决策前已连续无改进次数（discard / plateau） */
   consecutiveNoImprove?: number;
-  /** 连续无改进上限，默认 2 */
+  /** 连续无改进上限，默认 3（#15：旧 2 在 overall 微抖时过早 plateau_stop 永久拒绝） */
   plateauMaxNoImprove?: number;
-  /** overall 允许下降量，默认 0（不得低于 baseline） */
+  /**
+   * overall 允许下降量，默认 1。
+   * #15：旧默认 0 把 LLM 1 分抖动当 anti-regression，两次微跌即 plateau_stop 终态，
+   * 章永久不可 resume。1 分容差覆盖评分噪声，真大幅回退仍 discard。
+   */
   overallDelta?: number;
   isPassThreshold?: QualityIsPassThreshold;
   /**
@@ -67,8 +71,8 @@ export function decideRepairContentAdoption(
   input: RepairContentAdoptInput,
 ): RepairContentAdoptResult {
   const threshold = input.isPassThreshold ?? DEFAULT_QUALITY_IS_PASS_THRESHOLD;
-  const overallDelta = input.overallDelta ?? 0;
-  const plateauMax = input.plateauMaxNoImprove ?? 2;
+  const overallDelta = input.overallDelta ?? 1;
+  const plateauMax = input.plateauMaxNoImprove ?? 3;
   const consecutiveNoImprove = Math.max(0, input.consecutiveNoImprove ?? 0);
 
   const baselineLiteraryPass = isLiteraryQualityPass(input.baselineScore, threshold);

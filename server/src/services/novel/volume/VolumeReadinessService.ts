@@ -262,9 +262,26 @@ export class VolumeReadinessService {
 
       if (needsRefresh && novelService) {
         try {
-          const reviewResult = await novelService.reviewChapter(novelId, chapter.id, {
-            evaluateOnly: true,
-          });
+          // #13：refresh 路径 per-chapter 硬超时，避免 HTTP createRun 因单章
+          // evaluateOnly silent-hang 整请求挂死；超时后保留旧 signals 继续 classify。
+          const refreshTimeoutMs = Math.min(
+            volumeReadinessConfig.perChapterTimeoutMs,
+            5 * 60 * 1000,
+          );
+          const reviewResult = await Promise.race([
+            novelService.reviewChapter(novelId, chapter.id, {
+              evaluateOnly: true,
+              skipPayoffLedgerSync: true,
+            }),
+            new Promise<never>((_, reject) => {
+              setTimeout(
+                () => reject(new Error(
+                  `evaluateOnly refresh timeout after ${Math.round(refreshTimeoutMs / 1000)}s`,
+                )),
+                refreshTimeoutMs,
+              );
+            }),
+          ]);
           // evaluateOnly 不写库：用返回值合成 signals，禁止 re-read riskFlags 空转。
           if (isEvaluateOnlyReview(reviewResult)) {
             signals = synthesizeSignalsFromEvaluateOnly({

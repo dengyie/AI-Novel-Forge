@@ -55,6 +55,48 @@ test("decideRepairContentAdoption discards overall regression", () => {
   assert.match(result.reason, /anti-regression|降至/);
 });
 
+test("decideRepairContentAdoption default overallDelta=1 tolerates 1-point noise", () => {
+  // #15：LLM 评分 1 分抖动不应 anti-regression；默认 overallDelta=1
+  const noise = decideRepairContentAdoption({
+    baselineScore: score({ overall: 88, coherence: 70, repetition: 70, engagement: 70 }),
+    candidateScore: score({ overall: 87, coherence: 72, repetition: 71, engagement: 71 }),
+    baselineBlockingCodes: [],
+    candidateBlockingCodes: [],
+  });
+  assert.equal(noise.decision, "adopt");
+
+  const realDrop = decideRepairContentAdoption({
+    baselineScore: score({ overall: 88, coherence: 70, repetition: 70, engagement: 70 }),
+    candidateScore: score({ overall: 86, coherence: 70, repetition: 70, engagement: 70 }),
+    baselineBlockingCodes: [],
+    candidateBlockingCodes: [],
+  });
+  assert.equal(realDrop.decision, "discard");
+  assert.match(realDrop.reason, /anti-regression|降至/);
+});
+
+test("decideRepairContentAdoption default plateauMax=3 needs three consecutive no-improve", () => {
+  // #15：旧默认 2 过早 plateau；默认 3 需 consecutiveNoImprove=2 才 plateau_stop
+  const second = decideRepairContentAdoption({
+    baselineScore: score({ overall: 88 }),
+    candidateScore: score({ overall: 80 }),
+    baselineBlockingCodes: [],
+    candidateBlockingCodes: [],
+    consecutiveNoImprove: 1,
+  });
+  assert.equal(second.decision, "discard");
+
+  const third = decideRepairContentAdoption({
+    baselineScore: score({ overall: 88 }),
+    candidateScore: score({ overall: 80 }),
+    baselineBlockingCodes: [],
+    candidateBlockingCodes: [],
+    consecutiveNoImprove: 2,
+  });
+  assert.equal(third.decision, "plateau_stop");
+  assert.match(third.reason, /连续无改进/);
+});
+
 test("decideRepairContentAdoption discards newly introduced L0 codes", () => {
   const result = decideRepairContentAdoption({
     baselineScore: score({ overall: 70 }),
