@@ -170,10 +170,13 @@ test("continueParentTask: CAS 抢占父在 wipe/建子之前，落空即 409", (
   // 原「post-wipe 后算」断言不再适用——新断言：baseline 计算必须在 CAS 之前
   const readyIdx = body.indexOf("listReadyChapterAudioIds");
   assert.ok(readyIdx > 0 && readyIdx < casIdx, "progress baseline 必须在 CAS 之前预算");
-  // 预算逻辑必须减去 requestedIds（mode=resynthesize 路径）
+  // 预算逻辑已抽成纯函数 computeContinueParentBaseline（数值行为见下方 dist 单测），
+  // 这里只守调用点：必须在 CAS 之前算完，且把 wipe 语义如实传下去
+  const baselineIdx = body.indexOf("computeContinueParentBaseline(");
+  assert.ok(baselineIdx > 0 && baselineIdx < casIdx, "baseline 纯函数必须在 CAS 之前调用");
   assert.ok(
-    /readySet\.delete\(cid\)/.test(body),
-    "baseline 预算必须从 ready 集合减去即将 wipe 的 requestedIds",
+    /wipesRequested:\s*input\.mode === "resynthesize"/.test(body),
+    "mode=resynthesize 才会 wipe 被点名章，baseline 必须据此扣减",
   );
   assert.ok(
     /claimedParent\.count === 0/.test(body),
@@ -247,4 +250,107 @@ test("parseAnnotations: 坏 JSON / 非数组 / 空串安全降级为空 map", ()
   assert.equal(parseAnnotations(JSON.stringify({ chapterId: "c1" })).size, 0);
   // 缺 chapterId 的条目跳过
   assert.equal(parseAnnotations(JSON.stringify([{ segments: [] }])).size, 0);
+});
+
+// ── dist 纯函数：computeContinueParentBaseline ──
+//
+// 上面第 4 组只能断言「baseline 在 CAS 之前算」这类代码形状；代码顺序对 ≠ 算出来的数对。
+// 这一组把生产实测值固化下来，免得下次改动只能靠打生产、烧真 TTS 配额来验。
+
+const {
+  computeContinueParentBaseline,
+} = require("../dist/services/audiobook/AudiobookTaskService.js");
+
+test("computeContinueParentBaseline: 生产实测 2 章续 1 章 = 50", () => {
+  // 2026-07-26 生产任务 cms1rikzm004rei9khfpad2a0：2 章父，resynthesize ch24，
+  // 201 返回后第一拍快照 running@50。ready 2 − wipe 1 = 1/2。
+  assert.equal(
+    computeContinueParentBaseline({
+      preWipeReadyIds: ["chA", "chB"],
+      requestedIds: ["chB"],
+      totalChapterCount: 2,
+      wipesRequested: true,
+    }),
+    50,
+  );
+  // 同一批章但 mode≠resynthesize（补生成缺章）：ready 不扣减，2/2 → 上限 95
+  assert.equal(
+    computeContinueParentBaseline({
+      preWipeReadyIds: ["chA", "chB"],
+      requestedIds: ["chB"],
+      totalChapterCount: 2,
+      wipesRequested: false,
+    }),
+    95,
+  );
+});
+
+test("computeContinueParentBaseline: floor 2 —— 父在跑，进度条不得看着像没启动", () => {
+  // 单章书重做唯一那章：ready 清零 → 0% 会被前端读成「没启动」
+  assert.equal(
+    computeContinueParentBaseline({
+      preWipeReadyIds: ["chA"],
+      requestedIds: ["chA"],
+      totalChapterCount: 1,
+      wipesRequested: true,
+    }),
+    2,
+  );
+  // 全书重做同理
+  assert.equal(
+    computeContinueParentBaseline({
+      preWipeReadyIds: ["chA", "chB", "chC"],
+      requestedIds: ["chA", "chB", "chC"],
+      totalChapterCount: 3,
+      wipesRequested: true,
+    }),
+    2,
+  );
+  // 读盘失败降级（preWipeReadyIds=[]）也落 floor，不抛
+  assert.equal(
+    computeContinueParentBaseline({
+      preWipeReadyIds: [],
+      requestedIds: ["chA"],
+      totalChapterCount: 4,
+      wipesRequested: true,
+    }),
+    2,
+  );
+  // totalChapterCount=0 不得除零/NaN
+  assert.equal(
+    computeContinueParentBaseline({
+      preWipeReadyIds: [],
+      requestedIds: [],
+      totalChapterCount: 0,
+      wipesRequested: true,
+    }),
+    2,
+  );
+});
+
+test("computeContinueParentBaseline: 上限 95 —— 仍在跑就不能显示 100", () => {
+  // 100 章只重做 1 章：99/100 → 99 会被裁到 95；真正的 100 只由 reconcileParent 落
+  const ids = Array.from({ length: 100 }, (_, i) => `ch${i}`);
+  assert.equal(
+    computeContinueParentBaseline({
+      preWipeReadyIds: ids,
+      requestedIds: ["ch0"],
+      totalChapterCount: 100,
+      wipesRequested: true,
+    }),
+    95,
+  );
+});
+
+test("computeContinueParentBaseline: requestedIds 不在 ready 集内不影响结果", () => {
+  // 补生成从未产出过的章：ready 集里本就没有它们，扣减是 no-op
+  assert.equal(
+    computeContinueParentBaseline({
+      preWipeReadyIds: ["chA", "chB"],
+      requestedIds: ["chC", "chD"],
+      totalChapterCount: 4,
+      wipesRequested: true,
+    }),
+    50,
+  );
 });

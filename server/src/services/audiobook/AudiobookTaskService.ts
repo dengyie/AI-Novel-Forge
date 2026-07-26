@@ -487,6 +487,17 @@ type AudiobookTaskRow = {
   novel?: { id: string; title: string } | null;
 };
 
+/**
+ * 后台 m4b 封装期的父任务 label。
+ *
+ * 这不只是文案：scheduleBackgroundM4bEncode 的三个收口分支都拿它当 CAS 的
+ * where 条件（只翻「还停在封装中」的行，避免覆盖 cancel/其它路径已写的 label）。
+ * 散成字面量时改一个字就会让三处 CAS 静默失配——updateMany 不看 .count，
+ * label 会永久停在「封装中」，正是 R5 想根治的假象换个方式复发。
+ */
+const M4B_ENCODING_LABEL = "有声书生成完成（m4b 后台封装中）";
+const M4B_DONE_LABEL = "有声书生成完成（含 m4b）";
+
 function parseM4bStatusFromResultJson(resultJson: string | null | undefined): AudiobookTaskSummary["m4bStatus"] {
   if (!resultJson?.trim()) {
     return null;
@@ -501,6 +512,76 @@ function parseM4bStatusFromResultJson(resultJson: string | null | undefined): Au
   } catch {
     return null;
   }
+}
+
+/**
+ * 把 m4b 终态并回既有 resultJson，保留其余字段。
+ *
+ * 后台 encode 路径此前只改 currentItemLabel，从不写 resultJson——于是
+ * toSummary 的 m4bStatus（:555 从 resultJson 解析）对这类任务恒为 null，
+ * 前端 NovelAudiobookPanel `m4bStatus === "ready"` 判定失败，
+ * **盘上已存在的 m4b 不给下载入口**（生产实测：任务 cms1rikzm… m4b 7.9MB 可拉取，
+ * 但 m4bStatus=null，前端隐藏按钮并提示「m4b 仅在封装成功后提供」）。
+ * 走后台 encode 的都是大书/续生成，属于最需要 m4b 的场景。
+ */
+function mergeM4bIntoResultJson(
+  resultJson: string | null | undefined,
+  m4b: { status: "ready" | "skipped" | "failed"; path?: string | null; reason?: string | null; bytes?: number | null; chapterCount?: number | null },
+): string {
+  let base: Record<string, unknown> = {};
+  if (resultJson?.trim()) {
+    try {
+      const parsed = JSON.parse(resultJson) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        base = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // resultJson 损坏时不要丢掉 m4b 状态：宁可重建一个只含 m4b 的对象
+      base = {};
+    }
+  }
+  return JSON.stringify({
+    ...base,
+    m4b: {
+      status: m4b.status,
+      path: m4b.path ?? null,
+      reason: m4b.reason ?? null,
+      bytes: m4b.bytes ?? null,
+      chapterCount: m4b.chapterCount ?? null,
+    },
+  });
+}
+
+/**
+ * 续生成抢占父任务时一次性落定的 progress baseline。
+ *
+ * 为什么能在 wipe 之前算：wipeChapterAudioArtifacts 只动被点名的那些章，
+ * 所以 post-wipe ready == pre-wipe ready − requestedIds。预算出来直接并进
+ * claim CAS，避免「先写 floor 再补真值」的两阶段窗口（那期间父显示 running@旧值）。
+ *
+ * 下限 2 / 上限 95：父此刻是 running+continuing，0 会让前端进度条看着像没启动，
+ * 100 会与「仍在跑」矛盾——真正的 100 只由 reconcileParent 在全 ready 时落。
+ *
+ * 生产实测（2026-07-26，任务 cms1rikzm…）：2 章父续生 1 章 → 50。
+ */
+export function computeContinueParentBaseline(input: {
+  preWipeReadyIds: readonly string[];
+  requestedIds: readonly string[];
+  totalChapterCount: number;
+  /** mode=resynthesize：被点名的章会被 wipe，须从 ready 集中扣除 */
+  wipesRequested: boolean;
+}): number {
+  const { preWipeReadyIds, requestedIds, totalChapterCount, wipesRequested } = input;
+  if (totalChapterCount <= 0) {
+    return 2;
+  }
+  const readySet = new Set(preWipeReadyIds);
+  if (wipesRequested) {
+    for (const cid of requestedIds) {
+      readySet.delete(cid);
+    }
+  }
+  return Math.max(2, Math.min(95, Math.round((readySet.size / totalChapterCount) * 100)));
 }
 
 function parseChunksPrunedFromResultJson(resultJson: string | null | undefined): boolean {
@@ -1073,20 +1154,19 @@ export class AudiobookTaskService {
     //
     // MEDIUM-3 fix: progress baseline 预算（wipe 前算 ready 集、减去 requestedIds）在 CAS 前完成，
     // 避免两阶段写的「running @ 100%」窗口（一次原子抢占即落真 baseline）。
-    let parentReadyBaseline = 0;
+    let preWipeReadyIds: string[] = [];
     try {
-      const readySet = new Set(listReadyChapterAudioIds(parentOutputDir, parentChapterIds));
-      // mode=resynthesize 会 wipe requestedIds，post-wipe ready = pre-wipe ready - requestedIds
-      if (input.mode === "resynthesize") {
-        for (const cid of requestedIds) readySet.delete(cid);
-      }
-      parentReadyBaseline = readySet.size;
+      preWipeReadyIds = listReadyChapterAudioIds(parentOutputDir, parentChapterIds);
     } catch {
-      parentReadyBaseline = 0;
+      // 读盘失败按「无就绪章」算：baseline 落到 floor，宁可低报也不高报
+      preWipeReadyIds = [];
     }
-    const parentProgressBaseline = parentChapterIds.length > 0
-      ? Math.max(2, Math.min(95, Math.round((parentReadyBaseline / parentChapterIds.length) * 100)))
-      : 2;
+    const parentProgressBaseline = computeContinueParentBaseline({
+      preWipeReadyIds,
+      requestedIds,
+      totalChapterCount: parentChapterIds.length,
+      wipesRequested: input.mode === "resynthesize",
+    });
 
     const claimedParent = await prisma.audiobookTask.updateMany({
       where: { id: parent.id, status: { in: ["succeeded", "failed"] } },
@@ -1261,19 +1341,14 @@ export class AudiobookTaskService {
     }
     // m4b：已存在则 skip；缺则先落父 succeeded，再后台 encode（不 await，避免占全局串行队列）
     const m4bAlreadyReady = allReady && fullAudioReady && isFullBookM4bReady(taskDir);
-    // 续生成期间父 progress 反映 ready/total（避免旧终态 100 与 running 矛盾）；全 ready 翻 100
-    const parentProgress = allReady
-      ? 100
-      : Math.max(2, Math.min(99, Math.round((readyChapterIds.length / Math.max(1, chapterIds.length)) * 100)));
-
     if (allReady) {
       // 全部就绪：父翻 succeeded，currentStage 收尾
       // error:null —— 前次续生成失败留下的 error 文本必须清，否则父 succeeded 仍带旧红字
       // m4b 不在此 await：大书 ffmpeg 可 20min 级，会堵 processQueue；后台补标 label
       const successLabel = m4bAlreadyReady
-        ? "有声书生成完成（含 m4b）"
+        ? M4B_DONE_LABEL
         : fullAudioReady
-          ? "有声书生成完成（m4b 后台封装中）"
+          ? M4B_ENCODING_LABEL
           : "有声书生成完成";
       // CAS `status in (running, queued)`：reconcileParent 会被 cancelTask / finalizeContinueChild /
       // 恢复路径并发调用。无 CAS 时被取消的父会被迟到的子回调覆写成 succeeded/failed
@@ -1317,6 +1392,11 @@ export class AudiobookTaskService {
     const failureLabel = prunedFailed.length > 0
       ? `续生成后有 ${prunedFailed.length} 章失败，可在对照 list 逐章重试`
       : `续生成未完成，已就绪 ${readyChapterIds.length}/${chapterIds.length} 章`;
+    // 部分就绪的父保留真实就绪比例（上限 99：终态 failed 不该显示 100）
+    const parentProgress = Math.max(
+      2,
+      Math.min(99, Math.round((readyChapterIds.length / Math.max(1, chapterIds.length)) * 100)),
+    );
     // 同上 CAS：cancelTask 先落的 cancelled 不得被迟到的子回调改写成 failed。
     await prisma.audiobookTask.updateMany({
       where: { id: parent.id, status: { in: ["running", "queued"] } },
@@ -1378,34 +1458,23 @@ export class AudiobookTaskService {
           }),
         });
         if (m4b.status === "ready") {
-          await prisma.audiobookTask.updateMany({
-            where: {
-              id: parentTaskId,
-              status: "succeeded",
-              currentItemLabel: "有声书生成完成（m4b 后台封装中）",
-            },
-            data: {
-              currentItemLabel: "有声书生成完成（含 m4b）",
-              heartbeatAt: new Date(),
-            },
+          await this.settleBackgroundM4b(parentTaskId, M4B_DONE_LABEL, {
+            status: "ready",
+            path: m4b.relativePath,
+            bytes: m4b.bytes ?? null,
+            chapterCount: m4b.chapterCount ?? null,
           });
           return;
         }
         const reason = m4b.reason ?? m4b.status;
         console.warn("[audiobook] background m4b encode not ready", parentTaskId, reason);
-        await prisma.audiobookTask.updateMany({
-          where: {
-            id: parentTaskId,
-            status: "succeeded",
-            currentItemLabel: "有声书生成完成（m4b 后台封装中）",
-          },
-          data: {
-            currentItemLabel: m4b.status === "skipped"
-              ? `有声书生成完成；m4b 未生成（${reason}）`
-              : `有声书生成完成；m4b 失败（${reason}）`,
-            heartbeatAt: new Date(),
-          },
-        });
+        await this.settleBackgroundM4b(
+          parentTaskId,
+          m4b.status === "skipped"
+            ? `有声书生成完成；m4b 未生成（${reason}）`
+            : `有声书生成完成；m4b 失败（${reason}）`,
+          { status: m4b.status === "skipped" ? "skipped" : "failed", reason },
+        );
       } catch (error) {
         console.warn(
           "[audiobook] background m4b encode exception",
@@ -1415,22 +1484,53 @@ export class AudiobookTaskService {
         // R5：终极 catch 也必须收 label，否则父 succeeded 但 label 久留「m4b 后台封装中」假象
         try {
           const errMsg = (error instanceof Error ? error.message : String(error)).slice(0, 120);
-          await prisma.audiobookTask.updateMany({
-            where: {
-              id: parentTaskId,
-              status: "succeeded",
-              currentItemLabel: "有声书生成完成（m4b 后台封装中）",
-            },
-            data: {
-              currentItemLabel: `有声书生成完成；m4b 失败（${errMsg}）`,
-              heartbeatAt: new Date(),
-            },
-          });
+          await this.settleBackgroundM4b(
+            parentTaskId,
+            `有声书生成完成；m4b 失败（${errMsg}）`,
+            { status: "failed", reason: errMsg },
+          );
         } catch (labelError) {
           console.warn("[audiobook] m4b failure label update failed", parentTaskId, labelError);
         }
       }
     })();
+  }
+
+  /**
+   * 后台 m4b 收口：label + resultJson.m4b.status 一次写完。
+   *
+   * label 与 m4bStatus 必须同一次 CAS 落库——分两次写会出现「label 说完成、
+   * m4bStatus 仍 null」的中间态，前端正是靠 m4bStatus 决定给不给下载入口。
+   * CAS 条件保持 status=succeeded ∧ label 仍是封装中：cancel/其它路径已改写过
+   * 就不覆盖（幂等）。resultJson 需读-改-写，故先 findUnique 再 updateMany；
+   * 两者之间的竞态由 label 条件兜住（并发只会有一枪命中）。
+   */
+  private async settleBackgroundM4b(
+    parentTaskId: string,
+    label: string,
+    m4b: { status: "ready" | "skipped" | "failed"; path?: string | null; reason?: string | null; bytes?: number | null; chapterCount?: number | null },
+  ): Promise<void> {
+    const row = await prisma.audiobookTask.findUnique({
+      where: { id: parentTaskId },
+      select: { resultJson: true },
+    });
+    const claimed = await prisma.audiobookTask.updateMany({
+      where: {
+        id: parentTaskId,
+        status: "succeeded",
+        currentItemLabel: M4B_ENCODING_LABEL,
+      },
+      data: {
+        currentItemLabel: label,
+        resultJson: mergeM4bIntoResultJson(row?.resultJson, m4b),
+        heartbeatAt: new Date(),
+      },
+    });
+    if (claimed.count === 0) {
+      // 不是错误：任务可能已被 cancel，或 label 已被其它路径改写。留痕便于排查
+      // 「盘上有 m4b 但前端不给下载」这类反馈。
+      console.warn("[audiobook] m4b settle CAS missed", parentTaskId, m4b.status);
+    }
   }
 
   /**
