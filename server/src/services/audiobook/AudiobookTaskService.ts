@@ -1076,6 +1076,9 @@ export class AudiobookTaskService {
         status: "running",
         currentStage: "continuing",
         currentItemLabel: `续生成 ${precheck.chapterCount} 章`,
+        // progress 在此先落地板值：真 baseline 要等 wipe 后才算得准（见下），
+        // 但抢占与 baseline 写之间父已是 running，若沿用旧值前端会看到「running @ 100%」。
+        progress: 2,
         fullAudioPath: null,
         resultJson: null,
         cancelRequestedAt: null,
@@ -1116,38 +1119,8 @@ export class AudiobookTaskService {
       }
     };
 
-    // mode=resynthesize：强制 wipe 目标章音频 + 全书，避免 layout fingerprint cache-hit 跳过
-    if (input.mode === "resynthesize") {
-      for (const chapterId of requestedIds) {
-        try {
-          wipeChapterAudioArtifacts(parentOutputDir, chapterId);
-        } catch (wipeError) {
-          console.warn(
-            "[audiobook] continueParentTask resynthesize wipe 失败",
-            parent.id,
-            chapterId,
-            wipeError instanceof Error ? wipeError.message : wipeError,
-          );
-        }
-      }
-      // wipeChapterAudioArtifacts 已清 full-book；再保险清 m4b part
-      safeUnlink(resolveFullBookAudioPath(parentOutputDir));
-      safeUnlink(`${resolveFullBookAudioPath(parentOutputDir)}.part`);
-      safeUnlink(resolveFullBookM4bPath(parentOutputDir));
-      safeUnlink(`${resolveFullBookM4bPath(parentOutputDir)}.part`);
-    }
     const title = `${parent.title}（续生成 ${requestedIds.length} 章）`;
     const parentDeliveryMode = readDeliveryStyleModeFromTask(parent as AudiobookTaskRow);
-    // 续生成起点 progress：父当前已就绪章占比（开始后随子完成 reconcile 推进）
-    let parentReadyBaseline = 0;
-    try {
-      parentReadyBaseline = listReadyChapterAudioIds(parentOutputDir, parentChapterIds).length;
-    } catch {
-      parentReadyBaseline = 0;
-    }
-    const parentProgressBaseline = parentChapterIds.length > 0
-      ? Math.max(2, Math.min(95, Math.round((parentReadyBaseline / parentChapterIds.length) * 100)))
-      : 2;
 
     let child;
     try {
@@ -1180,14 +1153,49 @@ export class AudiobookTaskService {
         include: { novel: { select: { id: true, title: true } } },
       });
     } catch (createError) {
-      // 子任务没建成 = 父的 continuing 永远等不到收口者，必须立刻放回终态
+      // 子任务没建成 = 父的 continuing 永远等不到收口者，必须立刻放回终态。
+      // wipe 排在 create 之后，此处磁盘还没动过，回滚回 parent.status/fullAudioPath 是真的。
       await releaseParentOnFailure(
         createError instanceof Error ? createError.message : String(createError),
       );
       throw createError;
     }
 
-    // 父 progress 基线（章 ready 占比）：抢占时未知 baseline，此处补写
+    // mode=resynthesize：强制 wipe 目标章音频 + 全书，避免 layout fingerprint cache-hit 跳过。
+    // 必须排在 create 成功之后：wipe 一旦执行，父的 fullAudioPath/resultJson 就与磁盘不符，
+    // 此时再走 releaseParentOnFailure 会把父放回 succeeded 并声称全书可播，而音频已被删。
+    // 反过来放在 create 之后则无失败面——wipe/safeUnlink 全吞异常，其后只剩纯内存的 enqueueTask。
+    if (input.mode === "resynthesize") {
+      for (const chapterId of requestedIds) {
+        try {
+          wipeChapterAudioArtifacts(parentOutputDir, chapterId);
+        } catch (wipeError) {
+          console.warn(
+            "[audiobook] continueParentTask resynthesize wipe 失败",
+            parent.id,
+            chapterId,
+            wipeError instanceof Error ? wipeError.message : wipeError,
+          );
+        }
+      }
+      // wipeChapterAudioArtifacts 已清 full-book；再保险清 m4b part
+      safeUnlink(resolveFullBookAudioPath(parentOutputDir));
+      safeUnlink(`${resolveFullBookAudioPath(parentOutputDir)}.part`);
+      safeUnlink(resolveFullBookM4bPath(parentOutputDir));
+      safeUnlink(`${resolveFullBookM4bPath(parentOutputDir)}.part`);
+    }
+
+    // 父 progress 基线（章 ready 占比）：必须在 wipe 之后算，否则刚被删的章仍算作已就绪。
+    // 抢占 CAS 只落了地板值 2，此处补写真基线。
+    let parentReadyBaseline = 0;
+    try {
+      parentReadyBaseline = listReadyChapterAudioIds(parentOutputDir, parentChapterIds).length;
+    } catch {
+      parentReadyBaseline = 0;
+    }
+    const parentProgressBaseline = parentChapterIds.length > 0
+      ? Math.max(2, Math.min(95, Math.round((parentReadyBaseline / parentChapterIds.length) * 100)))
+      : 2;
     await prisma.audiobookTask.updateMany({
       where: { id: parent.id, status: "running", currentStage: "continuing" },
       data: { progress: parentProgressBaseline },
@@ -1579,7 +1587,17 @@ export class AudiobookTaskService {
         try {
           const liveChildren = await this.countLiveContinueChildren(parentRow.id);
           if (liveChildren > 0) continue;
-          await this.reconcileParent(parentRow.id);
+          // reconcile 抛错（WAV 格式不一、磁盘满、DB 抖动）时也必须走兜底，否则孤儿父继续卡
+          // continuing。兜底不能与 reconcile 共用一个 catch——那样抛错时兜底反被跳过。
+          try {
+            await this.reconcileParent(parentRow.id);
+          } catch (reconcileError) {
+            console.warn(
+              "[audiobook] resumePendingTasks reconcileParent 失败，转兜底",
+              parentRow.id,
+              reconcileError instanceof Error ? reconcileError.message : reconcileError,
+            );
+          }
           await this.forceContinueParentTerminal(parentRow.id);
         } catch (error) {
           console.warn(
@@ -2467,7 +2485,8 @@ export class AudiobookTaskService {
             await this.finalizeContinueChild(row.id, true);
           }
         } catch (error) {
-          console.warn("[audiobook.watchdog] markFailedIfRunning failed", {
+          // 这个 try 现在覆盖翻 fail + 续生成收口两步，文案不能只指前者
+          console.warn("[audiobook.watchdog] 翻 fail / 续生成收口失败", {
             taskId: row.id,
             error,
           });

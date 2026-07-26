@@ -68,6 +68,15 @@ test("resumePendingTasks: 不清 cancelRequestedAt，且已请求取消的行走
     /countLiveContinueChildren/.test(body) && /forceContinueParentTerminal/.test(body),
     "无活子的 continuing 父必须被收口（reconcile + forceContinueParentTerminal）",
   );
+  // reconcileParent 必须有自己的 catch，否则它抛错时 forceContinueParentTerminal 被跳过，
+  // 兜底形同虚设（兜底存在的唯一理由就是接住 reconcile 抛错）
+  const reconcileIdx = body.indexOf("this.reconcileParent(");
+  const forceIdx = body.indexOf("this.forceContinueParentTerminal(");
+  assert.ok(reconcileIdx > 0 && forceIdx > reconcileIdx, "force 兜底应排在 reconcile 之后");
+  assert.ok(
+    /catch\s*\(reconcileError\)/.test(body.slice(reconcileIdx, forceIdx)),
+    "reconcileParent 与 forceContinueParentTerminal 之间必须有独立 catch",
+  );
 });
 
 test("resumeTask: 拒绝已请求取消 / continuing 父，且不清 cancelRequestedAt", () => {
@@ -139,6 +148,17 @@ test("continueParentTask: CAS 抢占父在 wipe/建子之前，落空即 409", (
   assert.ok(casIdx > 0 && wipeIdx > 0 && createIdx > 0, "三个关键点都应存在");
   assert.ok(casIdx < wipeIdx, "CAS 抢占必须在破坏性 wipe 之前（双提交防双 wipe）");
   assert.ok(casIdx < createIdx, "CAS 抢占必须在建子之前（双提交防双子）");
+  // wipe 必须在 create 之后：wipe 先跑则 create 失败时回滚把父放回 succeeded，
+  // 声称全书可播而音频已删
+  assert.ok(
+    createIdx < wipeIdx,
+    "破坏性 wipe 必须排在建子之后（回滚路径不得回滚到已被删的磁盘状态）",
+  );
+  // baseline 必须在 wipe 之后算，否则刚被删的章仍被算作已就绪
+  assert.ok(
+    body.indexOf("listReadyChapterAudioIds") > wipeIdx,
+    "progress baseline 必须在 wipe 之后计算",
+  );
   assert.ok(
     /claimedParent\.count === 0/.test(body),
     "抢占落空必须拒绝（409），不得继续",
