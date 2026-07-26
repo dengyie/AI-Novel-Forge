@@ -11,6 +11,7 @@ import { getSharedNovelServices } from "../application/sharedNovelServices";
 import type { RepairOptions } from "../novelCoreShared";
 import {
   buildPadReviewIssuesFromContent,
+  buildSeedReviewIssuesFromPlanReasons,
 } from "./volumeReadinessPadIssues";
 import {
   appendVolumeReadinessChapterResult,
@@ -605,8 +606,11 @@ export class VolumeReadinessExecutor {
               ? "heavy_repair"
               : "light_repair";
 
-            // pad 定向：仅当垫长是主因时注入 reviewIssues（会覆盖 resolveRepairIssues 的
-            // fallback review）。style/l0 未清时不注入，以免丢掉其它 issue。
+            // reviewIssues 注入策略（覆盖 resolveRepairIssues 的 full critical_review）：
+            // 1) light + 垫长主因 → pad 定向 issues
+            // 2) 否则用 plan.reasons 种子，避免 createRepairStream 入口再烧 600s+ audit
+            //    （生产真跑曾 timeout after 900s: createRepairStream，acted 永久 0）
+            // adopt 仍走 baseline/candidate evaluateOnly + L0，不靠种子假通过。
             const padHits = typeof planItem.signals?.padHitCount === "number"
               ? planItem.signals.padHitCount
               : 0;
@@ -625,6 +629,12 @@ export class VolumeReadinessExecutor {
               padIssueCount = padIssues.length;
               if (padIssues.length > 0) {
                 repairOptions.reviewIssues = padIssues;
+              }
+            }
+            if (!repairOptions.reviewIssues || repairOptions.reviewIssues.length === 0) {
+              const seedIssues = buildSeedReviewIssuesFromPlanReasons(planItem.reasons);
+              if (seedIssues.length > 0) {
+                repairOptions.reviewIssues = seedIssues;
               }
             }
 
@@ -738,6 +748,16 @@ export class VolumeReadinessExecutor {
                 padIssueCountChain = padIssuesChain.length;
                 if (padIssuesChain.length > 0) {
                   repairOptionsChain.reviewIssues = padIssuesChain;
+                }
+              }
+              if (!repairOptionsChain.reviewIssues || repairOptionsChain.reviewIssues.length === 0) {
+                // 链式 re_review→repair：用 re-assess 后的 reasons 优先，否则 plan 原 reasons
+                const chainReasons = (typeof after?.reasons !== "undefined" && Array.isArray(after.reasons))
+                  ? after.reasons
+                  : planItem.reasons;
+                const seedChain = buildSeedReviewIssuesFromPlanReasons(chainReasons);
+                if (seedChain.length > 0) {
+                  repairOptionsChain.reviewIssues = seedChain;
                 }
               }
 

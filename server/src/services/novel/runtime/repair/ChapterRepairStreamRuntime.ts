@@ -129,6 +129,74 @@ function contentFingerprint(content: string): string {
   return createHash("sha256").update(content).digest("hex");
 }
 
+const REVIEW_ISSUE_SEVERITIES = new Set(["low", "medium", "high", "critical"]);
+const REVIEW_ISSUE_CATEGORIES = new Set([
+  "coherence",
+  "repetition",
+  "pacing",
+  "voice",
+  "engagement",
+  "logic",
+]);
+
+/**
+ * 从最近 QualityReport.issues JSON 解析为 ReviewIssue[]。
+ * 解析失败 / 空 / 无行 → null（调用方再走真 review）。
+ * 导出供单测覆盖，不改变生产行为契约。
+ */
+export async function loadLatestQualityReportIssues(
+  novelId: string,
+  chapterId: string,
+): Promise<ReviewIssue[] | null> {
+  try {
+    const report = await prisma.qualityReport.findFirst({
+      where: { novelId, chapterId },
+      orderBy: { createdAt: "desc" },
+      select: { issues: true },
+    });
+    if (!report?.issues?.trim()) {
+      return null;
+    }
+    const parsed = JSON.parse(report.issues) as unknown;
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+      return null;
+    }
+    const normalized: ReviewIssue[] = [];
+    for (const raw of parsed) {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+        continue;
+      }
+      const item = raw as Record<string, unknown>;
+      const severity = typeof item.severity === "string" ? item.severity : "";
+      const category = typeof item.category === "string" ? item.category : "";
+      const evidence = typeof item.evidence === "string" ? item.evidence.trim() : "";
+      const fixSuggestion = typeof item.fixSuggestion === "string"
+        ? item.fixSuggestion.trim()
+        : "";
+      if (
+        !REVIEW_ISSUE_SEVERITIES.has(severity)
+        || !REVIEW_ISSUE_CATEGORIES.has(category)
+        || !evidence
+      ) {
+        continue;
+      }
+      const issue: ReviewIssue & { code?: string } = {
+        severity: severity as ReviewIssue["severity"],
+        category: category as ReviewIssue["category"],
+        evidence,
+        fixSuggestion: fixSuggestion || "按 evidence 定向修复，保持剧情方向与角色状态。",
+      };
+      if (typeof item.code === "string" && item.code.trim()) {
+        issue.code = item.code.trim();
+      }
+      normalized.push(issue);
+    }
+    return normalized.length > 0 ? normalized : null;
+  } catch {
+    return null;
+  }
+}
+
 function blockingProseCodes(
   content: string,
   options: { mustAvoid?: string | null; bannedTerms?: string[] | null } = {},
@@ -425,10 +493,29 @@ export class ChapterRepairStreamRuntime {
       }));
     }
 
-    // repair 取 issues 不得阻塞在 payoff_ledger.sync（transport 重试可达 5×600s）
+    // 优先复用最近一次真 review 落库的 QualityReport.issues，避免 repair 入口再烧
+    // 一次 critical_review（grok 可达 600s + fallback 再 600s）。readiness 章级
+    // 时钟曾因此在 createRepairStream 阶段就 timeout after 900s，整卷 acted=0。
+    // adopt 仍走 baseline/candidate evaluateOnly，不靠这份缓存做 L1 判定。
+    const cachedIssues = await loadLatestQualityReportIssues(novelId, chapterId);
+    if (cachedIssues && cachedIssues.length > 0) {
+      logPipelineInfo("resolveRepairIssues: reusing QualityReport issues (skip full audit).", {
+        novelId,
+        chapterId,
+        operation: "repair",
+        provider: options.provider ?? null,
+        model: options.model ?? null,
+        issueCount: cachedIssues.length,
+      });
+      return cachedIssues;
+    }
+
+    // 无缓存才真 review；evaluateOnly 避免写库副作用；仍 skip ledger sync
+    // （transport 重试可达 5×600s，readiness 热路径绝不能阻塞）。
     const fallbackReview = await this.deps.reviewChapterAfterRepair(novelId, chapterId, {
       ...options,
       skipPayoffLedgerSync: true,
+      evaluateOnly: true,
     });
     return fallbackReview.issues;
   }

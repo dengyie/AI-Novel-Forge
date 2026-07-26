@@ -62,7 +62,7 @@ describe("volumeReadiness config asInt empty-env fallback", () => {
     assert.equal(cfg.budget.maxHeavyRewrites, 3);
     assert.equal(cfg.budget.maxLlmCalls, 60);
     assert.equal(cfg.budget.maxWallMinutes, 180);
-    assert.equal(cfg.perChapterTimeoutMs, 15 * 60 * 1000);
+    assert.equal(cfg.perChapterTimeoutMs, 45 * 60 * 1000);
     assert.equal(cfg.wallHeartbeatMs, 30_000);
     assert.equal(cfg.maxIncompleteRetries, 3);
     assert.equal(cfg.signalStaleHours, 72);
@@ -77,7 +77,7 @@ describe("volumeReadiness config asInt empty-env fallback", () => {
     const cfg = mod.volumeReadinessConfig;
     assert.equal(cfg.budget.maxChapters, 20);
     assert.equal(cfg.budget.maxHeavyRewrites, 3);
-    assert.equal(cfg.perChapterTimeoutMs, 15 * 60 * 1000);
+    assert.equal(cfg.perChapterTimeoutMs, 45 * 60 * 1000);
     assert.equal(cfg.budget.maxWallMinutes, 180);
   });
 

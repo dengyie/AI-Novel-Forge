@@ -102,11 +102,18 @@ export const VOLUME_READINESS_MAX_INCOMPLETE_RETRIES = asInt(
  * 防 provider silent-hang / transport 半开连接导致单章 await 永不返回，
  * 把整卷 wall 烧干并永久卡住 executor（"卡住不动"次主因）。到点 abort 并 race
  * 兜底抛错，outcome=failed/incomplete 可 resume 重试，不污染 chapter 日志。
- * 默认 15 分钟：heavy streaming + baseline/candidate evaluateOnly 真实可达 12m+。
+ *
+ * 默认 45 分钟（曾 15m）：heavy 路径真实墙钟 ≈
+ *   resolveIssues(critical_review 可达 600s + fallback 600s)
+ *   + rewrite stream
+ *   + baseline/candidate evaluateOnly（各可达 600s）
+ * 15m 在 grok-4.5 慢响应时必然 timeout after 900s: createRepairStream，
+ * 整卷 acted 永久 0。45m 覆盖「一次成功 critical_review ~6m + stream + 两次
+ * evaluateOnly」常态，仍远小于整卷 wall；silent-hang 仍由章级 abort 收口。
  */
 export const VOLUME_READINESS_PER_CHAPTER_TIMEOUT_MS = asInt(
   process.env.VOLUME_READINESS_PER_CHAPTER_TIMEOUT_MS,
-  15 * 60 * 1000,
+  45 * 60 * 1000,
   60_000,
   60 * 60 * 1000,
 );
