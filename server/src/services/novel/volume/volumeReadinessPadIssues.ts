@@ -76,3 +76,55 @@ export function mergeReviewIssuesPreferPad(
   }
   return out;
 }
+
+/**
+ * readiness plan.reasons → 最小 ReviewIssue 种子。
+ * 给 heavy/light repair 入口跳过 resolveRepairIssues 的 full critical_review
+ * （单次可达 600s+fallback 600s，曾把 15m 章钟烧穿在 createRepairStream）。
+ * adopt 仍走 baseline/candidate evaluateOnly，不靠种子做 L1 判定。
+ */
+export function buildSeedReviewIssuesFromPlanReasons(
+  reasons: string[] | null | undefined,
+  maxIssues = 8,
+): ReviewIssueWithCode[] {
+  if (!Array.isArray(reasons) || reasons.length === 0) {
+    return [];
+  }
+  const issues: ReviewIssueWithCode[] = [];
+  for (const raw of reasons) {
+    if (issues.length >= maxIssues) {
+      break;
+    }
+    const text = typeof raw === "string" ? raw.trim() : "";
+    if (!text) {
+      continue;
+    }
+    const lower = text.toLowerCase();
+    const category: ReviewIssue["category"] =
+      /重复|套话|垫长|pad|repetition/.test(lower)
+        ? "repetition"
+        : /节奏|pacing|拖沓|注水/.test(lower)
+          ? "pacing"
+          : /人物|角色|character|逻辑|logic/.test(lower)
+            ? "logic"
+            : /文风|voice|口吻|人称/.test(lower)
+              ? "voice"
+              : /吸引力|engagement|爽点/.test(lower)
+                ? "engagement"
+                : "coherence";
+    const severity: ReviewIssue["severity"] =
+      /critical|严重|硬伤|L0|blocking|不可/.test(lower)
+        ? "critical"
+        : /high|高|未过|fail|literary|文学性/.test(lower)
+          ? "high"
+          : "medium";
+    issues.push({
+      code: "readiness_plan_reason",
+      severity,
+      category,
+      evidence: text.length > 400 ? `${text.slice(0, 400)}…` : text,
+      fixSuggestion: "按 readiness 判定原因定向修复硬伤与未过门项，保持剧情方向与角色状态。",
+    });
+  }
+  return issues;
+}

@@ -441,3 +441,102 @@ test("isWallBudgetExhausted + listPlannedLiveReadinessRuns skip wall-exhausted",
   const listedAll = listPlannedLiveReadinessRuns({ skipWallExhausted: false });
   assert.ok(listedAll.some((r) => r.runId === run.runId));
 });
+
+test("cancel zombie running (no flight) terminates status, not just flag", () => {
+  process.env.VOLUME_READINESS_RUN_PERSIST = "0";
+  resetVolumeReadinessRunStoreForTests();
+  const {
+    seedVolumeReadinessRunForTests,
+    findOpenLiveRunForNovel,
+  } = require("../dist/services/novel/volume/volumeReadinessRunStore.js");
+
+  const now = new Date().toISOString();
+  seedVolumeReadinessRunForTests({
+    runId: "vrr_zombie_running",
+    novelId: "n-zombie",
+    volumeOrder: 1,
+    fromOrder: 1,
+    toOrder: 20,
+    rangeSource: "explicit",
+    dryRun: false,
+    actionFilter: ["needs_heavy"],
+    budget: {
+      maxChapters: 20,
+      maxHeavyRewrites: 16,
+      maxLlmCalls: 300,
+      maxWallMinutes: 480,
+    },
+    status: "running",
+    cancelRequested: false,
+    plan: [],
+    planSummary: {
+      total: 0,
+      publishReady: 0,
+      needsReReview: 0,
+      needsPatch: 0,
+      needsPolish: 0,
+      needsHeavy: 0,
+      needsManual: 0,
+      publishReadyRatio: 0,
+    },
+    results: [],
+    finalSummary: null,
+    error: null,
+    createdAt: now,
+    updatedAt: now,
+    startedAt: now,
+    finishedAt: null,
+    llmCallsUsed: 0,
+    heavyRewritesUsed: 0,
+    chaptersActed: 0,
+    wallMsUsed: 1000,
+  });
+
+  // no tryClaim → activeNovelRuns empty, but status=running still open-live
+  // (deploy-restart zombie: findActive scans status, not only flight table)
+  assert.ok(findOpenLiveRunForNovel("n-zombie"));
+
+  const cancelled = requestVolumeReadinessRunCancel("vrr_zombie_running");
+  assert.equal(cancelled.cancelRequested, true);
+  assert.equal(cancelled.status, "cancelled");
+  assert.ok(cancelled.finishedAt);
+  assert.equal(findOpenLiveRunForNovel("n-zombie"), null);
+});
+
+test("cancel live running (with flight) only sets flag", () => {
+  process.env.VOLUME_READINESS_RUN_PERSIST = "0";
+  resetVolumeReadinessRunStoreForTests();
+
+  const run = createVolumeReadinessRun({
+    novelId: "n-live",
+    volumeOrder: 1,
+    fromOrder: 1,
+    toOrder: 2,
+    dryRun: false,
+    actionFilter: ["needs_heavy"],
+    budget: {
+      maxChapters: 5,
+      maxHeavyRewrites: 3,
+      maxLlmCalls: 60,
+      maxWallMinutes: 180,
+    },
+    plan: [],
+    planSummary: {
+      total: 0,
+      publishReady: 0,
+      needsReReview: 0,
+      needsPatch: 0,
+      needsPolish: 0,
+      needsHeavy: 0,
+      needsManual: 0,
+      publishReadyRatio: 0,
+    },
+  });
+  updateVolumeReadinessRun(run.runId, { status: "running", startedAt: new Date().toISOString() });
+  assert.equal(tryClaimNovelRunFlight("n-live", run.runId), true);
+
+  const cancelled = requestVolumeReadinessRunCancel(run.runId);
+  assert.equal(cancelled.cancelRequested, true);
+  assert.equal(cancelled.status, "running", "live flight keeps running for executor to settle");
+  releaseNovelRunFlight("n-live", run.runId);
+});

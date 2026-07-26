@@ -172,10 +172,20 @@ export async function hydrateVolumeReadinessRunsFromDisk(limit = 100): Promise<n
       if (runsById.has(parsed.runId)) {
         continue;
       }
-      // 进程重启后 running 视为可 re-enter：降为 planned，保留 results 作断点
+      // 进程重启后：
+      // - 已 cancelRequested 的 running 是 zombie（旧进程 executor 已死），直接 cancelled，
+      //   否则降 planned 后仍占 open-run 互斥，createRun/auto-resume 全被挡。
+      // - 其它 running → planned，保留 results 作断点。
       if (parsed.status === "running") {
-        parsed.status = "planned";
-        parsed.startedAt = null;
+        if (parsed.cancelRequested) {
+          parsed.status = "cancelled";
+          if (!parsed.finishedAt) {
+            parsed.finishedAt = nowIso();
+          }
+        } else {
+          parsed.status = "planned";
+          parsed.startedAt = null;
+        }
       }
       // 旧快照 planSummary 可能缺 needsPolish 等字段
       parsed.planSummary = normalizePlanSummary(parsed.planSummary);
@@ -470,7 +480,12 @@ export function requestVolumeReadinessRunCancel(runId: string): VolumeReadinessR
   }
   run.cancelRequested = true;
   run.updatedAt = nowIso();
-  if (run.status === "planned") {
+  // planned：无 executor，直接 cancelled。
+  // running 但本进程 flight 表没有该 runId：deploy/restart 后的 zombie，
+  // 旧进程 executor 已死，再只打 flag 会永久占 open-run 互斥。
+  // running 且 flight 持有：留给 live executor 读 cancelRequested 后终态收口。
+  const liveFlight = activeNovelRuns.get(run.novelId) === runId;
+  if (run.status === "planned" || (run.status === "running" && !liveFlight)) {
     run.status = "cancelled";
     run.finishedAt = run.updatedAt;
     releaseNovelRunFlight(run.novelId, runId);

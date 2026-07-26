@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 
 const {
   buildPadReviewIssuesFromContent,
+  buildSeedReviewIssuesFromPlanReasons,
   mergeReviewIssuesPreferPad,
 } = require("../dist/services/novel/volume/volumeReadinessPadIssues.js");
 const {
@@ -52,6 +53,24 @@ test("mergeReviewIssuesPreferPad puts pad first and dedupes", () => {
   assert.equal(merged.length, 2);
   assert.equal(merged[0].code, "prose_pad_phrase");
   assert.equal(merged[1].evidence, "other");
+});
+
+test("buildSeedReviewIssuesFromPlanReasons maps reasons to ReviewIssue seeds", () => {
+  assert.deepEqual(buildSeedReviewIssuesFromPlanReasons(null), []);
+  assert.deepEqual(buildSeedReviewIssuesFromPlanReasons([]), []);
+  const issues = buildSeedReviewIssuesFromPlanReasons([
+    "文学性未过门",
+    "重复套话过多",
+    "  ",
+    "人物逻辑断裂",
+  ]);
+  assert.equal(issues.length, 3);
+  assert.ok(issues.every((i) => i.code === "readiness_plan_reason"));
+  assert.equal(issues[0].severity, "high");
+  assert.equal(issues[0].category, "coherence");
+  assert.equal(issues[1].category, "repetition");
+  assert.equal(issues[2].category, "logic");
+  assert.ok(issues[0].fixSuggestion.length > 0);
 });
 
 test("countIncompleteAttemptsForChapter uses attemptCount on last incomplete", () => {
