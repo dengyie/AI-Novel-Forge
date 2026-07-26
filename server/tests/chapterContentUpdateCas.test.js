@@ -43,6 +43,8 @@ test("updateChapter content CAS: matching expectedContentRevision succeeds and b
     updateMany: prisma.chapter.updateMany,
     update: prisma.chapter.update,
     findMany: prisma.chapter.findMany,
+    characterFindMany: prisma.character.findMany,
+    consistencyFactFindMany: prisma.consistencyFact.findMany,
     transaction: prisma.$transaction,
   };
   const mirror = service.volumeService.mirrorChapterIntoWorkspace.bind(service.volumeService);
@@ -68,6 +70,8 @@ test("updateChapter content CAS: matching expectedContentRevision succeeds and b
       throw new Error("CAS path must not call chapter.update");
     };
     prisma.chapter.findMany = async () => [];
+    prisma.character.findMany = async () => [];
+    prisma.consistencyFact.findMany = async () => [];
     // 跳过 syncChapterArtifacts 真实写库（FK 依赖 novel/chapter 行）
     // product: novelChapterArtifacts 先 findUnique 再 update/create，不能只 stub upsert
     prisma.$transaction = async (fn) => {
@@ -99,6 +103,8 @@ test("updateChapter content CAS: matching expectedContentRevision succeeds and b
     prisma.chapter.updateMany = originals.updateMany;
     prisma.chapter.update = originals.update;
     prisma.chapter.findMany = originals.findMany;
+    prisma.character.findMany = originals.characterFindMany;
+    prisma.consistencyFact.findMany = originals.consistencyFactFindMany;
     prisma.$transaction = originals.transaction;
     service.volumeService.mirrorChapterIntoWorkspace = mirror;
   }
@@ -159,6 +165,8 @@ test("updateChapter without expectedContentRevision is last-write-wins and still
     updateMany: prisma.chapter.updateMany,
     update: prisma.chapter.update,
     findMany: prisma.chapter.findMany,
+    characterFindMany: prisma.character.findMany,
+    consistencyFactFindMany: prisma.consistencyFact.findMany,
     transaction: prisma.$transaction,
   };
   const mirror = service.volumeService.mirrorChapterIntoWorkspace.bind(service.volumeService);
@@ -175,6 +183,8 @@ test("updateChapter without expectedContentRevision is last-write-wins and still
       return baseChapter({ content: "兼容正文", contentRevision: 3 });
     };
     prisma.chapter.findMany = async () => [];
+    prisma.character.findMany = async () => [];
+    prisma.consistencyFact.findMany = async () => [];
     prisma.$transaction = async (fn) => {
       if (typeof fn === "function") {
         const tx = {
@@ -200,6 +210,8 @@ test("updateChapter without expectedContentRevision is last-write-wins and still
     prisma.chapter.updateMany = originals.updateMany;
     prisma.chapter.update = originals.update;
     prisma.chapter.findMany = originals.findMany;
+    prisma.character.findMany = originals.characterFindMany;
+    prisma.consistencyFact.findMany = originals.consistencyFactFindMany;
     prisma.$transaction = originals.transaction;
     service.volumeService.mirrorChapterIntoWorkspace = mirror;
   }

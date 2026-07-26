@@ -78,6 +78,7 @@ export class ChapterPipelineRuntimeAdapter {
             return {
               finalContent: finalized.finalContent,
               runtimePackage: finalized.runtimePackage,
+              contentRevision: finalized.contentRevision,
             };
           },
           markChapterGenerationState: (targetChapterId, generationState, options) =>

@@ -116,6 +116,9 @@ export class ChapterStreamGenerationOrchestrator {
           signal: cancelSignal,
         });
         const generatedContent = normalized.finalContent;
+        if (!Number.isInteger(normalized.contentRevision)) {
+          throw new Error("Chapter draft save did not return a content revision.");
+        }
         this.emitRunStatus(helpers, buildChapterRunStatusFrame({
           runId: runStatusId,
           status: "running",
@@ -128,6 +131,7 @@ export class ChapterStreamGenerationOrchestrator {
           request,
           contextPackage: assembled.contextPackage,
           content: generatedContent,
+          expectedContentRevision: normalized.contentRevision as number,
           lengthControl: normalized?.lengthControl,
           runId: traceRunId,
           startMs,
@@ -224,6 +228,7 @@ export class ChapterStreamGenerationOrchestrator {
     lengthControl?: ChapterRuntimePackage["lengthControl"];
     artifactsAlreadySynced?: boolean;
     backgroundSyncDeferred?: boolean;
+    contentRevision?: number;
   }> {
     throwIfChapterGenerationAborted(input.signal, "章节生成已取消。");
     const writerResult = await this.deps.chapterWritingGraph.createChapterStream({
@@ -268,6 +273,7 @@ export class ChapterStreamGenerationOrchestrator {
       lengthControl: normalized?.lengthControl,
       artifactsAlreadySynced: Boolean(normalized?.artifactsAlreadySynced),
       backgroundSyncDeferred: Boolean(normalized?.backgroundSyncDeferred),
+      contentRevision: normalized?.contentRevision,
     };
   }
 
@@ -312,6 +318,7 @@ export class ChapterStreamGenerationOrchestrator {
       lengthControl?: ChapterRuntimePackage["lengthControl"];
       artifactsAlreadySynced?: boolean;
       backgroundSyncDeferred?: boolean;
+      contentRevision?: number;
     } | void>;
     fallbackContent: string;
     signal?: AbortSignal;
@@ -320,6 +327,7 @@ export class ChapterStreamGenerationOrchestrator {
     lengthControl?: ChapterRuntimePackage["lengthControl"];
     artifactsAlreadySynced?: boolean;
     backgroundSyncDeferred?: boolean;
+    contentRevision?: number;
   }> {
     // Align with pipeline: independent empty / chinese counters (1 retry each).
     const EMPTY_CONTENT_GENERATION_RETRY_LIMIT = 1;
@@ -371,6 +379,7 @@ export class ChapterStreamGenerationOrchestrator {
           lengthControl: retryDraft.lengthControl,
           artifactsAlreadySynced: retryDraft.artifactsAlreadySynced,
           backgroundSyncDeferred: retryDraft.backgroundSyncDeferred,
+          contentRevision: retryDraft.contentRevision,
         };
       } catch (error) {
         if (isChapterEmptyContentError(error)) {

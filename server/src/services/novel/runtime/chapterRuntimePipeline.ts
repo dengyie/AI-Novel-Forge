@@ -1,5 +1,6 @@
 import type { ChapterRuntimePackage, GenerationContextPackage } from "@ai-novel/shared/types/chapterRuntime";
 import type { ContentProvenance } from "@ai-novel/shared/types/canonicalState";
+import type { CommittedChapterContent } from "./content/ChapterContentCommitTypes";
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
 import type { QualityScore, ReviewIssue } from "@ai-novel/shared/types/novel";
 import {
@@ -135,6 +136,7 @@ export interface PipelineRuntimeResult {
 export interface FinalizedRuntimeResult {
   finalContent: string;
   runtimePackage: ChapterRuntimePackage;
+  contentRevision: number;
 }
 
 export interface PipelineRecoverableRepairFailure {
@@ -147,7 +149,14 @@ export interface PipelineRecoverableRepairFailure {
 
 export interface AssembledRuntimeChapter {
   novel: { id: string; title: string };
-  chapter: { id: string; title: string; order: number; content: string | null; expectation: string | null };
+  chapter: {
+    id: string;
+    title: string;
+    order: number;
+    content: string | null;
+    contentRevision: number;
+    expectation: string | null;
+  };
   contextPackage: GenerationContextPackage;
 }
 
@@ -166,6 +175,7 @@ interface RunPipelineChapterDeps {
     content: string;
     lengthControl?: ChapterRuntimePackage["lengthControl"];
     artifactsAlreadySynced?: boolean;
+    contentRevision?: number;
   }>;
   saveDraftAndArtifacts: (
     novelId: string,
@@ -173,7 +183,7 @@ interface RunPipelineChapterDeps {
     content: string,
     generationState: "drafted" | "repaired",
     options?: { scheduleBackgroundSync?: boolean; artifactSyncMode?: PipelineRuntimeInput["artifactSyncMode"]; syncArtifacts?: boolean },
-  ) => Promise<void>;
+  ) => Promise<CommittedChapterContent>;
   syncFinalChapterArtifacts: (
     novelId: string,
     chapterId: string,
@@ -189,6 +199,7 @@ interface RunPipelineChapterDeps {
     request: ChapterRuntimeRequestInput;
     contextPackage: GenerationContextPackage;
     content: string;
+    expectedContentRevision: number;
     lengthControl?: ChapterRuntimePackage["lengthControl"];
     runId: string | null;
     startMs: number | null;
@@ -250,6 +261,7 @@ export async function runPipelineChapterWithRuntime(
   const chapterWriterSettings = await getChapterWriterRuntimeSettings();
   const transportRetryMaxAttempts = chapterWriterSettings.transportRetryMaxAttempts;
   let content = assembled.chapter.content?.trim() ? assembled.chapter.content : "";
+  let contentRevision = assembled.chapter.contentRevision;
   let retryCountUsed = 0;
   let latestResult: FinalizedRuntimeResult | null = null;
   let latestIssues: ReviewIssue[] = [];
@@ -282,11 +294,16 @@ export async function runPipelineChapterWithRuntime(
       content = generatedDraft.content;
       latestLengthControl = generatedDraft.lengthControl;
       if (!generatedDraft.artifactsAlreadySynced) {
-        await deps.saveDraftAndArtifacts(novelId, chapterId, content, "drafted", {
+        const committedDraft = await deps.saveDraftAndArtifacts(novelId, chapterId, content, "drafted", {
           scheduleBackgroundSync: false,
           artifactSyncMode,
           syncArtifacts: false,
         });
+        contentRevision = committedDraft.contentRevision;
+      } else if (Number.isInteger(generatedDraft.contentRevision)) {
+        contentRevision = generatedDraft.contentRevision as number;
+      } else {
+        throw new Error("Chapter writer did not return the committed content revision.");
       }
     }
 
@@ -319,6 +336,7 @@ export async function runPipelineChapterWithRuntime(
       request,
       contextPackage: assembled.contextPackage,
       content,
+      expectedContentRevision: contentRevision,
       lengthControl: latestLengthControl,
       runId: null,
       startMs: null,
@@ -330,6 +348,7 @@ export async function runPipelineChapterWithRuntime(
       ...styleLeakageIssues,
     ];
     content = latestResult.finalContent;
+    contentRevision = latestResult.contentRevision;
     await deps.markChapterGenerationState(chapterId, "reviewed");
 
     const acceptanceStatus = latestResult.runtimePackage.meta?.acceptanceStatus;
@@ -356,17 +375,6 @@ export async function runPipelineChapterWithRuntime(
       && isQualityPass(latestResult.runtimePackage.audit.score, qualityThreshold)
       && styleLeakageIssues.length === 0;
     if (pass) {
-      // 改写实际发生时把改写后正文落库到 Chapter.content，否则一次过审章节会保留有 AI 味的原始草稿而
-      // 只有 artifacts 用的是改写后文本。syncArtifacts:false 不重复触发已由循环后 syncFinalRetainedChapterArtifacts
-      // 承担的 artifact 同步。在 markChapterGenerationState("approved") 之前调用，因 saveDraftAndArtifacts 会把
-      // chapterStatus 置 "generating"，由随后的 literaryPass 门写回 completed。
-      if (latestResult.runtimePackage.styleReview?.autoRewritten) {
-        await deps.saveDraftAndArtifacts(novelId, chapterId, content, "drafted", {
-          scheduleBackgroundSync: false,
-          artifactSyncMode,
-          syncArtifacts: false,
-        });
-      }
       // A6 + styleClear：文学 isPass ∧ 文风门皆过才允许 completed
       const styleClear = projectStyleClearFromRuntimePackage(latestResult.runtimePackage);
       await deps.markChapterGenerationState(chapterId, "approved", {
@@ -433,11 +441,12 @@ export async function runPipelineChapterWithRuntime(
     repairEscalatedFromPatch = repairResult.escalatedFromPatch;
     content = repairResult.content;
     retryCountUsed += 1;
-    await deps.saveDraftAndArtifacts(novelId, chapterId, content, "repaired", {
+    const committedRepair = await deps.saveDraftAndArtifacts(novelId, chapterId, content, "repaired", {
       scheduleBackgroundSync: false,
       artifactSyncMode,
       syncArtifacts: false,
     });
+    contentRevision = committedRepair.contentRevision;
   }
 
   if (!latestResult) {
@@ -490,6 +499,7 @@ async function generateNonEmptyDraftFromWriter(input: {
   content: string;
   lengthControl?: ChapterRuntimePackage["lengthControl"];
   artifactsAlreadySynced?: boolean;
+  contentRevision?: number;
 }> {
   let emptyAttempt = 0;
   let chineseGateAttempt = 0;
@@ -823,4 +833,3 @@ function buildQualityDebtAttribution(input: {
     },
   };
 }
-

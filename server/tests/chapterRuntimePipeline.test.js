@@ -5,7 +5,7 @@ const promptRunner = require("../dist/prompting/core/promptRunner.js");
 const fs = require("node:fs");
 const path = require("node:path");
 const {
-  runPipelineChapterWithRuntime,
+  runPipelineChapterWithRuntime: runPipelineChapterWithRuntimeActual,
 } = require("../dist/services/novel/runtime/chapterRuntimePipeline.js");
 const {
   ChapterEmptyContentError,
@@ -16,6 +16,52 @@ const {
 const {
   mergeChapterPatchForGenerationStateBump,
 } = require("../dist/services/novel/chapterLifecycleState.js");
+
+async function runPipelineChapterWithRuntime(deps, novelId, chapterId, options, hooks) {
+  let contentRevision = 0;
+  return runPipelineChapterWithRuntimeActual({
+    ...deps,
+    assemble: async (...args) => {
+      const assembled = await deps.assemble(...args);
+      contentRevision = assembled.chapter.contentRevision ?? contentRevision;
+      return {
+        ...assembled,
+        chapter: {
+          ...assembled.chapter,
+          contentRevision,
+        },
+      };
+    },
+    generateDraftFromWriter: async (...args) => {
+      const generated = await deps.generateDraftFromWriter(...args);
+      if (generated.artifactsAlreadySynced && !Number.isInteger(generated.contentRevision)) {
+        contentRevision += 1;
+        return { ...generated, contentRevision };
+      }
+      return generated;
+    },
+    saveDraftAndArtifacts: async (targetNovelId, targetChapterId, content, generationState, saveOptions) => {
+      const committed = await deps.saveDraftAndArtifacts(
+        targetNovelId,
+        targetChapterId,
+        content,
+        generationState,
+        saveOptions,
+      );
+      if (committed && Number.isInteger(committed.contentRevision)) {
+        contentRevision = committed.contentRevision;
+        return committed;
+      }
+      contentRevision += 1;
+      return { targetNovelId, chapterId: targetChapterId, novelId: targetNovelId, content, contentRevision };
+    },
+    finalizeChapterContent: async (input) => {
+      const finalized = await deps.finalizeChapterContent(input);
+      contentRevision = finalized.contentRevision ?? input.expectedContentRevision;
+      return { ...finalized, contentRevision };
+    },
+  }, novelId, chapterId, options, hooks);
+}
 
 function createRuntimePackage(overallScore, options = {}) {
   return {
@@ -1909,4 +1955,3 @@ test("open-chapter rewrite paths forward chapterOrder into style contract", () =
     /buildWriterStyleContractText\(\s*[\s\S]*?\{\s*chapterOrder\s*\}/,
   );
 });
-

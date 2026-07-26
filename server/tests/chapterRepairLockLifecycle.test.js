@@ -224,15 +224,21 @@ function installPrismaHappyPath() {
     chapterFindFirst: prisma.chapter.findFirst,
     bibleFindUnique: prisma.novelBible.findUnique,
     chapterUpdate: prisma.chapter.update,
+    chapterUpdateMany: prisma.chapter.updateMany,
     qualityReportFindFirst: prisma.qualityReport.findFirst,
     runStructured: promptRunner.runStructuredPrompt,
     streamText: promptRunner.streamTextPrompt,
   };
   prisma.novel.findUnique = async () => ({ id: "novel-1", title: "测试小说" });
+  let chapterContent = "旧正文里有一段需要修复的内容。";
+  let contentRevision = 7;
   prisma.chapter.findFirst = async () => ({
     id: "chapter-1",
+    novelId: "novel-1",
     title: "第1章",
-    content: "旧正文里有一段需要修复的内容。",
+    order: 1,
+    content: chapterContent,
+    contentRevision,
     repairHistory: null,
     qualityScore: 70,
     continuityScore: 70,
@@ -250,6 +256,14 @@ function installPrismaHappyPath() {
     overall: 70,
   });
   prisma.chapter.update = async ({ data }) => ({ id: "chapter-1", ...data });
+  prisma.chapter.updateMany = async ({ where, data }) => {
+    if (where.contentRevision !== contentRevision) {
+      return { count: 0 };
+    }
+    chapterContent = data.content;
+    contentRevision += 1;
+    return { count: 1 };
+  };
   // force heavy path so streamTextPrompt is used
   promptRunner.runStructuredPrompt = async () => {
     throw new Error("[{\"origin\":\"string\",\"code\":\"too_small\",\"minimum\":6,\"inclusive\":true,\"path\":[\"patches\",0,\"targetExcerpt\"],\"message\":\"Too small\"}]");
@@ -267,6 +281,7 @@ function installPrismaHappyPath() {
     prisma.chapter.findFirst = originals.chapterFindFirst;
     prisma.novelBible.findUnique = originals.bibleFindUnique;
     prisma.chapter.update = originals.chapterUpdate;
+    prisma.chapter.updateMany = originals.chapterUpdateMany;
     prisma.qualityReport.findFirst = originals.qualityReportFindFirst;
     promptRunner.runStructuredPrompt = originals.runStructured;
     promptRunner.streamTextPrompt = originals.streamText;

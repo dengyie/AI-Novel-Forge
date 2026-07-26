@@ -731,21 +731,28 @@ test("createRepairStream escalates patch schema failures to a single heavy repai
   const originalChapterFindFirst = prisma.chapter.findFirst;
   const originalBibleFindUnique = prisma.novelBible.findUnique;
   const originalChapterUpdate = prisma.chapter.update;
+  const originalChapterUpdateMany = prisma.chapter.updateMany;
   const originalQualityReportFindFirst = prisma.qualityReport.findFirst;
   const originalRunStructuredPrompt = promptRunner.runStructuredPrompt;
   const originalStreamTextPrompt = promptRunner.streamTextPrompt;
 
   const chapterUpdates = [];
+  const chapterUpdateManyCalls = [];
   const syncCalls = [];
   const reviewCalls = [];
   const resolvedIssues = [];
   const frames = [];
 
   prisma.novel.findUnique = async () => ({ id: "novel-1", title: "测试小说" });
+  let persistedContent = "旧正文里有一段需要修复的内容。";
+  let contentRevision = 7;
   prisma.chapter.findFirst = async () => ({
     id: "chapter-1",
+    novelId: "novel-1",
     title: "第1章",
-    content: "旧正文里有一段需要修复的内容。",
+    order: 1,
+    content: persistedContent,
+    contentRevision,
     repairHistory: null,
     qualityScore: 70,
     continuityScore: 70,
@@ -764,6 +771,13 @@ test("createRepairStream escalates patch schema failures to a single heavy repai
   prisma.chapter.update = async ({ data }) => {
     chapterUpdates.push(data);
     return { id: "chapter-1", ...data };
+  };
+  prisma.chapter.updateMany = async ({ where, data }) => {
+    chapterUpdateManyCalls.push(data);
+    if (where.contentRevision !== contentRevision) return { count: 0 };
+    persistedContent = data.content;
+    contentRevision += 1;
+    return { count: 1 };
   };
   promptRunner.runStructuredPrompt = async () => {
     throw new Error("[{\"origin\":\"string\",\"code\":\"too_small\",\"minimum\":6,\"inclusive\":true,\"path\":[\"patches\",0,\"targetExcerpt\"],\"message\":\"Too small: expected string to have >=6 characters\"}]");
@@ -845,8 +859,9 @@ test("createRepairStream escalates patch schema failures to a single heavy repai
     assert.equal(syncCalls[0][3].scheduleBackgroundSync, true);
     assert.equal(syncCalls[0][3].skipLegacySummaryAndFacts, true);
     assert.deepEqual(resolvedIssues, [["issue-1"]]);
-    assert.deepEqual(chapterUpdates.map((item) => item.generationState), ["repaired", "approved"]);
-    assert.ok(chapterUpdates[0].repairHistory?.includes("decision=adopt"));
+    assert.equal(chapterUpdateManyCalls[0].generationState, "repaired");
+    assert.ok(chapterUpdateManyCalls[0].repairHistory?.includes("decision=adopt"));
+    assert.deepEqual(chapterUpdates.map((item) => item.generationState), ["approved"]);
     assert.equal(frames.at(-1)?.status, "succeeded");
     assert.equal(frames.at(-1)?.phase, "completed");
   } finally {
@@ -854,6 +869,7 @@ test("createRepairStream escalates patch schema failures to a single heavy repai
     prisma.chapter.findFirst = originalChapterFindFirst;
     prisma.novelBible.findUnique = originalBibleFindUnique;
     prisma.chapter.update = originalChapterUpdate;
+    prisma.chapter.updateMany = originalChapterUpdateMany;
     prisma.qualityReport.findFirst = originalQualityReportFindFirst;
     promptRunner.runStructuredPrompt = originalRunStructuredPrompt;
     promptRunner.streamTextPrompt = originalStreamTextPrompt;
@@ -1225,6 +1241,7 @@ test("createChapterStream retries once before failing empty generated content", 
           onDone: async () => ({
             finalContent: currentCall === 1 ? "   " : "重试后的正文",
             artifactsAlreadySynced: true,
+            contentRevision: currentCall,
           }),
         };
       },
@@ -1241,6 +1258,7 @@ test("createChapterStream retries once before failing empty generated content", 
       runtimePackage: {
         audit: { hasBlockingIssues: false },
       },
+      contentRevision: input.expectedContentRevision,
     };
   };
 

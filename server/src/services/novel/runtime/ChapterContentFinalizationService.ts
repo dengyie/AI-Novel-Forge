@@ -1,34 +1,18 @@
-import { createHash } from "node:crypto";
 import type { ChapterRuntimePackage, GenerationContextPackage } from "@ai-novel/shared/types/chapterRuntime";
 import type { QualityScore, ReviewIssue } from "@ai-novel/shared/types/novel";
 import { prisma } from "../../../db/prisma";
-import { withSqliteRetry } from "../../../db/sqliteRetry";
-import { openConflictService } from "../../state/OpenConflictService";
-import { directorAutomationLedgerEventService } from "../director/runtime/DirectorAutomationLedgerEventService";
-import { filterAcceptedFactItems, type FactLedgerExcludedItem } from "../fact/factLedgerFilter";
-import { novelFactService } from "../fact/NovelFactService";
 import { ChapterArtifactSyncService } from "./ChapterArtifactSyncService";
 import type { ChapterRuntimeRequestInput } from "./chapterRuntimeSchema";
-import { PostGenerationStyleReviewRunner, type StyleReviewResult } from "./PostGenerationStyleReviewRunner";
-import { ChapterQualityGateService } from "./ChapterQualityGateService";
-import {
-  buildRuntimePackage,
-  type ChapterRuntimePlannerPort,
-} from "./chapterRuntimePackageBuilders";
-import { extractSotBannedTermsFromNovel } from "@ai-novel/shared/types/sotBannedTerms";
-import { extractBannedTermsFromStyleToneSafe } from "@ai-novel/shared/types/styleToneBannedTerms";
-import {
-  buildProseQualityAuditReport,
-  detectProseQuality,
-  normalizeProseQualityTermList,
-} from "./proseQuality/ProseQualityDetector";
-import {
-  chapterTimelineFinalizationService,
-  type ChapterTimelineFinalizationService,
-  type ChapterTimelineGateResult,
-} from "./ChapterTimelineFinalizationService";
-import { persistChapterQualityScores } from "../quality/chapterQualityScorePersist";
-import { contentRevisionBumpData } from "../chapterContentCas";
+import type { PostGenerationStyleReviewRunner, StyleReviewResult } from "./PostGenerationStyleReviewRunner";
+import type { ChapterQualityGateService } from "./ChapterQualityGateService";
+import type { ChapterRuntimePlannerPort } from "./chapterRuntimePackageBuilders";
+import type { ChapterTimelineFinalizationService } from "./ChapterTimelineFinalizationService";
+import { ChapterContentCommitService } from "./content/ChapterContentCommitService";
+import { ChapterContentFinalizationOrchestrator } from "./finalization/ChapterContentFinalizationOrchestrator";
+import { ChapterFactProjectionService } from "./finalization/ChapterFactProjectionService";
+import { ChapterQualityProjectionService } from "./finalization/ChapterQualityProjectionService";
+import { ChapterStyleReviewFinalizer } from "./finalization/ChapterStyleReviewFinalizer";
+import { ChapterTimelineProjectionService } from "./finalization/ChapterTimelineProjectionService";
 
 export interface ChapterContentFinalizationAgentRuntime {
   finishChapterGenRun: (runId: string, summary: string, durationMs: number) => Promise<void>;
@@ -37,11 +21,10 @@ export interface ChapterContentFinalizationAgentRuntime {
 export interface ChapterContentFinalizationServiceDeps {
   qualityGateService: Pick<ChapterQualityGateService, "runAcceptanceGateOnly">;
   artifactSyncService: Pick<ChapterArtifactSyncService, "syncChapterArtifacts">;
+  contentCommitService?: Pick<ChapterContentCommitService, "commit">;
   plannerService: ChapterRuntimePlannerPort;
   agentRuntime: ChapterContentFinalizationAgentRuntime;
-  // 生成后去 AI 味双轮自审改写。生产用默认实例；测试可注入 stub 验证接入。
   postGenerationStyleReviewRunner?: Pick<PostGenerationStyleReviewRunner, "run">;
-  /** 时间线异步定稿；热路径仍 defer extract，但必须调度补齐 + 上章守卫 */
   timelineFinalizer?: Pick<
     ChapterTimelineFinalizationService,
     "finalizeCurrentContent" | "ensurePreviousChapterFinalized"
@@ -54,6 +37,7 @@ export interface FinalizeChapterContentInput {
   request: ChapterRuntimeRequestInput;
   contextPackage: GenerationContextPackage;
   content: string;
+  expectedContentRevision: number;
   lengthControl?: ChapterRuntimePackage["lengthControl"];
   runId: string | null;
   startMs: number | null;
@@ -65,285 +49,53 @@ export interface FinalizeChapterContentResult {
   finalContent: string;
   runtimePackage: ChapterRuntimePackage;
   styleReview: StyleReviewResult;
-  /** 验收分数/问题；供流式路径写终态 QualityReport（pipeline 用 createQualityReport） */
   score: QualityScore;
   issues: ReviewIssue[];
+  contentRevision: number;
 }
 
 export class ChapterContentFinalizationService {
-  private readonly qualityGateService: Pick<ChapterQualityGateService, "runAcceptanceGateOnly">;
-  private readonly artifactSyncService: Pick<ChapterArtifactSyncService, "syncChapterArtifacts">;
-  private readonly plannerService: ChapterRuntimePlannerPort;
-  private readonly agentRuntime: ChapterContentFinalizationAgentRuntime;
-  private readonly postGenerationStyleReviewRunner: Pick<PostGenerationStyleReviewRunner, "run">;
-  private readonly timelineFinalizer: Pick<
-    ChapterTimelineFinalizationService,
-    "finalizeCurrentContent" | "ensurePreviousChapterFinalized"
-  >;
+  private readonly orchestrator: ChapterContentFinalizationOrchestrator;
 
-  constructor(deps: ChapterContentFinalizationServiceDeps) {
-    this.qualityGateService = deps.qualityGateService;
-    this.artifactSyncService = deps.artifactSyncService;
-    this.plannerService = deps.plannerService;
-    this.agentRuntime = deps.agentRuntime;
-    this.postGenerationStyleReviewRunner = deps.postGenerationStyleReviewRunner ?? new PostGenerationStyleReviewRunner();
-    this.timelineFinalizer = deps.timelineFinalizer ?? chapterTimelineFinalizationService;
+  constructor(private readonly deps: ChapterContentFinalizationServiceDeps) {
+    const contentCommitService = deps.contentCommitService ?? new ChapterContentCommitService();
+    this.orchestrator = new ChapterContentFinalizationOrchestrator({
+      styleFinalizer: new ChapterStyleReviewFinalizer({
+        contentCommitService,
+        runner: deps.postGenerationStyleReviewRunner,
+      }),
+      qualityProjection: new ChapterQualityProjectionService({
+        qualityGateService: deps.qualityGateService,
+        plannerService: deps.plannerService,
+      }),
+      timelineProjection: new ChapterTimelineProjectionService(deps.timelineFinalizer),
+      factProjection: new ChapterFactProjectionService(),
+      artifactSyncService: deps.artifactSyncService,
+      markChapterStatus: (chapterId, status) => this.markChapterStatus(chapterId, status),
+      finishTraceRun: (runId, contentLength, startMs) => (
+        this.finishTraceRun(runId, contentLength, startMs)
+      ),
+    });
   }
 
-  async finalizeChapterContent(input: FinalizeChapterContentInput): Promise<FinalizeChapterContentResult> {
-    // 生成后去 AI 味：先跑双轮自审改写，拿到改写后正文再做验收。runner 内部已有质量回退门
-    // （二轮产物 riskScore 不低于首轮即回退）+ policy gate + detect 失败回退，不会降低质量。
-    // runner 整体抛错时保守回退原正文 + 空 styleReview，绝不让去 AI 味阻断章节定稿。
-    let styleReview: StyleReviewResult;
-    try {
-      styleReview = await this.postGenerationStyleReviewRunner.run({
-        novelId: input.novelId,
-        chapterId: input.chapterId,
-        request: input.request,
-        contextPackage: input.contextPackage,
-        content: input.content,
-      });
-    } catch (error) {
-      console.warn("[chapter-runtime] post-generation style review failed, fallback to raw content", {
-        novelId: input.novelId,
-        chapterId: input.chapterId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      styleReview = {
-        report: null,
-        residualReport: null,
-        autoRewritten: false,
-        originalContent: null,
-        finalContent: input.content,
-      };
-    }
-    const finalContent = styleReview.autoRewritten ? styleReview.finalContent : input.content;
-    // 改写后正文必须落库，否则 chapter.content 保留有 AI 味的原始草稿，只有下游
-    // artifacts/摘要用的是改写后文本，造成「终稿与落库稿」漂移。手工单章流式路径
-    // （ChapterStreamGenerationOrchestrator.createChapterStream → finalizeChapterContent）
-    // 不走 pipeline 的 saveDraftAndArtifacts 补偿，需在此处补落库。
-    // 注：pipeline 路径（chapterRuntimePipeline pass 分支）随后还会经
-    // saveDraftAndArtifacts 二次落库同一 finalContent 并再 bump 一次 revision——
-    // 两次写的是同一内容，幂等无害（revision 跳号不影响 CAS，客户端先读当前 revision）。
-    // 直接 prisma update，不触发 artifact 同步（由本章后续 deferArtifactBackgroundSync
-    // 分支统一调度）、不改 chapterStatus（避免覆盖调用方前置的 generating 标记，后续
-    // markChapterStatus 会按 needsRepair 正确落终态）。与 pipeline 的
-    // saveDraftAndArtifacts(syncArtifacts:false, scheduleBackgroundSync:false) 行为对齐，
-    // 但更轻——不动 generationState/chapterStatus 配对。
-    if (styleReview.autoRewritten) {
-      try {
-        // 与 ChapterArtifactSyncService.saveDraftAndArtifacts 同款 withSqliteRetry 加固：
-        // 手工流式路径在 finalize 之后没有任何补偿性落库，这次 update 是改写稿落库的
-        // 唯一一环，BUSY/锁超时不能静默吞掉（否则 chapter.content 停留在 AI 味原稿，
-        // 正是本分支要修的漂移）。
-        await withSqliteRetry(
-          () => prisma.chapter.update({
-            where: { id: input.chapterId },
-            data: {
-              content: finalContent,
-              ...contentRevisionBumpData(),
-            },
-          }),
-          { label: "chapterFinalization.autoRewrittenContent" },
-        );
-      } catch (error) {
-        // 落库失败不阻断 finalize——调用方仍拿得到 finalContent 走 SSE 下发；
-        // 但要打 warn 让运维侧发现「改写稿未落库」。
-        console.warn("[chapter-runtime] auto-rewritten content persist failed", {
-          novelId: input.novelId,
-          chapterId: input.chapterId,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-    }
-    const { acceptance, timelineGate } = await this.qualityGateService.runAcceptanceGateOnly({
-      novelId: input.novelId,
-      chapterId: input.chapterId,
-      contextPackage: input.contextPackage,
-      content: finalContent,
-      request: input.request,
-    });
-    const timelineCheck = timelineGate.result;
-    const mustAvoidTerms = normalizeProseQualityTermList(
-      input.contextPackage?.chapter?.mustAvoid ?? null,
-    );
-    // 书级禁词：sotBannedTerms（结构化通道） + Novel.styleTone（C 方案自然语言通道）并集，
-    // 命中即走已有 sot_banned_term (high) → needs_repair 闭环。
-    const bannedTerms = await this.loadNovelBannedTerms(input.novelId);
-    const proseQualityReport = detectProseQuality(finalContent, {
-      mustAvoidTerms,
-      bannedTerms,
-    });
-    const proseQualityAuditReport = buildProseQualityAuditReport({
-      novelId: input.novelId,
-      chapterId: input.chapterId,
-      report: proseQualityReport,
-    });
-    const auditResult = {
-      score: acceptance.score,
-      issues: acceptance.issues,
-      auditReports: proseQualityAuditReport
-        ? [...acceptance.auditReports, proseQualityAuditReport]
-        : acceptance.auditReports,
-    };
-    const activeOpenConflicts = await openConflictService.listOpenConflicts(input.novelId, {
-      beforeChapterOrder: input.contextPackage.chapter.order,
-      includeCurrentChapter: true,
-      limit: 8,
-    });
-    const runtimePackage = buildRuntimePackage({
-      novelId: input.novelId,
-      chapterId: input.chapterId,
-      request: input.request,
-      contextPackage: input.contextPackage,
-      finalContent,
-      lengthControl: input.lengthControl,
-      auditResult,
-      activeOpenConflicts,
-      styleReview,
-      acceptance: acceptance.assessment,
-      timelineCheck,
-      runId: input.runId,
-      plannerService: this.plannerService,
-    });
-    const needsRepair = acceptance.assessment.status === "repairable"
-      || acceptance.assessment.status === "needs_manual_review"
-      || timelineCheck.status === "failed"
-      || runtimePackage.audit.hasBlockingIssues;
-    await this.markChapterStatus(input.chapterId, needsRepair ? "needs_repair" : "pending_review");
-
-    // P2-1：定稿热路径只拍平 Chapter 四列；QualityReport 由 pipeline/manual
-    // createQualityReport 写终态一行，避免 retry 时每轮 finalize 再堆报告。
-    // 失败只告警，不阻断定稿返回（与 fact ledger / timeline 一致）。
-    try {
-      await persistChapterQualityScores({
-        novelId: input.novelId,
-        chapterId: input.chapterId,
-        score: acceptance.score,
-        issues: acceptance.issues,
-        writeReport: false,
-      });
-    } catch (error) {
-      const chapterOrder = input.contextPackage.chapter.order;
-      console.warn("[chapter-runtime] chapter quality score persist failed", {
-        novelId: input.novelId,
-        chapterId: input.chapterId,
-        chapterOrder,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      // 结构化可观测：写入 riskFlags 标记，供债板/运营发现静默缺分。
-      try {
-        const existing = await prisma.chapter.findFirst({
-          where: { id: input.chapterId, novelId: input.novelId },
-          select: { riskFlags: true },
-        });
-        let parsed: Record<string, unknown> = {};
-        if (existing?.riskFlags?.trim()) {
-          try {
-            const value = JSON.parse(existing.riskFlags) as unknown;
-            if (value && typeof value === "object" && !Array.isArray(value)) {
-              parsed = value as Record<string, unknown>;
-            }
-          } catch {
-            parsed = {};
-          }
-        }
-        await prisma.chapter.update({
-          where: { id: input.chapterId },
-          data: {
-            riskFlags: JSON.stringify({
-              ...parsed,
-              qualityScorePersistFailed: {
-                at: new Date().toISOString(),
-                chapterOrder,
-                message: error instanceof Error ? error.message : String(error),
-              },
-            }),
-          },
-        });
-      } catch {
-        // 二次失败忽略，避免掩盖定稿主路径
-      }
-    }
-
-    // 时间线：热路径仍用 deferred gate；定稿后异步必达 + 上章 checkpoint 守卫。
-    // 失败只告警，不阻断定稿返回（与 fact ledger 一致）。
-    void this.scheduleTimelineFinalization({
-      novelId: input.novelId,
-      chapterId: input.chapterId,
-      content: finalContent,
-      contextPackage: input.contextPackage,
-      request: input.request,
-      qualityDebt: needsRepair,
-      timelineGate,
-    }).catch((error) => {
-      console.warn("[chapter-runtime] timeline finalization schedule failed", {
-        novelId: input.novelId,
-        chapterId: input.chapterId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    });
-
-    if (!needsRepair) {
-      // 保证义务账本在下一章 JIT 上下文组装前完成；失败只告警，不阻断定稿返回。
-      try {
-        await this.writeAcceptedFacts(
-          input.novelId,
-          input.chapterId,
-          input.runId,
-          input.contextPackage,
-          runtimePackage,
-        );
-      } catch (error) {
-        console.warn("[chapter-runtime] fact ledger write failed", {
-          novelId: input.novelId,
-          chapterId: input.chapterId,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-
-    }
-
-    if (!needsRepair && input.deferArtifactBackgroundSync && input.scheduleDeferredArtifactBackgroundSync !== false) {
-      await this.artifactSyncService.syncChapterArtifacts(
-        input.novelId,
-        input.chapterId,
-        finalContent,
-        {
-          scheduleBackgroundSync: true,
-          artifactSyncMode: input.request.artifactSyncMode,
-          awaitArtifactDelta: true,
-          skipLegacySummaryAndFacts: true,
-          provider: input.request.provider,
-          model: input.request.model,
-        },
-      );
-    }
-
-    await this.finishTraceRun(input.runId, finalContent.length, input.startMs);
-
-    return {
-      finalContent,
-      runtimePackage,
-      styleReview,
-      score: acceptance.score,
-      issues: acceptance.issues,
-    };
+  finalizeChapterContent(input: FinalizeChapterContentInput): Promise<FinalizeChapterContentResult> {
+    return this.orchestrator.finalize(input);
   }
 
-  async finishTraceRun(runId: string | null, contentLength: number, startMs: number | null): Promise<void> {
-    if (!runId || startMs == null) {
-      return;
-    }
-
+  async finishTraceRun(
+    runId: string | null,
+    contentLength: number,
+    startMs: number | null,
+  ): Promise<void> {
+    if (!runId || startMs == null) return;
     try {
-      await this.agentRuntime.finishChapterGenRun(
+      await this.deps.agentRuntime.finishChapterGenRun(
         runId,
         `chapter draft generated, ${contentLength} chars`,
         Date.now() - startMs,
       );
     } catch {
-      // Ignore trace failures so chapter generation still completes.
+      // Trace failures do not change the committed chapter result.
     }
   }
 
@@ -354,190 +106,6 @@ export class ChapterContentFinalizationService {
     await prisma.chapter.update({
       where: { id: chapterId },
       data: { chapterStatus },
-    });
-  }
-
-  /**
-   * 定稿后异步补齐时间线：先守卫上章 checkpoint，再 finalize 本章。
-   * 失败由调用方 catch 告警，不阻断定稿返回。
-   */
-  private async scheduleTimelineFinalization(input: {
-    novelId: string;
-    chapterId: string;
-    content: string;
-    contextPackage: GenerationContextPackage;
-    request: ChapterRuntimeRequestInput;
-    qualityDebt: boolean;
-    timelineGate?: ChapterTimelineGateResult | null;
-  }): Promise<void> {
-    const request = {
-      provider: input.request.provider,
-      model: input.request.model,
-      temperature: input.request.temperature,
-    };
-    await this.timelineFinalizer.ensurePreviousChapterFinalized({
-      novelId: input.novelId,
-      currentChapterOrder: input.contextPackage.chapter.order,
-      request,
-    }).catch((error) => {
-      console.warn("[chapter-runtime] previous chapter timeline finalization failed", {
-        novelId: input.novelId,
-        chapterId: input.chapterId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    });
-    await this.timelineFinalizer.finalizeCurrentContent({
-      novelId: input.novelId,
-      chapterId: input.chapterId,
-      content: input.content,
-      contextPackage: input.contextPackage,
-      request,
-      timelineGate: input.timelineGate ?? null,
-      qualityDebt: input.qualityDebt,
-      sourceStage: "chapter_content_finalization",
-      reason: input.qualityDebt ? "post_finalize_with_quality_debt" : "post_finalize_async",
-    });
-  }
-
-  /**
-   * 书级禁词：D2 sotBannedTerms（storyWorldSlice(Overrides)Json 结构化通道）
-   * + C 方案 Novel.styleTone 自然语言通道（源世界系：称重/过秤/放上秤/称人斤两/货架标签
-   * 机械度量隐喻族 + styleTone 内显式「禁『X』」声明抽取）。两者并集，
-   * 命中即走已有 sot_banned_term (high) → needs_repair 闭环，不新造信号。
-   */
-  private async loadNovelBannedTerms(novelId: string): Promise<string[]> {
-    try {
-      const novel = await prisma.novel.findUnique({
-        where: { id: novelId },
-        select: {
-          storyWorldSliceJson: true,
-          storyWorldSliceOverridesJson: true,
-          styleTone: true,
-        },
-      });
-      const sotTerms = extractSotBannedTermsFromNovel(novel);
-      const styleToneTerms = extractBannedTermsFromStyleToneSafe(novel);
-      const seen = new Set<string>();
-      const merged: string[] = [];
-      for (const term of [...sotTerms, ...styleToneTerms]) {
-        if (!seen.has(term)) {
-          seen.add(term);
-          merged.push(term);
-        }
-      }
-      return merged;
-    } catch (error) {
-      console.warn("[chapter-runtime] load novel banned terms failed; treating as empty", {
-        novelId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      return [];
-    }
-  }
-
-  /**
-   * 章节接收通过后，仅将验收确认已完成的 mustHitNow 义务写入事实账本。
-   *
-   * payoffDirectives 是写前指令，不是正文观测结果；伏笔“已揭示”事实应由
-   * payoff ledger 状态迁移或 timeline gate 的 resolvedHookIds 等观测来源写入。
-   */
-  private async writeAcceptedFacts(
-    novelId: string,
-    chapterId: string,
-    runId: string | null,
-    contextPackage: GenerationContextPackage,
-    runtimePackage: ChapterRuntimePackage,
-  ): Promise<void> {
-    const chapterOrder = contextPackage.chapter.order;
-    const writeCtx = contextPackage.chapterWriteContext;
-    if (!writeCtx) {
-      return;
-    }
-    const obligationCoverage = runtimePackage.obligationCoverage ?? {
-      status: "satisfied" as const,
-      missing: [],
-      summary: "旧运行记录未包含章节义务覆盖信息。",
-    };
-    const filtered = filterAcceptedFactItems({
-      chapterOrder,
-      mustHitNow: writeCtx.obligationContract?.mustHitNow ?? [],
-      obligationCoverage,
-      acceptanceRiskTags: runtimePackage.meta?.riskTags ?? [],
-    });
-    if (filtered.excluded.length > 0) {
-      await this.recordExcludedFactItems({
-        novelId,
-        chapterId,
-        chapterOrder,
-        runId,
-        obligationCoverageStatus: obligationCoverage.status,
-        excluded: filtered.excluded,
-      });
-    }
-
-    if (filtered.accepted.length === 0) {
-      return;
-    }
-    await novelFactService.writeFacts(novelId, chapterOrder, filtered.accepted);
-  }
-
-  private async recordExcludedFactItems(input: {
-    novelId: string;
-    chapterId: string;
-    chapterOrder: number;
-    runId: string | null;
-    obligationCoverageStatus: ChapterRuntimePackage["obligationCoverage"]["status"];
-    excluded: FactLedgerExcludedItem[];
-  }): Promise<void> {
-    for (const item of input.excluded) {
-      console.warn("[fact-ledger] skipped unverified chapter obligation", {
-        novelId: input.novelId,
-        chapterId: input.chapterId,
-        chapterOrder: input.chapterOrder,
-        reason: item.reason,
-        matchedMissingKind: item.matchedMissingKind ?? null,
-        matchedMissingSummary: item.matchedMissingSummary ?? null,
-        matchScore: item.matchScore ?? null,
-        text: item.text,
-      });
-    }
-
-    const fingerprint = createHash("sha1")
-      .update(JSON.stringify(input.excluded.map((item) => ({
-        text: item.text,
-        reason: item.reason,
-        matchedMissingKind: item.matchedMissingKind ?? null,
-        matchedMissingSummary: item.matchedMissingSummary ?? null,
-      }))))
-      .digest("hex")
-      .slice(0, 16);
-    await directorAutomationLedgerEventService.recordEvent({
-      type: "continue_with_risk",
-      idempotencyKey: [
-        input.novelId,
-        input.chapterId,
-        input.chapterOrder,
-        "fact-ledger-obligation-filter",
-        fingerprint,
-      ].join(":"),
-      runId: input.runId,
-      novelId: input.novelId,
-      nodeKey: "chapter_execution_node",
-      summary: `本章 ${input.excluded.length} 条义务未由验收确认，未写入事实账本。`,
-      affectedScope: `chapter:${input.chapterId}`,
-      severity: "medium",
-      metadata: {
-        decision: "exclude_unverified_fact_items",
-        chapterOrder: input.chapterOrder,
-        obligationCoverageStatus: input.obligationCoverageStatus,
-        excludedObligations: input.excluded,
-      },
-    }).catch((error) => {
-      console.warn("[fact-ledger] skipped obligation exclusion event failed", {
-        novelId: input.novelId,
-        chapterId: input.chapterId,
-        error: error instanceof Error ? error.message : String(error),
-      });
     });
   }
 }

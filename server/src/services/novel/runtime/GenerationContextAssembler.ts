@@ -76,6 +76,7 @@ const runtimeChapterSelect = {
   title: true,
   order: true,
   content: true,
+  contentRevision: true,
   expectation: true,
   targetWordCount: true,
   conflictLevel: true,
@@ -225,6 +226,7 @@ export class GenerationContextAssembler {
       title: string;
       order: number;
       content: string | null;
+      contentRevision: number;
       expectation: string | null;
       targetWordCount: number | null;
       conflictLevel: number | null;
@@ -626,6 +628,7 @@ export class GenerationContextAssembler {
         title: chapter.title,
         order: chapter.order,
         content: chapter.content ?? null,
+        contentRevision: chapter.contentRevision,
         expectation: chapter.expectation ?? null,
         targetWordCount: chapter.targetWordCount ?? null,
         conflictLevel: chapter.conflictLevel ?? null,
@@ -787,6 +790,7 @@ export class GenerationContextAssembler {
         title: chapter.title,
         order: chapter.order,
         content: chapter.content ?? null,
+        contentRevision: chapter.contentRevision,
         expectation: chapter.expectation ?? null,
         targetWordCount: chapter.targetWordCount ?? null,
         conflictLevel: chapter.conflictLevel ?? null,

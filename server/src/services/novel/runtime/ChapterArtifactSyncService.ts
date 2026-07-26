@@ -9,6 +9,7 @@ import { chapterArtifactBackgroundSyncService } from "./ChapterArtifactBackgroun
 import { assertChapterContentNotEmpty } from "./chapterEmptyContentError";
 import type { ArtifactSyncMode } from "../novelCoreShared";
 import type { ContentProvenance } from "@ai-novel/shared/types/canonicalState";
+import type { CommittedChapterContent } from "./content/ChapterContentCommitTypes";
 
 export interface ChapterArtifactSyncOptions {
   scheduleBackgroundSync?: boolean;
@@ -29,13 +30,13 @@ export class ChapterArtifactSyncService {
     content: string,
     generationState: "drafted" | "repaired",
     options: ChapterArtifactSyncOptions = {},
-  ): Promise<void> {
+  ): Promise<CommittedChapterContent> {
     const safeContent = assertChapterContentNotEmpty(content, {
       novelId,
       chapterId,
       source: "chapter_artifact_save",
     });
-    await withSqliteRetry(
+    const saved = await withSqliteRetry(
       () => prisma.chapter.update({
         where: { id: chapterId },
         data: {
@@ -45,13 +46,30 @@ export class ChapterArtifactSyncService {
           // 以便随后的人工编辑能检测到「生成已覆盖」。
           ...contentRevisionBumpData(),
         },
+        select: {
+          novelId: true,
+          id: true,
+          content: true,
+          contentRevision: true,
+        },
       }),
       { label: "chapterArtifactSync.chapter.update" },
     );
     if (options.syncArtifacts === false) {
-      return;
+      return {
+        novelId: saved.novelId,
+        chapterId: saved.id,
+        content: saved.content ?? safeContent,
+        contentRevision: saved.contentRevision,
+      };
     }
     await this.syncChapterArtifacts(novelId, chapterId, safeContent, options);
+    return {
+      novelId: saved.novelId,
+      chapterId: saved.id,
+      content: saved.content ?? safeContent,
+      contentRevision: saved.contentRevision,
+    };
   }
 
   async syncChapterArtifacts(

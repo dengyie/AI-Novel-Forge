@@ -26,7 +26,9 @@
   - 控制入口统一经 `novelProductionOrchestrator`。
   - 手动单章生成、批量执行与自动导演的章节生产统一落到 `ChapterExecutionStageRunner`。
   - 手动单章修复与书级重规划统一落到 `quality_repair` stage；其中会改正文的修复入口必须委托给 `ChapterRuntimeCoordinator`。
-  - 正文 writer、接收闸门、patch repair、heavy repair、保存正文、资产同步、复审和状态推进必须复用同一套 runtime 规则，不允许 route、旧 service 或导演分支各自再维护第二套正文执行实现。
+- 正文 writer、接收闸门、patch repair、heavy repair、保存正文、资产同步、复审和状态推进必须复用同一套 runtime 规则，不允许 route、旧 service 或导演分支各自再维护第二套正文执行实现。
+- **已提交正文快照是所有章节投影的唯一事实源**：草稿保存必须返回 `content + contentRevision`；style rewrite 和 repair adopt 必须以生成开始时的 revision 做 CAS。只有 CAS 成功返回的 committed snapshot 才能进入 acceptance、质量分数、时间线、事实账本和 artifact delta。提交失败或 revision 冲突时必须在任何投影前停止；禁止把未落库候选继续下发为终稿或用于生成衍生事实。
+- finalization 的顺序固定为 `draft commit -> optional style rewrite CAS -> quality projection -> timeline/fact/artifact projection`。pipeline 不得在 finalization 之后再次无条件保存同一终稿；这既会制造 revision 跳号，也会扩大覆盖人工编辑的竞态窗口。
 - `NovelGenerationService.createChapterStream`、`NovelService.createRepairStream`、`startPipelineJob / resumePipelineJob` 只是不同控制入口；它们的业务执行面必须继续汇入同一 coordinator，而不是按入口复制 writer 或修文逻辑。
 - 默认 writer 继续整章一次性生成，不把 sceneCards、章节合同或分场景多轮写作重新接入正文热路径。
 - 章节合同和 sceneCards 可作为规划、审校、诊断和局部修复辅助资产，不驱动默认正文生成。
@@ -136,6 +138,8 @@
 - 一章生成耗时异常：检查是否又把多个 LLM 后处理塞回热路径。
 - 同一章重复同步账本或重复 timeline / artifact delta 抽取：检查 content hash checkpoint 是否在 LLM 调用前完成 `running` 抢占，而不是只在调用成功后写 `succeeded`。
 - 修复循环：检查自动修文次数是否被限制，失败是否落到可继续生产的终态，并确认自动导演质量预算是否已经从局部修复升级到整章修复或重规划。
+- 后台修文覆盖人工编辑：检查 repair 是否携带生成开始时的 `contentRevision`，并确认 adopt 使用统一 commit service 的 `updateMany` CAS。若冲突后仍有 artifact/recheck 调用，说明未提交候选仍泄漏到了投影链。
+- 时间线、事实或 artifact 内容与章节正文不一致：先核对 finalization 是否只消费 commit service 返回的正文快照；若使用 style runner 的候选字符串或旧 draft 参数，属于事实源分叉。
 - 正文出现 AI 自述、占位符、工程词或明显截断：优先检查 runtime package 的 `audit.openIssues` 是否包含 `prose_*` code。若只有 `prose_*` 且没有 `replan_required`、邻章计划失配或不可用正文，应走本章修复或质量债，不应暂停整本自动导演。
 - `chapter.draft.write 未满足其完成标准` 高频出现：先查 runtime package 的 `failureClassification` 和 `obligationCoverage`。如果 root cause 是 `draft_obligation_unmet`，应优先检查接收闸门输出的缺失义务和 patch repair；如果是 `replan_required`，检查是否存在单章职责过载或邻章分工失配。
 - 章节反复要求重规划：检查 `rolling_window_review` 的原因是否只来自生成前的紧急 payoff 或 `advance_payoff`。如果审计分数可通过、正文和 artifact delta 已经体现推进，但 runtime package 仍推荐重规划，说明重规划推荐读取了写前状态而不是写后失败证据。

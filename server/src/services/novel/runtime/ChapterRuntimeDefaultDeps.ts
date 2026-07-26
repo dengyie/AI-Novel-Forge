@@ -1,5 +1,8 @@
 import type { QualityScore, ReviewIssue } from "@ai-novel/shared/types/novel";
 import type { ReviewOptions } from "../novelCoreShared";
+import { ChapterContentCommitService } from "./content/ChapterContentCommitService";
+
+export const defaultChapterContentCommitService = new ChapterContentCommitService();
 
 export interface ChapterRuntimeAgentPort {
   createChapterGenRun: (novelId: string, chapterId: string, chapterOrder: number) => Promise<string>;

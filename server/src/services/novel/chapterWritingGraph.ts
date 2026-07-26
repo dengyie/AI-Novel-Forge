@@ -21,6 +21,7 @@ import { buildChapterChineseProseGateError } from "./runtime/chapterChineseProse
 import { throwIfChapterGenerationAborted } from "./runtime/chapterAbortGuard";
 import { buildNGramSet, jaccardSimilarity } from "@ai-novel/shared/utils/textSimilarity";
 import { assessChineseProse } from "../../utils/chineseProseGate";
+import type { CommittedChapterContent } from "./runtime/content/ChapterContentCommitTypes";
 
 export interface ChapterGraphLLMOptions {
   provider?: LLMProvider;
@@ -61,7 +62,7 @@ interface ChapterGraphDeps {
     content: string,
     generationState: "drafted" | "repaired",
     options?: { scheduleBackgroundSync?: boolean; syncArtifacts?: boolean },
-  ) => Promise<void>;
+  ) => Promise<CommittedChapterContent>;
   logInfo: (message: string, meta?: Record<string, unknown>) => void;
   logWarn: (message: string, meta?: Record<string, unknown>) => void;
 }
@@ -578,6 +579,7 @@ export class ChapterWritingGraph {
       lengthControl?: ChapterRuntimePackage["lengthControl"];
       artifactsAlreadySynced?: boolean;
       backgroundSyncDeferred?: boolean;
+      contentRevision?: number;
     } | void>;
   }> {
     const continuationPack = (input.contextPackage?.continuation as ContinuationPack | undefined)
@@ -714,7 +716,7 @@ export class ChapterWritingGraph {
           chapterOrder: input.chapter.order,
           source: "chapter_writer",
         });
-        await this.deps.saveDraftAndArtifacts(
+        const committedDraft = await this.deps.saveDraftAndArtifacts(
           input.novelId,
           input.chapter.id,
           safeContent,
@@ -728,6 +730,7 @@ export class ChapterWritingGraph {
           finalContent: safeContent,
           artifactsAlreadySynced: true,
           backgroundSyncDeferred: Boolean(input.options.deferArtifactBackgroundSync),
+          contentRevision: committedDraft.contentRevision,
         };
       },
     };

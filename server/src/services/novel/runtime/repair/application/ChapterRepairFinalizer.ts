@@ -1,0 +1,372 @@
+import { createHash } from "node:crypto";
+import type { ReviewIssue } from "@ai-novel/shared/types/novel";
+import {
+  appendRepairAdoptHistoryLine,
+  countTrailingRepairNoImprove,
+  decideRepairContentAdoption,
+  fingerprintReviewIssuesAsL1BlockingCodes,
+  formatRepairAdoptHistoryLine,
+} from "@ai-novel/shared/types/repairAdoptDecision";
+import { extractSotBannedTermsFromNovel } from "@ai-novel/shared/types/sotBannedTerms";
+import {
+  hasBlockingPronounProseFromIssueCodes,
+  projectStyleClear,
+} from "@ai-novel/shared/types/styleClearGate";
+import type { StreamDoneHelpers } from "../../../../../llm/streaming";
+import { prisma } from "../../../../../db/prisma";
+import { auditService } from "../../../../audit/AuditService";
+import { computeDeterministicResidualRiskScore } from "../../../../styleEngine/StyleDetectionService";
+import { CHAPTER_CONTENT_CONFLICT_CODE } from "../../../chapterContentCas";
+import {
+  chapterStatePairAfterDraftSave,
+  chapterStatePairAfterQualityGates,
+} from "../../../chapterLifecycleState";
+import { ChapterPatchRepairFailedError } from "../../../chapterPatchRepairService";
+import { isPass, logPipelineError, type RepairOptions } from "../../../novelCoreShared";
+import { chapterQualityLoopService } from "../../../quality/ChapterQualityLoopService";
+import type { ChapterArtifactSyncService } from "../../ChapterArtifactSyncService";
+import type { ChapterContentCommitService } from "../../content/ChapterContentCommitService";
+import {
+  detectProseQuality,
+  normalizeProseQualityTermList,
+} from "../../proseQuality/ProseQualityDetector";
+import { assertRepairAbortSignal } from "../concurrency/ChapterRepairCancellation";
+import {
+  ChapterRepairBaselineEvaluator,
+  type RepairReviewResult,
+  type ReviewChapterAfterRepair,
+} from "../evaluation/ChapterRepairBaselineEvaluator";
+
+export interface ChapterRepairFinalizerDeps {
+  contentCommitService: Pick<ChapterContentCommitService, "commit">;
+  artifactSyncService: Pick<ChapterArtifactSyncService, "syncChapterArtifacts">;
+  reviewChapterAfterRepair: ReviewChapterAfterRepair;
+  resolveAuditIssues?: (novelId: string, issueIds: string[]) => Promise<unknown>;
+}
+
+export interface FinalizeChapterRepairInput {
+  novelId: string;
+  chapterId: string;
+  baselineContentRevision: number;
+  options: RepairOptions;
+  content: string;
+  helpers: StreamDoneHelpers;
+}
+
+function contentFingerprint(content: string): string {
+  return createHash("sha256").update(content).digest("hex");
+}
+
+function blockingProseCodes(
+  content: string,
+  options: { mustAvoid?: string | null; bannedTerms?: string[] | null } = {},
+): string[] {
+  const report = detectProseQuality(content, {
+    mustAvoidTerms: normalizeProseQualityTermList(options.mustAvoid ?? null),
+    bannedTerms: normalizeProseQualityTermList(options.bannedTerms ?? null),
+  });
+  return report.findings
+    .filter((finding) => finding.severity === "high" || finding.severity === "critical")
+    .map((finding) => finding.code);
+}
+
+export function buildRepairRunStatusFrame(input: {
+  chapterId: string;
+  status: "succeeded" | "failed" | "running";
+  phase: "streaming" | "finalizing" | "completed";
+  message: string;
+}) {
+  return {
+    type: "run_status" as const,
+    runId: `chapter-repair:${input.chapterId}`,
+    status: input.status,
+    phase: input.phase,
+    message: input.message,
+  };
+}
+
+function isContentRevisionConflict(error: unknown): boolean {
+  return Boolean(
+    error
+    && typeof error === "object"
+    && "details" in error
+    && (error as { details?: { code?: unknown } }).details?.code === CHAPTER_CONTENT_CONFLICT_CODE,
+  );
+}
+
+function projectStyleClearFromRepairReview(input: {
+  content: string;
+  issues: ReviewIssue[];
+  chapterOrder: number;
+}): boolean {
+  const issueCodes = input.issues
+    .map((issue) => (issue as ReviewIssue & { code?: string | null }).code ?? null)
+    .filter((code): code is string => typeof code === "string" && code.length > 0);
+  const proseCodes = blockingProseCodes(input.content);
+  const hasBlockingPronounProse = hasBlockingPronounProseFromIssueCodes([
+    ...issueCodes,
+    ...proseCodes,
+  ]);
+  return projectStyleClear({
+    residualRiskScore: computeDeterministicResidualRiskScore(input.content),
+    hasBlockingPronounProse,
+    chapterOrder: input.chapterOrder,
+  });
+}
+
+export class ChapterRepairFinalizer {
+  private readonly baselineEvaluator: ChapterRepairBaselineEvaluator;
+
+  constructor(private readonly deps: ChapterRepairFinalizerDeps) {
+    this.baselineEvaluator = new ChapterRepairBaselineEvaluator(deps.reviewChapterAfterRepair);
+  }
+
+  async finalize(input: FinalizeChapterRepairInput): Promise<void> {
+    input.helpers.writeFrame(buildRepairRunStatusFrame({
+      chapterId: input.chapterId,
+      status: "running",
+      phase: "finalizing",
+      message: "修复稿已生成，正在评估是否采纳（evaluate → adopt|discard）。",
+    }));
+
+    const repairedContent = input.content.trim();
+    if (!repairedContent) {
+      throw new ChapterPatchRepairFailedError("修复结果为空，未保存章节正文。");
+    }
+
+    const baselineChapter = await prisma.chapter.findFirst({
+      where: { id: input.chapterId, novelId: input.novelId },
+      select: {
+        id: true,
+        order: true,
+        content: true,
+        contentRevision: true,
+        repairHistory: true,
+        riskFlags: true,
+        qualityScore: true,
+        continuityScore: true,
+        characterScore: true,
+        pacingScore: true,
+        mustAvoid: true,
+        novel: {
+          select: {
+            storyWorldSliceJson: true,
+            storyWorldSliceOverridesJson: true,
+          },
+        },
+      },
+    });
+    if (!baselineChapter) {
+      throw new Error("章节不存在，无法完成修复采纳评估。");
+    }
+
+    const baselineContent = baselineChapter.content ?? "";
+    const baselineHash = contentFingerprint(baselineContent);
+    const candidateHash = contentFingerprint(repairedContent);
+    const consecutiveNoImprove = countTrailingRepairNoImprove(baselineChapter.repairHistory);
+    const proseDetectOpts = {
+      mustAvoid: baselineChapter.mustAvoid ?? null,
+      bannedTerms: extractSotBannedTermsFromNovel(baselineChapter.novel),
+    };
+    const baselineBlockingCodes = blockingProseCodes(baselineContent, proseDetectOpts);
+    const candidateBlockingCodes = blockingProseCodes(repairedContent, proseDetectOpts);
+
+    const baselineReview = await this.baselineEvaluator.evaluate({
+      novelId: input.novelId,
+      chapterId: input.chapterId,
+      baselineContent,
+      chapter: baselineChapter,
+      options: input.options,
+    });
+    assertRepairAbortSignal("finalize-baseline-review", input.options.signal);
+    const baselineL1Degraded = baselineReview.degraded === true;
+    const baselineBlockingL1Codes = baselineL1Degraded
+      ? []
+      : fingerprintReviewIssuesAsL1BlockingCodes(baselineReview.issues);
+    const candidateReview = await this.deps.reviewChapterAfterRepair(input.novelId, input.chapterId, {
+      provider: input.options.provider,
+      model: input.options.model,
+      temperature: input.options.temperature,
+      content: repairedContent,
+      evaluateOnly: true,
+      signal: input.options.signal,
+    });
+    assertRepairAbortSignal("finalize-candidate-review", input.options.signal);
+    const candidateScoreDegraded = candidateReview.degraded === true;
+    const candidateBlockingL1Codes = candidateScoreDegraded
+      ? []
+      : fingerprintReviewIssuesAsL1BlockingCodes(candidateReview.issues);
+    const adoptDecision = decideRepairContentAdoption({
+      baselineScore: baselineReview.score,
+      candidateScore: candidateReview.score,
+      baselineBlockingCodes,
+      candidateBlockingCodes,
+      baselineBlockingL1Codes,
+      candidateBlockingL1Codes,
+      consecutiveNoImprove,
+      skipL1Check: baselineL1Degraded || candidateScoreDegraded,
+      skipScoreCheck: candidateScoreDegraded,
+    });
+    const historyLine = formatRepairAdoptHistoryLine({
+      decision: adoptDecision.decision,
+      reason: adoptDecision.reason,
+      baselineOverall: baselineReview.score.overall,
+      candidateOverall: candidateReview.score.overall,
+      baselineHash,
+      candidateHash,
+    });
+    const nextRepairHistory = appendRepairAdoptHistoryLine(
+      baselineChapter.repairHistory,
+      historyLine,
+    );
+
+    if (adoptDecision.decision !== "adopt") {
+      await prisma.chapter.update({
+        where: { id: input.chapterId },
+        data: { repairHistory: nextRepairHistory },
+      });
+      await chapterQualityLoopService.recordRepairFeedbackDecision({
+        novelId: input.novelId,
+        chapterId: input.chapterId,
+        chapterOrder: baselineChapter.order,
+        score: baselineReview.score,
+        issues: baselineReview.issues,
+        repairDecision: adoptDecision.decision === "plateau_stop" ? "plateau_stop" : "discard",
+      }).catch((error) => {
+        logPipelineError("Failed to record QFP repairDecision after discard/plateau.", {
+          novelId: input.novelId,
+          chapterId: input.chapterId,
+          operation: "repair",
+          provider: input.options.provider ?? null,
+          model: input.options.model ?? null,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+      input.helpers.writeFrame(buildRepairRunStatusFrame({
+        chapterId: input.chapterId,
+        status: "succeeded",
+        phase: "completed",
+        message: adoptDecision.decision === "plateau_stop"
+          ? `修复候选未采纳（plateau）：${adoptDecision.reason} 正文保持 baseline。`
+          : `修复候选未采纳（discard）：${adoptDecision.reason} 正文保持 baseline。`,
+      }));
+      return;
+    }
+
+    let committed;
+    try {
+      assertRepairAbortSignal("finalize-adopt-write", input.options.signal);
+      committed = await this.deps.contentCommitService.commit({
+        novelId: input.novelId,
+        chapterId: input.chapterId,
+        content: repairedContent,
+        expectedContentRevision: input.baselineContentRevision,
+        statePatch: {
+          repairHistory: nextRepairHistory,
+          ...chapterStatePairAfterDraftSave("repaired"),
+        },
+        source: "repair_adopt",
+      });
+    } catch (error) {
+      if (!isContentRevisionConflict(error)) {
+        throw error;
+      }
+      input.helpers.writeFrame(buildRepairRunStatusFrame({
+        chapterId: input.chapterId,
+        status: "failed",
+        phase: "completed",
+        message: "修复期间章节正文已发生变更（可能来自人工编辑），本次候选未覆盖最新正文。",
+      }));
+      return;
+    }
+
+    try {
+      await this.deps.artifactSyncService.syncChapterArtifacts(
+        input.novelId,
+        input.chapterId,
+        committed.content,
+        {
+          scheduleBackgroundSync: true,
+          awaitArtifactDelta: false,
+          skipLegacySummaryAndFacts: true,
+          provider: input.options.provider,
+          model: input.options.model,
+        },
+      );
+    } catch (error) {
+      logPipelineError("Artifact sync schedule failed after repair adopt; content kept, continuing recheck.", {
+        novelId: input.novelId,
+        chapterId: input.chapterId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    let review: RepairReviewResult;
+    try {
+      review = await this.deps.reviewChapterAfterRepair(input.novelId, input.chapterId, {
+        provider: input.options.provider,
+        model: input.options.model,
+        temperature: input.options.temperature,
+        content: committed.content,
+        signal: input.options.signal,
+      });
+    } catch (error) {
+      await this.markPostAdoptNeedsRepair({
+        novelId: input.novelId,
+        chapterId: input.chapterId,
+        helpers: input.helpers,
+        userMessage: "修复候选已采纳，但正式 recheck 失败，已标 needs_repair。",
+        error,
+      });
+      return;
+    }
+
+    const literaryPass = isPass(review.score);
+    const styleClear = projectStyleClearFromRepairReview({
+      content: committed.content,
+      issues: review.issues,
+      chapterOrder: baselineChapter.order,
+    });
+    await prisma.chapter.update({
+      where: { id: input.chapterId },
+      data: chapterStatePairAfterQualityGates({ literaryPass, styleClear }),
+    });
+    if (literaryPass && styleClear && input.options.auditIssueIds?.length) {
+      const resolveAuditIssues = this.deps.resolveAuditIssues
+        ?? ((novelId: string, issueIds: string[]) => auditService.resolveIssues(novelId, issueIds));
+      await resolveAuditIssues(input.novelId, input.options.auditIssueIds).catch(() => null);
+    }
+    input.helpers.writeFrame(buildRepairRunStatusFrame({
+      chapterId: input.chapterId,
+      status: literaryPass && styleClear ? "succeeded" : "failed",
+      phase: "completed",
+      message: literaryPass && styleClear
+        ? "修复候选已采纳，本章已达到可继续推进状态。"
+        : "修复候选已采纳并保存，但仍有问题待继续处理。",
+    }));
+  }
+
+  private async markPostAdoptNeedsRepair(input: {
+    novelId: string;
+    chapterId: string;
+    helpers: StreamDoneHelpers;
+    userMessage: string;
+    error: unknown;
+  }): Promise<void> {
+    logPipelineError("Post-adopt recheck failed; content kept, marking needs_repair.", {
+      novelId: input.novelId,
+      chapterId: input.chapterId,
+      error: input.error instanceof Error ? input.error.message : String(input.error),
+    });
+    await prisma.chapter.update({
+      where: { id: input.chapterId },
+      data: chapterStatePairAfterQualityGates({ literaryPass: false, styleClear: false }),
+    });
+    input.helpers.writeFrame(buildRepairRunStatusFrame({
+      chapterId: input.chapterId,
+      status: "failed",
+      phase: "completed",
+      message: input.userMessage,
+    }));
+  }
+}

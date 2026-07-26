@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 
 const { ChapterContentFinalizationService } = require("../dist/services/novel/runtime/ChapterContentFinalizationService.js");
 const { openConflictService } = require("../dist/services/state/OpenConflictService.js");
+const { prisma } = require("../dist/db/prisma.js");
 
 // 接入守卫：finalize 必须真正调用 PostGenerationStyleReviewRunner.run，采纳改写产物作为定稿正文，
 // runner 抛错时回退原内容不中断生成，质量门收到的应是改写后正文（而非原始草稿）。
@@ -33,8 +34,25 @@ function acceptedAcceptance() {
 }
 
 const originalListOpenConflicts = openConflictService.listOpenConflicts;
-test.before(() => { openConflictService.listOpenConflicts = async () => []; });
-test.after(() => { openConflictService.listOpenConflicts = originalListOpenConflicts; });
+const originalNovelFindUnique = prisma.novel.findUnique;
+const originalTransaction = prisma.$transaction;
+test.before(() => {
+  openConflictService.listOpenConflicts = async () => [];
+  prisma.novel.findUnique = async () => ({
+    storyWorldSliceJson: null,
+    storyWorldSliceOverridesJson: null,
+    styleTone: null,
+  });
+  prisma.$transaction = async (callback) => callback({
+    chapter: { update: async () => ({ id: "chapter-1" }) },
+    qualityReport: { create: async () => ({ id: "report-1" }) },
+  });
+});
+test.after(() => {
+  openConflictService.listOpenConflicts = originalListOpenConflicts;
+  prisma.novel.findUnique = originalNovelFindUnique;
+  prisma.$transaction = originalTransaction;
+});
 
 function buildService({ runner }) {
   let gateContent = null;
@@ -50,9 +68,21 @@ function buildService({ runner }) {
   const service = new ChapterContentFinalizationService({
     qualityGateService,
     artifactSyncService,
+    contentCommitService: {
+      commit: async (input) => ({
+        novelId: input.novelId,
+        chapterId: input.chapterId,
+        content: input.content,
+        contentRevision: input.expectedContentRevision + 1,
+      }),
+    },
     plannerService,
     agentRuntime,
     postGenerationStyleReviewRunner: runner,
+    timelineFinalizer: {
+      ensurePreviousChapterFinalized: async () => null,
+      finalizeCurrentContent: async () => undefined,
+    },
   });
   service.markChapterStatus = async () => undefined;
   service.finishTraceRun = async () => undefined;
@@ -66,6 +96,7 @@ const baseInput = (content) => ({
   request: {},
   contextPackage: { chapter: { id: "chapter-1", title: "第1章", order: 1, targetWordCount: 3000 }, ...STYLE_CONTEXT },
   content,
+  expectedContentRevision: 4,
   runId: null,
   startMs: null,
 });
