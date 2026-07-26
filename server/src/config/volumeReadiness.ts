@@ -3,8 +3,17 @@
  * 默认调度关闭；仅 VOLUME_READINESS_SCHEDULE=1 时在后台注册 dry-run 巡检。
  */
 
+/**
+ * Parse env int with clamp. Empty / whitespace / undefined → fallback.
+ * Critical: `Number("") === 0` is finite, so treating missing env as ""
+ * used to clamp every default to `min` (e.g. perChapterTimeoutMs=60s,
+ * maxChapters=1, maxWallMinutes=1) and burn readiness runs in 60s steps.
+ */
 function asInt(rawValue: string | undefined, fallback: number, min: number, max: number): number {
-  const parsed = Number(rawValue ?? "");
+  if (rawValue == null || rawValue.trim() === "") {
+    return fallback;
+  }
+  const parsed = Number(rawValue);
   if (!Number.isFinite(parsed)) {
     return fallback;
   }
