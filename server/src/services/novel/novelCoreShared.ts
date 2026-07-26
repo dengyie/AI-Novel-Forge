@@ -512,6 +512,44 @@ export function normalizeScore(value: Partial<QualityScore>): QualityScore {
   return { coherence, repetition, pacing, voice, engagement, overall };
 }
 
+/**
+ * C4：判别 LLM 是否真吐了可用 score。
+ * 见 novelP0Utils.hasUsableQualityScore —— 两处实现必须保持一致
+ * （AuditService 走 novelP0Utils；review 走本文件）。
+ */
+export function hasUsableQualityScore(
+  value: Partial<QualityScore> | null | undefined,
+): boolean {
+  if (value == null || typeof value !== "object") {
+    return false;
+  }
+  const keys = [
+    "coherence",
+    "repetition",
+    "pacing",
+    "voice",
+    "engagement",
+    "overall",
+  ] as const;
+  return keys.some((key) => {
+    const n = value[key];
+    return typeof n === "number" && Number.isFinite(n);
+  });
+}
+
+/**
+ * C4：解析 LLM score；缺失/空对象 → ruleScore + degraded，禁止静默 overall=20。
+ */
+export function resolveLlmQualityScore(
+  value: Partial<QualityScore> | null | undefined,
+  content: string,
+): { score: QualityScore; degraded: boolean } {
+  if (hasUsableQualityScore(value)) {
+    return { score: normalizeScore(value as Partial<QualityScore>), degraded: false };
+  }
+  return { score: ruleScore(content), degraded: true };
+}
+
 export function ruleScore(content: string): QualityScore {
   const text = content.replace(/\s+/g, " ").trim();
   const sentences = text.split(/[。！"?]/).map((item) => item.trim()).filter(Boolean);

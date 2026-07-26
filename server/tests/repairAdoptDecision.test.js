@@ -243,6 +243,88 @@ test("decideRepairContentAdoption: skipL1Check 不绕过 L0（I4 回归防护）
   assert.match(result.reason, /L0/);
 });
 
+test("decideRepairContentAdoption: skipScoreCheck 跳过假 20 anti-regression（C4）", () => {
+  // 真跑 ch2/ch8：candidate overall 恰好 20（normalizeScore 缺项），baseline 81/88
+  // → 旧逻辑 anti-regression 终态 discard。skipScoreCheck 后应 adopt（L0 干净）。
+  const silent20 = score({
+    coherence: 0,
+    repetition: 100,
+    pacing: 0,
+    voice: 0,
+    engagement: 0,
+    overall: 20,
+  });
+  const result = decideRepairContentAdoption({
+    baselineScore: score({ overall: 81, coherence: 70, repetition: 70, engagement: 70 }),
+    candidateScore: silent20,
+    baselineBlockingCodes: [],
+    candidateBlockingCodes: [],
+    skipScoreCheck: true,
+  });
+  assert.equal(result.decision, "adopt");
+  assert.match(result.reason, /score 降级|跳过分数/);
+});
+
+test("decideRepairContentAdoption: skipScoreCheck 不绕过 L0（C4 安全网）", () => {
+  const result = decideRepairContentAdoption({
+    baselineScore: score({ overall: 81 }),
+    candidateScore: score({ overall: 20, coherence: 0, repetition: 100, pacing: 0, voice: 0, engagement: 0 }),
+    baselineBlockingCodes: [],
+    candidateBlockingCodes: ["prose_verbatim_repeat"],
+    skipScoreCheck: true,
+  });
+  assert.equal(result.decision, "discard");
+  assert.match(result.reason, /L0|prose_verbatim_repeat/);
+});
+
+test("decideRepairContentAdoption: skipScoreCheck 仍受 L1 类目膨胀约束（除非 skipL1Check）", () => {
+  // 候选 score 降级但 issues 仍可信时，L1 膨胀 + 无分数协议 → 仍应能用 L1 判据
+  // （实际 runtime 在 candidate degraded 时同时 skipL1Check；本测锁纯函数组合语义）
+  // baseline 门槛维已 ≥ 阈值，避免 L1 分支的 improvedDimension 逃生口放行。
+  const result = decideRepairContentAdoption({
+    baselineScore: score({ overall: 88, coherence: 85, repetition: 85, engagement: 85 }),
+    candidateScore: score({
+      overall: 20,
+      coherence: 0,
+      repetition: 100,
+      pacing: 0,
+      voice: 0,
+      engagement: 0,
+    }),
+    baselineBlockingCodes: [],
+    candidateBlockingCodes: [],
+    baselineBlockingL1Codes: [],
+    candidateBlockingL1Codes: ["l1:coherence", "l1:logic"],
+    skipScoreCheck: true,
+    // 不 skipL1：类目 0→2 且 overall 未升且未 isPass → 仍 fail
+  });
+  assert.equal(result.decision, "discard");
+  assert.match(result.reason, /L1/);
+});
+
+test("decideRepairContentAdoption: runtime C4 组合 skipScoreCheck+skipL1Check 可采纳", () => {
+  // ChapterRepairStreamRuntime：candidateScoreDegraded → 两旗同开；L0 干净则 adopt
+  const result = decideRepairContentAdoption({
+    baselineScore: score({ overall: 88, coherence: 80, repetition: 80, engagement: 80 }),
+    candidateScore: score({
+      overall: 20,
+      coherence: 0,
+      repetition: 100,
+      pacing: 0,
+      voice: 0,
+      engagement: 0,
+    }),
+    baselineBlockingCodes: [],
+    candidateBlockingCodes: [],
+    baselineBlockingL1Codes: [],
+    candidateBlockingL1Codes: ["l1:logic"], // 会被 skipL1 忽略
+    skipScoreCheck: true,
+    skipL1Check: true,
+  });
+  assert.equal(result.decision, "adopt");
+  assert.match(result.reason, /score 降级|跳过分数/);
+});
+
 test("decideRepairContentAdoption plateau_stop after consecutive no-improve", () => {
   const result = decideRepairContentAdoption({
     baselineScore: score({ overall: 88 }),

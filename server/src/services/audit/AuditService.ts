@@ -10,6 +10,7 @@ import {
   normalizeScore,
   normalizeSeverity,
   parseLegacyReviewOutput,
+  resolveLlmQualityScore,
   ruleScore,
 } from "../novel/novelP0Utils";
 import { ragServices } from "../rag";
@@ -115,7 +116,9 @@ export class AuditService {
       requestedTypes,
       options,
     );
-    const score = normalizeScore(structured.score ?? ruleScore(content));
+    // C4：structured.score 可能是 {}（optional schema + 空对象绕过 ??），
+    // 禁止 normalizeScore({}) 静默 overall=20。
+    const score = resolveLlmQualityScore(structured.score, content).score;
     const issues = structured.issues ?? [];
     const continueRecommendation = structured.continueRecommendation ?? "continue";
     const shouldRunFullAudit = structured.shouldRunFullAudit
@@ -144,7 +147,13 @@ export class AuditService {
     chapterId: string,
     scope: "full" | AuditType = "full",
     options: AuditOptions = {},
-  ): Promise<{ score: QualityScore; issues: ReviewIssue[]; auditReports: AuditReport[] }> {
+  ): Promise<{
+    score: QualityScore;
+    issues: ReviewIssue[];
+    auditReports: AuditReport[];
+    /** C4：LLM score 缺失时 true（已回退 ruleScore） */
+    degraded?: boolean;
+  }> {
     const chapter = await prisma.chapter.findFirst({
       where: { id: chapterId, novelId },
       include: {
@@ -186,7 +195,10 @@ export class AuditService {
       };
     }
     const structured = await this.invokeAuditLLM(novelId, chapter.novel.title, chapter.title, content, requestedTypes, options);
-    const score = normalizeScore(structured.score ?? ruleScore(content));
+    // C4：full audit 是 heavy evaluateOnly 主路径；score 缺失/空对象 → ruleScore，禁止静默 20。
+    // degraded 经 reviewChapterWithAudit 返回值透出，由 ChapterRepairStreamRuntime 跳过 score anti-regression。
+    const resolvedScore = resolveLlmQualityScore(structured.score, content);
+    const score = resolvedScore.score;
     const auditReportsInput = requestedTypes.map((type) => {
       const matched = structured.auditReports?.find((item) => normalizeAuditType(item.auditType) === type);
       return {
@@ -232,10 +244,15 @@ export class AuditService {
       ...syntheticPayoffReports,
     ];
     const issues = this.buildLegacyIssues(structured.issues ?? [], mergedReports);
+    // parseLegacyReviewOutput 在 catch 路径已 ruleScore + degraded；其 score 全字段有数，
+    // resolveLlmQualityScore 会当成「可用」——必须保留 structured.degraded。
+    const structuredDegraded = (structured as { degraded?: boolean }).degraded === true;
+    const degraded = resolvedScore.degraded || structuredDegraded;
     return {
       score,
       issues,
       auditReports: mergedReports,
+      ...(degraded ? { degraded: true as const } : {}),
     };
   }
 

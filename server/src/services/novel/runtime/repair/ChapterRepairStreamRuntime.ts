@@ -622,7 +622,12 @@ export class ChapterRepairStreamRuntime {
     // C1: chapter clock 超时后不继续 adopt 判定与写库
     assertRepairAbortSignal("finalize-candidate-review", input.options.signal);
     const candidateScore = candidateReview.score;
-    const candidateBlockingL1Codes = fingerprintReviewIssuesAsL1BlockingCodes(candidateReview.issues);
+    // C4：候选 score 缺失曾静默 overall=20 → anti-regression 终态 discard heavy。
+    // review 路径现把缺失标 degraded + ruleScore；此处 skipScoreCheck，L0 仍硬拦。
+    const candidateScoreDegraded = candidateReview.degraded === true;
+    const candidateBlockingL1Codes = candidateScoreDegraded
+      ? []
+      : fingerprintReviewIssuesAsL1BlockingCodes(candidateReview.issues);
 
     const adoptDecision = decideRepairContentAdoption({
       baselineScore,
@@ -634,7 +639,9 @@ export class ChapterRepairStreamRuntime {
       consecutiveNoImprove,
       // F7：baseline 走 columns/ruleScore 时 issues 未知；skipL1Check 让 decideRepairContentAdoption
       // 不再拿"空集"当 baseline L1 去减 candidate L1，避免把候选自带 L1 全部误当"新增硬伤"discard。
-      skipL1Check: baselineL1Degraded,
+      // C4：候选 score 也 degraded 时 issues 同样不可信，一并 skip L1。
+      skipL1Check: baselineL1Degraded || candidateScoreDegraded,
+      skipScoreCheck: candidateScoreDegraded,
     });
 
     const historyLine = formatRepairAdoptHistoryLine({
