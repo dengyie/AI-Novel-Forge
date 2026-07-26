@@ -119,6 +119,48 @@ export function normalizeScore(value: Partial<QualityScore>): QualityScore {
   return { coherence, repetition, pacing, voice, engagement, overall };
 }
 
+/**
+ * C4：判别 LLM 是否真吐了可用 score。
+ *
+ * `normalizeScore({})` 会把缺项填成 coherence/pacing/voice/engagement=0、repetition=100，
+ * overall 恰好 20 —— 把「评分缺失」伪装成「质量暴跌」。调用方在 `parsed.score ?? {}`
+ * 或 `structured.score ?? ruleScore(...)` 时，空对象 `{}` 不是 nullish，会绕过 `??`。
+ * 必须先用本函数拦截；不可用则走 ruleScore + degraded，禁止静默 20。
+ */
+export function hasUsableQualityScore(
+  value: Partial<QualityScore> | null | undefined,
+): boolean {
+  if (value == null || typeof value !== "object") {
+    return false;
+  }
+  const keys = [
+    "coherence",
+    "repetition",
+    "pacing",
+    "voice",
+    "engagement",
+    "overall",
+  ] as const;
+  return keys.some((key) => {
+    const n = value[key];
+    return typeof n === "number" && Number.isFinite(n);
+  });
+}
+
+/**
+ * 解析 LLM score：可用则 normalize；缺失/空对象则 ruleScore + degraded=true。
+ * 空正文路径（故意 overall≈20 + critical issue）不要走这里。
+ */
+export function resolveLlmQualityScore(
+  value: Partial<QualityScore> | null | undefined,
+  content: string,
+): { score: QualityScore; degraded: boolean } {
+  if (hasUsableQualityScore(value)) {
+    return { score: normalizeScore(value as Partial<QualityScore>), degraded: false };
+  }
+  return { score: ruleScore(content), degraded: true };
+}
+
 export function ruleScore(content: string): QualityScore {
   const text = content.trim();
   const sentences = text.split(/[。！？!?]/).map((item) => item.trim()).filter(Boolean);
@@ -133,19 +175,26 @@ export function ruleScore(content: string): QualityScore {
   return { coherence, repetition, pacing, voice, engagement, overall };
 }
 
-export function parseLegacyReviewOutput(text: string): { score: QualityScore; issues: ReviewIssue[] } {
+export function parseLegacyReviewOutput(text: string): {
+  score: QualityScore;
+  issues: ReviewIssue[];
+  degraded?: boolean;
+} {
   try {
     const parsed = parseJSONObject<{
       score?: Partial<QualityScore>;
       scores?: Partial<QualityScore>;
       issues?: ReviewIssue[];
     }>(text);
+    // C4：legacy 解析同样禁止 score/scores 缺失时静默 20。
+    const resolved = resolveLlmQualityScore(parsed.score ?? parsed.scores, text);
     return {
-      score: normalizeScore(parsed.score ?? parsed.scores ?? {}),
+      score: resolved.score,
       issues: Array.isArray(parsed.issues) ? parsed.issues : [],
+      ...(resolved.degraded ? { degraded: true as const } : {}),
     };
   } catch {
-    return { score: ruleScore(text), issues: [] };
+    return { score: ruleScore(text), issues: [], degraded: true };
   }
 }
 

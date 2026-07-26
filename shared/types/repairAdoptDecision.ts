@@ -37,6 +37,13 @@ export interface RepairContentAdoptInput {
    * L0 blocking 检查仍生效（L0 走独立探测，不依赖 review issues）。
    */
   skipL1Check?: boolean;
+  /**
+   * C4：候选 score 来自 ruleScore 降级（LLM 未吐可用 score，曾被 normalizeScore({}) 静默成 overall=20）。
+   * 置 true 时跳过 overall anti-regression 与「未 isPass 且无门槛维提升」的分数比较——
+   * 那些比较假设两侧分数同协议；假 20 / ruleScore 对真 baseline 比较会误 discard heavy。
+   * L0 仍硬拦；L1 仍按 skipL1Check 规则。不得用本旗绕过 L0。
+   */
+  skipScoreCheck?: boolean;
 }
 
 export interface RepairContentAdoptResult {
@@ -148,35 +155,41 @@ export function decideRepairContentAdoption(
     }
   }
 
-  if (input.candidateScore.overall < input.baselineScore.overall - overallDelta) {
-    return fail(
-      `overall 从 ${input.baselineScore.overall} 降至 ${input.candidateScore.overall}，anti-regression 拒绝采纳`,
-    );
-  }
+  // C4：候选 score 不可信时跳过分数比较；L0/L1 已在上方处理。
+  // 仍要求无 L0 引入；有分数协议时才做 anti-regression / 文学门 / 门槛维。
+  if (!input.skipScoreCheck) {
+    if (input.candidateScore.overall < input.baselineScore.overall - overallDelta) {
+      return fail(
+        `overall 从 ${input.baselineScore.overall} 降至 ${input.candidateScore.overall}，anti-regression 拒绝采纳`,
+      );
+    }
 
-  if (baselineLiteraryPass && !candidateLiteraryPass) {
-    return fail("基线已 isPass，候选未达文学门，拒绝采纳");
-  }
+    if (baselineLiteraryPass && !candidateLiteraryPass) {
+      return fail("基线已 isPass，候选未达文学门，拒绝采纳");
+    }
 
-  if (!baselineLiteraryPass && !candidateLiteraryPass) {
-    const improvedDimension = (
-      (input.baselineScore.coherence < threshold.coherence
-        && input.candidateScore.coherence > input.baselineScore.coherence)
-      || (input.baselineScore.repetition < threshold.repetition
-        && input.candidateScore.repetition > input.baselineScore.repetition)
-      || (input.baselineScore.engagement < threshold.engagement
-        && input.candidateScore.engagement > input.baselineScore.engagement)
-    );
-    if (!improvedDimension && scoreDelta.overall <= 0) {
-      return fail("未 isPass 且无门槛维提升、overall 未升，拒绝采纳");
+    if (!baselineLiteraryPass && !candidateLiteraryPass) {
+      const improvedDimension = (
+        (input.baselineScore.coherence < threshold.coherence
+          && input.candidateScore.coherence > input.baselineScore.coherence)
+        || (input.baselineScore.repetition < threshold.repetition
+          && input.candidateScore.repetition > input.baselineScore.repetition)
+        || (input.baselineScore.engagement < threshold.engagement
+          && input.candidateScore.engagement > input.baselineScore.engagement)
+      );
+      if (!improvedDimension && scoreDelta.overall <= 0) {
+        return fail("未 isPass 且无门槛维提升、overall 未升，拒绝采纳");
+      }
     }
   }
 
   return {
     decision: "adopt",
-    reason: candidateLiteraryPass
-      ? "候选通过文学门且无 L0/L1 回归，采纳"
-      : "候选相对基线有改进且无 L0/L1 回归，采纳",
+    reason: input.skipScoreCheck
+      ? "候选 score 降级不可信，跳过分数比较；无 L0/L1 回归，采纳"
+      : candidateLiteraryPass
+        ? "候选通过文学门且无 L0/L1 回归，采纳"
+        : "候选相对基线有改进且无 L0/L1 回归，采纳",
     scoreDelta,
     introducedBlockingCodes,
     introducedBlockingL1Codes,

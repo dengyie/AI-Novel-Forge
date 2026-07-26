@@ -16,6 +16,7 @@ import {
   logPipelineError,
   normalizeScore,
   RepairOptions,
+  resolveLlmQualityScore,
   ReviewOptions,
   ruleScore,
 } from "./novelCoreShared";
@@ -265,7 +266,7 @@ export class NovelCoreReviewService {
     content: string,
     options: ReviewOptions = {},
     novelId?: string,
-  ): Promise<{ score: QualityScore; issues: ReviewIssue[] }> {
+  ): Promise<{ score: QualityScore; issues: ReviewIssue[]; degraded?: boolean }> {
     if (!content.trim()) {
       return {
         score: normalizeScore({}),
@@ -310,13 +311,16 @@ export class NovelCoreReviewService {
         },
       });
       const parsed = result.output;
-
+      // C4：parsed.score 缺失/空对象不得静默 overall=20；走 ruleScore + degraded。
+      // evaluateOnly 路径会把 degraded 透给 adopt，跳过假 20 的 anti-regression。
+      const resolved = resolveLlmQualityScore(parsed.score, content);
       return {
-        score: normalizeScore(parsed.score ?? {}),
+        score: resolved.score,
         issues: Array.isArray(parsed.issues) ? parsed.issues : [],
+        ...(resolved.degraded ? { degraded: true as const } : {}),
       };
     } catch {
-      return { score: ruleScore(content), issues: [] };
+      return { score: ruleScore(content), issues: [], degraded: true };
     }
   }
 
@@ -332,6 +336,8 @@ export class NovelCoreReviewService {
     issues: ReviewIssue[];
     auditReports?: AuditReport[];
     contextPackage?: GenerationContextPackage;
+    /** C4：LLM score 缺失时 true（已回退 ruleScore），evaluateOnly 透给 adopt */
+    degraded?: boolean;
   }> {
     if (!content.trim()) {
       return {
