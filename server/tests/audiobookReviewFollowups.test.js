@@ -125,6 +125,18 @@ test("runWatchdogTick: markFailedIfRunning 命中后对续生成子调 finalizeC
     /finalizeContinueChild\(row\.id,\s*true\)/.test(body),
     "watchdog 翻 fail 子任务后必须 finalizeContinueChild 收口父，否则父永久卡 continuing",
   );
+  // HIGH-3：翻 fail 只改 DB 行，pipeline 还活着（慢 TTS = 误判）。不 abort 则僵尸子
+  // 继续往父目录写 wav，onProgress CAS 静默落空，成功路径 reconcileParent 命中 0 行，
+  // 盘上真章永远反映不进父 progressJson。abort 必须排在收口父之前。
+  const abortIdx = body.indexOf("this.activeControllers.get(row.id)?.abort()");
+  const finalizeIdx = body.indexOf("finalizeContinueChild(row.id");
+  assert.ok(abortIdx > 0, "watchdog 翻 fail 后必须 abort 该任务的 AbortController（防僵尸子）");
+  assert.ok(abortIdx < finalizeIdx, "abort 必须排在 finalizeContinueChild 之前");
+  // abort 只在 CAS 真命中时执行——否则会误杀已被 cancel/其它路径收走的任务
+  assert.ok(
+    body.indexOf("failedCount > 0") > 0 && body.indexOf("failedCount > 0") < abortIdx,
+    "abort 必须在 failedCount > 0 分支内（CAS 落空说明这行不归 watchdog 管）",
+  );
 });
 
 test("markFailedIfRunning 返回命中行数（watchdog 依据它决定是否收口父）", () => {
@@ -154,10 +166,14 @@ test("continueParentTask: CAS 抢占父在 wipe/建子之前，落空即 409", (
     createIdx < wipeIdx,
     "破坏性 wipe 必须排在建子之后（回滚路径不得回滚到已被删的磁盘状态）",
   );
-  // baseline 必须在 wipe 之后算，否则刚被删的章仍被算作已就绪
+  // MEDIUM-3 fix: progress baseline 在 CAS 之前预算（listReadyChapterAudioIds - requestedIds），
+  // 原「post-wipe 后算」断言不再适用——新断言：baseline 计算必须在 CAS 之前
+  const readyIdx = body.indexOf("listReadyChapterAudioIds");
+  assert.ok(readyIdx > 0 && readyIdx < casIdx, "progress baseline 必须在 CAS 之前预算");
+  // 预算逻辑必须减去 requestedIds（mode=resynthesize 路径）
   assert.ok(
-    body.indexOf("listReadyChapterAudioIds") > wipeIdx,
-    "progress baseline 必须在 wipe 之后计算",
+    /readySet\.delete\(cid\)/.test(body),
+    "baseline 预算必须从 ready 集合减去即将 wipe 的 requestedIds",
   );
   assert.ok(
     /claimedParent\.count === 0/.test(body),

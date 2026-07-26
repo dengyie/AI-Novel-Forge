@@ -1070,15 +1070,31 @@ export class AudiobookTaskService {
     // 原顺序把 CAS 放最后：:996 的读闸与 CAS 之间隔着 await precheck，双提交下两个请求都能过读闸，
     // 各自 wipe 同一批章的 wav（可能删掉另一个已产出的音频）并各建一个子任务，只有一个 CAS 命中，
     // 但两个子任务都被 enqueue。抢占前置后，第二枪 CAS 落空即 409，不动磁盘、不建子。
+    //
+    // MEDIUM-3 fix: progress baseline 预算（wipe 前算 ready 集、减去 requestedIds）在 CAS 前完成，
+    // 避免两阶段写的「running @ 100%」窗口（一次原子抢占即落真 baseline）。
+    let parentReadyBaseline = 0;
+    try {
+      const readySet = new Set(listReadyChapterAudioIds(parentOutputDir, parentChapterIds));
+      // mode=resynthesize 会 wipe requestedIds，post-wipe ready = pre-wipe ready - requestedIds
+      if (input.mode === "resynthesize") {
+        for (const cid of requestedIds) readySet.delete(cid);
+      }
+      parentReadyBaseline = readySet.size;
+    } catch {
+      parentReadyBaseline = 0;
+    }
+    const parentProgressBaseline = parentChapterIds.length > 0
+      ? Math.max(2, Math.min(95, Math.round((parentReadyBaseline / parentChapterIds.length) * 100)))
+      : 2;
+
     const claimedParent = await prisma.audiobookTask.updateMany({
       where: { id: parent.id, status: { in: ["succeeded", "failed"] } },
       data: {
         status: "running",
         currentStage: "continuing",
         currentItemLabel: `续生成 ${precheck.chapterCount} 章`,
-        // progress 在此先落地板值：真 baseline 要等 wipe 后才算得准（见下），
-        // 但抢占与 baseline 写之间父已是 running，若沿用旧值前端会看到「running @ 100%」。
-        progress: 2,
+        progress: parentProgressBaseline,
         fullAudioPath: null,
         resultJson: null,
         cancelRequestedAt: null,
@@ -1184,22 +1200,6 @@ export class AudiobookTaskService {
       safeUnlink(resolveFullBookM4bPath(parentOutputDir));
       safeUnlink(`${resolveFullBookM4bPath(parentOutputDir)}.part`);
     }
-
-    // 父 progress 基线（章 ready 占比）：必须在 wipe 之后算，否则刚被删的章仍算作已就绪。
-    // 抢占 CAS 只落了地板值 2，此处补写真基线。
-    let parentReadyBaseline = 0;
-    try {
-      parentReadyBaseline = listReadyChapterAudioIds(parentOutputDir, parentChapterIds).length;
-    } catch {
-      parentReadyBaseline = 0;
-    }
-    const parentProgressBaseline = parentChapterIds.length > 0
-      ? Math.max(2, Math.min(95, Math.round((parentReadyBaseline / parentChapterIds.length) * 100)))
-      : 2;
-    await prisma.audiobookTask.updateMany({
-      where: { id: parent.id, status: "running", currentStage: "continuing" },
-      data: { progress: parentProgressBaseline },
-    });
 
     this.enqueueTask(child.id);
     return toDetail(child as AudiobookTaskRow);
@@ -2477,12 +2477,20 @@ export class AudiobookTaskService {
             row.id,
             `watchdog: 任务 ${stalledSeconds}s 未推进，判定假 running 已终止。`,
           );
-          // 关键：续生成子任务被 watchdog 翻 fail 时，executeTask 的 finalizeContinueChild
-          // 钩子不会触发（那 9 个调用点全在 executeTask 内）。若不在此显式收口，
-          // 父会永久卡 running+continuing——watchdog 跳过它、resumePendingTasks 跳过它、
-          // continueParentTask 因父非终态 409 拒绝重试，三条自愈路径同时关闭。
-          if (failedCount > 0 && readParentTaskIdFromProgress(row.progressJson)) {
-            await this.finalizeContinueChild(row.id, true);
+          if (failedCount > 0) {
+            // 必须 abort：翻 failed 只改 DB 行，pipeline 本身还活着。
+            // 「无推进」≠「已死」——TTS 慢过阈值就会误判，随后它会恢复并继续写磁盘。
+            // 此时 onProgress 的 CAS（status="running"）落空后只是静默 return，既不抛也不停，
+            // 子会一路跑到成功路径再调一次 reconcileParent，而父已终态、CAS 命中 0 行，
+            // 新写好的章永远反映不进父 progressJson（盘上有音频，前端却标黄）。
+            this.activeControllers.get(row.id)?.abort();
+            // 续生成子任务被 watchdog 翻 fail 时，executeTask 的 finalizeContinueChild
+            // 钩子不会触发（那 9 个调用点全在 executeTask 内）。若不在此显式收口，
+            // 父会永久卡 running+continuing——watchdog 跳过它、resumePendingTasks 跳过它、
+            // continueParentTask 因父非终态 409 拒绝重试，三条自愈路径同时关闭。
+            if (readParentTaskIdFromProgress(row.progressJson)) {
+              await this.finalizeContinueChild(row.id, true);
+            }
           }
         } catch (error) {
           // 这个 try 现在覆盖翻 fail + 续生成收口两步，文案不能只指前者
