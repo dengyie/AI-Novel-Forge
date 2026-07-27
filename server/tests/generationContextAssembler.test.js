@@ -14,6 +14,8 @@ const { novelReferenceService } = require("../dist/services/novel/NovelReference
 const { characterDynamicsQueryService } = require("../dist/services/novel/dynamics/CharacterDynamicsQueryService.js");
 const { payoffLedgerSyncService } = require("../dist/services/payoff/PayoffLedgerSyncService.js");
 const { characterResourceLedgerService } = require("../dist/services/novel/characterResource/CharacterResourceLedgerService.js");
+const { novelFactService } = require("../dist/services/novel/fact/NovelFactService.js");
+const { timelineContextService } = require("../dist/modules/timeline/timeline-context.service.js");
 
 test("blocking pending-review proposals are scoped to the current chapter plus global proposals", () => {
   const where = buildBlockingPendingReviewProposalWhere("novel-1", "chapter-2");
@@ -161,6 +163,8 @@ test("assembler refreshes chapter execution fields after chapter plan regenerati
     buildRagContext: ragServices.hybridRetrievalService.buildContextBlock,
     getPayoffLedger: payoffLedgerSyncService.getPayoffLedger,
     buildCharacterResourceContext: characterResourceLedgerService.buildContext,
+    listFactsForChapter: novelFactService.listForChapter,
+    buildTimelineForChapter: timelineContextService.buildForChapter,
   };
 
   try {
@@ -241,6 +245,8 @@ test("assembler refreshes chapter execution fields after chapter plan regenerati
     ragServices.hybridRetrievalService.buildContextBlock = async () => "";
     payoffLedgerSyncService.getPayoffLedger = async () => ({ items: [] });
     characterResourceLedgerService.buildContext = async () => null;
+    novelFactService.listForChapter = async () => [];
+    timelineContextService.buildForChapter = async () => null;
 
     const assembler = new GenerationContextAssembler();
     const storyWorldSlice = createStoryWorldSlice();
@@ -308,6 +314,8 @@ test("assembler refreshes chapter execution fields after chapter plan regenerati
     ragServices.hybridRetrievalService.buildContextBlock = originals.buildRagContext;
     payoffLedgerSyncService.getPayoffLedger = originals.getPayoffLedger;
     characterResourceLedgerService.buildContext = originals.buildCharacterResourceContext;
+    novelFactService.listForChapter = originals.listFactsForChapter;
+    timelineContextService.buildForChapter = originals.buildTimelineForChapter;
   }
 });
 
@@ -333,6 +341,8 @@ test("assembler injects sceneDiversityForce from prior-chapter lookback when tex
     buildRagContext: ragServices.hybridRetrievalService.buildContextBlock,
     getPayoffLedger: payoffLedgerSyncService.getPayoffLedger,
     buildCharacterResourceContext: characterResourceLedgerService.buildContext,
+    listFactsForChapter: novelFactService.listForChapter,
+    buildTimelineForChapter: timelineContextService.buildForChapter,
   };
 
   try {
@@ -376,8 +386,8 @@ test("assembler injects sceneDiversityForce from prior-chapter lookback when tex
     prisma.auditIssue.findMany = async () => [];
     prisma.novelBible.findUnique = async () => null;
     prisma.chapterSummary.findMany = async () => [];
-    prisma.consistencyFactFindMany = async () => [];
-    prisma.creativeDecisionFindMany = async () => [];
+    prisma.consistencyFact.findMany = async () => [];
+    prisma.creativeDecision.findMany = async () => [];
 
     // Discriminate findMany by select shape: diversity uses taskSheet + chapterSummary; tail/opening use content.
     prisma.chapter.findMany = async (args = {}) => {
@@ -435,6 +445,8 @@ test("assembler injects sceneDiversityForce from prior-chapter lookback when tex
     ragServices.hybridRetrievalService.buildContextBlock = async () => "";
     payoffLedgerSyncService.getPayoffLedger = async () => ({ items: [] });
     characterResourceLedgerService.buildContext = async () => null;
+    novelFactService.listForChapter = async () => [];
+    timelineContextService.buildForChapter = async () => null;
 
     const assembler = new GenerationContextAssembler();
     assembler.worldContextGateway = {
@@ -499,7 +511,7 @@ test("assembler injects sceneDiversityForce from prior-chapter lookback when tex
     prisma.chapterSummary.findMany = originals.chapterSummaryFindMany;
     prisma.consistencyFact.findMany = originals.consistencyFactFindMany;
     prisma.chapter.findMany = originals.chapterFindMany;
-    prisma.creativeDecisionFindMany = originals.creativeDecisionFindMany;
+    prisma.creativeDecision.findMany = originals.creativeDecisionFindMany;
     plannerService.ensureChapterPlan = originals.ensureChapterPlan;
     plannerService.buildPlanPromptBlock = originals.buildPlanPromptBlock;
     contextAssemblyService.build = originals.buildStateContext;
@@ -508,12 +520,13 @@ test("assembler injects sceneDiversityForce from prior-chapter lookback when tex
     ragServices.hybridRetrievalService.buildContextBlock = originals.buildRagContext;
     payoffLedgerSyncService.getPayoffLedger = originals.getPayoffLedger;
     characterResourceLedgerService.buildContext = originals.buildCharacterResourceContext;
+    novelFactService.listForChapter = originals.listFactsForChapter;
+    timelineContextService.buildForChapter = originals.buildTimelineForChapter;
   }
 });
 
 
 test("assembler injects timelineContext from timelineContextService into write package", async () => {
-  const { timelineContextService } = require("../dist/modules/timeline/timeline-context.service.js");
   const now = new Date();
   const originals = {
     novelFindUnique: prisma.novel.findUnique,
@@ -534,6 +547,7 @@ test("assembler injects timelineContext from timelineContextService into write p
     buildRagContext: ragServices.hybridRetrievalService.buildContextBlock,
     getPayoffLedger: payoffLedgerSyncService.getPayoffLedger,
     buildCharacterResourceContext: characterResourceLedgerService.buildContext,
+    listFactsForChapter: novelFactService.listForChapter,
     buildForChapter: timelineContextService.buildForChapter,
   };
 
@@ -577,9 +591,9 @@ test("assembler injects timelineContext from timelineContextService into write p
     prisma.stateChangeProposal.findMany = async () => [];
     prisma.auditIssue.findMany = async () => [];
     prisma.novelBible.findUnique = async () => null;
-    prisma.chapterSummaryFindMany = async () => [];
-    prisma.consistencyFactFindMany = async () => [];
-    prisma.creativeDecisionFindMany = async () => [];
+    prisma.chapterSummary.findMany = async () => [];
+    prisma.consistencyFact.findMany = async () => [];
+    prisma.creativeDecision.findMany = async () => [];
     prisma.chapter.findMany = async () => [];
     plannerService.ensureChapterPlan = async () => ({
       id: "plan-5",
@@ -613,6 +627,7 @@ test("assembler injects timelineContext from timelineContextService into write p
     ragServices.hybridRetrievalService.buildContextBlock = async () => "";
     payoffLedgerSyncService.getPayoffLedger = async () => ({ items: [] });
     characterResourceLedgerService.buildContext = async () => null;
+    novelFactService.listForChapter = async () => [];
 
     let buildCalls = 0;
     timelineContextService.buildForChapter = async (input) => {
@@ -684,12 +699,12 @@ test("assembler injects timelineContext from timelineContextService into write p
     ragServices.hybridRetrievalService.buildContextBlock = originals.buildRagContext;
     payoffLedgerSyncService.getPayoffLedger = originals.getPayoffLedger;
     characterResourceLedgerService.buildContext = originals.buildCharacterResourceContext;
+    novelFactService.listForChapter = originals.listFactsForChapter;
     timelineContextService.buildForChapter = originals.buildForChapter;
   }
 });
 
 test("assembler falls back to null timelineContext when buildForChapter fails", async () => {
-  const { timelineContextService } = require("../dist/modules/timeline/timeline-context.service.js");
   const now = new Date();
   const originals = {
     novelFindUnique: prisma.novel.findUnique,
@@ -710,6 +725,7 @@ test("assembler falls back to null timelineContext when buildForChapter fails", 
     buildRagContext: ragServices.hybridRetrievalService.buildContextBlock,
     getPayoffLedger: payoffLedgerSyncService.getPayoffLedger,
     buildCharacterResourceContext: characterResourceLedgerService.buildContext,
+    listFactsForChapter: novelFactService.listForChapter,
     buildForChapter: timelineContextService.buildForChapter,
   };
   const warn = console.warn;
@@ -790,6 +806,7 @@ test("assembler falls back to null timelineContext when buildForChapter fails", 
     ragServices.hybridRetrievalService.buildContextBlock = async () => "";
     payoffLedgerSyncService.getPayoffLedger = async () => ({ items: [] });
     characterResourceLedgerService.buildContext = async () => null;
+    novelFactService.listForChapter = async () => [];
     timelineContextService.buildForChapter = async () => {
       throw new Error("timeline boom");
     };
@@ -845,6 +862,7 @@ test("assembler falls back to null timelineContext when buildForChapter fails", 
     ragServices.hybridRetrievalService.buildContextBlock = originals.buildRagContext;
     payoffLedgerSyncService.getPayoffLedger = originals.getPayoffLedger;
     characterResourceLedgerService.buildContext = originals.buildCharacterResourceContext;
+    novelFactService.listForChapter = originals.listFactsForChapter;
     timelineContextService.buildForChapter = originals.buildForChapter;
   }
 });

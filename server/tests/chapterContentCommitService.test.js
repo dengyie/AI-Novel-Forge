@@ -11,27 +11,20 @@ const { AppError } = require("../dist/middleware/errorHandler.js");
 
 test("chapter content commit uses revision CAS and returns the committed snapshot", async () => {
   let updateManyInput = null;
+  let reloadCalls = 0;
   const db = {
     chapter: {
       updateMany: async (input) => {
         updateManyInput = input;
         return { count: 1 };
       },
-      findFirst: async (input) => {
-        assert.deepEqual(input, {
-          where: { id: "chapter-1", novelId: "novel-1" },
-          select: {
-            novelId: true,
-            id: true,
-            content: true,
-            contentRevision: true,
-          },
-        });
+      findFirst: async () => {
+        reloadCalls += 1;
         return {
           novelId: "novel-1",
           id: "chapter-1",
-          content: "提交后的正文",
-          contentRevision: 8,
+          content: "紧随其后的人工编辑",
+          contentRevision: 9,
         };
       },
       update: async () => {
@@ -68,6 +61,11 @@ test("chapter content commit uses revision CAS and returns the committed snapsho
     content: "提交后的正文",
     contentRevision: 8,
   });
+  assert.equal(
+    reloadCalls,
+    0,
+    "successful CAS must return its own deterministic snapshot instead of reloading a newer writer",
+  );
 });
 
 test("chapter content commit reports the current revision after a CAS conflict", async () => {

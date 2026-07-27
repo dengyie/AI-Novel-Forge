@@ -5,6 +5,57 @@ const path = require("node:path");
 
 const serverRoot = path.resolve(__dirname, "..");
 
+test("aborting prompt capture interrupts a provider iterator that ignores AbortSignal", async () => {
+  const {
+    capturePromptStream,
+  } = require("../dist/prompting/streaming/PromptStreamCapture.js");
+  const controller = new AbortController();
+  let iteratorReturnCalls = 0;
+  let nextStartedResolve;
+  const nextStarted = new Promise((resolve) => {
+    nextStartedResolve = resolve;
+  });
+  const rawStream = {
+    [Symbol.asyncIterator]() {
+      return {
+        next() {
+          nextStartedResolve();
+          return new Promise(() => undefined);
+        },
+        async return() {
+          iteratorReturnCalls += 1;
+          return { done: true, value: undefined };
+        },
+      };
+    },
+  };
+  const captured = capturePromptStream(rawStream, {
+    signal: controller.signal,
+    timeoutMs: 5_000,
+  });
+  const handledCompletion = captured.completion.catch(() => undefined);
+  const drain = (async () => {
+    for await (const _chunk of captured.stream) {
+      // The provider never yields; abort must terminate this loop.
+    }
+  })();
+
+  await nextStarted;
+  controller.abort(new Error("TEST_PROVIDER_IGNORES_ABORT"));
+  const outcome = await Promise.race([
+    drain.then(
+      () => ({ kind: "resolved" }),
+      (error) => ({ kind: "rejected", error }),
+    ),
+    new Promise((resolve) => setTimeout(() => resolve({ kind: "timed_out" }), 150)),
+  ]);
+  await handledCompletion;
+
+  assert.equal(outcome.kind, "rejected");
+  assert.match(outcome.error.message, /TEST_PROVIDER_IGNORES_ABORT/);
+  assert.equal(iteratorReturnCalls, 1);
+});
+
 test("aborting a text prompt stream does not leave an unhandled completion rejection", () => {
   const script = String.raw`
     const {

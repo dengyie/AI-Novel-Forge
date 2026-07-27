@@ -1,6 +1,5 @@
-import type { ChapterRuntimePackage, GenerationContextPackage } from "@ai-novel/shared/types/chapterRuntime";
+import type { ChapterRuntimePackage } from "@ai-novel/shared/types/chapterRuntime";
 import type { ContentProvenance } from "@ai-novel/shared/types/canonicalState";
-import type { CommittedChapterContent } from "./content/ChapterContentCommitTypes";
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
 import type { QualityScore, ReviewIssue } from "@ai-novel/shared/types/novel";
 import {
@@ -32,185 +31,29 @@ import {
 import { isTransientTransportError } from "../../../llm/transportRetry";
 import { runChapterRepairText } from "./repair/chapterRepairRuntime";
 import { getChapterWriterRuntimeSettings } from "../../settings/ChapterWriterRuntimeSettingsService";
+import type {
+  AssembledRuntimeChapter,
+  FinalizedRuntimeResult,
+  PipelineRecoverableRepairFailure,
+  PipelineRuntimeHooks,
+  PipelineRuntimeInput,
+  PipelineRuntimeResult,
+  QualityDebtAttribution,
+  RunPipelineChapterDeps,
+} from "./pipeline/ChapterPipelineContracts";
 
-export interface PipelineRuntimeHooks {
-  onCheckCancelled?: () => Promise<void>;
-  onStageChange?: (stage: "generating_chapters" | "reviewing" | "repairing") => Promise<void>;
-  onEmptyContent?: (event: PipelineEmptyContentEvent) => Promise<void>;
-  /** 中文硬门失败后整章重试时回调（可观测） */
-  onChineseProseGate?: (event: PipelineChineseProseGateEvent) => Promise<void>;
-  /** mid-stream / writer 瞬时 transport 失败，将整章重试时回调（可观测） */
-  onWriterTransportRetry?: (event: PipelineWriterTransportRetryEvent) => Promise<void>;
-}
-
-export interface PipelineEmptyContentEvent {
-  attempt: number;
-  willRetry: boolean;
-  error: ChapterEmptyContentError;
-  contentLength: number;
-  rawContentLength: number;
-}
-
-export interface PipelineChineseProseGateEvent {
-  attempt: number;
-  willRetry: boolean;
-  error: ChapterChineseProseGateError;
-  reason?: string;
-  rawContentLength: number;
-}
-
-export interface PipelineWriterTransportRetryEvent {
-  attempt: number;
-  willRetry: boolean;
-  error: unknown;
-  message: string;
-}
-
-export interface PipelineRuntimeInput extends ChapterRuntimeRequestInput {
-  maxRetries?: number;
-  autoReview?: boolean;
-  autoRepair?: boolean;
-  auditMode?: "light" | "full" | "repair_only";
-  /**
-   * 分数硬门（P2-3 双轨之一）：仅用于 `isQualityPass` 与是否再 light_repair。
-   * 默认 75，并与固定维阈（coherence/repetition/engagement）合取。
-   * **不是** qualityLoop / 债板 / replan / director blocking 的判据——那些读
-   * `riskFlags.qualityLoop`（rootCauseCode / recommendedAction 等）。
-   * 详见 novelCoreShared.PipelineRunOptions.qualityThreshold 与基础服务文档 §双轨。
-   */
-  qualityThreshold?: number;
-  repairMode?: "detect_only" | "light_repair" | "heavy_repair" | "continuity_only" | "character_only" | "ending_only";
-  /**
-   * polish：章已有 content 时跳过 writer graph，直接进 finalize（风格/验收/L0/双门）。
-   * 空 content 仍会走 writer（与 fast 一致），避免 polish 误清稿。
-   */
-  runMode?: "fast" | "polish";
-  /** 取消穿透到 LLM stream；与 onCheckCancelled 互补（轮询间隙 vs 流内中断） */
-  signal?: AbortSignal;
-}
-
-/**
- * 质量债务根因归因数据，在章节以 defer_and_continue 结束时收集。
- * 用于 analyze_quality_debt_attribution 工具聚合根因占比。
- */
-export interface QualityDebtAttribution {
-  /** 首次验收失败的 issue code 列表（来自 runtimePackage.audit.openIssues） */
-  firstFailureIssueCodes: string[];
-  /** 二次验收失败的 issue code 列表（修复后再次失败时才有值） */
-  secondFailureIssueCodes: string[];
-  /** 首次失败的 failureClassification.code（判定根因 D） */
-  firstFailureClassificationCode: string | null;
-  /** patch 锚点失配，升级到 heavy_repair（判定根因 B） */
-  patchAnchorFailed: boolean;
-  /** 首次与二次的 openIssue codes 完全一致（判定根因 A：义务未传达给修复器） */
-  sameObligationRepeated: boolean;
-  /** firstFailureClassificationCode === "draft_obligation_unmet" → 义务不可达（判定根因 D） */
-  planMisaligned: boolean;
-  /** 首次为 length 类 issue、二次为 content 类（判定根因 E：签名漂移） */
-  lengthVsContentDrift: boolean;
-  /** 首次失败缺失的义务种类（来自 obligationCoverage.missing[].kind） */
-  missingObligationKinds: string[];
-  /** 已消耗的 Director 预算操作（由外层 Director 写入） */
-  budgetActionsConsumed?: Array<"patch_repair" | "chapter_rewrite" | "window_replan">;
-  /** 章节质量债务导致的提案降级路由，用于后续复核入口聚合。 */
-  degradedProposalRouting?: {
-    contentProvenance: "debt";
-    routedToPendingReview: true;
-    proposalTypes: Array<"character_state_update" | "character_resource_update">;
-    fields: Array<"currentState" | "currentGoal" | "characterResource">;
-  };
-}
-
-export interface PipelineRuntimeResult {
-  reviewExecuted: boolean;
-  pass: boolean;
-  score: QualityScore;
-  issues: ReviewIssue[];
-  runtimePackage: ChapterRuntimePackage | null;
-  retryCountUsed: number;
-  recoverableRepairFailure?: PipelineRecoverableRepairFailure | null;
-  /** 仅在章节最终未通过时填充，供 defer_and_continue 路径记录根因 */
-  qualityDebtAttribution?: QualityDebtAttribution | null;
-}
-
-export interface FinalizedRuntimeResult {
-  finalContent: string;
-  runtimePackage: ChapterRuntimePackage;
-  contentRevision: number;
-}
-
-export interface PipelineRecoverableRepairFailure {
-  chapterId: string;
-  message: string;
-  repairMode: NonNullable<PipelineRuntimeInput["repairMode"]>;
-  failureTypes: string[];
-  occurredAt: string;
-}
-
-export interface AssembledRuntimeChapter {
-  novel: { id: string; title: string };
-  chapter: {
-    id: string;
-    title: string;
-    order: number;
-    content: string | null;
-    contentRevision: number;
-    expectation: string | null;
-  };
-  contextPackage: GenerationContextPackage;
-}
-
-interface RunPipelineChapterDeps {
-  validateRequest: (input: ChapterRuntimeRequestInput) => ChapterRuntimeRequestInput;
-  ensureNovelCharacters: (novelId: string, actionName: string, minCount?: number) => Promise<void>;
-  assemble: (novelId: string, chapterId: string, request: ChapterRuntimeRequestInput) => Promise<AssembledRuntimeChapter>;
-  generateDraftFromWriter: (input: {
-    novelId: string;
-    chapterId: string;
-    request: ChapterRuntimeRequestInput;
-    assembled: AssembledRuntimeChapter;
-    signal?: AbortSignal;
-    emptyContentAttempt?: number;
-  }) => Promise<{
-    content: string;
-    lengthControl?: ChapterRuntimePackage["lengthControl"];
-    artifactsAlreadySynced?: boolean;
-    contentRevision?: number;
-  }>;
-  saveDraftAndArtifacts: (
-    novelId: string,
-    chapterId: string,
-    content: string,
-    generationState: "drafted" | "repaired",
-    options?: { scheduleBackgroundSync?: boolean; artifactSyncMode?: PipelineRuntimeInput["artifactSyncMode"]; syncArtifacts?: boolean },
-  ) => Promise<CommittedChapterContent>;
-  syncFinalChapterArtifacts: (
-    novelId: string,
-    chapterId: string,
-    content: string,
-    options?: {
-      artifactSyncMode?: PipelineRuntimeInput["artifactSyncMode"];
-      contentProvenance?: ContentProvenance;
-    },
-  ) => Promise<void>;
-  finalizeChapterContent: (input: {
-    novelId: string;
-    chapterId: string;
-    request: ChapterRuntimeRequestInput;
-    contextPackage: GenerationContextPackage;
-    content: string;
-    expectedContentRevision: number;
-    lengthControl?: ChapterRuntimePackage["lengthControl"];
-    runId: string | null;
-    startMs: number | null;
-  }) => Promise<FinalizedRuntimeResult>;
-  markChapterGenerationState: (
-    chapterId: string,
-    generationState: "reviewed" | "approved",
-    options?: { literaryPass?: boolean; styleClear?: boolean },
-  ) => Promise<void>;
-  markChapterNeedsRepair: (chapterId: string) => Promise<void>;
-}
+export type {
+  AssembledRuntimeChapter,
+  FinalizedRuntimeResult,
+  PipelineChineseProseGateEvent,
+  PipelineEmptyContentEvent,
+  PipelineRecoverableRepairFailure,
+  PipelineRuntimeHooks,
+  PipelineRuntimeInput,
+  PipelineRuntimeResult,
+  PipelineWriterTransportRetryEvent,
+  QualityDebtAttribution,
+} from "./pipeline/ChapterPipelineContracts";
 
 /** 分维固定阈；与 options.qualityThreshold（overall）合取，见 isQualityPass。与 shared isPass 同源。 */
 const QUALITY_THRESHOLD = DEFAULT_QUALITY_IS_PASS_THRESHOLD;

@@ -230,7 +230,11 @@ export class PipelineTaskAdapter {
     }
 
     const job = await this.novelService.cancelPipelineJob(id);
-    await this.cancelLinkedAutoDirectorTask(job.id, job.novelId).catch(() => null);
+    // cancel CAS 可能输给并发 succeeded/failed。此时返回 canonical terminal row 供 UI 刷新，
+    // 但绝不能再取消关联导演任务，否则会出现 pipeline 已成功、导演却 cancelled 的状态分叉。
+    if (job.status === "cancelled") {
+      await this.cancelLinkedAutoDirectorTask(job.id, job.novelId).catch(() => null);
+    }
     const detail = await this.detail(job.id);
     if (!detail) {
       throw new AppError("Task not found after cancellation.", 404);

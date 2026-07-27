@@ -63,6 +63,9 @@
 同一次流式调用只能有一个 completion Promise 持有正文和 token usage 的最终结果。
 取消、超时或断流时，该 Promise 同时失败；禁止再派生一个可能无人 await 的独立 usage Promise，
 否则会在请求已经结束后产生未处理拒绝。
+流消费不能假定 provider 会遵守传入的 `AbortSignal`：每次 `iterator.next()` 都必须同时等待
+abort 与剩余 deadline，并在中断后调用 iterator cleanup。否则 completion 虽然已失败，生成器仍可能
+卡在不响应 signal 的 provider iterator 上，直到外层超时才释放请求资源。
 
 说明：
 

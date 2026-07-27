@@ -10,23 +10,6 @@ import type {
   CommittedChapterContent,
 } from "./ChapterContentCommitTypes";
 
-function asCommittedChapterContent(row: Record<string, unknown>): CommittedChapterContent {
-  if (
-    typeof row.novelId !== "string"
-    || typeof row.id !== "string"
-    || typeof row.content !== "string"
-    || typeof row.contentRevision !== "number"
-  ) {
-    throw new Error("Committed chapter content reload returned an invalid snapshot.");
-  }
-  return {
-    novelId: row.novelId,
-    chapterId: row.id,
-    content: row.content,
-    contentRevision: row.contentRevision,
-  };
-}
-
 export class ChapterContentCommitService {
   constructor(
     private readonly db: ChapterContentCommitDatabase = prisma as unknown as ChapterContentCommitDatabase,
@@ -60,18 +43,14 @@ export class ChapterContentCommitService {
       });
     }
 
-    const committed = await this.db.chapter.findFirst({
-      where: { id: input.chapterId, novelId: input.novelId },
-      select: {
-        novelId: true,
-        id: true,
-        content: true,
-        contentRevision: true,
-      },
-    });
-    if (!committed) {
-      throw createChapterNotFoundError();
-    }
-    return asCommittedChapterContent(committed);
+    // updateMany count=1 已证明 N -> N+1 与正文写入原子成功。此处不能再按 id 无约束重读：
+    // 另一位写者可能在 CAS 成功后立刻推进到 N+2，重读会把对方正文冒充成本次提交快照，
+    // 让后续质量、事实和时间线投影消费错误事实源。返回本次 CAS 可确定的快照即可。
+    return {
+      novelId: input.novelId,
+      chapterId: input.chapterId,
+      content: input.content,
+      contentRevision: input.expectedContentRevision + 1,
+    };
   }
 }

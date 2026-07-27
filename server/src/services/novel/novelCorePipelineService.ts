@@ -15,10 +15,6 @@ import {
   PIPELINE_JOB_TRANSPORT_AUTO_RETRY_MAX,
 } from "./pipelineJobAutoRetry";
 import {
-  buildUnhandledPipelineFailureTerminalCasWhere,
-  resolveUnhandledPipelineFailureTerminalUpdate,
-} from "./pipelineJobTerminalGuard";
-import {
   buildPipelineCurrentItemLabel,
   buildPipelineStageProgress,
   decoratePipelineJob as decoratePipelineJobRow,
@@ -39,6 +35,10 @@ import {
 import { executePipelineJob } from "./pipelineExecute";
 import { PipelineJobCancellationService } from "./pipeline/state/PipelineJobCancellationService";
 import { PipelineJobLeaseService } from "./pipeline/state/PipelineJobLeaseService";
+import {
+  PipelineJobWriteService,
+  type PipelineJobWritePatch,
+} from "./pipeline/state/PipelineJobWriteService";
 
 export { buildPipelineCurrentItemLabel, buildPipelineStageProgress } from "./pipelineJobState";
 export {
@@ -63,6 +63,7 @@ export class NovelCorePipelineService {
   private readonly chapterRuntimeCoordinator = new ChapterRuntimeCoordinator();
   private readonly pipelineJobCancellationService = new PipelineJobCancellationService();
   private readonly pipelineJobLeaseService = new PipelineJobLeaseService();
+  private readonly pipelineJobWriteService = new PipelineJobWriteService();
   private decoratePipelineJob<T extends PipelineJobLike | null>(
     job: T,
   ): T extends null ? null : DecoratedPipelineJob<Extract<T, PipelineJobLike>> {
@@ -227,7 +228,7 @@ export class NovelCorePipelineService {
   }
 
   async markPipelineJobFailed(jobId: string, message: string): Promise<void> {
-    await this.updateJobSafe(jobId, {
+    await this.pipelineJobWriteService.updateSafe(jobId, {
       status: "failed",
       error: message.trim(),
       heartbeatAt: null,
@@ -240,7 +241,7 @@ export class NovelCorePipelineService {
   }
 
   async markPipelineJobCancelled(jobId: string): Promise<void> {
-    await this.updateJobSafe(jobId, {
+    await this.pipelineJobWriteService.updateSafe(jobId, {
       status: "cancelled",
       heartbeatAt: null,
       currentStage: null,
@@ -252,7 +253,7 @@ export class NovelCorePipelineService {
   }
 
   async markPipelineJobPendingManualRecovery(jobId: string, message: string): Promise<void> {
-    await this.updateJobSafe(jobId, {
+    await this.pipelineJobWriteService.updateSafe(jobId, {
       status: "queued",
       error: message.trim(),
       pendingManualRecovery: true,
@@ -296,7 +297,7 @@ export class NovelCorePipelineService {
     const jobTransportAutoRetryCount = normalizeJobTransportAutoRetryCount(
       payload.jobTransportAutoRetryCount,
     );
-    await this.updateJobSafe(job.id, {
+    await this.pipelineJobWriteService.updateSafe(job.id, {
       status: "queued",
       pendingManualRecovery: false,
       heartbeatAt: null,
@@ -523,136 +524,6 @@ export class NovelCorePipelineService {
     }
   }
 
-  private async updateJobSafe(jobId: string, data: {
-    status?: "queued" | "running" | "succeeded" | "failed" | "cancelled";
-    progress?: number;
-    completedCount?: number;
-    retryCount?: number;
-    pendingManualRecovery?: boolean;
-    heartbeatAt?: Date | null;
-    leaseOwner?: string | null;
-    leaseExpiresAt?: Date | null;
-    currentStage?: string | null;
-    currentItemKey?: string | null;
-    currentItemLabel?: string | null;
-    cancelRequestedAt?: Date | null;
-    error?: string | null;
-    startedAt?: Date | null;
-    finishedAt?: Date | null;
-    payload?: string | null;
-  }) {
-    // #9：非 terminal（heartbeat / lease / progress）也要重试——旧 maxAttempts=1
-    // 一次写库失败即静默，随后 updateMany lease CAS 判 PIPELINE_LEASE_LOST，
-    // 任务要等 ACTIVE_JOB_STALE_GRACE 才被 watchdog 捞起，UI 像卡住。
-    // terminal / non-terminal 统一 3 次（M1：去掉 isTerminal ? 3 : 3 死分支）。
-    const maxAttempts = 3;
-    let lastError: unknown;
-    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-      try {
-        await prisma.generationJob.update({
-          where: { id: jobId },
-          data,
-        });
-        return;
-      } catch (error) {
-        lastError = error;
-        if (attempt < maxAttempts) {
-          await new Promise((resolve) => setTimeout(resolve, 50 * attempt));
-          continue;
-        }
-      }
-    }
-    logPipelineWarn("流水线任务状态写库失败", {
-      jobId,
-      status: data.status ?? null,
-      error: lastError instanceof Error ? lastError.message : String(lastError),
-    });
-  }
-
-  /**
-   * 调度层兜底：executePipeline 在内层 try 之外抛错时，仍保证 job 离开 running。
-   * 已是 succeeded/failed/cancelled/queued（含 auto-requeue）则不覆盖。
-   * 写库用 status=running CAS，避免 read→write 窗口覆盖并发 requeue/cancel。
-   */
-  private async ensurePipelineJobTerminalAfterUnhandledError(jobId: string, error: unknown): Promise<void> {
-    try {
-      const job = await prisma.generationJob.findUnique({
-        where: { id: jobId },
-        select: {
-          status: true,
-          cancelRequestedAt: true,
-        },
-      });
-      const terminal = resolveUnhandledPipelineFailureTerminalUpdate({
-        status: job?.status,
-        cancelRequestedAt: job?.cancelRequestedAt ?? null,
-        error,
-      });
-      if (!terminal) {
-        return;
-      }
-      const casData = {
-        status: terminal.status,
-        error: terminal.error,
-        finishedAt: new Date(),
-        heartbeatAt: null,
-        leaseOwner: null,
-        leaseExpiresAt: null,
-        currentStage: null,
-        currentItemKey: null,
-        currentItemLabel: null,
-        ...(terminal.status === "cancelled" ? { cancelRequestedAt: null } : {}),
-      };
-      // 最多 3 次：仅当仍 running 时写入，防止盖掉 queued requeue / 其它终态
-      let applied = false;
-      let lastError: unknown;
-      for (let attempt = 1; attempt <= 3; attempt += 1) {
-        try {
-          const result = await prisma.generationJob.updateMany({
-            where: buildUnhandledPipelineFailureTerminalCasWhere(jobId),
-            data: casData,
-          });
-          if (result.count === 0) {
-            logPipelineWarn("流水线调度兜底终态 CAS 未命中（已离开 running）", {
-              jobId,
-              intendedStatus: terminal.status,
-              priorStatus: job?.status ?? null,
-            });
-            return;
-          }
-          applied = true;
-          break;
-        } catch (writeError) {
-          lastError = writeError;
-          if (attempt < 3) {
-            await new Promise((resolve) => setTimeout(resolve, 50 * attempt));
-            continue;
-          }
-        }
-      }
-      if (!applied) {
-        logPipelineWarn("流水线调度兜底终态写库失败", {
-          jobId,
-          error: lastError instanceof Error ? lastError.message : String(lastError),
-          original: error instanceof Error ? error.message : String(error),
-        });
-        return;
-      }
-      logPipelineWarn("流水线调度兜底写入终态", {
-        jobId,
-        status: terminal.status,
-        error: terminal.error,
-        cas: "status=running",
-      });
-    } catch (guardError) {
-      logPipelineWarn("流水线调度兜底终态写库失败", {
-        jobId,
-        error: guardError instanceof Error ? guardError.message : String(guardError),
-        original: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-
   private schedulePipelineExecution(jobId: string, novelId: string, options: PipelineRunOptions): void {
     if (NovelCorePipelineService.activeJobIds.has(jobId)) {
       return;
@@ -693,7 +564,7 @@ export class NovelCorePipelineService {
       await this.executePipeline(jobId, novelId, options, leaseOwner)
         .catch(async (error) => {
           // 防止未处理 rejection 拖垮进程；并保证 job 不永久卡在 running。
-          await this.ensurePipelineJobTerminalAfterUnhandledError(jobId, error);
+          await this.pipelineJobWriteService.ensureTerminalAfterUnhandledError(jobId, error);
         })
         .finally(() => {
           NovelCorePipelineService.activeJobIds.delete(jobId);
@@ -714,7 +585,7 @@ export class NovelCorePipelineService {
     await executePipelineJob({
       parsePipelinePayload: (payload) => this.parsePipelinePayload(payload),
       stringifyPipelinePayload: (input) => this.stringifyPipelinePayload(input),
-      updateJobSafe: (id, data) => this.updateJobSafe(id, data as Parameters<NovelCorePipelineService["updateJobSafe"]>[1]),
+      updateJobSafe: (id, data) => this.pipelineJobWriteService.updateSafe(id, data as PipelineJobWritePatch),
       ensurePipelineNotCancelled: (id) => this.ensurePipelineNotCancelled(id),
       schedulePipelineExecution: (id, nId, opts) => this.schedulePipelineExecution(id, nId, opts),
       chapterRuntimeCoordinator: this.chapterRuntimeCoordinator,

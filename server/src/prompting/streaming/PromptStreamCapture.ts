@@ -40,6 +40,16 @@ function createStreamTimeoutError(timeoutMs: number, label?: string): Error {
   return error;
 }
 
+function createStreamAbortError(signal: AbortSignal): Error {
+  const reason = signal.reason;
+  return reason instanceof Error
+    ? reason
+    : Object.assign(
+        new Error(typeof reason === "string" && reason.trim() ? reason.trim() : "Request aborted."),
+        { name: "AbortError" },
+      );
+}
+
 /**
  * 消费模型流并用单一 completion Promise 交付正文与 usage。
  * timeout/abort/iterator error 只 reject 这一份 Promise，避免某个派生 Promise
@@ -94,14 +104,9 @@ export function capturePromptStream(
   const upstreamSignal = options.signal;
   const onUpstreamAbort = (): void => {
     clearStreamTimeout();
-    const reason = upstreamSignal?.reason;
-    const error = reason instanceof Error
-      ? reason
-      : Object.assign(
-          new Error(typeof reason === "string" && reason.trim() ? reason.trim() : "Request aborted."),
-          { name: "AbortError" },
-        );
-    settleReject(error);
+    if (upstreamSignal) {
+      settleReject(createStreamAbortError(upstreamSignal));
+    }
   };
   if (upstreamSignal) {
     if (upstreamSignal.aborted) {
@@ -121,10 +126,7 @@ export function capturePromptStream(
           throw makeTimeoutError();
         }
         if (upstreamSignal?.aborted) {
-          const reason = upstreamSignal.reason;
-          throw reason instanceof Error
-            ? reason
-            : Object.assign(new Error("Request aborted."), { name: "AbortError" });
+          throw createStreamAbortError(upstreamSignal);
         }
 
         while (true) {
@@ -133,33 +135,45 @@ export function capturePromptStream(
             throw makeTimeoutError();
           }
           if (upstreamSignal?.aborted) {
-            const reason = upstreamSignal.reason;
-            throw reason instanceof Error
-              ? reason
-              : Object.assign(new Error("Request aborted."), { name: "AbortError" });
+            throw createStreamAbortError(upstreamSignal);
           }
 
-          let timeoutRaceHandle: ReturnType<typeof setTimeout> | null = null;
           const nextResult = await new Promise<IteratorResult<BaseMessageChunk>>((resolve, reject) => {
+            let completed = false;
+            let timeoutRaceHandle: ReturnType<typeof setTimeout> | null = null;
+            const cleanup = (): void => {
+              if (timeoutRaceHandle) {
+                clearTimeout(timeoutRaceHandle);
+                timeoutRaceHandle = null;
+              }
+              upstreamSignal?.removeEventListener("abort", rejectForAbort);
+            };
+            const finishResolve = (value: IteratorResult<BaseMessageChunk>): void => {
+              if (completed) return;
+              completed = true;
+              cleanup();
+              resolve(value);
+            };
+            const finishReject = (error: unknown): void => {
+              if (completed) return;
+              completed = true;
+              cleanup();
+              reject(error);
+            };
+            const rejectForAbort = (): void => {
+              if (upstreamSignal) {
+                finishReject(createStreamAbortError(upstreamSignal));
+              }
+            };
+
             timeoutRaceHandle = setTimeout(() => {
               timedOut = true;
-              reject(makeTimeoutError());
+              finishReject(makeTimeoutError());
             }, left);
+            upstreamSignal?.addEventListener("abort", rejectForAbort, { once: true });
             Promise.resolve(iterator.next()).then(
-              (value) => {
-                if (timeoutRaceHandle) {
-                  clearTimeout(timeoutRaceHandle);
-                  timeoutRaceHandle = null;
-                }
-                resolve(value);
-              },
-              (error) => {
-                if (timeoutRaceHandle) {
-                  clearTimeout(timeoutRaceHandle);
-                  timeoutRaceHandle = null;
-                }
-                reject(error);
-              },
+              finishResolve,
+              finishReject,
             );
           });
 
