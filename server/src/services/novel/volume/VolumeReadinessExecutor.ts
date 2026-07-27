@@ -27,8 +27,35 @@ import {
 import { volumeReadinessService } from "./VolumeReadinessService";
 import {
   summarizeReadinessPlans,
+  type VolumeReadinessChapterSignals,
   type VolumeReadinessVerdict,
 } from "./volumeReadinessPolicy";
+import { chapterStatePairAfterManualQualityReview } from "../chapterLifecycleState";
+
+/**
+ * Part A0 判定：真 review 后是否需要收口 chapterStatus=completed。
+ *
+ * 抽成独立函数便于单测——8 条守卫是 A0 的全部触发条件，不应被主流程淹没。
+ * 严守 fail-closed：缺信号 / 任一门非全绿 / 有硬债 / 已 completed / 假 approved（hasTrueReview≠true）
+ * 一律返回 false，保持原 needs_re_review verdict 可 resume。
+ */
+function shouldReconcileChapterStatusAfterReview(
+  outcome: VolumeReadinessChapterOutcome,
+  verdictAfter: VolumeReadinessVerdict | null,
+  signals: VolumeReadinessChapterSignals | undefined,
+): boolean {
+  return (
+    outcome === "re_reviewed"
+    && verdictAfter === "needs_re_review"
+    && signals != null
+    && signals.hasTrueReview === true
+    && signals.literaryPass === true
+    && signals.l0Clear === true
+    && signals.styleClear === true
+    && Math.max(0, Math.floor(signals.hardDebtCount ?? 0)) === 0
+    && signals.chapterStatus !== "completed"
+  );
+}
 
 interface RepairStatusFrame {
   type?: string;
@@ -801,6 +828,48 @@ export class VolumeReadinessExecutor {
           );
           const after = report.chapters.find((c) => c.chapterId === planItem.chapterId);
           verdictAfter = after?.verdict ?? null;
+
+          // Part A0：真 review 后双门全绿但 chapterStatus 停在非 completed（编辑/角色路由或分离
+          // markChapterGenerationState 路径把 chapterStatus 写成 pending_review/needs_repair，与
+          // reviewChapter 的 reviewed+completed 写路径不同源）。policy 仅看 chapterStatus!=completed
+          // 即重判 needs_re_review（volumeReadinessPolicy line 159），导致真 review 已过门却永久
+          // re_review_incomplete、chain 也接不到（guard 仅 needs_heavy/needs_patch）。
+          // 仅当真 review 信号（hasTrueReview===true，非 evaluateOnly 合成）+ 所有门已绿 + 无硬债
+          // 时才收口 chapterStatus=completed —— 与 reviewChapter 写路径同源、不放过假 approved。
+          // 判定逻辑抽成 shouldReconcileChapterStatusAfterReview，便于单测。
+          if (shouldReconcileChapterStatusAfterReview(outcome, verdictAfter, after?.signals)) {
+            try {
+              await clock.race(
+                () => prisma.chapter.update({
+                  where: { id: planItem.chapterId },
+                  data: chapterStatePairAfterManualQualityReview({
+                    literaryPass: true,
+                    styleClear: true,
+                  }),
+                }),
+                "reconcileChapterStatusAfterReview",
+              );
+              const reconciled = await clock.race(
+                () => volumeReadinessService.assess(initial.novelId, {
+                  fromOrder: planItem.chapterOrder,
+                  toOrder: planItem.chapterOrder,
+                  // 刚写完 chapterStatus，需绕过 assess 快照拿最新状态（其它 assess 均 refresh:false）
+                  refresh: true,
+                }),
+                "reconcileChapterStatusAfterReview.assess",
+              );
+              const reconciledAfter = reconciled.chapters.find(
+                (c) => c.chapterId === planItem.chapterId,
+              );
+              if (reconciledAfter) {
+                verdictAfter = reconciledAfter.verdict ?? verdictAfter;
+                // 保留原 message 追加收口痕迹，run 报告里可见 A0 触发，便于 debug
+                message = `${message ?? "true review executed (dual gate)"} → 收口 chapterStatus=completed`;
+              }
+            } catch {
+              // 收口失败（DB/assess）不阻断；保持 needs_re_review verdict 可 resume
+            }
+          }
 
           // Part A：同章链式 re_review→repair
           // 真 review 后 verdict 落到 needs_heavy/needs_patch，且 actionFilter 允许 + 预算允许
