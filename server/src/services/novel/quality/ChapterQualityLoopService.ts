@@ -15,6 +15,10 @@ import {
   type QualityFeedbackRepairDecision,
 } from "@ai-novel/shared/types/qualityFeedback";
 import { prisma } from "../../../db/prisma";
+import {
+  createChapterContentConflictError,
+  createChapterNotFoundError,
+} from "../chapterContentCas";
 import { directorAutomationLedgerEventService } from "../director/runtime/DirectorAutomationLedgerEventService";
 import type { QualityDebtAttribution } from "../runtime/chapterRuntimePipeline";
 
@@ -42,6 +46,7 @@ interface RecordChapterQualityLoopInput {
    * Prefer recordRepairFeedbackDecision for discard/plateau so assessment/status stay intact.
    */
   repairDecision?: QualityFeedbackRepairDecision | null;
+  expectedContentRevision?: number;
 }
 
 /**
@@ -170,7 +175,7 @@ export function buildChapterQualityLoopChapterUpdate(
   qualityDebtAttribution?: RecordChapterQualityLoopInput["qualityDebtAttribution"],
   settingAlignment?: SettingAlignmentAssessment | null,
   feedback?: QualityFeedbackPacket[] | null,
-): Prisma.ChapterUpdateInput {
+): Prisma.ChapterUpdateManyMutationInput {
   const nextRepairHistory = appendRepairHistory(chapter.repairHistory, assessment, terminalAction);
   const shouldContinueChapter = assessment.recommendedAction === "continue" || terminalAction === "defer_and_continue";
   const nextChapterStatus: ChapterStatus | undefined = shouldContinueChapter
@@ -205,6 +210,7 @@ export class ChapterQualityLoopService {
         repairHistory: true,
         chapterStatus: true,
         generationState: true,
+        contentRevision: true,
       },
     });
     if (!chapter) {
@@ -233,18 +239,41 @@ export class ChapterQualityLoopService {
       ? mergeQualityFeedbackList(previousFeedback, nextPacket)
       : previousFeedback;
 
-    await prisma.chapter.update({
-      where: { id: input.chapterId },
-      data: buildChapterQualityLoopChapterUpdate(
-        chapter,
-        assessment,
-        input.source,
-        input.terminalAction ?? null,
-        input.qualityDebtAttribution,
-        input.settingAlignment,
-        feedback,
-      ),
-    });
+    const data = buildChapterQualityLoopChapterUpdate(
+      chapter,
+      assessment,
+      input.source,
+      input.terminalAction ?? null,
+      input.qualityDebtAttribution,
+      input.settingAlignment,
+      feedback,
+    );
+    if (input.expectedContentRevision == null) {
+      await prisma.chapter.update({
+        where: { id: input.chapterId },
+        data,
+      });
+    } else {
+      const projected = await prisma.chapter.updateMany({
+        where: {
+          id: input.chapterId,
+          novelId: input.novelId,
+          contentRevision: input.expectedContentRevision,
+        },
+        data,
+      });
+      if (projected.count === 0) {
+        const current = await prisma.chapter.findFirst({
+          where: { id: input.chapterId, novelId: input.novelId },
+          select: { contentRevision: true },
+        });
+        if (!current) throw createChapterNotFoundError();
+        throw createChapterContentConflictError({
+          currentContentRevision: current.contentRevision,
+          expectedContentRevision: input.expectedContentRevision,
+        });
+      }
+    }
     await directorAutomationLedgerEventService.recordQualityLoopAssessment({
       taskId: input.taskId,
       runId: input.runId,

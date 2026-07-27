@@ -13,6 +13,10 @@ import { ChapterFactProjectionService } from "./finalization/ChapterFactProjecti
 import { ChapterQualityProjectionService } from "./finalization/ChapterQualityProjectionService";
 import { ChapterStyleReviewFinalizer } from "./finalization/ChapterStyleReviewFinalizer";
 import { ChapterTimelineProjectionService } from "./finalization/ChapterTimelineProjectionService";
+import {
+  createChapterContentConflictError,
+  createChapterNotFoundError,
+} from "../chapterContentCas";
 
 export interface ChapterContentFinalizationAgentRuntime {
   finishChapterGenRun: (runId: string, summary: string, durationMs: number) => Promise<void>;
@@ -71,7 +75,9 @@ export class ChapterContentFinalizationService {
       timelineProjection: new ChapterTimelineProjectionService(deps.timelineFinalizer),
       factProjection: new ChapterFactProjectionService(),
       artifactSyncService: deps.artifactSyncService,
-      markChapterStatus: (chapterId, status) => this.markChapterStatus(chapterId, status),
+      markChapterStatus: (chapterId, status, expectedContentRevision) => (
+        this.markChapterStatus(chapterId, status, expectedContentRevision)
+      ),
       finishTraceRun: (runId, contentLength, startMs) => (
         this.finishTraceRun(runId, contentLength, startMs)
       ),
@@ -102,10 +108,30 @@ export class ChapterContentFinalizationService {
   async markChapterStatus(
     chapterId: string,
     chapterStatus: "pending_generation" | "generating" | "pending_review" | "needs_repair",
+    expectedContentRevision?: number,
   ): Promise<void> {
-    await prisma.chapter.update({
-      where: { id: chapterId },
+    if (expectedContentRevision == null) {
+      await prisma.chapter.update({
+        where: { id: chapterId },
+        data: { chapterStatus },
+      });
+      return;
+    }
+    const projected = await prisma.chapter.updateMany({
+      where: { id: chapterId, contentRevision: expectedContentRevision },
       data: { chapterStatus },
+    });
+    if (projected.count > 0) return;
+    const current = await prisma.chapter.findUnique({
+      where: { id: chapterId },
+      select: { contentRevision: true },
+    });
+    if (!current) {
+      throw createChapterNotFoundError();
+    }
+    throw createChapterContentConflictError({
+      currentContentRevision: current.contentRevision,
+      expectedContentRevision,
     });
   }
 }

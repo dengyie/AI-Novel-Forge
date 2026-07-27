@@ -38,7 +38,9 @@ test("fresh database migrations create the novel fact ledger for sqlite and post
       "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'NovelFactEntry' ORDER BY name",
     ).all().map((row) => row.name);
     assert.deepEqual(indexNames, [
+      "NovelFactEntry_idempotencyKey_key",
       "NovelFactEntry_novelId_category_idx",
+      "NovelFactEntry_novelId_chapterId_contentRevision_idx",
       "NovelFactEntry_novelId_chapterOrder_idx",
       "sqlite_autoindex_NovelFactEntry_1",
     ]);
@@ -57,5 +59,7 @@ test("fresh database migrations create the novel fact ledger for sqlite and post
   assert.match(postgresSql, /CREATE TABLE "NovelFactEntry"/);
   assert.match(postgresSql, /NovelFactEntry_novelId_chapterOrder_idx/);
   assert.match(postgresSql, /NovelFactEntry_novelId_category_idx/);
+  assert.match(postgresSql, /NovelFactEntry_idempotencyKey_key/);
+  assert.match(postgresSql, /NovelFactEntry_novelId_chapterId_contentRevision_idx/);
   assert.match(postgresSql, /FOREIGN KEY \("novelId"\) REFERENCES "Novel"\("id"\) ON DELETE CASCADE/);
 });

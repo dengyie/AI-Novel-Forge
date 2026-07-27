@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { prisma } from "../../../db/prisma";
 
 export type NovelFactCategory = "completed" | "revealed" | "state_changed";
@@ -29,6 +30,8 @@ export interface NovelFactEntry {
   id: string;
   novelId: string;
   chapterOrder: number;
+  chapterId: string | null;
+  contentRevision: number | null;
   text: string;
   category: NovelFactCategory;
   source: NovelFactSource;
@@ -46,20 +49,23 @@ export interface NovelFactEntry {
  */
 export class NovelFactService {
   /**
-   * 批量写入事实条目。幂等设计：同一 novelId+chapterOrder+text 组合不重复插入。
+   * 写入某一正文 revision 的自动事实。
+   *
+   * 更高 revision 只清理更低 revision 与迁移前无 ownership 的自动事实；不会清理未来
+   * revision，也不会触碰 manual。这样即使旧异步任务晚到，也不能删除新正文的事实。
+   * idempotencyKey 的数据库唯一索引负责并发/重试去重。
    */
-  async writeFacts(
-    novelId: string,
-    chapterOrder: number,
-    items: NovelFactWriteItem[],
-  ): Promise<void> {
-    if (items.length === 0) {
-      return;
-    }
+  async writeChapterFacts(input: {
+    novelId: string;
+    chapterId: string;
+    chapterOrder: number;
+    contentRevision: number;
+    items: NovelFactWriteItem[];
+  }): Promise<void> {
     // 规范化 + 批次内去重：空白差异/批次内重复不再产生重复行
     const normalizedItems: NovelFactWriteItem[] = [];
     const seenInBatch = new Set<string>();
-    for (const item of items) {
+    for (const item of input.items) {
       const text = normalizeFactText(item.text);
       if (!text || seenInBatch.has(text)) {
         continue;
@@ -67,27 +73,48 @@ export class NovelFactService {
       seenInBatch.add(text);
       normalizedItems.push({ ...item, text });
     }
-    if (normalizedItems.length === 0) {
-      return;
-    }
-    // 查出已存在的 text，避免重复
-    const existing = await prisma.novelFactEntry.findMany({
-      where: { novelId, chapterOrder },
-      select: { text: true },
-    });
-    const existingTexts = new Set(existing.map((row) => normalizeFactText(row.text)));
-    const toCreate = normalizedItems.filter((item) => !existingTexts.has(item.text));
-    if (toCreate.length === 0) {
-      return;
-    }
-    await prisma.novelFactEntry.createMany({
-      data: toCreate.map((item) => ({
-        novelId,
-        chapterOrder,
-        text: item.text,
-        category: item.category,
-        source: item.source ?? "auto",
-      })),
+    await prisma.$transaction(async (tx) => {
+      await tx.novelFactEntry.deleteMany({
+        where: {
+          novelId: input.novelId,
+          source: "auto",
+          OR: [
+            {
+              chapterId: input.chapterId,
+              contentRevision: { lt: input.contentRevision },
+            },
+            {
+              chapterId: null,
+              chapterOrder: input.chapterOrder,
+            },
+          ],
+        },
+      });
+      if (normalizedItems.length === 0) return;
+      for (const item of normalizedItems) {
+        const data = {
+          novelId: input.novelId,
+          chapterId: input.chapterId,
+          chapterOrder: input.chapterOrder,
+          contentRevision: input.contentRevision,
+          text: item.text,
+          category: item.category,
+          source: "auto",
+          idempotencyKey: createHash("sha256")
+            .update([
+              input.novelId,
+              input.chapterId,
+              String(input.contentRevision),
+              item.text,
+            ].join("\u0000"))
+            .digest("hex"),
+        };
+        await tx.novelFactEntry.upsert({
+          where: { idempotencyKey: data.idempotencyKey },
+          update: {},
+          create: data,
+        });
+      }
     });
   }
 
@@ -146,7 +173,12 @@ export class NovelFactService {
       },
       orderBy: { chapterOrder: "asc" },
     });
-    return [...olderMilestoneRows, ...recentMilestoneRows, ...recentStateRows].map(mapRow);
+    const canonicalRows = await this.filterCanonicalAutomaticFacts([
+      ...olderMilestoneRows,
+      ...recentMilestoneRows,
+      ...recentStateRows,
+    ]);
+    return canonicalRows.map(mapRow);
   }
 
   /**
@@ -169,12 +201,38 @@ export class NovelFactService {
     });
     return mapRow(row);
   }
+
+  private async filterCanonicalAutomaticFacts<T extends {
+    source: string;
+    chapterId: string | null;
+    contentRevision: number | null;
+  }>(rows: T[]): Promise<T[]> {
+    const ownedChapterIds = Array.from(new Set(rows
+      .filter((row) => row.source === "auto" && row.chapterId && row.contentRevision != null)
+      .map((row) => row.chapterId as string)));
+    if (ownedChapterIds.length === 0) return rows;
+    const chapters = await prisma.chapter.findMany({
+      where: { id: { in: ownedChapterIds } },
+      select: { id: true, contentRevision: true },
+    });
+    const currentRevisionByChapterId = new Map(
+      chapters.map((chapter) => [chapter.id, chapter.contentRevision]),
+    );
+    return rows.filter((row) => (
+      row.source !== "auto"
+      || row.chapterId == null
+      || row.contentRevision == null
+      || currentRevisionByChapterId.get(row.chapterId) === row.contentRevision
+    ));
+  }
 }
 
 function mapRow(row: {
   id: string;
   novelId: string;
   chapterOrder: number;
+  chapterId: string | null;
+  contentRevision: number | null;
   text: string;
   category: string;
   source: string;
@@ -184,6 +242,8 @@ function mapRow(row: {
     id: row.id,
     novelId: row.novelId,
     chapterOrder: row.chapterOrder,
+    chapterId: row.chapterId,
+    contentRevision: row.contentRevision,
     text: row.text,
     category: row.category as NovelFactCategory,
     source: row.source as NovelFactSource,

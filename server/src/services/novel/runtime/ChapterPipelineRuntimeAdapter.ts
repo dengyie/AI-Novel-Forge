@@ -1,6 +1,11 @@
 import { prisma } from "../../../db/prisma";
-import { mergeChapterPatchForGenerationStateBump } from "../chapterLifecycleState";
+import {
+  chapterStatePairAfterDraftSave,
+  mergeChapterPatchForGenerationStateBump,
+} from "../chapterLifecycleState";
 import { ChapterArtifactSyncService } from "./ChapterArtifactSyncService";
+import { ChapterContentCommitService } from "./content/ChapterContentCommitService";
+import { createChapterContentConflictError, createChapterNotFoundError } from "../chapterContentCas";
 import {
   runPipelineChapterWithRuntime,
   type PipelineRuntimeHooks,
@@ -20,6 +25,7 @@ export interface ChapterPipelineRuntimeAdapterDeps {
     "prepareRuntimeChapter" | "generateDraftFromWriter" | "markChapterStatus"
   >;
   artifactSyncService: Pick<ChapterArtifactSyncService, "saveDraftAndArtifacts" | "syncChapterArtifacts">;
+  contentCommitService: Pick<ChapterContentCommitService, "commit">;
   contentFinalizationService: Pick<ChapterContentFinalizationService, "finalizeChapterContent">;
   ensureNovelCharacters: (novelId: string, actionName: string, minCount?: number) => Promise<void>;
 }
@@ -54,6 +60,15 @@ export class ChapterPipelineRuntimeAdapter {
               generationState,
               saveOptions,
             ),
+          commitRepairContent: (targetNovelId, targetChapterId, content, expectedContentRevision) =>
+            this.deps.contentCommitService.commit({
+              novelId: targetNovelId,
+              chapterId: targetChapterId,
+              content,
+              expectedContentRevision,
+              statePatch: chapterStatePairAfterDraftSave("repaired"),
+              source: "pipeline_repair",
+            }),
           syncFinalChapterArtifacts: (targetNovelId, targetChapterId, content, syncOptions) =>
             this.deps.artifactSyncService.syncChapterArtifacts(
               targetNovelId,
@@ -81,10 +96,15 @@ export class ChapterPipelineRuntimeAdapter {
               contentRevision: finalized.contentRevision,
             };
           },
-          markChapterGenerationState: (targetChapterId, generationState, options) =>
-            this.markChapterGenerationState(targetChapterId, generationState, options),
-          markChapterNeedsRepair: (targetChapterId) =>
-            this.deps.streamOrchestrator.markChapterStatus(targetChapterId, "needs_repair"),
+          markChapterGenerationState: (targetChapterId, generationState, expectedContentRevision, options) =>
+            this.markChapterGenerationState(
+              targetChapterId,
+              generationState,
+              expectedContentRevision,
+              options,
+            ),
+          markChapterNeedsRepair: (targetChapterId, expectedContentRevision) =>
+            this.markChapterStatus(targetChapterId, "needs_repair", expectedContentRevision),
         },
         novelId,
         chapterId,
@@ -102,11 +122,46 @@ export class ChapterPipelineRuntimeAdapter {
   private async markChapterGenerationState(
     chapterId: string,
     generationState: "reviewed" | "approved",
+    expectedContentRevision: number,
     options?: { literaryPass?: boolean; styleClear?: boolean },
   ): Promise<void> {
-    await prisma.chapter.update({
-      where: { id: chapterId },
+    const updated = await prisma.chapter.updateMany({
+      where: { id: chapterId, contentRevision: expectedContentRevision },
       data: mergeChapterPatchForGenerationStateBump({}, generationState, options),
+    });
+    if (updated.count === 0) {
+      await this.throwContentProjectionConflict(chapterId, expectedContentRevision);
+    }
+  }
+
+  private async markChapterStatus(
+    chapterId: string,
+    chapterStatus: "needs_repair",
+    expectedContentRevision: number,
+  ): Promise<void> {
+    const updated = await prisma.chapter.updateMany({
+      where: { id: chapterId, contentRevision: expectedContentRevision },
+      data: { chapterStatus },
+    });
+    if (updated.count === 0) {
+      await this.throwContentProjectionConflict(chapterId, expectedContentRevision);
+    }
+  }
+
+  private async throwContentProjectionConflict(
+    chapterId: string,
+    expectedContentRevision: number,
+  ): Promise<never> {
+    const current = await prisma.chapter.findUnique({
+      where: { id: chapterId },
+      select: { contentRevision: true },
+    });
+    if (!current) {
+      throw createChapterNotFoundError();
+    }
+    throw createChapterContentConflictError({
+      currentContentRevision: current.contentRevision,
+      expectedContentRevision,
     });
   }
 }

@@ -48,7 +48,7 @@ export class NovelSourceAdapter implements SourceContentPort {
       prisma.chapter.findMany({
         where: { novelId },
         orderBy: { order: "asc" },
-        select: { order: true, title: true, expectation: true, content: true },
+        select: { id: true, order: true, title: true, expectation: true, content: true, contentRevision: true },
       }),
       prisma.character.findMany({
         where: { novelId },
@@ -68,7 +68,13 @@ export class NovelSourceAdapter implements SourceContentPort {
       prisma.novelFactEntry.findMany({
         where: { novelId },
         orderBy: { chapterOrder: "asc" },
-        select: { text: true, category: true },
+        select: {
+          text: true,
+          category: true,
+          source: true,
+          chapterId: true,
+          contentRevision: true,
+        },
       }),
     ]);
 
@@ -97,7 +103,15 @@ export class NovelSourceAdapter implements SourceContentPort {
       sourceCharacterRef: character.id,
     }));
 
-    const hardFacts: SourceFact[] = factRows.map((row) => ({
+    const revisionByChapterId = new Map(
+      chapters.map((chapter) => [chapter.id, chapter.contentRevision]),
+    );
+    const hardFacts: SourceFact[] = factRows.filter((row) => (
+      row.source !== "auto"
+      || row.chapterId == null
+      || row.contentRevision == null
+      || revisionByChapterId.get(row.chapterId) === row.contentRevision
+    )).map((row) => ({
       text: row.text,
       category: normalizeFactCategory(row.category),
     }));

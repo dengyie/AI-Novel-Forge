@@ -18,6 +18,7 @@ export class ChapterContentFinalizationOrchestrator {
     markChapterStatus: (
       chapterId: string,
       status: "pending_review" | "needs_repair",
+      expectedContentRevision: number,
     ) => Promise<void>;
     finishTraceRun: (
       runId: string | null,
@@ -34,6 +35,7 @@ export class ChapterContentFinalizationOrchestrator {
       request: input.request,
       contextPackage: input.contextPackage,
       content: committed.content,
+      contentRevision: committed.contentRevision,
       lengthControl: input.lengthControl,
       runId: input.runId,
       styleReview,
@@ -41,6 +43,7 @@ export class ChapterContentFinalizationOrchestrator {
     await this.deps.markChapterStatus(
       input.chapterId,
       projected.needsRepair ? "needs_repair" : "pending_review",
+      committed.contentRevision,
     );
 
     void this.deps.timelineProjection.schedule({
@@ -64,6 +67,7 @@ export class ChapterContentFinalizationOrchestrator {
         await this.deps.factProjection.writeAcceptedFacts({
           novelId: input.novelId,
           chapterId: input.chapterId,
+          contentRevision: committed.contentRevision,
           runId: input.runId,
           contextPackage: input.contextPackage,
           runtimePackage: projected.runtimePackage,

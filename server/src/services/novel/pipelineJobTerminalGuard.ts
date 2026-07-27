@@ -42,62 +42,69 @@ export function resolveUnhandledPipelineFailureTerminalUpdate(input: {
 }
 
 /**
- * 调度兜底终态写库 CAS 谓词：只允许覆盖仍为 running 的行。
- * 与 resolve 配套；updateMany count=0 表示并发已离开 running，应跳过。
+ * 调度兜底终态写库 CAS 谓词：只允许当前 owner 覆盖仍为 running 的行。
+ * 与 resolve 配套；updateMany count=0 表示并发已离开 running 或租约已转手，应跳过。
  */
-export function buildUnhandledPipelineFailureTerminalCasWhere(jobId: string): {
+export function buildUnhandledPipelineFailureTerminalCasWhere(
+  jobId: string,
+  leaseOwner: string | null,
+): {
   id: string;
   status: "running";
+  leaseOwner: string | null;
 } {
   return {
     id: jobId,
     status: "running",
+    leaseOwner,
   };
 }
 
 /**
- * auto-requeue 写回 queued 的 CAS：必须仍 running 且未请求取消。
- * 避免 cancel 竞态下把 cancelRequestedAt 清掉并再次排队。
+ * auto-requeue 写回 queued 的 CAS：必须仍 running、未请求取消且仍由当前 owner 持有。
+ * 避免 cancel 竞态下清掉 cancelRequestedAt，也避免旧执行者在租约转手后覆盖新 owner。
  */
-export function buildPipelineJobAutoRequeueCasWhere(jobId: string): {
+export function buildPipelineJobAutoRequeueCasWhere(
+  jobId: string,
+  leaseOwner: string | null,
+): {
   id: string;
   status: "running";
   cancelRequestedAt: null;
+  leaseOwner: string | null;
 } {
   return {
     id: jobId,
     status: "running",
     cancelRequestedAt: null,
+    leaseOwner,
   };
 }
 
 /**
  * 成功终写（succeeded）的 CAS：仅当仍 running 且未请求取消才覆盖。
  *
- * 为什么 success 路径也要 CAS：章循环退出后到 `updateJobSafe(status:"succeeded")` 之间
+ * 为什么 success 路径也要 CAS：章循环退出后到 succeeded 终写之间
  * 仍有 read→write 窗口——若并发 cancel 在最后一章结果落地后、终写前打入（心跳间隙轮询
  * 把 chapterAbort abort 掉但终写仍走成功分支），直写会盖掉 cancelRequestedAt 并把行
  * 写成 succeeded，使取消请求被静默吞掉。和 auto-requeue 同一套谓词语义：count=0 即视为
  * 并发已把 job 推离 running 或已请求取消，调用方应改走 cancelled 收口。
  *
- * `leaseOwner` 可选（GENERATION_JOB_LEASE_ENABLED=false 或本进程未持租约时传 null）：
- * 传入 owner 时另加 leaseOwner 等值判定；空字符串等价于「不校验」，保持旧路径兼容。
+ * `leaseOwner=null` 表示 lease-disabled 执行，只允许更新同样未持租约的行。null 不是
+ * “跳过 owner 校验”；否则关闭租约的旧执行者可能覆盖已被另一实例认领的任务。
  */
-export function buildPipelineJobSuccessTerminalCasWhere(jobId: string, leaseOwner?: string | null): {
+export function buildPipelineJobSuccessTerminalCasWhere(jobId: string, leaseOwner: string | null): {
   id: string;
   status: "running";
   cancelRequestedAt: null;
-  leaseOwner?: string;
+  leaseOwner: string | null;
 } {
-  const base = {
+  return {
     id: jobId,
     status: "running" as const,
     cancelRequestedAt: null,
+    leaseOwner,
   };
-  if (leaseOwner) {
-    return { ...base, leaseOwner };
-  }
-  return base;
 }
 
 /**
@@ -117,16 +124,13 @@ export function buildPipelineJobSuccessTerminalCasWhere(jobId: string, leaseOwne
 export function buildPipelineJobLeaseOwnedCasWhere(jobId: string, leaseOwner: string | null): {
   id: string;
   status: "running";
-  leaseOwner?: string;
+  leaseOwner: string | null;
 } {
-  const base = {
+  return {
     id: jobId,
     status: "running" as const,
+    leaseOwner,
   };
-  if (leaseOwner) {
-    return { ...base, leaseOwner };
-  }
-  return base;
 }
 
 /**

@@ -33,6 +33,15 @@ export function createChapterNotFoundError(): AppError {
   return new AppError("章节不存在", 404);
 }
 
+export function isChapterContentConflictError(error: unknown): boolean {
+  return Boolean(
+    error
+    && typeof error === "object"
+    && "details" in error
+    && (error as { details?: { code?: unknown } }).details?.code === CHAPTER_CONTENT_CONFLICT_CODE,
+  );
+}
+
 /**
  * Prisma data 片段：content 写入时 revision +1。
  * 使用 increment，避免 read-modify-write 竞态下丢版本。

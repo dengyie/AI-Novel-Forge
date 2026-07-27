@@ -149,6 +149,7 @@ export class ChapterStreamGenerationOrchestrator {
             chapterId,
             score: finalized.score,
             issues: finalized.issues,
+            expectedContentRevision: finalized.contentRevision,
             writeReport: true,
           });
         } catch (error) {

@@ -1,5 +1,10 @@
 import type { QualityScore, ReviewIssue } from "@ai-novel/shared/types/novel";
+import type { ChapterGenerationState, ChapterStatus } from "@prisma/client";
 import { prisma } from "../../../db/prisma";
+import {
+  createChapterContentConflictError,
+  createChapterNotFoundError,
+} from "../chapterContentCas";
 
 /**
  * Chapter 列上的可运营分数字段（schema 已有，finalize 热路径历史上未写入）。
@@ -41,6 +46,11 @@ export interface PersistChapterQualityScoresInput {
   chapterId: string;
   score: QualityScore;
   issues?: ReviewIssue[];
+  expectedContentRevision?: number;
+  chapterPatch?: {
+    generationState?: ChapterGenerationState;
+    chapterStatus?: ChapterStatus | null;
+  };
   /** 默认 true：同时写 QualityReport 行 */
   writeReport?: boolean;
 }
@@ -55,12 +65,37 @@ export async function persistChapterQualityScores(
   const columns = mapQualityScoreToChapterColumns(input.score);
   const writeReport = input.writeReport !== false;
   const issues = input.issues ?? [];
+  const chapterData = { ...columns, ...input.chapterPatch };
 
   await prisma.$transaction(async (tx) => {
-    await tx.chapter.update({
-      where: { id: input.chapterId },
-      data: columns,
-    });
+    if (input.expectedContentRevision == null) {
+      await tx.chapter.update({
+        where: { id: input.chapterId },
+        data: chapterData,
+      });
+    } else {
+      const projected = await tx.chapter.updateMany({
+        where: {
+          id: input.chapterId,
+          novelId: input.novelId,
+          contentRevision: input.expectedContentRevision,
+        },
+        data: chapterData,
+      });
+      if (projected.count === 0) {
+        const current = await tx.chapter.findFirst({
+          where: { id: input.chapterId, novelId: input.novelId },
+          select: { contentRevision: true },
+        });
+        if (!current) {
+          throw createChapterNotFoundError();
+        }
+        throw createChapterContentConflictError({
+          currentContentRevision: current.contentRevision,
+          expectedContentRevision: input.expectedContentRevision,
+        });
+      }
+    }
     if (writeReport) {
       await tx.qualityReport.create({
         data: {

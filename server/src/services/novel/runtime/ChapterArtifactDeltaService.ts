@@ -66,6 +66,7 @@ export interface ChapterArtifactDeltaSyncInput {
   novelId: string;
   chapterId: string;
   content: string;
+  contentRevision: number;
   sourceType?: string;
   sourceStage?: string | null;
   provider?: string;
@@ -333,6 +334,7 @@ export class ChapterArtifactDeltaService {
       novelId: input.novelId,
       chapterId: input.chapterId,
       chapterOrder: chapter.order,
+      contentRevision: input.contentRevision,
       content,
       output,
     });
@@ -432,6 +434,7 @@ export class ChapterArtifactDeltaService {
     novelId: string;
     chapterId: string;
     chapterOrder: number;
+    contentRevision: number;
     content: string;
     output: ChapterArtifactDeltaOutput;
   }): Promise<number> {
@@ -489,9 +492,13 @@ export class ChapterArtifactDeltaService {
         source: "auto" as const,
       }))
       .filter((fact) => fact.text.length > 0);
-    if (concreteFacts.length > 0) {
-      await novelFactService.writeFacts(input.novelId, input.chapterOrder, concreteFacts);
-    }
+    await novelFactService.writeChapterFacts({
+      novelId: input.novelId,
+      chapterId: input.chapterId,
+      chapterOrder: input.chapterOrder,
+      contentRevision: input.contentRevision,
+      items: concreteFacts,
+    });
 
     this.queueRagUpsert("chapter", input.chapterId);
     this.queueRagUpsert("chapter_summary", input.chapterId);

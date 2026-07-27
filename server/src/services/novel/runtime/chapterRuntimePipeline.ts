@@ -153,7 +153,7 @@ export async function runPipelineChapterWithRuntime(
     if (!autoReview) {
       await syncFinalRetainedChapterArtifacts(deps, novelId, chapterId, content, artifactSyncMode, "confirmed");
       // 跳过审校 ≠ 质量过审：不传 literaryPass → 只 bump generationState，不写 completed，也不误标 needs_repair（A6）
-      await deps.markChapterGenerationState(chapterId, "approved");
+      await deps.markChapterGenerationState(chapterId, "approved", contentRevision);
       return {
         reviewExecuted: false,
         pass: true,
@@ -168,6 +168,7 @@ export async function runPipelineChapterWithRuntime(
         issues: [],
         runtimePackage: null,
         retryCountUsed,
+        contentRevision,
         recoverableRepairFailure: null,
       };
     }
@@ -192,7 +193,7 @@ export async function runPipelineChapterWithRuntime(
     ];
     content = latestResult.finalContent;
     contentRevision = latestResult.contentRevision;
-    await deps.markChapterGenerationState(chapterId, "reviewed");
+    await deps.markChapterGenerationState(chapterId, "reviewed", contentRevision);
 
     const acceptanceStatus = latestResult.runtimePackage.meta?.acceptanceStatus;
     const continuePolicy = latestResult.runtimePackage.meta?.continuePolicy;
@@ -220,7 +221,7 @@ export async function runPipelineChapterWithRuntime(
     if (pass) {
       // A6 + styleClear：文学 isPass ∧ 文风门皆过才允许 completed
       const styleClear = projectStyleClearFromRuntimePackage(latestResult.runtimePackage);
-      await deps.markChapterGenerationState(chapterId, "approved", {
+      await deps.markChapterGenerationState(chapterId, "approved", contentRevision, {
         literaryPass: true,
         styleClear,
       });
@@ -245,7 +246,7 @@ export async function runPipelineChapterWithRuntime(
       // 进待审/债板，绝不写 completed。与「不退化、硬伤真拦」一致。
       // 本短路是 judge-unavailable 的唯一真源（riskTag 单一来源）；repairDraftContent 内
       // 不再保留 shouldDeferNonPatchableReviewRisk 等防御文本启发分支（已去冗余）。
-      await deps.markChapterNeedsRepair(chapterId);
+      await deps.markChapterNeedsRepair(chapterId, contentRevision);
       recoverableRepairFailure = {
         chapterId,
         message: "章节接收判断暂时不可用，正文已保留，后续需要重新审校或人工复查。",
@@ -284,11 +285,12 @@ export async function runPipelineChapterWithRuntime(
     repairEscalatedFromPatch = repairResult.escalatedFromPatch;
     content = repairResult.content;
     retryCountUsed += 1;
-    const committedRepair = await deps.saveDraftAndArtifacts(novelId, chapterId, content, "repaired", {
-      scheduleBackgroundSync: false,
-      artifactSyncMode,
-      syncArtifacts: false,
-    });
+    const committedRepair = await deps.commitRepairContent(
+      novelId,
+      chapterId,
+      content,
+      contentRevision,
+    );
     contentRevision = committedRepair.contentRevision;
   }
 
@@ -324,6 +326,7 @@ export async function runPipelineChapterWithRuntime(
     issues: latestIssues,
     runtimePackage: latestResult.runtimePackage,
     retryCountUsed,
+    contentRevision,
     recoverableRepairFailure,
     qualityDebtAttribution,
   };

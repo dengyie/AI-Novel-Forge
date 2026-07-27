@@ -8,6 +8,7 @@ export class ChapterFactProjectionService {
   async writeAcceptedFacts(input: {
     novelId: string;
     chapterId: string;
+    contentRevision: number;
     runId: string | null;
     contextPackage: GenerationContextPackage;
     runtimePackage: ChapterRuntimePackage;
@@ -36,9 +37,13 @@ export class ChapterFactProjectionService {
         excluded: filtered.excluded,
       });
     }
-    if (filtered.accepted.length > 0) {
-      await novelFactService.writeFacts(input.novelId, chapterOrder, filtered.accepted);
-    }
+    await novelFactService.writeChapterFacts({
+      novelId: input.novelId,
+      chapterId: input.chapterId,
+      chapterOrder,
+      contentRevision: input.contentRevision,
+      items: filtered.accepted,
+    });
   }
 
   private async recordExcludedFactItems(input: {

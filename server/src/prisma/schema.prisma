@@ -3248,6 +3248,12 @@ model NovelFactEntry {
   novelId      String
   // 事实发生在第几章（用于排序和范围查询）
   chapterOrder Int
+  // 自动事实所属章节；旧数据与人工事实允许为空
+  chapterId    String?
+  // 自动事实基于的正文 revision；与 chapterId 同时用于淘汰陈旧投影
+  contentRevision Int?
+  // 新写入自动事实的稳定幂等键；nullable 兼容迁移前数据
+  idempotencyKey String? @unique
   // 一两句话描述，例如"陈建国已在第7章取得个体户执照"
   text         String
   // completed=过程性目标已完成；revealed=信息已揭示；state_changed=不可逆状态变化
@@ -3259,6 +3265,7 @@ model NovelFactEntry {
 
   @@index([novelId, chapterOrder])
   @@index([novelId, category])
+  @@index([novelId, chapterId, contentRevision])
 }
 
 // ============================================================

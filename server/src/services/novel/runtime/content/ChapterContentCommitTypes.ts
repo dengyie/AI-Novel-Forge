@@ -11,7 +11,7 @@ export interface CommitChapterContentInput {
   content: string;
   expectedContentRevision: number;
   statePatch?: Record<string, unknown>;
-  source: "style_rewrite" | "repair_adopt";
+  source: "style_rewrite" | "repair_adopt" | "pipeline_repair";
 }
 
 export interface ChapterContentCommitDatabase {

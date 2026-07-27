@@ -5,6 +5,8 @@ const {
   resolveUnhandledPipelineFailureTerminalUpdate,
   buildUnhandledPipelineFailureTerminalCasWhere,
   buildPipelineJobAutoRequeueCasWhere,
+  buildPipelineJobLeaseOwnedCasWhere,
+  buildPipelineJobSuccessTerminalCasWhere,
 } = require("../dist/services/novel/pipelineJobTerminalGuard.js");
 
 test("resolveUnhandledPipelineFailureTerminalUpdate skips terminal and queued statuses", () => {
@@ -90,13 +92,26 @@ test("resolveUnhandledPipelineFailureTerminalUpdate uses fallback message for em
 });
 
 test("terminal and requeue CAS where only match running (and requeue requires no cancel)", () => {
-  assert.deepEqual(buildUnhandledPipelineFailureTerminalCasWhere("job-1"), {
+  assert.deepEqual(buildUnhandledPipelineFailureTerminalCasWhere("job-1", "owner-a"), {
     id: "job-1",
     status: "running",
+    leaseOwner: "owner-a",
   });
-  assert.deepEqual(buildPipelineJobAutoRequeueCasWhere("job-2"), {
+  assert.deepEqual(buildPipelineJobAutoRequeueCasWhere("job-2", "owner-b"), {
     id: "job-2",
     status: "running",
     cancelRequestedAt: null,
+    leaseOwner: "owner-b",
+  });
+  assert.deepEqual(buildPipelineJobLeaseOwnedCasWhere("job-3", null), {
+    id: "job-3",
+    status: "running",
+    leaseOwner: null,
+  });
+  assert.deepEqual(buildPipelineJobSuccessTerminalCasWhere("job-4", null), {
+    id: "job-4",
+    status: "running",
+    cancelRequestedAt: null,
+    leaseOwner: null,
   });
 });

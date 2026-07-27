@@ -50,12 +50,14 @@ export async function createQualityReport(
   chapterId: string,
   score: QualityScore,
   issues: ReviewIssue[],
+  expectedContentRevision?: number,
 ) {
   await persistChapterQualityScores({
     novelId,
     chapterId,
     score,
     issues,
+    expectedContentRevision,
     writeReport: true,
   });
 }
@@ -102,11 +104,15 @@ export class NovelCoreReviewService {
       literaryPass,
       styleClear,
     });
-    await prisma.chapter.update({
-      where: { id: chapterId },
-      data: chapterStatePatch,
+    await persistChapterQualityScores({
+      novelId,
+      chapterId,
+      expectedContentRevision: chapter.contentRevision,
+      score: review.score,
+      issues: review.issues,
+      chapterPatch: chapterStatePatch,
+      writeReport: true,
     });
-    await createQualityReport(novelId, chapterId, review.score, review.issues);
     await chapterQualityLoopService.recordAssessment({
       novelId,
       chapterId,
@@ -114,6 +120,7 @@ export class NovelCoreReviewService {
       score: review.score,
       issues: review.issues,
       source: options.content ? "repair_recheck" : "manual_review",
+      expectedContentRevision: chapter.contentRevision,
     }).catch((error) => {
       logPipelineError("Failed to record chapter quality loop assessment.", {
         novelId,

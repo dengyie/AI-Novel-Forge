@@ -55,11 +55,44 @@ async function runPipelineChapterWithRuntime(deps, novelId, chapterId, options, 
       contentRevision += 1;
       return { targetNovelId, chapterId: targetChapterId, novelId: targetNovelId, content, contentRevision };
     },
+    commitRepairContent: async (targetNovelId, targetChapterId, content, expectedContentRevision) => {
+      const committed = deps.commitRepairContent
+        ? await deps.commitRepairContent(
+          targetNovelId,
+          targetChapterId,
+          content,
+          expectedContentRevision,
+        )
+        : await deps.saveDraftAndArtifacts(
+          targetNovelId,
+          targetChapterId,
+          content,
+          "repaired",
+          { syncArtifacts: false },
+        );
+      if (committed && Number.isInteger(committed.contentRevision)) {
+        contentRevision = committed.contentRevision;
+        return committed;
+      }
+      contentRevision += 1;
+      return {
+        novelId: targetNovelId,
+        chapterId: targetChapterId,
+        content,
+        contentRevision,
+      };
+    },
     finalizeChapterContent: async (input) => {
       const finalized = await deps.finalizeChapterContent(input);
       contentRevision = finalized.contentRevision ?? input.expectedContentRevision;
       return { ...finalized, contentRevision };
     },
+    markChapterGenerationState: (chapterId, generationState, _expectedContentRevision, options) => (
+      deps.markChapterGenerationState(chapterId, generationState, options)
+    ),
+    markChapterNeedsRepair: (chapterId, _expectedContentRevision) => (
+      deps.markChapterNeedsRepair(chapterId)
+    ),
   }, novelId, chapterId, options, hooks);
 }
 
@@ -493,6 +526,7 @@ test("runPipelineChapterWithRuntime escalates patch failures to heavy repair and
   const originalRunStructuredPrompt = promptRunner.runStructuredPrompt;
   const stages = [];
   const savedDrafts = [];
+  const repairCommits = [];
   const finalSyncs = [];
   let needsRepairMarked = false;
   let reviewCount = 0;
@@ -544,6 +578,15 @@ test("runPipelineChapterWithRuntime escalates patch failures to heavy repair and
         async saveDraftAndArtifacts(_novelId, _chapterId, content, generationState, options) {
           savedDrafts.push({ content, generationState, options });
         },
+        async commitRepairContent(novelId, chapterId, content, expectedContentRevision) {
+          repairCommits.push({ novelId, chapterId, content, expectedContentRevision });
+          return {
+            novelId,
+            chapterId,
+            content,
+            contentRevision: expectedContentRevision + 1,
+          };
+        },
         async syncFinalChapterArtifacts(_novelId, _chapterId, content) {
           finalSyncs.push(content);
         },
@@ -587,14 +630,12 @@ test("runPipelineChapterWithRuntime escalates patch failures to heavy repair and
         artifactSyncMode: "adaptive",
         syncArtifacts: false,
       },
-    }, {
+    }]);
+    assert.deepEqual(repairCommits, [{
+      novelId: "novel-1",
+      chapterId: "chapter-1",
       content: "rewritten chapter after safe full repair",
-      generationState: "repaired",
-      options: {
-        scheduleBackgroundSync: false,
-        artifactSyncMode: "adaptive",
-        syncArtifacts: false,
-      },
+      expectedContentRevision: 1,
     }]);
   } finally {
     promptRunner.runStructuredPrompt = originalRunStructuredPrompt;
@@ -1910,16 +1951,31 @@ test("dual-gate wiring: ChapterPipelineRuntimeAdapter forwards options to merge"
   );
   assert.match(
     adapterSrc,
-    /markChapterGenerationState:\s*\(\s*targetChapterId\s*,\s*generationState\s*,\s*options\s*\)\s*=>/,
+    /markChapterGenerationState:\s*\(\s*targetChapterId\s*,\s*generationState\s*,\s*expectedContentRevision\s*,\s*options\s*\)\s*=>/,
   );
   assert.match(
     adapterSrc,
-    /this\.markChapterGenerationState\(\s*targetChapterId\s*,\s*generationState\s*,\s*options\s*\)/,
+    /this\.markChapterGenerationState\(\s*targetChapterId\s*,\s*generationState\s*,\s*expectedContentRevision\s*,\s*options\s*\)/,
   );
   // 禁止两参闭包丢弃 options（回归 guard）
   assert.doesNotMatch(
     adapterSrc,
     /markChapterGenerationState:\s*\(\s*targetChapterId\s*,\s*generationState\s*\)\s*=>\s*\s*this\.markChapterGenerationState\(\s*targetChapterId\s*,\s*generationState\s*\)/,
+  );
+});
+
+test("pipeline automatic repair commits through revision CAS instead of authoritative draft save", () => {
+  const pipelineSrc = fs.readFileSync(
+    path.join(__dirname, "../src/services/novel/runtime/chapterRuntimePipeline.ts"),
+    "utf8",
+  );
+  assert.match(
+    pipelineSrc,
+    /commitRepairContent\(\s*novelId\s*,\s*chapterId\s*,\s*content\s*,\s*contentRevision\s*\)/,
+  );
+  assert.doesNotMatch(
+    pipelineSrc,
+    /saveDraftAndArtifacts\(\s*novelId\s*,\s*chapterId\s*,\s*content\s*,\s*"repaired"/,
   );
 });
 

@@ -240,10 +240,12 @@ test("manual review and manual audit pass assembled chapter review context into 
 
   const auditCalls = [];
   const chapterUpdateCalls = [];
+  const chapterUpdateManyCalls = [];
   prisma.chapter.findFirst = async () => ({
     id: "chapter-1",
     title: "第1章",
     content: "章节正文",
+    contentRevision: 4,
     order: 1,
     novel: { title: "测试小说" },
   });
@@ -251,6 +253,11 @@ test("manual review and manual audit pass assembled chapter review context into 
     chapterUpdateCalls.push(payload);
     // persistChapterQualityScores 会按 chapterId update 分数列；假库必须返回成功
     return { id: payload?.where?.id ?? "chapter-1", ...payload?.data };
+  };
+  const originalChapterUpdateMany = prisma.chapter.updateMany;
+  prisma.chapter.updateMany = async (payload) => {
+    chapterUpdateManyCalls.push(payload);
+    return { count: 1 };
   };
   // $transaction 用于 persistChapterQualityScores；透传调用方回调并用同一 fake prisma
   prisma.$transaction = async (fn) => {
@@ -290,17 +297,18 @@ test("manual review and manual audit pass assembled chapter review context into 
       ["full", "shared-review-context"],
       ["plot", "shared-review-context"],
     ]);
-    // 第一笔 update 是 manual review 的 lifecycle state（分数列在后续 $transaction 内再 update）
-    assert.deepEqual(chapterUpdateCalls[0], {
-      where: { id: "chapter-1" },
-      data: {
-        generationState: "reviewed",
-        chapterStatus: "completed",
-      },
+    assert.deepEqual(chapterUpdateManyCalls[0].where, {
+      id: "chapter-1",
+      novelId: "novel-1",
+      contentRevision: 4,
     });
+    assert.equal(chapterUpdateManyCalls[0].data.generationState, "reviewed");
+    assert.equal(chapterUpdateManyCalls[0].data.chapterStatus, "completed");
+    assert.equal(chapterUpdateManyCalls[0].data.qualityScore, 84);
   } finally {
     prisma.chapter.findFirst = originalChapterFindFirst;
     prisma.chapter.update = originalChapterUpdate;
+    prisma.chapter.updateMany = originalChapterUpdateMany;
     prisma.qualityReport.create = originalQualityReportCreate;
     prisma.$transaction = originalTransaction;
     plannerService.shouldTriggerReplanFromAudit = originalShouldTriggerReplanFromAudit;

@@ -14,6 +14,9 @@ const { volumeReadinessExecutor } = require("../dist/services/novel/volume/Volum
 const volumeReadinessService = require("../dist/services/novel/volume/VolumeReadinessService.js");
 const { _resetSharedNovelServicesForTest, getSharedNovelServices } = require("../dist/services/novel/application/sharedNovelServices.js");
 const { prisma } = require("../dist/db/prisma.js");
+const {
+  shouldReconcileChapterStatusAfterReview,
+} = require("../dist/services/novel/volume/readiness/application/ChapterReviewStatusReconciler.js");
 
 const STORE_DIR = require("node:path").join(__dirname, ".tmp-volume-readiness-reconcile");
 
@@ -44,6 +47,7 @@ function greenSignals(overrides = {}) {
     padHitCount: 0,
     hasTrueReview: true,
     contentEmpty: false,
+    contentRevision: 7,
     ...overrides,
   };
 }
@@ -73,6 +77,29 @@ function makeBaseRun() {
     },
   });
 }
+
+test("extracted review-status reconciler fails closed unless all revision-bound gates pass", () => {
+  assert.equal(
+    shouldReconcileChapterStatusAfterReview("re_reviewed", "needs_re_review", greenSignals()),
+    true,
+  );
+  assert.equal(
+    shouldReconcileChapterStatusAfterReview(
+      "re_reviewed",
+      "needs_re_review",
+      greenSignals({ contentRevision: null }),
+    ),
+    false,
+  );
+  assert.equal(
+    shouldReconcileChapterStatusAfterReview(
+      "re_reviewed",
+      "needs_re_review",
+      greenSignals({ hasTrueReview: false }),
+    ),
+    false,
+  );
+});
 
 test("re_review：真 review 后门全绿但 chapterStatus 非 completed → 收口 completed 升 publish_ready", () => {
   return withEnv({
@@ -105,14 +132,16 @@ test("re_review：真 review 后门全绿但 chapterStatus 非 completed → 收
     let repairCalls = 0;
     let chapterUpdateCalls = 0;
     let chapterUpdatePatch = null;
+    let chapterUpdateWhere = null;
     const services = getSharedNovelServices();
     services.reviewChapter = async () => { reviewCalls += 1; };
     services.createRepairStream = async () => { repairCalls += 1; };
-    const originalChapterUpdate = prisma.chapter.update;
-    prisma.chapter.update = async (args) => {
+    const originalChapterUpdateMany = prisma.chapter.updateMany;
+    prisma.chapter.updateMany = async (args) => {
       chapterUpdateCalls += 1;
       chapterUpdatePatch = args.data;
-      return args;
+      chapterUpdateWhere = args.where;
+      return { count: 1 };
     };
 
     try {
@@ -121,7 +150,12 @@ test("re_review：真 review 后门全绿但 chapterStatus 非 completed → 收
 
       assert.equal(reviewCalls, 1, "reviewChapter 被调一次");
       assert.equal(repairCalls, 0, "门已绿不该再 chain repair");
-      assert.equal(chapterUpdateCalls, 1, "A0 应收口写一次 chapter.update");
+      assert.equal(chapterUpdateCalls, 1, "A0 应收口写一次 chapter.updateMany CAS");
+      assert.deepEqual(chapterUpdateWhere, {
+        id: "c1",
+        contentRevision: 7,
+        chapterStatus: "pending_review",
+      });
       assert.deepEqual(chapterUpdatePatch, {
         generationState: "reviewed",
         chapterStatus: "completed",
@@ -133,7 +167,7 @@ test("re_review：真 review 后门全绿但 chapterStatus 非 completed → 收
       assert.equal(completed.heavyRewritesUsed, 0);
     } finally {
       volumeReadinessService.volumeReadinessService.assess = realAssess;
-      prisma.chapter.update = originalChapterUpdate;
+      prisma.chapter.updateMany = originalChapterUpdateMany;
     }
   });
 });
@@ -158,8 +192,8 @@ test("re_review：门非全绿（literaryPass=false）→ 不收口、保持 nee
     const services = getSharedNovelServices();
     services.reviewChapter = async () => {};
     services.createRepairStream = async () => {};
-    const originalChapterUpdate = prisma.chapter.update;
-    prisma.chapter.update = async () => { chapterUpdateCalls += 1; };
+    const originalChapterUpdateMany = prisma.chapter.updateMany;
+    prisma.chapter.updateMany = async () => { chapterUpdateCalls += 1; return { count: 1 }; };
 
     try {
       const run = makeBaseRun();
@@ -169,7 +203,7 @@ test("re_review：门非全绿（literaryPass=false）→ 不收口、保持 nee
       assert.equal(r.verdictAfter, "needs_re_review");
     } finally {
       volumeReadinessService.volumeReadinessService.assess = realAssess;
-      prisma.chapter.update = originalChapterUpdate;
+      prisma.chapter.updateMany = originalChapterUpdateMany;
     }
   });
 });
@@ -193,8 +227,8 @@ test("re_review：hasTrueReview===false（evaluateOnly 合成 / ops 假 approved
     const services = getSharedNovelServices();
     services.reviewChapter = async () => {};
     services.createRepairStream = async () => {};
-    const originalChapterUpdate = prisma.chapter.update;
-    prisma.chapter.update = async () => { chapterUpdateCalls += 1; };
+    const originalChapterUpdateMany = prisma.chapter.updateMany;
+    prisma.chapter.updateMany = async () => { chapterUpdateCalls += 1; return { count: 1 }; };
 
     try {
       const run = makeBaseRun();
@@ -204,7 +238,7 @@ test("re_review：hasTrueReview===false（evaluateOnly 合成 / ops 假 approved
       assert.equal(r.verdictAfter, "needs_re_review");
     } finally {
       volumeReadinessService.volumeReadinessService.assess = realAssess;
-      prisma.chapter.update = originalChapterUpdate;
+      prisma.chapter.updateMany = originalChapterUpdateMany;
     }
   });
 });
@@ -229,8 +263,8 @@ test("re_review：硬债>0（hardDebtCount=2，其余门全绿）→ 不收口�
     const services = getSharedNovelServices();
     services.reviewChapter = async () => {};
     services.createRepairStream = async () => {};
-    const originalChapterUpdate = prisma.chapter.update;
-    prisma.chapter.update = async () => { chapterUpdateCalls += 1; };
+    const originalChapterUpdateMany = prisma.chapter.updateMany;
+    prisma.chapter.updateMany = async () => { chapterUpdateCalls += 1; return { count: 1 }; };
 
     try {
       const run = makeBaseRun();
@@ -240,12 +274,69 @@ test("re_review：硬债>0（hardDebtCount=2，其余门全绿）→ 不收口�
       assert.equal(r.verdictAfter, "needs_re_review");
     } finally {
       volumeReadinessService.volumeReadinessService.assess = realAssess;
-      prisma.chapter.update = originalChapterUpdate;
+      prisma.chapter.updateMany = originalChapterUpdateMany;
     }
   });
 });
 
-test("re_review：A0 收口时 chapter.update 抛错 → 兜底不阻断、降 re_review_incomplete", () => {
+test("re_review：收口 CAS 未命中时不得把新 revision 标成 publish_ready", () => {
+  return withEnv({
+    VOLUME_READINESS_RUN_PERSIST: "0",
+    VOLUME_READINESS_RUN_DIR: STORE_DIR,
+  }, async () => {
+    resetVolumeReadinessRunStoreForTests();
+    _resetSharedNovelServicesForTest();
+
+    let refreshAssessCalls = 0;
+    const realAssess = volumeReadinessService.volumeReadinessService.assess;
+    volumeReadinessService.volumeReadinessService.assess = async (_novelId, options = {}) => {
+      if (options.refresh) refreshAssessCalls += 1;
+      return {
+        chapters: [
+          {
+            chapterId: "c1",
+            chapterOrder: 1,
+            title: "一",
+            verdict: "needs_re_review",
+            signals: greenSignals({ contentRevision: 7 }),
+          },
+        ],
+      };
+    };
+    const services = getSharedNovelServices();
+    services.reviewChapter = async () => {};
+    services.createRepairStream = async () => {};
+
+    let updateWhere = null;
+    const originalChapterUpdateMany = prisma.chapter.updateMany;
+    prisma.chapter.updateMany = async (args) => {
+      updateWhere = args.where;
+      // 模拟 review 后用户保存正文，canonical revision 已从 7 推进到 8。
+      return { count: 0 };
+    };
+
+    try {
+      const run = makeBaseRun();
+      const completed = await volumeReadinessExecutor.execute(run.runId);
+      const result = completed.results[completed.results.length - 1];
+
+      assert.deepEqual(updateWhere, {
+        id: "c1",
+        contentRevision: 7,
+        chapterStatus: "pending_review",
+      });
+      assert.equal(refreshAssessCalls, 0, "CAS miss 后不得刷新并伪造 publish_ready");
+      assert.equal(result.verdictAfter, "needs_re_review");
+      assert.equal(result.outcome, "re_review_incomplete");
+      assert.match(result.message, /正文或章节状态已并发变化/);
+    } finally {
+      volumeReadinessService.volumeReadinessService.assess = realAssess;
+      prisma.chapter.updateMany = originalChapterUpdateMany;
+    }
+  });
+});
+
+test("re_review：A0 收口时 chapter.updateMany 抛错 → 兜底不阻断、降 re_review_incomplete", () => {
   return withEnv({
     VOLUME_READINESS_RUN_PERSIST: "0",
     VOLUME_READINESS_RUN_DIR: STORE_DIR,
@@ -272,8 +363,8 @@ test("re_review：A0 收口时 chapter.update 抛错 → 兜底不阻断、降 r
     services.reviewChapter = async () => { reviewCalls += 1; };
     services.createRepairStream = async () => {};
     // A0 收口写库时抛错，验证 catch 兜底
-    const originalChapterUpdate = prisma.chapter.update;
-    prisma.chapter.update = async () => {
+    const originalChapterUpdateMany = prisma.chapter.updateMany;
+    prisma.chapter.updateMany = async () => {
       throw new Error("db write failed (test)");
     };
 
@@ -289,7 +380,7 @@ test("re_review：A0 收口时 chapter.update 抛错 → 兜底不阻断、降 r
         `DB 抛错兜底应降 re_review_incomplete，实得 ${r.outcome}`);
     } finally {
       volumeReadinessService.volumeReadinessService.assess = realAssess;
-      prisma.chapter.update = originalChapterUpdate;
+      prisma.chapter.updateMany = originalChapterUpdateMany;
     }
   });
 });

@@ -24,6 +24,29 @@ import { isChapterChineseProseGateError } from "../../runtime/chapterChinesePros
 import { isChapterEmptyContentError } from "../../runtime/chapterEmptyContentError";
 import type { PipelineExecuteHost } from "../execution/PipelineChapterExecution";
 
+async function settleConcurrentPipelineCancellation(input: {
+  host: PipelineExecuteHost;
+  jobId: string;
+  novelId: string;
+  payload: string | null;
+}): Promise<boolean> {
+  const latest = await prisma.generationJob.findUnique({
+    where: { id: input.jobId },
+    select: { status: true, cancelRequestedAt: true },
+  });
+  if (!latest?.cancelRequestedAt && latest?.status !== "cancelled") {
+    return false;
+  }
+  const settled = await input.host.settleJobCancelled(input.jobId, input.payload);
+  if (settled) {
+    void novelEventBus.emit({
+      type: "pipeline:completed",
+      payload: { novelId: input.novelId, jobId: input.jobId, status: "cancelled" },
+    }).catch(() => {});
+  }
+  return settled;
+}
+
 export async function recoverPipelineJob(input: {
   error: unknown;
   host: PipelineExecuteHost;
@@ -60,16 +83,9 @@ export async function recoverPipelineJob(input: {
     return;
   }
   if (isPipelineCancellationError(error)) {
-    await host.updateJobSafe(jobId, {
-      status: "cancelled",
-      error: null,
-      heartbeatAt: null,
-      currentStage: null,
-      currentItemKey: null,
-      currentItemLabel: null,
-      cancelRequestedAt: null,
-      finishedAt: new Date(),
-      payload: host.stringifyPipelinePayload({
+    const settled = await host.settleJobCancelled(
+      jobId,
+      host.stringifyPipelinePayload({
         ...runtimePayload,
         qualityAlertDetails,
         replanAlertDetails,
@@ -77,11 +93,13 @@ export async function recoverPipelineJob(input: {
         recoverableRepairDetails,
         jobTransportAutoRetryCount: 0,
       }),
-    });
-    void novelEventBus.emit({
-      type: "pipeline:completed",
-      payload: { novelId, jobId, status: "cancelled" },
-    }).catch(() => {});
+    );
+    if (settled) {
+      void novelEventBus.emit({
+        type: "pipeline:completed",
+        payload: { novelId, jobId, status: "cancelled" },
+      }).catch(() => {});
+    }
     return;
   }
 
@@ -140,7 +158,7 @@ export async function recoverPipelineJob(input: {
     let requeued = false;
     try {
       const result = await prisma.generationJob.updateMany({
-        where: buildPipelineJobAutoRequeueCasWhere(jobId),
+        where: buildPipelineJobAutoRequeueCasWhere(jobId, host.leaseOwner),
         data: {
           status: "queued",
           error: retryMessage,
@@ -170,15 +188,57 @@ export async function recoverPipelineJob(input: {
         select: { status: true, cancelRequestedAt: true },
       });
       if (latest?.cancelRequestedAt || latest?.status === "cancelled") {
-        await host.updateJobSafe(jobId, {
-          status: "cancelled",
-          error: null,
-          heartbeatAt: null,
-          currentStage: null,
-          currentItemKey: null,
-          currentItemLabel: null,
-          cancelRequestedAt: null,
-          finishedAt: new Date(),
+        const settled = await host.settleJobCancelled(
+          jobId,
+          host.stringifyPipelinePayload({
+            ...runtimePayload,
+            qualityAlertDetails,
+            replanAlertDetails,
+            genreBeatAlertDetails,
+            recoverableRepairDetails,
+            jobTransportAutoRetryCount: 0,
+          }),
+        );
+        if (settled) {
+          void novelEventBus.emit({
+            type: "pipeline:completed",
+            payload: { novelId, jobId, status: "cancelled" },
+          }).catch(() => {});
+        }
+        return;
+      }
+      if (latest?.status === "queued" || latest?.status === "succeeded" || latest?.status === "failed") {
+        return;
+      }
+      const failed = await host.settleJobFailed(
+        jobId,
+        message,
+        host.stringifyPipelinePayload({
+          ...runtimePayload,
+          qualityAlertDetails,
+          replanAlertDetails,
+          genreBeatAlertDetails,
+          recoverableRepairDetails,
+          jobTransportAutoRetryCount: usedJobAutoRetry,
+        }),
+      );
+      logPipelineError("任务执行异常（自动重试 CAS 未命中）", {
+        jobId,
+        novelId,
+        message,
+        jobTransportAutoRetryCount: usedJobAutoRetry,
+        latestStatus: latest?.status ?? null,
+      });
+      if (failed) {
+        void novelEventBus.emit({
+          type: "pipeline:completed",
+          payload: { novelId, jobId, status: "failed" },
+        }).catch(() => {});
+      } else {
+        await settleConcurrentPipelineCancellation({
+          host,
+          jobId,
+          novelId,
           payload: host.stringifyPipelinePayload({
             ...runtimePayload,
             qualityAlertDetails,
@@ -188,39 +248,7 @@ export async function recoverPipelineJob(input: {
             jobTransportAutoRetryCount: 0,
           }),
         });
-        void novelEventBus.emit({
-          type: "pipeline:completed",
-          payload: { novelId, jobId, status: "cancelled" },
-        }).catch(() => {});
-        return;
       }
-      if (latest?.status === "queued" || latest?.status === "succeeded" || latest?.status === "failed") {
-        return;
-      }
-      await host.updateJobSafe(jobId, {
-        status: "failed",
-        error: message,
-        finishedAt: new Date(),
-        payload: host.stringifyPipelinePayload({
-          ...runtimePayload,
-          qualityAlertDetails,
-          replanAlertDetails,
-          genreBeatAlertDetails,
-          recoverableRepairDetails,
-          jobTransportAutoRetryCount: usedJobAutoRetry,
-        }),
-      });
-      logPipelineError("任务执行异常（自动重试 CAS 未命中）", {
-        jobId,
-        novelId,
-        message,
-        jobTransportAutoRetryCount: usedJobAutoRetry,
-        latestStatus: latest?.status ?? null,
-      });
-      void novelEventBus.emit({
-        type: "pipeline:completed",
-        payload: { novelId, jobId, status: "failed" },
-      }).catch(() => {});
       return;
     }
 
@@ -257,11 +285,10 @@ export async function recoverPipelineJob(input: {
     return;
   }
 
-  await host.updateJobSafe(jobId, {
-    status: "failed",
-    error: message,
-    finishedAt: new Date(),
-    payload: host.stringifyPipelinePayload({
+  const failed = await host.settleJobFailed(
+    jobId,
+    message,
+    host.stringifyPipelinePayload({
       ...runtimePayload,
       qualityAlertDetails,
       replanAlertDetails,
@@ -269,15 +296,31 @@ export async function recoverPipelineJob(input: {
       recoverableRepairDetails,
       jobTransportAutoRetryCount: usedJobAutoRetry,
     }),
-  });
+  );
   logPipelineError("任务执行异常", {
     jobId,
     novelId,
     message,
     jobTransportAutoRetryCount: usedJobAutoRetry,
   });
-  void novelEventBus.emit({
-    type: "pipeline:completed",
-    payload: { novelId, jobId, status: "failed" },
-  }).catch(() => {});
+  if (failed) {
+    void novelEventBus.emit({
+      type: "pipeline:completed",
+      payload: { novelId, jobId, status: "failed" },
+    }).catch(() => {});
+  } else {
+    await settleConcurrentPipelineCancellation({
+      host,
+      jobId,
+      novelId,
+      payload: host.stringifyPipelinePayload({
+        ...runtimePayload,
+        qualityAlertDetails,
+        replanAlertDetails,
+        genreBeatAlertDetails,
+        recoverableRepairDetails,
+        jobTransportAutoRetryCount: 0,
+      }),
+    });
+  }
 }

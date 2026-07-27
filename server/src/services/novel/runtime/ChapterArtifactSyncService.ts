@@ -28,7 +28,7 @@ export class ChapterArtifactSyncService {
     novelId: string,
     chapterId: string,
     content: string,
-    generationState: "drafted" | "repaired",
+    generationState: "drafted",
     options: ChapterArtifactSyncOptions = {},
   ): Promise<CommittedChapterContent> {
     const safeContent = assertChapterContentNotEmpty(content, {

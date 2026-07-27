@@ -1,7 +1,7 @@
 /**
  * Pipeline 章批执行主路径（P2-1 从 NovelCorePipelineService 拆出）。
  * 行为与拆分前 executePipeline 一致：只搬迁，不改契约。
- * 通过 host 注入 updateJobSafe / schedule / runtime / abort map，避免循环依赖。
+ * 通过 host 注入生命周期 CAS / schedule / runtime / abort map，避免循环依赖。
  */
 import { prisma } from "../../../../db/prisma";
 import { novelEventBus } from "../../../../events";
@@ -112,18 +112,20 @@ export async function executePipelineJob(
         ? directorTelemetryTask?.directorRun?.id ?? runtimePayload.workflowTaskId ?? null
         : null,
     }, async () => {
-      await host.updateJobSafe(jobId, {
-        status: "running",
-        error: null,
-        pendingManualRecovery: false,
-        startedAt: existingJob?.startedAt ?? new Date(),
-        heartbeatAt: new Date(),
-        leaseExpiresAt: new Date(Date.now() + PIPELINE_LEASE_TTL_MS),
-        currentStage: "generating_chapters",
-        // running 行永不带 finishedAt：即便先前竞态分支误写过 finishedAt，此处显式清零，
-        // 保住 watchdog/startup-resume 的 finishedAt:null 可恢复谓词，杜绝 crash 后僵尸不可见。
-        finishedAt: null,
-      });
+      const beganExecution = await host.beginJobExecution(
+        jobId,
+        existingJob?.startedAt ?? new Date(),
+      );
+      if (!beganExecution) {
+        const latest = await prisma.generationJob.findUnique({
+          where: { id: jobId },
+          select: { status: true, cancelRequestedAt: true },
+        });
+        if (latest?.status === "cancelled" || latest?.cancelRequestedAt) {
+          throw new Error("PIPELINE_CANCELLED");
+        }
+        throw new Error(PIPELINE_LEASE_LOST_MESSAGE);
+      }
       logPipelineInfo("任务开始执行", {
         jobId,
         novelId,

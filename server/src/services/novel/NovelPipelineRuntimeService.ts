@@ -5,12 +5,12 @@ const STALE_PIPELINE_RECOVERY_MESSAGE = "章节流水线任务心跳超时，正
 const DEFAULT_WATCHDOG_INTERVAL_MS = 60000;
 const DEFAULT_STALE_THRESHOLD_MS = 3 * 60 * 1000;
 /**
- * 本进程活跃 job 的宽限上限：心跳写库（updateJobSafe maxAttempts=1）失败后，
+ * 本进程活跃 job 的宽限上限：周期心跳写库失败后，
  * watchdog 在宽限内跳过 resume 并补心跳；超过该时长仍失联才允许 stale 拾起，
  * 防止 lease 路径（TTL 300s > stale 180s）把健康 job 永久压在本进程。
  */
 // #9：本进程活跃 job 心跳写库失败宽限。旧 10m 让 UI 像卡住；
-// 3m + updateJobSafe 非 terminal 3 次重试，瞬时 DB 抖动可自愈，真死才放行 stale。
+// 3m + 补偿心跳 3 次重试，瞬时 DB 抖动可自愈，真死才放行 stale。
 const ACTIVE_JOB_STALE_GRACE_MS = 3 * 60 * 1000;
 
 interface PipelineRecoveryPort {
@@ -55,8 +55,11 @@ function createLocalActiveJobPort(): PipelineActiveJobPort & PipelineHeartbeatPo
       return activeJobIds?.has(jobId) === true;
     },
     async touchPipelineJobHeartbeat(jobId: string, maxAttempts = 3): Promise<boolean> {
-      // 自带重试的补偿心跳：仅当 job 仍在 queued/running 时续 heartbeat/lease，
-      // 用 updateMany CAS 避免覆盖并发终态/取消。失败不抛——下次 watchdog tick 再试。
+      // 自带重试的补偿心跳：仅当 job 仍在 queued/running 且仍归本进程 owner 时续
+      // heartbeat/lease。用 updateMany CAS 避免覆盖并发终态、取消或新 owner。
+      const leaseOwner = process.env.GENERATION_JOB_LEASE_ENABLED === "false"
+        ? null
+        : `pipeline-${process.pid}`;
       for (let attempt = 1; attempt <= Math.max(1, maxAttempts); attempt += 1) {
         try {
           const result = await prisma.generationJob.updateMany({
@@ -65,6 +68,7 @@ function createLocalActiveJobPort(): PipelineActiveJobPort & PipelineHeartbeatPo
               status: { in: ["queued", "running"] },
               finishedAt: null,
               cancelRequestedAt: null,
+              leaseOwner,
             },
             data: {
               heartbeatAt: new Date(),
@@ -119,8 +123,8 @@ export class NovelPipelineRuntimeService {
     const rows = await this.pipelineService.listStaleRecoverablePipelineJobs(cutoff, now);
     const recoverable: Array<{ id: string; status: string }> = [];
     for (const row of rows) {
-      // 本进程正在执行的 job 只是心跳写库失败（updateJobSafe maxAttempts=1），
-      // 不是真死：跳过 resume 并补一次带重试的心跳。宽限（默认 10 分钟）内连续
+      // 本进程正在执行的 job 只是周期心跳写库失败，
+      // 不是真死：跳过 resume 并补一次带重试的心跳。宽限（默认 3 分钟）内连续
       // 写不进去才放行 stale 拾起，防止 lease 路径把健康 job 永久压住。
       if (this.localJobPort.isPipelineJobActiveLocally(row.id)) {
         const firstSeen = this.staleFirstSeenAtMs.get(row.id) ?? now.getTime();

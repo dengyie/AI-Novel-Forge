@@ -3246,6 +3246,9 @@ model NovelFactEntry {
   id           String   @id @default(cuid())
   novelId      String
   chapterOrder Int
+  chapterId    String?
+  contentRevision Int?
+  idempotencyKey String? @unique
   text         String
   category     String   @default("completed")
   source       String   @default("auto")
@@ -3254,6 +3257,7 @@ model NovelFactEntry {
 
   @@index([novelId, chapterOrder])
   @@index([novelId, category])
+  @@index([novelId, chapterId, contentRevision])
 }
 
 // ============================================================

@@ -28,11 +28,15 @@ async function runReviewWithAction(action) {
     order: 1,
     title: "第一章",
     content: "这是一段可审校的章节正文。",
+    contentRevision: 3,
     novel: { title: "测试小说" },
   });
   prisma.chapter.update = async () => ({});
   prisma.$transaction = async (runner) => runner({
-    chapter: { update: async () => ({}) },
+    chapter: {
+      updateMany: async () => ({ count: 1 }),
+      findFirst: async () => ({ contentRevision: 3 }),
+    },
     qualityReport: { create: async () => ({}) },
   });
   chapterQualityLoopService.recordAssessment = async () => ({});

@@ -16,7 +16,10 @@ import type { StreamDoneHelpers } from "../../../../../llm/streaming";
 import { prisma } from "../../../../../db/prisma";
 import { auditService } from "../../../../audit/AuditService";
 import { computeDeterministicResidualRiskScore } from "../../../../styleEngine/StyleDetectionService";
-import { CHAPTER_CONTENT_CONFLICT_CODE } from "../../../chapterContentCas";
+import {
+  CHAPTER_CONTENT_CONFLICT_CODE,
+  isChapterContentConflictError,
+} from "../../../chapterContentCas";
 import {
   chapterStatePairAfterDraftSave,
   chapterStatePairAfterQualityGates,
@@ -24,6 +27,7 @@ import {
 import { ChapterPatchRepairFailedError } from "../../../chapterPatchRepairService";
 import { isPass, logPipelineError, type RepairOptions } from "../../../novelCoreShared";
 import { chapterQualityLoopService } from "../../../quality/ChapterQualityLoopService";
+import { persistChapterQualityScores } from "../../../quality/chapterQualityScorePersist";
 import type { ChapterArtifactSyncService } from "../../ChapterArtifactSyncService";
 import type { ChapterContentCommitService } from "../../content/ChapterContentCommitService";
 import {
@@ -308,6 +312,7 @@ export class ChapterRepairFinalizer {
         model: input.options.model,
         temperature: input.options.temperature,
         content: committed.content,
+        evaluateOnly: true,
         signal: input.options.signal,
       });
     } catch (error) {
@@ -315,6 +320,7 @@ export class ChapterRepairFinalizer {
         novelId: input.novelId,
         chapterId: input.chapterId,
         helpers: input.helpers,
+        expectedContentRevision: committed.contentRevision,
         userMessage: "修复候选已采纳，但正式 recheck 失败，已标 needs_repair。",
         error,
       });
@@ -327,10 +333,37 @@ export class ChapterRepairFinalizer {
       issues: review.issues,
       chapterOrder: baselineChapter.order,
     });
-    await prisma.chapter.update({
-      where: { id: input.chapterId },
-      data: chapterStatePairAfterQualityGates({ literaryPass, styleClear }),
-    });
+    try {
+      await persistChapterQualityScores({
+        novelId: input.novelId,
+        chapterId: input.chapterId,
+        expectedContentRevision: committed.contentRevision,
+        score: review.score,
+        issues: review.issues,
+        chapterPatch: chapterStatePairAfterQualityGates({ literaryPass, styleClear }),
+        writeReport: true,
+      });
+      await chapterQualityLoopService.recordAssessment({
+        novelId: input.novelId,
+        chapterId: input.chapterId,
+        chapterOrder: baselineChapter.order,
+        expectedContentRevision: committed.contentRevision,
+        score: review.score,
+        issues: review.issues,
+        source: "repair_recheck",
+      });
+    } catch (error) {
+      const casMiss = isChapterContentConflictError(error)
+        || (error instanceof Error && error.message === CHAPTER_CONTENT_CONFLICT_CODE);
+      if (!casMiss) throw error;
+      input.helpers.writeFrame(buildRepairRunStatusFrame({
+        chapterId: input.chapterId,
+        status: "failed",
+        phase: "completed",
+        message: "修复复检期间章节正文已再次变更，本次旧 revision 的状态与评分未覆盖最新正文。",
+      }));
+      return;
+    }
     if (literaryPass && styleClear && input.options.auditIssueIds?.length) {
       const resolveAuditIssues = this.deps.resolveAuditIssues
         ?? ((novelId: string, issueIds: string[]) => auditService.resolveIssues(novelId, issueIds));
@@ -350,6 +383,7 @@ export class ChapterRepairFinalizer {
     novelId: string;
     chapterId: string;
     helpers: StreamDoneHelpers;
+    expectedContentRevision: number;
     userMessage: string;
     error: unknown;
   }): Promise<void> {
@@ -358,10 +392,23 @@ export class ChapterRepairFinalizer {
       chapterId: input.chapterId,
       error: input.error instanceof Error ? input.error.message : String(input.error),
     });
-    await prisma.chapter.update({
-      where: { id: input.chapterId },
+    const projected = await prisma.chapter.updateMany({
+      where: {
+        id: input.chapterId,
+        novelId: input.novelId,
+        contentRevision: input.expectedContentRevision,
+      },
       data: chapterStatePairAfterQualityGates({ literaryPass: false, styleClear: false }),
     });
+    if (projected.count === 0) {
+      input.helpers.writeFrame(buildRepairRunStatusFrame({
+        chapterId: input.chapterId,
+        status: "failed",
+        phase: "completed",
+        message: "修复复检失败后正文已再次变更，未把最新 revision 标记为 needs_repair。",
+      }));
+      return;
+    }
     input.helpers.writeFrame(buildRepairRunStatusFrame({
       chapterId: input.chapterId,
       status: "failed",

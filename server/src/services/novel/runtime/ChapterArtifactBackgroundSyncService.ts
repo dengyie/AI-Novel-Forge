@@ -122,9 +122,12 @@ export class ChapterArtifactBackgroundSyncService {
   ): Promise<void> {
     const chapter = await prisma.chapter.findFirst({
       where: { id: chapterId, novelId },
-      select: { id: true, order: true, title: true },
+      select: { id: true, order: true, title: true, content: true, contentRevision: true },
     });
     if (!chapter) {
+      return;
+    }
+    if (buildContentHash(chapter.content ?? "") !== contentHash) {
       return;
     }
     if (await this.hasCompletedCheckpoint({
@@ -166,6 +169,7 @@ export class ChapterArtifactBackgroundSyncService {
           novelId,
           chapterId,
           content,
+          contentRevision: chapter.contentRevision,
           sourceType: "chapter_background_sync",
           sourceStage: "chapter_execution",
           provider: options.provider,

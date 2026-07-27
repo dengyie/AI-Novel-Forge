@@ -35,10 +35,7 @@ import {
 import { executePipelineJob } from "./pipelineExecute";
 import { PipelineJobCancellationService } from "./pipeline/state/PipelineJobCancellationService";
 import { PipelineJobLeaseService } from "./pipeline/state/PipelineJobLeaseService";
-import {
-  PipelineJobWriteService,
-  type PipelineJobWritePatch,
-} from "./pipeline/state/PipelineJobWriteService";
+import { PipelineJobWriteService } from "./pipeline/state/PipelineJobWriteService";
 
 export { buildPipelineCurrentItemLabel, buildPipelineStageProgress } from "./pipelineJobState";
 export {
@@ -228,42 +225,15 @@ export class NovelCorePipelineService {
   }
 
   async markPipelineJobFailed(jobId: string, message: string): Promise<void> {
-    await this.pipelineJobWriteService.updateSafe(jobId, {
-      status: "failed",
-      error: message.trim(),
-      heartbeatAt: null,
-      currentStage: null,
-      currentItemKey: null,
-      currentItemLabel: null,
-      cancelRequestedAt: null,
-      finishedAt: new Date(),
-    });
+    await this.pipelineJobWriteService.markFailedIfRecoverable(jobId, message);
   }
 
   async markPipelineJobCancelled(jobId: string): Promise<void> {
-    await this.pipelineJobWriteService.updateSafe(jobId, {
-      status: "cancelled",
-      heartbeatAt: null,
-      currentStage: null,
-      currentItemKey: null,
-      currentItemLabel: null,
-      cancelRequestedAt: null,
-      finishedAt: new Date(),
-    });
+    await this.pipelineJobWriteService.markCancelledIfPending(jobId);
   }
 
   async markPipelineJobPendingManualRecovery(jobId: string, message: string): Promise<void> {
-    await this.pipelineJobWriteService.updateSafe(jobId, {
-      status: "queued",
-      error: message.trim(),
-      pendingManualRecovery: true,
-      heartbeatAt: null,
-      currentStage: "queued",
-      currentItemKey: null,
-      currentItemLabel: null,
-      cancelRequestedAt: null,
-      finishedAt: null,
-    });
+    await this.pipelineJobWriteService.markPendingManualRecoveryIfRecoverable(jobId, message);
   }
 
   async resumePipelineJob(jobId: string): Promise<void> {
@@ -297,14 +267,10 @@ export class NovelCorePipelineService {
     const jobTransportAutoRetryCount = normalizeJobTransportAutoRetryCount(
       payload.jobTransportAutoRetryCount,
     );
-    await this.pipelineJobWriteService.updateSafe(job.id, {
-      status: "queued",
-      pendingManualRecovery: false,
-      heartbeatAt: null,
-      leaseOwner: null,
-      leaseExpiresAt: null,
-      cancelRequestedAt: null,
-    });
+    const claimed = await this.pipelineJobWriteService.claimForResume(job.id);
+    if (claimed.count === 0) {
+      return;
+    }
     logPipelineInfo("恢复流水线任务调度", {
       jobId: job.id,
       novelId: job.novelId,
@@ -564,7 +530,11 @@ export class NovelCorePipelineService {
       await this.executePipeline(jobId, novelId, options, leaseOwner)
         .catch(async (error) => {
           // 防止未处理 rejection 拖垮进程；并保证 job 不永久卡在 running。
-          await this.pipelineJobWriteService.ensureTerminalAfterUnhandledError(jobId, error);
+          await this.pipelineJobWriteService.ensureTerminalAfterUnhandledError(
+            jobId,
+            leaseOwner,
+            error,
+          );
         })
         .finally(() => {
           NovelCorePipelineService.activeJobIds.delete(jobId);
@@ -585,7 +555,15 @@ export class NovelCorePipelineService {
     await executePipelineJob({
       parsePipelinePayload: (payload) => this.parsePipelinePayload(payload),
       stringifyPipelinePayload: (input) => this.stringifyPipelinePayload(input),
-      updateJobSafe: (id, data) => this.pipelineJobWriteService.updateSafe(id, data as PipelineJobWritePatch),
+      beginJobExecution: async (id, startedAt) => (
+        await this.pipelineJobWriteService.beginExecution({ jobId: id, leaseOwner, startedAt })
+      ).count > 0,
+      settleJobCancelled: async (id, payload) => (
+        await this.pipelineJobWriteService.settleCancelled({ jobId: id, leaseOwner, payload })
+      ).count > 0,
+      settleJobFailed: async (id, error, payload) => (
+        await this.pipelineJobWriteService.settleFailed({ jobId: id, leaseOwner, error, payload })
+      ).count > 0,
       ensurePipelineNotCancelled: (id) => this.ensurePipelineNotCancelled(id),
       schedulePipelineExecution: (id, nId, opts) => this.schedulePipelineExecution(id, nId, opts),
       chapterRuntimeCoordinator: this.chapterRuntimeCoordinator,

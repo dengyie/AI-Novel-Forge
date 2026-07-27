@@ -73,6 +73,7 @@ export interface PipelineRuntimeResult {
   issues: ReviewIssue[];
   runtimePackage: ChapterRuntimePackage | null;
   retryCountUsed: number;
+  contentRevision: number;
   recoverableRepairFailure?: PipelineRecoverableRepairFailure | null;
   qualityDebtAttribution?: QualityDebtAttribution | null;
 }
@@ -125,12 +126,18 @@ export interface RunPipelineChapterDeps {
     novelId: string,
     chapterId: string,
     content: string,
-    generationState: "drafted" | "repaired",
+    generationState: "drafted",
     options?: {
       scheduleBackgroundSync?: boolean;
       artifactSyncMode?: PipelineRuntimeInput["artifactSyncMode"];
       syncArtifacts?: boolean;
     },
+  ) => Promise<CommittedChapterContent>;
+  commitRepairContent: (
+    novelId: string,
+    chapterId: string,
+    content: string,
+    expectedContentRevision: number,
   ) => Promise<CommittedChapterContent>;
   syncFinalChapterArtifacts: (
     novelId: string,
@@ -155,7 +162,8 @@ export interface RunPipelineChapterDeps {
   markChapterGenerationState: (
     chapterId: string,
     generationState: "reviewed" | "approved",
+    expectedContentRevision: number,
     options?: { literaryPass?: boolean; styleClear?: boolean },
   ) => Promise<void>;
-  markChapterNeedsRepair: (chapterId: string) => Promise<void>;
+  markChapterNeedsRepair: (chapterId: string, expectedContentRevision: number) => Promise<void>;
 }

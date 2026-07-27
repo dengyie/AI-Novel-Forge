@@ -26,6 +26,7 @@ import { ChapterQualityGateService } from "./ChapterQualityGateService";
 import { ChapterContentFinalizationService } from "./ChapterContentFinalizationService";
 import { ChapterStreamGenerationOrchestrator } from "./ChapterStreamGenerationOrchestrator";
 import { ChapterPipelineRuntimeAdapter } from "./ChapterPipelineRuntimeAdapter";
+import { ChapterContentCommitService } from "./content/ChapterContentCommitService";
 import {
   createDefaultReviewChapterAfterRepair,
   defaultChapterRuntimeAgent,
@@ -68,6 +69,7 @@ export class ChapterRuntimeCoordinator {
 
   constructor(deps: ChapterRuntimeCoordinatorDeps = {}) {
     const artifactSyncService = deps.artifactSyncService ?? new ChapterArtifactSyncService();
+    const contentCommitService = new ChapterContentCommitService();
     const agentRuntime = this.getAgentRuntime(deps.agentRuntime);
     const assembler = deps.assembler ?? new GenerationContextAssembler();
     const chapterWritingGraph = deps.chapterWritingGraph ?? this.createDefaultChapterWritingGraph(artifactSyncService);
@@ -84,6 +86,7 @@ export class ChapterRuntimeCoordinator {
     this.contentFinalizationService = new ChapterContentFinalizationService({
       qualityGateService: this.qualityGateService,
       artifactSyncService,
+      contentCommitService,
       plannerService: plannerRuntime,
       agentRuntime,
     });
@@ -110,6 +113,7 @@ export class ChapterRuntimeCoordinator {
     this.pipelineAdapter = new ChapterPipelineRuntimeAdapter({
       streamOrchestrator: this.streamOrchestrator,
       artifactSyncService,
+      contentCommitService,
       contentFinalizationService: this.contentFinalizationService,
       ensureNovelCharacters,
     });

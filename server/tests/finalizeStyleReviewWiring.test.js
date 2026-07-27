@@ -44,7 +44,11 @@ test.before(() => {
     styleTone: null,
   });
   prisma.$transaction = async (callback) => callback({
-    chapter: { update: async () => ({ id: "chapter-1" }) },
+    chapter: {
+      update: async () => ({ id: "chapter-1" }),
+      updateMany: async () => ({ count: 1 }),
+      findFirst: async () => ({ contentRevision: 5 }),
+    },
     qualityReport: { create: async () => ({ id: "report-1" }) },
   });
 });
@@ -169,6 +173,42 @@ test("runner.run 抛错时回退原始正文，不中断章节定稿", async () 
   assert.equal(result.styleReview.report, null);
   assert.equal(result.styleReview.residualReport, null);
   assert.equal(getGateContent(), "正文");
+});
+
+test("acceptance finishing after a newer content revision cannot project stale scores or status", async () => {
+  const previousTransaction = prisma.$transaction;
+  let statusCalls = 0;
+  const { service } = buildService({
+    runner: {
+      run: async (input) => ({
+        report: null,
+        residualReport: null,
+        autoRewritten: false,
+        originalContent: null,
+        finalContent: input.content,
+      }),
+    },
+  });
+  service.markChapterStatus = async () => {
+    statusCalls += 1;
+  };
+  prisma.$transaction = async (callback) => callback({
+    chapter: {
+      updateMany: async () => ({ count: 0 }),
+      findFirst: async () => ({ contentRevision: 5 }),
+    },
+    qualityReport: { create: async () => ({}) },
+  });
+
+  try {
+    await assert.rejects(
+      () => service.finalizeChapterContent(baseInput("revision 4 的正文")),
+      (error) => error?.details?.code === "CHAPTER_CONTENT_CONFLICT",
+    );
+    assert.equal(statusCalls, 0);
+  } finally {
+    prisma.$transaction = previousTransaction;
+  }
 });
 
 test("无 styleContext 时 runner 仍被调用但应自短路（不依赖 finalize 跳过）", async () => {

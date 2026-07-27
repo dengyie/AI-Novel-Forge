@@ -79,6 +79,7 @@ test("running cancellation does not overwrite a concurrent succeeded terminal ro
   assert.deepEqual(outcome.updateManyInputs[0].where, {
     id: "job-race",
     status: "running",
+    leaseOwner: null,
   });
   assert.equal(outcome.row.status, "succeeded");
   assert.equal(outcome.row.finishedAt, finishedAt);

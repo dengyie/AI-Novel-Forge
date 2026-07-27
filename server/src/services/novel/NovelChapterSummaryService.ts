@@ -169,17 +169,21 @@ export class NovelChapterSummaryService {
 
     // 桥接 Fact Ledger：将正文即兴产生的硬事实写入事实账本，
     // 供后续章节 JIT task sheet 通过 completedMilestones 消费，防止后文改写本章设定。
-    if (concreteFacts.length > 0) {
-      try {
-        await novelFactService.writeFacts(novelId, chapter.order, concreteFacts);
-      } catch (error) {
-        // 事实写入失败不应阻断摘要生成主流程
-        console.warn("[chapter-summary] concreteFacts ledger write failed", {
-          novelId,
-          chapterId,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
+    try {
+      await novelFactService.writeChapterFacts({
+        novelId,
+        chapterId,
+        chapterOrder: chapter.order,
+        contentRevision: chapter.contentRevision,
+        items: concreteFacts,
+      });
+    } catch (error) {
+      // 事实写入失败不应阻断摘要生成主流程
+      console.warn("[chapter-summary] concreteFacts ledger write failed", {
+        novelId,
+        chapterId,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
 
     this.queueRagUpsert("chapter", chapterId);

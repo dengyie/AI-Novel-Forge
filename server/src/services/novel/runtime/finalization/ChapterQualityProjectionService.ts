@@ -18,6 +18,7 @@ import {
   detectProseQuality,
   normalizeProseQualityTermList,
 } from "../proseQuality/ProseQualityDetector";
+import { isChapterContentConflictError } from "../../chapterContentCas";
 
 export interface ChapterQualityProjectionResult {
   runtimePackage: ChapterRuntimePackage;
@@ -39,6 +40,7 @@ export class ChapterQualityProjectionService {
     request: ChapterRuntimeRequestInput;
     contextPackage: GenerationContextPackage;
     content: string;
+    contentRevision: number;
     lengthControl?: ChapterRuntimePackage["lengthControl"];
     runId: string | null;
     styleReview: StyleReviewResult;
@@ -96,6 +98,7 @@ export class ChapterQualityProjectionService {
       chapterOrder: input.contextPackage.chapter.order,
       score: acceptance.score,
       issues: acceptance.issues,
+      contentRevision: input.contentRevision,
     });
     return {
       runtimePackage,
@@ -140,6 +143,7 @@ export class ChapterQualityProjectionService {
     chapterOrder: number;
     score: QualityScore;
     issues: ReviewIssue[];
+    contentRevision: number;
   }): Promise<void> {
     try {
       await persistChapterQualityScores({
@@ -147,9 +151,13 @@ export class ChapterQualityProjectionService {
         chapterId: input.chapterId,
         score: input.score,
         issues: input.issues,
+        expectedContentRevision: input.contentRevision,
         writeReport: false,
       });
     } catch (error) {
+      if (isChapterContentConflictError(error)) {
+        throw error;
+      }
       console.warn("[chapter-runtime] chapter quality score persist failed", {
         novelId: input.novelId,
         chapterId: input.chapterId,
@@ -172,8 +180,12 @@ export class ChapterQualityProjectionService {
             parsed = {};
           }
         }
-        await prisma.chapter.update({
-          where: { id: input.chapterId },
+        await prisma.chapter.updateMany({
+          where: {
+            id: input.chapterId,
+            novelId: input.novelId,
+            contentRevision: input.contentRevision,
+          },
           data: {
             riskFlags: JSON.stringify({
               ...parsed,

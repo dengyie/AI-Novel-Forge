@@ -27,7 +27,9 @@ import { prisma } from "../../../../db/prisma";
 export interface PipelineExecuteHost {
   parsePipelinePayload(payload: string | null | undefined): PipelinePayload;
   stringifyPipelinePayload(input: PipelinePayload): string | null;
-  updateJobSafe(jobId: string, data: Record<string, unknown>): Promise<void>;
+  beginJobExecution(jobId: string, startedAt: Date): Promise<boolean>;
+  settleJobCancelled(jobId: string, payload: string | null): Promise<boolean>;
+  settleJobFailed(jobId: string, error: string, payload: string | null): Promise<boolean>;
   ensurePipelineNotCancelled(jobId: string): Promise<void>;
   schedulePipelineExecution(jobId: string, novelId: string, options: PipelineRunOptions): void;
   chapterRuntimeCoordinator: ChapterRuntimeCoordinator;

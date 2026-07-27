@@ -65,7 +65,13 @@ export async function projectPipelineChapterQuality(input: {
     return { final, settingAlignmentVolumeDocument };
   }
 
-  await createQualityReport(novelId, chapter.id, final.score, final.issues);
+  await createQualityReport(
+    novelId,
+    chapter.id,
+    final.score,
+    final.issues,
+    chapterResult.contentRevision,
+  );
   const assessmentSource = chapterResult.retryCountUsed > 0
     ? "repair_recheck"
     : "pipeline_review";
@@ -147,6 +153,7 @@ export async function projectPipelineChapterQuality(input: {
       taskId: runtimePayload.workflowTaskId,
       qualityDebtAttribution: chapterResult.qualityDebtAttribution ?? null,
       settingAlignment,
+      expectedContentRevision: chapterResult.contentRevision,
     });
     if (
       settingQualityMode === "enforce"

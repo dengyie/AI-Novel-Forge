@@ -6,7 +6,9 @@ const path = require("node:path");
 
 const {
   mapQualityScoreToChapterColumns,
+  persistChapterQualityScores,
 } = require("../dist/services/novel/quality/chapterQualityScorePersist.js");
+const { prisma } = require("../dist/db/prisma.js");
 
 test("mapQualityScoreToChapterColumns flattens overall/coherence/voice/pacing", () => {
   const columns = mapQualityScoreToChapterColumns({
@@ -60,4 +62,52 @@ test("quality projection owns column-only persist; pipeline/manual/stream owns Q
   assert.match(reviewSrc, /createQualityReport/);
   assert.match(streamSrc, /writeReport:\s*true/);
   assert.match(streamSrc, /persistChapterQualityScores/);
+});
+
+test("revision-scoped quality projection does not attach stale scores or reports to newer content", async () => {
+  const originalTransaction = prisma.$transaction;
+  const calls = [];
+  prisma.$transaction = async (callback) => callback({
+    chapter: {
+      updateMany: async (input) => {
+        calls.push(["chapter.updateMany", input]);
+        return { count: 0 };
+      },
+      findFirst: async () => ({ contentRevision: 12 }),
+    },
+    qualityReport: {
+      create: async (input) => {
+        calls.push(["qualityReport.create", input]);
+        return {};
+      },
+    },
+  });
+
+  try {
+    await assert.rejects(
+      () => persistChapterQualityScores({
+        novelId: "novel-1",
+        chapterId: "chapter-1",
+        expectedContentRevision: 11,
+        score: {
+          coherence: 90,
+          repetition: 90,
+          pacing: 90,
+          voice: 90,
+          engagement: 90,
+          overall: 90,
+        },
+        writeReport: true,
+      }),
+      (error) => error?.details?.code === "CHAPTER_CONTENT_CONFLICT",
+    );
+    assert.deepEqual(calls[0][1].where, {
+      id: "chapter-1",
+      novelId: "novel-1",
+      contentRevision: 11,
+    });
+    assert.equal(calls.some(([name]) => name === "qualityReport.create"), false);
+  } finally {
+    prisma.$transaction = originalTransaction;
+  }
 });

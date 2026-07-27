@@ -29,7 +29,13 @@
 - 正文 writer、接收闸门、patch repair、heavy repair、保存正文、资产同步、复审和状态推进必须复用同一套 runtime 规则，不允许 route、旧 service 或导演分支各自再维护第二套正文执行实现。
 - **已提交正文快照是所有章节投影的唯一事实源**：草稿保存必须返回 `content + contentRevision`；style rewrite 和 repair adopt 必须以生成开始时的 revision 做 CAS。CAS 成功后应返回本次写入可确定的 `content + expectedRevision + 1`，不得再按章节 id 无约束重读；后续写者可能已推进到更高 revision，无约束重读会把别人的正文冒充成本次提交结果。只有 CAS 成功返回的 committed snapshot 才能进入 acceptance、质量分数、时间线、事实账本和 artifact delta。提交失败或 revision 冲突时必须在任何投影前停止；禁止把未落库候选继续下发为终稿或用于生成衍生事实。
 - finalization 的顺序固定为 `draft commit -> optional style rewrite CAS -> quality projection -> timeline/fact/artifact projection`。pipeline 不得在 finalization 之后再次无条件保存同一终稿；这既会制造 revision 跳号，也会扩大覆盖人工编辑的竞态窗口。
+- 自动 pipeline 修复不是新的权威草稿写入。修复候选必须通过 `ChapterContentCommitService` 以当前 `contentRevision` 提交；CAS 冲突表示人工或其他执行者已推进正文，旧候选必须停止状态、评分、事实和资产投影，并向上返回统一的正文冲突语义。
+- 章节质量分数、`reviewed / approved / needs_repair / completed` 状态和质量闭环记录都属于正文 revision 的投影。接收或复检完成后的写入条件必须包含产生该结果的 `contentRevision`；CAS 未命中不得把旧结果附着到新正文，也不得关闭审计问题。分数与对应章节状态应尽量在同一事务内提交。
+- 自动事实账本必须记录 `chapterId + contentRevision + idempotencyKey`。新 revision 只淘汰同章更旧 revision 和迁移前无 ownership 的自动事实，绝不删除人工事实，也不得删除未来 revision；读取写作上下文和小说适配源时只消费与章节当前 revision 一致的自动事实。数据库唯一幂等键负责并发与重试去重，不能依赖“先查再写”。
 - **pipeline 取消是受租约约束的状态动作**：排队任务只能用 `status=queued` CAS 进入取消终态；运行任务只能用 `status=running` 加当前 `leaseOwner`（启用租约时）CAS 写入取消请求。CAS 未命中必须重读 canonical job 并返回数据库现状，禁止再用无条件 update 覆盖并发成功、失败、重排队或新 owner。取消关联导演任务也必须以重读后的 canonical pipeline 状态为准：只有结果确实为 `cancelled` 才能传播取消；若竞态已收口为 `succeeded` 或 `failed`，只能刷新投影，不能再把导演任务改成取消。等待运行器收口的取消行保持 `finishedAt=null`，只有真正进入终态的写入才设置完成时间。
+- **pipeline 生命周期写入必须统一 owner-aware CAS**：开始执行、进度、心跳、成功、失败、取消、自动重排队、手动恢复、重启恢复和最外层异常收口都必须同时校验允许的源状态、`finishedAt=null`、取消条件和当前 `leaseOwner`。`leaseOwner=null` 表示只拥有未租赁行，不表示跳过 owner 校验。恢复只能认领租约为空或已过期的 canonical job；CAS 未命中必须静默交给当前 owner 或 canonical 终态，禁止清空有效租约后继续调度。
+- **卷级 readiness 只能收口它实际审过的正文快照**：真 review 后把 `chapterStatus` 推进到 `completed` 时，写入条件必须包含 review 返回的 `contentRevision` 与当时的章节状态。CAS 未命中表示正文或章节状态已被并发修改；此时保留 `needs_re_review`，不得刷新旧 review 结果并把新 revision 投影为 publish-ready。
+- 卷级 readiness 的执行编排保留在 `VolumeReadinessExecutor`；复检状态收口归 `volume/readiness/application/ChapterReviewStatusReconciler`，流消费、超时、预算估算和重试分类归 `VolumeReadinessExecutionSupport`。新增规则应进入对应责任模块，不得继续把数据库收口、流协议和预算政策堆回 executor。
 - `NovelGenerationService.createChapterStream`、`NovelService.createRepairStream`、`startPipelineJob / resumePipelineJob` 只是不同控制入口；它们的业务执行面必须继续汇入同一 coordinator，而不是按入口复制 writer 或修文逻辑。
 - 默认 writer 继续整章一次性生成，不把 sceneCards、章节合同或分场景多轮写作重新接入正文热路径。
 - 章节合同和 sceneCards 可作为规划、审校、诊断和局部修复辅助资产，不驱动默认正文生成。
