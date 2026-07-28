@@ -51,6 +51,7 @@ interface ChapterRef {
   id: string;
   title: string;
   order: number;
+  contentRevision: number;
   content?: string | null;
   expectation?: string | null;
   targetWordCount?: number | null;
@@ -71,7 +72,11 @@ interface ChapterGraphDeps {
     chapterId: string,
     content: string,
     generationState: "drafted",
-    options?: { scheduleBackgroundSync?: boolean; syncArtifacts?: boolean },
+    options: {
+      expectedContentRevision: number;
+      scheduleBackgroundSync?: boolean;
+      syncArtifacts?: boolean;
+    },
   ) => Promise<CommittedChapterContent>;
   logInfo: (message: string, meta?: Record<string, unknown>) => void;
   logWarn: (message: string, meta?: Record<string, unknown>) => void;
@@ -620,6 +625,7 @@ export class ChapterWritingGraph {
           safeContent,
           "drafted",
           {
+            expectedContentRevision: input.chapter.contentRevision,
             scheduleBackgroundSync: !input.options.deferArtifactBackgroundSync,
             syncArtifacts: false,
           },

@@ -127,7 +127,8 @@ export interface RunPipelineChapterDeps {
     chapterId: string,
     content: string,
     generationState: "drafted",
-    options?: {
+    options: {
+      expectedContentRevision: number;
       scheduleBackgroundSync?: boolean;
       artifactSyncMode?: PipelineRuntimeInput["artifactSyncMode"];
       syncArtifacts?: boolean;

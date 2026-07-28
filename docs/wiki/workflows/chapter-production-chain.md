@@ -27,7 +27,7 @@
   - 手动单章生成、批量执行与自动导演的章节生产统一落到 `ChapterExecutionStageRunner`。
   - 手动单章修复与书级重规划统一落到 `quality_repair` stage；其中会改正文的修复入口必须委托给 `ChapterRuntimeCoordinator`。
 - 正文 writer、接收闸门、patch repair、heavy repair、保存正文、资产同步、复审和状态推进必须复用同一套 runtime 规则，不允许 route、旧 service 或导演分支各自再维护第二套正文执行实现。
-- **已提交正文快照是所有章节投影的唯一事实源**：草稿保存必须返回 `content + contentRevision`；style rewrite 和 repair adopt 必须以生成开始时的 revision 做 CAS。CAS 成功后应返回本次写入可确定的 `content + expectedRevision + 1`，不得再按章节 id 无约束重读；后续写者可能已推进到更高 revision，无约束重读会把别人的正文冒充成本次提交结果。只有 CAS 成功返回的 committed snapshot 才能进入 acceptance、质量分数、时间线、事实账本和 artifact delta。提交失败或 revision 冲突时必须在任何投影前停止；禁止把未落库候选继续下发为终稿或用于生成衍生事实。
+- **已提交正文快照是所有章节投影的唯一事实源**：writer 初稿、style rewrite 和 repair adopt 都必须以生成开始时的 revision 做 CAS，草稿保存必须返回 `content + contentRevision`。CAS 成功后应返回本次写入可确定的 `content + expectedRevision + 1`，不得再按章节 id 无约束重读；后续写者可能已推进到更高 revision，无约束重读会把别人的正文冒充成本次提交结果。只有 CAS 成功返回的 committed snapshot 才能进入 acceptance、质量分数、时间线、事实账本和 artifact delta。提交失败或 revision 冲突时必须在任何投影前停止；禁止把未落库候选继续下发为终稿或用于生成衍生事实。
 - finalization 的顺序固定为 `draft commit -> optional style rewrite CAS -> quality projection -> timeline/fact/artifact projection`。pipeline 不得在 finalization 之后再次无条件保存同一终稿；这既会制造 revision 跳号，也会扩大覆盖人工编辑的竞态窗口。
 - 自动 pipeline 修复不是新的权威草稿写入。修复候选必须通过 `ChapterContentCommitService` 以当前 `contentRevision` 提交；CAS 冲突表示人工或其他执行者已推进正文，旧候选必须停止状态、评分、事实和资产投影，并向上返回统一的正文冲突语义。
 - 章节质量分数、`reviewed / approved / needs_repair / completed` 状态和质量闭环记录都属于正文 revision 的投影。接收或复检完成后的写入条件必须包含产生该结果的 `contentRevision`；CAS 未命中不得把旧结果附着到新正文，也不得关闭审计问题。分数与对应章节状态应尽量在同一事务内提交。
