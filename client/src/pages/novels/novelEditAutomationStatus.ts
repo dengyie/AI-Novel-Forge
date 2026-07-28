@@ -46,7 +46,7 @@ export function shouldPreserveRequestedDirectorTaskId(input: {
   if (input.requestedTask.id !== pinnedTaskId) {
     return false;
   }
-  return input.requestedTask.status !== "cancelled";
+  return true;
 }
 
 export function shouldShowPinnedBookAutomationProjection(input: {

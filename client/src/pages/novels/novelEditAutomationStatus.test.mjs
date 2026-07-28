@@ -150,7 +150,7 @@ test("failed tasks are not rewritten into waiting approval by stale projections"
   assert.equal(result.lastError, "指定区间内没有可生成的章节。");
 });
 
-test("requested failed director task stays pinned after the active task disappears", () => {
+test("requested terminal director task stays pinned after the active task disappears", () => {
   assert.equal(
     shouldPreserveRequestedDirectorTaskId({
       directorTaskId: "task-failed",
@@ -169,7 +169,7 @@ test("requested failed director task stays pinned after the active task disappea
         status: "cancelled",
       },
     }),
-    false,
+    true,
   );
 });
 
