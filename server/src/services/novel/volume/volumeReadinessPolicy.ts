@@ -7,6 +7,7 @@ import {
   PROSE_PAD_HARD_THRESHOLD,
   PROSE_PAD_SOFT_THRESHOLD,
 } from "../../../config/proseQuality";
+import type { OperationalChapterStatus } from "../chapterLifecycleState";
 
 export type VolumeReadinessVerdict =
   | "publish_ready"
@@ -22,7 +23,7 @@ export interface VolumeReadinessChapterSignals {
   chapterId: string;
   chapterOrder: number;
   title?: string | null;
-  chapterStatus: string | null;
+  chapterStatus: OperationalChapterStatus | null;
   generationState?: string | null;
   /** 文学门；null = 从未真 review / 不可解析 */
   literaryPass: boolean | null;

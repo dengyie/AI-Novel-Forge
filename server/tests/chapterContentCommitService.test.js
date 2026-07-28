@@ -39,7 +39,7 @@ test("chapter content commit uses revision CAS and returns the committed snapsho
     chapterId: "chapter-1",
     content: "提交后的正文",
     expectedContentRevision: 7,
-    statePatch: { generationState: "ready" },
+    statePatch: { generationState: "drafted" },
     source: "style_rewrite",
   });
 
@@ -51,7 +51,7 @@ test("chapter content commit uses revision CAS and returns the committed snapsho
     },
     data: {
       content: "提交后的正文",
-      generationState: "ready",
+      generationState: "drafted",
       contentRevision: { increment: 1 },
     },
   });

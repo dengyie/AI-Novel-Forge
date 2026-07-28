@@ -19,6 +19,7 @@ import {
 import { prisma } from "../../../db/prisma";
 import { AppError } from "../../../middleware/errorHandler";
 import { getSharedNovelServices } from "../application/sharedNovelServices";
+import type { OperationalChapterStatus } from "../chapterLifecycleState";
 import {
   parseQualityLoopFromRiskFlags,
 } from "../quality/qualityDebtBoard";
@@ -157,7 +158,7 @@ function projectSignalsFromChapter(input: {
   order: number;
   title: string | null;
   content: string | null;
-  chapterStatus: string | null;
+  chapterStatus: OperationalChapterStatus | null;
   generationState: string | null;
   riskFlags: string | null;
   contentRevision: number | null;

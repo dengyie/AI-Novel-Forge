@@ -70,7 +70,7 @@ interface ChapterGraphDeps {
     novelId: string,
     chapterId: string,
     content: string,
-    generationState: "drafted" | "repaired",
+    generationState: "drafted",
     options?: { scheduleBackgroundSync?: boolean; syncArtifacts?: boolean },
   ) => Promise<CommittedChapterContent>;
   logInfo: (message: string, meta?: Record<string, unknown>) => void;
