@@ -112,6 +112,7 @@ export class ChapterTimelineFinalizationService {
   async hasCurrentFinalization(input: {
     novelId: string;
     chapterId: string;
+    expectedContentRevision: number;
     content: string;
   }): Promise<boolean> {
     return Boolean(await this.findCurrentFinalizationMode(input));
@@ -120,6 +121,7 @@ export class ChapterTimelineFinalizationService {
   private async findCurrentFinalizationMode(input: {
     novelId: string;
     chapterId: string;
+    expectedContentRevision: number;
     content: string;
   }): Promise<ChapterTimelineFinalizationMode | null> {
     const contentHash = hashContent(input.content.trim());
@@ -153,6 +155,7 @@ export class ChapterTimelineFinalizationService {
     if (await this.hasCurrentFinalization({
       novelId: input.novelId,
       chapterId: previousChapter.id,
+      expectedContentRevision: previousChapter.contentRevision,
       content: previousContent,
     })) {
       return null;
@@ -198,7 +201,7 @@ export class ChapterTimelineFinalizationService {
         throw error;
       }
       const contentHash = hashContent(input.content.trim());
-      await this.checkpoints.markSuperseded({
+      const checkpointWritten = await this.checkpoints.markSuperseded({
         novelId: input.novelId,
         chapterId: input.chapterId,
         expectedContentRevision: input.expectedContentRevision,
@@ -211,7 +214,7 @@ export class ChapterTimelineFinalizationService {
         extractorSucceeded: false,
         eventCount: 0,
         hookCount: 0,
-        checkpointWritten: true,
+        checkpointWritten,
       };
     }
   }
@@ -227,6 +230,7 @@ export class ChapterTimelineFinalizationService {
     const existingMode = await this.findCurrentFinalizationMode({
       novelId: input.novelId,
       chapterId: input.chapterId,
+      expectedContentRevision: input.expectedContentRevision,
       content,
     });
     if (existingMode === "stable" || (existingMode === "degraded" && input.mode === "degraded")) {
@@ -279,6 +283,7 @@ export class ChapterTimelineFinalizationService {
     const stableClaim = await this.checkpoints.claim({
       novelId: input.novelId,
       chapterId: input.chapterId,
+      expectedContentRevision: input.expectedContentRevision,
       contentHash,
       syncMode: "stable",
       sourceStage: input.sourceStage,
@@ -324,6 +329,7 @@ export class ChapterTimelineFinalizationService {
       await this.checkpoints.markFailed({
         novelId: input.novelId,
         chapterId: input.chapterId,
+        expectedContentRevision: input.expectedContentRevision,
         contentHash,
         syncMode: "stable",
         sourceStage: input.sourceStage,
@@ -367,6 +373,7 @@ export class ChapterTimelineFinalizationService {
       await this.checkpoints.markFailed({
         novelId: input.novelId,
         chapterId: input.chapterId,
+        expectedContentRevision: input.expectedContentRevision,
         contentHash,
         syncMode: "stable",
         sourceStage: input.sourceStage,
@@ -392,6 +399,7 @@ export class ChapterTimelineFinalizationService {
     await this.checkpoints.markSucceeded({
       novelId: input.novelId,
       chapterId: input.chapterId,
+      expectedContentRevision: input.expectedContentRevision,
       contentHash,
       syncMode: "stable",
       sourceStage: input.sourceStage,
@@ -561,6 +569,7 @@ export class ChapterTimelineFinalizationService {
     await this.checkpoints.markSucceeded({
       novelId: input.novelId,
       chapterId: input.chapterId,
+      expectedContentRevision: input.expectedContentRevision,
       contentHash: input.contentHash,
       syncMode: "degraded",
       sourceStage: input.sourceStage,

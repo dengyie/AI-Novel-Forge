@@ -134,6 +134,7 @@ export class ChapterArtifactBackgroundSyncService {
       novelId,
       chapterId,
       contentHash,
+      contentRevision: chapter.contentRevision,
       artifactType: "artifact_delta",
       syncMode: artifactSyncMode,
     })) {
@@ -143,6 +144,7 @@ export class ChapterArtifactBackgroundSyncService {
       novelId,
       chapterId,
       contentHash,
+      contentRevision: chapter.contentRevision,
       artifactType: "artifact_delta",
       syncMode: artifactSyncMode,
       sourceType: "chapter_background_sync",
@@ -196,6 +198,7 @@ export class ChapterArtifactBackgroundSyncService {
         novelId,
         chapterId,
         contentHash,
+        contentRevision: chapter.contentRevision,
         artifactType: "artifact_delta",
         syncMode: artifactSyncMode,
         sourceType: "chapter_background_sync",
@@ -208,6 +211,7 @@ export class ChapterArtifactBackgroundSyncService {
       novelId,
       chapterId,
       contentHash,
+      contentRevision: chapter.contentRevision,
       artifactType: "artifact_delta",
       syncMode: artifactSyncMode,
       sourceType: "chapter_background_sync",
@@ -225,6 +229,7 @@ export class ChapterArtifactBackgroundSyncService {
       novelId,
       chapterId,
       contentHash,
+      contentRevision: chapter.contentRevision,
       artifactType: "payoff_ledger_full_reconcile",
       syncMode: artifactSyncMode,
     }))) {
@@ -238,6 +243,7 @@ export class ChapterArtifactBackgroundSyncService {
         novelId,
         chapterId,
         contentHash,
+        contentRevision: chapter.contentRevision,
         artifactType: "payoff_ledger_full_reconcile",
         syncMode: artifactSyncMode,
         sourceType: "chapter_background_sync",
@@ -321,6 +327,7 @@ export class ChapterArtifactBackgroundSyncService {
     novelId: string;
     chapterId: string;
     contentHash: string;
+    contentRevision: number;
     artifactType: string;
     syncMode: ArtifactSyncMode;
   }): Promise<boolean> {
@@ -334,6 +341,7 @@ export class ChapterArtifactBackgroundSyncService {
           novelId: input.novelId,
           chapterId: input.chapterId,
           contentHash: input.contentHash,
+          contentRevision: input.contentRevision,
           artifactType: input.artifactType,
           syncMode: input.syncMode,
         },
@@ -355,6 +363,7 @@ export class ChapterArtifactBackgroundSyncService {
             novelId: input.novelId,
             chapterId: input.chapterId,
             contentHash: input.contentHash,
+            contentRevision: input.contentRevision,
             artifactType: input.artifactType,
             syncMode: input.syncMode,
             status: "running",
@@ -378,6 +387,7 @@ export class ChapterArtifactBackgroundSyncService {
     novelId: string;
     chapterId: string;
     contentHash: string;
+    contentRevision: number;
     artifactType: string;
     syncMode: ArtifactSyncMode;
     sourceType?: string | null;
@@ -389,6 +399,7 @@ export class ChapterArtifactBackgroundSyncService {
         novelId: input.novelId,
         chapterId: input.chapterId,
         contentHash: input.contentHash,
+        contentRevision: input.contentRevision,
         artifactType: input.artifactType,
         syncMode: input.syncMode,
       },
@@ -400,6 +411,7 @@ export class ChapterArtifactBackgroundSyncService {
           novelId: input.novelId,
           chapterId: input.chapterId,
           contentHash: input.contentHash,
+          contentRevision: input.contentRevision,
           artifactType: input.artifactType,
           syncMode: input.syncMode,
           status: "running",
@@ -428,6 +440,7 @@ export class ChapterArtifactBackgroundSyncService {
             novelId: input.novelId,
             chapterId: input.chapterId,
             contentHash: input.contentHash,
+            contentRevision: input.contentRevision,
             artifactType: input.artifactType,
             syncMode: input.syncMode,
             status: "running",
@@ -448,6 +461,7 @@ export class ChapterArtifactBackgroundSyncService {
           novelId: input.novelId,
           chapterId: input.chapterId,
           contentHash: input.contentHash,
+          contentRevision: input.contentRevision,
           artifactType: input.artifactType,
           syncMode: input.syncMode,
           OR: [
@@ -471,6 +485,7 @@ export class ChapterArtifactBackgroundSyncService {
     novelId: string;
     chapterId: string;
     contentHash: string;
+    contentRevision: number;
     artifactType: string;
     syncMode: ArtifactSyncMode;
     sourceType?: string | null;
@@ -483,6 +498,7 @@ export class ChapterArtifactBackgroundSyncService {
           novelId: input.novelId,
           chapterId: input.chapterId,
           contentHash: input.contentHash,
+          contentRevision: input.contentRevision,
           artifactType: input.artifactType,
           syncMode: input.syncMode,
         },
@@ -491,6 +507,7 @@ export class ChapterArtifactBackgroundSyncService {
         novelId: input.novelId,
         chapterId: input.chapterId,
         contentHash: input.contentHash,
+        contentRevision: input.contentRevision,
         artifactType: input.artifactType,
         syncMode: input.syncMode,
         status: "succeeded",
@@ -535,6 +552,7 @@ export class ChapterArtifactBackgroundSyncService {
     novelId: string;
     chapterId: string;
     contentHash: string;
+    contentRevision: number;
     artifactType: string;
     syncMode: ArtifactSyncMode;
     sourceType?: string | null;
@@ -546,6 +564,7 @@ export class ChapterArtifactBackgroundSyncService {
         novelId: input.novelId,
         chapterId: input.chapterId,
         contentHash: input.contentHash,
+        contentRevision: input.contentRevision,
         artifactType: input.artifactType,
         syncMode: input.syncMode,
         status: "running",

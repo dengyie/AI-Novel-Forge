@@ -11,6 +11,7 @@ interface TimelineCheckpointIdentity {
   novelId: string;
   chapterId: string;
   contentHash: string;
+  expectedContentRevision: number;
   syncMode: ChapterTimelineFinalizationMode;
 }
 
@@ -27,6 +28,7 @@ export class ChapterTimelineCheckpointStore {
         novelId: input.novelId,
         chapterId: input.chapterId,
         contentHash: input.contentHash,
+        contentRevision: input.expectedContentRevision,
         artifactType: "timeline_finalization",
         syncMode: { in: ["stable", "degraded"] },
         status: "succeeded",
@@ -134,7 +136,7 @@ export class ChapterTimelineCheckpointStore {
   async markSuperseded(input: Omit<TimelineCheckpointIdentity, "syncMode"> & {
     expectedContentRevision: number;
     sourceStage: string;
-  }): Promise<void> {
+  }): Promise<boolean> {
     const metadataJson = JSON.stringify({
       reason: "projection_superseded",
       superseded: true,
@@ -142,23 +144,34 @@ export class ChapterTimelineCheckpointStore {
       sourceStage: input.sourceStage,
     });
     const key = checkpointKey({ ...input, syncMode: "stable" });
-    await prisma.chapterArtifactSyncCheckpoint.upsert({
-      where: { novelId_chapterId_contentHash_artifactType_syncMode: key },
-      create: {
-        ...key,
-        status: "failed",
-        sourceType: "chapter_runtime",
-        sourceStage: input.sourceStage,
-        metadataJson,
-      },
-      update: {
-        status: "failed",
-        sourceType: "chapter_runtime",
-        sourceStage: input.sourceStage,
-        metadataJson,
-        updatedAt: new Date(),
-      },
-    }).catch(() => null);
+    try {
+      await prisma.chapterArtifactSyncCheckpoint.upsert({
+        where: { novelId_chapterId_contentHash_artifactType_syncMode: key },
+        create: {
+          ...key,
+          status: "failed",
+          sourceType: "chapter_runtime",
+          sourceStage: input.sourceStage,
+          metadataJson,
+        },
+        update: {
+          status: "failed",
+          sourceType: "chapter_runtime",
+          sourceStage: input.sourceStage,
+          metadataJson,
+          updatedAt: new Date(),
+        },
+      });
+      return true;
+    } catch (error) {
+      console.warn("[chapter-runtime] timeline superseded checkpoint write failed", {
+        novelId: input.novelId,
+        chapterId: input.chapterId,
+        expectedContentRevision: input.expectedContentRevision,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    }
   }
 }
 
@@ -169,5 +182,6 @@ function checkpointKey(input: TimelineCheckpointIdentity) {
     contentHash: input.contentHash,
     artifactType: "timeline_finalization",
     syncMode: input.syncMode,
+    contentRevision: input.expectedContentRevision,
   };
 }

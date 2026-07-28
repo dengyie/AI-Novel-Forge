@@ -1,4 +1,4 @@
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import { prisma } from "../../../../db/prisma";
 
 export interface ChapterProjectionOwner {
@@ -23,7 +23,7 @@ export class ChapterProjectionSupersededError extends Error {
   }
 }
 
-type ChapterRevisionReader = Pick<Prisma.TransactionClient, "chapter">;
+type ChapterRevisionReader = Pick<Prisma.TransactionClient, "chapter" | "$executeRaw">;
 
 export class ChapterProjectionRevisionGuard {
   constructor(private readonly db: ChapterRevisionReader = prisma) {}
@@ -38,6 +38,19 @@ export class ChapterProjectionRevisionGuard {
       select: { id: true },
     });
     if (!current) {
+      throw new ChapterProjectionSupersededError(owner);
+    }
+  }
+
+  async lockCurrentForWrite(owner: ChapterProjectionOwner): Promise<void> {
+    const matched = await this.db.$executeRaw(Prisma.sql`
+      UPDATE "Chapter"
+      SET "contentRevision" = "contentRevision"
+      WHERE "id" = ${owner.chapterId}
+        AND "novelId" = ${owner.novelId}
+        AND "contentRevision" = ${owner.expectedContentRevision}
+    `);
+    if (matched !== 1) {
       throw new ChapterProjectionSupersededError(owner);
     }
   }

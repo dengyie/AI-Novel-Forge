@@ -253,7 +253,7 @@ export interface DegradedChapterTimelineCommit {
 export class PrismaTimelineRepository implements TimelineRepository {
   async commitAutomaticChapterTimeline(input: AutomaticChapterTimelineCommit): Promise<StoryTimelineEvent[]> {
     return prisma.$transaction(async (tx) => {
-      await new ChapterProjectionRevisionGuard(tx).assertCurrent(input.owner);
+      await new ChapterProjectionRevisionGuard(tx).lockCurrentForWrite(input.owner);
 
       await tx.storyTimelineEvent.deleteMany({
         where: {
@@ -373,7 +373,7 @@ export class PrismaTimelineRepository implements TimelineRepository {
 
   async commitDegradedChapterTimeline(input: DegradedChapterTimelineCommit): Promise<void> {
     await prisma.$transaction(async (tx) => {
-      await new ChapterProjectionRevisionGuard(tx).assertCurrent(input.owner);
+      await new ChapterProjectionRevisionGuard(tx).lockCurrentForWrite(input.owner);
       const existingAnchor = await tx.chapterTimeAnchor.findUnique({
         where: { novelId_chapterId: { novelId: input.owner.novelId, chapterId: input.owner.chapterId } },
         select: { source: true },

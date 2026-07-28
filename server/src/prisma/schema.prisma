@@ -579,6 +579,7 @@ model ChapterArtifactSyncCheckpoint {
   novelId      String
   chapterId    String
   contentHash  String
+  contentRevision Int   @default(0)
   artifactType String
   syncMode     String
   status       String   @default("succeeded")
@@ -590,7 +591,7 @@ model ChapterArtifactSyncCheckpoint {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  @@unique([novelId, chapterId, contentHash, artifactType, syncMode])
+  @@unique([novelId, chapterId, contentHash, artifactType, syncMode, contentRevision], name: "novelId_chapterId_contentHash_artifactType_syncMode")
   @@index([novelId, chapterId, artifactType, updatedAt])
 }
 

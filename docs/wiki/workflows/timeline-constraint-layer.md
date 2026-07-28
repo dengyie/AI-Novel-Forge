@@ -27,7 +27,7 @@
 - 时间线抽取使用结构化 AI 输出；检测器只对结构化事件、钩子和状态变化做确定性判断。
 - `autoReview=false` 不影响时间线检测。时间线检测属于章节接收闸门，不依赖完整质量审校事实。
 - 检测失败时不提交 `occurred` 事件；通过或 warning 时才允许提交抽取事件和新钩子。
-- 自动时间线投影必须绑定已提交正文的 `contentRevision`。抽取完成后、任何 canonical 写入前，以及拥有写入的数据库事务内，都要再次验证 `{ novelId, chapterId, contentRevision }`；不匹配表示本次投影已被新正文取代（superseded），只终止本次局部投影，不得触发章节失败、自动导演失败或重规划。
+- 自动时间线投影必须绑定已提交正文的 `contentRevision`。checkpoint 的唯一身份必须同时包含正文哈希与 revision，避免正文 `A -> B -> A` 时复用旧 revision 的成功记录。抽取完成后，拥有写入的数据库事务必须先用 revision 条件 no-op update 锁定 Chapter 行，再执行任何 canonical 写入；普通 `SELECT` 不能提供写权限。不匹配表示本次投影已被新正文取代（superseded），只终止本次局部投影，不得触发章节失败、自动导演失败或重规划。
 - 自动重投影按章节替换 `source=chapter_extraction` 的事件、钩子和时间锚点。人工维护的数据必须使用显式来源标记保留，禁止通过标题文本或其他启发式规则推断所有权。
 - 自动修复由现有章节修复链路处理，timeline 模块只提供问题清单和修复建议。
 - 章节接收闸门会把 `acceptance` 与 `timeline` 并行执行，并对同一章同一内容 hash 做门禁缓存，避免重复触发相同检测。

@@ -181,6 +181,7 @@ export class ChapterQualityGateService {
             contentHash: identity.contentHash,
             artifactType: identity.artifactType,
             syncMode: identity.syncMode,
+            contentRevision: 0,
           },
         },
         select: {
@@ -237,12 +238,14 @@ export class ChapterQualityGateService {
             contentHash: identity.contentHash,
             artifactType: identity.artifactType,
             syncMode: identity.syncMode,
+            contentRevision: 0,
           },
         },
         create: {
           novelId: input.novelId,
           chapterId: input.chapterId,
           contentHash: identity.contentHash,
+          contentRevision: 0,
           artifactType: identity.artifactType,
           syncMode: identity.syncMode,
           status: "succeeded",

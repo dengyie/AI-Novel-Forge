@@ -108,6 +108,7 @@ test("timeline extraction for revision N cannot commit after chapter advances to
     ...data,
   });
   prisma.$transaction = async (callback) => callback({
+    $executeRaw: async () => (contentRevision === 7 ? 1 : 0),
     chapter: { findFirst: chapterLookup },
     storyTimelineEvent: {
       create: eventCreate,
@@ -215,6 +216,7 @@ test("automatic timeline replacement preserves manual rows and manual chapter an
     reports: 0,
   };
   const tx = {
+    $executeRaw: async () => 1,
     chapter: { findFirst: async ({ where }) => (
       where.novelId === "novel-1"
         && where.id === "chapter-3"
@@ -337,5 +339,152 @@ test("automatic timeline replacement preserves manual rows and manual chapter an
     assert.equal(calls.reports, 1);
   } finally {
     prisma.$transaction = originalTransaction;
+  }
+});
+
+test("restoring identical text at a newer revision does not reuse an older timeline checkpoint", async () => {
+  const originals = {
+    checkpointFindMany: prisma.chapterArtifactSyncCheckpoint.findMany,
+    checkpointFindFirst: prisma.chapterArtifactSyncCheckpoint.findFirst,
+    checkpointCreate: prisma.chapterArtifactSyncCheckpoint.create,
+    checkpointUpsert: prisma.chapterArtifactSyncCheckpoint.upsert,
+    chapterFindFirst: prisma.chapter.findFirst,
+    transaction: prisma.$transaction,
+  };
+  const checkpointQueries = [];
+  let canonicalWrites = 0;
+  let currentCheckpointRevision = 7;
+
+  prisma.chapterArtifactSyncCheckpoint.findMany = async () => [];
+  prisma.chapterArtifactSyncCheckpoint.findFirst = async ({ where }) => {
+    checkpointQueries.push(where);
+    return where.contentRevision === currentCheckpointRevision
+      ? { syncMode: "stable" }
+      : null;
+  };
+  prisma.chapterArtifactSyncCheckpoint.create = async ({ data }) => ({
+    id: "checkpoint-revision-9",
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    ...data,
+  });
+  prisma.chapterArtifactSyncCheckpoint.upsert = async ({ create }) => ({
+    id: "checkpoint-revision-9",
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    ...create,
+  });
+  prisma.chapter.findFirst = async ({ where }) => (
+    where.id === "chapter-3"
+      && where.novelId === "novel-1"
+      && where.contentRevision === 9
+      ? { id: "chapter-3" }
+      : null
+  );
+  prisma.$transaction = async (callback) => callback({
+    $executeRaw: async () => 1,
+    storyTimelineEvent: {
+      deleteMany: async () => {
+        canonicalWrites += 1;
+        return { count: 1 };
+      },
+      create: async ({ data }) => {
+        canonicalWrites += 1;
+        return { id: "event-revision-9", createdAt: new Date(), updatedAt: new Date(), ...data };
+      },
+    },
+    timelineHook: {
+      deleteMany: async () => ({ count: 0 }),
+      updateMany: async () => ({ count: 0 }),
+      createMany: async ({ data }) => ({ count: data.length }),
+    },
+    chapterTimeAnchor: {
+      findUnique: async () => ({ source: "chapter_extraction" }),
+      upsert: async () => {
+        canonicalWrites += 1;
+        return {};
+      },
+    },
+    timelineCheckReport: {
+      create: async () => {
+        canonicalWrites += 1;
+        return {};
+      },
+    },
+  });
+
+  const input = {
+    novelId: "novel-1",
+    chapterId: "chapter-3",
+    expectedContentRevision: 9,
+    content: "恢复后的正文 A",
+    contextPackage: {
+      chapter: { id: "chapter-3", title: "第三章", order: 3 },
+      timelineContext: timelineContext(),
+      bookContract: { title: "回滚测试小说" },
+    },
+    timelineGate: {
+      result: { status: "passed", score: 1, issues: [] },
+      extractedEvents: [],
+      extractedHooks: [],
+      timeAnchor: { storyDayIndex: 2, label: "第二日夜" },
+      addressedHookIds: [],
+      resolvedHookIds: [],
+      extractorSucceeded: true,
+      extractorError: null,
+      timelineContext: timelineContext(),
+    },
+    sourceStage: "chapter_content_finalization",
+  };
+
+  try {
+    const result = await new ChapterTimelineFinalizationService().finalizeCurrentContent(input);
+    assert.equal(result.syncMode, "stable");
+    assert.ok(canonicalWrites > 0);
+    assert.equal(checkpointQueries[0].contentRevision, 9);
+
+    currentCheckpointRevision = 9;
+    const writesAfterRevisionNine = canonicalWrites;
+    await new ChapterTimelineFinalizationService().finalizeCurrentContent(input);
+    assert.equal(canonicalWrites, writesAfterRevisionNine);
+  } finally {
+    prisma.chapterArtifactSyncCheckpoint.findMany = originals.checkpointFindMany;
+    prisma.chapterArtifactSyncCheckpoint.findFirst = originals.checkpointFindFirst;
+    prisma.chapterArtifactSyncCheckpoint.create = originals.checkpointCreate;
+    prisma.chapterArtifactSyncCheckpoint.upsert = originals.checkpointUpsert;
+    prisma.chapter.findFirst = originals.chapterFindFirst;
+    prisma.$transaction = originals.transaction;
+  }
+});
+
+test("superseded checkpoint write failure is reported without escalating workflow state", async () => {
+  const originals = {
+    chapterFindFirst: prisma.chapter.findFirst,
+    checkpointUpsert: prisma.chapterArtifactSyncCheckpoint.upsert,
+    warn: console.warn,
+  };
+  const warnings = [];
+  prisma.chapter.findFirst = async () => null;
+  prisma.chapterArtifactSyncCheckpoint.upsert = async () => {
+    throw new Error("checkpoint storage unavailable");
+  };
+  console.warn = (...args) => warnings.push(args);
+
+  try {
+    const result = await new ChapterTimelineFinalizationService().finalizeCurrentContent({
+      novelId: "novel-1",
+      chapterId: "chapter-3",
+      expectedContentRevision: 7,
+      content: "已过期正文",
+      sourceStage: "chapter_content_finalization",
+    });
+    assert.equal(result.syncMode, "degraded");
+    assert.equal(result.checkpointWritten, false);
+    assert.equal(warnings.length, 1);
+    assert.match(String(warnings[0][0]), /superseded checkpoint write failed/);
+  } finally {
+    prisma.chapter.findFirst = originals.chapterFindFirst;
+    prisma.chapterArtifactSyncCheckpoint.upsert = originals.checkpointUpsert;
+    console.warn = originals.warn;
   }
 });
