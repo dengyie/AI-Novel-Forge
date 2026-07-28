@@ -8,6 +8,8 @@ import type {
   TimelineIssue,
 } from "@ai-novel/shared/types/timeline";
 import { prisma } from "../../db/prisma";
+import type { ChapterProjectionOwner } from "../../services/novel/runtime/projections";
+import { ChapterProjectionRevisionGuard } from "../../services/novel/runtime/projections";
 
 function parseJsonArray(value: string | null | undefined): string[] {
   if (!value) {
@@ -214,9 +216,205 @@ export interface TimelineRepository {
   markHooksAddressed(input: { hookIds: string[]; chapterId: string; chapterIndex: number; resolved?: boolean }): Promise<void>;
   expireOverdueImmediateHooks(input: { novelId: string; chapterId: string; chapterIndex: number }): Promise<void>;
   saveCheckReport(report: Omit<TimelineCheckReport, "id" | "createdAt">): Promise<TimelineCheckReport>;
+  commitAutomaticChapterTimeline?(input: AutomaticChapterTimelineCommit): Promise<StoryTimelineEvent[]>;
+  commitDegradedChapterTimeline?(input: DegradedChapterTimelineCommit): Promise<void>;
+}
+
+interface TimelineHookWrite {
+  novelId: string;
+  createdInChapterId: string;
+  createdInChapterIndex: number;
+  expectedResolveByChapterIndex?: number | null;
+  title: string;
+  description: string;
+  priority: TimelineHook["priority"];
+  resolveMode?: TimelineHookResolveMode;
+  blocking?: boolean;
+  relatedEventIndexes?: number[];
+  participantIds?: string[];
+}
+
+export interface AutomaticChapterTimelineCommit {
+  owner: ChapterProjectionOwner;
+  events: Array<Omit<StoryTimelineEvent, "id" | "createdAt" | "updatedAt">>;
+  anchor: Omit<ChapterTimeAnchor, "id" | "createdAt" | "updatedAt" | "endedWithEventIds">;
+  hooks: TimelineHookWrite[];
+  addressedHookIds: string[];
+  resolvedHookIds: string[];
+  checkReport: Omit<TimelineCheckReport, "id" | "createdAt">;
+}
+
+export interface DegradedChapterTimelineCommit {
+  owner: ChapterProjectionOwner;
+  anchor: Omit<ChapterTimeAnchor, "id" | "createdAt" | "updatedAt">;
+  expireOverdueImmediateHooks: boolean;
 }
 
 export class PrismaTimelineRepository implements TimelineRepository {
+  async commitAutomaticChapterTimeline(input: AutomaticChapterTimelineCommit): Promise<StoryTimelineEvent[]> {
+    return prisma.$transaction(async (tx) => {
+      await new ChapterProjectionRevisionGuard(tx).assertCurrent(input.owner);
+
+      await tx.storyTimelineEvent.deleteMany({
+        where: {
+          novelId: input.owner.novelId,
+          chapterId: input.owner.chapterId,
+          source: "chapter_extraction",
+        },
+      });
+      await tx.timelineHook.deleteMany({
+        where: {
+          novelId: input.owner.novelId,
+          createdInChapterId: input.owner.chapterId,
+          source: "chapter_extraction",
+        },
+      });
+      await tx.timelineHook.updateMany({
+        where: {
+          novelId: input.owner.novelId,
+          source: "chapter_extraction",
+          resolvedInChapterId: input.owner.chapterId,
+        },
+        data: {
+          status: "open",
+          resolvedInChapterId: null,
+          resolvedInChapterIndex: null,
+        },
+      });
+
+      const savedEvents: StoryTimelineEvent[] = [];
+      for (const event of input.events) {
+        const row = await tx.storyTimelineEvent.create({
+          data: timelineEventCreateData(event),
+        });
+        savedEvents.push(mapTimelineEvent(row));
+      }
+
+      const existingAnchor = await tx.chapterTimeAnchor.findUnique({
+        where: {
+          novelId_chapterId: {
+            novelId: input.owner.novelId,
+            chapterId: input.owner.chapterId,
+          },
+        },
+        select: { source: true },
+      });
+      if (!existingAnchor || existingAnchor.source === "chapter_extraction") {
+        const anchorData = chapterTimeAnchorData({
+          ...input.anchor,
+          endedWithEventIds: savedEvents.map((event) => event.id),
+        });
+        await tx.chapterTimeAnchor.upsert({
+          where: {
+            novelId_chapterId: {
+              novelId: input.owner.novelId,
+              chapterId: input.owner.chapterId,
+            },
+          },
+          create: {
+            novelId: input.owner.novelId,
+            chapterId: input.owner.chapterId,
+            source: "chapter_extraction",
+            ...anchorData,
+          },
+          update: { source: "chapter_extraction", ...anchorData },
+        });
+      }
+
+      await markAutomaticHooksAddressed(tx, {
+        hookIds: input.addressedHookIds,
+        chapterId: input.owner.chapterId,
+        chapterIndex: input.anchor.chapterIndex,
+        resolved: false,
+      });
+      await markAutomaticHooksAddressed(tx, {
+        hookIds: input.resolvedHookIds,
+        chapterId: input.owner.chapterId,
+        chapterIndex: input.anchor.chapterIndex,
+        resolved: true,
+      });
+      if (input.hooks.length > 0) {
+        await tx.timelineHook.createMany({
+          data: input.hooks.map((hook) => ({
+            novelId: hook.novelId,
+            createdInChapterId: hook.createdInChapterId,
+            createdInChapterIndex: hook.createdInChapterIndex,
+            expectedResolveByChapterIndex: hook.expectedResolveByChapterIndex ?? deriveHookDeadline(
+              hook.resolveMode ?? "long_arc",
+              hook.createdInChapterIndex,
+            ),
+            resolveMode: hook.resolveMode ?? "long_arc",
+            blocking: hook.blocking ?? (hook.resolveMode === "immediate"),
+            title: hook.title,
+            description: hook.description,
+            status: "open",
+            priority: hook.priority,
+            source: "chapter_extraction",
+            relatedEventIdsJson: stringifyJson(
+              (hook.relatedEventIndexes ?? []).map((index) => savedEvents[index]?.id).filter(Boolean),
+            ),
+            participantIdsJson: stringifyJson(hook.participantIds ?? []),
+          })),
+        });
+      }
+      await tx.timelineCheckReport.create({
+        data: {
+          novelId: input.checkReport.novelId,
+          chapterId: input.checkReport.chapterId,
+          chapterIndex: input.checkReport.chapterIndex,
+          status: input.checkReport.status,
+          score: input.checkReport.score,
+          issuesJson: stringifyJson(input.checkReport.issues),
+        },
+      });
+      return savedEvents;
+    });
+  }
+
+  async commitDegradedChapterTimeline(input: DegradedChapterTimelineCommit): Promise<void> {
+    await prisma.$transaction(async (tx) => {
+      await new ChapterProjectionRevisionGuard(tx).assertCurrent(input.owner);
+      const existingAnchor = await tx.chapterTimeAnchor.findUnique({
+        where: { novelId_chapterId: { novelId: input.owner.novelId, chapterId: input.owner.chapterId } },
+        select: { source: true },
+      });
+      if (!existingAnchor || existingAnchor.source === "chapter_extraction") {
+        const data = chapterTimeAnchorData(input.anchor);
+        await tx.chapterTimeAnchor.upsert({
+          where: { novelId_chapterId: { novelId: input.owner.novelId, chapterId: input.owner.chapterId } },
+          create: {
+            novelId: input.owner.novelId,
+            chapterId: input.owner.chapterId,
+            source: "chapter_extraction",
+            ...data,
+          },
+          update: { source: "chapter_extraction", ...data },
+        });
+      }
+      if (input.expireOverdueImmediateHooks) {
+        await tx.timelineHook.updateMany({
+          where: {
+            novelId: input.owner.novelId,
+            source: "chapter_extraction",
+            status: { in: ["open", "addressed"] },
+            blocking: true,
+            resolveMode: "immediate",
+            createdInChapterIndex: { lt: input.anchor.chapterIndex },
+            OR: [
+              { expectedResolveByChapterIndex: null },
+              { expectedResolveByChapterIndex: { lte: input.anchor.chapterIndex } },
+            ],
+          },
+          data: {
+            status: "expired",
+            resolvedInChapterId: input.owner.chapterId,
+            resolvedInChapterIndex: input.anchor.chapterIndex,
+          },
+        });
+      }
+    });
+  }
+
   async listEventsBeforeChapter(input: { novelId: string; chapterIndex: number; limit?: number }): Promise<StoryTimelineEvent[]> {
     const rows = await prisma.storyTimelineEvent.findMany({
       where: {
@@ -324,17 +522,7 @@ export class PrismaTimelineRepository implements TimelineRepository {
   }
 
   async upsertChapterTimeAnchor(input: Omit<ChapterTimeAnchor, "id" | "createdAt" | "updatedAt">): Promise<ChapterTimeAnchor> {
-    const data = {
-      chapterIndex: input.chapterIndex,
-      storyDayIndex: input.storyDayIndex ?? null,
-      timeLabel: input.timeLabel,
-      startsAfterIdsJson: stringifyJson(input.startsAfterEventIds),
-      plannedEventIdsJson: stringifyJson(input.plannedEventIds),
-      endedWithIdsJson: stringifyJson(input.endedWithEventIds),
-      previousHookIdsJson: stringifyJson(input.previousHookIds),
-      nextHookIdsJson: stringifyJson(input.nextHookIds),
-      forbiddenEventIdsJson: stringifyJson(input.forbiddenEventIds),
-    };
+    const data = chapterTimeAnchorData(input);
     const row = await prisma.chapterTimeAnchor.upsert({
       where: { novelId_chapterId: { novelId: input.novelId, chapterId: input.chapterId } },
       create: {
@@ -352,26 +540,7 @@ export class PrismaTimelineRepository implements TimelineRepository {
     for (const event of events) {
       const row = await prisma.storyTimelineEvent.create({
         data: {
-          novelId: event.novelId,
-          chapterId: event.chapterId ?? null,
-          chapterIndex: event.chapterIndex ?? null,
-          eventOrder: event.eventOrder,
-          storyDayIndex: event.storyDayIndex ?? null,
-          storyTimeLabel: event.storyTimeLabel ?? null,
-          title: event.title,
-          summary: event.summary,
-          type: event.type,
-          status: event.status,
-          visibility: event.visibility,
-          source: event.source,
-          participantIdsJson: stringifyJson(event.participantIds),
-          locationId: event.locationId ?? null,
-          factionIdsJson: stringifyJson(event.factionIds),
-          prerequisiteIdsJson: stringifyJson(event.prerequisiteEventIds),
-          consequenceIdsJson: stringifyJson(event.consequenceEventIds),
-          stateChangesJson: stringifyJson(event.stateChanges),
-          eventKey: event.eventKey ?? null,
-          confidence: event.confidence,
+          ...timelineEventCreateData(event),
         },
       });
       created.push(mapTimelineEvent(row));
@@ -464,6 +633,60 @@ export class PrismaTimelineRepository implements TimelineRepository {
     });
     return mapReport(row);
   }
+}
+
+function timelineEventCreateData(event: Omit<StoryTimelineEvent, "id" | "createdAt" | "updatedAt">) {
+  return {
+    novelId: event.novelId,
+    chapterId: event.chapterId ?? null,
+    chapterIndex: event.chapterIndex ?? null,
+    eventOrder: event.eventOrder,
+    storyDayIndex: event.storyDayIndex ?? null,
+    storyTimeLabel: event.storyTimeLabel ?? null,
+    title: event.title,
+    summary: event.summary,
+    type: event.type,
+    status: event.status,
+    visibility: event.visibility,
+    source: event.source,
+    participantIdsJson: stringifyJson(event.participantIds),
+    locationId: event.locationId ?? null,
+    factionIdsJson: stringifyJson(event.factionIds),
+    prerequisiteIdsJson: stringifyJson(event.prerequisiteEventIds),
+    consequenceIdsJson: stringifyJson(event.consequenceEventIds),
+    stateChangesJson: stringifyJson(event.stateChanges),
+    eventKey: event.eventKey ?? null,
+    confidence: event.confidence,
+  };
+}
+
+function chapterTimeAnchorData(input: Omit<ChapterTimeAnchor, "id" | "createdAt" | "updatedAt">) {
+  return {
+    chapterIndex: input.chapterIndex,
+    storyDayIndex: input.storyDayIndex ?? null,
+    timeLabel: input.timeLabel,
+    startsAfterIdsJson: stringifyJson(input.startsAfterEventIds),
+    plannedEventIdsJson: stringifyJson(input.plannedEventIds),
+    endedWithIdsJson: stringifyJson(input.endedWithEventIds),
+    previousHookIdsJson: stringifyJson(input.previousHookIds),
+    nextHookIdsJson: stringifyJson(input.nextHookIds),
+    forbiddenEventIdsJson: stringifyJson(input.forbiddenEventIds),
+  };
+}
+
+async function markAutomaticHooksAddressed(
+  tx: Parameters<Parameters<typeof prisma.$transaction>[0]>[0],
+  input: { hookIds: string[]; chapterId: string; chapterIndex: number; resolved: boolean },
+): Promise<void> {
+  if (input.hookIds.length === 0) return;
+  await tx.timelineHook.updateMany({
+    where: { id: { in: input.hookIds }, source: "chapter_extraction" },
+    data: {
+      status: input.resolved ? "resolved" : "addressed",
+      resolvedInChapterId: input.chapterId,
+      resolvedInChapterIndex: input.chapterIndex,
+    },
+  });
 }
 
 export const timelineRepository = new PrismaTimelineRepository();

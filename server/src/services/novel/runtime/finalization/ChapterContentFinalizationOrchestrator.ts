@@ -49,6 +49,7 @@ export class ChapterContentFinalizationOrchestrator {
     void this.deps.timelineProjection.schedule({
       novelId: input.novelId,
       chapterId: input.chapterId,
+      expectedContentRevision: committed.contentRevision,
       content: committed.content,
       contextPackage: input.contextPackage,
       request: input.request,
