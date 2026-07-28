@@ -79,7 +79,7 @@ test("running cancellation does not overwrite a concurrent succeeded terminal ro
   assert.deepEqual(outcome.updateManyInputs[0].where, {
     id: "job-race",
     status: "running",
-    leaseOwner: null,
+    finishedAt: null,
   });
   assert.equal(outcome.row.status, "succeeded");
   assert.equal(outcome.row.finishedAt, finishedAt);
@@ -87,7 +87,7 @@ test("running cancellation does not overwrite a concurrent succeeded terminal ro
   assert.equal(outcome.result.status, "succeeded");
 });
 
-test("running cancellation does not overwrite a job claimed by a new lease owner", async () => {
+test("running cancellation remains effective after lease takeover", async () => {
   const outcome = await runCancellationRace({
     initialLeaseOwner: "pipeline-owner-a",
     concurrentTransition: {
@@ -98,13 +98,9 @@ test("running cancellation does not overwrite a job claimed by a new lease owner
 
   assert.equal(outcome.unconditionalUpdateCount, 0);
   assert.equal(outcome.updateManyInputs.length, 1);
-  assert.deepEqual(outcome.updateManyInputs[0].where, {
-    id: "job-race",
-    status: "running",
-    leaseOwner: "pipeline-owner-a",
-  });
-  assert.equal(outcome.row.status, "running");
+  assert.equal(outcome.row.status, "cancelled");
   assert.equal(outcome.row.leaseOwner, "pipeline-owner-b");
-  assert.equal(outcome.row.cancelRequestedAt, null);
-  assert.equal(outcome.result.leaseOwner, "pipeline-owner-b");
+  assert.ok(outcome.row.cancelRequestedAt instanceof Date);
+  assert.equal(outcome.updateManyInputs[0].where.status, "running");
+  assert.equal("leaseOwner" in outcome.updateManyInputs[0].where, false);
 });
