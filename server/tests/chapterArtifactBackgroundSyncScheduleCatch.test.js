@@ -47,3 +47,19 @@ test("scheduleChapterSync swallows runChapterSyncNow rejection", async () => {
     service.runChapterSyncNow = original;
   }
 });
+
+test("identical content still reaches the revision-owned database checkpoint", async () => {
+  const {
+    ChapterArtifactBackgroundSyncService,
+  } = require("../dist/services/novel/runtime/ChapterArtifactBackgroundSyncService.js");
+  const service = new ChapterArtifactBackgroundSyncService();
+  let runs = 0;
+  service.runChapterSync = async () => {
+    runs += 1;
+  };
+
+  await service.runChapterSyncNow("novel-1", "chapter-1", "相同正文", { artifactSyncMode: "adaptive" });
+  await service.runChapterSyncNow("novel-1", "chapter-1", "相同正文", { artifactSyncMode: "adaptive" });
+
+  assert.equal(runs, 2);
+});

@@ -12,7 +12,6 @@ import type {
 } from "../novelCoreShared";
 import type { ContentProvenance } from "@ai-novel/shared/types/canonicalState";
 import { buildContentHash, ChapterArtifactDeltaService } from "./ChapterArtifactDeltaService";
-import { rememberCacheValue } from "./chapterRuntimePackageBuilders";
 import {
   ARTIFACT_CHECKPOINT_RUNNING_STALE_MS,
   reclaimStaleRunningArtifactCheckpointsThrottled,
@@ -40,9 +39,6 @@ const ARTIFACT_SYNC_RUNNING_STALE_MS = ARTIFACT_CHECKPOINT_RUNNING_STALE_MS;
 
 export class ChapterArtifactBackgroundSyncService {
   private readonly artifactDeltaService = new ChapterArtifactDeltaService();
-  private readonly activeSyncKeys = new Set<string>();
-  // 声明为 Promise<string> | string 以复用 rememberCacheValue（80 条 FIFO cap）
-  private readonly latestSyncedContentHashByChapter = new Map<string, Promise<string> | string>();
 
   scheduleChapterSync(
     novelId: string,
@@ -84,19 +80,8 @@ export class ChapterArtifactBackgroundSyncService {
   ): Promise<void> {
     const artifactSyncMode = options.artifactSyncMode ?? DEFAULT_ARTIFACT_SYNC_MODE;
     const contentHash = buildContentHash(content);
-    const chapterKey = `${novelId}:${chapterId}:${artifactSyncMode}`;
-    const syncKey = `${chapterKey}:${contentHash}`;
-    if (
-      this.activeSyncKeys.has(syncKey)
-      || this.latestSyncedContentHashByChapter.get(chapterKey) === contentHash
-    ) {
-      return;
-    }
-    this.activeSyncKeys.add(syncKey);
     try {
       await this.runChapterSync(novelId, chapterId, content, artifactSyncMode, contentHash, options);
-      // 走 rememberCacheValue 的 FIFO cap（80 条），避免长跑进程里 key 随章节×模式无限累积
-      rememberCacheValue(this.latestSyncedContentHashByChapter, chapterKey, contentHash);
     } catch (error) {
       console.warn("[chapter-artifact-background-sync] background sync failed", {
         novelId,
@@ -107,8 +92,6 @@ export class ChapterArtifactBackgroundSyncService {
       // 必须 rethrow：awaitArtifactDelta:true 调用方（finalization / pipeline）依赖失败信号；
       // scheduleChapterSync 用 void 吞掉 rejection，fire-and-forget 语义不变。
       throw error;
-    } finally {
-      this.activeSyncKeys.delete(syncKey);
     }
   }
 

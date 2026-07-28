@@ -109,7 +109,7 @@ test("timeline extraction for revision N cannot commit after chapter advances to
   });
   prisma.$transaction = async (callback) => callback({
     $executeRaw: async () => (contentRevision === 7 ? 1 : 0),
-    chapter: { findFirst: chapterLookup },
+    chapter: { findFirst: async () => ({ id: "chapter-3" }) },
     storyTimelineEvent: {
       create: eventCreate,
       deleteMany: async () => {

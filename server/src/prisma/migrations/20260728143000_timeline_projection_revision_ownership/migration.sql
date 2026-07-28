@@ -16,7 +16,7 @@ ALTER TABLE "ChapterArtifactSyncCheckpoint"
 
 DROP INDEX IF EXISTS "ChapterArtifactSyncCheckpoint_novelId_chapterId_contentHash_artifactType_syncMode_key";
 
-CREATE UNIQUE INDEX IF NOT EXISTS "ChapterArtifactSyncCheckpoint_novelId_chapterId_contentHash_artifactType_syncMode_key"
+CREATE UNIQUE INDEX IF NOT EXISTS "ChapterArtifactSyncCheckpoint_owner_revision_key"
   ON "ChapterArtifactSyncCheckpoint"("novelId", "chapterId", "contentHash", "artifactType", "syncMode", "contentRevision");
 
 CREATE INDEX IF NOT EXISTS "TimelineHook_novelId_createdInChapterId_source_idx"
