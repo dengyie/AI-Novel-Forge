@@ -14,7 +14,10 @@ import {
   sanitizeWriterContextBlocks,
 } from "../../prompting/prompts/novel/chapterLayeredContext";
 import { chapterWriterPrompt } from "../../prompting/prompts/novel/chapterWriter.prompts";
-import { NovelContinuationService } from "./NovelContinuationService";
+import {
+  NovelContinuationService,
+  type ContinuationSimilarityDebt,
+} from "./NovelContinuationService";
 import { prisma } from "../../db/prisma";
 import { assertChapterContentNotEmpty } from "./runtime/chapterEmptyContentError";
 import { buildChapterChineseProseGateError } from "./runtime/chapterChineseProseGateError";
@@ -58,6 +61,13 @@ interface ChapterRef {
 }
 
 type ContinuationPack = Awaited<ReturnType<NovelContinuationService["buildChapterContextPack"]>>;
+
+interface ChapterLengthDebt {
+  targetWordCount: number;
+  minWordCount: number;
+  finalWordCount: number;
+  attempts: number;
+}
 
 interface ChapterGraphDeps {
   enforceOpeningDiversity: (
@@ -104,27 +114,30 @@ function getContinuationService(): NovelContinuationService {
 export class ChapterWritingGraph {
   constructor(private readonly deps: ChapterGraphDeps) {}
 
-  /**
-   * 长度欠账留债：合并写 chapter.riskFlags.chapterLengthDebt，
-   * 与 continuationUnresolvedHighSimilarity / qualityScorePersistFailed 同款模式。
-   * best-effort：失败只告警，不影响定稿主路径。
-   */
-  private async persistLengthDebtRiskFlag(
-    novelId: string,
-    chapterId: string,
-    chapterOrder: number,
-    lengthDebt: {
-      targetWordCount: number;
-      minWordCount: number;
-      finalWordCount: number;
-      attempts: number;
-    },
-  ): Promise<void> {
+  /** 仅在正文 CAS 成功后，把候选质量债投影到该次提交拥有的 revision。 */
+  private async persistCommittedDraftRiskFlags(input: {
+    novelId: string;
+    chapterId: string;
+    chapterOrder: number;
+    contentRevision: number;
+    lengthDebt?: ChapterLengthDebt;
+    continuationSimilarityDebt?: ContinuationSimilarityDebt;
+  }): Promise<void> {
+    if (!input.lengthDebt && !input.continuationSimilarityDebt) {
+      return;
+    }
     try {
       const existing = await prisma.chapter.findFirst({
-        where: { id: chapterId, novelId },
+        where: {
+          id: input.chapterId,
+          novelId: input.novelId,
+          contentRevision: input.contentRevision,
+        },
         select: { riskFlags: true },
       });
+      if (!existing) {
+        return;
+      }
       let parsed: Record<string, unknown> = {};
       if (existing?.riskFlags?.trim()) {
         try {
@@ -136,24 +149,41 @@ export class ChapterWritingGraph {
           parsed = {};
         }
       }
-      await prisma.chapter.update({
-        where: { id: chapterId },
+      await prisma.chapter.updateMany({
+        where: {
+          id: input.chapterId,
+          novelId: input.novelId,
+          contentRevision: input.contentRevision,
+        },
         data: {
           riskFlags: JSON.stringify({
             ...parsed,
-            chapterLengthDebt: {
-              at: new Date().toISOString(),
-              chapterOrder,
-              ...lengthDebt,
-            },
+            ...(input.continuationSimilarityDebt
+              ? {
+                  continuationUnresolvedHighSimilarity: {
+                    at: new Date().toISOString(),
+                    ...input.continuationSimilarityDebt,
+                  },
+                }
+              : {}),
+            ...(input.lengthDebt
+              ? {
+                  chapterLengthDebt: {
+                    at: new Date().toISOString(),
+                    chapterOrder: input.chapterOrder,
+                    ...input.lengthDebt,
+                  },
+                }
+              : {}),
           }),
         },
       });
     } catch (error) {
-      this.deps.logWarn("persist length-debt riskFlag failed", {
-        novelId,
-        chapterId,
-        chapterOrder,
+      this.deps.logWarn("persist committed draft riskFlags failed", {
+        novelId: input.novelId,
+        chapterId: input.chapterId,
+        chapterOrder: input.chapterOrder,
+        contentRevision: input.contentRevision,
         error: error instanceof Error ? error.message : String(error),
       });
     }
@@ -209,7 +239,7 @@ export class ChapterWritingGraph {
     content: string,
     options: ChapterGraphLLMOptions,
     continuationPack: ContinuationPack,
-  ): Promise<string> {
+  ): Promise<{ content: string; similarityDebt?: ContinuationSimilarityDebt }> {
     throwIfChapterGenerationAborted(options.signal, "章节生成已取消。");
     const openingGuard = await this.deps.enforceOpeningDiversity(
       novelId,
@@ -243,7 +273,10 @@ export class ChapterWritingGraph {
         maxSimilarity: Number(continuationGuard.maxSimilarity.toFixed(4)),
       });
     }
-    return continuationGuard.content;
+    return {
+      content: continuationGuard.content,
+      similarityDebt: continuationGuard.unresolvedSimilarityDebt,
+    };
   }
 
   private async enforceTargetLength(input: {
@@ -256,12 +289,7 @@ export class ChapterWritingGraph {
   }): Promise<{
     content: string;
     /** 仍低于 minWordCount 时的欠账记录（长度兜底未补齐） */
-    lengthDebt?: {
-      targetWordCount: number;
-      minWordCount: number;
-      finalWordCount: number;
-      attempts: number;
-    };
+    lengthDebt?: ChapterLengthDebt;
   }> {
     throwIfChapterGenerationAborted(input.options.signal, "章节生成已取消。");
     const writeContext = input.contextPackage.chapterWriteContext;
@@ -576,24 +604,18 @@ export class ChapterWritingGraph {
           novelId: input.novelId,
           novelTitle: input.novelTitle,
           chapter: input.chapter,
-          content: normalized,
+          content: normalized.content,
           contextPackage,
           options: input.options,
         });
         if (lengthAdjusted.lengthDebt) {
-          // 长度欠账：兜底续写仍未达标，logWarn + riskFlags 双写，让用户在债板可见
+          // 先记录日志；riskFlags 必须等正文 CAS 成功后再按 committed revision 投影。
           this.deps.logWarn("Chapter length debt recorded", {
             novelId: input.novelId,
             chapterId: input.chapter.id,
             chapterOrder: input.chapter.order,
             ...lengthAdjusted.lengthDebt,
           });
-          void this.persistLengthDebtRiskFlag(
-            input.novelId,
-            input.chapter.id,
-            input.chapter.order,
-            lengthAdjusted.lengthDebt,
-          );
         }
         const chineseGate = assessChineseProse(lengthAdjusted.content);
         if (!chineseGate.ok) {
@@ -630,6 +652,14 @@ export class ChapterWritingGraph {
             syncArtifacts: false,
           },
         );
+        await this.persistCommittedDraftRiskFlags({
+          novelId: input.novelId,
+          chapterId: input.chapter.id,
+          chapterOrder: input.chapter.order,
+          contentRevision: committedDraft.contentRevision,
+          lengthDebt: lengthAdjusted.lengthDebt,
+          continuationSimilarityDebt: normalized.similarityDebt,
+        });
         return {
           finalContent: safeContent,
           artifactsAlreadySynced: true,

@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const { prisma } = require("../dist/db/prisma.js");
 const { NovelContinuationService } = require("../dist/services/novel/NovelContinuationService.js");
 const { NovelReferenceService } = require("../dist/services/novel/NovelReferenceService.js");
+const promptRunner = require("../dist/prompting/core/promptRunner.js");
 
 test("continuation chapter pack prefers bound structured book analysis sections", async () => {
   const original = {
@@ -97,5 +98,55 @@ test("reference stage builder rethrows DB/lookup failures (fail-loud on the prom
     );
   } finally {
     prisma.novel.findUnique = original.novelFindUnique;
+  }
+});
+
+test("unresolved continuation similarity returns debt metadata without writing risk flags", async () => {
+  const originalRunTextPrompt = promptRunner.runTextPrompt;
+  const originalChapterFindFirst = prisma.chapter.findFirst;
+  const originalChapterUpdate = prisma.chapter.update;
+  let chapterWriteCalls = 0;
+  const repeatedSource = "夜雨敲打长街青石，沈砚握紧旧钥匙穿过钟楼阴影，追兵的脚步始终贴在身后。";
+
+  promptRunner.runTextPrompt = async () => ({ output: "" });
+  prisma.chapter.findFirst = async () => {
+    chapterWriteCalls += 1;
+    return { riskFlags: null };
+  };
+  prisma.chapter.update = async () => {
+    chapterWriteCalls += 1;
+    return {};
+  };
+
+  try {
+    const result = await new NovelContinuationService().rewriteIfTooSimilar({
+      novelId: "novel-1",
+      chapterId: "chapter-1",
+      chapterTitle: "第1章",
+      content: repeatedSource,
+      continuationPack: {
+        enabled: true,
+        sourceType: "novel",
+        sourceId: "source-1",
+        sourceTitle: "参考作品",
+        systemRule: "",
+        humanBlock: "",
+        antiCopyCorpus: [repeatedSource],
+      },
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(result.content, repeatedSource);
+    assert.equal(result.rewritten, false);
+    assert.deepEqual(result.unresolvedSimilarityDebt, {
+      chapterTitle: "第1章",
+      reason: "rewrite_empty_output",
+      maxSimilarity: 1,
+    });
+    assert.equal(chapterWriteCalls, 0);
+  } finally {
+    promptRunner.runTextPrompt = originalRunTextPrompt;
+    prisma.chapter.findFirst = originalChapterFindFirst;
+    prisma.chapter.update = originalChapterUpdate;
   }
 });
