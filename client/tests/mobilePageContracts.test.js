@@ -12,6 +12,7 @@ const css = readClientFile("src/index.css");
 const mobileSiteNavigation = readClientFile("src/components/layout/mobile/mobileSiteNavigation.ts");
 const novelEditView = readClientFile("src/pages/novels/components/NovelEditView.tsx");
 const homePage = readClientFile("src/pages/Home.tsx");
+const homeStatusStrip = readClientFile("src/pages/home/components/HomeStatusStrip.tsx");
 const taskCenterPage = readClientFile("src/pages/tasks/TaskCenterPage.tsx");
 const taskCenterFilterPanel = readClientFile("src/pages/tasks/components/TaskCenterFilterPanel.tsx");
 const taskCenterSummaryCards = readClientFile("src/pages/tasks/components/TaskCenterSummaryCards.tsx");
@@ -256,7 +257,9 @@ test("every routed page has a route-specific mobile CSS landing point", () => {
 });
 
 test("mobile home status metrics stay compact in a single four-column row", () => {
-  assert.match(homePage, /home-status-summary-grid/);
+  assert.match(homeStatusStrip, /home-status-summary-grid/);
+  assert.match(homeStatusStrip, /text-2xl/);
+  assert.match(homeStatusStrip, /cn\("p-4"/);
   assert.match(
     css,
     /mobile-route-home \.home-status-summary-grid[\s\S]+grid-template-columns: repeat\(4, minmax\(0, 1fr\)\);/,
@@ -269,13 +272,13 @@ test("mobile home status metrics stay compact in a single four-column row", () =
   );
   assert.match(
     css,
-    /mobile-route-home \.home-status-summary-grid h3[\s\S]+font-size: 1rem;/,
+    /mobile-route-home \.home-status-summary-grid \.text-2xl[\s\S]+font-size: 1rem;/,
     "home status metric values should be reduced for a four-column mobile row",
   );
   assert.match(
     css,
-    /mobile-route-home \.home-status-summary-grid > \.rounded-xl[\s\S]+box-shadow: none;/,
-    "home status cards should read as compact status partitions instead of heavy mobile cards",
+    /mobile-route-home \.home-status-summary-grid \.p-4[\s\S]+padding: 0.5rem;/,
+    "home status cards should use compact padding on phone width",
   );
 });
 

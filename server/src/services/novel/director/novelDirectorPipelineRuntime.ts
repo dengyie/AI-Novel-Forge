@@ -117,7 +117,12 @@ export class NovelDirectorPipelineRuntime {
       scope?: string | null;
       batchAlreadyStartedCount?: number;
     }) => Promise<void>;
+    inspectStepFacts?: typeof inspectWorkflowStepFacts;
   }) {}
+
+  private inspectStepFacts: typeof inspectWorkflowStepFacts = (module, context) => (
+    this.deps.inspectStepFacts?.(module, context) ?? inspectWorkflowStepFacts(module, context)
+  );
 
   async runPipeline(input: DirectorPipelineRunInput): Promise<void> {
     const safeStartPhase = await this.resolveSafePipelineStartPhase({
@@ -304,7 +309,7 @@ export class NovelDirectorPipelineRuntime {
     if (!isExecutableWorkflowStepModule(module)) {
       return false;
     }
-    const facts = await inspectWorkflowStepFacts(module, {
+    const facts = await this.inspectStepFacts(module, {
       taskId: input.taskId,
       novelId: input.novelId,
     });
@@ -386,7 +391,7 @@ export class NovelDirectorPipelineRuntime {
     // Otherwise runFromReady throws "缺少完整章节细化" after outline short-circuits.
     const detailModule = getDirectorStructuredOutlineStepModules().find((module) => isChapterDetailBundleModule(module));
     if (detailModule && isExecutableWorkflowStepModule(detailModule)) {
-      const facts = await inspectWorkflowStepFacts(detailModule, {
+      const facts = await this.inspectStepFacts(detailModule, {
         taskId: input.taskId,
         novelId: input.novelId,
       });

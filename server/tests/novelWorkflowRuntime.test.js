@@ -276,6 +276,9 @@ test("startup recovery initialization auto-resumes interrupted tasks (including 
       async resumePendingStyleTasks() {
         calls.push(["resume-style"]);
       },
+      async resumePendingAudiobookTasks() {
+        calls.push(["resume-audiobook"]);
+      },
     },
   );
 
@@ -287,5 +290,6 @@ test("startup recovery initialization auto-resumes interrupted tasks (including 
     ["resume-auto-director"],
     ["resume-pipeline"],
     ["resume-style"],
+    ["resume-audiobook"],
   ]);
 });

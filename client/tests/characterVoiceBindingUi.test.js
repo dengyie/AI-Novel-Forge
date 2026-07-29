@@ -44,10 +44,11 @@ test("CharacterVoiceEditor is the single configuration surface", () => {
   assert.match(editor, /export default function CharacterVoiceEditor/);
   assert.match(editor, /CHARACTER_VOICE_MODE_OPTIONS/);
   assert.match(editor, /MIMO_TTS_VOICE_CATALOG/);
-  assert.match(editor, /canPreviewCharacterVoice/);
+  assert.match(editor, /canGenerateCharacterVoicePreview/);
   assert.match(editor, /isCharacterVoiceFormDirty/);
   assert.match(editor, /未保存/);
-  assert.match(editor, /试听音色/);
+  assert.match(editor, /生成试听/);
+  assert.match(editor, /播放试听/);
   assert.match(editor, /保存音色/);
   assert.match(editor, /onSave/);
   assert.match(editor, /tryAutoPlayAudio/);
@@ -56,7 +57,7 @@ test("CharacterVoiceEditor is the single configuration surface", () => {
   assert.doesNotMatch(editor, /autoPlay/);
   assert.match(editor, /resolveLocalAudioSrc/);
   assert.match(editor, /createObjectUrlSlot/);
-  assert.match(editor, /本地试听/);
+  assert.match(editor, /本地听参考轨/);
   assert.match(editor, /配置方式/);
   assert.match(editor, /中文预置/);
   assert.match(editor, /英文预置/);
@@ -94,8 +95,12 @@ test("character workspace mounts CharacterVoiceEditor once as source of truth", 
 
 test("audiobook panel lists bound voices and autoplays preview via shared audio util", () => {
   const panel = read("src/pages/novels/components/NovelAudiobookPanel.tsx");
+  const readiness = read("src/pages/novels/components/AudiobookVoiceReadinessSection.tsx");
   assert.match(panel, /characterVoiceRows/);
-  assert.match(panel, /当前绑定/);
+  assert.match(panel, /AudiobookVoiceReadinessSection/);
+  assert.match(readiness, /角色就绪表/);
+  assert.match(readiness, /voiceDetailLabel/);
+  assert.match(readiness, /onPlayCharacter/);
   assert.match(panel, /kind: "character"/);
   assert.match(panel, /kind: "plan"/);
   assert.match(panel, /previewAudioRef/);

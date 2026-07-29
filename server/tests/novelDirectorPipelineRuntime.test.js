@@ -280,6 +280,16 @@ test("explicit chapter execution resume runs chapters even when auto approval pr
       },
       async markTaskRunning() {},
     },
+    async inspectStepFacts(module) {
+      return {
+        stepId: module.id,
+        ready: true,
+        completed: module.id === "volume.chapter_detail_bundle.generate",
+        blockers: [],
+        nextAction: null,
+        resumeFrom: null,
+      };
+    },
   });
 
   await runtime.runPipeline({
