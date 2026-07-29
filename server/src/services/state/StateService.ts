@@ -8,6 +8,10 @@ import {
   type StateServiceOptions,
 } from "./stateSnapshotExtraction";
 import { detectStateDiffConflicts } from "./stateConflictDetection";
+import {
+  ChapterProjectionRevisionGuard,
+  ChapterProjectionSupersededError,
+} from "../novel/runtime/projections";
 
 function clampStateScore(value: unknown): number | null {
   if (typeof value !== "number" || !Number.isFinite(value)) {
@@ -251,6 +255,7 @@ export class StateService {
   async persistExtractedChapterSnapshot(input: {
     novelId: string;
     chapterId: string;
+    expectedContentRevision?: number;
     extracted: SnapshotExtractionOutput;
     skipPayoffLedgerSync?: boolean;
   }) {
@@ -280,6 +285,7 @@ export class StateService {
       characters,
       previousSnapshot,
       extracted: input.extracted,
+      expectedContentRevision: input.expectedContentRevision,
       skipPayoffLedgerSync: input.skipPayoffLedgerSync,
     });
   }
@@ -310,6 +316,7 @@ export class StateService {
     characters: Array<{ id: string; name: string }>;
     previousSnapshot: Awaited<ReturnType<StateService["getLatestSnapshotBeforeChapter"]>>;
     extracted: SnapshotExtractionOutput;
+    expectedContentRevision?: number;
     skipPayoffLedgerSync?: boolean;
   }) {
     const characterMap = new Map<string, string>();
@@ -468,12 +475,24 @@ export class StateService {
       foreshadowStates: mergedForeshadowStates,
     });
     const summary = input.extracted.summary?.trim() || `第${input.chapterOrder}章状态快照`;
-    const existing = await prisma.storyStateSnapshot.findFirst({
-      where: { novelId: input.novelId, sourceChapterId: input.chapterId },
-      select: { id: true },
-    });
 
     const snapshotId = await prisma.$transaction(async (tx) => {
+      if (input.expectedContentRevision != null) {
+        await new ChapterProjectionRevisionGuard(tx).lockCurrentForWrite({
+          novelId: input.novelId,
+          chapterId: input.chapterId,
+          expectedContentRevision: input.expectedContentRevision,
+        });
+      }
+      const existing = await tx.storyStateSnapshot.findUnique({
+        where: {
+          novelId_sourceChapterId: {
+            novelId: input.novelId,
+            sourceChapterId: input.chapterId,
+          },
+        },
+        select: { id: true },
+      });
       const snapshot = existing
         ? await tx.storyStateSnapshot.update({
             where: { id: existing.id },
@@ -551,19 +570,39 @@ export class StateService {
         previousSnapshot: input.previousSnapshot,
         currentSnapshot: persistedSnapshot,
       });
-      await openConflictService.syncFromStateDiff({
-        novelId: input.novelId,
-        chapterId: input.chapterId,
-        chapterOrder: input.chapterOrder,
-        sourceSnapshotId: persistedSnapshot.id,
-        trackedConflictKeys: detected.trackedConflictKeys,
-        conflicts: detected.conflicts,
-      }).catch(() => null);
-      if (!input.skipPayoffLedgerSync) {
-        await payoffLedgerSyncService.syncLedger(input.novelId, {
+      try {
+        await openConflictService.syncFromStateDiff({
+          novelId: input.novelId,
+          chapterId: input.chapterId,
           chapterOrder: input.chapterOrder,
-          sourceChapterId: input.chapterId,
-        }).catch(() => null);
+          sourceSnapshotId: persistedSnapshot.id,
+          trackedConflictKeys: detected.trackedConflictKeys,
+          conflicts: detected.conflicts,
+          expectedContentRevision: input.expectedContentRevision,
+        });
+      } catch (error) {
+        if (error instanceof ChapterProjectionSupersededError) {
+          throw error;
+        }
+      }
+      if (!input.skipPayoffLedgerSync) {
+        try {
+          await payoffLedgerSyncService.syncLedger(input.novelId, {
+            chapterOrder: input.chapterOrder,
+            sourceChapterId: input.chapterId,
+            projectionOwner: input.expectedContentRevision == null
+              ? undefined
+              : {
+                  novelId: input.novelId,
+                  chapterId: input.chapterId,
+                  expectedContentRevision: input.expectedContentRevision,
+                },
+          });
+        } catch (error) {
+          if (error instanceof ChapterProjectionSupersededError) {
+            throw error;
+          }
+        }
       }
     }
 

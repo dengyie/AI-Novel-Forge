@@ -16,6 +16,7 @@ import {
   ARTIFACT_CHECKPOINT_RUNNING_STALE_MS,
   reclaimStaleRunningArtifactCheckpointsThrottled,
 } from "./ChapterArtifactSyncCheckpointHygiene";
+import { ChapterProjectionSupersededError } from "./projections";
 
 interface ChapterBackgroundSyncContext {
   chapterId: string;
@@ -188,6 +189,9 @@ export class ChapterArtifactBackgroundSyncService {
         sourceStage: "chapter_execution",
         metadata: { reason: error instanceof Error ? error.message : String(error) },
       });
+      if (error instanceof ChapterProjectionSupersededError) {
+        return;
+      }
       throw error;
     }
     await this.markCheckpoint({
@@ -208,29 +212,36 @@ export class ChapterArtifactBackgroundSyncService {
       artifactSyncMode,
       requiresFullReconcileFromDelta,
     });
-    if (shouldReconcile && !(await this.hasCompletedCheckpoint({
+    if (!shouldReconcile) return;
+    const payoffCheckpoint = {
       novelId,
       chapterId,
       contentHash,
       contentRevision: chapter.contentRevision,
       artifactType: "payoff_ledger_full_reconcile",
       syncMode: artifactSyncMode,
-    }))) {
+      sourceType: "chapter_background_sync",
+      sourceStage: "chapter_execution",
+    };
+    const payoffClaim = await this.claimCheckpoint({
+      ...payoffCheckpoint,
+      metadata: { reason: "payoff_ledger_full_reconcile_started" },
+    });
+    if (payoffClaim !== "claimed") return;
+    try {
       await this.runTrackedActivity(novelId, context, "payoff_ledger", async () => {
         await payoffLedgerSyncService.syncLedger(novelId, {
           chapterOrder: chapter.order,
           sourceChapterId: chapterId,
+          projectionOwner: {
+            novelId,
+            chapterId,
+            expectedContentRevision: chapter.contentRevision,
+          },
         });
       });
       await this.markCheckpoint({
-        novelId,
-        chapterId,
-        contentHash,
-        contentRevision: chapter.contentRevision,
-        artifactType: "payoff_ledger_full_reconcile",
-        syncMode: artifactSyncMode,
-        sourceType: "chapter_background_sync",
-        sourceStage: "chapter_execution",
+        ...payoffCheckpoint,
         metadata: {
           trigger: this.describePayoffReconcileTrigger({
             chapterOrder: chapter.order,
@@ -240,6 +251,13 @@ export class ChapterArtifactBackgroundSyncService {
           }),
         },
       });
+    } catch (error) {
+      await this.markCheckpointFailed({
+        ...payoffCheckpoint,
+        metadata: { reason: error instanceof Error ? error.message : String(error) },
+      });
+      if (error instanceof ChapterProjectionSupersededError) return;
+      throw error;
     }
   }
 

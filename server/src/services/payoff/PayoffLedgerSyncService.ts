@@ -1,7 +1,6 @@
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
 import type { AuditReport, OpenConflict, PayoffLedgerResponse } from "@ai-novel/shared/types/novel";
 import type {
-  PayoffLedgerItem,
   PayoffLedgerSourceRef,
   PayoffLedgerStatus,
 } from "@ai-novel/shared/types/payoffLedger";
@@ -20,6 +19,7 @@ import {
   isTerminalPayoffStatus,
   mapPayoffLedgerRow,
   resolvePayoffLedgerSyncLedgerKey,
+  safeParseJson,
   sanitizePayoffLedgerSyncItem,
   serializeLedgerJson,
 } from "./payoffLedgerShared";
@@ -34,6 +34,15 @@ import {
   createNovelChapterReferenceLookup,
   normalizePayoffLedgerPromptChapterRefs,
 } from "./payoffLedgerChapterRefs";
+import {
+  ChapterProjectionRevisionGuard,
+  ChapterProjectionSupersededError,
+  type ChapterProjectionOwner,
+} from "../novel/runtime/projections";
+import {
+  extendStalePendingPayoffWindows,
+  syncPayoffLedgerOpenConflicts,
+} from "./sync";
 
 interface PayoffLedgerSyncOptions {
   provider?: LLMProvider;
@@ -41,6 +50,7 @@ interface PayoffLedgerSyncOptions {
   temperature?: number;
   chapterOrder?: number | null;
   sourceChapterId?: string | null;
+  projectionOwner?: ChapterProjectionOwner;
 }
 
 interface PayoffLedgerReadOptions extends PayoffLedgerSyncOptions {
@@ -50,17 +60,6 @@ interface PayoffLedgerReadOptions extends PayoffLedgerSyncOptions {
 function compactText(value: string | null | undefined, fallback = "无"): string {
   const normalized = String(value ?? "").replace(/\s+/g, " ").trim();
   return normalized || fallback;
-}
-
-function safeParseJson<T>(raw: string | null | undefined, fallback: T): T {
-  if (!raw?.trim()) {
-    return fallback;
-  }
-  try {
-    return JSON.parse(raw) as T;
-  } catch {
-    return fallback;
-  }
 }
 
 function normalizeConflict(row: {
@@ -159,59 +158,6 @@ export class PayoffLedgerSyncService {
       include: {
         setupChapter: { select: { order: true } },
       },
-    });
-  }
-
-  /**
-   * 全表扫描：对 DB 里所有"有窗口但已过当前章"的 pending_payoff 跑 applyGraceExtension 顺延窗口。
-   * 不依赖 LLM 本次是否重新输出该项——解决"被 LLM 遗忘的旧伏笔（窗口已过却不被顺延）"死循环。
-   * applyGraceExtension 内部已封顶 3 次，超限项不再变化、自然进入 overdue。
-   */
-  private async extendStalePendingWindows(novelId: string, chapterOrder: number | null): Promise<void> {
-    if (typeof chapterOrder !== "number" || !Number.isFinite(chapterOrder)) {
-      return;
-    }
-    const rows = await this.loadLedgerRows(novelId);
-    const now = new Date();
-    await prisma.$transaction(async (tx) => {
-      for (const row of rows) {
-        if (row.currentStatus !== "pending_payoff") {
-          continue;
-        }
-        if (typeof row.targetEndChapterOrder !== "number" || row.targetEndChapterOrder >= chapterOrder) {
-          continue;
-        }
-        const riskSignals = safeParseJson<Array<{ code: string; severity: "low" | "medium" | "high" | "critical"; summary: string; stale?: boolean }>>(
-          row.riskSignalsJson,
-          [],
-        );
-        const extended = applyGraceExtension(
-          {
-            ledgerKey: row.ledgerKey,
-            title: row.title,
-            scopeType: row.scopeType,
-            currentStatus: row.currentStatus,
-            targetStartChapterOrder: row.targetStartChapterOrder,
-            targetEndChapterOrder: row.targetEndChapterOrder,
-            payoffChapterId: row.payoffChapterId,
-            riskSignals,
-            statusReason: row.statusReason,
-          },
-          chapterOrder,
-        );
-        if (extended.targetEndChapterOrder === row.targetEndChapterOrder) {
-          continue;
-        }
-        await tx.payoffLedgerItem.update({
-          where: { id: row.id },
-          data: {
-            targetStartChapterOrder: extended.targetStartChapterOrder ?? null,
-            targetEndChapterOrder: extended.targetEndChapterOrder ?? null,
-            riskSignalsJson: serializeLedgerJson(extended.riskSignals),
-            updatedAt: now,
-          },
-        });
-      }
     });
   }
 
@@ -389,75 +335,16 @@ export class PayoffLedgerSyncService {
     };
   }
 
-  private async syncLedgerOpenConflicts(
-    novelId: string,
-    items: PayoffLedgerItem[],
-    chapterOrder?: number | null,
-  ): Promise<void> {
-    const syntheticIssues = buildSyntheticPayoffIssues(items, chapterOrder);
-    const activeConflictKeys = syntheticIssues.map((issue) => `payoff:${issue.ledgerKey}:${issue.code}`);
-
-    await prisma.$transaction(async (tx) => {
-      await tx.openConflict.updateMany({
-        where: {
-          novelId,
-          sourceType: "payoff_ledger",
-          status: "open",
-          conflictKey: {
-            notIn: activeConflictKeys,
-          },
-        },
-        data: {
-          status: "resolved",
-        },
-      });
-
-      for (const issue of syntheticIssues) {
-        const ledgerItem = items.find((item) => item.ledgerKey === issue.ledgerKey);
-        const conflictKey = `payoff:${issue.ledgerKey}:${issue.code}`;
-        const data = {
-          chapterId: ledgerItem?.lastTouchedChapterId ?? ledgerItem?.setupChapterId ?? ledgerItem?.payoffChapterId ?? null,
-          sourceSnapshotId: ledgerItem?.lastSnapshotId ?? null,
-          sourceIssueId: null,
-          conflictType: issue.code,
-          title: `payoff/${issue.code}`,
-          summary: issue.description,
-          severity: issue.severity,
-          status: "open",
-          evidenceJson: JSON.stringify([issue.evidence]),
-          affectedCharacterIdsJson: JSON.stringify([]),
-          resolutionHint: issue.fixSuggestion,
-          lastSeenChapterOrder: ledgerItem?.lastTouchedChapterOrder ?? ledgerItem?.targetEndChapterOrder ?? null,
-        };
-        const updated = await tx.openConflict.updateMany({
-          where: {
-            novelId,
-            sourceType: "payoff_ledger",
-            conflictKey,
-          },
-          data,
-        });
-        if (updated.count === 0) {
-          await tx.openConflict.create({
-            data: {
-              novelId,
-              sourceType: "payoff_ledger",
-              conflictKey,
-              ...data,
-            },
-          });
-        }
-      }
-    });
-  }
-
   async getPayoffLedger(novelId: string, options: PayoffLedgerReadOptions = {}): Promise<PayoffLedgerResponse> {
     let rows = await this.loadLedgerRows(novelId);
     if (rows.length === 0 && options.syncIfMissing !== false) {
       try {
         const synced = await this.syncLedger(novelId, options);
         return synced;
-      } catch {
+      } catch (error) {
+        if (error instanceof ChapterProjectionSupersededError) {
+          throw error;
+        }
         rows = await this.loadLedgerRows(novelId);
       }
     }
@@ -532,6 +419,9 @@ export class PayoffLedgerSyncService {
       });
 
       await prisma.$transaction(async (tx) => {
+        if (options.projectionOwner) {
+          await new ChapterProjectionRevisionGuard(tx).lockCurrentForWrite(options.projectionOwner);
+        }
         for (const item of resolvedItems) {
           const previous = existingRows.find((row) => row.ledgerKey === item.ledgerKey);
           // 终态保护：previous 已是 paid_off/failed，LLM 重报不得自动重开为 active 状态。
@@ -678,28 +568,49 @@ export class PayoffLedgerSyncService {
         }
       });
 
-      await this.extendStalePendingWindows(novelId, chapterOrder);
+      await extendStalePendingPayoffWindows({
+        novelId,
+        chapterOrder,
+        projectionOwner: options.projectionOwner,
+      });
 
       const rows = await this.loadLedgerRows(novelId);
       const items = rows.map(mapPayoffLedgerRow);
-      await this.syncLedgerOpenConflicts(novelId, items, chapterOrder);
+      await syncPayoffLedgerOpenConflicts({
+        novelId,
+        items,
+        chapterOrder,
+        projectionOwner: options.projectionOwner,
+      });
       return buildPayoffLedgerResponse(items, chapterOrder);
     } catch (error) {
+      if (error instanceof ChapterProjectionSupersededError) {
+        throw error;
+      }
       if (existingRows.length > 0) {
-        await prisma.$transaction(async (tx) => {
-          for (const row of existingRows) {
-            const staleSignals = appendStaleRiskSignal(
-              safeParseJson(row.riskSignalsJson, [] as Array<{ code: string; severity: "low" | "medium" | "high" | "critical"; summary: string; stale?: boolean }>),
-              "伏笔账本同步失败，已保留上次成功结果。",
-            );
-            await tx.payoffLedgerItem.update({
-              where: { id: row.id },
-              data: {
-                riskSignalsJson: serializeLedgerJson(staleSignals),
-              },
-            });
+        try {
+          await prisma.$transaction(async (tx) => {
+            if (options.projectionOwner) {
+              await new ChapterProjectionRevisionGuard(tx).lockCurrentForWrite(options.projectionOwner);
+            }
+            for (const row of existingRows) {
+              const staleSignals = appendStaleRiskSignal(
+                safeParseJson(row.riskSignalsJson, [] as Array<{ code: string; severity: "low" | "medium" | "high" | "critical"; summary: string; stale?: boolean }>),
+                "伏笔账本同步失败，已保留上次成功结果。",
+              );
+              await tx.payoffLedgerItem.update({
+                where: { id: row.id },
+                data: {
+                  riskSignalsJson: serializeLedgerJson(staleSignals),
+                },
+              });
+            }
+          });
+        } catch (fallbackError) {
+          if (fallbackError instanceof ChapterProjectionSupersededError) {
+            throw fallbackError;
           }
-        }).catch(() => null);
+        }
         return buildPayoffLedgerResponse(existingRows.map(mapPayoffLedgerRow), options.chapterOrder);
       }
       throw error;

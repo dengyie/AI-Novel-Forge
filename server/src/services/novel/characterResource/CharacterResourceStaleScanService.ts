@@ -4,6 +4,8 @@ import {
   parseJsonArray,
   stringifyJson,
 } from "./characterResourceShared";
+import type { ChapterProjectionOwner } from "../runtime/projections";
+import { ChapterProjectionRevisionGuard } from "../runtime/projections";
 
 const DEFAULT_STALE_AFTER_CHAPTERS = 10;
 
@@ -17,6 +19,7 @@ export class CharacterResourceStaleScanService {
     chapterId: string;
     chapterOrder: number;
     staleAfterChapters?: number;
+    projectionOwner?: ChapterProjectionOwner;
   }): Promise<number> {
     const staleAfterChapters = input.staleAfterChapters ?? DEFAULT_STALE_AFTER_CHAPTERS;
     const rows = await prisma.characterResourceLedgerItem.findMany({
@@ -41,6 +44,9 @@ export class CharacterResourceStaleScanService {
 
     let markedCount = 0;
     await prisma.$transaction(async (tx) => {
+      if (input.projectionOwner) {
+        await new ChapterProjectionRevisionGuard(tx).lockCurrentForWrite(input.projectionOwner);
+      }
       for (const row of staleRows) {
         const existingSignals = parseJsonArray<CharacterResourceRiskSignal>(row.riskSignalsJson);
         const staleSignal: CharacterResourceRiskSignal = {

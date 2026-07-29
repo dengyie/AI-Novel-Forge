@@ -1,6 +1,9 @@
 import type { AuditReport } from "@ai-novel/shared/types/novel";
 import { prisma } from "../../db/prisma";
 import type { StateDiffConflictCandidate } from "./stateConflictDetection";
+import {
+  ChapterProjectionRevisionGuard,
+} from "../novel/runtime/projections";
 
 const AUDIT_SOURCE_TYPE = "audit_issue";
 const STATE_DIFF_SOURCE_TYPE = "state_diff";
@@ -201,10 +204,18 @@ export class OpenConflictService {
     sourceSnapshotId?: string | null;
     trackedConflictKeys: string[];
     conflicts: StateDiffConflictCandidate[];
+    expectedContentRevision?: number;
   }) {
     const activeKeys = input.conflicts.map((item) => item.conflictKey);
 
     await prisma.$transaction(async (tx) => {
+      if (input.expectedContentRevision != null) {
+        await new ChapterProjectionRevisionGuard(tx).lockCurrentForWrite({
+          novelId: input.novelId,
+          chapterId: input.chapterId,
+          expectedContentRevision: input.expectedContentRevision,
+        });
+      }
       if (input.trackedConflictKeys.length > 0) {
         await tx.openConflict.updateMany({
           where: {

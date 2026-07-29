@@ -1,5 +1,9 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { prisma } = require("../dist/db/prisma.js");
+const {
+  ChapterProjectionSupersededError,
+} = require("../dist/services/novel/runtime/projections/index.js");
 
 /**
  * scheduleChapterSync 必须 .catch fire-and-forget rejection：
@@ -62,4 +66,49 @@ test("identical content still reaches the revision-owned database checkpoint", a
   await service.runChapterSyncNow("novel-1", "chapter-1", "相同正文", { artifactSyncMode: "adaptive" });
 
   assert.equal(runs, 2);
+});
+
+test("background artifact supersession is recorded locally and does not escape", async () => {
+  const {
+    ChapterArtifactBackgroundSyncService,
+  } = require("../dist/services/novel/runtime/ChapterArtifactBackgroundSyncService.js");
+  const originalChapterFindFirst = prisma.chapter.findFirst;
+  const service = new ChapterArtifactBackgroundSyncService();
+  const calls = { failed: 0, succeeded: 0, reconcile: 0 };
+  prisma.chapter.findFirst = async () => ({
+    id: "chapter-1",
+    order: 1,
+    title: "第一章",
+    content: "旧正文",
+    contentRevision: 7,
+  });
+  service.hasCompletedCheckpoint = async () => false;
+  service.claimCheckpoint = async () => "claimed";
+  service.runTrackedActivity = async (_novelId, _context, _kind, run) => run();
+  service.artifactDeltaService = {
+    syncChapterArtifacts: async () => {
+      throw new ChapterProjectionSupersededError({
+        novelId: "novel-1",
+        chapterId: "chapter-1",
+        expectedContentRevision: 7,
+      });
+    },
+  };
+  service.markCheckpointFailed = async () => {
+    calls.failed += 1;
+  };
+  service.markCheckpoint = async () => {
+    calls.succeeded += 1;
+  };
+  service.shouldRunPayoffFullReconcile = async () => {
+    calls.reconcile += 1;
+    return false;
+  };
+
+  try {
+    await service.runChapterSyncNow("novel-1", "chapter-1", "旧正文");
+    assert.deepEqual(calls, { failed: 1, succeeded: 0, reconcile: 0 });
+  } finally {
+    prisma.chapter.findFirst = originalChapterFindFirst;
+  }
 });
