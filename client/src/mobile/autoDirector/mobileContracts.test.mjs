@@ -67,7 +67,7 @@ test("auto-director follow-up center uses mobile contracts for single-column non
   );
   assertContains(
     appLayout,
-    "hidden md:block",
+    "hidden h-full md:block",
     "project/workspace side navigation should not squeeze auto-director target pages at phone width",
   );
   assertContains(

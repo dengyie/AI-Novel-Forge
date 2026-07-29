@@ -1,5 +1,4 @@
 import { prisma } from "../../../../db/prisma";
-import { buildPipelineJobLeaseOwnedCasWhere } from "../../pipelineJobTerminalGuard";
 
 export class PipelineJobStateRepository {
   findById(jobId: string) {
@@ -24,11 +23,14 @@ export class PipelineJobStateRepository {
 
   requestRunningCancellation(input: {
     jobId: string;
-    leaseOwner: string | null;
     requestedAt: Date;
   }) {
     return prisma.generationJob.updateMany({
-      where: buildPipelineJobLeaseOwnedCasWhere(input.jobId, input.leaseOwner),
+      where: {
+        id: input.jobId,
+        status: "running",
+        finishedAt: null,
+      },
       data: {
         status: "cancelled",
         cancelRequestedAt: input.requestedAt,

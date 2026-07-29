@@ -79,7 +79,7 @@ export interface SyntheticPayoffIssue {
   fixSuggestion: string;
 }
 
-function safeParseJson<T>(raw: string | null | undefined, fallback: T): T {
+export function safeParseJson<T>(raw: string | null | undefined, fallback: T): T {
   if (!raw?.trim()) {
     return fallback;
   }

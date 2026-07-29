@@ -23,6 +23,7 @@ function createAssembledChapter() {
       id: "chapter-1",
       title: "第1章",
       order: 1,
+      contentRevision: 7,
       targetWordCount: 3000,
     },
     contextPackage: {
@@ -277,7 +278,7 @@ test("createChapterStream uses lightweight readiness without forcing execution c
     },
     chapterWritingGraph: {
       createChapterStream: async (input) => {
-        calls.push(["writer", input.options]);
+        calls.push(["writer", input.options, input.chapter.contentRevision]);
         return {
           stream: createEmptyStream(),
           onDone: async () => ({ finalContent: "正文草稿" }),
@@ -298,6 +299,7 @@ test("createChapterStream uses lightweight readiness without forcing execution c
   assert.notEqual(writerIndex, -1);
   assert.equal(ensureContractIndex, -1);
   assert.ok(assembleIndex < writerIndex);
+  assert.equal(calls[writerIndex][2], 7);
 });
 
 test("finalizeChapterContent runs acceptance gate once and defers timeline extraction", async () => {
@@ -732,6 +734,7 @@ test("createRepairStream escalates patch schema failures to a single heavy repai
   const originalBibleFindUnique = prisma.novelBible.findUnique;
   const originalChapterUpdate = prisma.chapter.update;
   const originalChapterUpdateMany = prisma.chapter.updateMany;
+  const originalTransaction = prisma.$transaction;
   const originalQualityReportFindFirst = prisma.qualityReport.findFirst;
   const originalRunStructuredPrompt = promptRunner.runStructuredPrompt;
   const originalStreamTextPrompt = promptRunner.streamTextPrompt;
@@ -775,10 +778,24 @@ test("createRepairStream escalates patch schema failures to a single heavy repai
   prisma.chapter.updateMany = async ({ where, data }) => {
     chapterUpdateManyCalls.push(data);
     if (where.contentRevision !== contentRevision) return { count: 0 };
-    persistedContent = data.content;
-    contentRevision += 1;
+    if (Object.prototype.hasOwnProperty.call(data, "content")) {
+      persistedContent = data.content;
+    }
+    if (data.contentRevision?.increment) {
+      contentRevision += data.contentRevision.increment;
+    }
     return { count: 1 };
   };
+  prisma.$transaction = async (callback) => callback({
+    chapter: {
+      update: prisma.chapter.update,
+      updateMany: prisma.chapter.updateMany,
+      findFirst: prisma.chapter.findFirst,
+    },
+    qualityReport: {
+      create: async () => ({}),
+    },
+  });
   promptRunner.runStructuredPrompt = async () => {
     throw new Error("[{\"origin\":\"string\",\"code\":\"too_small\",\"minimum\":6,\"inclusive\":true,\"path\":[\"patches\",0,\"targetExcerpt\"],\"message\":\"Too small: expected string to have >=6 characters\"}]");
   };
@@ -846,11 +863,11 @@ test("createRepairStream escalates patch schema failures to a single heavy repai
     });
 
     assert.equal(streamedContent, "全文修复片段");
-    // baseline evaluateOnly + candidate evaluateOnly + 采纳后正式 recheck
+    // baseline evaluateOnly + candidate evaluateOnly + 采纳后 revision 绑定 recheck
     assert.deepEqual(reviewCalls, [
       { content: "旧正文里有一段需要修复的内容。", evaluateOnly: true },
       { content: "全文修复后的正文", evaluateOnly: true },
-      { content: "全文修复后的正文", evaluateOnly: false },
+      { content: "全文修复后的正文", evaluateOnly: true },
     ]);
     assert.equal(syncCalls.length, 1);
     assert.equal(syncCalls[0][2], "全文修复后的正文");
@@ -861,7 +878,7 @@ test("createRepairStream escalates patch schema failures to a single heavy repai
     assert.deepEqual(resolvedIssues, [["issue-1"]]);
     assert.equal(chapterUpdateManyCalls[0].generationState, "repaired");
     assert.ok(chapterUpdateManyCalls[0].repairHistory?.includes("decision=adopt"));
-    assert.deepEqual(chapterUpdates.map((item) => item.generationState), ["approved"]);
+    assert.deepEqual(chapterUpdates.map((item) => item.generationState), []);
     assert.equal(frames.at(-1)?.status, "succeeded");
     assert.equal(frames.at(-1)?.phase, "completed");
   } finally {
@@ -870,6 +887,7 @@ test("createRepairStream escalates patch schema failures to a single heavy repai
     prisma.novelBible.findUnique = originalBibleFindUnique;
     prisma.chapter.update = originalChapterUpdate;
     prisma.chapter.updateMany = originalChapterUpdateMany;
+    prisma.$transaction = originalTransaction;
     prisma.qualityReport.findFirst = originalQualityReportFindFirst;
     promptRunner.runStructuredPrompt = originalRunStructuredPrompt;
     promptRunner.streamTextPrompt = originalStreamTextPrompt;

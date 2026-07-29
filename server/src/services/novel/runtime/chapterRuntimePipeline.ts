@@ -138,6 +138,7 @@ export async function runPipelineChapterWithRuntime(
       latestLengthControl = generatedDraft.lengthControl;
       if (!generatedDraft.artifactsAlreadySynced) {
         const committedDraft = await deps.saveDraftAndArtifacts(novelId, chapterId, content, "drafted", {
+          expectedContentRevision: contentRevision,
           scheduleBackgroundSync: false,
           artifactSyncMode,
           syncArtifacts: false,

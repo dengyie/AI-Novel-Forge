@@ -281,8 +281,15 @@ body {
   .mobile-route-help,
   .mobile-route-novels,
   .mobile-route-novel-create,
+  .mobile-route-novel-auto-director,
   .mobile-route-novel-preview,
   .mobile-route-drama,
+  .mobile-route-drama-project,
+  .mobile-route-comic,
+  .mobile-route-comic-project,
+  .mobile-route-audiobook,
+  .mobile-route-audiobook-voice-library,
+  .mobile-route-audiobook-project,
   .mobile-route-creative-hub,
   .mobile-route-chat-legacy,
   .mobile-route-book-analysis,
@@ -310,8 +317,15 @@ body {
   .mobile-route-help,
   .mobile-route-novels,
   .mobile-route-novel-create,
+  .mobile-route-novel-auto-director,
   .mobile-route-novel-preview,
   .mobile-route-drama,
+  .mobile-route-drama-project,
+  .mobile-route-comic,
+  .mobile-route-comic-project,
+  .mobile-route-audiobook,
+  .mobile-route-audiobook-voice-library,
+  .mobile-route-audiobook-project,
   .mobile-route-creative-hub,
   .mobile-route-chat-legacy,
   .mobile-route-book-analysis,
@@ -391,12 +405,12 @@ body {
     box-shadow: none;
   }
 
-  .mobile-route-home .home-status-summary-grid .p-6,
+  .mobile-route-home .home-status-summary-grid .p-4,
   .mobile-route-tasks .task-status-summary-grid .p-6 {
     padding: 0.5rem;
   }
 
-  .mobile-route-home .home-status-summary-grid h3,
+  .mobile-route-home .home-status-summary-grid .text-2xl,
   .mobile-route-tasks .task-status-summary-grid h3,
   .mobile-route-tasks .task-status-summary-grid .text-2xl {
     font-size: 1rem;

@@ -517,11 +517,33 @@ test("StoryTimelineService closes hooks by extractor hook ids and saves chapter 
     getLatestCheckReport: async () => null,
     saveCheckReport: async () => null,
     expireOverdueImmediateHooks: async () => {},
+    commitAutomaticChapterTimeline: async (input) => {
+      const savedEvents = await repo.saveExtractedEvents(input.events);
+      await repo.upsertChapterTimeAnchor({
+        ...input.anchor,
+        endedWithEventIds: savedEvents.map((event) => event.id),
+      });
+      await repo.markHooksAddressed({
+        hookIds: input.addressedHookIds,
+        chapterId: input.owner.chapterId,
+        chapterIndex: input.anchor.chapterIndex,
+        resolved: false,
+      });
+      await repo.markHooksAddressed({
+        hookIds: input.resolvedHookIds,
+        chapterId: input.owner.chapterId,
+        chapterIndex: input.anchor.chapterIndex,
+        resolved: true,
+      });
+      await repo.createHooks(input.hooks);
+      return savedEvents;
+    },
   };
   const service = new StoryTimelineService(repo);
   await service.commitChapterTimeline({
     novelId: "novel-1",
     chapterId: "chapter-8",
+    expectedContentRevision: 1,
     chapterIndex: 8,
     timeAnchor: { storyDayIndex: 3, label: "第三日夜" },
     timelineContext: baseContext({
@@ -560,6 +582,7 @@ test("StoryTimelineService closes hooks by extractor hook ids and saves chapter 
     extractedHooks: [],
     addressedHookIds: ["hook-addressed"],
     resolvedHookIds: ["hook-resolved"],
+    checkResult: { status: "passed", score: 1, issues: [] },
   });
 
   assert.equal(anchorCalls.length, 1);

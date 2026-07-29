@@ -258,6 +258,7 @@ test("runPipelineChapterWithRuntime skips review and repair when autoReview is d
             title: "第一章",
             order: 1,
             content: null,
+            contentRevision: 7,
             expectation: null,
           },
           contextPackage: {},
@@ -304,6 +305,7 @@ test("runPipelineChapterWithRuntime skips review and repair when autoReview is d
     content: "生成后的正文",
     generationState: "drafted",
     options: {
+      expectedContentRevision: 7,
       scheduleBackgroundSync: false,
       artifactSyncMode: "adaptive",
       syncArtifacts: false,
@@ -567,6 +569,7 @@ test("runPipelineChapterWithRuntime escalates patch failures to heavy repair and
               title: "第一章",
               order: 1,
               content: null,
+              contentRevision: 7,
               expectation: null,
             },
             contextPackage: {},
@@ -626,6 +629,7 @@ test("runPipelineChapterWithRuntime escalates patch failures to heavy repair and
       content: "生成后的正文需要承接。",
       generationState: "drafted",
       options: {
+        expectedContentRevision: 7,
         scheduleBackgroundSync: false,
         artifactSyncMode: "adaptive",
         syncArtifacts: false,
@@ -635,7 +639,7 @@ test("runPipelineChapterWithRuntime escalates patch failures to heavy repair and
       novelId: "novel-1",
       chapterId: "chapter-1",
       content: "rewritten chapter after safe full repair",
-      expectedContentRevision: 1,
+      expectedContentRevision: 8,
     }]);
   } finally {
     promptRunner.runStructuredPrompt = originalRunStructuredPrompt;
@@ -686,6 +690,7 @@ test("runPipelineChapterWithRuntime sends critical prose findings to repair and 
               title: "第一章",
               order: 1,
               content: null,
+              contentRevision: 7,
               expectation: null,
             },
             contextPackage: {},
@@ -1659,6 +1664,7 @@ test("runPipelineChapterWithRuntime clamps maxRetries to a single repair pass", 
               title: "第一章",
               order: 1,
               content: null,
+              contentRevision: 7,
               expectation: null,
             },
             contextPackage: {},
@@ -1711,6 +1717,7 @@ test("runPipelineChapterWithRuntime clamps maxRetries to a single repair pass", 
         content: "生成后的正文",
         generationState: "drafted",
         options: {
+          expectedContentRevision: 7,
           scheduleBackgroundSync: false,
           artifactSyncMode: "adaptive",
           syncArtifacts: false,
@@ -1720,8 +1727,6 @@ test("runPipelineChapterWithRuntime clamps maxRetries to a single repair pass", 
         content: "修后正文补足承接。",
         generationState: "repaired",
         options: {
-          scheduleBackgroundSync: false,
-          artifactSyncMode: "adaptive",
           syncArtifacts: false,
         },
       },
@@ -1955,7 +1960,7 @@ test("dual-gate wiring: ChapterPipelineRuntimeAdapter forwards options to merge"
   );
   assert.match(
     adapterSrc,
-    /this\.markChapterGenerationState\(\s*targetChapterId\s*,\s*generationState\s*,\s*expectedContentRevision\s*,\s*options\s*\)/,
+    /this\.markChapterGenerationState\(\s*targetChapterId\s*,\s*generationState\s*,\s*expectedContentRevision\s*,\s*options\s*,?\s*\)/,
   );
   // 禁止两参闭包丢弃 options（回归 guard）
   assert.doesNotMatch(
@@ -1971,7 +1976,7 @@ test("pipeline automatic repair commits through revision CAS instead of authorit
   );
   assert.match(
     pipelineSrc,
-    /commitRepairContent\(\s*novelId\s*,\s*chapterId\s*,\s*content\s*,\s*contentRevision\s*\)/,
+    /deps\.commitRepairContent\(\s*novelId\s*,\s*chapterId\s*,\s*content\s*,\s*contentRevision\s*,?\s*\)/,
   );
   assert.doesNotMatch(
     pipelineSrc,

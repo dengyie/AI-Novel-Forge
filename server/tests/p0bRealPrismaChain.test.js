@@ -41,6 +41,7 @@ async function main() {
   const { NovelDirectorService } = require(path.join(repoRoot, "server", "dist", "services", "novel", "director", "NovelDirectorService.js"));
   const { NovelWorldSliceService } = require(path.join(repoRoot, "server", "dist", "services", "novel", "storyWorldSlice", "NovelWorldSliceService.js"));
   const { NovelContinuationService } = require(path.join(repoRoot, "server", "dist", "services", "novel", "NovelContinuationService.js"));
+  const { buildChapterExecutionContractHash } = require(path.join(repoRoot, "server", "dist", "services", "planner", "plannerPersistence.js"));
   const { StyleBindingService } = require(path.join(repoRoot, "server", "dist", "services", "styleEngine", "StyleBindingService.js"));
   const { ragServices } = require(path.join(repoRoot, "server", "dist", "services", "rag", "index.js"));
   const { auditService } = require(path.join(repoRoot, "server", "dist", "services", "audit", "AuditService.js"));
@@ -207,6 +208,23 @@ async function main() {
       throw new Error("volumeId missing");
     }
 
+    await prisma.payoffLedgerItem.create({
+      data: {
+        novelId: novel.id,
+        ledgerKey: "zhao-gao-clue",
+        title: "赵高线索",
+        summary: "本卷持续铺垫赵高阴影，并在后续章节兑现身份真相。",
+        scopeType: "volume",
+        currentStatus: "pending_payoff",
+        targetStartChapterOrder: 1,
+        targetEndChapterOrder: 10,
+        firstSeenChapterOrder: 1,
+        lastTouchedChapterOrder: 1,
+        lastTouchedChapterId: chapter.id,
+        setupChapterId: chapter.id,
+      },
+    });
+
     const protagonist = await prisma.character.create({
       data: {
         novelId: novel.id,
@@ -291,6 +309,18 @@ async function main() {
         mustAdvanceJson: JSON.stringify(["建立宫廷压迫", "推进求生动机"]),
         mustPreserveJson: JSON.stringify(["身份反差", "历史阴影"]),
         hookTarget: "结尾留下更大的宫廷威胁",
+        rawPlanJson: JSON.stringify({
+          executionContractHash: buildChapterExecutionContractHash({
+            expectation: chapter.expectation,
+            targetWordCount: chapter.targetWordCount,
+            conflictLevel: chapter.conflictLevel,
+            revealLevel: chapter.revealLevel,
+            mustAvoid: chapter.mustAvoid,
+            taskSheet: chapter.taskSheet,
+            sceneCards: chapter.sceneCards,
+            hook: chapter.hook,
+          }),
+        }),
         scenes: {
           create: [{
             sortOrder: 1,
@@ -490,7 +520,7 @@ test("legacy project migration feeds shared review context through manual audit 
   assert.match(result.volumeMission ?? "", /压迫|求生|赵高/);
   assert.ok(result.structureObligations.length > 0);
   assert.ok(result.structureObligations.some((item) => item.startsWith("volume mission:")));
-  assert.ok(result.structureObligations.some((item) => item.startsWith("payoff directive:")));
+  assert.ok(result.structureObligations.some((item) => item.startsWith("pending payoff:")));
   assert.ok(result.participantNames.includes("刘雪婷"));
 });
 
@@ -504,7 +534,7 @@ test("volume workspace projects feed the same shared review context through manu
   assert.match(result.volumeMission ?? "", /压迫|求生|赵高/);
   assert.ok(result.structureObligations.length > 0);
   assert.ok(result.structureObligations.some((item) => item.startsWith("volume mission:")));
-  assert.ok(result.structureObligations.some((item) => item.startsWith("payoff directive:")));
+  assert.ok(result.structureObligations.some((item) => item.startsWith("pending payoff:")));
   assert.ok(result.participantNames.includes("刘雪婷"));
 });
 

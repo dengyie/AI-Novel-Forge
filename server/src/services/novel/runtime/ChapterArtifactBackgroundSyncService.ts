@@ -12,11 +12,11 @@ import type {
 } from "../novelCoreShared";
 import type { ContentProvenance } from "@ai-novel/shared/types/canonicalState";
 import { buildContentHash, ChapterArtifactDeltaService } from "./ChapterArtifactDeltaService";
-import { rememberCacheValue } from "./chapterRuntimePackageBuilders";
 import {
   ARTIFACT_CHECKPOINT_RUNNING_STALE_MS,
   reclaimStaleRunningArtifactCheckpointsThrottled,
 } from "./ChapterArtifactSyncCheckpointHygiene";
+import { ChapterProjectionSupersededError } from "./projections";
 
 interface ChapterBackgroundSyncContext {
   chapterId: string;
@@ -40,9 +40,6 @@ const ARTIFACT_SYNC_RUNNING_STALE_MS = ARTIFACT_CHECKPOINT_RUNNING_STALE_MS;
 
 export class ChapterArtifactBackgroundSyncService {
   private readonly artifactDeltaService = new ChapterArtifactDeltaService();
-  private readonly activeSyncKeys = new Set<string>();
-  // 声明为 Promise<string> | string 以复用 rememberCacheValue（80 条 FIFO cap）
-  private readonly latestSyncedContentHashByChapter = new Map<string, Promise<string> | string>();
 
   scheduleChapterSync(
     novelId: string,
@@ -84,19 +81,8 @@ export class ChapterArtifactBackgroundSyncService {
   ): Promise<void> {
     const artifactSyncMode = options.artifactSyncMode ?? DEFAULT_ARTIFACT_SYNC_MODE;
     const contentHash = buildContentHash(content);
-    const chapterKey = `${novelId}:${chapterId}:${artifactSyncMode}`;
-    const syncKey = `${chapterKey}:${contentHash}`;
-    if (
-      this.activeSyncKeys.has(syncKey)
-      || this.latestSyncedContentHashByChapter.get(chapterKey) === contentHash
-    ) {
-      return;
-    }
-    this.activeSyncKeys.add(syncKey);
     try {
       await this.runChapterSync(novelId, chapterId, content, artifactSyncMode, contentHash, options);
-      // 走 rememberCacheValue 的 FIFO cap（80 条），避免长跑进程里 key 随章节×模式无限累积
-      rememberCacheValue(this.latestSyncedContentHashByChapter, chapterKey, contentHash);
     } catch (error) {
       console.warn("[chapter-artifact-background-sync] background sync failed", {
         novelId,
@@ -107,8 +93,6 @@ export class ChapterArtifactBackgroundSyncService {
       // 必须 rethrow：awaitArtifactDelta:true 调用方（finalization / pipeline）依赖失败信号；
       // scheduleChapterSync 用 void 吞掉 rejection，fire-and-forget 语义不变。
       throw error;
-    } finally {
-      this.activeSyncKeys.delete(syncKey);
     }
   }
 
@@ -134,6 +118,7 @@ export class ChapterArtifactBackgroundSyncService {
       novelId,
       chapterId,
       contentHash,
+      contentRevision: chapter.contentRevision,
       artifactType: "artifact_delta",
       syncMode: artifactSyncMode,
     })) {
@@ -143,6 +128,7 @@ export class ChapterArtifactBackgroundSyncService {
       novelId,
       chapterId,
       contentHash,
+      contentRevision: chapter.contentRevision,
       artifactType: "artifact_delta",
       syncMode: artifactSyncMode,
       sourceType: "chapter_background_sync",
@@ -196,18 +182,23 @@ export class ChapterArtifactBackgroundSyncService {
         novelId,
         chapterId,
         contentHash,
+        contentRevision: chapter.contentRevision,
         artifactType: "artifact_delta",
         syncMode: artifactSyncMode,
         sourceType: "chapter_background_sync",
         sourceStage: "chapter_execution",
         metadata: { reason: error instanceof Error ? error.message : String(error) },
       });
+      if (error instanceof ChapterProjectionSupersededError) {
+        return;
+      }
       throw error;
     }
     await this.markCheckpoint({
       novelId,
       chapterId,
       contentHash,
+      contentRevision: chapter.contentRevision,
       artifactType: "artifact_delta",
       syncMode: artifactSyncMode,
       sourceType: "chapter_background_sync",
@@ -221,27 +212,36 @@ export class ChapterArtifactBackgroundSyncService {
       artifactSyncMode,
       requiresFullReconcileFromDelta,
     });
-    if (shouldReconcile && !(await this.hasCompletedCheckpoint({
+    if (!shouldReconcile) return;
+    const payoffCheckpoint = {
       novelId,
       chapterId,
       contentHash,
+      contentRevision: chapter.contentRevision,
       artifactType: "payoff_ledger_full_reconcile",
       syncMode: artifactSyncMode,
-    }))) {
+      sourceType: "chapter_background_sync",
+      sourceStage: "chapter_execution",
+    };
+    const payoffClaim = await this.claimCheckpoint({
+      ...payoffCheckpoint,
+      metadata: { reason: "payoff_ledger_full_reconcile_started" },
+    });
+    if (payoffClaim !== "claimed") return;
+    try {
       await this.runTrackedActivity(novelId, context, "payoff_ledger", async () => {
         await payoffLedgerSyncService.syncLedger(novelId, {
           chapterOrder: chapter.order,
           sourceChapterId: chapterId,
+          projectionOwner: {
+            novelId,
+            chapterId,
+            expectedContentRevision: chapter.contentRevision,
+          },
         });
       });
       await this.markCheckpoint({
-        novelId,
-        chapterId,
-        contentHash,
-        artifactType: "payoff_ledger_full_reconcile",
-        syncMode: artifactSyncMode,
-        sourceType: "chapter_background_sync",
-        sourceStage: "chapter_execution",
+        ...payoffCheckpoint,
         metadata: {
           trigger: this.describePayoffReconcileTrigger({
             chapterOrder: chapter.order,
@@ -251,6 +251,13 @@ export class ChapterArtifactBackgroundSyncService {
           }),
         },
       });
+    } catch (error) {
+      await this.markCheckpointFailed({
+        ...payoffCheckpoint,
+        metadata: { reason: error instanceof Error ? error.message : String(error) },
+      });
+      if (error instanceof ChapterProjectionSupersededError) return;
+      throw error;
     }
   }
 
@@ -321,6 +328,7 @@ export class ChapterArtifactBackgroundSyncService {
     novelId: string;
     chapterId: string;
     contentHash: string;
+    contentRevision: number;
     artifactType: string;
     syncMode: ArtifactSyncMode;
   }): Promise<boolean> {
@@ -334,6 +342,7 @@ export class ChapterArtifactBackgroundSyncService {
           novelId: input.novelId,
           chapterId: input.chapterId,
           contentHash: input.contentHash,
+          contentRevision: input.contentRevision,
           artifactType: input.artifactType,
           syncMode: input.syncMode,
         },
@@ -355,6 +364,7 @@ export class ChapterArtifactBackgroundSyncService {
             novelId: input.novelId,
             chapterId: input.chapterId,
             contentHash: input.contentHash,
+            contentRevision: input.contentRevision,
             artifactType: input.artifactType,
             syncMode: input.syncMode,
             status: "running",
@@ -378,6 +388,7 @@ export class ChapterArtifactBackgroundSyncService {
     novelId: string;
     chapterId: string;
     contentHash: string;
+    contentRevision: number;
     artifactType: string;
     syncMode: ArtifactSyncMode;
     sourceType?: string | null;
@@ -389,6 +400,7 @@ export class ChapterArtifactBackgroundSyncService {
         novelId: input.novelId,
         chapterId: input.chapterId,
         contentHash: input.contentHash,
+        contentRevision: input.contentRevision,
         artifactType: input.artifactType,
         syncMode: input.syncMode,
       },
@@ -400,6 +412,7 @@ export class ChapterArtifactBackgroundSyncService {
           novelId: input.novelId,
           chapterId: input.chapterId,
           contentHash: input.contentHash,
+          contentRevision: input.contentRevision,
           artifactType: input.artifactType,
           syncMode: input.syncMode,
           status: "running",
@@ -428,6 +441,7 @@ export class ChapterArtifactBackgroundSyncService {
             novelId: input.novelId,
             chapterId: input.chapterId,
             contentHash: input.contentHash,
+            contentRevision: input.contentRevision,
             artifactType: input.artifactType,
             syncMode: input.syncMode,
             status: "running",
@@ -448,6 +462,7 @@ export class ChapterArtifactBackgroundSyncService {
           novelId: input.novelId,
           chapterId: input.chapterId,
           contentHash: input.contentHash,
+          contentRevision: input.contentRevision,
           artifactType: input.artifactType,
           syncMode: input.syncMode,
           OR: [
@@ -471,6 +486,7 @@ export class ChapterArtifactBackgroundSyncService {
     novelId: string;
     chapterId: string;
     contentHash: string;
+    contentRevision: number;
     artifactType: string;
     syncMode: ArtifactSyncMode;
     sourceType?: string | null;
@@ -483,6 +499,7 @@ export class ChapterArtifactBackgroundSyncService {
           novelId: input.novelId,
           chapterId: input.chapterId,
           contentHash: input.contentHash,
+          contentRevision: input.contentRevision,
           artifactType: input.artifactType,
           syncMode: input.syncMode,
         },
@@ -491,6 +508,7 @@ export class ChapterArtifactBackgroundSyncService {
         novelId: input.novelId,
         chapterId: input.chapterId,
         contentHash: input.contentHash,
+        contentRevision: input.contentRevision,
         artifactType: input.artifactType,
         syncMode: input.syncMode,
         status: "succeeded",
@@ -535,6 +553,7 @@ export class ChapterArtifactBackgroundSyncService {
     novelId: string;
     chapterId: string;
     contentHash: string;
+    contentRevision: number;
     artifactType: string;
     syncMode: ArtifactSyncMode;
     sourceType?: string | null;
@@ -546,6 +565,7 @@ export class ChapterArtifactBackgroundSyncService {
         novelId: input.novelId,
         chapterId: input.chapterId,
         contentHash: input.contentHash,
+        contentRevision: input.contentRevision,
         artifactType: input.artifactType,
         syncMode: input.syncMode,
         status: "running",

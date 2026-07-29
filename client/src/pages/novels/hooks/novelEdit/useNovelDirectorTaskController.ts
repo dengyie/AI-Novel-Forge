@@ -12,8 +12,8 @@ import { useNovelWorkspaceQueries } from "./useNovelWorkspaceQueries";
 import { tabFromDirectorDisplayStage, tabFromDirectorProgress } from "../../novelWorkspaceNavigation";
 import { resolveChapterTitleWarning } from "@/lib/directorTaskNotice";
 import { resolveAutoExecutionScopeLabel } from "../../novelEditTakeover.shared";
-import { shouldPreserveRequestedDirectorTaskId } from "../../novelEditAutomationStatus";
 import { resolveCanonicalDirectorTask } from "../../automation/directorTaskSelection";
+import { reconcileDirectorTaskId } from "./directorTaskIdReconciliation";
 
 function takeoverDismissStorageKey(novelId: string): string {
   return `novel-edit:takeover-dismissed:${novelId}`;
@@ -116,26 +116,16 @@ export function useNovelDirectorTaskController(
   const actionTargetDirectorTaskId = visibleDirectorTask?.id ?? "";
   const selectedDirectorTaskId = visibleDirectorTask?.id ?? requestedDirectorTaskId;
   useEffect(() => {
-    if (!id || !activeAutoDirectorTaskQuery.isSuccess) {
-      return;
-    }
-    const canonicalDirectorTaskId = activeAutoDirectorTask?.id ?? "";
-    if (!canonicalDirectorTaskId && taskPanelOpen && directorTaskId) {
-      return;
-    }
-    if (directorTaskId && !requestedDirectorTaskQuery.isFetched) {
-      return;
-    }
-    if (shouldPreserveRequestedDirectorTaskId({
+    reconcileDirectorTaskId({
+      novelId: id,
+      activeTaskQuerySucceeded: activeAutoDirectorTaskQuery.isSuccess,
+      activeTaskId: activeAutoDirectorTask?.id,
       directorTaskId,
       requestedTask: requestedDirectorTask,
-    })) {
-      return;
-    }
-    if (directorTaskId === canonicalDirectorTaskId) {
-      return;
-    }
-    setDirectorTaskId(canonicalDirectorTaskId);
+      requestedTaskFetched: requestedDirectorTaskQuery.isFetched,
+      taskPanelOpen,
+      setDirectorTaskId,
+    });
   }, [
     activeAutoDirectorTask?.id,
     activeAutoDirectorTaskQuery.isSuccess,

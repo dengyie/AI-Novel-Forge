@@ -3,6 +3,10 @@ import type {
   StateVersionRecord,
 } from "@ai-novel/shared/types/canonicalState";
 import { prisma } from "../../../db/prisma";
+import {
+  ChapterProjectionRevisionGuard,
+  type ChapterProjectionOwner,
+} from "../runtime/projections";
 
 function parseStringArray(value: string | null | undefined): string[] {
   if (!value?.trim()) {
@@ -26,11 +30,15 @@ export interface CreateStateVersionInput {
   summary: string;
   acceptedProposalIds: string[];
   snapshot: CanonicalStateSnapshot;
+  projectionOwner?: ChapterProjectionOwner;
 }
 
 export class StateVersionLog {
   async createVersion(input: CreateStateVersionInput): Promise<StateVersionRecord> {
     const created = await prisma.$transaction(async (tx) => {
+      if (input.projectionOwner) {
+        await new ChapterProjectionRevisionGuard(tx).lockCurrentForWrite(input.projectionOwner);
+      }
       const latest = await tx.canonicalStateVersion.findFirst({
         where: { novelId: input.novelId },
         orderBy: { version: "desc" },

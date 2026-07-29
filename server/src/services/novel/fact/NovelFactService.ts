@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { prisma } from "../../../db/prisma";
+import { ChapterProjectionRevisionGuard } from "../runtime/projections";
 
 export type NovelFactCategory = "completed" | "revealed" | "state_changed";
 export type NovelFactSource = "auto" | "manual";
@@ -74,6 +75,11 @@ export class NovelFactService {
       normalizedItems.push({ ...item, text });
     }
     await prisma.$transaction(async (tx) => {
+      await new ChapterProjectionRevisionGuard(tx).lockCurrentForWrite({
+        novelId: input.novelId,
+        chapterId: input.chapterId,
+        expectedContentRevision: input.contentRevision,
+      });
       await tx.novelFactEntry.deleteMany({
         where: {
           novelId: input.novelId,

@@ -3,13 +3,13 @@ import { prisma } from "../../../db/prisma";
 import { withSqliteRetry } from "../../../db/sqliteRetry";
 import { ragServices } from "../../rag";
 import { briefSummary, extractFacts } from "../novelP0Utils";
-import { contentRevisionBumpData } from "../chapterContentCas";
 import { chapterStatePairAfterDraftSave } from "../chapterLifecycleState";
 import { chapterArtifactBackgroundSyncService } from "./ChapterArtifactBackgroundSyncService";
 import { assertChapterContentNotEmpty } from "./chapterEmptyContentError";
 import type { ArtifactSyncMode } from "../novelCoreShared";
 import type { ContentProvenance } from "@ai-novel/shared/types/canonicalState";
 import type { CommittedChapterContent } from "./content/ChapterContentCommitTypes";
+import { ChapterContentCommitService } from "./content/ChapterContentCommitService";
 
 export interface ChapterArtifactSyncOptions {
   scheduleBackgroundSync?: boolean;
@@ -23,53 +23,40 @@ export interface ChapterArtifactSyncOptions {
   contentProvenance?: ContentProvenance;
 }
 
+export interface ChapterDraftCommitOptions extends ChapterArtifactSyncOptions {
+  expectedContentRevision: number;
+}
+
 export class ChapterArtifactSyncService {
+  constructor(
+    private readonly contentCommitService: ChapterContentCommitService = new ChapterContentCommitService(),
+  ) {}
+
   async saveDraftAndArtifacts(
     novelId: string,
     chapterId: string,
     content: string,
     generationState: "drafted" | "repaired",
-    options: ChapterArtifactSyncOptions = {},
+    options: ChapterDraftCommitOptions,
   ): Promise<CommittedChapterContent> {
     const safeContent = assertChapterContentNotEmpty(content, {
       novelId,
       chapterId,
       source: "chapter_artifact_save",
     });
-    const saved = await withSqliteRetry(
-      () => prisma.chapter.update({
-        where: { id: chapterId },
-        data: {
-          content: safeContent,
-          ...chapterStatePairAfterDraftSave(generationState),
-          // 生成/定稿旁路写正文：系统权威写，不走 expected CAS，但仍 bump revision
-          // 以便随后的人工编辑能检测到「生成已覆盖」。
-          ...contentRevisionBumpData(),
-        },
-        select: {
-          novelId: true,
-          id: true,
-          content: true,
-          contentRevision: true,
-        },
-      }),
-      { label: "chapterArtifactSync.chapter.update" },
-    );
+    const committed = await this.contentCommitService.commit({
+      novelId,
+      chapterId,
+      content: safeContent,
+      expectedContentRevision: options.expectedContentRevision,
+      statePatch: chapterStatePairAfterDraftSave(generationState),
+      source: "writer_draft",
+    });
     if (options.syncArtifacts === false) {
-      return {
-        novelId: saved.novelId,
-        chapterId: saved.id,
-        content: saved.content ?? safeContent,
-        contentRevision: saved.contentRevision,
-      };
+      return committed;
     }
     await this.syncChapterArtifacts(novelId, chapterId, safeContent, options);
-    return {
-      novelId: saved.novelId,
-      chapterId: saved.id,
-      content: saved.content ?? safeContent,
-      contentRevision: saved.contentRevision,
-    };
+    return committed;
   }
 
   async syncChapterArtifacts(

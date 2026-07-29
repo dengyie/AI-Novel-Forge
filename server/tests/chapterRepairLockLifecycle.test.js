@@ -225,6 +225,7 @@ function installPrismaHappyPath() {
     bibleFindUnique: prisma.novelBible.findUnique,
     chapterUpdate: prisma.chapter.update,
     chapterUpdateMany: prisma.chapter.updateMany,
+    transaction: prisma.$transaction,
     qualityReportFindFirst: prisma.qualityReport.findFirst,
     runStructured: promptRunner.runStructuredPrompt,
     streamText: promptRunner.streamTextPrompt,
@@ -264,6 +265,18 @@ function installPrismaHappyPath() {
     contentRevision += 1;
     return { count: 1 };
   };
+  prisma.$transaction = async (callback) => callback({
+    chapter: {
+      update: prisma.chapter.update,
+      updateMany: async ({ where }) => ({
+        count: where.contentRevision === contentRevision ? 1 : 0,
+      }),
+      findFirst: async () => ({ contentRevision }),
+    },
+    qualityReport: {
+      create: async () => ({ id: "quality-report-1" }),
+    },
+  });
   // force heavy path so streamTextPrompt is used
   promptRunner.runStructuredPrompt = async () => {
     throw new Error("[{\"origin\":\"string\",\"code\":\"too_small\",\"minimum\":6,\"inclusive\":true,\"path\":[\"patches\",0,\"targetExcerpt\"],\"message\":\"Too small\"}]");
@@ -282,6 +295,7 @@ function installPrismaHappyPath() {
     prisma.novelBible.findUnique = originals.bibleFindUnique;
     prisma.chapter.update = originals.chapterUpdate;
     prisma.chapter.updateMany = originals.chapterUpdateMany;
+    prisma.$transaction = originals.transaction;
     prisma.qualityReport.findFirst = originals.qualityReportFindFirst;
     promptRunner.runStructuredPrompt = originals.runStructured;
     promptRunner.streamTextPrompt = originals.streamText;

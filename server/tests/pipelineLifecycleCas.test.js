@@ -13,6 +13,9 @@ const {
 const {
   recoverPipelineJob,
 } = require("../dist/services/novel/pipeline/recovery/PipelineJobRecoveryPolicy.js");
+const {
+  PIPELINE_LEASE_LOST_MESSAGE,
+} = require("../dist/services/novel/pipelineJobTerminalGuard.js");
 
 test("beginExecution uses status, cancellation, terminal and owner CAS guards", async () => {
   const originalUpdateMany = prisma.generationJob.updateMany;
@@ -274,6 +277,80 @@ test("failed settlement CAS miss closes a concurrent cancellation instead", asyn
     });
 
     assert.equal(failedCalls, 1);
+    assert.equal(cancelledCalls, 1);
+  } finally {
+    prisma.generationJob.findUnique = originalFindUnique;
+  }
+});
+
+test("lease-lost recovery settles a canonical cancellation owned by the same worker", async () => {
+  const originalFindUnique = prisma.generationJob.findUnique;
+  prisma.generationJob.findUnique = async () => ({
+    status: "cancelled",
+    cancelRequestedAt: new Date("2026-07-29T10:06:00.000Z"),
+  });
+  let cancelledCalls = 0;
+  const host = {
+    leaseOwner: "pipeline-owner-a",
+    settleJobCancelled: async () => {
+      cancelledCalls += 1;
+      return true;
+    },
+    stringifyPipelinePayload: (payload) => JSON.stringify(payload),
+  };
+
+  try {
+    await recoverPipelineJob({
+      error: new Error(PIPELINE_LEASE_LOST_MESSAGE),
+      host,
+      jobId: "job-remote-cancel",
+      novelId: "novel-1",
+      options: { startOrder: 1, endOrder: 1 },
+      runtimePayload: { jobTransportAutoRetryCount: 0 },
+      totalRetryCount: 0,
+      qualityAlertDetails: [],
+      replanAlertDetails: [],
+      genreBeatAlertDetails: [],
+      recoverableRepairDetails: [],
+    });
+
+    assert.equal(cancelledCalls, 1);
+  } finally {
+    prisma.generationJob.findUnique = originalFindUnique;
+  }
+});
+
+test("lease-lost recovery cannot settle cancellation after ownership moved", async () => {
+  const originalFindUnique = prisma.generationJob.findUnique;
+  prisma.generationJob.findUnique = async () => ({
+    status: "cancelled",
+    cancelRequestedAt: new Date("2026-07-29T10:07:00.000Z"),
+  });
+  let cancelledCalls = 0;
+  const host = {
+    leaseOwner: "pipeline-owner-old",
+    settleJobCancelled: async () => {
+      cancelledCalls += 1;
+      return false;
+    },
+    stringifyPipelinePayload: (payload) => JSON.stringify(payload),
+  };
+
+  try {
+    await recoverPipelineJob({
+      error: new Error(PIPELINE_LEASE_LOST_MESSAGE),
+      host,
+      jobId: "job-taken-over",
+      novelId: "novel-1",
+      options: { startOrder: 1, endOrder: 1 },
+      runtimePayload: { jobTransportAutoRetryCount: 0 },
+      totalRetryCount: 0,
+      qualityAlertDetails: [],
+      replanAlertDetails: [],
+      genreBeatAlertDetails: [],
+      recoverableRepairDetails: [],
+    });
+
     assert.equal(cancelledCalls, 1);
   } finally {
     prisma.generationJob.findUnique = originalFindUnique;

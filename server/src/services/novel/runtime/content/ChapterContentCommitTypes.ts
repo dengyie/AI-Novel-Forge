@@ -1,3 +1,9 @@
+import type { ChapterStatePairPatch } from "../../chapterLifecycleState";
+
+export type ChapterContentStatePatch = ChapterStatePairPatch & {
+  repairHistory?: string | null;
+};
+
 export interface CommittedChapterContent {
   novelId: string;
   chapterId: string;
@@ -10,8 +16,8 @@ export interface CommitChapterContentInput {
   chapterId: string;
   content: string;
   expectedContentRevision: number;
-  statePatch?: Record<string, unknown>;
-  source: "style_rewrite" | "repair_adopt" | "pipeline_repair";
+  statePatch?: ChapterContentStatePatch;
+  source: "style_rewrite" | "repair_adopt" | "pipeline_repair" | "writer_draft";
 }
 
 export interface ChapterContentCommitDatabase {

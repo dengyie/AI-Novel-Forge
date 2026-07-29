@@ -68,8 +68,8 @@ export class ChapterRuntimeCoordinator {
   private readonly pipelineAdapter: ChapterPipelineRuntimeAdapter;
 
   constructor(deps: ChapterRuntimeCoordinatorDeps = {}) {
-    const artifactSyncService = deps.artifactSyncService ?? new ChapterArtifactSyncService();
     const contentCommitService = new ChapterContentCommitService();
+    const artifactSyncService = deps.artifactSyncService ?? new ChapterArtifactSyncService(contentCommitService);
     const agentRuntime = this.getAgentRuntime(deps.agentRuntime);
     const assembler = deps.assembler ?? new GenerationContextAssembler();
     const chapterWritingGraph = deps.chapterWritingGraph ?? this.createDefaultChapterWritingGraph(artifactSyncService);

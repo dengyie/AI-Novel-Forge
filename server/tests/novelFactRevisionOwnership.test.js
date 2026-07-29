@@ -7,7 +7,12 @@ const { NovelFactService } = require("../dist/services/novel/fact/NovelFactServi
 test("new chapter revision supersedes older automatic facts and preserves manual facts", async () => {
   const originalTransaction = prisma.$transaction;
   const calls = [];
+  let currentContentRevision = 9;
   prisma.$transaction = async (callback) => callback({
+    $executeRaw: async (query) => {
+      calls.push(["revisionLock", query]);
+      return query.values.includes(currentContentRevision) ? 1 : 0;
+    },
     novelFactEntry: {
       deleteMany: async (input) => {
         calls.push(["deleteMany", input]);
@@ -32,7 +37,8 @@ test("new chapter revision supersedes older automatic facts and preserves manual
       ],
     });
 
-    assert.deepEqual(calls[0][1].where, {
+    assert.equal(calls[0][0], "revisionLock");
+    assert.deepEqual(calls[1][1].where, {
       novelId: "novel-1",
       source: "auto",
       OR: [
@@ -40,14 +46,14 @@ test("new chapter revision supersedes older automatic facts and preserves manual
         { chapterId: null, chapterOrder: 3 },
       ],
     });
-    assert.equal(calls.length, 2);
-    assert.equal(calls[1][0], "upsert");
-    assert.deepEqual(calls[1][1].update, {});
-    assert.equal(calls[1][1].create.chapterId, "chapter-3");
-    assert.equal(calls[1][1].create.contentRevision, 9);
-    assert.match(calls[1][1].create.idempotencyKey, /^[a-f0-9]{64}$/);
+    assert.equal(calls.length, 3);
+    assert.equal(calls[2][0], "upsert");
+    assert.deepEqual(calls[2][1].update, {});
+    assert.equal(calls[2][1].create.chapterId, "chapter-3");
+    assert.equal(calls[2][1].create.contentRevision, 9);
+    assert.match(calls[2][1].create.idempotencyKey, /^[a-f0-9]{64}$/);
 
-    const firstIdempotencyKey = calls[1][1].create.idempotencyKey;
+    const firstIdempotencyKey = calls[2][1].create.idempotencyKey;
     await new NovelFactService().writeChapterFacts({
       novelId: "novel-1",
       chapterId: "chapter-3",
@@ -55,8 +61,22 @@ test("new chapter revision supersedes older automatic facts and preserves manual
       contentRevision: 9,
       items: [{ text: "主角 已取得 钥匙", category: "completed" }],
     });
-    assert.equal(calls[3][0], "upsert");
-    assert.equal(calls[3][1].where.idempotencyKey, firstIdempotencyKey);
+    assert.equal(calls[5][0], "upsert");
+    assert.equal(calls[5][1].where.idempotencyKey, firstIdempotencyKey);
+
+    currentContentRevision = 10;
+    await assert.rejects(
+      new NovelFactService().writeChapterFacts({
+        novelId: "novel-1",
+        chapterId: "chapter-3",
+        chapterOrder: 3,
+        contentRevision: 9,
+        items: [{ text: "旧 revision 事实", category: "completed" }],
+      }),
+      { name: "ChapterProjectionSupersededError" },
+    );
+    assert.equal(calls.length, 7);
+    assert.equal(calls[6][0], "revisionLock");
   } finally {
     prisma.$transaction = originalTransaction;
   }

@@ -20,6 +20,10 @@ import {
   normalizeContentProvenance,
   resolveProposalSourceQuality,
 } from "./stateProposalSourceQuality";
+import {
+  ChapterProjectionRevisionGuard,
+  type ChapterProjectionOwner,
+} from "../runtime/projections";
 
 const AUTO_COMMIT_TYPES = new Set<StateChangeProposal["proposalType"]>([
   "event_record",
@@ -69,6 +73,7 @@ export interface StateCommitServiceInput extends ChapterFactExtractorInput {
   proposals?: StateChangeProposal[];
   skipFactExtraction?: boolean;
   contentProvenance?: ContentProvenance;
+  projectionOwner?: ChapterProjectionOwner;
 }
 
 export interface CommitExistingProposalsInput {
@@ -112,7 +117,7 @@ export class StateCommitService {
       input.novelId,
       this.validate(proposals),
     );
-    const persisted = await this.persistValidated(validation);
+    const persisted = await this.persistValidated(validation, input.projectionOwner);
 
     let versionRecord: StateVersionRecord | null = null;
     if (persisted.committed.length > 0) {
@@ -129,16 +134,24 @@ export class StateCommitService {
         summary: buildVersionSummary(input.chapterOrder, persisted.committed),
         acceptedProposalIds: persisted.committed.map((proposal) => proposal.id).filter((id): id is string => Boolean(id)),
         snapshot,
+        projectionOwner: input.projectionOwner,
       });
-      await prisma.stateChangeProposal.updateMany({
-        where: {
-          id: {
-            in: persisted.committed.map((proposal) => proposal.id).filter((id): id is string => Boolean(id)),
+      if (!versionRecord) {
+        throw new Error("state version record was not created");
+      }
+      const committedVersionId = versionRecord.id;
+      await prisma.$transaction(async (tx) => {
+        if (input.projectionOwner) {
+          await new ChapterProjectionRevisionGuard(tx).lockCurrentForWrite(input.projectionOwner);
+        }
+        await tx.stateChangeProposal.updateMany({
+          where: {
+            id: {
+              in: persisted.committed.map((proposal) => proposal.id).filter((id): id is string => Boolean(id)),
+            },
           },
-        },
-        data: {
-          committedVersionId: versionRecord.id,
-        },
+          data: { committedVersionId },
+        });
       });
     }
 
@@ -329,6 +342,7 @@ export class StateCommitService {
       pendingReview: StateChangeProposal[];
       rejected: StateChangeProposal[];
     },
+    projectionOwner?: ChapterProjectionOwner,
   ): Promise<{
     committed: StateChangeProposal[];
     pendingReview: StateChangeProposal[];
@@ -339,6 +353,9 @@ export class StateCommitService {
     const rejectedRows: PersistedProposalRow[] = [];
 
     await prisma.$transaction(async (tx) => {
+      if (projectionOwner) {
+        await new ChapterProjectionRevisionGuard(tx).lockCurrentForWrite(projectionOwner);
+      }
       for (const proposal of validation.accepted) {
         const created = await tx.stateChangeProposal.create({
           data: {

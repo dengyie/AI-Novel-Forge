@@ -15,6 +15,7 @@ export class ChapterTimelineProjectionService {
   async schedule(input: {
     novelId: string;
     chapterId: string;
+    expectedContentRevision: number;
     content: string;
     contextPackage: GenerationContextPackage;
     request: ChapterRuntimeRequestInput;
@@ -40,6 +41,7 @@ export class ChapterTimelineProjectionService {
     await this.finalizer.finalizeCurrentContent({
       novelId: input.novelId,
       chapterId: input.chapterId,
+      expectedContentRevision: input.expectedContentRevision,
       content: input.content,
       contextPackage: input.contextPackage,
       request,

@@ -43,17 +43,17 @@ function hookResolveModeRank(resolveMode: TimelineHookDraft["resolveMode"]): num
 }
 
 function mergeHookDrafts(
-  hooks: Array<TimelineHookDraft & { relatedEventIds: string[] }>,
-): Array<TimelineHookDraft & { relatedEventIds: string[] }> {
-  const merged = new Map<string, TimelineHookDraft & { relatedEventIds: string[] }>();
+  hooks: Array<TimelineHookDraft & { relatedEventIndexes: number[] }>,
+): Array<TimelineHookDraft & { relatedEventIndexes: number[] }> {
+  const merged = new Map<string, TimelineHookDraft & { relatedEventIndexes: number[] }>();
   for (const hook of hooks) {
-    const draft: TimelineHookDraft & { relatedEventIds: string[] } = {
+    const draft: TimelineHookDraft & { relatedEventIndexes: number[] } = {
       title: normalizeHookText(hook.title),
       description: normalizeHookText(hook.description),
       priority: hook.priority,
       resolveMode: hook.resolveMode ?? "long_arc",
       blocking: hook.blocking ?? false,
-      relatedEventIds: Array.from(new Set((hook.relatedEventIds ?? []).filter(Boolean))),
+      relatedEventIndexes: Array.from(new Set(hook.relatedEventIndexes ?? [])),
     };
     const key = `${draft.title}::${draft.description}`;
     const existing = merged.get(key);
@@ -61,9 +61,9 @@ function mergeHookDrafts(
       merged.set(key, draft);
       continue;
     }
-    existing.relatedEventIds = Array.from(new Set([
-      ...existing.relatedEventIds,
-      ...draft.relatedEventIds,
+    existing.relatedEventIndexes = Array.from(new Set([
+      ...existing.relatedEventIndexes,
+      ...draft.relatedEventIndexes,
     ]));
     if (draft.blocking) {
       existing.blocking = true;
@@ -133,6 +133,7 @@ export class StoryTimelineService {
   async commitChapterTimeline(input: {
     novelId: string;
     chapterId: string;
+    expectedContentRevision: number;
     chapterIndex: number;
     timeAnchor?: { storyDayIndex?: number | null; label?: string | null } | null;
     extractedEvents: ExtractedTimelineEvent[];
@@ -140,6 +141,7 @@ export class StoryTimelineService {
     addressedHookIds?: string[];
     resolvedHookIds?: string[];
     timelineContext: TimelineContextForChapter;
+    checkResult: TimelineCheckResult;
   }) {
     const occurredEventsInput = input.extractedEvents.filter((event) => event.occurred);
     const occurredEvents = occurredEventsInput.map((event, index) => ({
@@ -164,8 +166,7 @@ export class StoryTimelineService {
         eventKey: eventKey(event.title),
         confidence: event.confidence,
       }));
-    const savedEvents = await this.repo.saveExtractedEvents(occurredEvents);
-    await this.repo.upsertChapterTimeAnchor({
+    const anchor = {
       novelId: input.novelId,
       chapterId: input.chapterId,
       chapterIndex: input.chapterIndex,
@@ -175,25 +176,22 @@ export class StoryTimelineService {
         || `第 ${input.chapterIndex} 章`,
       startsAfterEventIds: resolvePreviousEventIds(input.timelineContext),
       plannedEventIds: resolvePlannedEventIds(input.timelineContext),
-      endedWithEventIds: savedEvents.map((event) => event.id),
       previousHookIds: uniqueHookIds((input.timelineContext.openHooks ?? []).map((hook) => hook.id), input.timelineContext),
       nextHookIds: [],
       forbiddenEventIds: resolveForbiddenEventIds(input.timelineContext),
-    } satisfies Omit<ChapterTimeAnchor, "id" | "createdAt" | "updatedAt">);
+    } satisfies Omit<ChapterTimeAnchor, "id" | "createdAt" | "updatedAt" | "endedWithEventIds">;
     let occurredCursor = 0;
     const hookDrafts = mergeHookDrafts([
       ...input.extractedEvents.flatMap((event) => {
-        const relatedEventIds = event.occurred && savedEvents[occurredCursor]
-          ? [savedEvents[occurredCursor++].id]
-          : [];
+        const relatedEventIndexes = event.occurred ? [occurredCursor++] : [];
         return event.possibleHooks.map((hook) => ({
           ...hook,
-          relatedEventIds,
+          relatedEventIndexes,
         }));
       }),
       ...(input.extractedHooks ?? []).map((hook) => ({
         ...hook,
-        relatedEventIds: [],
+        relatedEventIndexes: [],
       })),
     ]);
     const resolvedHookIds = uniqueHookIds(input.resolvedHookIds ?? [], input.timelineContext);
@@ -205,19 +203,18 @@ export class StoryTimelineService {
           extractedEvents: input.extractedEvents,
           timelineContext: input.timelineContext,
         });
-    await this.repo.markHooksAddressed({
-      hookIds: hookIdsToAddress,
-      chapterId: input.chapterId,
-      chapterIndex: input.chapterIndex,
-      resolved: false,
-    });
-    await this.repo.markHooksAddressed({
-      hookIds: resolvedHookIds,
-      chapterId: input.chapterId,
-      chapterIndex: input.chapterIndex,
-      resolved: true,
-    });
-    await this.repo.createHooks(hookDrafts.map((hook) => ({
+    if (!this.repo.commitAutomaticChapterTimeline) {
+      throw new Error("Timeline repository does not support revision-owned commits");
+    }
+    return this.repo.commitAutomaticChapterTimeline({
+      owner: {
+        novelId: input.novelId,
+        chapterId: input.chapterId,
+        expectedContentRevision: input.expectedContentRevision,
+      },
+      events: occurredEvents,
+      anchor,
+      hooks: hookDrafts.map((hook) => ({
       novelId: input.novelId,
       createdInChapterId: input.chapterId,
       createdInChapterIndex: input.chapterIndex,
@@ -231,10 +228,20 @@ export class StoryTimelineService {
       priority: hook.priority,
       resolveMode: hook.resolveMode,
       blocking: hook.blocking,
-      relatedEventIds: hook.relatedEventIds,
+      relatedEventIndexes: hook.relatedEventIndexes,
       participantIds: [],
-    })));
-    return savedEvents;
+      })),
+      addressedHookIds: hookIdsToAddress,
+      resolvedHookIds,
+      checkReport: {
+        novelId: input.novelId,
+        chapterId: input.chapterId,
+        chapterIndex: input.chapterIndex,
+        status: input.checkResult.status,
+        score: input.checkResult.score,
+        issues: input.checkResult.issues,
+      },
+    });
   }
 }
 

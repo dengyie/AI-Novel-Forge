@@ -1,10 +1,27 @@
-import test from "node:test";
+import test, { after } from "node:test";
 import assert from "node:assert/strict";
-import {
+
+const handlesBeforeAssistantUiImport = new Set(process._getActiveHandles());
+const {
   getMessageContent,
   normalizeLangChainMessageContent,
   safeConvertLangChainMessages,
-} from "../src/pages/creativeHub/lib/creativeHubMessageContent.ts";
+} = await import("../src/pages/creativeHub/lib/creativeHubMessageContent.ts");
+
+after(() => {
+  // @assistant-ui/react-langgraph creates one Node MessagePort while its browser
+  // adapter module is evaluated. The package exposes no teardown API, so close
+  // only the handles created by this isolated import; never force-exit the suite.
+  for (const handle of process._getActiveHandles()) {
+    if (
+      !handlesBeforeAssistantUiImport.has(handle)
+      && handle?.constructor?.name === "MessagePort"
+      && typeof handle.close === "function"
+    ) {
+      handle.close();
+    }
+  }
+});
 
 test("normalizeLangChainMessageContent accepts string and array only", () => {
   assert.equal(normalizeLangChainMessageContent("hi"), "hi");
