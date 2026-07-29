@@ -29,7 +29,10 @@ function createAbortError(reason?: unknown): Error {
 const DEFAULT_ENFORCED_TIMEOUT_MS = (() => {
   const raw = process.env.LLM_REQUEST_TIMEOUT_MS?.trim();
   const parsed = raw ? Number(raw) : Number.NaN;
-  if (Number.isFinite(parsed) && parsed >= 30_000 && parsed <= 900_000) {
+  // 上限从 900s 提到 3600s：12000 字目标章节 writer 单次调用实测 >480s（deepseek-v4-pro
+  // 流式 ~15 tok/s），900s 钳制会让长章永远撞墙。默认仍 300s，其它调用方不受影响——只有
+  // 显式设 LLM_REQUEST_TIMEOUT_MS 的环境才放大预算。
+  if (Number.isFinite(parsed) && parsed >= 30_000 && parsed <= 3_600_000) {
     return Math.floor(parsed);
   }
   return 300_000;
@@ -62,6 +65,15 @@ export async function runWithEnforcedTimeout<T>(input: {
   const raceCandidates: Array<Promise<T>> = [];
   const workPromise = input.run(controller.signal);
   raceCandidates.push(workPromise);
+  // P0 修复：墙钟超时/上游 abort 一旦让 race 由 timeout/abort 分支获胜，workPromise 仍在
+  // 后台继续跑。若它之后才因 controller.abort 以 "Request was aborted." 迟到 settle 为
+  // rejection，而该 rejection 没有任何 rejection owner（race 已结束、调用方早已 await 到
+  // timeout 错误），就会触发进程级 unhandledRejection —— Node 20 默认 throw → novel-server
+  // 整体崩溃（生产曾因 [novel.chapter.writer@v5] 480s 超时连崩 25 次）。这里挂一个只观察、
+  // 不再向上传播的 handler，把迟到 rejection 吞掉；它不改变 race 的对外结果。
+  workPromise.catch(() => {
+    // 故意吞掉：race 已对外 settle，这是 loser 分支的迟到 rejection，只能观察。
+  });
 
   if (timeoutMs) {
     raceCandidates.push(new Promise<T>((_resolve, reject) => {

@@ -36,6 +36,33 @@ import {
 
 export { trimContinuationOverlap } from "./runtime/writer/ChapterContinuationTextPolicy";
 
+/**
+ * writer 单次 LLM 调用的墙钟预算，按目标字数线性放大。
+ *
+ * 背景（生产 P0）：12000 字目标章节用默认 300s/480s 预算，deepseek-v4-pro 流式
+ * （~15-20 tok/s）根本写不完，单次调用必撞墙 → 此前超时还会打崩整个进程（已在
+ * invokeTimeout 修复崩溃）。这里给 writer 一个随 target 放大的预算：
+ * - 经验吞吐按 ~25 字/秒保守估计（CJK 长章 deepseek-v4-pro 偏慢），
+ * - 再乘 1.6 安全裕度覆盖首 token 延迟 + 慢渠道，
+ * - 下限 480s（短章不退化），上限 1500s（仍受 invokeTimeout env 3600s 钳制内）。
+ * 只对 writer 传显式 timeoutMs；其它 prompt 调用方仍走 DEFAULT_ENFORCED_TIMEOUT_MS。
+ */
+const WRITER_TIMEOUT_MIN_MS = 480_000;
+const WRITER_TIMEOUT_MAX_MS = 1_500_000;
+const WRITER_CHARS_PER_SECOND = 25;
+const WRITER_TIMEOUT_HEADROOM = 1.6;
+
+function resolveWriterTimeoutMs(targetWordCount?: number | null): number {
+  const target = typeof targetWordCount === "number" && Number.isFinite(targetWordCount)
+    ? Math.max(0, targetWordCount)
+    : 0;
+  if (target <= 0) {
+    return WRITER_TIMEOUT_MIN_MS;
+  }
+  const estimated = (target / WRITER_CHARS_PER_SECOND) * 1000 * WRITER_TIMEOUT_HEADROOM;
+  return Math.min(WRITER_TIMEOUT_MAX_MS, Math.max(WRITER_TIMEOUT_MIN_MS, Math.ceil(estimated)));
+}
+
 export interface ChapterGraphLLMOptions {
   provider?: LLMProvider;
   model?: string;
@@ -385,6 +412,8 @@ export class ChapterWritingGraph {
           provider: input.options.provider,
           model: input.options.model,
           temperature: input.options.temperature ?? 0.8,
+          // 续写只需补 missingWordGap，但仍给整章量级预算的保守下界，避免短 gap 撞 480s 墙。
+          timeoutMs: resolveWriterTimeoutMs(Math.max(missingWordGap, lengthGoal.minWordCount ?? 0)),
           novelId: input.novelId,
           chapterId: input.chapter.id,
           stage: "writer_extend",
@@ -574,6 +603,10 @@ export class ChapterWritingGraph {
         model: input.options.model,
         temperature: input.options.temperature ?? 0.8,
         maxTokens: undefined,
+        // 整章 draft 给按 target 放大的预算：12000 字 ≈ 768s，远超旧 480s 默认。
+        timeoutMs: resolveWriterTimeoutMs(
+          chapterWriteContext.chapterMission.targetWordCount ?? targetRange.minWordCount,
+        ),
         novelId: input.novelId,
         chapterId: input.chapter.id,
         stage: "writer_draft",
