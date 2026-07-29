@@ -1,4 +1,5 @@
 import { prisma } from "../../../../../db/prisma";
+import type { ChapterStatus } from "@prisma/client";
 import { chapterStatePairAfterManualQualityReview } from "../../../chapterLifecycleState";
 import type { VolumeReadinessChapterOutcome } from "../../volumeReadinessRunStore";
 import type {
@@ -59,7 +60,9 @@ export class ChapterReviewStatusReconciler {
           where: {
             id: input.chapterId,
             contentRevision: signals.contentRevision,
-            chapterStatus: signals.chapterStatus,
+            // signals.chapterStatus 来源是 Prisma Chapter 行的 enum 字段，类型被 policy/service
+            // 宽松成 string|null；收窄回 ChapterStatus 让 where CAS 合法（null → Prisma 的 IS NULL）。
+            chapterStatus: signals.chapterStatus as ChapterStatus | null,
           },
           data: chapterStatePairAfterManualQualityReview({
             literaryPass: true,

@@ -66,7 +66,9 @@ export class ChapterPipelineRuntimeAdapter {
               chapterId: targetChapterId,
               content,
               expectedContentRevision,
-              statePatch: chapterStatePairAfterDraftSave("repaired"),
+              // 展开 ChapterStatePairPatch 为普通对象以匹配 commit 的
+              // statePatch: Record<string, unknown>（与 ChapterRepairFinalizer 同构写法）。
+              statePatch: { ...chapterStatePairAfterDraftSave("repaired") },
               source: "pipeline_repair",
             }),
           syncFinalChapterArtifacts: (targetNovelId, targetChapterId, content, syncOptions) =>
