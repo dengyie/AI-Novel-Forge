@@ -75,6 +75,22 @@ export async function recoverPipelineJob(input: {
   } = input;
 
   if (isPipelineLeaseLostError(error)) {
+    const settledCancellation = await settleConcurrentPipelineCancellation({
+      host,
+      jobId,
+      novelId,
+      payload: host.stringifyPipelinePayload({
+        ...runtimePayload,
+        qualityAlertDetails,
+        replanAlertDetails,
+        genreBeatAlertDetails,
+        recoverableRepairDetails,
+        jobTransportAutoRetryCount: 0,
+      }),
+    });
+    if (settledCancellation) {
+      return;
+    }
     logPipelineWarn("流水线租约已丢失，另一进程已接管，本进程静默退出", {
       jobId,
       novelId,
