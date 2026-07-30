@@ -59,6 +59,23 @@ export const TASK_ORPHAN_AGENT_RUN_STALE_HOURS = asInt(
   1,
   24 * 30,
 );
+// 状态投影自愈（autopilot P2）：活跃任务投影校正。
+// - running 但无心跳超窗口（进程死了/executor 漏 settle）→ 投影为 failed + 可恢复标记，
+//   不再让 UI 长期显示假 running。默认与 auto_director 僵尸判定同阈值（90min）。
+// - waiting_approval 超窗口无人理 → 标 pendingManualRecovery，进 recovery candidates
+//   （overview.recoveryCandidateCount 即 attention 信号，前端已有展示）。
+export const TASK_STALE_RUNNING_PROJECTION_MS = asInt(
+  process.env.TASK_STALE_RUNNING_PROJECTION_MS,
+  90 * 60 * 1000,
+  10 * 60 * 1000,
+  24 * 60 * 60 * 1000,
+);
+export const TASK_WAITING_APPROVAL_ATTENTION_HOURS = asInt(
+  process.env.TASK_WAITING_APPROVAL_ATTENTION_HOURS,
+  72,
+  1,
+  24 * 90,
+);
 
 export interface TaskRetentionConfig {
   keepPerNovel: number;
@@ -69,6 +86,8 @@ export interface TaskRetentionConfig {
   autoArchiveSucceededHours: number;
   autoArchiveFailedDays: number;
   orphanAgentRunStaleHours: number;
+  staleRunningProjectionMs: number;
+  waitingApprovalAttentionHours: number;
 }
 
 export const taskRetentionConfig: TaskRetentionConfig = {
@@ -80,4 +99,6 @@ export const taskRetentionConfig: TaskRetentionConfig = {
   autoArchiveSucceededHours: TASK_AUTO_ARCHIVE_SUCCEEDED_HOURS,
   autoArchiveFailedDays: TASK_AUTO_ARCHIVE_FAILED_DAYS,
   orphanAgentRunStaleHours: TASK_ORPHAN_AGENT_RUN_STALE_HOURS,
+  staleRunningProjectionMs: TASK_STALE_RUNNING_PROJECTION_MS,
+  waitingApprovalAttentionHours: TASK_WAITING_APPROVAL_ATTENTION_HOURS,
 };

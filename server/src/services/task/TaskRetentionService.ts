@@ -43,6 +43,8 @@ export interface TaskRetentionSummary {
   nullNovelAgentRunsDeleted: number;
   autoArchived: number;
   orphanAgentRunsCancelled: number;
+  staleRunningProjected: number;
+  waitingApprovalFlagged: number;
 }
 
 const NULL_NOVEL_BUCKET = "__none__";
@@ -611,6 +613,87 @@ export class TaskRetentionService {
     }
   }
 
+  /**
+   * 状态投影自愈（autopilot P2）：校正「活跃但宿主/执行器已不在」的任务投影。
+   *
+   * a) NovelWorkflowTask running 无心跳超窗口（auto_director 之外的 lane 没有僵尸
+   *    清理，manual_create 等卡 running 会一直显示「进行中」）→ failed +
+   *    pendingManualRecovery=true，进 recovery candidates 由用户决定 resume/retry。
+   *    auto_director 已被 cancelZombieRunningTasks 处理，这里只兜其它 lane。
+   * b) waiting_approval 超窗口无人审批 → pendingManualRecovery=true（状态不动，
+   *    进 recovery candidates / overview.recoveryCandidateCount 即 attention）。
+   *
+   * 条件 update 防竞态：只动仍处原状态、且 pendingManualRecovery 仍未置位的行。
+   */
+  private async projectStaleActiveWorkflowTasks(
+    now: Date,
+    cfg: TaskRetentionConfig,
+    summary: TaskRetentionSummary,
+  ): Promise<void> {
+    const staleRunningCutoff = new Date(now.getTime() - cfg.staleRunningProjectionMs);
+    const staleRunning = await prisma.novelWorkflowTask.findMany({
+      where: {
+        status: "running",
+        lane: { not: SUPERSEDE_LANE },
+        pendingManualRecovery: false,
+        cancelRequestedAt: null,
+        updatedAt: { lt: staleRunningCutoff },
+        OR: [
+          { heartbeatAt: null },
+          { heartbeatAt: { lt: staleRunningCutoff } },
+        ],
+      },
+      select: { id: true },
+      take: 500,
+    });
+    if (staleRunning.length > 0) {
+      const ids = staleRunning.map((row) => row.id);
+      const projected = await prisma.novelWorkflowTask.updateMany({
+        where: { id: { in: ids }, status: "running", pendingManualRecovery: false },
+        data: {
+          status: "failed",
+          finishedAt: now,
+          heartbeatAt: now,
+          pendingManualRecovery: true,
+          lastError: "任务长时间没有心跳，可能已因服务重启或执行器异常中断。可在恢复候选中继续或重试。",
+        },
+      });
+      summary.staleRunningProjected += projected.count;
+      if (projected.count > 0) {
+        console.warn("[task.retention] stale running workflow tasks projected to failed", {
+          count: projected.count,
+          taskIds: ids,
+        });
+      }
+    }
+
+    const attentionCutoff = new Date(now.getTime() - cfg.waitingApprovalAttentionHours * 60 * 60 * 1000);
+    const staleApproval = await prisma.novelWorkflowTask.findMany({
+      where: {
+        status: "waiting_approval",
+        pendingManualRecovery: false,
+        cancelRequestedAt: null,
+        updatedAt: { lt: attentionCutoff },
+      },
+      select: { id: true },
+      take: 500,
+    });
+    if (staleApproval.length > 0) {
+      const ids = staleApproval.map((row) => row.id);
+      const flagged = await prisma.novelWorkflowTask.updateMany({
+        where: { id: { in: ids }, status: "waiting_approval", pendingManualRecovery: false },
+        data: { pendingManualRecovery: true },
+      });
+      summary.waitingApprovalFlagged += flagged.count;
+      if (flagged.count > 0) {
+        console.warn("[task.retention] waiting_approval tasks flagged for attention", {
+          count: flagged.count,
+          taskIds: ids,
+        });
+      }
+    }
+  }
+
   async runOnce(now = new Date()): Promise<TaskRetentionSummary> {
     const cfg = taskRetentionConfig;
     const summary: TaskRetentionSummary = {
@@ -624,6 +707,8 @@ export class TaskRetentionService {
       nullNovelAgentRunsDeleted: 0,
       autoArchived: 0,
       orphanAgentRunsCancelled: 0,
+      staleRunningProjected: 0,
+      waitingApprovalFlagged: 0,
     };
 
     // --- NovelWorkflowTask ---
@@ -636,6 +721,9 @@ export class TaskRetentionService {
 
       // Step 1b: orphan AgentRuns whose host is gone/terminal can never settle — cancel+archive.
       await this.reconcileOrphanAgentRuns(now, cfg, summary);
+
+      // Step 1c: projection self-heal — fake-running → failed+recoverable; stale approvals → attention.
+      await this.projectStaleActiveWorkflowTasks(now, cfg, summary);
 
       // Step 2: supersede sweep — only load novels that currently have an active
       // auto_director task, plus their terminal siblings (not the whole table).

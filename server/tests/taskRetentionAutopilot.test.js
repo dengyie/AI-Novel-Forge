@@ -27,6 +27,8 @@ function makeSummary() {
     nullNovelAgentRunsDeleted: 0,
     autoArchived: 0,
     orphanAgentRunsCancelled: 0,
+    staleRunningProjected: 0,
+    waitingApprovalFlagged: 0,
   };
 }
 
@@ -97,6 +99,113 @@ test("autoArchiveTerminalTasks honors disabled windows (0 = off)", { concurrency
     prisma.novelWorkflowTask.findMany = originals.workflowFind;
     prisma.agentRun.findMany = originals.agentFind;
     prisma.taskCenterArchive.upsert = originals.upsert;
+  }
+});
+
+// --- P2 status projection self-heal ---
+
+test("projectStaleActiveWorkflowTasks: fake-running manual lane → failed+recoverable; auto_director untouched", { concurrency: false }, async () => {
+  const service = new TaskRetentionService();
+  const now = new Date("2026-07-30T00:00:00.000Z");
+  const originals = {
+    find: prisma.novelWorkflowTask.findMany,
+    update: prisma.novelWorkflowTask.updateMany,
+  };
+  const projectedIds = [];
+  const findCalls = [];
+
+  prisma.novelWorkflowTask.findMany = async (args) => {
+    findCalls.push(args.where);
+    if (args.where.status === "running") {
+      // 校验查询护栏：不含 auto_director lane、不含已标 recovery、不含 cancel 请求
+      assert.equal(args.where.lane.not, "auto_director");
+      assert.equal(args.where.pendingManualRecovery, false);
+      assert.equal(args.where.cancelRequestedAt, null);
+      assert.ok(args.where.updatedAt.lt instanceof Date);
+      return [{ id: "wf-manual-stuck" }];
+    }
+    return []; // waiting_approval 查询
+  };
+  prisma.novelWorkflowTask.updateMany = async (args) => {
+    if (args.data.status === "failed") {
+      projectedIds.push(...args.where.id.in);
+      assert.equal(args.data.pendingManualRecovery, true);
+      assert.ok(args.data.finishedAt instanceof Date);
+      assert.match(args.data.lastError, /心跳/);
+      // 条件 update 防竞态
+      assert.equal(args.where.status, "running");
+      return { count: args.where.id.in.length };
+    }
+    return { count: 0 };
+  };
+
+  try {
+    const summary = makeSummary();
+    await service.projectStaleActiveWorkflowTasks(now, taskRetentionConfig, summary);
+    assert.equal(summary.staleRunningProjected, 1);
+    assert.deepEqual(projectedIds, ["wf-manual-stuck"]);
+  } finally {
+    prisma.novelWorkflowTask.findMany = originals.find;
+    prisma.novelWorkflowTask.updateMany = originals.update;
+  }
+});
+
+test("projectStaleActiveWorkflowTasks: stale waiting_approval → pendingManualRecovery attention flag, status untouched", { concurrency: false }, async () => {
+  const service = new TaskRetentionService();
+  const now = new Date("2026-07-30T00:00:00.000Z");
+  const originals = {
+    find: prisma.novelWorkflowTask.findMany,
+    update: prisma.novelWorkflowTask.updateMany,
+  };
+  const flaggedIds = [];
+
+  prisma.novelWorkflowTask.findMany = async (args) => {
+    if (args.where.status === "waiting_approval") {
+      assert.equal(args.where.pendingManualRecovery, false);
+      assert.ok(args.where.updatedAt.lt instanceof Date);
+      return [{ id: "wf-approval-old" }];
+    }
+    return [];
+  };
+  prisma.novelWorkflowTask.updateMany = async (args) => {
+    // 只置 pendingManualRecovery，不动 status（审批语义保留）
+    assert.deepEqual(Object.keys(args.data), ["pendingManualRecovery"]);
+    flaggedIds.push(...args.where.id.in);
+    assert.equal(args.where.status, "waiting_approval");
+    return { count: args.where.id.in.length };
+  };
+
+  try {
+    const summary = makeSummary();
+    await service.projectStaleActiveWorkflowTasks(now, taskRetentionConfig, summary);
+    assert.equal(summary.waitingApprovalFlagged, 1);
+    assert.equal(summary.staleRunningProjected, 0);
+    assert.deepEqual(flaggedIds, ["wf-approval-old"]);
+  } finally {
+    prisma.novelWorkflowTask.findMany = originals.find;
+    prisma.novelWorkflowTask.updateMany = originals.update;
+  }
+});
+
+test("projectStaleActiveWorkflowTasks: no stale rows → no writes", { concurrency: false }, async () => {
+  const service = new TaskRetentionService();
+  const originals = {
+    find: prisma.novelWorkflowTask.findMany,
+    update: prisma.novelWorkflowTask.updateMany,
+  };
+  prisma.novelWorkflowTask.findMany = async () => [];
+  let updateCalled = false;
+  prisma.novelWorkflowTask.updateMany = async () => { updateCalled = true; return { count: 0 }; };
+
+  try {
+    const summary = makeSummary();
+    await service.projectStaleActiveWorkflowTasks(new Date(), taskRetentionConfig, summary);
+    assert.equal(summary.staleRunningProjected, 0);
+    assert.equal(summary.waitingApprovalFlagged, 0);
+    assert.equal(updateCalled, false);
+  } finally {
+    prisma.novelWorkflowTask.findMany = originals.find;
+    prisma.novelWorkflowTask.updateMany = originals.update;
   }
 });
 
