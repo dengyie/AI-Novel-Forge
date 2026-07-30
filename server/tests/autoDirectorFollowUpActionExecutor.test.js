@@ -310,6 +310,8 @@ test("novel workflow retry forces auto director resume after retry state healing
   });
   adapter.workflowService.retryTask = async (taskId) => {
     retryCalls.push(taskId);
+    // 真实 retryTask 认领成功返回更新后的行；返回 null 会跳过 continue。
+    return { id: taskId, status: "queued" };
   };
   adapter.novelDirectorService.continueTask = async (taskId, input) => {
     calls.push({ taskId, input });

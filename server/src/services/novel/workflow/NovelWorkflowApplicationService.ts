@@ -338,13 +338,29 @@ export class NovelWorkflowApplicationService {
     });
   }
 
+  /**
+   * 统一重试认领点（唯一 attemptCount 自增处）。
+   *
+   * 单次条件 updateMany 防竞态 + 幂等：只有仍处 failed/cancelled、未被人工标记恢复、
+   * 无取消请求、且 attemptCount 仍等于读取时值的行才被认领并自增一次。
+   * P3 retention 自动重试与人工重试并发时只有一个生效，绝不双重自增。
+   *
+   * 返回认领后的完整行（含 novel，供通知）；行不存在抛 404；条件不满足
+   * （已被并发认领/已人工介入/状态已翻回活跃）返回 null，调用方据此跳过 continue。
+   */
   async retryTask(taskId: string) {
     const existing = await this.workflow.getTaskById(taskId);
     if (!existing) {
       throw new AppError("Task not found.", 404);
     }
-    return this.workflow.updateWorkflowTaskWithNotifications({
-      before: existing,
+    const claimed = await prisma.novelWorkflowTask.updateMany({
+      where: {
+        id: taskId,
+        status: { in: ["failed", "cancelled"] },
+        pendingManualRecovery: false,
+        cancelRequestedAt: null,
+        attemptCount: existing.attemptCount,
+      },
       data: {
         status: existing.checkpointType ? "waiting_approval" : "queued",
         pendingManualRecovery: false,
@@ -355,6 +371,18 @@ export class NovelWorkflowApplicationService {
         heartbeatAt: new Date(),
       },
     });
+    if (claimed.count === 0) {
+      return null;
+    }
+    const next = await prisma.novelWorkflowTask.findUnique({
+      where: { id: taskId },
+      include: { novel: { select: { title: true } } },
+    });
+    if (!next) {
+      return null;
+    }
+    await this.workflow.notifyAutoDirectorTaskTransition({ before: existing, after: next });
+    return next;
   }
 
   async restoreTaskToCheckpoint(

@@ -2,7 +2,7 @@ import { Prisma } from "@prisma/client";
 import type { TaskRetentionConfig } from "../../config/taskRetention";
 import { TASK_RETENTION_INTERVAL_MS, taskRetentionConfig } from "../../config/taskRetention";
 import { prisma } from "../../db/prisma";
-import { isTransientTransportError } from "../../llm/transportRetry";
+import { isStrictTransientTaskRetryError } from "../../llm/transportRetry";
 import { deleteWorkflowTasksHard } from "../novel/novelDeleteCascade";
 import {
   STALE_AUTO_DIRECTOR_RUNNING_MESSAGE,
@@ -709,15 +709,23 @@ export class TaskRetentionService {
    * - cfg.autoRetryTransientEnabled（默认关，显式 env 打开）
    * - status=failed、lane=auto_director、pendingManualRecovery=false、无取消请求
    * - attemptCount < maxAttempts（重试预算由任务自身字段控制）
-   * - lastError 命中瞬时传输错误（复用 transportRetry 的模式表：超时/断连/502-504/429 等）
+   * - lastError 命中严格瞬时传输判据 isStrictTransientTaskRetryError（超时/断连/502-504/429，
+   *   不含 SDK 反序列化兜底模式——那些是确定性缺陷，延迟重烧 token 不会自愈）
    * - 距失败超过冷却窗口（避免 retention 每 6h 跑就每 6h 重试一次形成持续风暴）
    * - 该小说当日 token 用量未超预算（0 = 不限制）
    *
+   * 认领与 attemptCount 自增全部下沉到 adapter.retry → retryTask（唯一自增点，条件化
+   * updateMany + attemptCount 守卫，幂等）。本方法只筛候选、做预算判断、调 adapter——
+   * 不再手动认领，避免与 retryTask 双重自增。
+   *
+   * 覆盖范围说明：
+   * - 已归档的 failed 任务（超过 autoArchiveFailedDays 窗口）不在候选内——
+   *   adapter.retry 的 isTaskArchived 会拒绝，旧任务交人工，这是有意的保守边界。
+   * - token 预算是 run 开始时的一次 groupBy 快照，非实时硬顶；单次 run 内并发重试
+   *   同一小说用同一快照判断。由 autoRetryMaxPerRun + 冷却窗口兜底，超额有限。
+   *
    * 超预算的小说：任务置 pendingManualRecovery=true 进恢复候选交人工，不自动烧 token。
    * 单次 run 最多重试 cfg.autoRetryMaxPerRun 条（最久失败的优先），进一步限流。
-   *
-   * 条件 updateMany 认领防竞态：只有仍处 failed 且未被人工干预的行才被重置为
-   * queued + attemptCount+1（与 retryTask 同构）；认领成功的才走 continue 链路。
    */
   private async autoRetryTransientFailedWorkflowTasks(
     now: Date,
@@ -749,13 +757,13 @@ export class TaskRetentionService {
     });
     const retryable = candidates.filter((row) => (
       row.attemptCount < row.maxAttempts
-      && isTransientTransportError(row.lastError ?? "")
+      && isStrictTransientTaskRetryError(row.lastError ?? "")
     ));
     if (retryable.length === 0) {
       return;
     }
 
-    // 每本小说每日 token 预算：一次 groupBy 拿全部候选小说的当日用量。
+    // 每本小说每日 token 预算：一次 groupBy 拿全部候选小说的当日用量（run 级快照）。
     const dayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
     const novelIds = Array.from(new Set(retryable.map((row) => row.novelId).filter((id): id is string => Boolean(id))));
     const usageByNovel = new Map<string, number>();
@@ -802,20 +810,7 @@ export class TaskRetentionService {
         continue;
       }
 
-      // 认领：只有仍 failed 且未被人工处理的行才会被重置（retryTask 同构，但条件化）。
-      const claimed = await prisma.novelWorkflowTask.updateMany({
-        where: { id: row.id, status: "failed", pendingManualRecovery: false, cancelRequestedAt: null },
-        data: {
-          status: "queued",
-          attemptCount: row.attemptCount + 1,
-          lastError: null,
-          finishedAt: null,
-          heartbeatAt: now,
-        },
-      });
-      if (claimed.count === 0) {
-        continue;
-      }
+      // 认领 + attemptCount 自增在 adapter.retry → retryTask 内原子完成（唯一自增点）。
       try {
         await this.workflowTaskAdapter.retry({ id: row.id, resume: true });
         started += 1;
@@ -828,7 +823,7 @@ export class TaskRetentionService {
           lastError: row.lastError?.slice(0, 200) ?? null,
         });
       } catch (error) {
-        // continue 链路失败：任务已 queued，后续心跳自愈/恢复候选会兜住，不回滚。
+        // continue/claim 链路失败：任务保持 failed，下一 retention 周期再评估，不回滚。
         console.warn("[task.retention] auto retry continue failed:", error instanceof Error ? error.message : String(error));
       }
     }

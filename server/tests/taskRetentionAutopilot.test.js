@@ -226,6 +226,9 @@ function makeAutoRetryConfig(overrides = {}) {
 
 const TRANSIENT_ERROR = "Request failed with status 503: service unavailable";
 const PERMANENT_ERROR = "校验失败：章节大纲缺失必填字段";
+// SDK 反序列化兜底模式：transport 层算瞬时（重试一次可能自愈），但任务级延迟重烧
+// token 不应把它当瞬时——P3 收紧判据后这类确定性缺陷必须被排除在自动重试之外。
+const CODE_DEFECT_ERROR = "TypeError: Cannot read properties of undefined (reading 'message')";
 
 function makeFailedWorkflowRow(overrides = {}) {
   return {
@@ -255,12 +258,11 @@ test("autoRetryTransientFailedWorkflowTasks: disabled by default — no query at
   }
 });
 
-test("autoRetryTransientFailedWorkflowTasks: retries transient failures via adapter, skips permanent/exhausted", { concurrency: false }, async () => {
+test("autoRetryTransientFailedWorkflowTasks: retries transient failures via adapter, skips permanent/code-defect/exhausted", { concurrency: false }, async () => {
   const service = new TaskRetentionService();
   const now = new Date("2026-07-30T12:00:00.000Z");
   const originals = {
     find: prisma.novelWorkflowTask.findMany,
-    update: prisma.novelWorkflowTask.updateMany,
   };
   const retried = [];
   service.workflowTaskAdapter = {
@@ -277,26 +279,22 @@ test("autoRetryTransientFailedWorkflowTasks: retries transient failures via adap
     return [
       makeFailedWorkflowRow({ id: "wf-transient" }),
       makeFailedWorkflowRow({ id: "wf-permanent", lastError: PERMANENT_ERROR }),
+      makeFailedWorkflowRow({ id: "wf-code-defect", lastError: CODE_DEFECT_ERROR }),
       makeFailedWorkflowRow({ id: "wf-exhausted", attemptCount: 3 }),
     ];
-  };
-  prisma.novelWorkflowTask.updateMany = async (args) => {
-    // 认领重置：queued + attempt+1 + 清错误，条件 where 防竞态
-    assert.equal(args.where.status, "failed");
-    assert.equal(args.where.pendingManualRecovery, false);
-    assert.equal(args.data.status, "queued");
-    assert.equal(args.data.lastError, null);
-    return { count: 1 };
   };
 
   try {
     const summary = makeSummary();
     await service.autoRetryTransientFailedWorkflowTasks(now, makeAutoRetryConfig(), summary);
     assert.equal(summary.autoRetried, 1);
-    assert.deepEqual(retried, [{ id: "wf-transient", resume: true }]);
+    assert.deepEqual(
+      retried,
+      [{ id: "wf-transient", resume: true }],
+      "permanent + code-defect + attempt-exhausted must all be skipped",
+    );
   } finally {
     prisma.novelWorkflowTask.findMany = originals.find;
-    prisma.novelWorkflowTask.updateMany = originals.update;
   }
 });
 
@@ -344,7 +342,6 @@ test("autoRetryTransientFailedWorkflowTasks: maxPerRun caps retries per retentio
   const now = new Date("2026-07-30T12:00:00.000Z");
   const originals = {
     find: prisma.novelWorkflowTask.findMany,
-    update: prisma.novelWorkflowTask.updateMany,
   };
   const retried = [];
   service.workflowTaskAdapter = {
@@ -356,13 +353,56 @@ test("autoRetryTransientFailedWorkflowTasks: maxPerRun caps retries per retentio
     makeFailedWorkflowRow({ id: "wf-2" }),
     makeFailedWorkflowRow({ id: "wf-3" }),
   ];
-  prisma.novelWorkflowTask.updateMany = async () => ({ count: 1 });
 
   try {
     const summary = makeSummary();
     await service.autoRetryTransientFailedWorkflowTasks(now, makeAutoRetryConfig({ autoRetryMaxPerRun: 2 }), summary);
     assert.equal(summary.autoRetried, 2);
     assert.deepEqual(retried, ["wf-1", "wf-2"], "third candidate must wait for the next run");
+  } finally {
+    prisma.novelWorkflowTask.findMany = originals.find;
+  }
+});
+
+// P1 回归：attemptCount 只许自增一次。认领已下沉到 adapter.retry → retryTask
+// （条件 updateMany + attemptCount 守卫），retention 不再手动自增。这里不 stub
+// adapter 的 retry，而是用真实 adapter + stub 其下游（workflowService.retryTask /
+// novelDirectorService.continueTask），断言 retention 自身不再发 updateMany 自增。
+test("autoRetryTransientFailedWorkflowTasks: retention does not self-claim — single attempt increment owned by retryTask", { concurrency: false }, async () => {
+  const service = new TaskRetentionService();
+  const now = new Date("2026-07-30T12:00:00.000Z");
+  const originals = {
+    find: prisma.novelWorkflowTask.findMany,
+    update: prisma.novelWorkflowTask.updateMany,
+  };
+  const claimAttempts = [];
+  // 真实 adapter 太重（通知/导演运行时），这里用一个「像真实 retryTask 一样做条件
+  // updateMany 认领」的轻量替身：关键是 retention 不得再额外发认领 updateMany。
+  service.workflowTaskAdapter = {
+    retry: async (input) => {
+      // 模拟 retryTask 的唯一一次认领自增
+      await prisma.novelWorkflowTask.updateMany({
+        where: { id: input.id, status: "failed", pendingManualRecovery: false },
+        data: { status: "queued", attemptCount: 2 },
+      });
+      return {};
+    },
+  };
+
+  prisma.novelWorkflowTask.findMany = async () => [makeFailedWorkflowRow({ id: "wf-single" })];
+  prisma.novelWorkflowTask.updateMany = async (args) => {
+    claimAttempts.push(args);
+    return { count: 1 };
+  };
+
+  try {
+    const summary = makeSummary();
+    await service.autoRetryTransientFailedWorkflowTasks(now, makeAutoRetryConfig(), summary);
+    assert.equal(summary.autoRetried, 1);
+    // 整个流程只应有 adapter（retryTask）发起的那一次认领 updateMany——
+    // retention 自己的旧版手动认领（queued + attemptCount+1）必须已移除。
+    assert.equal(claimAttempts.length, 1, "exactly one claim (from retryTask), no retention self-claim");
+    assert.equal(claimAttempts[0].data.attemptCount, 2, "attempt increments exactly once (1 -> 2)");
   } finally {
     prisma.novelWorkflowTask.findMany = originals.find;
     prisma.novelWorkflowTask.updateMany = originals.update;

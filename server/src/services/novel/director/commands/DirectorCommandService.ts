@@ -316,7 +316,11 @@ export class DirectorCommandService {
     if (input.llmOverride) {
       await this.workflowService.applyAutoDirectorLlmOverride(input.taskId, input.llmOverride);
     }
-    await this.workflowService.retryTask(input.taskId);
+    // retryTask 返回 null = 并发认领失败/状态已变，另一重试已接管，不再入队执行命令。
+    const claimed = await this.workflowService.retryTask(input.taskId);
+    if (!claimed) {
+      throw new AppError("Task is already being retried or no longer in a retryable state.", 409);
+    }
     return this.enqueueExecutionCommand({
       taskId: input.taskId,
       commandType: "retry",

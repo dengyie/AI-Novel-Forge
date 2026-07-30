@@ -44,6 +44,28 @@ const TRANSIENT_TRANSPORT_ERROR_PATTERNS = [
   "service unavailable",
 ];
 
+// 任务级自动重试（P3）用的严格瞬时判据：只含真正的传输/限流信号。
+// 剥离了 SDK 反序列化兜底模式（"reading 'message'"、"cannot read properties of undefined"
+// 等）——那些更像确定性代码/响应缺陷，延迟重烧 token 几乎不会自愈，不应进任务级重试。
+const STRICT_TRANSIENT_TASK_RETRY_PATTERNS = [
+  "timed out",
+  "timeout",
+  "econnreset",
+  "econnrefused",
+  "enetunreach",
+  "esockettimedout",
+  "socket hang",
+  "fetch failed",
+  "network error",
+  "upstream service",
+  "502",
+  "503",
+  "504",
+  "429",
+  "bad gateway",
+  "service unavailable",
+];
+
 /**
  * 显式用户/流水线取消文案（不含泛化 "Request was aborted."）。
  * 泛化 abort 常是墙钟 timeout abort 的 undici/fetch 表象，见 isTimeoutDrivenAbortError。
@@ -212,6 +234,30 @@ export function isTransientTransportError(error: unknown): boolean {
   }
   const lower = message.toLowerCase();
   return TRANSIENT_TRANSPORT_ERROR_PATTERNS.some((pattern) => lower.includes(pattern));
+}
+
+/**
+ * 任务级自动重试（P3 retention）的瞬时判据。比 isTransientTransportError 更严格：
+ * 显式取消 / timeout-driven abort 之外，只认真正的传输/限流模式（STRICT 表），
+ * 把 SDK 反序列化兜底模式（"reading 'message'" 等确定性缺陷）排除在自动重烧 token 之外。
+ */
+export function isStrictTransientTaskRetryError(error: unknown): boolean {
+  if (isCancellationLikeTransportError(error)) {
+    return false;
+  }
+  if (isTimeoutLikeTransportError(error)) {
+    return true;
+  }
+  const message = error instanceof Error
+    ? error.message
+    : typeof error === "string"
+      ? error
+      : String(error ?? "");
+  if (!message) {
+    return false;
+  }
+  const lower = message.toLowerCase();
+  return STRICT_TRANSIENT_TASK_RETRY_PATTERNS.some((pattern) => lower.includes(pattern));
 }
 
 /**

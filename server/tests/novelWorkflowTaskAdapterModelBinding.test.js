@@ -207,6 +207,8 @@ test("auto-director retry resumes failed tasks by default", async () => {
   });
   adapter.workflowService.retryTask = async (taskId) => {
     calls.push(["retry", taskId]);
+    // 真实 retryTask 认领成功返回更新后的行；返回 null 表示并发认领失败会跳过 continue。
+    return { id: taskId, status: "queued" };
   };
   adapter.novelDirectorService.continueTask = async (taskId, input) => {
     calls.push(["continue", taskId, input]);

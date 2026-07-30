@@ -96,7 +96,7 @@ export class NovelWorkflowStoreService {
     };
   }
 
-  private async notifyAutoDirectorTaskTransition(input: {
+  public async notifyAutoDirectorTaskTransition(input: {
     before: {
       id: string;
       novelId: string | null;

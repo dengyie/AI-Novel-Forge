@@ -627,8 +627,10 @@ export class NovelWorkflowTaskAdapter {
     if (row.lane === "auto_director" && llmOverride) {
       await this.workflowService.applyAutoDirectorLlmOverride(id, llmOverride);
     }
-    await this.workflowService.retryTask(id);
-    if (shouldResumeAutoDirector) {
+    // retryTask 是唯一 attemptCount 自增/认领点；返回 null = 并发认领失败或状态已变，
+    // 跳过 continue（另一个重试已接管）。
+    const claimed = await this.workflowService.retryTask(id);
+    if (claimed && shouldResumeAutoDirector) {
       await this.novelDirectorService.continueTask(id, {
         batchAlreadyStartedCount,
         forceResume: true,
