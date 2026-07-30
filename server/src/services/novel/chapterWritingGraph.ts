@@ -6,7 +6,7 @@ import type {
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
 import type { TaskType } from "../../llm/modelRouter";
 import { createContextBlock } from "../../prompting/core/contextBudget";
-import { runTextPrompt, streamTextPrompt } from "../../prompting/core/promptRunner";
+import { streamTextPrompt } from "../../prompting/core/promptRunner";
 import { resolvePromptContextBlocksForAsset } from "../../prompting/context/promptContextResolution";
 import {
   buildChapterWriterContextBlocks,
@@ -61,6 +61,12 @@ function resolveWriterTimeoutMs(targetWordCount?: number | null): number {
   }
   const estimated = (target / WRITER_CHARS_PER_SECOND) * 1000 * WRITER_TIMEOUT_HEADROOM;
   return Math.min(WRITER_TIMEOUT_MAX_MS, Math.max(WRITER_TIMEOUT_MIN_MS, Math.ceil(estimated)));
+}
+
+/** 判断错误是否墙钟超时（TimeoutError），用于 writer 阶段观测日志归类。 */
+function isWriterTimeoutError(error: unknown): boolean {
+  return error instanceof Error
+    && (error.name === "TimeoutError" || /timed out after \d+ms/i.test(error.message));
 }
 
 export interface ChapterGraphLLMOptions {
@@ -395,7 +401,28 @@ export class ChapterWritingGraph {
         "writer_extend",
       );
 
-      const completion = await runTextPrompt({
+      // P2 修复：续写改走 streamTextPrompt。旧 runTextPrompt 非流式整段等待，建立请求无
+      // transport retry、无 live 进度，body 静默 hang 只能等墙钟兜底；流式与 writer_draft
+      // 同构——establish 走 runWithTransportRetry，token 逐个进 live session，超时/abort 语义一致。
+      const extendTimeoutMs = resolveWriterTimeoutMs(Math.max(missingWordGap, lengthGoal.minWordCount ?? 0));
+      const extendStartedAt = Date.now();
+      // P3 观测：writer 每阶段 start/complete/fail 结构化日志，超时单独归类，
+      // 让「慢」与「挂」在日志里一眼可分（不再只能事后翻 err.log 对时间戳）。
+      this.deps.logInfo("Writer stage started", {
+        novelId: input.novelId,
+        chapterId: input.chapter.id,
+        chapterOrder: input.chapter.order,
+        stage: "writer_extend",
+        attempt,
+        currentLength,
+        missingWordGap,
+        timeoutMs: extendTimeoutMs,
+        provider: input.options.provider ?? null,
+        model: input.options.model ?? null,
+      });
+      let continuationStream: Awaited<ReturnType<typeof streamTextPrompt>>;
+      try {
+        continuationStream = await streamTextPrompt({
         asset: chapterWriterPrompt,
         promptInput: {
           novelTitle: input.novelTitle,
@@ -413,7 +440,7 @@ export class ChapterWritingGraph {
           model: input.options.model,
           temperature: input.options.temperature ?? 0.8,
           // 续写只需补 missingWordGap，但仍给整章量级预算的保守下界，避免短 gap 撞 480s 墙。
-          timeoutMs: resolveWriterTimeoutMs(Math.max(missingWordGap, lengthGoal.minWordCount ?? 0)),
+          timeoutMs: extendTimeoutMs,
           novelId: input.novelId,
           chapterId: input.chapter.id,
           stage: "writer_extend",
@@ -421,7 +448,49 @@ export class ChapterWritingGraph {
           signal: input.options.signal,
         },
       });
-      let appended = completion.output.trim();
+      } catch (error) {
+        this.deps.logWarn("Writer stage failed (establish)", {
+          novelId: input.novelId,
+          chapterId: input.chapter.id,
+          chapterOrder: input.chapter.order,
+          stage: "writer_extend",
+          attempt,
+          kind: isWriterTimeoutError(error) ? "timeout" : "error",
+          latencyMs: Date.now() - extendStartedAt,
+          timeoutMs: extendTimeoutMs,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        throw error;
+      }
+      // 与 writer_draft onDone 同理：不吞 complete 的 reject。超时/abort 时若有 partial buffer
+      // 也不能冒充成功续写段——直接让 reject 冒泡为章节失败（可恢复），不落半截文字。
+      let continuationCompleted: Awaited<typeof continuationStream.complete>;
+      try {
+        continuationCompleted = await continuationStream.complete;
+      } catch (error) {
+        this.deps.logWarn("Writer stage failed (stream)", {
+          novelId: input.novelId,
+          chapterId: input.chapter.id,
+          chapterOrder: input.chapter.order,
+          stage: "writer_extend",
+          attempt,
+          kind: isWriterTimeoutError(error) ? "timeout" : "error",
+          latencyMs: Date.now() - extendStartedAt,
+          timeoutMs: extendTimeoutMs,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        throw error;
+      }
+      this.deps.logInfo("Writer stage completed", {
+        novelId: input.novelId,
+        chapterId: input.chapter.id,
+        chapterOrder: input.chapter.order,
+        stage: "writer_extend",
+        attempt,
+        latencyMs: Date.now() - extendStartedAt,
+        outputChars: (continuationCompleted?.output ?? "").trim().length,
+      });
+      let appended = (continuationCompleted?.output ?? "").trim();
       if (!appended) {
         // 空输出视为本轮失败：还有重试额度则再来一次，否则记欠账
         this.deps.logWarn("Writer continuation returned empty output", {
@@ -586,7 +655,24 @@ export class ChapterWritingGraph {
       "writer_draft",
     );
 
-    const streamed = await streamTextPrompt({
+    // P3 观测：writer_draft 同样记 start/fail（complete 在 onDone 侧记录产出字数）。
+    const draftTimeoutMs = resolveWriterTimeoutMs(
+      chapterWriteContext.chapterMission.targetWordCount ?? targetRange.minWordCount,
+    );
+    const draftStartedAt = Date.now();
+    this.deps.logInfo("Writer stage started", {
+      novelId: input.novelId,
+      chapterId: input.chapter.id,
+      chapterOrder: input.chapter.order,
+      stage: "writer_draft",
+      targetWordCount: chapterWriteContext.chapterMission.targetWordCount ?? null,
+      timeoutMs: draftTimeoutMs,
+      provider: input.options.provider ?? null,
+      model: input.options.model ?? null,
+    });
+    let streamed: Awaited<ReturnType<typeof streamTextPrompt>>;
+    try {
+      streamed = await streamTextPrompt({
       asset: chapterWriterPrompt,
       promptInput: {
         novelTitle: input.novelTitle,
@@ -604,16 +690,27 @@ export class ChapterWritingGraph {
         temperature: input.options.temperature ?? 0.8,
         maxTokens: undefined,
         // 整章 draft 给按 target 放大的预算：12000 字 ≈ 768s，远超旧 480s 默认。
-        timeoutMs: resolveWriterTimeoutMs(
-          chapterWriteContext.chapterMission.targetWordCount ?? targetRange.minWordCount,
-        ),
+        timeoutMs: draftTimeoutMs,
         novelId: input.novelId,
         chapterId: input.chapter.id,
         stage: "writer_draft",
         triggerReason: "chapter_initial_draft",
         signal: input.options.signal,
       },
-    });
+      });
+    } catch (error) {
+      this.deps.logWarn("Writer stage failed (establish)", {
+        novelId: input.novelId,
+        chapterId: input.chapter.id,
+        chapterOrder: input.chapter.order,
+        stage: "writer_draft",
+        kind: isWriterTimeoutError(error) ? "timeout" : "error",
+        latencyMs: Date.now() - draftStartedAt,
+        timeoutMs: draftTimeoutMs,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
 
     return {
       stream: streamed.stream as AsyncIterable<BaseMessageChunk>,
@@ -624,8 +721,31 @@ export class ChapterWritingGraph {
         // reject 只来自超时/abort/iterator error，此时若回退 partial buffer 落库，会把截断章
         // 冒充成功定稿。直接 await 让 reject 冒泡 → resolveWriterResultWithEmptyRetry 原样上抛
         // → 任务失败（可恢复），不再静默持久化半截正文。?? fullContent 仅兜 resolve 后空值边界。
-        const completed = await streamed.complete;
+        let completed: Awaited<typeof streamed.complete>;
+        try {
+          completed = await streamed.complete;
+        } catch (error) {
+          this.deps.logWarn("Writer stage failed (stream)", {
+            novelId: input.novelId,
+            chapterId: input.chapter.id,
+            chapterOrder: input.chapter.order,
+            stage: "writer_draft",
+            kind: isWriterTimeoutError(error) ? "timeout" : "error",
+            latencyMs: Date.now() - draftStartedAt,
+            timeoutMs: draftTimeoutMs,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          throw error;
+        }
         const rawContent = completed?.output ?? fullContent;
+        this.deps.logInfo("Writer stage completed", {
+          novelId: input.novelId,
+          chapterId: input.chapter.id,
+          chapterOrder: input.chapter.order,
+          stage: "writer_draft",
+          latencyMs: Date.now() - draftStartedAt,
+          outputChars: rawContent.length,
+        });
         const normalized = await this.continuityNode(
           input.novelId,
           input.chapter,

@@ -72,6 +72,10 @@ import {
   startArtifactCheckpointHygieneScanner,
   stopArtifactCheckpointHygieneScanner,
 } from "./services/novel/runtime/ChapterArtifactSyncCheckpointHygiene";
+import {
+  startChapterLockHygieneScanner,
+  stopChapterLockHygieneScanner,
+} from "./services/novel/runtime/ChapterGeneratingLockHygiene";
 import { registerBuiltInEngines } from "./services/audiobook/engine/registerBuiltInEngines";
 import { audiobookTaskService } from "./services/audiobook/AudiobookTaskService";
 
@@ -372,6 +376,9 @@ function initializeBackgroundServices(): BackgroundServicesHandle {
   novelSideEffectWorker.start();
   // Prevent zombie chapterArtifactSyncCheckpoint rows from blocking writer claim paths.
   startArtifactCheckpointHygieneScanner();
+  // 章节 generating 陈旧锁自愈：writer 超时/崩溃遗留的假 running 由扫描器回收，
+  // 不再依赖人工 SQL（生产曾单章 4 次手动回收）。
+  startChapterLockHygieneScanner();
   const directorWorker = new DirectorWorker();
   void directorWorker.start().catch((error) => {
     console.error("[director.worker] unexpected stop", error);
@@ -421,6 +428,7 @@ function initializeBackgroundServices(): BackgroundServicesHandle {
       }
       novelSideEffectWorker.stop();
       stopArtifactCheckpointHygieneScanner();
+      stopChapterLockHygieneScanner();
       ragServices.ragWorker.stop();
       ragServices.ragRetrievalTraceRetention.stop();
       taskRetentionService.stop();
