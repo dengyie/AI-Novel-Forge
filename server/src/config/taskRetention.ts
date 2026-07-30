@@ -1,5 +1,11 @@
 function asInt(rawValue: string | undefined, fallback: number, min: number, max: number): number {
-  const parsed = Number(rawValue ?? "");
+  // 空串/未设置都必须走 fallback：Number("" ?? x) 的旧写法里 Number("")===0 是有限数，
+  // 会把未设置的 env 静默钳到 0（对 min<=0 的新配置是真实 bug：autoArchive 窗口曾全变 0）。
+  const raw = rawValue?.trim();
+  if (!raw) {
+    return fallback;
+  }
+  const parsed = Number(raw);
   if (!Number.isFinite(parsed)) {
     return fallback;
   }
@@ -28,6 +34,31 @@ export const TASK_RETENTION_NULL_NOVEL_STALE_HOURS = asInt(
   1,
   24 * 30,
 );
+// 自动归档（autopilot P1）：终态任务在列表里可见一小段窗口后自动写入 TaskCenterArchive，
+// 从默认列表/overview 消失（数据保留，可在归档视图找回）。0 = 关闭该状态的自动归档。
+// 与老化硬删正交：归档只影响可见性，succeededDays/failedDays 才管数据生命周期。
+export const TASK_AUTO_ARCHIVE_SUCCEEDED_HOURS = asInt(
+  process.env.TASK_AUTO_ARCHIVE_SUCCEEDED_HOURS,
+  24,
+  0,
+  24 * 90,
+);
+export const TASK_AUTO_ARCHIVE_FAILED_DAYS = asInt(
+  process.env.TASK_AUTO_ARCHIVE_FAILED_DAYS,
+  7,
+  0,
+  365,
+);
+// 孤儿 AgentRun 自愈（autopilot P1b）：宿主已消失（novel/chapter 删除）或宿主章节
+// 已到终态（completed/pending_review 等）而 run 仍 active 超过该小时数 → 自动 cancel。
+// 与 ChapterGeneratingLockHygiene 互补：那个管「章节卡 generating」，这个管「章节早走完、
+// run 漏 settle」——生产曾留下 3 条跨 14 天的 running 幽灵。
+export const TASK_ORPHAN_AGENT_RUN_STALE_HOURS = asInt(
+  process.env.TASK_ORPHAN_AGENT_RUN_STALE_HOURS,
+  1,
+  1,
+  24 * 30,
+);
 
 export interface TaskRetentionConfig {
   keepPerNovel: number;
@@ -35,6 +66,9 @@ export interface TaskRetentionConfig {
   failedDays: number;
   supersededMinAgeMs: number;
   nullNovelStaleHours: number;
+  autoArchiveSucceededHours: number;
+  autoArchiveFailedDays: number;
+  orphanAgentRunStaleHours: number;
 }
 
 export const taskRetentionConfig: TaskRetentionConfig = {
@@ -43,4 +77,7 @@ export const taskRetentionConfig: TaskRetentionConfig = {
   failedDays: TASK_RETENTION_FAILED_DAYS,
   supersededMinAgeMs: TASK_RETENTION_SUPERSEDED_MIN_AGE_MS,
   nullNovelStaleHours: TASK_RETENTION_NULL_NOVEL_STALE_HOURS,
+  autoArchiveSucceededHours: TASK_AUTO_ARCHIVE_SUCCEEDED_HOURS,
+  autoArchiveFailedDays: TASK_AUTO_ARCHIVE_FAILED_DAYS,
+  orphanAgentRunStaleHours: TASK_ORPHAN_AGENT_RUN_STALE_HOURS,
 };

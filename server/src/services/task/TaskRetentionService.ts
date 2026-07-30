@@ -41,6 +41,8 @@ export interface TaskRetentionSummary {
   zombieRunningCancelled: number;
   nullNovelOrphansDeleted: number;
   nullNovelAgentRunsDeleted: number;
+  autoArchived: number;
+  orphanAgentRunsCancelled: number;
 }
 
 const NULL_NOVEL_BUCKET = "__none__";
@@ -427,6 +429,188 @@ export class TaskRetentionService {
     return rows.map((row) => row.id).filter((id) => !excluded.has(id));
   }
 
+  /**
+   * 自动归档终态任务（autopilot P1a）：终态超过窗口即从默认列表/overview 消失。
+   * - succeeded/cancelled → autoArchiveSucceededHours（默认 24h）
+   * - failed → autoArchiveFailedDays（默认 7d，留人工查看窗口）
+   * - 窗口配 0 = 该状态不自动归档。
+   * 只写 TaskCenterArchive（幂等 createMany skipDuplicates），不删数据；
+   * 数据生命周期仍由年龄硬删（succeededDays/failedDays）管理。
+   */
+  private async autoArchiveTerminalTasks(now: Date, cfg: TaskRetentionConfig): Promise<number> {
+    const statuses: Array<{ status: "succeeded" | "failed" | "cancelled"; cutoff: Date | null }> = [
+      {
+        status: "succeeded",
+        cutoff: cfg.autoArchiveSucceededHours > 0
+          ? new Date(now.getTime() - cfg.autoArchiveSucceededHours * 60 * 60 * 1000)
+          : null,
+      },
+      {
+        status: "cancelled",
+        cutoff: cfg.autoArchiveSucceededHours > 0
+          ? new Date(now.getTime() - cfg.autoArchiveSucceededHours * 60 * 60 * 1000)
+          : null,
+      },
+      {
+        status: "failed",
+        cutoff: cfg.autoArchiveFailedDays > 0
+          ? new Date(now.getTime() - cfg.autoArchiveFailedDays * 24 * 60 * 60 * 1000)
+          : null,
+      },
+    ];
+
+    let archived = 0;
+    type TerminalStatus = "succeeded" | "failed" | "cancelled";
+    const archivePairs: Array<{ taskKind: "novel_workflow" | "agent_run"; ids: string[] }> = [];
+    const kinds: Array<{
+      taskKind: "novel_workflow" | "agent_run";
+      findMany: (status: TerminalStatus, cutoff: Date) => Promise<Array<{ id: string }>>;
+    }> = [
+      {
+        taskKind: "novel_workflow",
+        findMany: (status, cutoff) => prisma.novelWorkflowTask.findMany({
+          where: { status, finishedAt: { not: null, lt: cutoff } },
+          select: { id: true },
+          take: 2000,
+        }),
+      },
+      {
+        taskKind: "agent_run",
+        findMany: (status, cutoff) => prisma.agentRun.findMany({
+          where: { status, finishedAt: { not: null, lt: cutoff } },
+          select: { id: true },
+          take: 2000,
+        }),
+      },
+    ];
+
+    for (const { status, cutoff } of statuses) {
+      if (!cutoff) continue;
+      for (const { taskKind, findMany } of kinds) {
+        const rows = await findMany(status, cutoff);
+        if (rows.length === 0) continue;
+        const pair = archivePairs.find((p) => p.taskKind === taskKind);
+        if (pair) {
+          pair.ids.push(...rows.map((r) => r.id));
+        } else {
+          archivePairs.push({ taskKind, ids: rows.map((r) => r.id) });
+        }
+      }
+    }
+    for (const { taskKind, ids } of archivePairs) {
+      // 逐条 upsert 而非 createMany：SQLite 下 taskCenterArchive.createMany 类型/兼容
+      // 受限；且手动归档若已存在（同 taskKind+taskId 唯一键）需刷新 archivedAt 而非报错。
+      for (const taskId of ids) {
+        await prisma.taskCenterArchive.upsert({
+          where: { taskKind_taskId: { taskKind, taskId } },
+          create: { taskKind, taskId },
+          update: { archivedAt: now },
+        });
+        archived += 1;
+      }
+    }
+    return archived;
+  }
+
+  /**
+   * 孤儿 AgentRun 自愈（autopilot P1b）：run 仍 active 但宿主已不可能再让它 settle——
+   * 1) novelId 指向已删除的小说（历史 SetNull 前的残留）
+   * 2) chapterId 指向已删除的章节
+   * 3) 宿主章节已到终态（非 generating/pending_generation）——成功/失败路径漏 settle 的
+   *    幽灵（生产 3 条：2 条章节 completed 14 天、1 条 pending_review）。
+   * 与 ChapterGeneratingLockHygiene 互补：那个管「章节卡 generating」，这个管「章节早
+   * 走完、run 漏 settle」。只 cancel 满足窗口（orphanAgentRunStaleHours）的，给慢
+   * settle 路径留余量；pending approvals 一并 expire，行硬删（与 null-novel 孤儿同级：
+   * 无参考价值且不可恢复）。
+   */
+  private async reconcileOrphanAgentRuns(
+    now: Date,
+    cfg: TaskRetentionConfig,
+    summary: TaskRetentionSummary,
+  ): Promise<void> {
+    const cutoff = new Date(now.getTime() - cfg.orphanAgentRunStaleHours * 60 * 60 * 1000);
+    const activeRuns = await prisma.agentRun.findMany({
+      where: {
+        status: { in: [...ACTIVE_AGENT_STATUSES] },
+        updatedAt: { lt: cutoff },
+      },
+      select: { id: true, novelId: true, chapterId: true },
+      take: 1000,
+    });
+    if (activeRuns.length === 0) {
+      return;
+    }
+
+    const novelIds = Array.from(new Set(activeRuns.map((r) => r.novelId).filter((id): id is string => Boolean(id))));
+    const chapterIds = Array.from(new Set(activeRuns.map((r) => r.chapterId).filter((id): id is string => Boolean(id))));
+    const [existingNovels, existingChapters] = await Promise.all([
+      novelIds.length > 0
+        ? prisma.novel.findMany({ where: { id: { in: novelIds } }, select: { id: true } })
+        : Promise.resolve([]),
+      chapterIds.length > 0
+        ? prisma.chapter.findMany({ where: { id: { in: chapterIds } }, select: { id: true, chapterStatus: true } })
+        : Promise.resolve([]),
+    ]);
+    const liveNovelIds = new Set(existingNovels.map((r) => r.id));
+    const chapterStatusById = new Map<string, string>(
+      existingChapters.map((r) => [r.id, r.chapterStatus ?? "unplanned"]),
+    );
+    // 章节仍处于写作相关状态 → run 可能真在跑（锁自愈扫描器管那个），这里不动。
+    const WRITING_CHAPTER_STATUSES = new Set(["generating", "pending_generation"]);
+
+    const orphanIds: string[] = [];
+    for (const run of activeRuns) {
+      if (run.novelId && !liveNovelIds.has(run.novelId)) {
+        orphanIds.push(run.id); // 小说已删
+        continue;
+      }
+      if (run.chapterId) {
+        const chapterStatus = chapterStatusById.get(run.chapterId);
+        if (chapterStatus === undefined) {
+          orphanIds.push(run.id); // 章节已删
+        } else if (!WRITING_CHAPTER_STATUSES.has(chapterStatus)) {
+          orphanIds.push(run.id); // 章节已终态，run 漏 settle
+        }
+      }
+    }
+    if (orphanIds.length === 0) {
+      return;
+    }
+
+    await prisma.agentApproval.updateMany({
+      where: { runId: { in: orphanIds }, status: "pending" },
+      data: {
+        status: "expired",
+        decisionNote: "宿主已终态或删除，孤儿运行由任务保留策略自动取消。",
+        decidedAt: now,
+      },
+    });
+    const cancelled = await prisma.agentRun.updateMany({
+      where: { id: { in: orphanIds }, status: { in: [...ACTIVE_AGENT_STATUSES] } },
+      data: {
+        status: "cancelled",
+        finishedAt: now,
+        currentStep: "cancelled",
+        error: "宿主已终态或删除，孤儿运行由任务保留策略自动取消。",
+      },
+    });
+    // 立即归档：从任务中心默认视图消失（保留行供审计，生命周期交给年龄硬删的上游逻辑）。
+    for (const taskId of orphanIds) {
+      await prisma.taskCenterArchive.upsert({
+        where: { taskKind_taskId: { taskKind: "agent_run", taskId } },
+        create: { taskKind: "agent_run", taskId },
+        update: { archivedAt: now },
+      });
+    }
+    summary.orphanAgentRunsCancelled += cancelled.count;
+    if (cancelled.count > 0) {
+      console.warn("[task.retention] orphan agent runs auto-cancelled", {
+        count: cancelled.count,
+        runIds: orphanIds,
+      });
+    }
+  }
+
   async runOnce(now = new Date()): Promise<TaskRetentionSummary> {
     const cfg = taskRetentionConfig;
     const summary: TaskRetentionSummary = {
@@ -438,6 +622,8 @@ export class TaskRetentionService {
       zombieRunningCancelled: 0,
       nullNovelOrphansDeleted: 0,
       nullNovelAgentRunsDeleted: 0,
+      autoArchived: 0,
+      orphanAgentRunsCancelled: 0,
     };
 
     // --- NovelWorkflowTask ---
@@ -447,6 +633,9 @@ export class TaskRetentionService {
 
       // Step 1: cancel zombie running tasks (two-step: they become supersedeable next).
       summary.zombieRunningCancelled = await this.cancelZombieRunningTasks(now);
+
+      // Step 1b: orphan AgentRuns whose host is gone/terminal can never settle — cancel+archive.
+      await this.reconcileOrphanAgentRuns(now, cfg, summary);
 
       // Step 2: supersede sweep — only load novels that currently have an active
       // auto_director task, plus their terminal siblings (not the whole table).
@@ -613,6 +802,13 @@ export class TaskRetentionService {
       }
     } catch (error) {
       console.warn("[task.retention] generation job cleanup failed:", error instanceof Error ? error.message : String(error));
+    }
+
+    // --- Auto-archive terminal tasks (visibility only; runs last so hard-deletes above win) ---
+    try {
+      summary.autoArchived = await this.autoArchiveTerminalTasks(now, cfg);
+    } catch (error) {
+      console.warn("[task.retention] auto-archive failed:", error instanceof Error ? error.message : String(error));
     }
 
     console.info("[task.retention] cleanup done", summary);
