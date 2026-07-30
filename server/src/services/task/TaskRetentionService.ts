@@ -2,11 +2,13 @@ import { Prisma } from "@prisma/client";
 import type { TaskRetentionConfig } from "../../config/taskRetention";
 import { TASK_RETENTION_INTERVAL_MS, taskRetentionConfig } from "../../config/taskRetention";
 import { prisma } from "../../db/prisma";
+import { isTransientTransportError } from "../../llm/transportRetry";
 import { deleteWorkflowTasksHard } from "../novel/novelDeleteCascade";
 import {
   STALE_AUTO_DIRECTOR_RUNNING_MESSAGE,
   isStaleAutoDirectorRunningTaskBroad,
 } from "../novel/workflow/autoDirectorStaleTaskRecovery";
+import { NovelWorkflowTaskAdapter } from "./adapters/NovelWorkflowTaskAdapter";
 
 const TERMINAL_WORKFLOW_STATUSES = ["succeeded", "failed", "cancelled"] as const;
 const TERMINAL_PIPELINE_STATUSES = ["succeeded", "failed", "cancelled"] as const;
@@ -45,6 +47,8 @@ export interface TaskRetentionSummary {
   orphanAgentRunsCancelled: number;
   staleRunningProjected: number;
   waitingApprovalFlagged: number;
+  autoRetried: number;
+  autoRetryBudgetSkipped: number;
 }
 
 const NULL_NOVEL_BUCKET = "__none__";
@@ -218,6 +222,10 @@ export function selectSupersededGenerationJobIds(
 
 export class TaskRetentionService {
   private timer: NodeJS.Timeout | null = null;
+
+  // P3 自动重试走统一 retry 链路（含 archived 检查/通知/continue 编排）；
+  // 测试可替换此字段为轻量 stub。
+  private workflowTaskAdapter: Pick<NovelWorkflowTaskAdapter, "retry"> = new NovelWorkflowTaskAdapter();
 
   start(intervalMs = TASK_RETENTION_INTERVAL_MS): void {
     if (this.timer) return;
@@ -694,6 +702,138 @@ export class TaskRetentionService {
     }
   }
 
+  /**
+   * 自动跟进策略（autopilot P3）：瞬时失败的 auto_director 任务冷却后自动重试。
+   *
+   * 门槛（全部满足才动）：
+   * - cfg.autoRetryTransientEnabled（默认关，显式 env 打开）
+   * - status=failed、lane=auto_director、pendingManualRecovery=false、无取消请求
+   * - attemptCount < maxAttempts（重试预算由任务自身字段控制）
+   * - lastError 命中瞬时传输错误（复用 transportRetry 的模式表：超时/断连/502-504/429 等）
+   * - 距失败超过冷却窗口（避免 retention 每 6h 跑就每 6h 重试一次形成持续风暴）
+   * - 该小说当日 token 用量未超预算（0 = 不限制）
+   *
+   * 超预算的小说：任务置 pendingManualRecovery=true 进恢复候选交人工，不自动烧 token。
+   * 单次 run 最多重试 cfg.autoRetryMaxPerRun 条（最久失败的优先），进一步限流。
+   *
+   * 条件 updateMany 认领防竞态：只有仍处 failed 且未被人工干预的行才被重置为
+   * queued + attemptCount+1（与 retryTask 同构）；认领成功的才走 continue 链路。
+   */
+  private async autoRetryTransientFailedWorkflowTasks(
+    now: Date,
+    cfg: TaskRetentionConfig,
+    summary: TaskRetentionSummary,
+  ): Promise<void> {
+    if (!cfg.autoRetryTransientEnabled) {
+      return;
+    }
+    const cooldownCutoff = new Date(now.getTime() - cfg.autoRetryCooldownMinutes * 60 * 1000);
+    const candidates = await prisma.novelWorkflowTask.findMany({
+      where: {
+        status: "failed",
+        lane: SUPERSEDE_LANE,
+        pendingManualRecovery: false,
+        cancelRequestedAt: null,
+        novelId: { not: null },
+        updatedAt: { lt: cooldownCutoff },
+      },
+      select: {
+        id: true,
+        novelId: true,
+        attemptCount: true,
+        maxAttempts: true,
+        lastError: true,
+      },
+      orderBy: [{ updatedAt: "asc" }, { id: "asc" }],
+      take: 100,
+    });
+    const retryable = candidates.filter((row) => (
+      row.attemptCount < row.maxAttempts
+      && isTransientTransportError(row.lastError ?? "")
+    ));
+    if (retryable.length === 0) {
+      return;
+    }
+
+    // 每本小说每日 token 预算：一次 groupBy 拿全部候选小说的当日用量。
+    const dayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    const novelIds = Array.from(new Set(retryable.map((row) => row.novelId).filter((id): id is string => Boolean(id))));
+    const usageByNovel = new Map<string, number>();
+    if (cfg.dailyTokenBudgetPerNovel > 0 && novelIds.length > 0) {
+      const usageRows = await prisma.directorLlmUsageRecord.groupBy({
+        by: ["novelId"],
+        where: {
+          novelId: { in: novelIds },
+          recordedAt: { gte: dayStart },
+        },
+        _sum: { totalTokens: true },
+      });
+      for (const row of usageRows) {
+        if (row.novelId) {
+          usageByNovel.set(row.novelId, row._sum.totalTokens ?? 0);
+        }
+      }
+    }
+
+    let started = 0;
+    for (const row of retryable) {
+      if (started >= cfg.autoRetryMaxPerRun) {
+        break;
+      }
+      if (
+        cfg.dailyTokenBudgetPerNovel > 0
+        && row.novelId
+        && (usageByNovel.get(row.novelId) ?? 0) >= cfg.dailyTokenBudgetPerNovel
+      ) {
+        // 预算封顶：交人工，不自动烧 token。
+        const flagged = await prisma.novelWorkflowTask.updateMany({
+          where: { id: row.id, status: "failed", pendingManualRecovery: false },
+          data: { pendingManualRecovery: true },
+        });
+        if (flagged.count > 0) {
+          summary.autoRetryBudgetSkipped += 1;
+          console.warn("[task.retention] auto retry skipped: daily token budget reached", {
+            taskId: row.id,
+            novelId: row.novelId,
+            usedTokens: usageByNovel.get(row.novelId),
+            budget: cfg.dailyTokenBudgetPerNovel,
+          });
+        }
+        continue;
+      }
+
+      // 认领：只有仍 failed 且未被人工处理的行才会被重置（retryTask 同构，但条件化）。
+      const claimed = await prisma.novelWorkflowTask.updateMany({
+        where: { id: row.id, status: "failed", pendingManualRecovery: false, cancelRequestedAt: null },
+        data: {
+          status: "queued",
+          attemptCount: row.attemptCount + 1,
+          lastError: null,
+          finishedAt: null,
+          heartbeatAt: now,
+        },
+      });
+      if (claimed.count === 0) {
+        continue;
+      }
+      try {
+        await this.workflowTaskAdapter.retry({ id: row.id, resume: true });
+        started += 1;
+        summary.autoRetried += 1;
+        console.warn("[task.retention] transient-failed workflow task auto retried", {
+          taskId: row.id,
+          novelId: row.novelId,
+          attempt: row.attemptCount + 1,
+          maxAttempts: row.maxAttempts,
+          lastError: row.lastError?.slice(0, 200) ?? null,
+        });
+      } catch (error) {
+        // continue 链路失败：任务已 queued，后续心跳自愈/恢复候选会兜住，不回滚。
+        console.warn("[task.retention] auto retry continue failed:", error instanceof Error ? error.message : String(error));
+      }
+    }
+  }
+
   async runOnce(now = new Date()): Promise<TaskRetentionSummary> {
     const cfg = taskRetentionConfig;
     const summary: TaskRetentionSummary = {
@@ -709,6 +849,8 @@ export class TaskRetentionService {
       orphanAgentRunsCancelled: 0,
       staleRunningProjected: 0,
       waitingApprovalFlagged: 0,
+      autoRetried: 0,
+      autoRetryBudgetSkipped: 0,
     };
 
     // --- NovelWorkflowTask ---
@@ -724,6 +866,9 @@ export class TaskRetentionService {
 
       // Step 1c: projection self-heal — fake-running → failed+recoverable; stale approvals → attention.
       await this.projectStaleActiveWorkflowTasks(now, cfg, summary);
+
+      // Step 1d: auto follow-up (P3, 默认关) — 瞬时失败任务冷却后自动重试，受每日 token 预算封顶。
+      await this.autoRetryTransientFailedWorkflowTasks(now, cfg, summary);
 
       // Step 2: supersede sweep — only load novels that currently have an active
       // auto_director task, plus their terminal siblings (not the whole table).

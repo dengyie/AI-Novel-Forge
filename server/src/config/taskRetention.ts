@@ -76,6 +76,39 @@ export const TASK_WAITING_APPROVAL_ATTENTION_HOURS = asInt(
   1,
   24 * 90,
 );
+// 自动跟进策略（autopilot P3，默认全部关闭 = 保守）：
+// - autoRetryEnabled: failed 且 lastError 命中瞬时错误（复用 transportRetry 的
+//   TRANSIENT 模式）且 attemptCount < maxAttempts 的任务，冷却窗口后自动 retry+resume。
+//   只处理 auto_director lane（有完整 resume/continue 链路）；0 = 关。
+// - autoRetryCooldownMinutes: 同一任务两次自动重试之间的最小间隔，避免风暴。
+// - autoRetryMaxPerRun: 单次 retention run 最多自动重试多少条，进一步限流。
+// - dailyTokenBudgetPerNovel: 每本小说每日（UTC）自动任务 token 预算上限（统计
+//   DirectorLlmUsageRecord 当日 totalTokens 之和）。超过则该小说的自动重试暂停，
+//   仅置 pendingManualRecovery 进恢复候选交人工。0 = 不限制（默认）。
+export const TASK_AUTO_RETRY_TRANSIENT_ENABLED = asInt(
+  process.env.TASK_AUTO_RETRY_TRANSIENT_ENABLED,
+  0,
+  0,
+  1,
+) === 1;
+export const TASK_AUTO_RETRY_COOLDOWN_MINUTES = asInt(
+  process.env.TASK_AUTO_RETRY_COOLDOWN_MINUTES,
+  60,
+  5,
+  24 * 60,
+);
+export const TASK_AUTO_RETRY_MAX_PER_RUN = asInt(
+  process.env.TASK_AUTO_RETRY_MAX_PER_RUN,
+  3,
+  1,
+  50,
+);
+export const TASK_DAILY_TOKEN_BUDGET_PER_NOVEL = asInt(
+  process.env.TASK_DAILY_TOKEN_BUDGET_PER_NOVEL,
+  0,
+  0,
+  100_000_000,
+);
 
 export interface TaskRetentionConfig {
   keepPerNovel: number;
@@ -88,6 +121,10 @@ export interface TaskRetentionConfig {
   orphanAgentRunStaleHours: number;
   staleRunningProjectionMs: number;
   waitingApprovalAttentionHours: number;
+  autoRetryTransientEnabled: boolean;
+  autoRetryCooldownMinutes: number;
+  autoRetryMaxPerRun: number;
+  dailyTokenBudgetPerNovel: number;
 }
 
 export const taskRetentionConfig: TaskRetentionConfig = {
@@ -101,4 +138,8 @@ export const taskRetentionConfig: TaskRetentionConfig = {
   orphanAgentRunStaleHours: TASK_ORPHAN_AGENT_RUN_STALE_HOURS,
   staleRunningProjectionMs: TASK_STALE_RUNNING_PROJECTION_MS,
   waitingApprovalAttentionHours: TASK_WAITING_APPROVAL_ATTENTION_HOURS,
+  autoRetryTransientEnabled: TASK_AUTO_RETRY_TRANSIENT_ENABLED,
+  autoRetryCooldownMinutes: TASK_AUTO_RETRY_COOLDOWN_MINUTES,
+  autoRetryMaxPerRun: TASK_AUTO_RETRY_MAX_PER_RUN,
+  dailyTokenBudgetPerNovel: TASK_DAILY_TOKEN_BUDGET_PER_NOVEL,
 };

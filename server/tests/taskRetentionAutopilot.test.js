@@ -29,6 +29,8 @@ function makeSummary() {
     orphanAgentRunsCancelled: 0,
     staleRunningProjected: 0,
     waitingApprovalFlagged: 0,
+    autoRetried: 0,
+    autoRetryBudgetSkipped: 0,
   };
 }
 
@@ -203,6 +205,164 @@ test("projectStaleActiveWorkflowTasks: no stale rows → no writes", { concurren
     assert.equal(summary.staleRunningProjected, 0);
     assert.equal(summary.waitingApprovalFlagged, 0);
     assert.equal(updateCalled, false);
+  } finally {
+    prisma.novelWorkflowTask.findMany = originals.find;
+    prisma.novelWorkflowTask.updateMany = originals.update;
+  }
+});
+
+// --- P3 auto follow-up policies ---
+
+function makeAutoRetryConfig(overrides = {}) {
+  return {
+    ...taskRetentionConfig,
+    autoRetryTransientEnabled: true,
+    autoRetryCooldownMinutes: 60,
+    autoRetryMaxPerRun: 3,
+    dailyTokenBudgetPerNovel: 0,
+    ...overrides,
+  };
+}
+
+const TRANSIENT_ERROR = "Request failed with status 503: service unavailable";
+const PERMANENT_ERROR = "校验失败：章节大纲缺失必填字段";
+
+function makeFailedWorkflowRow(overrides = {}) {
+  return {
+    id: "wf-failed-1",
+    novelId: "n1",
+    attemptCount: 1,
+    maxAttempts: 3,
+    lastError: TRANSIENT_ERROR,
+    ...overrides,
+  };
+}
+
+test("autoRetryTransientFailedWorkflowTasks: disabled by default — no query at all", { concurrency: false }, async () => {
+  const service = new TaskRetentionService();
+  const originals = { find: prisma.novelWorkflowTask.findMany };
+  let queried = false;
+  prisma.novelWorkflowTask.findMany = async () => { queried = true; return []; };
+  try {
+    const summary = makeSummary();
+    // taskRetentionConfig.autoRetryTransientEnabled 默认 false（env 未设）
+    assert.equal(taskRetentionConfig.autoRetryTransientEnabled, false);
+    await service.autoRetryTransientFailedWorkflowTasks(new Date(), taskRetentionConfig, summary);
+    assert.equal(queried, false, "disabled policy must not touch the DB");
+    assert.equal(summary.autoRetried, 0);
+  } finally {
+    prisma.novelWorkflowTask.findMany = originals.find;
+  }
+});
+
+test("autoRetryTransientFailedWorkflowTasks: retries transient failures via adapter, skips permanent/exhausted", { concurrency: false }, async () => {
+  const service = new TaskRetentionService();
+  const now = new Date("2026-07-30T12:00:00.000Z");
+  const originals = {
+    find: prisma.novelWorkflowTask.findMany,
+    update: prisma.novelWorkflowTask.updateMany,
+  };
+  const retried = [];
+  service.workflowTaskAdapter = {
+    retry: async (input) => { retried.push(input); return {}; },
+  };
+
+  prisma.novelWorkflowTask.findMany = async (args) => {
+    // 查询护栏：只捞 auto_director + failed + 未标恢复 + 无取消 + 过了冷却窗口
+    assert.equal(args.where.status, "failed");
+    assert.equal(args.where.lane, "auto_director");
+    assert.equal(args.where.pendingManualRecovery, false);
+    assert.equal(args.where.cancelRequestedAt, null);
+    assert.ok(args.where.updatedAt.lt instanceof Date);
+    return [
+      makeFailedWorkflowRow({ id: "wf-transient" }),
+      makeFailedWorkflowRow({ id: "wf-permanent", lastError: PERMANENT_ERROR }),
+      makeFailedWorkflowRow({ id: "wf-exhausted", attemptCount: 3 }),
+    ];
+  };
+  prisma.novelWorkflowTask.updateMany = async (args) => {
+    // 认领重置：queued + attempt+1 + 清错误，条件 where 防竞态
+    assert.equal(args.where.status, "failed");
+    assert.equal(args.where.pendingManualRecovery, false);
+    assert.equal(args.data.status, "queued");
+    assert.equal(args.data.lastError, null);
+    return { count: 1 };
+  };
+
+  try {
+    const summary = makeSummary();
+    await service.autoRetryTransientFailedWorkflowTasks(now, makeAutoRetryConfig(), summary);
+    assert.equal(summary.autoRetried, 1);
+    assert.deepEqual(retried, [{ id: "wf-transient", resume: true }]);
+  } finally {
+    prisma.novelWorkflowTask.findMany = originals.find;
+    prisma.novelWorkflowTask.updateMany = originals.update;
+  }
+});
+
+test("autoRetryTransientFailedWorkflowTasks: daily token budget reached → flag for manual, no retry", { concurrency: false }, async () => {
+  const service = new TaskRetentionService();
+  const now = new Date("2026-07-30T12:00:00.000Z");
+  const originals = {
+    find: prisma.novelWorkflowTask.findMany,
+    update: prisma.novelWorkflowTask.updateMany,
+    groupBy: prisma.directorLlmUsageRecord.groupBy,
+  };
+  let retried = false;
+  service.workflowTaskAdapter = {
+    retry: async () => { retried = true; return {}; },
+  };
+
+  prisma.novelWorkflowTask.findMany = async () => [makeFailedWorkflowRow({ id: "wf-over-budget" })];
+  prisma.directorLlmUsageRecord.groupBy = async (args) => {
+    assert.deepEqual(args.by, ["novelId"]);
+    assert.ok(args.where.recordedAt.gte instanceof Date);
+    return [{ novelId: "n1", _sum: { totalTokens: 600_000 } }];
+  };
+  prisma.novelWorkflowTask.updateMany = async (args) => {
+    // 超预算 → 只置 pendingManualRecovery，不动 status
+    assert.deepEqual(Object.keys(args.data), ["pendingManualRecovery"]);
+    return { count: 1 };
+  };
+
+  try {
+    const summary = makeSummary();
+    const cfg = makeAutoRetryConfig({ dailyTokenBudgetPerNovel: 500_000 });
+    await service.autoRetryTransientFailedWorkflowTasks(now, cfg, summary);
+    assert.equal(summary.autoRetried, 0);
+    assert.equal(summary.autoRetryBudgetSkipped, 1);
+    assert.equal(retried, false, "over-budget novel must not burn tokens automatically");
+  } finally {
+    prisma.novelWorkflowTask.findMany = originals.find;
+    prisma.novelWorkflowTask.updateMany = originals.update;
+    prisma.directorLlmUsageRecord.groupBy = originals.groupBy;
+  }
+});
+
+test("autoRetryTransientFailedWorkflowTasks: maxPerRun caps retries per retention run", { concurrency: false }, async () => {
+  const service = new TaskRetentionService();
+  const now = new Date("2026-07-30T12:00:00.000Z");
+  const originals = {
+    find: prisma.novelWorkflowTask.findMany,
+    update: prisma.novelWorkflowTask.updateMany,
+  };
+  const retried = [];
+  service.workflowTaskAdapter = {
+    retry: async (input) => { retried.push(input.id); return {}; },
+  };
+
+  prisma.novelWorkflowTask.findMany = async () => [
+    makeFailedWorkflowRow({ id: "wf-1" }),
+    makeFailedWorkflowRow({ id: "wf-2" }),
+    makeFailedWorkflowRow({ id: "wf-3" }),
+  ];
+  prisma.novelWorkflowTask.updateMany = async () => ({ count: 1 });
+
+  try {
+    const summary = makeSummary();
+    await service.autoRetryTransientFailedWorkflowTasks(now, makeAutoRetryConfig({ autoRetryMaxPerRun: 2 }), summary);
+    assert.equal(summary.autoRetried, 2);
+    assert.deepEqual(retried, ["wf-1", "wf-2"], "third candidate must wait for the next run");
   } finally {
     prisma.novelWorkflowTask.findMany = originals.find;
     prisma.novelWorkflowTask.updateMany = originals.update;
