@@ -1,3 +1,4 @@
+import type { NovelWorkflowTaskStatus } from "@prisma/client";
 import { prisma } from "../../db/prisma";
 
 const ACTIVE_WORKFLOW_STATUSES = ["queued", "running", "waiting_approval"] as const;
@@ -33,38 +34,85 @@ function emptySummary(): NovelDeleteCascadeSummary {
  * Hard-delete workflow tasks of any status plus non-FK dependents.
  * Unlike TaskRetentionService (terminal-only), novel delete must purge active rows too.
  */
+interface HardDeleteConstraints {
+  novelId?: string | null;
+  statuses?: readonly NovelWorkflowTaskStatus[];
+}
+
 export async function deleteWorkflowTasksHard(
   taskIds: string[],
   summary: NovelDeleteCascadeSummary = emptySummary(),
+  constraints: HardDeleteConstraints = {},
 ): Promise<NovelDeleteCascadeSummary> {
   if (taskIds.length === 0) {
     return summary;
   }
 
-  const runtimeDeleteResults = await Promise.all([
-    prisma.directorRuntimeEvent.deleteMany({ where: { workflowTaskId: { in: taskIds } } }),
-    prisma.directorRuntimeExecution.deleteMany({ where: { workflowTaskId: { in: taskIds } } }),
-    prisma.directorRuntimeCommand.deleteMany({ where: { workflowTaskId: { in: taskIds } } }),
-    prisma.directorRuntimeInstance.deleteMany({ where: { workflowTaskId: { in: taskIds } } }),
-    prisma.autoDirectorFollowUpActionLog.deleteMany({ where: { taskId: { in: taskIds } } }),
-    prisma.autoDirectorFollowUpNotificationLog.deleteMany({ where: { taskId: { in: taskIds } } }),
-  ]);
-  summary.runtimeRowsDeleted += runtimeDeleteResults.slice(0, 4).reduce((sum, r) => sum + r.count, 0);
-  summary.followUpRowsDeleted += runtimeDeleteResults.slice(4).reduce((sum, r) => sum + r.count, 0);
+  const deleted = await prisma.$transaction(async (tx) => {
+    const where = {
+      id: { in: taskIds },
+      ...(constraints.novelId === undefined ? {} : { novelId: constraints.novelId }),
+      ...(constraints.statuses ? { status: { in: [...constraints.statuses] } } : {}),
+    };
+    const eligible = await tx.novelWorkflowTask.findMany({
+      where,
+      select: { id: true },
+    });
+    const eligibleIds = eligible.map((row) => row.id);
+    if (eligibleIds.length === 0) {
+      return {
+        runtimeRowsDeleted: 0,
+        followUpRowsDeleted: 0,
+        workflowTasksDeleted: 0,
+        archiveRowsDeleted: 0,
+      };
+    }
 
-  // autoApproval / director* with task FK cascade on task delete; explicit is fine too
-  await prisma.autoDirectorAutoApprovalRecord.deleteMany({ where: { taskId: { in: taskIds } } });
+    const workflowDeleteResult = await tx.novelWorkflowTask.deleteMany({ where });
+    if (workflowDeleteResult.count === 0) {
+      return {
+        runtimeRowsDeleted: 0,
+        followUpRowsDeleted: 0,
+        workflowTasksDeleted: 0,
+        archiveRowsDeleted: 0,
+      };
+    }
+    let deletedIds = eligibleIds;
+    if (workflowDeleteResult.count !== eligibleIds.length) {
+      const remaining = await tx.novelWorkflowTask.findMany({
+        where: { id: { in: eligibleIds } },
+        select: { id: true },
+      });
+      const remainingIds = new Set(remaining.map((row) => row.id));
+      deletedIds = eligibleIds.filter((id) => !remainingIds.has(id));
+    }
 
-  const workflowDeleteResult = await prisma.novelWorkflowTask.deleteMany({
-    where: { id: { in: taskIds } },
+    // Runtime and follow-up rows are intentionally application-managed and do not
+    // have a database FK to the workflow task.
+    const runtimeDeleteResults = await Promise.all([
+      tx.directorRuntimeEvent.deleteMany({ where: { workflowTaskId: { in: deletedIds } } }),
+      tx.directorRuntimeExecution.deleteMany({ where: { workflowTaskId: { in: deletedIds } } }),
+      tx.directorRuntimeCommand.deleteMany({ where: { workflowTaskId: { in: deletedIds } } }),
+      tx.directorRuntimeInstance.deleteMany({ where: { workflowTaskId: { in: deletedIds } } }),
+      tx.autoDirectorFollowUpActionLog.deleteMany({ where: { taskId: { in: deletedIds } } }),
+      tx.autoDirectorFollowUpNotificationLog.deleteMany({ where: { taskId: { in: deletedIds } } }),
+    ]);
+    const archiveWorkflowResult = await tx.taskCenterArchive.deleteMany({
+      where: { taskKind: "novel_workflow", taskId: { in: deletedIds } },
+    });
+
+    return {
+      runtimeRowsDeleted: runtimeDeleteResults.slice(0, 4).reduce((sum, result) => sum + result.count, 0),
+      followUpRowsDeleted: runtimeDeleteResults.slice(4).reduce((sum, result) => sum + result.count, 0),
+      workflowTasksDeleted: workflowDeleteResult.count,
+      archiveRowsDeleted: archiveWorkflowResult.count,
+    };
   });
-  summary.workflowTasksDeleted += workflowDeleteResult.count;
 
-  const archiveWorkflowResult = await prisma.taskCenterArchive.deleteMany({
-    where: { taskKind: "novel_workflow", taskId: { in: taskIds } },
-  });
-  summary.archiveRowsDeleted += archiveWorkflowResult.count;
-
+  summary.runtimeRowsDeleted += deleted.runtimeRowsDeleted;
+  summary.followUpRowsDeleted += deleted.followUpRowsDeleted;
+  summary.workflowTasksDeleted += deleted.workflowTasksDeleted;
+  summary.archiveRowsDeleted += deleted.archiveRowsDeleted;
   return summary;
 }
 

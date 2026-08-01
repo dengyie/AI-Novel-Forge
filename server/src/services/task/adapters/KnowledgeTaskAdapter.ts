@@ -16,7 +16,12 @@ import {
 import {
   KNOWLEDGE_DOCUMENT_STEPS,
   buildSteps,
-  toLegacyTaskStatus,
+  buildTaskKeysetWhere,
+  compareTaskSummary,
+  getTaskStatusesForList,
+  LEGACY_TASK_STATUSES,
+  withListMetadata,
+  type TaskAdapterListResult,
 } from "../taskCenter.shared";
 
 interface KnowledgeDocumentRecord {
@@ -91,14 +96,16 @@ export class KnowledgeTaskAdapter {
     status?: TaskStatus;
     keyword?: string;
     take: number;
-  }): Promise<UnifiedTaskSummary[]> {
+    cursor?: import("../taskCenter.shared").CursorPayload;
+  }): Promise<TaskAdapterListResult> {
     if (input.status === "waiting_approval") {
-      return [];
+      return withListMetadata([], false);
     }
 
-    const status = toLegacyTaskStatus(input.status);
+    const statuses = getTaskStatusesForList(input.status, input.cursor, LEGACY_TASK_STATUSES);
     const archivedIds = await getArchivedTaskIds("knowledge_document");
-    const rows = await prisma.ragIndexJob.findMany({
+    const scanTake = input.keyword ? Math.max(input.take * 3, input.take + 1) : input.take + 1;
+    const rows = (await Promise.all(statuses.map((status) => prisma.ragIndexJob.findMany({
       where: {
         ownerType: "knowledge_document",
         ...(archivedIds.length
@@ -108,11 +115,12 @@ export class KnowledgeTaskAdapter {
             },
           }
           : {}),
-        ...(status ? { status } : {}),
+        status,
+        ...(input.cursor ? { AND: [buildTaskKeysetWhere(input.cursor, LEGACY_TASK_STATUSES)] } : {}),
       },
       orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
-      take: input.keyword ? Math.max(input.take * 3, input.take) : input.take,
-    });
+      take: scanTake,
+    })))).flat();
 
     const documents = await prisma.knowledgeDocument.findMany({
       where: {
@@ -133,10 +141,9 @@ export class KnowledgeTaskAdapter {
       documents.map((item) => [item.id, item]),
     );
 
-    return rows
-      .filter((row) => !input.keyword || matchesKeyword(row, documentMap.get(row.ownerId), input.keyword))
-      .slice(0, input.take)
-      .map((row) => {
+    const filteredRows = rows
+      .filter((row) => !input.keyword || matchesKeyword(row, documentMap.get(row.ownerId), input.keyword));
+    const items: UnifiedTaskSummary[] = filteredRows.map((row) => {
         const progress = parseJobProgress(row.payloadJson);
         const document = documentMap.get(row.ownerId);
         const documentTitle = document?.title ?? "未命名知识文档";
@@ -184,6 +191,8 @@ export class KnowledgeTaskAdapter {
           }],
         };
       });
+    items.sort(compareTaskSummary);
+    return withListMetadata(items.slice(0, input.take), items.length > input.take);
   }
 
   async detail(id: string): Promise<UnifiedTaskDetail | null> {

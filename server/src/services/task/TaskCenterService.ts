@@ -28,6 +28,7 @@ import {
   parseCursor,
   toCursor,
   type ListTasksFilters,
+  type TaskAdapterListResult,
 } from "./taskCenter.shared";
 import { getArchivedTaskIdsByKind } from "./taskArchive";
 import type { TaskCancelSource } from "./taskSupport";
@@ -234,7 +235,7 @@ export class TaskCenterService {
       prisma.novelWorkflowTask.count({
         where: {
           lane: "auto_director",
-          status: { in: ["queued", "running"] },
+          status: { in: ["queued", "running", "waiting_approval"] },
           pendingManualRecovery: true,
           ...notInArchived(archivedWorkflowIds),
         },
@@ -344,33 +345,30 @@ export class TaskCenterService {
     const sourceTake = Math.max(60, limit * 4);
     const keyword = normalizeKeyword(filters.keyword);
     const cursorPayload = parseCursor(filters.cursor);
+    const adapterTake = cursorPayload ? limit + 1 : sourceTake;
+    if (filters.cursor?.trim() && !cursorPayload) {
+      throw new AppError("Invalid task cursor.", 400);
+    }
 
-    const [bookTasks, novelTasks, knowledgeTasks, imageTasks, agentTasks, workflowTasks, styleExtractionTasks, audiobookTasks] = await Promise.all([
-      filters.kind && filters.kind !== "book_analysis"
-        ? Promise.resolve<UnifiedTaskSummary[]>([])
-        : this.bookAdapter.list({ status: filters.status, keyword, take: sourceTake }),
-      filters.kind && filters.kind !== "novel_pipeline"
-        ? Promise.resolve<UnifiedTaskSummary[]>([])
-        : this.pipelineAdapter.list({ status: filters.status, keyword, take: sourceTake }),
-      filters.kind && filters.kind !== "knowledge_document"
-        ? Promise.resolve<UnifiedTaskSummary[]>([])
-        : this.knowledgeAdapter.list({ status: filters.status, keyword, take: sourceTake }),
-      filters.kind && filters.kind !== "image_generation"
-        ? Promise.resolve<UnifiedTaskSummary[]>([])
-        : this.imageAdapter.list({ status: filters.status, keyword, take: sourceTake }),
-      filters.kind && filters.kind !== "agent_run"
-        ? Promise.resolve<UnifiedTaskSummary[]>([])
-        : this.agentAdapter.list({ status: filters.status, keyword, take: sourceTake }),
-      filters.kind && filters.kind !== "novel_workflow"
-        ? Promise.resolve<UnifiedTaskSummary[]>([])
-        : this.workflowAdapter.list({ status: filters.status, keyword, take: sourceTake }),
-      filters.kind && filters.kind !== "style_extraction"
-        ? Promise.resolve<UnifiedTaskSummary[]>([])
-        : this.styleExtractionAdapter.list({ status: filters.status, keyword, take: sourceTake }),
-      filters.kind && filters.kind !== "novel_audiobook"
-        ? Promise.resolve<UnifiedTaskSummary[]>([])
-        : this.audiobookAdapter.list({ status: filters.status, keyword, take: sourceTake }),
+    const emptyResult = (): Promise<TaskAdapterListResult> => Promise.resolve({ items: [], hasMore: false, exhausted: true });
+    const [bookResult, novelResult, knowledgeResult, imageResult, agentResult, workflowResult, styleExtractionResult, audiobookResult] = await Promise.all([
+      filters.kind && filters.kind !== "book_analysis" ? emptyResult() : this.bookAdapter.list({ status: filters.status, keyword, take: adapterTake, cursor: cursorPayload ?? undefined }),
+      filters.kind && filters.kind !== "novel_pipeline" ? emptyResult() : this.pipelineAdapter.list({ status: filters.status, keyword, take: adapterTake, cursor: cursorPayload ?? undefined }),
+      filters.kind && filters.kind !== "knowledge_document" ? emptyResult() : this.knowledgeAdapter.list({ status: filters.status, keyword, take: adapterTake, cursor: cursorPayload ?? undefined }),
+      filters.kind && filters.kind !== "image_generation" ? emptyResult() : this.imageAdapter.list({ status: filters.status, keyword, take: adapterTake, cursor: cursorPayload ?? undefined }),
+      filters.kind && filters.kind !== "agent_run" ? emptyResult() : this.agentAdapter.list({ status: filters.status, keyword, take: adapterTake, cursor: cursorPayload ?? undefined }),
+      filters.kind && filters.kind !== "novel_workflow" ? emptyResult() : this.workflowAdapter.list({ status: filters.status, keyword, take: adapterTake, cursor: cursorPayload ?? undefined }),
+      filters.kind && filters.kind !== "style_extraction" ? emptyResult() : this.styleExtractionAdapter.list({ status: filters.status, keyword, take: adapterTake, cursor: cursorPayload ?? undefined }),
+      filters.kind && filters.kind !== "novel_audiobook" ? emptyResult() : this.audiobookAdapter.list({ status: filters.status, keyword, take: adapterTake, cursor: cursorPayload ?? undefined }),
     ]);
+    const bookTasks = bookResult.items;
+    const novelTasks = novelResult.items;
+    const knowledgeTasks = knowledgeResult.items;
+    const imageTasks = imageResult.items;
+    const agentTasks = agentResult.items;
+    const workflowTasks = workflowResult.items;
+    const styleExtractionTasks = styleExtractionResult.items;
+    const audiobookTasks = audiobookResult.items;
 
     const linkedPipelineIds = filters.kind === "novel_pipeline"
       ? new Set<string>()
@@ -385,7 +383,20 @@ export class TaskCenterService {
       ? merged.filter((item) => isAfterCursor(item, cursorPayload))
       : merged;
     const items = filteredByCursor.slice(0, limit);
-    const nextCursor = filteredByCursor.length > limit ? toCursor(items[items.length - 1]) : null;
+    const hasMoreSources = [
+      bookResult,
+      novelResult,
+      knowledgeResult,
+      imageResult,
+      agentResult,
+      workflowResult,
+      styleExtractionResult,
+      audiobookResult,
+    ].some((result) => result.hasMore && !result.exhausted);
+    const nextCursor = items.length > 0
+      && (filteredByCursor.length > limit || hasMoreSources)
+      ? toCursor(items[items.length - 1])
+      : null;
 
     return {
       items,

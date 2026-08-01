@@ -102,7 +102,7 @@ export interface RecoverableTaskSummary {
   kind: Extract<TaskKind, "book_analysis" | "novel_pipeline" | "image_generation" | "novel_workflow" | "style_extraction" | "novel_audiobook">;
   title: string;
   ownerLabel: string;
-  status: Extract<TaskStatus, "queued" | "running">;
+  status: Extract<TaskStatus, "queued" | "running" | "waiting_approval">;
   currentStage?: string | null;
   currentItemLabel?: string | null;
   resumeAction?: string | null;

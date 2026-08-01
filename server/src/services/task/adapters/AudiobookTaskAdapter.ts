@@ -6,7 +6,12 @@ import { audiobookTaskService } from "../../audiobook/AudiobookTaskService";
 import {
   AUDIOBOOK_TASK_STEPS,
   buildSteps,
-  toLegacyTaskStatus,
+  buildTaskKeysetWhere,
+  compareTaskSummary,
+  getTaskStatusesForList,
+  LEGACY_TASK_STATUSES,
+  withListMetadata,
+  type TaskAdapterListResult,
 } from "../taskCenter.shared";
 import {
   buildTaskRecoveryHint,
@@ -39,17 +44,19 @@ export class AudiobookTaskAdapter {
     status?: TaskStatus;
     keyword?: string;
     take: number;
-  }): Promise<UnifiedTaskSummary[]> {
+    cursor?: import("../taskCenter.shared").CursorPayload;
+  }): Promise<TaskAdapterListResult> {
     if (input.status === "waiting_approval") {
-      return [];
+      return withListMetadata([], false);
     }
     try {
-      const status = toLegacyTaskStatus(input.status);
+      const statuses = getTaskStatusesForList(input.status, input.cursor, LEGACY_TASK_STATUSES);
       const archivedIds = await getArchivedTaskIds("novel_audiobook");
-      const rows = await prisma.audiobookTask.findMany({
+      const rows = (await Promise.all(statuses.map((status) => prisma.audiobookTask.findMany({
         where: {
           ...(archivedIds.length ? { id: { notIn: archivedIds } } : {}),
-          ...(status ? { status } : {}),
+          status,
+          ...(input.cursor ? { AND: [buildTaskKeysetWhere(input.cursor, LEGACY_TASK_STATUSES)] } : {}),
           ...(input.keyword
             ? {
                 OR: [
@@ -64,10 +71,10 @@ export class AudiobookTaskAdapter {
           novel: { select: { id: true, title: true } },
         },
         orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
-        take: input.take,
-      });
+        take: input.take + 1,
+      })))).flat();
 
-      return rows.map((row) => {
+      const items = rows.map((row) => {
         const structuredFailure = resolveStructuredFailureSummary(row.error);
         const novelTitle = row.novel?.title?.trim() || "未命名小说";
         const route = buildSourceRoute(row.novelId);
@@ -119,10 +126,11 @@ export class AudiobookTaskAdapter {
               }]
             : [],
         } satisfies UnifiedTaskSummary;
-      });
+      }).sort(compareTaskSummary);
+      return withListMetadata(items.slice(0, input.take), items.length > input.take);
     } catch (error) {
       if (isMissingAudiobookTaskTableError(error)) {
-        return [];
+        return withListMetadata([], false);
       }
       throw error;
     }

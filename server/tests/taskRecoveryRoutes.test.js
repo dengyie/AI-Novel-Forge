@@ -144,3 +144,47 @@ test("task recovery routes expose overview, recovery candidates, and resume acti
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 });
+
+test("task recovery routes preserve waiting_approval status and expose it in overview semantics", async () => {
+  const originals = {
+    getOverview: taskCenterService.getOverview,
+    listRecoveryCandidates: recoveryTaskService.listRecoveryCandidates,
+  };
+  taskCenterService.getOverview = async () => ({
+    queuedCount: 0,
+    runningCount: 0,
+    failedCount: 0,
+    cancelledCount: 0,
+    waitingApprovalCount: 1,
+    recoveryCandidateCount: 1,
+    completed24hCount: 0,
+  });
+  recoveryTaskService.listRecoveryCandidates = async () => ({
+    items: [{
+      id: "approval-task",
+      kind: "novel_workflow",
+      title: "等待审批的导演任务",
+      ownerLabel: "示例小说",
+      status: "waiting_approval",
+      currentStage: "章节确认",
+      currentItemLabel: "等待人工审批",
+      resumeAction: "继续导演",
+      sourceRoute: "/novels/example/edit?directorTaskId=approval-task&taskPanel=1",
+      recoveryHint: "等待审批",
+    }],
+  });
+  const app = createApp();
+  const server = http.createServer(app);
+  const port = await listen(server);
+  try {
+    const overview = await (await fetch(`http://127.0.0.1:${port}/api/tasks/overview`)).json();
+    assert.equal(overview.data.waitingApprovalCount, 1);
+    assert.equal(overview.data.recoveryCandidateCount, 1);
+    const candidates = await (await fetch(`http://127.0.0.1:${port}/api/tasks/recovery-candidates`)).json();
+    assert.equal(candidates.data.items[0].status, "waiting_approval");
+  } finally {
+    taskCenterService.getOverview = originals.getOverview;
+    recoveryTaskService.listRecoveryCandidates = originals.listRecoveryCandidates;
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});

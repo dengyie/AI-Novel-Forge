@@ -7,6 +7,7 @@ import { deleteWorkflowTasksHard } from "../novel/novelDeleteCascade";
 import {
   STALE_AUTO_DIRECTOR_RUNNING_MESSAGE,
   isStaleAutoDirectorRunningTaskBroad,
+  resolveStaleRunningTaskMs,
 } from "../novel/workflow/autoDirectorStaleTaskRecovery";
 import { NovelWorkflowTaskAdapter } from "./adapters/NovelWorkflowTaskAdapter";
 
@@ -257,27 +258,94 @@ export class TaskRetentionService {
     if (ids.length === 0) {
       return;
     }
-    const runtimeDeleteResults = await Promise.all([
-      prisma.directorRuntimeEvent.deleteMany({ where: { workflowTaskId: { in: ids } } }),
-      prisma.directorRuntimeExecution.deleteMany({ where: { workflowTaskId: { in: ids } } }),
-      prisma.directorRuntimeCommand.deleteMany({ where: { workflowTaskId: { in: ids } } }),
-      prisma.directorRuntimeInstance.deleteMany({ where: { workflowTaskId: { in: ids } } }),
-      // follow-up action/notification logs reference taskId (no FK, indexed) — without this
-      // they become orphans that pile up in the "导演跟进" panel after the task is deleted.
-      prisma.autoDirectorFollowUpActionLog.deleteMany({ where: { taskId: { in: ids } } }),
-      prisma.autoDirectorFollowUpNotificationLog.deleteMany({ where: { taskId: { in: ids } } }),
-    ]);
-    summary.runtimeRowsDeleted += runtimeDeleteResults.reduce((sum, r) => sum + r.count, 0);
-
-    const workflowDeleteResult = await prisma.novelWorkflowTask.deleteMany({
-      where: { id: { in: ids }, status: { in: [...TERMINAL_WORKFLOW_STATUSES] } },
+    const deleted = await prisma.$transaction(async (tx) => {
+      const eligible = await tx.novelWorkflowTask.findMany({
+        where: { id: { in: ids }, status: { in: [...TERMINAL_WORKFLOW_STATUSES] } },
+        select: { id: true },
+      });
+      const eligibleIds = eligible.map((row) => row.id);
+      if (eligibleIds.length === 0) {
+        return { workflow: 0, runtime: 0, followUp: 0, archive: 0 };
+      }
+      const workflowDeleteResult = await tx.novelWorkflowTask.deleteMany({
+        where: { id: { in: eligibleIds }, status: { in: [...TERMINAL_WORKFLOW_STATUSES] } },
+      });
+      if (workflowDeleteResult.count === 0) {
+        return { workflow: 0, runtime: 0, followUp: 0, archive: 0 };
+      }
+      let deletedIds = eligibleIds;
+      if (workflowDeleteResult.count !== eligibleIds.length) {
+        const remaining = await tx.novelWorkflowTask.findMany({
+          where: { id: { in: eligibleIds } },
+          select: { id: true },
+        });
+        const remainingIds = new Set(remaining.map((row) => row.id));
+        deletedIds = eligibleIds.filter((id) => !remainingIds.has(id));
+      }
+      const runtimeDeleteResults = await Promise.all([
+        tx.directorRuntimeEvent.deleteMany({ where: { workflowTaskId: { in: deletedIds } } }),
+        tx.directorRuntimeExecution.deleteMany({ where: { workflowTaskId: { in: deletedIds } } }),
+        tx.directorRuntimeCommand.deleteMany({ where: { workflowTaskId: { in: deletedIds } } }),
+        tx.directorRuntimeInstance.deleteMany({ where: { workflowTaskId: { in: deletedIds } } }),
+        // follow-up action/notification logs reference taskId (no FK, indexed) — without this
+        // they become orphans that pile up in the "导演跟进" panel after the task is deleted.
+        tx.autoDirectorFollowUpActionLog.deleteMany({ where: { taskId: { in: deletedIds } } }),
+        tx.autoDirectorFollowUpNotificationLog.deleteMany({ where: { taskId: { in: deletedIds } } }),
+      ]);
+      const archiveWorkflowResult = await tx.taskCenterArchive.deleteMany({
+        where: { taskKind: "novel_workflow", taskId: { in: deletedIds } },
+      });
+      return {
+        workflow: workflowDeleteResult.count,
+        runtime: runtimeDeleteResults.slice(0, 4).reduce((sum, result) => sum + result.count, 0),
+        followUp: runtimeDeleteResults.slice(4).reduce((sum, result) => sum + result.count, 0),
+        archive: archiveWorkflowResult.count,
+      };
     });
-    summary.novelWorkflowDeleted += workflowDeleteResult.count;
+    summary.novelWorkflowDeleted += deleted.workflow;
+    summary.runtimeRowsDeleted += deleted.runtime + deleted.followUp;
+    summary.archiveRowsDeleted += deleted.archive;
+  }
 
-    const archiveWorkflowResult = await prisma.taskCenterArchive.deleteMany({
-      where: { taskKind: "novel_workflow", taskId: { in: ids } },
+  private async deleteTerminalGenerationJobs(
+    ids: string[],
+    summary: TaskRetentionSummary,
+  ): Promise<number> {
+    if (ids.length === 0) {
+      return 0;
+    }
+    const deleted = await prisma.$transaction(async (tx) => {
+      const eligible = await tx.generationJob.findMany({
+        where: { id: { in: ids }, status: { in: [...TERMINAL_PIPELINE_STATUSES] } },
+        select: { id: true },
+      });
+      const eligibleIds = eligible.map((row) => row.id);
+      if (eligibleIds.length === 0) {
+        return { jobs: 0, archives: 0 };
+      }
+      const result = await tx.generationJob.deleteMany({
+        where: { id: { in: eligibleIds }, status: { in: [...TERMINAL_PIPELINE_STATUSES] } },
+      });
+      if (result.count === 0) {
+        return { jobs: 0, archives: 0 };
+      }
+      let deletedIds = eligibleIds;
+      if (result.count !== eligibleIds.length) {
+        const remaining = await tx.generationJob.findMany({
+          where: { id: { in: eligibleIds } },
+          select: { id: true },
+        });
+        const remainingIds = new Set(remaining.map((row) => row.id));
+        deletedIds = eligibleIds.filter((id) => !remainingIds.has(id));
+      }
+      const archive = await tx.taskCenterArchive.deleteMany({
+        where: { taskKind: "novel_pipeline", taskId: { in: deletedIds } },
+      });
+      return { jobs: result.count, archives: archive.count };
     });
-    summary.archiveRowsDeleted += archiveWorkflowResult.count;
+    summary.generationJobDeleted += deleted.jobs;
+    summary.archiveRowsDeleted += deleted.archives;
+    return deleted.jobs;
   }
 
   /**
@@ -302,8 +370,13 @@ export class TaskRetentionService {
     });
     if (staleWorkflows.length > 0) {
       const ids = staleWorkflows.map((row) => row.id);
-      await prisma.novelWorkflowTask.updateMany({
-        where: { id: { in: ids } },
+      const cancelled = await prisma.novelWorkflowTask.updateMany({
+        where: {
+          id: { in: ids },
+          novelId: null,
+          status: { in: [...ACTIVE_WORKFLOW_STATUSES] },
+          updatedAt: { lt: cutoff },
+        },
         data: {
           status: "cancelled",
           cancelRequestedAt: now,
@@ -312,11 +385,28 @@ export class TaskRetentionService {
           lastError: NULL_NOVEL_ORPHAN_MESSAGE,
         },
       });
-      const cascadeSummary = await deleteWorkflowTasksHard(ids);
-      summary.novelWorkflowDeleted += cascadeSummary.workflowTasksDeleted;
-      summary.runtimeRowsDeleted += cascadeSummary.runtimeRowsDeleted + cascadeSummary.followUpRowsDeleted;
-      summary.archiveRowsDeleted += cascadeSummary.archiveRowsDeleted;
-      summary.nullNovelOrphansDeleted += cascadeSummary.workflowTasksDeleted;
+      if (cancelled.count > 0) {
+        const cancelledIds = (
+          await prisma.novelWorkflowTask.findMany({
+            where: {
+              id: { in: ids },
+              novelId: null,
+              status: "cancelled",
+              cancelRequestedAt: now,
+              lastError: NULL_NOVEL_ORPHAN_MESSAGE,
+            },
+            select: { id: true },
+          })
+        ).map((row) => row.id);
+        const cascadeSummary = await deleteWorkflowTasksHard(cancelledIds, undefined, {
+          novelId: null,
+          statuses: ["cancelled"],
+        });
+        summary.novelWorkflowDeleted += cascadeSummary.workflowTasksDeleted;
+        summary.runtimeRowsDeleted += cascadeSummary.runtimeRowsDeleted + cascadeSummary.followUpRowsDeleted;
+        summary.archiveRowsDeleted += cascadeSummary.archiveRowsDeleted;
+        summary.nullNovelOrphansDeleted += cascadeSummary.workflowTasksDeleted;
+      }
     }
 
     const staleAgents = await prisma.agentRun.findMany({
@@ -329,20 +419,56 @@ export class TaskRetentionService {
     });
     if (staleAgents.length > 0) {
       const agentIds = staleAgents.map((row) => row.id);
-      await prisma.agentApproval.updateMany({
-        where: { runId: { in: agentIds }, status: "pending" },
-        data: {
-          status: "expired",
-          decisionNote: NULL_NOVEL_ORPHAN_MESSAGE,
-          decidedAt: now,
-        },
+      const deleted = await prisma.$transaction(async (tx) => {
+        const eligible = await tx.agentRun.findMany({
+          where: {
+            id: { in: agentIds },
+            novelId: null,
+            status: { in: [...ACTIVE_AGENT_STATUSES] },
+            updatedAt: { lt: cutoff },
+          },
+          select: { id: true },
+        });
+        const eligibleIds = eligible.map((row) => row.id);
+        if (eligibleIds.length === 0) {
+          return { ids: [] as string[], archives: 0 };
+        }
+        await tx.agentApproval.updateMany({
+          where: { runId: { in: eligibleIds }, status: "pending" },
+          data: {
+            status: "expired",
+            decisionNote: NULL_NOVEL_ORPHAN_MESSAGE,
+            decidedAt: now,
+          },
+        });
+        const result = await tx.agentRun.deleteMany({
+          where: {
+            id: { in: eligibleIds },
+            novelId: null,
+            status: { in: [...ACTIVE_AGENT_STATUSES] },
+            updatedAt: { lt: cutoff },
+          },
+        });
+        if (result.count === 0) {
+          return { ids: [] as string[], archives: 0 };
+        }
+
+        let deletedIds = eligibleIds;
+        if (result.count !== eligibleIds.length) {
+          const remaining = await tx.agentRun.findMany({
+            where: { id: { in: eligibleIds } },
+            select: { id: true },
+          });
+          const remainingIds = new Set(remaining.map((row) => row.id));
+          deletedIds = eligibleIds.filter((id) => !remainingIds.has(id));
+        }
+        const archiveAgent = await tx.taskCenterArchive.deleteMany({
+          where: { taskKind: "agent_run", taskId: { in: deletedIds } },
+        });
+        return { ids: deletedIds, archives: archiveAgent.count };
       });
-      await prisma.agentRun.deleteMany({ where: { id: { in: agentIds } } });
-      const archiveAgent = await prisma.taskCenterArchive.deleteMany({
-        where: { taskKind: "agent_run", taskId: { in: agentIds } },
-      });
-      summary.archiveRowsDeleted += archiveAgent.count;
-      summary.nullNovelAgentRunsDeleted += agentIds.length;
+      summary.archiveRowsDeleted += deleted.archives;
+      summary.nullNovelAgentRunsDeleted += deleted.ids.length;
     }
   }
 
@@ -354,6 +480,7 @@ export class TaskRetentionService {
    * are caught too, not just structured-outline stages.
    */
   private async cancelZombieRunningTasks(now: Date): Promise<number> {
+    const staleCutoff = new Date(now.getTime() - resolveStaleRunningTaskMs());
     const runningRows = await prisma.novelWorkflowTask.findMany({
       where: {
         lane: SUPERSEDE_LANE,
@@ -371,23 +498,33 @@ export class TaskRetentionService {
         updatedAt: true,
       },
     });
-    const zombieIds = runningRows
-      .filter((row) => isStaleAutoDirectorRunningTaskBroad(row, now))
-      .map((row) => row.id);
-    if (zombieIds.length === 0) {
-      return 0;
+    const zombieRows = runningRows.filter((row) => isStaleAutoDirectorRunningTaskBroad(row, now));
+    let cancelled = 0;
+    for (const row of zombieRows) {
+      const result = await prisma.novelWorkflowTask.updateMany({
+        where: {
+          id: row.id,
+          lane: SUPERSEDE_LANE,
+          status: "running",
+          pendingManualRecovery: false,
+          cancelRequestedAt: null,
+          OR: [
+            { heartbeatAt: null },
+            { heartbeatAt: { lt: staleCutoff } },
+          ],
+          updatedAt: { lt: staleCutoff },
+        },
+        data: {
+          status: "cancelled",
+          cancelRequestedAt: now,
+          finishedAt: now,
+          heartbeatAt: now,
+          lastError: STALE_AUTO_DIRECTOR_RUNNING_MESSAGE,
+        },
+      });
+      cancelled += result.count;
     }
-    await prisma.novelWorkflowTask.updateMany({
-      where: { id: { in: zombieIds } },
-      data: {
-        status: "cancelled",
-        cancelRequestedAt: now,
-        finishedAt: now,
-        heartbeatAt: now,
-        lastError: STALE_AUTO_DIRECTOR_RUNNING_MESSAGE,
-      },
-    });
-    return zombieIds.length;
+    return cancelled;
   }
 
   /**
@@ -508,15 +645,27 @@ export class TaskRetentionService {
       }
     }
     for (const { taskKind, ids } of archivePairs) {
-      // 逐条 upsert 而非 createMany：SQLite 下 taskCenterArchive.createMany 类型/兼容
-      // 受限；且手动归档若已存在（同 taskKind+taskId 唯一键）需刷新 archivedAt 而非报错。
+      // 逐条事务化 re-check + upsert：扫描后任务可能已被 retry/取消，不能把活跃任务写入 archive。
       for (const taskId of ids) {
-        await prisma.taskCenterArchive.upsert({
-          where: { taskKind_taskId: { taskKind, taskId } },
-          create: { taskKind, taskId },
-          update: { archivedAt: now },
+        const didArchive = await prisma.$transaction(async (tx) => {
+          const current = taskKind === "novel_workflow"
+            ? await tx.novelWorkflowTask.findFirst({
+              where: { id: taskId, status: { in: [...TERMINAL_WORKFLOW_STATUSES] } },
+              select: { id: true },
+            })
+            : await tx.agentRun.findFirst({
+              where: { id: taskId, status: { in: [...TERMINAL_WORKFLOW_STATUSES] } },
+              select: { id: true },
+            });
+          if (!current) return false;
+          await tx.taskCenterArchive.upsert({
+            where: { taskKind_taskId: { taskKind, taskId } },
+            create: { taskKind, taskId },
+            update: { archivedAt: now },
+          });
+          return true;
         });
-        archived += 1;
+        if (didArchive) archived += 1;
       }
     }
     return archived;
@@ -657,7 +806,18 @@ export class TaskRetentionService {
     if (staleRunning.length > 0) {
       const ids = staleRunning.map((row) => row.id);
       const projected = await prisma.novelWorkflowTask.updateMany({
-        where: { id: { in: ids }, status: "running", pendingManualRecovery: false },
+        where: {
+          id: { in: ids },
+          status: "running",
+          lane: { not: SUPERSEDE_LANE },
+          pendingManualRecovery: false,
+          cancelRequestedAt: null,
+          updatedAt: { lt: staleRunningCutoff },
+          OR: [
+            { heartbeatAt: null },
+            { heartbeatAt: { lt: staleRunningCutoff } },
+          ],
+        },
         data: {
           status: "failed",
           finishedAt: now,
@@ -997,15 +1157,7 @@ export class TaskRetentionService {
           cfg,
         );
         if (pipelineSupersededIds.length > 0) {
-          const pipelineSupersededDeleteResult = await prisma.generationJob.deleteMany({
-            where: { id: { in: pipelineSupersededIds }, status: { in: [...TERMINAL_PIPELINE_STATUSES] } },
-          });
-          summary.generationJobDeleted += pipelineSupersededDeleteResult.count;
-
-          const archivePipelineSupersededResult = await prisma.taskCenterArchive.deleteMany({
-            where: { taskKind: "novel_pipeline", taskId: { in: pipelineSupersededIds } },
-          });
-          summary.archiveRowsDeleted += archivePipelineSupersededResult.count;
+          await this.deleteTerminalGenerationJobs(pipelineSupersededIds, summary);
         }
       }
 
@@ -1018,15 +1170,7 @@ export class TaskRetentionService {
       });
 
       if (pipelineDeletable.length > 0) {
-        const pipelineDeleteResult = await prisma.generationJob.deleteMany({
-          where: { id: { in: pipelineDeletable } },
-        });
-        summary.generationJobDeleted += pipelineDeleteResult.count;
-
-        const archivePipelineResult = await prisma.taskCenterArchive.deleteMany({
-          where: { taskKind: "novel_pipeline", taskId: { in: pipelineDeletable } },
-        });
-        summary.archiveRowsDeleted += archivePipelineResult.count;
+        await this.deleteTerminalGenerationJobs(pipelineDeletable, summary);
       }
     } catch (error) {
       console.warn("[task.retention] generation job cleanup failed:", error instanceof Error ? error.message : String(error));

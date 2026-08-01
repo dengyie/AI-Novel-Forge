@@ -21,6 +21,7 @@ import {
 } from "./novelWorkflow.shared";
 import {
   defaultProgressForStage,
+  isPreNovelAutoDirectorCandidateTask,
   mapStageToTab,
   stageLabel,
 } from "./novelWorkflow.helpers";
@@ -233,6 +234,20 @@ export class NovelWorkflowStoreService {
   public async findActiveTaskByNovelAndLane(novelId: string, lane: NovelWorkflowLane) {
     const rows = await this.getVisibleRowsByNovelId(novelId, lane);
     return rows.find((row) => ACTIVE_STATUSES.includes(row.status as (typeof ACTIVE_STATUSES)[number])) ?? null;
+  }
+
+  public async findLatestPreNovelAutoDirectorCandidate() {
+    const rows = await prisma.novelWorkflowTask.findMany({
+      where: {
+        lane: "auto_director",
+        novelId: null,
+        status: { in: [...ACTIVE_STATUSES] },
+      },
+      orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+      take: 20,
+    });
+    const archived = await getArchivedTaskIdSet("novel_workflow", rows.map((row) => row.id));
+    return rows.find((row) => !archived.has(row.id) && isPreNovelAutoDirectorCandidateTask(row)) ?? null;
   }
 
   public async listActiveTasksByNovelAndLane(novelId: string, lane: NovelWorkflowLane) {

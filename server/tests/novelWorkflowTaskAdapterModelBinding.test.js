@@ -304,7 +304,10 @@ test("task center list only queries auto director workflow rows", async () => {
   const whereSnapshots = [];
   prisma.novelWorkflowTask.findMany = async ({ where }) => {
     whereSnapshots.push(where);
-    return rows.filter((row) => !where?.lane || row.lane === where.lane);
+    return rows.filter((row) =>
+      (!where?.lane || row.lane === where.lane)
+      && (!where?.status || row.status === where.status),
+    );
   };
 
   const adapter = new NovelWorkflowTaskAdapter();
@@ -316,8 +319,12 @@ test("task center list only queries auto director workflow rows", async () => {
       take: 10,
     });
 
-    assert.equal(whereSnapshots.length, 1);
-    assert.equal(whereSnapshots[0].lane, "auto_director");
+    assert.equal(whereSnapshots.length, 6);
+    assert.ok(whereSnapshots.every((where) => where.lane === "auto_director"));
+    assert.deepEqual(
+      whereSnapshots.map((where) => where.status).sort(),
+      ["cancelled", "failed", "queued", "running", "succeeded", "waiting_approval"],
+    );
     assert.deepEqual(list.map((item) => item.id), ["task_auto_director"]);
     assert.equal(list[0].displayStatus, "节奏 / 拆章进行中");
     assert.equal(list[0].resumeAction, "查看当前进度");
@@ -333,7 +340,7 @@ test("task center list treats restart recovery note as running recovery instead 
     findMany: prisma.novelWorkflowTask.findMany,
   };
 
-  prisma.novelWorkflowTask.findMany = async () => ([
+  prisma.novelWorkflowTask.findMany = async ({ where }) => ([
     {
       id: "task_recovering",
       title: "AI 自动导演",
@@ -362,7 +369,7 @@ test("task center list treats restart recovery note as running recovery instead 
         title: "示例小说",
       },
     },
-  ]);
+  ].filter((row) => row.status === where?.status));
 
   const adapter = new NovelWorkflowTaskAdapter();
   const originalHeal = adapter.workflowService.healAutoDirectorTaskState;
@@ -390,7 +397,7 @@ test("task center list keeps manual recovery tasks out of running display state"
     findMany: prisma.novelWorkflowTask.findMany,
   };
 
-  prisma.novelWorkflowTask.findMany = async () => ([
+  prisma.novelWorkflowTask.findMany = async ({ where }) => ([
     {
       id: "task_manual_recovery",
       title: "AI 自动导演",
@@ -420,7 +427,7 @@ test("task center list keeps manual recovery tasks out of running display state"
         title: "示例小说",
       },
     },
-  ]);
+  ].filter((row) => row.status === where?.status));
 
   const adapter = new NovelWorkflowTaskAdapter();
   const originalHeal = adapter.workflowService.healAutoDirectorTaskState;
@@ -449,7 +456,7 @@ test("task center list surfaces actual auto execution range in explainability fi
     findMany: prisma.novelWorkflowTask.findMany,
   };
 
-  prisma.novelWorkflowTask.findMany = async () => ([
+  prisma.novelWorkflowTask.findMany = async ({ where }) => ([
     {
       id: "task_range_ready",
       title: "AI 自动导演",
@@ -487,7 +494,7 @@ test("task center list surfaces actual auto execution range in explainability fi
         },
       }),
     },
-  ]);
+  ].filter((row) => row.status === where?.status));
 
   const adapter = new NovelWorkflowTaskAdapter();
   const originalHeal = adapter.workflowService.healAutoDirectorTaskState;

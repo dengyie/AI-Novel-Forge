@@ -45,6 +45,14 @@ import {
 import { buildNovelWorkflowDetailSteps } from "../novelWorkflowDetailSteps";
 import { buildWorkflowExplainability } from "../novelWorkflowExplainability";
 import { buildNovelWorkflowNextActionLabel } from "../novelWorkflowTaskSummary";
+import {
+  AGENT_TASK_STATUSES,
+  buildTaskKeysetWhere,
+  compareTaskSummary,
+  getTaskStatusesForList,
+  withListMetadata,
+  type TaskAdapterListResult,
+} from "../taskCenter.shared";
 
 function buildOwnerLabel(row: {
   novel?: { title: string } | null;
@@ -417,74 +425,54 @@ export class NovelWorkflowTaskAdapter {
     status?: TaskStatus;
     keyword?: string;
     take: number;
-  }): Promise<UnifiedTaskSummary[]> {
+    cursor?: import("../taskCenter.shared").CursorPayload;
+  }): Promise<TaskAdapterListResult> {
+    const statuses = getTaskStatusesForList(input.status, input.cursor, AGENT_TASK_STATUSES);
     const archivedIds = await getArchivedTaskIds("novel_workflow");
-    const rows = await prisma.novelWorkflowTask.findMany({
-      where: {
-        ...(archivedIds.length
-          ? {
-            id: {
-              notIn: archivedIds,
-            },
-          }
-          : {}),
-        lane: "auto_director",
-        ...(input.status ? { status: input.status } : {}),
-        ...(input.keyword
-          ? {
-            OR: [
-              { title: { contains: input.keyword } },
-              { id: { contains: input.keyword } },
-              { novel: { title: { contains: input.keyword } } },
-            ],
-          }
-          : {}),
-      },
-      include: {
-        novel: {
-          select: {
-            title: true,
+    const buildWhere = (status: typeof statuses[number]) => ({
+      ...(archivedIds.length
+        ? {
+          id: {
+            notIn: archivedIds,
           },
+        }
+        : {}),
+      lane: "auto_director" as const,
+      status,
+      ...(input.cursor ? { AND: [buildTaskKeysetWhere(input.cursor, AGENT_TASK_STATUSES)] } : {}),
+      ...(input.keyword
+        ? {
+          OR: [
+            { title: { contains: input.keyword } },
+            { id: { contains: input.keyword } },
+            { novel: { title: { contains: input.keyword } } },
+          ],
+        }
+        : {}),
+    });
+    const include = {
+      novel: {
+        select: {
+          title: true,
         },
       },
+    } as const;
+    const rows = (await Promise.all(statuses.map((status) => prisma.novelWorkflowTask.findMany({
+      where: buildWhere(status),
+      include,
       orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
-      take: input.take,
-    });
+      take: input.take + 1,
+    })))).flat();
     const healed = await Promise.all(
       rows.map((row) => this.workflowService.healAutoDirectorTaskState(row.id, row)),
     );
     const normalizedRows = healed.some(Boolean)
-      ? await prisma.novelWorkflowTask.findMany({
-        where: {
-          ...(archivedIds.length
-            ? {
-              id: {
-                notIn: archivedIds,
-              },
-            }
-            : {}),
-          lane: "auto_director",
-          ...(input.status ? { status: input.status } : {}),
-          ...(input.keyword
-            ? {
-              OR: [
-                { title: { contains: input.keyword } },
-                { id: { contains: input.keyword } },
-                { novel: { title: { contains: input.keyword } } },
-              ],
-            }
-            : {}),
-        },
-        include: {
-          novel: {
-            select: {
-              title: true,
-            },
-          },
-        },
+      ? (await Promise.all(statuses.map((status) => prisma.novelWorkflowTask.findMany({
+        where: buildWhere(status),
+        include,
         orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
-        take: input.take,
-      })
+        take: input.take + 1,
+      })))).flat()
       : rows;
 
     const visibleRows = normalizedRows.filter((row) => {
@@ -499,7 +487,17 @@ export class NovelWorkflowTaskAdapter {
         && candidate.updatedAt >= row.updatedAt);
     });
 
-    return visibleRows.map((row) => mapSummary(row));
+    const allItems = visibleRows.map((row) => mapSummary(row)).sort(compareTaskSummary);
+    const items = allItems.slice(0, input.take);
+    const hasMore = normalizedRows.length > input.take || allItems.length > input.take;
+    // Keep direct adapter callers source-compatible while exposing metadata to
+    // TaskCenter. The array is also the `items` property for legacy callers.
+    Object.defineProperties(items, {
+      items: { value: items, enumerable: false },
+      hasMore: { value: hasMore, enumerable: false },
+      exhausted: { value: !hasMore, enumerable: false },
+    });
+    return items as unknown as TaskAdapterListResult;
   }
 
   async detail(
@@ -631,10 +629,15 @@ export class NovelWorkflowTaskAdapter {
     // 跳过 continue（另一个重试已接管）。
     const claimed = await this.workflowService.retryTask(id);
     if (claimed && shouldResumeAutoDirector) {
-      await this.novelDirectorService.continueTask(id, {
-        batchAlreadyStartedCount,
-        forceResume: true,
-      });
+      try {
+        await this.novelDirectorService.continueTask(id, {
+          batchAlreadyStartedCount,
+          forceResume: true,
+        });
+      } catch (error) {
+        await this.workflowService.markRetryDispatchFailed(id, claimed.attemptCount, error);
+        throw error;
+      }
     }
     const detail = await this.detail(id);
     if (!detail) {

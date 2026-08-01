@@ -21,8 +21,13 @@ import {
 import {
   BOOK_ANALYSIS_STEPS,
   buildSteps,
+  compareTaskSummary,
+  getTaskStatusesForList,
+  LEGACY_TASK_STATUSES,
   mapBookStatusToTaskStatus,
-  toLegacyTaskStatus,
+  buildTaskKeysetWhere,
+  withListMetadata,
+  type TaskAdapterListResult,
 } from "../taskCenter.shared";
 
 export class BookTaskAdapter {
@@ -30,15 +35,16 @@ export class BookTaskAdapter {
     status?: TaskStatus;
     keyword?: string;
     take: number;
-  }): Promise<UnifiedTaskSummary[]> {
+    cursor?: import("../taskCenter.shared").CursorPayload;
+  }): Promise<TaskAdapterListResult> {
     if (input.status === "waiting_approval") {
-      return [];
+      return withListMetadata([], false);
     }
-    const status = toLegacyTaskStatus(input.status);
+    const statuses = getTaskStatusesForList(input.status, input.cursor, LEGACY_TASK_STATUSES);
     const archivedIds = await getArchivedTaskIds("book_analysis");
-    const rows = await prisma.bookAnalysis.findMany({
+    const rows = (await Promise.all(statuses.map((status) => prisma.bookAnalysis.findMany({
       where: {
-        status: status ? status : { in: ["queued", "running", "succeeded", "failed", "cancelled"] },
+        status,
         ...(archivedIds.length
           ? {
             id: {
@@ -46,6 +52,7 @@ export class BookTaskAdapter {
             },
           }
           : {}),
+        ...(input.cursor ? { AND: [buildTaskKeysetWhere(input.cursor, LEGACY_TASK_STATUSES)] } : {}),
         ...(input.keyword
           ? {
             OR: [
@@ -64,8 +71,8 @@ export class BookTaskAdapter {
         },
       },
       orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
-      take: input.take,
-    });
+      take: input.take + 1,
+    })))).flat();
 
     const summaries: UnifiedTaskSummary[] = [];
     for (const row of rows) {
@@ -117,7 +124,8 @@ export class BookTaskAdapter {
         }],
       });
     }
-    return summaries;
+    summaries.sort(compareTaskSummary);
+    return withListMetadata(summaries.slice(0, input.take), summaries.length > input.take);
   }
 
   async detail(id: string): Promise<UnifiedTaskDetail | null> {

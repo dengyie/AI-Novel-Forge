@@ -7,7 +7,12 @@ import { getLlmRepairSessionLogPath, getLlmSessionLogPath } from "../../../llm/s
 import {
   buildSteps,
   STYLE_EXTRACTION_TASK_STEPS,
-  toLegacyTaskStatus,
+  buildTaskKeysetWhere,
+  compareTaskSummary,
+  getTaskStatusesForList,
+  LEGACY_TASK_STATUSES,
+  withListMetadata,
+  type TaskAdapterListResult,
 } from "../taskCenter.shared";
 import {
   buildTaskRecoveryHint,
@@ -31,16 +36,18 @@ export class StyleExtractionTaskAdapter {
     status?: TaskStatus;
     keyword?: string;
     take: number;
-  }): Promise<UnifiedTaskSummary[]> {
+    cursor?: import("../taskCenter.shared").CursorPayload;
+  }): Promise<TaskAdapterListResult> {
     if (input.status === "waiting_approval") {
-      return [];
+      return withListMetadata([], false);
     }
-    const status = toLegacyTaskStatus(input.status);
+    const statuses = getTaskStatusesForList(input.status, input.cursor, LEGACY_TASK_STATUSES);
     const archivedIds = await getArchivedTaskIds("style_extraction");
-    const rows = await prisma.styleExtractionTask.findMany({
+    const rows = (await Promise.all(statuses.map((status) => prisma.styleExtractionTask.findMany({
       where: {
         ...(archivedIds.length ? { id: { notIn: archivedIds } } : {}),
-        ...(status ? { status } : {}),
+        status,
+        ...(input.cursor ? { AND: [buildTaskKeysetWhere(input.cursor, LEGACY_TASK_STATUSES)] } : {}),
         ...(input.keyword
           ? {
               OR: [
@@ -52,10 +59,10 @@ export class StyleExtractionTaskAdapter {
           : {}),
       },
       orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
-      take: input.take,
-    });
+      take: input.take + 1,
+    })))).flat();
 
-    return rows.map((row) => {
+    const items = rows.map((row) => {
       const structuredFailure = resolveStructuredFailureSummary(row.error);
       return {
         id: row.id,
@@ -104,7 +111,8 @@ export class StyleExtractionTaskAdapter {
             }]
           : [],
       } satisfies UnifiedTaskSummary;
-    });
+    }).sort(compareTaskSummary);
+    return withListMetadata(items.slice(0, input.take), items.length > input.take);
   }
 
   async detail(id: string): Promise<UnifiedTaskDetail | null> {

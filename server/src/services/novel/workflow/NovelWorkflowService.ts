@@ -87,6 +87,10 @@ export class NovelWorkflowService extends NovelWorkflowStoreService {
     return this.applicationService.retryTask(...args);
   }
 
+  markRetryDispatchFailed(...args: Parameters<NovelWorkflowApplicationService["markRetryDispatchFailed"]>) {
+    return this.applicationService.markRetryDispatchFailed(...args);
+  }
+
   restoreTaskToCheckpoint(...args: Parameters<NovelWorkflowApplicationService["restoreTaskToCheckpoint"]>) {
     return this.applicationService.restoreTaskToCheckpoint(...args);
   }

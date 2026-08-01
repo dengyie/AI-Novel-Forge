@@ -1,4 +1,6 @@
+import { randomUUID } from "node:crypto";
 import { prisma } from "../../../db/prisma";
+import { acquireHighMemoryReservation } from "../highMemoryReservation";
 import { AppError } from "../../../middleware/errorHandler";
 import type { NovelWorkflowCheckpoint, NovelWorkflowStage } from "@ai-novel/shared/types/novelWorkflow";
 import { buildNovelCreateResumeTarget, appendMilestone, defaultWorkflowTitle, mergeSeedPayload, parseMilestones, parseResumeTarget, parseSeedPayload, stringifyResumeTarget } from "./novelWorkflow.shared";
@@ -29,6 +31,36 @@ export class NovelWorkflowApplicationService {
 
   private async getNovelTitle(novelId: string): Promise<string | null> {
     return this.workflow.getNovelTitle(novelId);
+  }
+
+  private async bootstrapTaskInner(input: BootstrapWorkflowInput) {
+    if (input.novelId?.trim() && input.forceNew !== true) {
+      const visibleRows = await this.workflow.getVisibleRowsByNovelId(input.novelId.trim(), input.lane);
+      const active = visibleRows.find((row) => ["queued", "running", "waiting_approval"].includes(row.status as string));
+      if (active) {
+        return active;
+      }
+      const latest = visibleRows[0];
+      if (latest) {
+        return latest;
+      }
+    }
+
+    if (
+      !input.novelId?.trim()
+      && input.forceNew !== true
+      && input.lane === "auto_director"
+    ) {
+      const candidate = await this.workflow.findLatestPreNovelAutoDirectorCandidate();
+      if (candidate) {
+        return candidate;
+      }
+    }
+
+    return this.workflow.createWorkflow({
+      ...input,
+      novelId: input.novelId?.trim() || null,
+    });
   }
 
   async bootstrapTask(input: BootstrapWorkflowInput) {
@@ -71,22 +103,30 @@ export class NovelWorkflowApplicationService {
       }
     }
 
-    if (input.novelId?.trim() && input.forceNew !== true) {
-      const visibleRows = await this.workflow.getVisibleRowsByNovelId(input.novelId.trim(), input.lane);
-      const active = visibleRows.find((row) => ["queued", "running", "waiting_approval"].includes(row.status as string));
-      if (active) {
-        return active;
-      }
-      const latest = visibleRows[0];
-      if (latest) {
-        return latest;
-      }
+    if (input.forceNew === true) {
+      return this.bootstrapTaskInner(input);
     }
 
-    return this.workflow.createWorkflow({
-      ...input,
-      novelId: input.novelId?.trim() || null,
+    const scopeKey = `${input.lane}:${input.novelId?.trim() || "pre_novel"}`;
+    const ownerId = `workflow-bootstrap:${process.pid}:${randomUUID()}`;
+    const reservation = await acquireHighMemoryReservation({
+      namespace: "novel-workflow-bootstrap",
+      scopeKey,
+      ownerId,
+      ttlMs: 5_000,
+      metadata: { lane: input.lane, novelId: input.novelId?.trim() || null },
     });
+    if (!reservation.acquired) {
+      // A lock holder is either about to create the shared task or has just released it.
+      // Give that short critical section a chance to commit before the final re-read.
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      return this.bootstrapTaskInner(input);
+    }
+    try {
+      return await this.bootstrapTaskInner(input);
+    } finally {
+      await reservation.handle.release();
+    }
   }
 
   async attachNovelToTask(taskId: string, novelId: string, stage: NovelWorkflowStage = "project_setup") {
@@ -95,8 +135,11 @@ export class NovelWorkflowApplicationService {
       throw new AppError("Workflow task not found.", 404);
     }
     const novelTitle = await this.getNovelTitle(novelId);
-    return this.workflow.updateTaskWithRetry({
-      where: { id: taskId },
+    const claimed = await this.workflow.updateTaskManyWithRetry({
+      where: {
+        id: taskId,
+        OR: [{ novelId: null }, { novelId }],
+      },
       data: {
         novelId,
         title: novelTitle ?? existing.title,
@@ -117,6 +160,14 @@ export class NovelWorkflowApplicationService {
         heartbeatAt: new Date(),
       },
     });
+    const latest = await this.workflow.getTaskByIdWithoutHealing(taskId);
+    if (!latest) {
+      throw new AppError("Workflow task not found.", 404);
+    }
+    if (claimed.count === 0 && latest.novelId !== novelId) {
+      return latest;
+    }
+    return latest;
   }
 
   async claimAutoDirectorNovelCreation(taskId: string, input: {
@@ -382,6 +433,45 @@ export class NovelWorkflowApplicationService {
       return null;
     }
     await this.workflow.notifyAutoDirectorTaskTransition({ before: existing, after: next });
+    return next;
+  }
+
+  async markRetryDispatchFailed(
+    taskId: string,
+    claimedAttemptCount: number,
+    error: unknown,
+  ) {
+    const message = error instanceof Error ? error.message : String(error);
+    // Capture the pre-CAS row for a transition event. The conditional update
+    // remains the source of truth; a concurrent state change simply yields no
+    // notification when the claim no longer matches.
+    const existing = await this.workflow.getTaskByIdWithoutHealing(taskId);
+    const updated = await this.workflow.updateTaskManyWithRetry({
+      where: {
+        id: taskId,
+        status: { in: ["queued", "waiting_approval"] },
+        pendingManualRecovery: false,
+        cancelRequestedAt: null,
+        attemptCount: claimedAttemptCount,
+      },
+      data: {
+        status: "failed",
+        pendingManualRecovery: true,
+        lastError: `重试任务入队失败：${message}`.slice(0, 2000),
+        finishedAt: null,
+        heartbeatAt: new Date(),
+      },
+    });
+    if (updated.count === 0) {
+      return null;
+    }
+    const next = await this.workflow.getTaskById(taskId);
+    if (next) {
+      await this.workflow.notifyAutoDirectorTaskTransition({
+        before: existing,
+        after: next,
+      });
+    }
     return next;
   }
 

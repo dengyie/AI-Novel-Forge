@@ -37,7 +37,9 @@ interface AutoDirectorRecoveryCommandPort {
 }
 
 function toRunningStatus(status: string): RecoverableTaskSummary["status"] {
-  return status === "running" ? "running" : "queued";
+  if (status === "running") return "running";
+  if (status === "waiting_approval") return "waiting_approval";
+  return "queued";
 }
 
 function buildWorkflowSourceRoute(row: { id: string; novelId: string | null }): string {
@@ -120,7 +122,7 @@ export class RecoveryTaskService {
       prisma.novelWorkflowTask.findMany({
         where: {
           lane: "auto_director",
-          status: { in: ["queued", "running"] },
+          status: { in: ["queued", "running", "waiting_approval"] },
           pendingManualRecovery: true,
         },
         select: {

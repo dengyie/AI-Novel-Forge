@@ -44,7 +44,7 @@ test("autoArchiveTerminalTasks archives aged terminal tasks, keeps fresh ones vi
   const originals = {
     workflowFind: prisma.novelWorkflowTask.findMany,
     agentFind: prisma.agentRun.findMany,
-    upsert: prisma.taskCenterArchive.upsert,
+    transaction: prisma.$transaction,
   };
 
   const queriedStatuses = [];
@@ -58,10 +58,20 @@ test("autoArchiveTerminalTasks archives aged terminal tasks, keeps fresh ones vi
   prisma.agentRun.findMany = async (args) => (
     args.where.status === "succeeded" ? [{ id: "ar-old-ok" }] : []
   );
-  prisma.taskCenterArchive.upsert = async (args) => {
-    archived.push(args.create);
-    return {};
-  };
+  prisma.$transaction = async (callback) => callback({
+    novelWorkflowTask: {
+      findFirst: async ({ where }) => where.id.startsWith("wf-") ? { id: where.id } : null,
+    },
+    agentRun: {
+      findFirst: async ({ where }) => where.id.startsWith("ar-") ? { id: where.id } : null,
+    },
+    taskCenterArchive: {
+      upsert: async (args) => {
+        archived.push(args.create);
+        return {};
+      },
+    },
+  });
 
   try {
     const count = await service.autoArchiveTerminalTasks(now, taskRetentionConfig);
@@ -75,7 +85,7 @@ test("autoArchiveTerminalTasks archives aged terminal tasks, keeps fresh ones vi
   } finally {
     prisma.novelWorkflowTask.findMany = originals.workflowFind;
     prisma.agentRun.findMany = originals.agentFind;
-    prisma.taskCenterArchive.upsert = originals.upsert;
+    prisma.$transaction = originals.transaction;
   }
 });
 

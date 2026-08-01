@@ -10,6 +10,14 @@ import {
 } from "../taskSupport";
 import { buildAgentRunTaskCenterVisibilityWhere } from "../taskVisibility";
 import {
+  AGENT_TASK_STATUSES,
+  buildTaskKeysetWhere,
+  compareTaskSummary,
+  getTaskStatusesForList,
+  withListMetadata,
+  type TaskAdapterListResult,
+} from "../taskCenter.shared";
+import {
   archiveTask as recordTaskArchive,
   getArchivedTaskIds,
   isTaskArchived,
@@ -88,9 +96,11 @@ export class AgentRunTaskAdapter {
     status?: TaskStatus;
     keyword?: string;
     take: number;
-  }): Promise<UnifiedTaskSummary[]> {
+    cursor?: import("../taskCenter.shared").CursorPayload;
+  }): Promise<TaskAdapterListResult> {
+    const statuses = getTaskStatusesForList(input.status, input.cursor, AGENT_TASK_STATUSES);
     const archivedIds = await getArchivedTaskIds("agent_run");
-    const rows = await prisma.agentRun.findMany({
+    const rows = (await Promise.all(statuses.map((status) => prisma.agentRun.findMany({
       where: {
         ...(archivedIds.length
           ? {
@@ -99,7 +109,7 @@ export class AgentRunTaskAdapter {
             },
           }
           : {}),
-        ...(input.status ? { status: input.status as AgentRunStatus } : {}),
+        status: status as AgentRunStatus,
         ...(input.keyword
           ? {
             OR: [
@@ -109,6 +119,7 @@ export class AgentRunTaskAdapter {
           }
           : {}),
         ...buildAgentRunTaskCenterVisibilityWhere(),
+        ...(input.cursor ? { AND: [buildTaskKeysetWhere(input.cursor, AGENT_TASK_STATUSES)] } : {}),
       },
       include: {
         steps: {
@@ -116,9 +127,12 @@ export class AgentRunTaskAdapter {
         },
       },
       orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
-      take: input.take,
-    });
-    return rows.map((item) => this.toSummary(item, item.steps.length));
+      take: input.take + 1,
+    })))).flat();
+    const items = rows
+      .map((item) => this.toSummary(item, item.steps.length))
+      .sort(compareTaskSummary);
+    return withListMetadata(items.slice(0, input.take), items.length > input.take);
   }
 
   async detail(id: string): Promise<UnifiedTaskDetail | null> {

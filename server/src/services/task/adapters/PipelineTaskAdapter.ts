@@ -22,7 +22,12 @@ import {
 import {
   NOVEL_PIPELINE_STEPS,
   buildSteps,
-  toLegacyTaskStatus,
+  compareTaskSummary,
+  getTaskStatusesForList,
+  LEGACY_TASK_STATUSES,
+  buildTaskKeysetWhere,
+  withListMetadata,
+  type TaskAdapterListResult,
 } from "../taskCenter.shared";
 
 type PipelineRow = {
@@ -121,13 +126,14 @@ export class PipelineTaskAdapter {
     status?: TaskStatus;
     keyword?: string;
     take: number;
-  }): Promise<UnifiedTaskSummary[]> {
+    cursor?: import("../taskCenter.shared").CursorPayload;
+  }): Promise<TaskAdapterListResult> {
     if (input.status === "waiting_approval") {
-      return [];
+      return withListMetadata([], false);
     }
-    const status = toLegacyTaskStatus(input.status);
+    const statuses = getTaskStatusesForList(input.status, input.cursor, LEGACY_TASK_STATUSES);
     const archivedIds = await getArchivedTaskIds("novel_pipeline");
-    const rows = await prisma.generationJob.findMany({
+    const rows = (await Promise.all(statuses.map((status) => prisma.generationJob.findMany({
       where: {
         ...(archivedIds.length
           ? {
@@ -136,7 +142,8 @@ export class PipelineTaskAdapter {
             },
           }
           : {}),
-        ...(status ? { status } : {}),
+        status,
+        ...(input.cursor ? { AND: [buildTaskKeysetWhere(input.cursor, LEGACY_TASK_STATUSES)] } : {}),
         ...(input.keyword
           ? {
             OR: [
@@ -155,10 +162,10 @@ export class PipelineTaskAdapter {
         },
       },
       orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
-      take: input.take,
-    });
-
-    return rows.map((row) => this.toSummary(row));
+      take: input.take + 1,
+    })))).flat();
+    const items = rows.map((row) => this.toSummary(row)).sort(compareTaskSummary);
+    return withListMetadata(items.slice(0, input.take), items.length > input.take);
   }
 
   async detail(id: string): Promise<UnifiedTaskDetail | null> {

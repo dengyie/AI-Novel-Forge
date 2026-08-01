@@ -18,6 +18,79 @@ export interface CursorPayload {
   id: string;
 }
 
+export interface TaskAdapterListResult {
+  items: UnifiedTaskSummary[];
+  hasMore: boolean;
+  exhausted: boolean;
+}
+
+export const LEGACY_TASK_STATUSES = [
+  "running",
+  "queued",
+  "failed",
+  "cancelled",
+  "succeeded",
+] as const satisfies readonly TaskStatus[];
+
+export const AGENT_TASK_STATUSES = [
+  "running",
+  "waiting_approval",
+  "queued",
+  "failed",
+  "cancelled",
+  "succeeded",
+] as const satisfies readonly TaskStatus[];
+
+export function getTaskStatusesForList<T extends TaskStatus>(
+  requestedStatus: TaskStatus | undefined,
+  cursor: CursorPayload | undefined,
+  supportedStatuses: readonly T[],
+): T[] {
+  const requested = requestedStatus
+    ? supportedStatuses.filter((status) => status === requestedStatus)
+    : [...supportedStatuses];
+  if (!cursor) {
+    return requested;
+  }
+  const cursorRank = statusRank(cursor.status);
+  return requested.filter((status) => statusRank(status) >= cursorRank) as T[];
+}
+
+export function withListMetadata(
+  items: UnifiedTaskSummary[],
+  hasMore: boolean,
+): TaskAdapterListResult {
+  return { items, hasMore, exhausted: !hasMore };
+}
+
+/**
+ * Builds the status-aware continuation predicate for the canonical merged
+ * order: status rank ascending, then updatedAt/id descending.
+ */
+export function buildTaskKeysetWhere(
+  cursor: CursorPayload,
+  allowedStatuses?: readonly TaskStatus[],
+): Record<string, unknown> {
+  const allowed = allowedStatuses
+    ? new Set(allowedStatuses)
+    : null;
+  const laterStatuses = (Object.keys(STATUS_RANK) as TaskStatus[])
+    .filter((status) => STATUS_RANK[status] > STATUS_RANK[cursor.status] && (!allowed || allowed.has(status)));
+  const equalStatus = (!allowed || allowed.has(cursor.status)) ? [{
+    status: cursor.status,
+    OR: [
+      { updatedAt: { lt: new Date(cursor.updatedAt) } },
+      { updatedAt: new Date(cursor.updatedAt), id: { lt: cursor.id } },
+    ],
+  }] : [];
+  return {
+    OR: [
+      ...(laterStatuses.length ? [{ status: { in: laterStatuses } }] : []),
+      ...equalStatus,
+    ],
+  };
+}
+
 export const STATUS_RANK: Record<TaskStatus, number> = {
   running: 0,
   waiting_approval: 1,
@@ -122,11 +195,23 @@ export function parseCursor(cursor: string | undefined): CursorPayload | null {
   }
   try {
     const raw = Buffer.from(cursor, "base64url").toString("utf8");
-    const parsed = JSON.parse(raw) as CursorPayload;
-    if (!parsed?.status || !parsed.updatedAt || !parsed.id) {
+    const parsed = JSON.parse(raw) as Partial<CursorPayload>;
+    const validStatuses = new Set(Object.keys(STATUS_RANK));
+    const updatedAtMs = typeof parsed.updatedAt === "string" ? Date.parse(parsed.updatedAt) : Number.NaN;
+    if (
+      typeof parsed.status !== "string"
+      || !validStatuses.has(parsed.status)
+      || !Number.isFinite(updatedAtMs)
+      || typeof parsed.id !== "string"
+      || !parsed.id.trim()
+    ) {
       return null;
     }
-    return parsed;
+    return {
+      status: parsed.status as TaskStatus,
+      updatedAt: new Date(updatedAtMs).toISOString(),
+      id: parsed.id,
+    };
   } catch {
     return null;
   }

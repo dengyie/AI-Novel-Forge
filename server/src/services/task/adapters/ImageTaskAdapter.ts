@@ -2,7 +2,16 @@ import type { TaskStatus, UnifiedTaskDetail, UnifiedTaskSummary } from "@ai-nove
 import { prisma } from "../../../db/prisma";
 import { AppError } from "../../../middleware/errorHandler";
 import { imageGenerationService } from "../../image/ImageGenerationService";
-import { IMAGE_TASK_STEPS, buildSteps, toLegacyTaskStatus } from "../taskCenter.shared";
+import {
+  IMAGE_TASK_STEPS,
+  buildSteps,
+  buildTaskKeysetWhere,
+  compareTaskSummary,
+  getTaskStatusesForList,
+  LEGACY_TASK_STATUSES,
+  withListMetadata,
+  type TaskAdapterListResult,
+} from "../taskCenter.shared";
 import {
   buildTaskRecoveryHint,
   isArchivableTaskStatus,
@@ -68,13 +77,14 @@ export class ImageTaskAdapter {
     status?: TaskStatus;
     keyword?: string;
     take: number;
-  }): Promise<UnifiedTaskSummary[]> {
+    cursor?: import("../taskCenter.shared").CursorPayload;
+  }): Promise<TaskAdapterListResult> {
     if (input.status === "waiting_approval") {
-      return [];
+      return withListMetadata([], false);
     }
-    const status = toLegacyTaskStatus(input.status);
+    const statuses = getTaskStatusesForList(input.status, input.cursor, LEGACY_TASK_STATUSES);
     const archivedIds = await getArchivedTaskIds("image_generation");
-    const rows = await prisma.imageGenerationTask.findMany({
+    const rows = (await Promise.all(statuses.map((status) => prisma.imageGenerationTask.findMany({
       where: {
         ...(archivedIds.length
           ? {
@@ -83,7 +93,8 @@ export class ImageTaskAdapter {
             },
           }
           : {}),
-        ...(status ? { status } : {}),
+        status,
+        ...(input.cursor ? { AND: [buildTaskKeysetWhere(input.cursor, LEGACY_TASK_STATUSES)] } : {}),
         ...(input.keyword
           ? {
             OR: [
@@ -109,10 +120,9 @@ export class ImageTaskAdapter {
         },
       },
       orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
-      take: input.take,
-    });
-
-    return rows.map((row) => ({
+      take: input.take + 1,
+    })))).flat();
+    const items = rows.map((row): UnifiedTaskSummary => ({
       ...buildImageTaskPresentation(row),
       id: row.id,
       kind: "image_generation",
@@ -132,7 +142,8 @@ export class ImageTaskAdapter {
         : row.error,
       recoveryHint: buildTaskRecoveryHint("image_generation", row.status as TaskStatus),
       targetResources: [],
-    }));
+    })).sort(compareTaskSummary);
+    return withListMetadata(items.slice(0, input.take), items.length > input.take);
   }
 
   async detail(id: string): Promise<UnifiedTaskDetail | null> {
