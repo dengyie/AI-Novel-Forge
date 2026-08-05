@@ -48,7 +48,7 @@ export const PROVIDERS: Record<BuiltinLLMProvider, ProviderConfig> = {
     name: "OpenAI",
     baseURL: "https://api.openai.com/v1",
     defaultModel: "gpt-5.5",
-    models: ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "deepseek-v4-pro"],
+    models: ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.6-luna", "deepseek-v4-pro"],
     envKey: "OPENAI_API_KEY",
     envBaseURLKey: "OPENAI_BASE_URL",
     envModelKey: "OPENAI_MODEL",

@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { prisma } = require("../dist/db/prisma.js");
 const { resolveModel } = require("../dist/llm/modelRouter.js");
+const { PROVIDERS } = require("../dist/llm/providers.js");
 
 test("resolveModel clamps DeepSeek route maxTokens to the provider limit", async () => {
   const originalFindUnique = prisma.modelRouteConfig.findUnique;
@@ -214,7 +215,38 @@ test("resolveModel ignores whitespace-only model override from stale job payload
   try {
     // No configured route → default route. Whitespace model must not override.
     const resolved = await resolveModel("writer", { model: "   " });
-    assert.equal(resolved.model, "deepseek-v4-pro");
+    assert.equal(resolved.model, "gpt-5.6-luna");
+  } finally {
+    prisma.modelRouteConfig.findUnique = originalFindUnique;
+  }
+});
+
+test("resolveModel uses the approved Luna and DeepSeek defaults", async () => {
+  const originalFindUnique = prisma.modelRouteConfig.findUnique;
+  prisma.modelRouteConfig.findUnique = async () => null;
+
+  const expectedModels = {
+    planner: "gpt-5.6-luna",
+    writer: "gpt-5.6-luna",
+    review: "gpt-5.6-luna",
+    light_review: "deepseek-v4-pro",
+    critical_review: "gpt-5.6-luna",
+    repair: "gpt-5.6-luna",
+    replan: "gpt-5.6-luna",
+    state_resolution: "gpt-5.6-luna",
+    summary: "deepseek-v4-pro",
+    fact_extraction: "deepseek-v4-pro",
+    chat: "deepseek-v4-pro",
+    default: "gpt-5.6-luna",
+  };
+
+  try {
+    for (const [taskType, model] of Object.entries(expectedModels)) {
+      const resolved = await resolveModel(taskType);
+      assert.equal(resolved.provider, "openai", taskType);
+      assert.equal(resolved.model, model, taskType);
+    }
+    assert.ok(PROVIDERS.openai.models.includes("gpt-5.6-luna"));
   } finally {
     prisma.modelRouteConfig.findUnique = originalFindUnique;
   }
