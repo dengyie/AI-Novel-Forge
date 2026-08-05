@@ -1,0 +1,220 @@
+const test = require("node:test");
+const assert = require("node:assert/strict");
+
+const {
+  CONTRACT_REPLAN_WINDOW_MARKER,
+} = require("../../shared/dist/types/chapterTaskSheetQuality.js");
+
+// 失败处理器（含 replan_window → 自动重排接线 + defer_and_continue 保守停止）
+const {
+  handleAutoExecutionFailure,
+} = require("../dist/services/novel/director/automation/application/AutoExecutionFailureHandler.js");
+
+// 预算记账辅助（用于播种"预算已耗尽"状态）
+const {
+  buildDirectorQualityLoopBudgetWindow,
+  buildDirectorQualityLoopIssueSignature,
+  recordDirectorQualityLoopBudgetAttempt,
+} = require("../dist/services/novel/director/runtime/DirectorQualityLoopBudgetLedgerService.js");
+
+const REPLAN_MESSAGE = `${CONTRACT_REPLAN_WINDOW_MARKER} 章节执行合同职责过载，需整窗重排`;
+
+function buildRequest(overrides = {}) {
+  return {
+    idea: "命运迷局",
+    candidate: {
+      id: "candidate-1",
+      workingTitle: "命运迷局",
+      titleOptions: [],
+      logline: "一个普通人误入更大的秘密链条。",
+      positioning: "都市悬疑成长",
+      sellingPoint: "强钩子与高压追更感",
+      coreConflict: "主角必须在真相与自保之间抉择",
+      protagonistPath: "从被动卷入到主动破局",
+      endingDirection: "主角以代价换来新秩序",
+      hookStrategy: "用反常事件做开局钩子",
+      progressionLoop: "调查推进、反噬升级",
+      whyItFits: "适合自动导演快速启动",
+      toneKeywords: ["悬疑"],
+      targetChapterCount: 10,
+    },
+    runMode: "full_book_autopilot",
+    provider: "test-provider",
+    model: "test-model",
+    temperature: 0.5,
+    ...overrides,
+  };
+}
+
+function withExecutionDetail(order) {
+  return {
+    id: `chapter-${order}`,
+    order,
+    title: `第${order}章`,
+    generationState: "planned",
+    chapterStatus: "pending_generation",
+    content: "",
+    purpose: `第${order}章目标`,
+    exclusiveEvent: `第${order}章独占事件`,
+    endingState: `第${order}章结尾状态`,
+    nextChapterEntryState: `第${order + 1}章入场状态`,
+    conflictLevel: 5,
+    revealLevel: 3,
+    targetWordCount: 2800,
+    mustAvoid: "不要展开无关支线",
+    taskSheet: `第${order}章任务单`,
+    sceneCards: JSON.stringify({
+      targetWordCount: 2800,
+      scenes: [
+        { key: `c${order}s1`, title: "起势", purpose: "推进", mustAdvance: ["主线"], mustPreserve: ["动机"], entryState: "进入", exitState: "升级", targetWordCount: 900 },
+      ],
+    }),
+  };
+}
+
+function buildAutoExecution(overrides = {}) {
+  return {
+    enabled: true,
+    mode: "book",
+    autoReview: true,
+    autoRepair: true,
+    firstChapterId: "chapter-6",
+    startOrder: 6,
+    endOrder: 10,
+    totalChapterCount: 10,
+    nextChapterId: "chapter-6",
+    nextChapterOrder: 6,
+    remainingChapterIds: ["chapter-6", "chapter-7", "chapter-8"],
+    remainingChapterOrders: [6, 7, 8],
+    remainingChapterCount: 3,
+    qualityRepairRisk: {
+      noticeCode: "PIPELINE_REPLAN_REQUIRED",
+      riskLevel: "replan",
+      repairMode: "heavy_repair",
+    },
+    ...overrides,
+  };
+}
+
+function buildRange() {
+  return { startOrder: 6, endOrder: 10, totalChapterCount: 10, firstChapterId: "chapter-6" };
+}
+
+function buildJob() {
+  return {
+    id: "job-failed",
+    status: "failed",
+    progress: 0.98,
+    error: REPLAN_MESSAGE,
+  };
+}
+
+function buildDeps() {
+  const calls = { replanNovel: [], markTaskFailed: [], bootstrapTask: [], recordEvent: [] };
+  const deps = {
+    novelContextService: {
+      async listChapters() {
+        return [6, 7, 8].map((order) => withExecutionDetail(order));
+      },
+    },
+    workflowService: {
+      async bootstrapTask() {
+        calls.bootstrapTask.push(true);
+      },
+      async markTaskFailed(taskId, message, patch) {
+        calls.markTaskFailed.push({ taskId, message, checkpointType: patch?.checkpointType });
+      },
+    },
+    buildDirectorSeedPayload(_request, _novelId, extra) {
+      return extra ?? {};
+    },
+    automationLedgerEventService: {
+      async recordEvent(input) {
+        calls.recordEvent.push(input.type);
+      },
+    },
+    async replanNovel(novelId, input) {
+      calls.replanNovel.push({ novelId, input });
+    },
+  };
+  return { deps, calls };
+}
+
+function baseHandlerInput({ deps, autoExecution, job }) {
+  return {
+    deps,
+    taskId: "task-1",
+    novelId: "novel-1",
+    request: buildRequest(),
+    range: buildRange(),
+    autoExecution,
+    pipelineJobId: "job-failed",
+    job,
+    allowLazyChapterPlanning: true,
+    progressGuard: {},
+    maxConsecutiveNoProgress: 3,
+    resolveQualityIssueChapter: async () => null,
+  };
+}
+
+test("replan_window 失败首次触发自动重排（triggerType=contract_replan_window）并 continue", async () => {
+  const { deps, calls } = buildDeps();
+  const autoExecution = buildAutoExecution({ qualityDebtSummaries: null });
+  const result = await handleAutoExecutionFailure(baseHandlerInput({
+    deps,
+    autoExecution,
+    job: buildJob(),
+  }));
+
+  assert.equal(result.kind, "continue");
+  // 首次 replan_window：调用 replanNovel，triggerType 应为合同重排分类，而非 audit_failure
+  assert.equal(calls.replanNovel.length, 1);
+  assert.equal(calls.replanNovel[0].novelId, "novel-1");
+  assert.equal(calls.replanNovel[0].input.triggerType, "contract_replan_window");
+  assert.equal(calls.replanNovel[0].input.chapterId, "chapter-6");
+  // continue 不应 markTaskFailed，也不发误导性事件
+  assert.equal(calls.markTaskFailed.length, 0);
+  assert.equal(calls.recordEvent.includes("continue_with_risk"), false);
+});
+
+test("同签名 replan_window 失败预算耗尽：不再 replan，保守 markTaskFailed 停止，不发 continue_with_risk", async () => {
+  const { deps, calls } = buildDeps();
+  // 播种 windowReplan 预算已耗尽（windowReplan 限额 = 1），且让 autoExecution.qualityRepairRisk
+  // 与 failureMessage 与播种用的 issueSignature 对齐，使 runFullBookAutopilotReplanNotice 命中 defer_and_continue。
+  const autoExecution = recordDirectorQualityLoopBudgetAttempt({
+    state: buildAutoExecution({ qualityDebtSummaries: null }),
+    novelId: "novel-1",
+    taskId: "task-1",
+    issueSignature: buildDirectorQualityLoopIssueSignature({
+      reason: REPLAN_MESSAGE,
+      noticeCode: "PIPELINE_REPLAN_REQUIRED",
+      riskLevel: "replan",
+      repairMode: "heavy_repair",
+    }),
+    affectedChapterWindow: buildDirectorQualityLoopBudgetWindow({
+      autoExecution: buildAutoExecution(),
+      chapterId: "chapter-6",
+      chapterOrder: 6,
+    }),
+    action: "window_replan",
+    reason: REPLAN_MESSAGE,
+    chapterId: "chapter-6",
+    chapterOrder: 6,
+  }).state;
+
+  const result = await handleAutoExecutionFailure(baseHandlerInput({
+    deps,
+    autoExecution,
+    job: buildJob(),
+  }));
+
+  assert.equal(result.kind, "stop");
+  // 预算耗尽 → 不再调用 replanNovel
+  assert.equal(calls.replanNovel.length, 0);
+  // 保守停止：markTaskFailed，checkpointType 为 replan_required
+  assert.equal(calls.markTaskFailed.length, 1);
+  assert.equal(calls.markTaskFailed[0].checkpointType, "replan_required");
+  // 关键：不构建/记录误导性 continue_with_risk，也不重复记账
+  assert.equal(calls.recordEvent.includes("continue_with_risk"), false);
+  assert.equal(calls.recordEvent.length, 0);
+});

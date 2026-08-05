@@ -5,7 +5,6 @@ import type {
 } from "@ai-novel/shared/types/novelDirector";
 import type { PipelineJobStatus } from "@ai-novel/shared/types/novel";
 import {
-  buildDirectorAutoExecutionDeferredQualityState,
   buildDirectorAutoExecutionPausedLabel,
   buildDirectorAutoExecutionPausedSummary,
   buildDirectorAutoExecutionScopeLabelFromState,
@@ -199,6 +198,8 @@ export async function runFullBookAutopilotReplanNotice(input: {
   autoExecution: DirectorAutoExecutionState;
   checkpointState: DirectorAutoExecutionState;
   noticeSummary: string;
+  /** 重排审计分类，默认按本书合同 replan_window 触发标注。 */
+  triggerType?: string;
 }): Promise<
   | { stopped: true }
   | {
@@ -228,6 +229,8 @@ export async function runFullBookAutopilotReplanNotice(input: {
   });
   const nextBudgetAction = resolveDirectorQualityLoopBudgetNextAction(existingBudgetEntry);
   if (nextBudgetAction === "defer_and_continue") {
+    // 预算耗尽：不再自动重排。不构建"暂存继续"状态、也不发 continue_with_risk——
+    // 由调用方（失败处理器）按保守策略自行决定停止，避免误导性事件与重复记账。
     const budgetResult = recordDirectorQualityLoopBudgetAttempt({
       state: input.checkpointState,
       novelId: input.novelId,
@@ -239,40 +242,11 @@ export async function runFullBookAutopilotReplanNotice(input: {
       chapterId: input.autoExecution.nextChapterId,
       chapterOrder: input.autoExecution.nextChapterOrder,
     });
-    const ledgerEventService = input.deps.automationLedgerEventService ?? directorAutomationLedgerEventService;
     const closedCircuitBreaker = buildClosedDirectorCircuitBreakerState(input.autoExecution.circuitBreaker);
-    const deferredState = buildDirectorAutoExecutionDeferredQualityState({
-      state: withCircuitBreakerState(budgetResult.state, closedCircuitBreaker),
-      reason: input.noticeSummary,
-      source: "replan_loop",
-    });
-    await ledgerEventService.recordEvent({
-      type: "continue_with_risk",
-      idempotencyKey: [
-        input.taskId,
-        input.novelId,
-        budgetResult.entry.signatureKey,
-        budgetResult.entry.deferredCount,
-      ].join(":"),
-      taskId: input.taskId,
-      novelId: input.novelId,
-      nodeKey: "planner.replan",
-      summary: "全书自动成书已暂存重复重规划问题，并继续推进后续章节。",
-      affectedScope: input.autoExecution.nextChapterId
-        ? `chapter:${input.autoExecution.nextChapterId}`
-        : (typeof input.autoExecution.nextChapterOrder === "number" ? `chapter_order:${input.autoExecution.nextChapterOrder}` : null),
-      severity: "medium",
-      metadata: {
-        decision: "defer_and_continue",
-        noticeSummary: input.noticeSummary,
-        chapterOrder: input.autoExecution.nextChapterOrder ?? null,
-        qualityBudgetEntry: budgetResult.entry,
-      },
-    }).catch(() => null);
     return {
       stopped: false,
       circuitBreaker: closedCircuitBreaker,
-      autoExecution: deferredState,
+      autoExecution: withCircuitBreakerState(budgetResult.state, closedCircuitBreaker),
       decision: "defer_and_continue",
     };
   }
@@ -294,42 +268,13 @@ export async function runFullBookAutopilotReplanNotice(input: {
     message: input.noticeSummary,
   });
   if (isDirectorCircuitBreakerOpen(replanCircuitBreaker)) {
-    const ledgerEventService = input.deps.automationLedgerEventService ?? directorAutomationLedgerEventService;
+    // 重排环熔断：不再自动重排。同上，不构建暂存继续状态、不发 continue_with_risk，
+    // 交由调用方按保守策略停止。
     const closedCircuitBreaker = buildClosedDirectorCircuitBreakerState(replanCircuitBreaker);
-    const deferredState = buildDirectorAutoExecutionDeferredQualityState({
-      state: withCircuitBreakerState(budgetResult.state, closedCircuitBreaker),
-      reason: input.noticeSummary,
-      source: "replan_loop",
-    });
-    await ledgerEventService.recordEvent({
-      type: "continue_with_risk",
-      idempotencyKey: [
-        input.taskId,
-        input.novelId,
-        deferredState.nextChapterId ?? input.autoExecution.nextChapterId ?? "unknown",
-        deferredState.nextChapterOrder ?? input.autoExecution.nextChapterOrder ?? "unknown",
-        replanCircuitBreaker.replanLoopCount ?? "replan",
-      ].join(":"),
-      taskId: input.taskId,
-      novelId: input.novelId,
-      nodeKey: "planner.replan",
-      summary: "全书自动成书已暂存重复重规划问题，并继续推进后续章节。",
-      affectedScope: input.autoExecution.nextChapterId
-        ? `chapter:${input.autoExecution.nextChapterId}`
-        : (typeof input.autoExecution.nextChapterOrder === "number" ? `chapter_order:${input.autoExecution.nextChapterOrder}` : null),
-      severity: "medium",
-      metadata: {
-        decision: "defer_and_continue",
-        circuitBreaker: replanCircuitBreaker,
-        noticeSummary: input.noticeSummary,
-        chapterOrder: input.autoExecution.nextChapterOrder ?? null,
-        qualityBudgetEntry: budgetResult.entry,
-      },
-    }).catch(() => null);
     return {
       stopped: false,
       circuitBreaker: closedCircuitBreaker,
-      autoExecution: deferredState,
+      autoExecution: withCircuitBreakerState(budgetResult.state, closedCircuitBreaker),
       decision: "defer_and_continue",
     };
   }
@@ -337,7 +282,7 @@ export async function runFullBookAutopilotReplanNotice(input: {
     try {
       await input.deps.replanNovel(input.novelId, {
         chapterId: input.autoExecution.nextChapterId ?? undefined,
-        triggerType: "audit_failure",
+        triggerType: input.triggerType ?? "contract_replan_window",
         reason: input.noticeSummary,
         provider: input.request.provider,
         model: input.request.model,

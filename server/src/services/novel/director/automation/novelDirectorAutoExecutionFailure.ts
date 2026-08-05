@@ -1,4 +1,5 @@
 import type { DirectorAutoExecutionState } from "@ai-novel/shared/types/novelDirector";
+import { CONTRACT_REPLAN_WINDOW_MARKER } from "@ai-novel/shared/types/chapterTaskSheetQuality";
 
 /**
  * Length-risk markers that disqualify a review failure from being skippable.
@@ -22,6 +23,15 @@ export function isSkippableAutoExecutionReviewFailure(message: string | null | u
   // risk markers, do not treat the failure as skippable.
   const lowered = normalized.toLowerCase();
   return !NON_SKIPPABLE_LENGTH_MARKERS.some((marker) => lowered.includes(marker));
+}
+
+/**
+ * 章节执行合同门禁判 replan_window（职责过载）的失败。结构性难题本地再生成修不好，
+ * 需整窗重排——失败处理器据此路由到 replanNovel 自动继续，而非终态停等人工。
+ */
+export function isContractReplanWindowFailure(message: string | null | undefined): boolean {
+  const normalized = message?.trim() ?? "";
+  return normalized.includes(CONTRACT_REPLAN_WINDOW_MARKER);
 }
 
 function formatAutoExecutionContinuation(input: Pick<

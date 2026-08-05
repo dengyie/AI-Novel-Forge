@@ -16,9 +16,12 @@ import {
   serializeChapterScenePlan,
 } from "@ai-novel/shared/types/chapterLengthControl";
 import {
+  CONTRACT_REPLAN_WINDOW_MARKER,
   inferChapterTaskSheetType,
+  isReplanWindowRequired,
   sanitizeChapterTaskSheetForPersistence,
 } from "@ai-novel/shared/types/chapterTaskSheetQuality";
+import type { ChapterTaskSheetQualityGateResult } from "@ai-novel/shared/types/chapterTaskSheetQuality";
 import { runStructuredPrompt } from "../../../prompting/core/promptRunner";
 import { volumeChapterExecutionContractPrompt } from "../../../prompting/prompts/novel/volume/chapterDetail.prompts";
 import { buildVolumeChapterDetailContextBlocks } from "../../../prompting/prompts/novel/volume/contextBlocks";
@@ -38,6 +41,17 @@ export {
   allocateChapterBudgets,
   deriveChapterBudget,
 } from "./volumeChapterBudgetAllocation";
+
+/**
+ * 章节执行合同被质量门禁判为 replan_window（职责过载）。结构性问题无法靠本地
+ * 再生成修好，需要整窗重排；错误消息携带稳定 marker 供失败处理器路由到 replanNovel。
+ */
+export class ChapterExecutionContractReplanWindowError extends Error {
+  constructor(readonly gateResult: ChapterTaskSheetQualityGateResult, message: string) {
+    super(`${CONTRACT_REPLAN_WINDOW_MARKER} ${message}`);
+    this.name = "ChapterExecutionContractReplanWindowError";
+  }
+}
 
 type StoryMacroPlanResult = Awaited<ReturnType<StoryMacroPlanService["getPlan"]>> | null;
 
@@ -874,6 +888,14 @@ export async function generateChapterTaskSheetDetail(params: {
         sceneCards: serializeChapterScenePlan(scenePlan),
       };
     } catch (error) {
+      // 门禁判 replan_window（职责过载）：结构性难题，本地再生成修不好。
+      // 不再烧剩余本地重试，立即抛出携带 marker 的专属错误，让失败处理器路由到整窗重排。
+      if (
+        error instanceof ChapterTaskSheetQualityGateError
+        && isReplanWindowRequired(error.result)
+      ) {
+        throw new ChapterExecutionContractReplanWindowError(error.result, error.message);
+      }
       lastError = error instanceof Error ? error : new Error("章节执行合同生成失败。");
       if (error instanceof ChapterTaskSheetQualityGateError) {
         qualityFeedback = error.message;

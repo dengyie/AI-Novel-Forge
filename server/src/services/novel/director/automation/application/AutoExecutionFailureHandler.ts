@@ -23,11 +23,15 @@ import {
 import {
   buildFailureCircuitBreaker,
   isDirectorCircuitBreakerOpen,
+  runFullBookAutopilotReplanNotice,
   stopAutoExecutionForCircuitBreaker,
   withCircuitBreakerState,
 } from "../novelDirectorAutoExecutionCircuitBreakerRuntime";
 import { syncAutoExecutionTaskState } from "../novelDirectorAutoExecutionCheckpointRuntime";
-import { isSkippableAutoExecutionReviewFailure } from "../novelDirectorAutoExecutionFailure";
+import {
+  isContractReplanWindowFailure,
+  isSkippableAutoExecutionReviewFailure,
+} from "../novelDirectorAutoExecutionFailure";
 import { resolveAutoExecutionRuntimeRangeAndState } from "../novelDirectorAutoExecutionRuntimePreparation";
 import type {
   NovelDirectorAutoExecutionRuntimeDeps,
@@ -74,6 +78,88 @@ export async function handleAutoExecutionFailure(input: {
     || (job.status === "cancelled"
       ? `${scopeLabel}自动执行已取消。`
       : `${scopeLabel}自动执行未能全部通过质量要求。`);
+
+  // 章节执行合同门禁判 replan_window（职责过载）：结构性难题需整窗重排，本地再生成修不好。
+  // 复用 runFullBookAutopilotReplanNotice（内含 window_replan 预算记账 + 重排环熔断 + replanNovel）。
+  // 预算耗尽 / 重排环熔断（decision=defer_and_continue）时回退到现有 markTaskFailed 行为——重排循环需人工判断。
+  if (
+    autoExecution.autoRepair
+    && isFullBookAutopilotRunMode(request.runMode)
+    && isContractReplanWindowFailure(failureMessage)
+    && deps.replanNovel
+  ) {
+    const replanResult = await runFullBookAutopilotReplanNotice({
+      deps,
+      taskId,
+      novelId,
+      request,
+      range,
+      autoExecution,
+      checkpointState: autoExecution,
+      noticeSummary: failureMessage,
+      triggerType: "contract_replan_window",
+    });
+    if (replanResult.stopped) {
+      return { kind: "stop" };
+    }
+    if (replanResult.decision === "auto_replan_window") {
+      ({ range, autoExecution } = await resolveAutoExecutionRuntimeRangeAndState(deps, {
+        novelId,
+        existingState: {
+          ...(replanResult.autoExecution ?? autoExecution),
+          pipelineJobId: null,
+          pipelineStatus: null,
+        },
+        pipelineJobId: null,
+        pipelineStatus: "queued",
+        allowLazyChapterPlanning: input.allowLazyChapterPlanning,
+      }));
+      await syncAutoExecutionTaskState(deps, {
+        taskId,
+        novelId,
+        request,
+        range,
+        autoExecution,
+        isBackgroundRunning: true,
+        resumeStage: "pipeline",
+      });
+      return { kind: "continue", range, autoExecution, progressGuard };
+    }
+    if (replanResult.decision === "defer_and_continue") {
+      // 重排预算耗尽 / 重排环熔断：保守停止，需人工判断。runtime 已记账，不发误导性
+      // continue_with_risk，直接落 markTaskFailed，与既有终态停等行为一致。
+      const stopAutoExecution = withCircuitBreakerState({
+        ...(replanResult.autoExecution ?? autoExecution),
+        pipelineJobId: input.pipelineJobId,
+        pipelineStatus: job.status,
+      }, replanResult.circuitBreaker);
+      const stopMessage = `${scopeLabel}章节执行合同重排预算已耗尽（重排环熔断），自动成书暂停，等待人工判断后继续。`;
+      await deps.workflowService.markTaskFailed(taskId, stopMessage, {
+        stage: "quality_repair",
+        itemKey: "quality_repair",
+        itemLabel: buildDirectorAutoExecutionPausedLabel(stopAutoExecution),
+        checkpointType: "replan_required",
+        checkpointSummary: buildDirectorAutoExecutionPausedSummary({
+          scopeLabel,
+          remainingChapterCount: stopAutoExecution.remainingChapterCount ?? 0,
+          nextChapterOrder: stopAutoExecution.nextChapterOrder ?? null,
+          failureMessage: stopMessage,
+        }),
+        chapterId: stopAutoExecution.nextChapterId ?? range.firstChapterId,
+        progress: 0.98,
+      });
+      await syncAutoExecutionTaskState(deps, {
+        taskId,
+        novelId,
+        request,
+        range,
+        autoExecution: stopAutoExecution,
+        isBackgroundRunning: false,
+        resumeStage: "pipeline",
+      });
+      return { kind: "stop" };
+    }
+  }
 
   if (
     isFullBookAutopilotRunMode(request.runMode)

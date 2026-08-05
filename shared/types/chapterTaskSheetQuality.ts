@@ -104,6 +104,21 @@ export interface ChapterTaskSheetQualityGateResult {
   confidence: number;
 }
 
+/**
+ * replan_window 门禁失败的稳定标识，写入专属错误消息，供自动成书失败处理器分类。
+ * 结构性职责过载无法靠本地再生成修好，需要整窗重排——失败侧据此路由到 replanNovel。
+ */
+export const CONTRACT_REPLAN_WINDOW_MARKER = "[contract_replan_window]";
+
+/**
+ * 是否要求整窗重排而非本地修复。
+ * mapSemanticAssessmentToQualityGate 在 recommendedHandling === "replan_window"
+ * 时保证追加 contract_overloaded 高阻断 issue（见本文件 mapSemanticAssessmentToQualityGate）。
+ */
+export function isReplanWindowRequired(result: ChapterTaskSheetQualityGateResult): boolean {
+  return result.issues.some((issue) => issue.id === "contract_overloaded");
+}
+
 function normalizeAssessmentVerdict(value: unknown): unknown {
   if (typeof value !== "string") {
     return value;

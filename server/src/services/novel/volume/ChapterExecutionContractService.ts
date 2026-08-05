@@ -95,16 +95,36 @@ export class ChapterExecutionContractService {
       && chapter.taskSheet?.trim()
       && existingScenePlan
     ) {
-      const styleContract = await this.resolveStyleContract(
-        novelId,
-        chapterId,
-        options.taskStyleProfileId,
-        chapter.order,
+      // 形状门禁（VolumeChapterSyncService.assertSyncableChapterExecutionContracts）按卷文档章条目
+      // 要求 purpose/exclusiveEvent/endingState/nextChapterEntryState 全非空——这四个规划字段没有 Chapter
+      // 行来源。仅当卷文档对应章条目四字段齐全时才算"可复用合同"，否则落穿到重新生成（连带再生四项）。
+      const workspace = await this.deps.ensureVolumeWorkspace(novelId);
+      const matched = this.deps.findVolumeChapterMatch(workspace, {
+        order: chapter.order,
+        title: chapter.title,
+      });
+      const targetChapter = workspace.volumes
+        .find((volume) => volume.id === matched.volumeId)
+        ?.chapters
+        .find((item) => item.id === matched.volumeChapterId);
+      const planningFieldsComplete = Boolean(
+        targetChapter?.purpose?.trim()
+        && targetChapter?.exclusiveEvent?.trim()
+        && targetChapter?.endingState?.trim()
+        && targetChapter?.nextChapterEntryState?.trim()
       );
-      return {
-        ...chapter,
-        styleContract,
-      };
+      if (planningFieldsComplete) {
+        const styleContract = await this.resolveStyleContract(
+          novelId,
+          chapterId,
+          options.taskStyleProfileId,
+          chapter.order,
+        );
+        return {
+          ...chapter,
+          styleContract,
+        };
+      }
     }
 
     const workspace = await this.deps.ensureVolumeWorkspace(novelId);
