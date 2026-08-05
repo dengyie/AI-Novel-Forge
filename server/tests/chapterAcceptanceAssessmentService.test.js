@@ -336,6 +336,37 @@ test("normalizeAssessment lifts severely short chapter (under_hard) to blocking 
   assert.notEqual(normalized.continuePolicy, "continue");
 });
 
+test("normalizeAssessment overrides high LLM score when content is under_hard (12字告警文本不可拿高分)", () => {
+  // 复现生产 bug：正文是被当正文落库的 12 字告警文本，验收 LLM 靠上下文脑补给出 84。
+  const content = "每月token额度已不足";
+  const normalized = normalizeAssessment(createAssessment({
+    status: "accepted",
+    score: { coherence: 85, pacing: 82, repetition: 88, engagement: 83, voice: 84, overall: 84 },
+  }), content, 8000);
+
+  // 分数必须被压到不及格，LLM 高分不得生效。
+  assert.ok(normalized.score.overall <= 49, `under_hard overall must be capped, got ${normalized.score.overall}`);
+  // 不得 accepted / continue_with_risk 静默放行；必须进入修复或人工复查轨道。
+  assert.ok(
+    normalized.status === "repairable" || normalized.status === "needs_manual_review",
+    `unexpected under_hard status ${normalized.status}`,
+  );
+  // continuePolicy 禁止 continue，避免继续推进污染下游与快照。
+  assert.notEqual(normalized.continuePolicy, "continue");
+});
+
+test("normalizeAssessment does not cap score when content satisfies length (no false positive)", () => {
+  // 正常达标正文的 LLM 高分不得被 under_hard 逻辑误伤。
+  const content = "字".repeat(8000);
+  const normalized = normalizeAssessment(createAssessment({
+    status: "accepted",
+    score: { coherence: 85, pacing: 82, repetition: 88, engagement: 83, voice: 84, overall: 84 },
+  }), content, 8000);
+  assert.equal(normalized.score.overall, 84);
+  assert.equal(normalized.status, "accepted");
+  assert.equal(normalized.continuePolicy, "continue");
+});
+
 test("normalizeAssessment does not drop under-length issue when content is severely short", () => {
   // 与上方 stale-drop 测试对照：内容远低于硬下限时，stale under-length issue 必须保留。
   const content = "字".repeat(1200);

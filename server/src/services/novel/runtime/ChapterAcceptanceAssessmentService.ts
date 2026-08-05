@@ -320,7 +320,13 @@ export function normalizeAssessment(
   options: NormalizeAssessmentOptions = {},
 ): ChapterAcceptanceAssessmentOutput {
   const reconciled = reconcileLengthAssessment(output, content, targetWordCount);
-  const score = normalizeScore(reconciled.score ?? ruleScore(content));
+  let score = normalizeScore(reconciled.score ?? ruleScore(content));
+  // 字数硬下限是不可由 LLM 分数推翻的客观事实：under_hard 直接压分到不及格，
+  // 防止验收 LLM 对着残缺/污染正文靠上下文脑补给出高分（如 12 字正文拿 84）。
+  const isUnderHardLength = evaluateLengthBudget({ content, targetWordCount })?.band === "under_hard";
+  if (isUnderHardLength) {
+    score = { ...score, overall: Math.min(score.overall, 49) };
+  }
   const requiredCharacterAppearances = options.requiredCharacterAppearances ?? [];
   // 故意 offscreen 的 character_appearance 保留在 missing 列表供审计，但不抬升 hard repair。
   // 已在 required 名单的角色不得被 soft 标注冲掉硬义务。
@@ -372,13 +378,30 @@ export function normalizeAssessment(
   if (reconciled.repairability === "plan_misalignment") {
     status = "needs_manual_review";
   }
-  const continuePolicy = status === "needs_manual_review"
+  // 字数硬下限不达标：无论 LLM 判什么状态，一律锁 needs_manual_review + pause，
+  // 禁止 continue_with_risk 静默放行残缺/污染正文进入下游与快照。
+  if (isUnderHardLength) {
+    // 已有 under-length 硬阻断 issue 时尊重 LLM 的可修复判断（repairable + repair_once），
+    // 只压分；LLM 漏判且自以为可放行（accepted/continue_with_risk，无 under-length issue）
+    // 时才强制锁 needs_manual_review + pause，防止验收 LLM 对着残缺/污染正文靠上下文
+    // 脑补放行（如 12 字正文判 accepted 拿 84）。
+    const hasUnderLengthBlockingIssue = reconciled.blockingIssues.some((issue) => isUnderLengthIssue(issue));
+    const llmReleasedWithoutUnderLengthIssue = !hasUnderLengthBlockingIssue
+      && (reconciled.status === "accepted" || reconciled.status === "continue_with_risk");
+    if (llmReleasedWithoutUnderLengthIssue) {
+      status = "needs_manual_review";
+    }
+  }
+  let continuePolicy = status === "needs_manual_review"
     ? "pause"
     : status === "repairable"
       ? "repair_once"
       : status === "continue_with_risk" && reconciled.continuePolicy === "pause"
         ? "continue"
         : reconciled.continuePolicy;
+  if (isUnderHardLength && status === "needs_manual_review") {
+    continuePolicy = "pause";
+  }
   const riskTags = Array.from(new Set(reconciled.riskTags.map((item) => item.trim()).filter(Boolean)));
   // R soft: plan-layer reader experience missing is observable only; never raises hard repair.
   if (options.expectReaderExperience) {
@@ -399,9 +422,12 @@ export function normalizeAssessment(
   };
 }
 
-function buildFallbackAssessment(content: string): ChapterAcceptanceAssessmentOutput {
+function buildFallbackAssessment(
+  content: string,
+  targetWordCount?: number | null,
+): ChapterAcceptanceAssessmentOutput {
   const score = ruleScore(content);
-  return {
+  const base: ChapterAcceptanceAssessmentOutput = {
     status: "continue_with_risk",
     score,
     summary: "正文已生成，接收闸门未完成结构化判断，系统将保留正文并标记后续复查风险。",
@@ -424,11 +450,32 @@ function buildFallbackAssessment(content: string): ChapterAcceptanceAssessmentOu
     },
     continuePolicy: "continue",
   };
+  // 闸门失败时也不得绕过字数硬下限：残缺/污染正文必须暂停，禁止静默放行。
+  const lengthEval = evaluateLengthBudget({ content, targetWordCount });
+  if (lengthEval?.band !== "under_hard") {
+    return base;
+  }
+  return {
+    ...base,
+    status: "needs_manual_review",
+    continuePolicy: "pause",
+    blockingIssues: [
+      {
+        severity: "high",
+        category: "mode_fit",
+        code: "length_under_hard",
+        evidence: `正文字数 ${lengthEval.actualWordCount} 远低于目标 ${lengthEval.budget.targetWordCount}（硬下限 ${lengthEval.hardMinWordCount}，目标 ×60%），未达最小可接受长度。`,
+        fixSuggestion: "重写或扩写本章，使其达到目标字数硬下限以上；不可静默通过。",
+      },
+      ...base.blockingIssues,
+    ],
+    riskTags: [...base.riskTags, "length_under_hard"],
+  };
 }
 
 export class ChapterAcceptanceAssessmentService {
   async assess(input: ChapterAcceptanceAssessmentInput): Promise<ChapterAcceptanceAssessmentResult> {
-    const assessment = await this.invokeAssessment(input).catch(() => buildFallbackAssessment(input.content));
+    const assessment = await this.invokeAssessment(input).catch(() => buildFallbackAssessment(input.content, input.targetWordCount));
     const requiredCharacterAppearances = resolveRequiredCharacterAppearances(input.contextPackage);
     const scenePlan = input.contextPackage.chapterWriteContext?.scenePlan
       ?? input.contextPackage.chapterReviewContext?.scenePlan

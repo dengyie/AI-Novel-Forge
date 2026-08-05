@@ -325,6 +325,7 @@ export const chapterAcceptanceAssessmentPrompt: PromptAsset<
       "只输出合法 JSON 对象，不要输出 Markdown、解释、注释或额外文本。",
       "",
       "判断原则：",
+      "0. 【最高优先·先于一切内容判断】先核对正文实际长度。若正文远短于目标长度（不足约六成）、明显残缺、或正文是错误/告警/说明性文本而非小说正文，必须直接判 needs_manual_review、overall 不得高于 49，并在 blockingIssues 记 severity=high、code=length_under_hard。绝对禁止依据分层上下文/章节计划/摘要脑补出正文不存在的情节并据此给高分。正文残缺时，任何内容分（coherence/pacing/voice 等）都不得高于 60。",
       "1. 默认支持继续推进；普通可优化问题不要升级为暂停。",
       "2. 只有严重越过章节任务、关键连续性断裂、角色行为严重失真、受保护信息提前泄露、正文无法阅读时，才使用 needs_manual_review。",
       "3. 可通过局部补丁解决的问题使用 repairable，并给出 repairDirectives。",
