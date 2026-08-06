@@ -132,6 +132,8 @@ function buildDeps() {
       async recordEvent(input) {
         calls.recordEvent.push(input.type);
       },
+      async recordRepairTicketCreated() {},
+      async recordCircuitBreakerOpened() {},
     },
     async replanNovel(novelId, input) {
       calls.replanNovel.push({ novelId, input });
@@ -217,4 +219,85 @@ test("同签名 replan_window 失败预算耗尽：不再 replan，保守 markTa
   // 关键：不构建/记录误导性 continue_with_risk，也不重复记账
   assert.equal(calls.recordEvent.includes("continue_with_risk"), false);
   assert.equal(calls.recordEvent.length, 0);
+});
+
+// ---- 方案 C（Phase 2）：patch/rewrite 成为可执行动作，重进管线而非 markTaskFailed ----
+
+const GENERIC_QUALITY_FAILURE = "章节执行合同质量未达阈值：正文与任务单存在认知偏差。";
+
+function buildGenericJob() {
+  return {
+    id: "job-failed",
+    status: "failed",
+    progress: 0.98,
+    error: GENERIC_QUALITY_FAILURE,
+    payload: null,
+  };
+}
+
+test("方案C: 通用质量失败首次预算 patch：重进管线 continue 而非 markTaskFailed", async () => {
+  const { deps, calls } = buildDeps();
+  const autoExecution = buildAutoExecution({ qualityDebtSummaries: null });
+
+  const result = await handleAutoExecutionFailure(baseHandlerInput({
+    deps,
+    autoExecution,
+    job: buildGenericJob(),
+  }));
+
+  // patch 是活动作：返回 continue 让执行环重放该批次，而不是终态停等
+  assert.equal(result.kind, "continue");
+  assert.equal(calls.markTaskFailed.length, 0);
+  // 本轮已记账（patchRepairCount = 1），预算随 continue 状态携带推进
+  const ledger = result.autoExecution?.qualityLoopLedger;
+  assert.ok(ledger, "continue 后应写入 qualityLoopLedger");
+  const patchEntry = ledger.entries.find((entry) => entry.patchRepairCount === 1);
+  assert.ok(patchEntry, "应记录一次 patch_repair 动作");
+  // 不误发 continue_with_risk（那是 defer 语义，patch 是主动重进）
+  assert.equal(calls.recordEvent.includes("continue_with_risk"), false);
+});
+
+test("方案C: patch 预算耗尽后决策 auto_rewrite_chapter：仍重进管线并记账 rewrite", async () => {
+  const { deps, calls } = buildDeps();
+  let autoExecution = buildAutoExecution({ qualityDebtSummaries: null });
+  const sig = buildDirectorQualityLoopIssueSignature({
+    reason: GENERIC_QUALITY_FAILURE,
+    noticeCode: undefined,
+    repairMode: undefined,
+  });
+  const window = buildDirectorQualityLoopBudgetWindow({
+    autoExecution,
+    chapterId: "chapter-6",
+    chapterOrder: 6,
+  });
+  // 播种两次 patch_repair（patch 预算 = 2 已耗尽），使 resolve → auto_rewrite_chapter
+  for (let i = 0; i < 2; i += 1) {
+    autoExecution = recordDirectorQualityLoopBudgetAttempt({
+      state: autoExecution,
+      novelId: "novel-1",
+      taskId: "task-1",
+      issueSignature: sig,
+      affectedChapterWindow: window,
+      action: "patch_repair",
+      reason: GENERIC_QUALITY_FAILURE,
+      chapterId: "chapter-6",
+      chapterOrder: 6,
+    }).state;
+  }
+
+  const result = await handleAutoExecutionFailure(baseHandlerInput({
+    deps,
+    autoExecution,
+    job: buildGenericJob(),
+  }));
+
+  assert.equal(result.kind, "continue");
+  assert.equal(calls.markTaskFailed.length, 0);
+  // 本轮记账升级到 chapter_rewrite（rewrite 预算 +1）
+  const ledger = result.autoExecution?.qualityLoopLedger;
+  assert.ok(ledger, "continue 后应写入 qualityLoopLedger");
+  const rewriteEntry = ledger.entries.find(
+    (entry) => entry.patchRepairCount === 2 && entry.chapterRewriteCount === 1,
+  );
+  assert.ok(rewriteEntry, "应记录一次 chapter_rewrite 动作（升级到更高 tier）");
 });

@@ -97,6 +97,16 @@ export interface VolumeGenerateOptions {
   entrypoint?: string;
   chapterTaskSheetQualityMode?: ChapterTaskSheetQualityMode;
   /**
+   * 章节执行合同单次生成内的门禁反馈本地重试上限（P2，方案 C）。
+   *
+   * 语义域：仅限单次生成内、因门禁反馈追加 guidance 的本地重试；
+   * 与 director 的跨调度修复预算（DIRECTOR_QUALITY_LOOP_BUDGET_LIMITS.patchRepair）
+   * **不在同一计数域**——本地反复重试不得消耗跨批次的修复预算。
+   * 缺省 3（保持既有 behavior）；replan_window 结构性过载会立即转抛专属错误，
+   * 不参与本地重试计数。
+   */
+  chapterTaskSheetRetryLimit?: number;
+  /**
    * 设定对齐质量模式（B2）。缺省 off：不强制 function 表/覆盖。
    * enforce 时 chapter_list 后跑 coverage；generated 表不可 enforce。
    */

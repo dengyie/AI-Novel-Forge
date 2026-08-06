@@ -216,6 +216,9 @@ export async function handleAutoExecutionFailure(input: {
   let budgetedAutoExecution = autoExecution;
   let qualityBudgetEntry: ReturnType<typeof recordDirectorQualityLoopBudgetAttempt>["entry"] | null = null;
   let qualityBudgetNextAction: ReturnType<typeof recordDirectorQualityLoopBudgetAttempt>["nextAction"] | null = null;
+  // 方案 C（Phase 2）：本次实际记账的修复动作（patch_repair / chapter_rewrite / 其他）。
+  // 用于决定是否为"可重进管线的活动作"——依据的是当轮真正采取的 action，而非记账后的下一档。
+  let executedBudgetAction: "patch_repair" | "chapter_rewrite" | null = null;
   if (job.status !== "cancelled" && autoExecution.autoRepair) {
     const pipelinePayload = parsePipelinePayload(job.payload);
     const affectedChapterWindow = buildDirectorQualityLoopBudgetWindow({
@@ -257,6 +260,9 @@ export async function handleAutoExecutionFailure(input: {
     budgetedAutoExecution = budgetResult.state;
     qualityBudgetEntry = budgetResult.entry;
     qualityBudgetNextAction = budgetResult.nextAction;
+    if (budgetAttemptAction === "patch_repair" || budgetAttemptAction === "chapter_rewrite") {
+      executedBudgetAction = budgetAttemptAction;
+    }
   }
   const failureCircuitBreaker = buildFailureCircuitBreaker({
     autoExecution: budgetedAutoExecution,
@@ -284,6 +290,39 @@ export async function handleAutoExecutionFailure(input: {
         qualityBudgetNextAction,
       },
     }).catch(() => null);
+  }
+
+  // Phase 2（方案 C）：当本轮回环预算决策为真正可重进管线的修复动作（patch_repair / chapter_rewrite）
+  // 时，让修复成为可执行动作（而不仅是记账）。此处复用现有「continue → 执行环重放该批次」路径，
+  // 不新写 stage 死代码：clone `budgetedAutoExecution`（已含本轮的 qualityLoopLedger + 熔断状态），
+  // 置为 queued 续跑。若同一签名再次失败，账本计数已 +1，下一次失败会升级到更高 tier
+  // （patch≥2 → rewrite → replan → defer），最终落在保守停等，重放次数有界。
+  if (
+    autoExecution.autoRepair
+    && !isDirectorCircuitBreakerOpen(failureCircuitBreaker)
+    && executedBudgetAction !== null
+  ) {
+    ({ range, autoExecution } = await resolveAutoExecutionRuntimeRangeAndState(deps, {
+      novelId,
+      existingState: {
+        ...budgetedAutoExecution,
+        pipelineJobId: null,
+        pipelineStatus: null,
+      },
+      pipelineJobId: null,
+      pipelineStatus: "queued",
+      allowLazyChapterPlanning: input.allowLazyChapterPlanning,
+    }));
+    await syncAutoExecutionTaskState(deps, {
+      taskId,
+      novelId,
+      request,
+      range,
+      autoExecution,
+      isBackgroundRunning: true,
+      resumeStage: "pipeline",
+    });
+    return { kind: "continue", range, autoExecution, progressGuard };
   }
 
   const qualityAction = failureCircuitBreaker.reason === "replan_loop"

@@ -786,7 +786,11 @@ export async function generateChapterTaskSheetDetail(params: {
   let qualityFeedback: string | null = null;
   const qualityGate = new ChapterTaskSheetQualityGateService();
 
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  // P2（方案 C）：本地重试上限来自单次生成的阶段重试配置（缺省 3），
+  // 与 director 的跨调度修复预算（qualityLoopBudget.patchRepair）分属不同计数域，不得共享。
+  const maxLocalRetries = params.options.chapterTaskSheetRetryLimit ?? 3;
+
+  for (let attempt = 0; attempt < maxLocalRetries; attempt += 1) {
     try {
       const promptInput = qualityFeedback
         ? {
