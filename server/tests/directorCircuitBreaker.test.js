@@ -28,13 +28,26 @@ test("director circuit breaker opens after repeated patch failures on the same c
   assert.equal(state.status, "closed");
   assert.equal(state.patchFailureCount, 2);
 
+  // 第 3 次失败（预算阶梯决策 rewrite 的那次）仍 closed —— patchFailureOpenAt 与
+  // 预算阶梯对齐（patchRepair=2 + chapterRewrite=1 + 1 = 4），rewrite 档必须可重进管线。
   state = recordPatchFailureSignal({
     previous: state,
     chapterId: "chapter-1",
     chapterOrder: 1,
-    message: "同一章节连续修复失败。",
+    message: "同一章节连续修复失败（rewrite 档）。",
+  });
+  assert.equal(state.status, "closed");
+  assert.equal(state.patchFailureCount, 3);
+
+  // 第 4 次失败（预算决策升级到 replan/defer 的那次）→ 熔断打开，保守停止。
+  state = recordPatchFailureSignal({
+    previous: state,
+    chapterId: "chapter-1",
+    chapterOrder: 1,
+    message: "可执行修复已到上界。",
   });
   assert.equal(isDirectorCircuitBreakerOpen(state), true);
+  assert.equal(state.patchFailureCount, 4);
   assert.equal(state.reason, "auto_repair_exhausted");
   assert.equal(state.recoveryAction, "manual_repair");
 });

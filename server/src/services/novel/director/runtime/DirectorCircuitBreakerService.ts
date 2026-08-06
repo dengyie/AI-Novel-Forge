@@ -4,9 +4,19 @@ import type {
   DirectorCircuitBreakerState,
   DirectorQualityRepairRisk,
 } from "@ai-novel/shared/types/novelDirector";
+import { DIRECTOR_QUALITY_LOOP_BUDGET_LIMITS } from "../../qualityLoopBudget";
 
 export const DIRECTOR_CIRCUIT_BREAKER_THRESHOLDS = {
-  patchFailureOpenAt: 3,
+  /**
+   * 与预算阶梯（qualityLoopBudget.DIRECTOR_QUALITY_LOOP_BUDGET_LIMITS）对齐：
+   * patchRepair(2) + chapterRewrite(1) 两档可重进管线后，第 +1 次失败（= 预算决策
+   * 升级到 replan/defer 的那次）才打开熔断。若阈值 < patchRepair + chapterRewrite + 1，
+   * 熔断会在「预算刚决策 rewrite」的同一次失败上抢先打开，导致可执行 rewrite 在通用
+   * 路径上实际不可达（预算与熔断在同一失败上竞争，熔断优先停止）。
+   */
+  patchFailureOpenAt: DIRECTOR_QUALITY_LOOP_BUDGET_LIMITS.patchRepair
+    + DIRECTOR_QUALITY_LOOP_BUDGET_LIMITS.chapterRewrite
+    + 1,
   replanLoopOpenAt: 3,
   modelFailureOpenAt: 3,
   // 240k allows two+ repair cycles before triggering given typical ~55-60k per cycle.

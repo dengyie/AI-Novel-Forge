@@ -121,14 +121,12 @@ export function buildDirectorQualityLoopIssueSignature(input: {
 export function buildDirectorQualityLoopIssueSignatureFromIssues(input: {
   recommendedHandling?: string | null;
   issueTargets?: string[] | null;
-  issueIds?: string[] | null;
   noticeCode?: string | null;
   riskLevel?: string | null;
   repairMode?: string | null;
 }): string {
   const issueClass = classifyIssueNoticeCode(input.noticeCode);
   const targets = stableStringList(input.issueTargets);
-  const ids = stableStringList(input.issueIds);
   return [
     issueClass,
     normalizeText(input.recommendedHandling) || "handling_unknown",
@@ -136,7 +134,6 @@ export function buildDirectorQualityLoopIssueSignatureFromIssues(input: {
     normalizeText(input.riskLevel) || "risk_unknown",
     normalizeText(input.repairMode) || "repair_unknown",
     targets.length > 0 ? targets.join(",") : "target_unknown",
-    ids.length > 0 ? ids.join(",") : "id_unknown",
   ].join("|");
 }
 

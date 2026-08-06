@@ -19,6 +19,11 @@ const {
   recordDirectorQualityLoopBudgetAttempt,
 } = require("../dist/services/novel/director/runtime/DirectorQualityLoopBudgetLedgerService.js");
 
+// 电路熔断辅助：播种"同章节已累计 N 次 patch 失败信号"（与生产 update 同步）
+const {
+  recordPatchFailureSignal,
+} = require("../dist/services/novel/director/runtime/DirectorCircuitBreakerService.js");
+
 const REPLAN_MESSAGE = `${CONTRACT_REPLAN_WINDOW_MARKER} 章节执行合同职责过载，需整窗重排`;
 
 function buildRequest(overrides = {}) {
@@ -161,6 +166,27 @@ function baseHandlerInput({ deps, autoExecution, job }) {
   };
 }
 
+/**
+ * 播种"同章节已累计 N 次 patch 失败信号"到 autoExecution.circuitBreaker，
+ * 与生产 buildFailureCircuitBreaker（recordPatchFailureSignal 按章累计）同机制。
+ * 若不播种，测试永远看不到熔断与预算阶梯的相互作用（生产侧前几次失败会真实累计）。
+ */
+function seedPatchFailureSignals(autoExecution, count) {
+  let state = autoExecution;
+  for (let i = 0; i < count; i += 1) {
+    state = {
+      ...state,
+      circuitBreaker: recordPatchFailureSignal({
+        previous: state.circuitBreaker,
+        chapterId: "chapter-6",
+        chapterOrder: 6,
+        message: GENERIC_QUALITY_FAILURE,
+      }),
+    };
+  }
+  return state;
+}
+
 test("replan_window 失败首次触发自动重排（triggerType=contract_replan_window）并 continue", async () => {
   const { deps, calls } = buildDeps();
   const autoExecution = buildAutoExecution({ qualityDebtSummaries: null });
@@ -286,6 +312,9 @@ test("方案C: patch 预算耗尽后决策 auto_rewrite_chapter：仍重进管�
       chapterOrder: 6,
     }).state;
   }
+  // 生产同步：前两次 patch 重放各记一次 patch 失败信号 → 熔断 patchFailureCount=2。
+  // rewrite 决策失败时到位（第 3 次，熔断 =3 < patchFailureOpenAt=4）→ 熔断未开 → 可 continue。
+  autoExecution = seedPatchFailureSignals(autoExecution, 2);
 
   const result = await handleAutoExecutionFailure(baseHandlerInput({
     deps,
@@ -295,7 +324,7 @@ test("方案C: patch 预算耗尽后决策 auto_rewrite_chapter：仍重进管�
 
   assert.equal(result.kind, "continue");
   assert.equal(calls.markTaskFailed.length, 0);
-  // 本轮记账升级到 chapter_rewrite（rewrite 预算 +1）
+  // 本轮记账应升级到 chapter_rewrite（rewrite 预算 +1）
   const ledger = result.autoExecution?.qualityLoopLedger;
   assert.ok(ledger, "continue 后应写入 qualityLoopLedger");
   const rewriteEntry = ledger.entries.find(
@@ -334,6 +363,8 @@ test("方案C Phase3: 消息文本漂移但信封相同 → 预算仍按结构�
       chapterOrder: 6,
     }).state;
   }
+  // 生产同步：前两次 patch 重放各记一次 patch 失败信号 → 熔断 patchFailureCount=2（未开）。
+  autoExecution = seedPatchFailureSignals(autoExecution, 2);
 
   // 第三次失败：信封相同，但正文文案与播种时完全不同（LLM 文本漂移 + 注入 qualityFeedback 引导）
   const envelope = buildContractIssueDescriptor({
@@ -365,4 +396,57 @@ test("方案C Phase3: 消息文本漂移但信封相同 → 预算仍按结构�
     (entry) => entry.patchRepairCount === 2 && entry.chapterRewriteCount === 1,
   );
   assert.ok(rewriteEntry, "消息文本漂移下仍应按稳定结构累计 patch×2 + rewrite×1");
+});
+
+test("方案C Phase3 熔断对齐: 通用失败第 4 次同签名（patch×2 + rewrite×1 后）→ 熔断打开保守停止", async () => {
+  const { deps, calls } = buildDeps();
+  let autoExecution = buildAutoExecution({ qualityDebtSummaries: null });
+  const sig = buildDirectorQualityLoopIssueSignature({
+    reason: GENERIC_QUALITY_FAILURE,
+    noticeCode: undefined,
+    repairMode: undefined,
+  });
+  const window = buildDirectorQualityLoopBudgetWindow({
+    autoExecution,
+    chapterId: "chapter-6",
+    chapterOrder: 6,
+  });
+  // 阶梯已爬满：patch×2 + rewrite×1（预算账本），同时熔断已累计 3 次 patch 失败信号。
+  for (let i = 0; i < 2; i += 1) {
+    autoExecution = recordDirectorQualityLoopBudgetAttempt({
+      state: autoExecution,
+      novelId: "novel-1",
+      taskId: "task-1",
+      issueSignature: sig,
+      affectedChapterWindow: window,
+      action: "patch_repair",
+      reason: GENERIC_QUALITY_FAILURE,
+      chapterId: "chapter-6",
+      chapterOrder: 6,
+    }).state;
+  }
+  autoExecution = recordDirectorQualityLoopBudgetAttempt({
+    state: autoExecution,
+    novelId: "novel-1",
+    taskId: "task-1",
+    issueSignature: sig,
+    affectedChapterWindow: window,
+    action: "chapter_rewrite",
+    reason: GENERIC_QUALITY_FAILURE,
+    chapterId: "chapter-6",
+    chapterOrder: 6,
+  }).state;
+  autoExecution = seedPatchFailureSignals(autoExecution, 3);
+
+  const result = await handleAutoExecutionFailure(baseHandlerInput({
+    deps,
+    autoExecution,
+    job: buildGenericJob(),
+  }));
+
+  // patchFailureOpenAt = patchRepair + chapterRewrite + 1 = 4：第 4 次失败熔断打开 → 保守停止，
+  // 不再 continue 无界重放；也不发误导性 continue_with_risk。
+  assert.equal(result.kind, "stop");
+  assert.equal(calls.markTaskFailed.length, 1);
+  assert.equal(calls.recordEvent.includes("continue_with_risk"), false);
 });
