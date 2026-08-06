@@ -108,6 +108,38 @@ export function buildDirectorQualityLoopIssueSignature(input: {
   ].join("|");
 }
 
+/**
+ * 方案 C（Phase 3）：结构化版本——用失败实体携带的稳定结构判据构造预算签名。
+ *
+ * 上述 reason 版把 failureMessage（含 LLM 波动的 summary/repairHint/repairGuidance）
+ * 纳入签名，结构相同的失败会因文案差异得到不同 signatureKey，导致账本计数永不累计、
+ * 修复阶梯（patch→rewrite→replan→defer）失效。本函数改以 throwsite 编码进失败消息
+ * 信封（见 shared/types/chapterTaskSheetQuality 的 buildContractIssueDescriptor）的
+ * recommendedHandling + issue.target 为签名主体——均为 closed enum，逐章波动时稳定，
+ * 同结构复现 ⇒ 同签名 ⇒ 预算单调累计、静态升级。
+ */
+export function buildDirectorQualityLoopIssueSignatureFromIssues(input: {
+  recommendedHandling?: string | null;
+  issueTargets?: string[] | null;
+  issueIds?: string[] | null;
+  noticeCode?: string | null;
+  riskLevel?: string | null;
+  repairMode?: string | null;
+}): string {
+  const issueClass = classifyIssueNoticeCode(input.noticeCode);
+  const targets = stableStringList(input.issueTargets);
+  const ids = stableStringList(input.issueIds);
+  return [
+    issueClass,
+    normalizeText(input.recommendedHandling) || "handling_unknown",
+    normalizeText(input.noticeCode) || "quality_loop",
+    normalizeText(input.riskLevel) || "risk_unknown",
+    normalizeText(input.repairMode) || "repair_unknown",
+    targets.length > 0 ? targets.join(",") : "target_unknown",
+    ids.length > 0 ? ids.join(",") : "id_unknown",
+  ].join("|");
+}
+
 function normalizeWindow(window: DirectorQualityLoopBudgetWindow): DirectorQualityLoopBudgetWindow {
   return {
     startOrder: typeof window.startOrder === "number" ? Math.round(window.startOrder) : null,

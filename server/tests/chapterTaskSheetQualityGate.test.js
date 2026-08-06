@@ -14,6 +14,8 @@ const {
   sanitizeChapterTaskSheetForPersistence,
   sanitizeWriterFacingTaskSheet,
   tryAutoRepairInternalCodesOnly,
+  buildContractIssueDescriptor,
+  parseContractIssueDescriptor,
 } = require("../../shared/dist/types/chapterTaskSheetQuality.js");
 const {
   ChapterTaskSheetQualityGateService,
@@ -565,4 +567,36 @@ test("B4: chapter detail task_sheet prompt includes template contract sections",
   assert.match(systemText, /【现场压力】/);
   assert.match(systemText, /钉死认知|钉认知/);
   assert.match(systemText, /禁止写入内部质量/);
+});
+
+test("方案C Phase3: 门禁失败描述符信封 buildContractIssueDescriptor / parseContractIssueDescriptor 往返", () => {
+  // replan 信封
+  const replanResult = {
+    status: "repairable",
+    canEnterExecution: false,
+    issues: [{ id: "contract_overloaded", severity: "high", target: "semantic", summary: "职责过载", repairHint: "重排窗口" }],
+    summary: "章节职责过载",
+    repairGuidance: ["重排"],
+    confidence: 0.9,
+  };
+  const envelope = buildContractIssueDescriptor(replanResult);
+  assert.match(envelope, /^\[contract_issue:/);
+  const parsed = parseContractIssueDescriptor(`前缀 ${envelope} 后缀`);
+  assert.deepEqual(parsed, { recommendedHandling: "replan_window", issueTargets: ["semantic"] });
+  // 通用 repair 信封
+  const repairResult = {
+    status: "repairable",
+    canEnterExecution: false,
+    issues: [{ id: "task_sheet_codes", severity: "high", target: "task_sheet", summary: "内部码泄露", repairHint: "清理" }],
+    summary: "章节执行合同质量未达阈值",
+    repairGuidance: ["清理"],
+    confidence: 0.8,
+  };
+  const repairEnvelope = buildContractIssueDescriptor(repairResult);
+  const repairParsed = parseContractIssueDescriptor(repairEnvelope);
+  assert.deepEqual(repairParsed, { recommendedHandling: "repair_contract", issueTargets: ["task_sheet"] });
+  // 无信封 → null
+  assert.equal(parseContractIssueDescriptor("无信封普通消息"), null);
+  assert.equal(parseContractIssueDescriptor(null), null);
+  assert.equal(parseContractIssueDescriptor(""), null);
 });

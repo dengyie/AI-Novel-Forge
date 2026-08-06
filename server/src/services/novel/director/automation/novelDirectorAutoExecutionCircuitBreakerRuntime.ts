@@ -28,10 +28,12 @@ import {
 import {
   buildDirectorQualityLoopBudgetWindow,
   buildDirectorQualityLoopIssueSignature,
+  buildDirectorQualityLoopIssueSignatureFromIssues,
   findDirectorQualityLoopBudgetEntry,
   recordDirectorQualityLoopBudgetAttempt,
   resolveDirectorQualityLoopBudgetNextAction,
 } from "../runtime/DirectorQualityLoopBudgetLedgerService";
+import { parseContractIssueDescriptor } from "@ai-novel/shared/types/chapterTaskSheetQuality";
 import { directorAutomationLedgerEventService } from "../runtime/DirectorAutomationLedgerEventService";
 import { directorUsageTelemetryQueryService } from "../runtime/DirectorUsageTelemetryQueryService";
 
@@ -214,12 +216,23 @@ export async function runFullBookAutopilotReplanNotice(input: {
     chapterId: input.autoExecution.nextChapterId,
     chapterOrder: input.autoExecution.nextChapterOrder,
   });
-  const issueSignature = buildDirectorQualityLoopIssueSignature({
-    reason: input.noticeSummary,
-    noticeCode: input.checkpointState.qualityRepairRisk?.noticeCode,
-    riskLevel: input.checkpointState.qualityRepairRisk?.riskLevel,
-    repairMode: input.checkpointState.qualityRepairRisk?.repairMode,
-  });
+  // Phase 3：信封结构化签名优先（同结构重排 ⇒ 同签名 ⇒ windowReplanCount 单调累计），
+  // 无信封（在途旧消息）回退 noticeSummary 旧签名，兼容既有行为。
+  const parsedContractIssue = parseContractIssueDescriptor(input.noticeSummary);
+  const issueSignature = parsedContractIssue
+    ? buildDirectorQualityLoopIssueSignatureFromIssues({
+      recommendedHandling: parsedContractIssue.recommendedHandling,
+      issueTargets: parsedContractIssue.issueTargets,
+      noticeCode: input.checkpointState.qualityRepairRisk?.noticeCode,
+      riskLevel: input.checkpointState.qualityRepairRisk?.riskLevel,
+      repairMode: input.checkpointState.qualityRepairRisk?.repairMode,
+    })
+    : buildDirectorQualityLoopIssueSignature({
+      reason: input.noticeSummary,
+      noticeCode: input.checkpointState.qualityRepairRisk?.noticeCode,
+      riskLevel: input.checkpointState.qualityRepairRisk?.riskLevel,
+      repairMode: input.checkpointState.qualityRepairRisk?.repairMode,
+    });
   const existingBudgetEntry = findDirectorQualityLoopBudgetEntry({
     state: input.autoExecution,
     novelId: input.novelId,

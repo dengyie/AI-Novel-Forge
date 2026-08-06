@@ -10,6 +10,7 @@ const {
   DIRECTOR_QUALITY_LOOP_BUDGET_LIMITS,
   buildDirectorQualityLoopBudgetWindow,
   buildDirectorQualityLoopIssueSignature,
+  buildDirectorQualityLoopIssueSignatureFromIssues,
   resolveDirectorQualityLoopBudgetNextAction,
   recordDirectorQualityLoopBudgetAttempt,
 } = require("../dist/services/novel/qualityLoopBudget.js");
@@ -52,4 +53,28 @@ test("共享账本纯函数与 director 侧预算上限语义一致", () => {
     chapterId: "c-6",
     chapterOrder: 6,
   }));
+});
+
+test("方案C Phase3: 结构化签名——同结构不同 reason 文案 → 相同签名；不同 targets → 不同签名", () => {
+  const base = {
+    recommendedHandling: "repair_contract",
+    issueTargets: ["task_sheet", "semantic"],
+    noticeCode: null,
+    repairMode: null,
+  };
+  // 同一组 issueTargets 不同顺序 → 稳定字符串列表排序去重 → 相同签名
+  const sigA = buildDirectorQualityLoopIssueSignatureFromIssues({
+    ...base,
+    issueTargets: ["semantic", "task_sheet"],
+  });
+  const sigB = buildDirectorQualityLoopIssueSignatureFromIssues(base);
+  assert.equal(sigA, sigB);
+  // 不同 issueTargets → 不同签名
+  const sigC = buildDirectorQualityLoopIssueSignatureFromIssues({
+    ...base,
+    issueTargets: ["purpose"],
+  });
+  assert.notEqual(sigA, sigC);
+  // 仅 reason 文案不同 → 签名不变（结构化签名不含 reason 字段）
+  assert.equal(sigA, buildDirectorQualityLoopIssueSignatureFromIssues(base));
 });

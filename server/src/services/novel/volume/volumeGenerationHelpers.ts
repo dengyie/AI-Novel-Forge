@@ -16,6 +16,7 @@ import {
   serializeChapterScenePlan,
 } from "@ai-novel/shared/types/chapterLengthControl";
 import {
+  buildContractIssueDescriptor,
   CONTRACT_REPLAN_WINDOW_MARKER,
   inferChapterTaskSheetType,
   isReplanWindowRequired,
@@ -51,6 +52,33 @@ export class ChapterExecutionContractReplanWindowError extends Error {
     super(`${CONTRACT_REPLAN_WINDOW_MARKER} ${message}`);
     this.name = "ChapterExecutionContractReplanWindowError";
   }
+}
+
+/**
+ * 方案 C（Phase 3）：本地重试耗尽后向上抛出的门禁失败，消息前缀稳定结构描述符信封。
+ *
+ * 与 ChapterTaskSheetQualityGateError 保持 instanceof 兼容（继承），但把
+ * buildContractIssueDescriptor(result) 编码进 message，供 director 失败处理器解析出
+ * 稳定预算签名（见 qualityLoopBudget.buildDirectorQualityLoopIssueSignatureFromIssues）。
+ * 注意：本地重试反馈循环（qualityFeedback）使用的是循环内捕获的**原始** gate 错误消息，
+ * 不会被本信封污染。
+ *
+ * 采用「运行时工厂 + 匿名子类」，而非模块顶层 `class ... extends`：
+ * 本文件与 ChapterTaskSheetQualityGateService 之间存在既有模块加载环
+ * （门禁服务 → prompts → … → volumeGenerationOrchestrator → … → 本文件），
+ * 顶层 extends 会在环内访问到服务模块的部分导出（基类 undefined）导致加载崩溃。
+ * 工厂在重试耗尽时（运行时，模块图已完整加载）才求值基类，规避加载环。
+ */
+export function buildContractIssueTransportError(
+  gateResult: ChapterTaskSheetQualityGateResult,
+): ChapterTaskSheetQualityGateError {
+  return new (class extends ChapterTaskSheetQualityGateError {
+    constructor(public readonly gateResult: ChapterTaskSheetQualityGateResult) {
+      super(gateResult);
+      this.name = "ContractIssueTransportError";
+      this.message = `${buildContractIssueDescriptor(gateResult)} ${this.message}`;
+    }
+  })(gateResult);
 }
 
 type StoryMacroPlanResult = Awaited<ReturnType<StoryMacroPlanService["getPlan"]>> | null;
@@ -898,7 +926,12 @@ export async function generateChapterTaskSheetDetail(params: {
         error instanceof ChapterTaskSheetQualityGateError
         && isReplanWindowRequired(error.result)
       ) {
-        throw new ChapterExecutionContractReplanWindowError(error.result, error.message);
+        // Phase 3：前缀结构化信封（recommendedHandling + issue.targets），
+        // 供 director 构造稳定预算签名；marker 兼容仍在，isContractReplanWindowFailure 不回归。
+        throw new ChapterExecutionContractReplanWindowError(
+          error.result,
+          `${buildContractIssueDescriptor(error.result)} ${error.message}`,
+        );
       }
       lastError = error instanceof Error ? error : new Error("章节执行合同生成失败。");
       if (error instanceof ChapterTaskSheetQualityGateError) {
@@ -907,6 +940,11 @@ export async function generateChapterTaskSheetDetail(params: {
     }
   }
 
+  // Phase 3：本地重试耗尽 → 门禁失败上抛时前缀稳定描述符信封（供 director 构造
+  // 稳定预算签名）；非门禁错误（网络等）原样抛，director 走兼容旧签名。
+  if (lastError instanceof ChapterTaskSheetQualityGateError) {
+    throw buildContractIssueTransportError(lastError.result);
+  }
   throw lastError ?? new Error("章节执行合同生成失败。");
 }
 

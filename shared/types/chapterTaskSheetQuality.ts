@@ -119,6 +119,68 @@ export function isReplanWindowRequired(result: ChapterTaskSheetQualityGateResult
   return result.issues.some((issue) => issue.id === "contract_overloaded");
 }
 
+/**
+ * 方案 C（Phase 3）：章节执行合同门禁失败的结构化描述符信封。
+ *
+ * 结构相同但文案波动的质量失败（LLM 生成的 summary/repairHint 逐次变化）若以自由
+ * 文本进预算签名，会导致签名漂移、账本计数永不累计、修复阶梯失效。因此失败侧
+ * （throwsite）把稳定结构判据——recommendedHandling + 排序去重的 issue.target——
+ * 编码进失败消息信封，director 侧据此构造稳定预算签名。
+ *
+ * 信封 `[contract_issue:{"recommendedHandling":...,"issueTargets":[...]}]` 只含
+ * ASCII 与中文，不含「第 X 章」/16+ 位 hex id/换行等会被预算签名 normalizeText 折叠
+ * 的内容，可安全随 job.error 透传；`isContractReplanWindowFailure`（marker 匹配）
+ * 保留为兼容网关。
+ */
+export const CONTRACT_ISSUE_ENVELOPE_PREFIX = "[contract_issue:";
+
+export type ContractIssueDescriptorRecommendedHandling = "repair_contract" | "replan_window";
+
+export interface ContractIssueDescriptor {
+  recommendedHandling: ContractIssueDescriptorRecommendedHandling;
+  issueTargets: string[];
+}
+
+function stableUniqueTargets(result: ChapterTaskSheetQualityGateResult): string[] {
+  return Array.from(new Set(result.issues.map((issue) => issue.target))).sort();
+}
+
+export function buildContractIssueDescriptor(result: ChapterTaskSheetQualityGateResult): string {
+  const descriptor: ContractIssueDescriptor = {
+    recommendedHandling: isReplanWindowRequired(result) ? "replan_window" : "repair_contract",
+    issueTargets: stableUniqueTargets(result),
+  };
+  return `${CONTRACT_ISSUE_ENVELOPE_PREFIX}${JSON.stringify(descriptor)}]`;
+}
+
+export function parseContractIssueDescriptor(
+  message: string | null | undefined,
+): ContractIssueDescriptor | null {
+  const match = /\[contract_issue:(\{.*?\})\]/s.exec(message?.trim() ?? "");
+  if (!match) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(match[1]) as Partial<ContractIssueDescriptor>;
+    if (
+      (parsed.recommendedHandling === "repair_contract" || parsed.recommendedHandling === "replan_window")
+      && Array.isArray(parsed.issueTargets)
+    ) {
+      return {
+        recommendedHandling: parsed.recommendedHandling,
+        issueTargets: Array.from(new Set(
+          parsed.issueTargets
+            .filter((target): target is string => typeof target === "string" && target.trim().length > 0)
+            .map((target) => target.trim()),
+        )).sort(),
+      };
+    }
+  } catch {
+    // 非法信封：视为无信封，调用方回退兼容旧签名。
+  }
+  return null;
+}
+
 function normalizeAssessmentVerdict(value: unknown): unknown {
   if (typeof value !== "string") {
     return value;

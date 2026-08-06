@@ -4,10 +4,12 @@ import type {
 } from "@ai-novel/shared/types/novelDirector";
 import { isFullBookAutopilotRunMode } from "@ai-novel/shared/types/novelDirector";
 import { parsePipelinePayload } from "../../../pipelineJobState";
+import { parseContractIssueDescriptor } from "@ai-novel/shared/types/chapterTaskSheetQuality";
 import { directorAutomationLedgerEventService } from "../../runtime/DirectorAutomationLedgerEventService";
 import {
   buildDirectorQualityLoopBudgetWindow,
   buildDirectorQualityLoopIssueSignature,
+  buildDirectorQualityLoopIssueSignatureFromIssues,
   findDirectorQualityLoopBudgetEntry,
   recordDirectorQualityLoopBudgetAttempt,
   resolveDirectorQualityLoopBudgetNextAction,
@@ -78,6 +80,9 @@ export async function handleAutoExecutionFailure(input: {
     || (job.status === "cancelled"
       ? `${scopeLabel}自动执行已取消。`
       : `${scopeLabel}自动执行未能全部通过质量要求。`);
+  // 方案 C（Phase 3）：失败实体携带的结构化描述符（recommendedHandling + issue.targets）。
+  // 有则用稳定结构构造预算签名（同结构复现 ⇒ 同签名 ⇒ 阶梯单调升级）；无则回退消息旧签名。
+  const parsedContractIssue = parseContractIssueDescriptor(failureMessage);
 
   // 章节执行合同门禁判 replan_window（职责过载）：结构性难题需整窗重排，本地再生成修不好。
   // 复用 runFullBookAutopilotReplanNotice（内含 window_replan 预算记账 + 重排环熔断 + replanNovel）。
@@ -85,7 +90,8 @@ export async function handleAutoExecutionFailure(input: {
   if (
     autoExecution.autoRepair
     && isFullBookAutopilotRunMode(request.runMode)
-    && isContractReplanWindowFailure(failureMessage)
+    // Phase 3：marker 兼容网关 + 结构化 recommendedHandling 双通道（在途旧消息无信封，走 marker）。
+    && (isContractReplanWindowFailure(failureMessage) || parsedContractIssue?.recommendedHandling === "replan_window")
     && deps.replanNovel
   ) {
     const replanResult = await runFullBookAutopilotReplanNotice({
@@ -226,11 +232,20 @@ export async function handleAutoExecutionFailure(input: {
       chapterId: autoExecution.nextChapterId,
       chapterOrder: autoExecution.nextChapterOrder,
     });
-    const issueSignature = buildDirectorQualityLoopIssueSignature({
-      reason: failureMessage,
-      noticeCode: job.noticeCode,
-      repairMode: pipelinePayload.repairMode,
-    });
+    // Phase 3：有结构化信封 → 稳定签名（recommendedHandling + issue.targets，逐章波动时不变）；
+    // 无信封（在途旧消息/网络错误）→ 回退 reason 版签名。
+    const issueSignature = parsedContractIssue
+      ? buildDirectorQualityLoopIssueSignatureFromIssues({
+        recommendedHandling: parsedContractIssue.recommendedHandling,
+        issueTargets: parsedContractIssue.issueTargets,
+        noticeCode: job.noticeCode,
+        repairMode: pipelinePayload.repairMode,
+      })
+      : buildDirectorQualityLoopIssueSignature({
+        reason: failureMessage,
+        noticeCode: job.noticeCode,
+        repairMode: pipelinePayload.repairMode,
+      });
     const existingBudgetEntry = findDirectorQualityLoopBudgetEntry({
       state: autoExecution,
       novelId,
@@ -288,6 +303,7 @@ export async function handleAutoExecutionFailure(input: {
         chapterOrder: autoExecution.nextChapterOrder ?? null,
         qualityBudgetEntry,
         qualityBudgetNextAction,
+        contractIssueDescriptor: parsedContractIssue,
       },
     }).catch(() => null);
   }

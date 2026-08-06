@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 
 const {
   CONTRACT_REPLAN_WINDOW_MARKER,
+  buildContractIssueDescriptor,
 } = require("../../shared/dist/types/chapterTaskSheetQuality.js");
 
 // 失败处理器（含 replan_window → 自动重排接线 + defer_and_continue 保守停止）
@@ -14,6 +15,7 @@ const {
 const {
   buildDirectorQualityLoopBudgetWindow,
   buildDirectorQualityLoopIssueSignature,
+  buildDirectorQualityLoopIssueSignatureFromIssues,
   recordDirectorQualityLoopBudgetAttempt,
 } = require("../dist/services/novel/director/runtime/DirectorQualityLoopBudgetLedgerService.js");
 
@@ -300,4 +302,67 @@ test("方案C: patch 预算耗尽后决策 auto_rewrite_chapter：仍重进管�
     (entry) => entry.patchRepairCount === 2 && entry.chapterRewriteCount === 1,
   );
   assert.ok(rewriteEntry, "应记录一次 chapter_rewrite 动作（升级到更高 tier）");
+});
+
+test("方案C Phase3: 消息文本漂移但信封相同 → 预算仍按结构单调升级（rewrite）", async () => {
+  const { deps, calls } = buildDeps();
+  let autoExecution = buildAutoExecution({ qualityDebtSummaries: null });
+
+  // 结构化签名：信封只含 recommendedHandling + issueTargets（closed enum），不含自由文本
+  const structuredSignature = buildDirectorQualityLoopIssueSignatureFromIssues({
+    recommendedHandling: "repair_contract",
+    issueTargets: ["task_sheet"],
+    noticeCode: null,
+    repairMode: "light_repair",
+  });
+  const window = buildDirectorQualityLoopBudgetWindow({
+    autoExecution,
+    chapterId: "chapter-6",
+    chapterOrder: 6,
+  });
+  // 播种两次 patch_repair（同结构化签名；两次 reason 文案不同，模拟 LLM 输出波动）
+  for (let i = 0; i < 2; i += 1) {
+    autoExecution = recordDirectorQualityLoopBudgetAttempt({
+      state: autoExecution,
+      novelId: "novel-1",
+      taskId: "task-1",
+      issueSignature: structuredSignature,
+      affectedChapterWindow: window,
+      action: "patch_repair",
+      reason: i === 0 ? "第 1 次质量失败：任务单泄露内部码" : "第 2 次质量失败：任务单遗漏关键义务",
+      chapterId: "chapter-6",
+      chapterOrder: 6,
+    }).state;
+  }
+
+  // 第三次失败：信封相同，但正文文案与播种时完全不同（LLM 文本漂移 + 注入 qualityFeedback 引导）
+  const envelope = buildContractIssueDescriptor({
+    status: "repairable",
+    canEnterExecution: false,
+    issues: [{ id: "task_sheet_codes", severity: "high", target: "task_sheet", summary: "任务单内部码泄露", repairHint: "清理" }],
+    summary: "章节执行合同质量未达阈值",
+    repairGuidance: ["清理内部码"],
+    confidence: 0.8,
+  });
+  const result = await handleAutoExecutionFailure(baseHandlerInput({
+    deps,
+    autoExecution,
+    job: {
+      id: "job-failed",
+      status: "failed",
+      progress: 0.98,
+      error: `${envelope} 这一次是完全不同的失败文案段落，长度与措辞均与之前不同。`,
+      payload: JSON.stringify({ repairMode: "light_repair" }),
+    },
+  }));
+
+  // 信封结构签名 → findEntries 命中播种条目 → patch 耗尽后升级到 rewrite → continue
+  assert.equal(result.kind, "continue");
+  assert.equal(calls.markTaskFailed.length, 0);
+  const ledger = result.autoExecution?.qualityLoopLedger;
+  assert.ok(ledger, "continue 后应写入 qualityLoopLedger");
+  const rewriteEntry = ledger.entries.find(
+    (entry) => entry.patchRepairCount === 2 && entry.chapterRewriteCount === 1,
+  );
+  assert.ok(rewriteEntry, "消息文本漂移下仍应按稳定结构累计 patch×2 + rewrite×1");
 });
