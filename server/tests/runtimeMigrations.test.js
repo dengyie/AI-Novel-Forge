@@ -234,6 +234,55 @@ test("ensureRuntimeDatabaseReady records a missing migration when schema is alre
 });
 
 
+test("readAt backfill adds missing column to notification log so in-app unread writes do not crash", async () => {
+  const { tempDir, databasePath } = createTempDatabaseFile();
+  const database = new Database(databasePath);
+
+  try {
+    createMigrationTable(database);
+    createSatisfiedBookAnalysisSourceCacheSchema(database);
+    // 模拟产线上由 db push 建表、但 readAt 后加进 schema 时未再 push 的缺列情况。
+    database.exec(`
+      CREATE TABLE "AutoDirectorFollowUpNotificationLog" (
+        "id" TEXT NOT NULL PRIMARY KEY,
+        "eventId" TEXT NOT NULL,
+        "eventType" TEXT NOT NULL,
+        "taskId" TEXT NOT NULL,
+        "channelType" TEXT NOT NULL,
+        "target" TEXT,
+        "requestPayload" TEXT,
+        "responseBody" TEXT,
+        "responseStatus" INTEGER,
+        "attemptCount" INTEGER NOT NULL DEFAULT 1,
+        "deliveredAt" DATETIME,
+        "status" TEXT NOT NULL,
+        "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        "updatedAt" DATETIME NOT NULL
+      );
+    `);
+    for (const migrationName of allMigrationNames) {
+      insertMigrationRecord(database, migrationName);
+    }
+  } finally {
+    database.close();
+  }
+
+  try {
+    await withDesktopRuntime(databasePath, () => ensureRuntimeDatabaseReady());
+
+    const verifyDb = new Database(databasePath, { readonly: true });
+    try {
+      const columns = verifyDb.prepare(`PRAGMA table_info("AutoDirectorFollowUpNotificationLog")`).all();
+      const names = columns.map((column) => column.name);
+      assert.ok(names.includes("readAt"), "readAt column should be backfilled");
+    } finally {
+      verifyDb.close();
+    }
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("web SQLite runtime migrates when AI_NOVEL_RUNTIME is not desktop", async () => {
   const { tempDir, databasePath } = createTempDatabaseFile();
   const database = new Database(databasePath);

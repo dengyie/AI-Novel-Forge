@@ -200,6 +200,14 @@ const REQUIRED_COLUMN_BACKFILLS = [
     columnName: "audiobookNarratorStyle",
     columnDefinition: `"audiobookNarratorStyle" TEXT`,
   },
+  // 站内红点未读标记（P2-6）。autoDirectorFollowUpNotificationLog 无 SQL 迁移（由 db push
+  // 建表），readAt 随后加进 schema 时产库未再 push → 缺列导致站内红点写入在启动/自动
+  // 恢复时报 "column readAt does not exist"，直接打崩导演续跑。幂等 ADD COLUMN 自愈。
+  {
+    tableName: "AutoDirectorFollowUpNotificationLog",
+    columnName: "readAt",
+    columnDefinition: `"readAt" DATETIME`,
+  },
 ] as const;
 
 function resolveSqliteDatabasePath(): string | null {
