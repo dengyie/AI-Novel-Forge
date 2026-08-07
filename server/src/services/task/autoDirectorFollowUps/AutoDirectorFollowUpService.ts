@@ -1,3 +1,10 @@
+import { buildDirectorBudgetLedgerSummary } from "../../novel/qualityLoopBudget";
+import type {
+  DirectorWorkflowSeedPayload,
+} from "../../novel/director/runtime/novelDirectorHelpers";
+import {
+  parseSeedPayload,
+} from "../../novel/workflow/novelWorkflow.shared";
 import type {
   AutoDirectorChannelDeliveryStatus,
   AutoDirectorFollowUpDetail,
@@ -168,6 +175,9 @@ export class AutoDirectorFollowUpService {
     const replanUrl = item.availableActions.some((action) => action.code === "go_replan")
       ? task.sourceRoute
       : null;
+    const budgetLedgerSummary = buildDirectorBudgetLedgerSummary(
+      parseSeedPayload<DirectorWorkflowSeedPayload>(row.seedPayloadJson)?.autoExecution,
+    );
 
     return {
       directorTaskId: taskId,
@@ -193,6 +203,7 @@ export class AutoDirectorFollowUpService {
       milestones: buildMilestones(row),
       channelDeliveries: await this.getRecentChannelDeliveries(taskId),
       task,
+      budgetLedgerSummary,
     };
   }
 
@@ -201,6 +212,10 @@ export class AutoDirectorFollowUpService {
       const rows = await prisma.autoDirectorFollowUpNotificationLog.findMany({
         where: {
           taskId,
+          // 站内红点（inapp）行不在外部渠道送达列表里呈现（它们不是授权 webhook 投递）。
+          channelType: {
+            not: "inapp",
+          },
         },
         orderBy: [{ createdAt: "desc" }, { id: "desc" }],
         take: 10,
@@ -222,6 +237,53 @@ export class AutoDirectorFollowUpService {
     } catch (error) {
       if (isMissingTableError(error) || isDbUnavailableError(error)) {
         return [];
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * 站内未读红点计数。仅统计 channelType="inapp" 且 readAt IS NULL 的行。
+   * 外部渠道（dingtalk/wecom）行 readAt 恒为 NULL，但 channelType 过滤排除了它们。
+   * 表不存在或 DB 不可用时安全返回 0（首次部署 / 迁移过渡期）。
+   */
+  async getUnreadCount(): Promise<{ unreadCount: number }> {
+    try {
+      const unreadCount = await prisma.autoDirectorFollowUpNotificationLog.count({
+        where: {
+          channelType: "inapp",
+          readAt: null,
+        },
+      });
+      return { unreadCount };
+    } catch (error) {
+      if (isMissingTableError(error) || isDbUnavailableError(error)) {
+        return { unreadCount: 0 };
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * 将全部站内未读通知标为已读（readAt = now）。
+   * 用户在打开跟进中心页面或点击红点后调用该接口。
+   * 返回本次标记的行数（语义上 = 清除的红点数）。
+   */
+  async markAllNotificationsRead(): Promise<{ updated: number }> {
+    try {
+      const result = await prisma.autoDirectorFollowUpNotificationLog.updateMany({
+        where: {
+          channelType: "inapp",
+          readAt: null,
+        },
+        data: {
+          readAt: new Date(),
+        },
+      });
+      return { updated: result.count };
+    } catch (error) {
+      if (isMissingTableError(error) || isDbUnavailableError(error)) {
+        return { updated: 0 };
       }
       throw error;
     }

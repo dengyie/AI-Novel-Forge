@@ -75,6 +75,8 @@ import { StyleProfileService } from "../../styleEngine/StyleProfileService";
 import {
   assertHighMemoryDirectorStartAllowed,
   releaseHighMemoryDirectorReservations,
+  type HighMemoryDirectorItemKey,
+  type HighMemoryDirectorStage,
 } from "./runtime/autoDirectorMemorySafety";
 import {
   validateAutoDirectorTakeoverRequest,
@@ -154,6 +156,7 @@ export class NovelDirectorService {
     isPendingReviewAutoPromotionEnabled: () => qualityDebtSettingsService.isAutoPromotionEnabled(),
     autoPromotePendingReviewProposals: (input) => this.autoPromotePendingReviewProposals(input),
     enableBatchRoll: true,
+    assertHighMemoryChapterAllowed: (input) => this.assertHighMemoryChapterAllowed(input),
     resolveBatchRoll: async ({ novelId, range, autoExecution, consecutiveBatchRolls, request, settingQualityMode }) => {
       const mode = settingQualityMode
         ?? (request?.settingQualityMode === "advisory" || request?.settingQualityMode === "enforce"
@@ -336,14 +339,33 @@ export class NovelDirectorService {
   private async assertHighMemoryDirectorStartAllowed(input: {
     taskId: string;
     novelId: string;
-    stage: "structured_outline";
-    itemKey: "beat_sheet" | "chapter_list" | "chapter_detail_bundle" | "chapter_sync";
+    stage: HighMemoryDirectorStage;
+    itemKey: HighMemoryDirectorItemKey;
     volumeId?: string | null;
     chapterId?: string | null;
     scope?: string | null;
     batchAlreadyStartedCount?: number;
   }): Promise<void> {
     await assertHighMemoryDirectorStartAllowed(this.workflowService, input);
+  }
+
+  /**
+   * autopilot 章节执行/质量修复入口内存锁：任何时刻每本小说最多 1 个
+   * 高内存阶段（structured_outline / chapter_execution / quality_repair）
+   * 在跑正文生成，防止双任务并发导致 OOM。scope 固定 book。
+   */
+  private async assertHighMemoryChapterAllowed(input: {
+    taskId: string;
+    novelId: string;
+    stage: "chapter_execution" | "quality_repair";
+  }): Promise<void> {
+    await assertHighMemoryDirectorStartAllowed(this.workflowService, {
+      taskId: input.taskId,
+      novelId: input.novelId,
+      stage: input.stage,
+      itemKey: "chapter_execution",
+      scope: "book",
+    });
   }
 
   private scheduleBackgroundRun(taskId: string, runner: () => Promise<void>) {

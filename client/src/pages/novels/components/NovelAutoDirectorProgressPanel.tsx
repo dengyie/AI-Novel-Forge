@@ -18,6 +18,7 @@ import {
 } from "@/api/novelDirector";
 import { queryKeys } from "@/api/queryKeys";
 import DirectorRuntimeProjectionCard from "@/components/autoDirector/DirectorRuntimeProjectionCard";
+import { DirectorBudgetLedgerGauge } from "@/components/autoDirector/DirectorBudgetLedgerGauge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import AITakeoverContainer, { type AITakeoverMode } from "@/components/workflow/AITakeoverContainer";
@@ -518,6 +519,12 @@ export default function NovelAutoDirectorProgressPanel({
           projection={runtimeProjectionForDisplay}
           className="mt-4"
         />
+
+        {dashboardView?.budgetLedgerSummary ? (
+          <div className="mt-4">
+            <DirectorBudgetLedgerGauge summary={dashboardView.budgetLedgerSummary} />
+          </div>
+        ) : null}
 
         <div className="mt-5">
           <div className="flex flex-wrap items-start justify-between gap-3">

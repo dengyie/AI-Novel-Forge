@@ -36,6 +36,7 @@ import {
 import { buildRestoreTaskToCheckpointResult } from "./novelWorkflowCheckpoint";
 import {
   STALE_AUTO_DIRECTOR_RUNNING_MESSAGE,
+  isAutoResumableStaleAutoDirectorTask,
   isStaleAutoDirectorRunningTask,
 } from "./autoDirectorStaleTaskRecovery";
 import {
@@ -45,6 +46,7 @@ import {
 } from "./novelWorkflowAutoDirectorReconciliation";
 import { repairAutoDirectorCandidateSeedPayload } from "./novelWorkflowCandidateSeedRepair";
 import { buildNovelCreateResumeTarget, mergeSeedPayload, parseResumeTarget, stringifyResumeTarget, parseSeedPayload } from "./novelWorkflow.shared";
+import { DirectorCommandService } from "../director/commands/DirectorCommandService";
 
 type AutoDirectorNovelTaskRow = {
   lane?: string | null;
@@ -70,7 +72,10 @@ type AutoDirectorNovelTaskRow = {
 };
 
 export class NovelWorkflowHealingService {
-  constructor(private readonly workflow: NovelWorkflowStoreService) {}
+  constructor(
+    private readonly workflow: NovelWorkflowStoreService,
+    private readonly directorCommandService: DirectorCommandService | null = null,
+  ) {}
 
   private async resolveStructuredOutlineTaskProgress(input: {
     novelId: string;
@@ -386,6 +391,34 @@ export class NovelWorkflowHealingService {
     const existing = await this.workflow.getTaskByIdWithoutHealing(taskId);
     if (!existing || !isStaleAutoDirectorRunningTask(existing)) {
       return false;
+    }
+    // P0-2 自动续跑：服务重启/僵死但任务本身可恢复（全书自动执行启用、熔断未开、
+    // 未取消、仍有剩余章节）→ 自动 enqueue continue，而不是标失败等人手点「继续」。
+    // 续跑后刷新心跳，避免下一轮保留扫描重复触发；任务保持 running 由命令队列接管。
+    if (this.directorCommandService && isAutoResumableStaleAutoDirectorTask(existing)) {
+      try {
+        await this.directorCommandService.enqueueContinueCommand(taskId, {
+          continuationMode: "resume",
+          forceResume: true,
+        });
+      } catch (error) {
+        console.warn("[auto-director.heal] auto-resume enqueue failed", {
+          taskId,
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      }
+      await this.workflow.updateTaskWithRetry({
+        where: { id: taskId },
+        data: {
+          status: "running",
+          heartbeatAt: new Date(),
+          checkpointSummary: "检测到后台执行中断，系统已自动从最近进度继续续跑。",
+          lastError: null,
+          finishedAt: null,
+          cancelRequestedAt: null,
+        },
+      });
+      return true;
     }
     const resumeTarget = parseResumeTarget(existing.resumeTargetJson) ?? this.workflow.buildResumeTarget({
       taskId,

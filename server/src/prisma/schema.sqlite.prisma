@@ -2320,11 +2320,15 @@ model AutoDirectorFollowUpNotificationLog {
   attemptCount   Int      @default(1)
   deliveredAt    DateTime?
   status         String
+  // 站内提醒（channelType="inapp"）已读时间。NULL = 未读 → 前端导航/跟进页红点。
+  // 外部渠道（dingtalk/wecom）行 readAt 恒为 NULL，仅通过 channelType 区分，不影响未读数。
+  readAt         DateTime?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
   @@index([taskId, createdAt])
   @@index([eventId, channelType, createdAt])
+  @@index([channelType, readAt])
 }
 
 model StoryStateSnapshot {

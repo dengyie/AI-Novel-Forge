@@ -117,6 +117,16 @@ export class AutoExecutionRangeRunner {
       return;
     }
 
+    // 章节执行/质量修复正文生成是内存最高峰：进入前取 book 级内存锁（每小说同时
+    // 最多 1 个高内存阶段），并在 scheduleBackgroundRun 的 finally 释放。
+    if (this.deps.assertHighMemoryChapterAllowed) {
+      await this.deps.assertHighMemoryChapterAllowed({
+        taskId: input.taskId,
+        novelId: input.novelId,
+        stage: input.resumeCheckpointType === "replan_required" ? "quality_repair" : "chapter_execution",
+      });
+    }
+
     try {
       await syncAutoExecutionTaskState(this.deps, {
         taskId: input.taskId,

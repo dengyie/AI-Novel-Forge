@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import {
   BookOpenText,
@@ -28,7 +28,7 @@ import {
 import { NavLink } from "react-router-dom";
 import { listKnowledgeDocuments } from "@/api/knowledge";
 import { queryKeys } from "@/api/queryKeys";
-import { getAutoDirectorFollowUpOverview } from "@/api/autoDirectorFollowUps";
+import { getAutoDirectorFollowUpUnreadCount, markAutoDirectorFollowUpsRead } from "@/api/autoDirectorFollowUps";
 import { getTaskOverview } from "@/api/tasks";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -91,6 +91,7 @@ interface SidebarProps {
 }
 
 export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
+  const queryClient = useQueryClient();
   const [badgeQueriesEnabled, setBadgeQueriesEnabled] = useState(false);
 
   useEffect(() => {
@@ -116,19 +117,22 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
     staleTime: 30_000,
   });
 
-  const autoDirectorFollowUpQuery = useQuery({
-    queryKey: queryKeys.autoDirectorFollowUps.overview,
-    queryFn: getAutoDirectorFollowUpOverview,
+  // 站内红点：只跟踪「需处理/关注」事件未读数（异常/恢复/完成/审批需处理），
+  // progress 推进噪声不计数；打开跟进页或点击导航即 mark-read 清除。
+  const autoDirectorFollowUpUnreadQuery = useQuery({
+    queryKey: queryKeys.autoDirectorFollowUps.unread,
+    queryFn: getAutoDirectorFollowUpUnreadCount,
     enabled: badgeQueriesEnabled,
+    staleTime: 15_000,
     refetchInterval: (query) => {
-      const totalCount = query.state.data?.data?.totalCount ?? 0;
-      return totalCount > 0 ? 4000 : false;
+      const unreadCount = query.state.data?.data?.unreadCount ?? 0;
+      return unreadCount > 0 ? 4000 : false;
     },
   });
 
   const runningTaskCount = taskQuery.data?.data?.runningCount ?? 0;
   const failedTaskCount = taskQuery.data?.data?.failedCount ?? 0;
-  const autoDirectorFollowUpCount = autoDirectorFollowUpQuery.data?.data?.totalCount ?? 0;
+  const autoDirectorFollowUpUnreadCount = autoDirectorFollowUpUnreadQuery.data?.data?.unreadCount ?? 0;
   const knowledgeDocuments = knowledgeQuery.data?.data ?? [];
   const failedIndexCount = knowledgeDocuments.filter((item) => item.latestIndexStatus === "failed").length;
 
@@ -174,7 +178,7 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
       );
     }
 
-    if (to === "/auto-director/follow-ups" && autoDirectorFollowUpCount > 0) {
+    if (to === "/auto-director/follow-ups" && autoDirectorFollowUpUnreadCount > 0) {
       return (
         <Badge
           variant="destructive"
@@ -182,8 +186,9 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
             "h-5 px-1.5 text-[10px]",
             collapsed ? "absolute right-1 top-1 h-4 min-w-4 px-1 text-[9px]" : "ml-auto",
           )}
+          title="导演跟进有未读提醒"
         >
-          {autoDirectorFollowUpCount}
+          {collapsed ? autoDirectorFollowUpUnreadCount : autoDirectorFollowUpUnreadCount}
         </Badge>
       );
     }
@@ -203,6 +208,16 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
     }
 
     return null;
+  };
+
+  // 点击导演跟进导航时清掉站内红点（fire-and-forget），并刷新红点计数。
+  const handleFollowUpNavClick = () => {
+    if (autoDirectorFollowUpUnreadCount <= 0) {
+      return;
+    }
+    void markAutoDirectorFollowUpsRead().then(() => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.autoDirectorFollowUps.unread });
+    });
   };
 
   return (
@@ -263,7 +278,12 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
               }
 
               return (
-                <NavLink key={item.to} to={item.to} title={collapsed ? item.label : undefined}>
+                <NavLink
+                  key={item.to}
+                  to={item.to}
+                  title={collapsed ? item.label : undefined}
+                  onClick={item.to === "/auto-director/follow-ups" ? handleFollowUpNavClick : undefined}
+                >
                   {({ isActive }) => (
                     <div
                       className={cn(

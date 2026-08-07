@@ -13,6 +13,7 @@ import type {
   DirectorRuntimeProjectionStatus,
   DirectorTaskFactSummary,
 } from "./projections";
+import type { DirectorBudgetLedgerSummary } from "../novelDirector";
 
 export interface DirectorTaskShell {
   id: string;
@@ -146,6 +147,7 @@ export interface DirectorDashboardView {
   steps: DirectorDisplayStep[];
   diagnostics: DirectorDashboardDiagnostic[];
   sourceTrace: DirectorDashboardSourceTrace;
+  budgetLedgerSummary?: DirectorBudgetLedgerSummary | null;
 }
 
 export interface DirectorTaskSnapshot {

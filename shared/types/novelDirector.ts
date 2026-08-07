@@ -297,6 +297,12 @@ export interface DirectorAutoExecutionState extends DirectorAutoExecutionPlan {
    * 缺省 0；runFromReady 必须 hydrate，expand/halt 后写回，禁止每次入口重置。
    */
   consecutiveBatchRolls?: number;
+  /**
+   * 瞬态模型/服务故障（transport 类 timeout/503/429/reset，非质量门禁）独立 fallback 重投递次数。
+   * 与质量预算 qualityLoopLedger 完全分开：fallback 重投不污染内容修复阶梯，也不累计熔断信号。
+   * 缺省 0；每次命中瞬态失败自增，超过上限后回落到既有熔断/质量预算路径（持续故障需人工介入）。
+   */
+  transientModelFallbackCount?: number;
 }
 
 export type DirectorQualityRepairRiskLevel =
@@ -314,6 +320,33 @@ export interface DirectorQualityRepairRisk {
   repairMode?: string | null;
   affectedChapterCount?: number;
   remainingChapterCount?: number;
+}
+
+export interface DirectorBudgetLedgerSummary {
+  totals: {
+    patchRepairCount: number;
+    chapterRewriteCount: number;
+    windowReplanCount: number;
+    deferredCount: number;
+  };
+  entryCount: number;
+  exhaustedEntryCount: number;
+  budgetLimits: {
+    patchRepair: number;
+    chapterRewrite: number;
+    windowReplan: number;
+  };
+  updatedAt: string | null;
+  circuitBreaker: {
+    status: "closed" | "open";
+    failureCount: number;
+    patchFailureCount: number;
+    modelFailureCount: number;
+    usageAnomalyCount: number;
+    openedAt: string | null;
+    recoveryAction: string | null;
+  } | null;
+  transientModelFallbackCount: number;
 }
 
 export const DIRECTOR_TAKEOVER_START_PHASES = [

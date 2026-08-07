@@ -28,6 +28,8 @@ SHARED_TGZ="${SHARED_TGZ:-}"
 SKIP_GIT_RESET="${SKIP_GIT_RESET:-0}"
 ALLOW_LOCKFILE_DRIFT="${ALLOW_LOCKFILE_DRIFT:-0}"
 RUN_PNPM_INSTALL="${RUN_PNPM_INSTALL:-0}"
+# 允许在活跃 auto_director 任务时强行 restart（默认拒绝，防止打断在途章节生成）
+ALLOW_RESTART_WITH_ACTIVE_DIRECTOR="${ALLOW_RESTART_WITH_ACTIVE_DIRECTOR:-0}"
 
 log() { printf '[pxed-cutover] %s\n' "$*"; }
 die() { printf '[pxed-cutover] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -308,6 +310,23 @@ log "prisma generate"
     npx prisma generate --config prisma.config.ts
   fi
 )
+
+# drain 门：若存在进行中的 auto_director 章节生成任务，restart 会 kill 在途 job，
+# 流式输出丢失 → 愈合标记失败需人工续跑。默认拒绝 restart，提示 drain 窗口；
+# 仅当 ALLOW_RESTART_WITH_ACTIVE_DIRECTOR=1 才强上（叠加新 dist 已就位）。
+ACTIVE_DIRECTOR=0
+if [[ -f "$SERVER_DIR/dev.db" ]] && command -v sqlite3 >/dev/null 2>&1; then
+  ACTIVE_DIRECTOR="$(sqlite3 "$SERVER_DIR/dev.db" "SELECT COUNT(*) FROM \"NovelWorkflowTask\" WHERE lane='auto_director' AND status='running';" 2>/dev/null || echo 0)"
+  ACTIVE_DIRECTOR="${ACTIVE_DIRECTOR:-0}"
+fi
+log "active auto_director running tasks = $ACTIVE_DIRECTOR"
+if [[ "$ACTIVE_DIRECTOR" =~ ^[1-9][0-9]*$ ]]; then
+  if [[ "$ALLOW_RESTART_WITH_ACTIVE_DIRECTOR" == "1" ]]; then
+    log "warn: ALLOW_RESTART_WITH_ACTIVE_DIRECTOR=1 — restarting despite $ACTIVE_DIRECTOR active auto_director task(s)"
+  else
+    die "drain required: $ACTIVE_DIRECTOR active auto_director task(s) running. Wait for completion then re-run; or set ALLOW_RESTART_WITH_ACTIVE_DIRECTOR=1 to force (risk: in-flight chapter generation lost)."
+  fi
+fi
 
 log "supervisorctl restart novel-server (once)"
 supervisorctl -c "$SUPERVISOR_CONF" restart novel-server

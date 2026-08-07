@@ -666,6 +666,17 @@ export class NovelWorkflowTaskAdapter {
     return detail;
   }
 
+  /**
+   * P0-2 服务重启自动续跑：对僵死（无心跳）但可恢复的 auto_director 任务
+   * enqueue continue，交由命令队列异步重跑，而不是等保留策略取消后人工接管。
+   */
+  async resumeStaleAutoDirectorTask(taskId: string): Promise<void> {
+    await this.directorCommandService.enqueueContinueCommand(taskId, {
+      continuationMode: "resume",
+      forceResume: true,
+    });
+  }
+
   async archive(id: string): Promise<UnifiedTaskDetail | null> {
     if (await isTaskArchived("novel_workflow", id)) {
       return null;

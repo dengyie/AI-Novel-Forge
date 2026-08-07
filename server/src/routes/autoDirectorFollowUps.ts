@@ -111,6 +111,32 @@ router.get("/", validate({ query: listQuerySchema }), async (req, res, next) => 
   }
 });
 
+router.get("/unread", async (_req, res, next) => {
+  try {
+    const data = await followUpService.getUnreadCount();
+    res.status(200).json({
+      success: true,
+      data,
+      message: "Unread follow-up count loaded.",
+    } satisfies ApiResponse<typeof data>);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/read", async (_req, res, next) => {
+  try {
+    const data = await followUpService.markAllNotificationsRead();
+    res.status(200).json({
+      success: true,
+      data,
+      message: "Follow-up notifications marked read.",
+    } satisfies ApiResponse<typeof data>);
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get("/:taskId", validate({ params: taskParamsSchema }), async (req, res, next) => {
   try {
     const { taskId } = req.params as z.infer<typeof taskParamsSchema>;

@@ -134,6 +134,7 @@ export const queryKeys = {
     overview: ["auto-director-follow-ups", "overview"] as const,
     list: (params: string) => ["auto-director-follow-ups", "list", params] as const,
     detail: (directorTaskId: string) => ["auto-director-follow-ups", "detail", directorTaskId] as const,
+    unread: ["auto-director-follow-ups", "unread"] as const,
   },
   agentRuns: {
     list: (params: string) => ["agent-runs", "list", params] as const,

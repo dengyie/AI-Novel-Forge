@@ -75,8 +75,29 @@ function buildView(patch = {}) {
       status: "running",
       commandType: "continue",
     },
+    budgetLedgerSummary: Object.prototype.hasOwnProperty.call(patch, "budgetLedgerSummary") ? patch.budgetLedgerSummary : null,
   });
 }
+
+test("dashboard surfaces budget ledger summary when provided", () => {
+  const budgetLedgerSummary = {
+    totals: { patchRepairCount: 2, chapterRewriteCount: 1, windowReplanCount: 0, deferredCount: 1 },
+    entryCount: 1,
+    exhaustedEntryCount: 1,
+    budgetLimits: { patchRepair: 2, chapterRewrite: 1, windowReplan: 1 },
+    updatedAt: "2026-08-07T01:00:00.000Z",
+    circuitBreaker: { status: "closed", failureCount: 2, patchFailureCount: 2, modelFailureCount: 0, usageAnomalyCount: 0, openedAt: null, recoveryAction: null },
+    transientModelFallbackCount: 0,
+  };
+  const view = buildView({ budgetLedgerSummary });
+
+  assert.deepEqual(view.budgetLedgerSummary, budgetLedgerSummary);
+});
+
+test("dashboard defaults budget ledger summary to null when not provided", () => {
+  const view = buildView({});
+  assert.equal(view.budgetLedgerSummary, null);
+});
 
 test("dashboard keeps running mode when task is running despite stale approval projection", () => {
   const view = buildView({

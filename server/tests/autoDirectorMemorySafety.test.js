@@ -240,7 +240,7 @@ test("resolveHighMemoryDirectorStartDecision allows lower-memory or unrelated sc
   assert.equal(lowerMemory.allowed, true);
   assert.equal(differentScope.allowed, true);
   assert.equal(isHighMemoryDirectorStage("structured_outline", "chapter_detail_bundle"), true);
-  assert.equal(isHighMemoryDirectorStage("chapter_execution", "chapter_execution"), false);
+  assert.equal(isHighMemoryDirectorStage("chapter_execution", "chapter_execution"), true);
 });
 
 test("resolveHighMemoryDirectorStartDecision treats full-book work as overlapping targeted ranges", () => {

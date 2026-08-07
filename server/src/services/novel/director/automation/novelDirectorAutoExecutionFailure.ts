@@ -1,5 +1,31 @@
 import type { DirectorAutoExecutionState } from "@ai-novel/shared/types/novelDirector";
 import { CONTRACT_REPLAN_WINDOW_MARKER } from "@ai-novel/shared/types/chapterTaskSheetQuality";
+import { isStrictTransientTaskRetryError } from "../../../../llm/transportRetry";
+
+/**
+ * 瞬态模型/服务故障独立 fallback 预算上限（单本书 run 内最多换模重投次数）。
+ * 与质量预算 qualityLoopLedger 完全分开：该预算只缓冲瞬时传输抖动（timeout/503/429/reset），
+ * 不污染内容修复阶梯，也不累计熔断信号。耗尽后回落既有熔断/质量预算路径，持续故障由人工介入。
+ */
+export const MAX_TRANSIENT_MODEL_FALLBACK = 3;
+
+/**
+ * 判定一次章节执行 job 失败是否为「瞬态模型/服务故障」（transport 类），而非质量门禁 / 用户取消。
+ *
+ * 复用任务级严格瞬时判据 isStrictTransientTaskRetryError（STRICT_TRANSIENT_TASK_RETRY_PATTERNS）：
+ * - 只认真正的传输/限流信号：timeout / ECONNRESET / fetch failed / 502-504 / 429 / bad gateway 等；
+ * - 显式取消与 timeout-driven abort 天然排除（取消不可重试）；
+ * - SDK 反序列化兜底模式（"reading 'message'" 等确定性缺陷）不视为瞬态——那类重烧 token 不会自愈。
+ */
+export function isTransientModelFailure(
+  message: string | null | undefined,
+  jobStatus?: string | null,
+): boolean {
+  if (jobStatus !== "failed") {
+    return false;
+  }
+  return isStrictTransientTaskRetryError(message ?? "");
+}
 
 /**
  * Length-risk markers that disqualify a review failure from being skippable.

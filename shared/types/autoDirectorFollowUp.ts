@@ -6,6 +6,7 @@ import type {
   AutoDirectorValidationResult,
   AutoDirectorValidationRequiredAction,
 } from "./autoDirectorValidation";
+import type { DirectorBudgetLedgerSummary } from "./novelDirector";
 
 export const AUTO_DIRECTOR_FOLLOW_UP_REASONS = [
   "manual_recovery_required",
@@ -152,6 +153,7 @@ export interface AutoDirectorFollowUpDetail {
   milestones: AutoDirectorFollowUpMilestone[];
   channelDeliveries?: AutoDirectorChannelDeliveryStatus[];
   task: UnifiedTaskDetail;
+  budgetLedgerSummary?: DirectorBudgetLedgerSummary | null;
 }
 
 export interface AutoDirectorFollowUpOverview {

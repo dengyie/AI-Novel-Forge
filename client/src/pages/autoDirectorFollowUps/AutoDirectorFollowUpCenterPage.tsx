@@ -23,6 +23,7 @@ import {
   getAutoDirectorFollowUpDetail,
   getAutoDirectorFollowUpOverview,
   listAutoDirectorFollowUps,
+  markAutoDirectorFollowUpsRead,
   revalidateAutoDirectorFollowUpDetail,
 } from "@/api/autoDirectorFollowUps";
 import { queryKeys } from "@/api/queryKeys";
@@ -166,6 +167,13 @@ export default function AutoDirectorFollowUpCenterPage() {
     enabled: Boolean(selectedDirectorTaskId),
     retry: false,
   });
+
+  // 打开跟进中心 = 已读所有站内提醒 → 清除红点（同时刷新 Sidebar 的 unread 计数）。
+  useEffect(() => {
+    void markAutoDirectorFollowUpsRead().then(() => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.autoDirectorFollowUps.unread });
+    });
+  }, [queryClient]);
 
   useEffect(() => {
     const legacyTaskId = searchParams.get("taskId")?.trim() || "";

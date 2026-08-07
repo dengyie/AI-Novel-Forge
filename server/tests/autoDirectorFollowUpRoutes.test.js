@@ -312,3 +312,48 @@ test("auto director follow-up routes expose overview, list, detail, and action e
     await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
   }
 });
+
+test("auto director follow-up routes expose unread-count and mark-read endpoints", async () => {
+  const originals = {
+    getUnreadCount: AutoDirectorFollowUpService.prototype.getUnreadCount,
+    markAllNotificationsRead: AutoDirectorFollowUpService.prototype.markAllNotificationsRead,
+  };
+  const calls = [];
+
+  AutoDirectorFollowUpService.prototype.getUnreadCount = async function getUnreadCountMock() {
+    calls.push(["unread"]);
+    return { unreadCount: 3 };
+  };
+  AutoDirectorFollowUpService.prototype.markAllNotificationsRead = async function markReadMock() {
+    calls.push(["read"]);
+    return { updated: 3 };
+  };
+
+  const app = createApp();
+  const server = http.createServer(app);
+  const port = await listen(server);
+
+  try {
+    const unreadResponse = await fetch(`http://127.0.0.1:${port}/api/auto-director/follow-ups/unread`);
+    assert.equal(unreadResponse.status, 200);
+    const unreadPayload = await unreadResponse.json();
+    assert.equal(unreadPayload.success, true);
+    assert.deepEqual(unreadPayload.data, { unreadCount: 3 });
+
+    const readResponse = await fetch(`http://127.0.0.1:${port}/api/auto-director/follow-ups/read`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    assert.equal(readResponse.status, 200);
+    const readPayload = await readResponse.json();
+    assert.equal(readPayload.success, true);
+    assert.deepEqual(readPayload.data, { updated: 3 });
+
+    assert.deepEqual(calls, [["unread"], ["read"]]);
+  } finally {
+    AutoDirectorFollowUpService.prototype.getUnreadCount = originals.getUnreadCount;
+    AutoDirectorFollowUpService.prototype.markAllNotificationsRead = originals.markAllNotificationsRead;
+    await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  }
+});

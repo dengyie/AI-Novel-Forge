@@ -18,6 +18,7 @@ import {
 import { directorWorkflowStepModuleRegistry } from "../workflowStepRuntime/directorWorkflowStepModules";
 import { buildDirectorDisplayState } from "./DirectorDisplayStateBuilder";
 import { buildDirectorDashboardView } from "./DirectorDashboardViewBuilder";
+import { buildDirectorBudgetLedgerSummary } from "../../qualityLoopBudget";
 
 function buildNextActions(input: {
   taskStatus: string;
@@ -250,6 +251,7 @@ export class DirectorTaskSnapshotService {
       chapterProgress: state.chapterProgress ?? null,
       activeStep: state.activeStep,
       latestCommand: state.latestCommand,
+      budgetLedgerSummary: buildDirectorBudgetLedgerSummary(state.seedPayload?.autoExecution),
     });
     const snapshot: DirectorTaskSnapshot = {
       task: {

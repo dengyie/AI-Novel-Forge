@@ -1,3 +1,6 @@
+import { parseSeedPayload } from "./novelWorkflow.shared";
+import type { DirectorWorkflowSeedPayload } from "../director/runtime/novelDirectorHelpers";
+
 const DEFAULT_STALE_RUNNING_TASK_MS = 90 * 60 * 1000;
 
 export function resolveStaleRunningTaskMs(): number {
@@ -85,6 +88,40 @@ export function isStaleAutoDirectorRunningTaskBroad(
     return true;
   }
   return now.getTime() - lastActivityAt.getTime() >= resolveStaleRunningTaskMs();
+}
+
+/**
+ * 判定一个僵死(无心跳)的 auto_director running 任务是否应自动续跑，而不是
+ * 标记失败/取消后等人手点「继续」。基于 seedPayload 里的 autoExecution 快照：
+ * - 全书自动执行已启用且未到熔断 open；
+ * - 未取消；autoRepair 未显式关闭（默认 true）；
+ * - 仍有剩余章节（remainingChapterCount>0）。
+ * 满足则服务重启后可以安全地自动 enqueueContinueCommand 续跑，防「静默停摆」。
+ */
+export function isAutoResumableStaleAutoDirectorTask(
+  row: {
+    seedPayloadJson?: string | null;
+    cancelRequestedAt?: Date | null;
+  },
+): boolean {
+  if (row.cancelRequestedAt) {
+    return false;
+  }
+  const seedPayload = parseSeedPayload<DirectorWorkflowSeedPayload>(row.seedPayloadJson);
+  const autoExecution = seedPayload?.autoExecution;
+  if (!autoExecution || autoExecution.enabled !== true) {
+    return false;
+  }
+  if (autoExecution.autoRepair === false) {
+    return false;
+  }
+  if (autoExecution.circuitBreaker?.status === "open") {
+    return false;
+  }
+  if ((autoExecution.remainingChapterCount ?? 0) === 0) {
+    return false;
+  }
+  return true;
 }
 
 export const STALE_AUTO_DIRECTOR_RUNNING_MESSAGE = "自动导演任务长时间没有心跳，可能已因服务重启或内存不足中断。请检查后继续或重试。";

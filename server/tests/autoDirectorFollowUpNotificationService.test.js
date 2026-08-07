@@ -123,11 +123,14 @@ test("auto director follow-up notification service delivers approval-required ev
       "https://writer.example.test/auto-director/follow-ups?directorTaskId=task_chapter_range",
     );
 
-    assert.equal(notifications.length, 1);
+    assert.equal(notifications.length, 2);
     assert.equal(notifications[0].eventType, "auto_director.approval_required");
     assert.equal(notifications[0].status, "delivered");
     assert.equal(notifications[0].responseStatus, 202);
     assert.equal(notifications[0].channelType, "dingtalk");
+    // 站内红点：额外落一条 inapp 未读记录。
+    assert.equal(notifications[1].channelType, "inapp");
+    assert.equal(notifications[1].readAt, null);
   } finally {
     prisma.autoDirectorFollowUpNotificationLog.create = originals.notificationLogCreate;
     prisma.appSetting.findMany = originals.appSettingFindMany;
@@ -224,11 +227,13 @@ test("auto director follow-up notification service delivers approval-required ev
     assert.match(fetchCalls[0].body.markdown.content, /\[查看详情\]\(https:\/\/writer\.example\.test\/tasks\?kind=novel_workflow&id=task_chapter_range\)/);
     assert.match(fetchCalls[0].body.markdown.content, /\[打开跟进中心\]\(https:\/\/writer\.example\.test\/auto-director\/follow-ups\?directorTaskId=task_chapter_range\)/);
 
-    assert.equal(notifications.length, 1);
+    assert.equal(notifications.length, 2);
     assert.equal(notifications[0].eventType, "auto_director.approval_required");
     assert.equal(notifications[0].status, "delivered");
     assert.equal(notifications[0].responseStatus, 200);
     assert.equal(notifications[0].channelType, "wecom");
+    assert.equal(notifications[1].channelType, "inapp");
+    assert.equal(notifications[1].readAt, null);
   } finally {
     prisma.autoDirectorFollowUpNotificationLog.create = originals.notificationLogCreate;
     prisma.appSetting.findMany = originals.appSettingFindMany;
@@ -626,9 +631,12 @@ test("auto director follow-up notification service delivers auto-approved events
     assert.match(fetchCalls[1].body.markdown.content, /原因：最近自动通过/);
     assert.doesNotMatch(fetchCalls[1].body.markdown.content, /actionCode=continue_auto_execution/);
     assert.doesNotMatch(fetchCalls[1].body.markdown.content, /callbackId=/);
-    assert.equal(notifications.length, 2);
+    assert.equal(notifications.length, 3);
     assert.equal(notifications[0].eventType, "auto_director.auto_approved");
     assert.equal(notifications[1].eventType, "auto_director.auto_approved");
+    assert.equal(notifications[2].channelType, "inapp");
+    assert.equal(notifications[2].eventType, "auto_director.auto_approved");
+    assert.equal(notifications[2].readAt, null);
   } finally {
     prisma.autoDirectorFollowUpNotificationLog.create = originals.notificationLogCreate;
     prisma.appSetting.findMany = originals.appSettingFindMany;
@@ -717,7 +725,9 @@ test("auto director follow-up notification service labels replan reminders witho
     assert.match(fetchCalls[1].body.markdown.content, /AI 已记录重规划提醒并继续推进/);
     assert.match(fetchCalls[1].body.markdown.content, /AI 已记录重规划提醒，并继续推进。/);
     assert.doesNotMatch(fetchCalls[1].body.markdown.content, /AI 已自动通过并继续推进/);
-    assert.equal(notifications.length, 2);
+    assert.equal(notifications.length, 3);
+    assert.equal(notifications[2].channelType, "inapp");
+    assert.equal(notifications[2].readAt, null);
   } finally {
     prisma.autoDirectorFollowUpNotificationLog.create = originals.notificationLogCreate;
     prisma.appSetting.findMany = originals.appSettingFindMany;
@@ -730,6 +740,92 @@ test("auto director follow-up notification service labels replan reminders witho
     process.env.AUTO_DIRECTOR_WECOM_CALLBACK_TOKEN = previousEnv.AUTO_DIRECTOR_WECOM_CALLBACK_TOKEN;
     process.env.AUTO_DIRECTOR_WECOM_OPERATOR_MAP_JSON = previousEnv.AUTO_DIRECTOR_WECOM_OPERATOR_MAP_JSON;
     process.env.AUTO_DIRECTOR_WECOM_EVENT_TYPES = previousEnv.AUTO_DIRECTOR_WECOM_EVENT_TYPES;
+    process.env.APP_BASE_URL = previousEnv.APP_BASE_URL;
+  }
+});
+
+test("auto director follow-up notification service writes inapp unread rows on attention events but not progress_changed", async () => {
+  const originals = {
+    notificationLogCreate: prisma.autoDirectorFollowUpNotificationLog.create,
+    appSettingFindMany: prisma.appSetting.findMany,
+    fetch: global.fetch,
+  };
+  const created = [];
+  const fetchCalls = [];
+
+  prisma.autoDirectorFollowUpNotificationLog.create = async ({ data }) => {
+    created.push(data);
+    return data;
+  };
+  prisma.appSetting.findMany = async () => [];
+  global.fetch = async (url, init) => {
+    fetchCalls.push({ url, body: init?.body ? JSON.parse(String(init.body)) : null });
+    return new Response(JSON.stringify({ ok: true }), { status: 202, headers: { "content-type": "application/json" } });
+  };
+
+  const previousEnv = {
+    AUTO_DIRECTOR_DINGTALK_WEBHOOK_URL: process.env.AUTO_DIRECTOR_DINGTALK_WEBHOOK_URL,
+    AUTO_DIRECTOR_WECOM_WEBHOOK_URL: process.env.AUTO_DIRECTOR_WECOM_WEBHOOK_URL,
+    APP_BASE_URL: process.env.APP_BASE_URL,
+  };
+  // 不配置外部渠道 → dingtalk/wecom 均跳过，只验证站内红点写入路径。
+  delete process.env.AUTO_DIRECTOR_DINGTALK_WEBHOOK_URL;
+  delete process.env.AUTO_DIRECTOR_WECOM_WEBHOOK_URL;
+  process.env.APP_BASE_URL = "https://writer.example.test";
+
+  const service = new AutoDirectorFollowUpNotificationService();
+  try {
+    // 异常事件：running → failed（runtime_failed）→ 应落一条 inapp 未读记录。
+    await service.handleTaskTransition({
+      before: buildWorkflowRow({
+        status: "running",
+        checkpointType: null,
+        checkpointSummary: null,
+        currentItemLabel: "正在执行章节",
+        updatedAt: new Date("2026-04-22T09:55:00.000Z"),
+      }),
+      after: buildWorkflowRow({
+        status: "failed",
+        checkpointType: "chapter_batch_ready",
+        checkpointSummary: "章节执行失败，需重试。",
+        updatedAt: new Date("2026-04-22T10:00:00.000Z"),
+      }),
+    });
+
+    assert.equal(fetchCalls.length, 0, "external channels unconfigured so no webhook call");
+    const exceptionRow = created.find((row) => row.channelType === "inapp");
+    assert.ok(exceptionRow, "exception event should write an inapp row");
+    assert.equal(exceptionRow.eventType, "auto_director.exception");
+    assert.equal(exceptionRow.readAt, null, "inapp row starts unread");
+    assert.equal(exceptionRow.status, "delivered");
+
+    // progress_changed 事件：不惊扰红点，不应额外写入 inapp 行。
+    created.length = 0;
+    await service.handleTaskTransition({
+      before: buildWorkflowRow({
+        status: "waiting_approval",
+        currentStage: "章节细化",
+        progress: 0.62,
+        checkpointType: "chapter_batch_ready",
+        checkpointSummary: "前 10 章已准备完成。",
+        updatedAt: new Date("2026-04-22T11:00:00.000Z"),
+      }),
+      after: buildWorkflowRow({
+        status: "waiting_approval",
+        currentStage: "章节执行",
+        progress: 0.74,
+        checkpointType: "chapter_batch_ready",
+        checkpointSummary: "前 10 章已准备完成。",
+        updatedAt: new Date("2026-04-22T11:05:00.000Z"),
+      }),
+    });
+    assert.equal(created.filter((row) => row.channelType === "inapp").length, 0, "progress noise must not create red-dot rows");
+  } finally {
+    prisma.autoDirectorFollowUpNotificationLog.create = originals.notificationLogCreate;
+    prisma.appSetting.findMany = originals.appSettingFindMany;
+    global.fetch = originals.fetch;
+    process.env.AUTO_DIRECTOR_DINGTALK_WEBHOOK_URL = previousEnv.AUTO_DIRECTOR_DINGTALK_WEBHOOK_URL;
+    process.env.AUTO_DIRECTOR_WECOM_WEBHOOK_URL = previousEnv.AUTO_DIRECTOR_WECOM_WEBHOOK_URL;
     process.env.APP_BASE_URL = previousEnv.APP_BASE_URL;
   }
 });

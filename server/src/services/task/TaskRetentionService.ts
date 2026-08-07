@@ -6,6 +6,7 @@ import { isStrictTransientTaskRetryError } from "../../llm/transportRetry";
 import { deleteWorkflowTasksHard } from "../novel/novelDeleteCascade";
 import {
   STALE_AUTO_DIRECTOR_RUNNING_MESSAGE,
+  isAutoResumableStaleAutoDirectorTask,
   isStaleAutoDirectorRunningTaskBroad,
   resolveStaleRunningTaskMs,
 } from "../novel/workflow/autoDirectorStaleTaskRecovery";
@@ -226,7 +227,7 @@ export class TaskRetentionService {
 
   // P3 自动重试走统一 retry 链路（含 archived 检查/通知/continue 编排）；
   // 测试可替换此字段为轻量 stub。
-  private workflowTaskAdapter: Pick<NovelWorkflowTaskAdapter, "retry"> = new NovelWorkflowTaskAdapter();
+  private workflowTaskAdapter: Pick<NovelWorkflowTaskAdapter, "retry" | "resumeStaleAutoDirectorTask"> = new NovelWorkflowTaskAdapter();
 
   start(intervalMs = TASK_RETENTION_INTERVAL_MS): void {
     if (this.timer) return;
@@ -478,6 +479,10 @@ export class TaskRetentionService {
    * supersede sweep deletes them. Uses the broad stale guard (no currentItemKey
    * restriction) so zombies stuck in chapter-execution stages (e.g. quality_repair)
    * are caught too, not just structured-outline stages.
+   *
+   * P0-2: 可恢复的僵死任务（seedPayload.autoExecution 未完成、熔断未开、未取消）
+   * 直接自动续跑（enqueue continue + 刷新心跳），而不是取消后等人手点「继续」，
+   * 防服务重启后全书自动执行静默停摆。
    */
   private async cancelZombieRunningTasks(now: Date): Promise<number> {
     const staleCutoff = new Date(now.getTime() - resolveStaleRunningTaskMs());
@@ -496,24 +501,50 @@ export class TaskRetentionService {
         cancelRequestedAt: true,
         heartbeatAt: true,
         updatedAt: true,
+        seedPayloadJson: true,
       },
     });
     const zombieRows = runningRows.filter((row) => isStaleAutoDirectorRunningTaskBroad(row, now));
     let cancelled = 0;
     for (const row of zombieRows) {
+      const staleGuardWhere: Prisma.NovelWorkflowTaskWhereInput = {
+        id: row.id,
+        lane: SUPERSEDE_LANE,
+        status: "running",
+        pendingManualRecovery: false,
+        cancelRequestedAt: null,
+        OR: [
+          { heartbeatAt: null },
+          { heartbeatAt: { lt: staleCutoff } },
+        ],
+        updatedAt: { lt: staleCutoff },
+      };
+      if (isAutoResumableStaleAutoDirectorTask(row)) {
+        try {
+          await this.workflowTaskAdapter.resumeStaleAutoDirectorTask(row.id);
+        } catch (error) {
+          console.warn("[task.retention] zombie auto-resume enqueue failed", {
+            taskId: row.id,
+            reason: error instanceof Error ? error.message : String(error),
+          });
+          cancelled += 1;
+          continue;
+        }
+        await prisma.novelWorkflowTask.updateMany({
+          where: staleGuardWhere,
+          data: {
+            status: "running",
+            heartbeatAt: now,
+            checkpointSummary: "检测到后台执行中断，系统已自动从最近进度继续续跑。",
+            lastError: null,
+            finishedAt: null,
+            cancelRequestedAt: null,
+          },
+        });
+        continue;
+      }
       const result = await prisma.novelWorkflowTask.updateMany({
-        where: {
-          id: row.id,
-          lane: SUPERSEDE_LANE,
-          status: "running",
-          pendingManualRecovery: false,
-          cancelRequestedAt: null,
-          OR: [
-            { heartbeatAt: null },
-            { heartbeatAt: { lt: staleCutoff } },
-          ],
-          updatedAt: { lt: staleCutoff },
-        },
+        where: staleGuardWhere,
         data: {
           status: "cancelled",
           cancelRequestedAt: now,

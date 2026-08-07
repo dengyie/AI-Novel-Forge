@@ -67,6 +67,25 @@ export async function revalidateAutoDirectorFollowUpDetail(directorTaskId: strin
   }
 }
 
+export interface AutoDirectorFollowUpUnreadCount {
+  unreadCount: number;
+}
+
+export async function getAutoDirectorFollowUpUnreadCount() {
+  const { data } = await apiClient.get<ApiResponse<AutoDirectorFollowUpUnreadCount>>(
+    "/auto-director/follow-ups/unread",
+  );
+  return data;
+}
+
+export async function markAutoDirectorFollowUpsRead() {
+  const { data } = await apiClient.post<ApiResponse<{ updated: number }>>(
+    "/auto-director/follow-ups/read",
+    {},
+  );
+  return data;
+}
+
 export async function executeAutoDirectorFollowUpAction(
   directorTaskId: string,
   input: {

@@ -124,12 +124,16 @@ test("markTaskWaitingApproval delivers WeCom notification for auto director appr
     assert.match(fetchCalls[0].body.markdown.content, /自动导演跟进提醒/);
     assert.match(fetchCalls[0].body.markdown.content, /前 10 章已准备完成。/);
 
-    assert.equal(notifications.length, 1);
+    assert.equal(notifications.length, 2);
     assert.equal(notifications[0].channelType, "wecom");
     assert.equal(notifications[0].eventType, "auto_director.approval_required");
     assert.equal(notifications[0].taskId, "task_workflow_notify");
     assert.equal(notifications[0].status, "delivered");
     assert.equal(notifications[0].responseStatus, 200);
+    // 站内红点：额外落一条 inapp 未读记录。
+    assert.equal(notifications[1].channelType, "inapp");
+    assert.equal(notifications[1].eventType, "auto_director.approval_required");
+    assert.equal(notifications[1].readAt, null);
   } finally {
     global.fetch = originals.fetch;
     prisma.taskCenterArchive.findUnique = originals.archiveFindUnique;

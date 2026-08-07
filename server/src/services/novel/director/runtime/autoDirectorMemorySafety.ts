@@ -34,13 +34,24 @@ export interface HighMemoryDirectorStartDecision {
 export type HighMemoryDirectorStartInput = {
   taskId: string;
   novelId: string;
-  stage: "structured_outline";
-  itemKey: "beat_sheet" | "chapter_list" | "chapter_detail_bundle" | "chapter_sync";
+  stage: HighMemoryDirectorStage;
+  itemKey: HighMemoryDirectorItemKey;
   volumeId?: string | null;
   chapterId?: string | null;
   scope?: string | null;
   batchAlreadyStartedCount?: number;
 };
+
+export type HighMemoryDirectorStage = "structured_outline" | "chapter_execution" | "quality_repair";
+export type HighMemoryDirectorItemKey =
+  | "beat_sheet"
+  | "chapter_list"
+  | "chapter_detail_bundle"
+  | "chapter_sync"
+  | "chapter_execution"
+  | "quality_repair"
+  | "batch_roll_prepare"
+  | "batch_roll_outline";
 
 type WorkflowTaskRow = Awaited<ReturnType<NovelWorkflowService["listActiveTasksByNovelAndLane"]>>[number];
 
@@ -174,6 +185,8 @@ export function isHighMemoryDirectorStage(
   const normalizedStage = stage?.trim();
   const normalizedItemKey = itemKey?.trim();
   return normalizedStage === "structured_outline"
+    || normalizedStage === "chapter_execution"
+    || normalizedStage === "quality_repair"
     || normalizedItemKey === "beat_sheet"
     || normalizedItemKey === "chapter_list"
     || normalizedItemKey === "chapter_detail_bundle"

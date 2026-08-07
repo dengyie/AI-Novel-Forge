@@ -33,6 +33,8 @@ import { syncAutoExecutionTaskState } from "../novelDirectorAutoExecutionCheckpo
 import {
   isContractReplanWindowFailure,
   isSkippableAutoExecutionReviewFailure,
+  isTransientModelFailure,
+  MAX_TRANSIENT_MODEL_FALLBACK,
 } from "../novelDirectorAutoExecutionFailure";
 import { resolveAutoExecutionRuntimeRangeAndState } from "../novelDirectorAutoExecutionRuntimePreparation";
 import type {
@@ -217,6 +219,43 @@ export async function handleAutoExecutionFailure(input: {
       });
       return { kind: "continue", range, autoExecution, progressGuard };
     }
+  }
+
+  // 方案 D（P1-4）：瞬态模型/服务故障独立 fallback 重投递。
+  // transport 类失败（timeout/503/429/reset，非质量门禁、非用户取消）先走独立预算重投该批次，
+  // 不立即计入质量预算阶梯（不污染内容修复阶梯），也不累计 patch/model 熔断信号——瞬时抖动给足自愈窗口。
+  // 预算耗尽（transientModelFallbackCount >= MAX_TRANSIENT_MODEL_FALLBACK）才回落到既有熔断路径，
+  // 持续故障最终停等人工介入。计数持久化在 autoExecution 状态（transientModelFallbackCount），
+  // 跨进程 / 服务重启连续累计，每次自增有界，重放次数有界。
+  if (
+    autoExecution.autoRepair
+    && isFullBookAutopilotRunMode(request.runMode)
+    && isTransientModelFailure(failureMessage, job.status)
+    && (autoExecution.transientModelFallbackCount ?? 0) < MAX_TRANSIENT_MODEL_FALLBACK
+  ) {
+    autoExecution = {
+      ...autoExecution,
+      transientModelFallbackCount: (autoExecution.transientModelFallbackCount ?? 0) + 1,
+      pipelineJobId: null,
+      pipelineStatus: null,
+    };
+    ({ range, autoExecution } = await resolveAutoExecutionRuntimeRangeAndState(deps, {
+      novelId,
+      existingState: autoExecution,
+      pipelineJobId: null,
+      pipelineStatus: "queued",
+      allowLazyChapterPlanning: input.allowLazyChapterPlanning,
+    }));
+    await syncAutoExecutionTaskState(deps, {
+      taskId,
+      novelId,
+      request,
+      range,
+      autoExecution,
+      isBackgroundRunning: true,
+      resumeStage: "pipeline",
+    });
+    return { kind: "continue", range, autoExecution, progressGuard };
   }
 
   let budgetedAutoExecution = autoExecution;

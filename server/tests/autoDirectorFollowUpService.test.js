@@ -645,6 +645,136 @@ test("auto director follow-up service detail reuses workflow detail and adds fol
   }
 });
 
+test("auto director follow-up service detail surfaces budget ledger summary from seed payload", async () => {
+  const originals = {
+    isTaskArchived: taskArchive.isTaskArchived,
+    findUnique: prisma.novelWorkflowTask.findUnique,
+    notificationLogFindMany: prisma.autoDirectorFollowUpNotificationLog.findMany,
+    adapterDetail: NovelWorkflowTaskAdapter.prototype.detail,
+    getAutoDirectorChannelSettings: autoDirectorChannelSettingsService.getAutoDirectorChannelSettings,
+  };
+
+  taskArchive.isTaskArchived = async () => false;
+  prisma.novelWorkflowTask.findUnique = async ({ where }) => {
+    assert.equal(where.id, "task_budget");
+    return buildWorkflowRow({
+      id: "task_budget",
+      checkpointType: "chapter_batch_ready",
+      currentStage: "章节执行",
+      currentItemKey: "chapter_execution",
+      currentItemLabel: "第 11-20 章已准备完成",
+      seedPayloadJson: JSON.stringify({
+        provider: "openai",
+        model: "gpt-5.4",
+        autoExecution: {
+          qualityLoopLedger: {
+            entries: [
+              {
+                signatureKey: "sig-a",
+                issueSignature: "content|handling_x|...",
+                blockingLedgerKeys: [],
+                affectedChapterWindow: { startOrder: 1, endOrder: 3, chapterOrders: [1, 2, 3], chapterIds: [] },
+                patchRepairCount: 2,
+                chapterRewriteCount: 1,
+                windowReplanCount: 0,
+                deferredCount: 1,
+                updatedAt: "2026-08-07T01:00:00.000Z",
+              },
+            ],
+            updatedAt: "2026-08-07T01:00:00.000Z",
+          },
+          circuitBreaker: {
+            status: "closed",
+            patchFailureCount: 2,
+            modelFailureCount: 0,
+            failureCount: 2,
+            usageAnomalyCount: 0,
+          },
+        },
+      }),
+    });
+  };
+  prisma.autoDirectorFollowUpNotificationLog.findMany = async () => ([]);
+  NovelWorkflowTaskAdapter.prototype.detail = async function detailMock(taskId) {
+    return {
+      id: taskId,
+      kind: "novel_workflow",
+      title: "AI 自动导演",
+      status: "waiting_approval",
+      progress: 0.3,
+      currentStage: "章节执行",
+      currentItemKey: "chapter_execution",
+      currentItemLabel: "第 11-20 章已准备完成",
+      executionScopeLabel: null,
+      displayStatus: "第 11-20 章已准备完成",
+      blockingReason: null,
+      resumeAction: null,
+      lastHealthyStage: "章节执行",
+      attemptCount: 1,
+      maxAttempts: 3,
+      lastError: null,
+      createdAt: "2026-08-07T00:00:00.000Z",
+      updatedAt: "2026-08-07T01:00:00.000Z",
+      heartbeatAt: "2026-08-07T01:00:00.000Z",
+      ownerId: "novel_default",
+      ownerLabel: "《雾港巡夜人》",
+      sourceRoute: "/novels/auto-director?taskId=task_budget",
+      checkpointType: "chapter_batch_ready",
+      checkpointSummary: "第 11-20 章已准备完成。",
+      resumeTarget: null,
+      nextActionLabel: null,
+      noticeCode: null,
+      noticeSummary: null,
+      failureCode: null,
+      failureSummary: null,
+      recoveryHint: null,
+      tokenUsage: null,
+      sourceResource: null,
+      targetResources: [],
+      provider: "openai",
+      model: "gpt-5.4",
+      startedAt: "2026-08-07T00:00:00.000Z",
+      finishedAt: null,
+      retryCountLabel: "1/3",
+      meta: {},
+      steps: [],
+      failureDetails: null,
+    };
+  };
+  autoDirectorChannelSettingsService.getAutoDirectorChannelSettings = async () => ({
+    baseUrl: "https://writer.example.test",
+    dingtalk: { webhookUrl: "", callbackToken: "", operatorMapJson: "", eventTypes: [] },
+    wecom: { webhookUrl: "", callbackToken: "", operatorMapJson: "", eventTypes: [] },
+  });
+
+  const service = new AutoDirectorFollowUpService();
+  const originalHeal = service.workflowService.healAutoDirectorTaskState;
+  service.workflowService.healAutoDirectorTaskState = async () => false;
+
+  try {
+    const detail = await service.getDetail("task_budget");
+    assert.ok(detail);
+    assert.equal(detail.taskId, "task_budget");
+    assert.ok(detail.budgetLedgerSummary);
+    assert.deepEqual(detail.budgetLedgerSummary.totals, {
+      patchRepairCount: 2,
+      chapterRewriteCount: 1,
+      windowReplanCount: 0,
+      deferredCount: 1,
+    });
+    assert.equal(detail.budgetLedgerSummary.entryCount, 1);
+    assert.equal(detail.budgetLedgerSummary.circuitBreaker.status, "closed");
+    assert.equal(detail.budgetLedgerSummary.circuitBreaker.patchFailureCount, 2);
+  } finally {
+    taskArchive.isTaskArchived = originals.isTaskArchived;
+    prisma.novelWorkflowTask.findUnique = originals.findUnique;
+    prisma.autoDirectorFollowUpNotificationLog.findMany = originals.notificationLogFindMany;
+    NovelWorkflowTaskAdapter.prototype.detail = originals.adapterDetail;
+    autoDirectorChannelSettingsService.getAutoDirectorChannelSettings = originals.getAutoDirectorChannelSettings;
+    service.workflowService.healAutoDirectorTaskState = originalHeal;
+  }
+});
+
 test("auto director follow-up service detail only marks replaced when replacement task exists", async () => {
   const originals = {
     isTaskArchived: taskArchive.isTaskArchived,
@@ -813,5 +943,69 @@ test("auto director follow-up service reflects runtime channel capabilities from
     process.env.AUTO_DIRECTOR_DINGTALK_WEBHOOK_URL = previousEnv.AUTO_DIRECTOR_DINGTALK_WEBHOOK_URL;
     process.env.AUTO_DIRECTOR_WECOM_WEBHOOK_URL = previousEnv.AUTO_DIRECTOR_WECOM_WEBHOOK_URL;
     service.workflowService.healAutoDirectorTaskState = originalHeal;
+  }
+});
+
+test("auto director follow-up service unread-count counts only inapp unread rows and mark-read clears them", async () => {
+  const originals = {
+    count: prisma.autoDirectorFollowUpNotificationLog.count,
+    updateMany: prisma.autoDirectorFollowUpNotificationLog.updateMany,
+  };
+  const countCalls = [];
+  const updateCalls = [];
+
+  prisma.autoDirectorFollowUpNotificationLog.count = async ({ where }) => {
+    countCalls.push(where);
+    // 未读红点：只应计数 channelType=inapp 且 readAt 为 null 的行。
+    assert.equal(where.channelType, "inapp");
+    assert.equal(where.readAt, null);
+    return 2;
+  };
+  prisma.autoDirectorFollowUpNotificationLog.updateMany = async ({ where, data }) => {
+    updateCalls.push({ where, data });
+    assert.equal(where.channelType, "inapp");
+    assert.equal(where.readAt, null);
+    assert.ok(data.readAt instanceof Date);
+    return { count: 2 };
+  };
+
+  const service = new AutoDirectorFollowUpService();
+  try {
+    const unread = await service.getUnreadCount();
+    assert.deepEqual(unread, { unreadCount: 2 });
+    assert.equal(countCalls.length, 1);
+
+    const marked = await service.markAllNotificationsRead();
+    assert.deepEqual(marked, { updated: 2 });
+    assert.equal(updateCalls.length, 1);
+  } finally {
+    prisma.autoDirectorFollowUpNotificationLog.count = originals.count;
+    prisma.autoDirectorFollowUpNotificationLog.updateMany = originals.updateMany;
+  }
+});
+
+test("auto director follow-up service unread getters degrade to zero when table absent", async () => {
+  const originals = {
+    count: prisma.autoDirectorFollowUpNotificationLog.count,
+    updateMany: prisma.autoDirectorFollowUpNotificationLog.updateMany,
+  };
+  prisma.autoDirectorFollowUpNotificationLog.count = async () => {
+    const err = new Error("table AutoDirectorFollowUpNotificationLog does not exist");
+    err.code = "P2021";
+    throw err;
+  };
+  prisma.autoDirectorFollowUpNotificationLog.updateMany = async () => {
+    const err = new Error("table AutoDirectorFollowUpNotificationLog does not exist");
+    err.code = "P2021";
+    throw err;
+  };
+
+  const service = new AutoDirectorFollowUpService();
+  try {
+    assert.deepEqual(await service.getUnreadCount(), { unreadCount: 0 });
+    assert.deepEqual(await service.markAllNotificationsRead(), { updated: 0 });
+  } finally {
+    prisma.autoDirectorFollowUpNotificationLog.count = originals.count;
+    prisma.autoDirectorFollowUpNotificationLog.updateMany = originals.updateMany;
   }
 });

@@ -1,6 +1,7 @@
 import { createHash } from "crypto";
 import type {
   DirectorAutoExecutionState,
+  DirectorBudgetLedgerSummary,
   DirectorQualityLoopBudgetAttemptAction,
   DirectorQualityLoopBudgetEntry,
   DirectorQualityLoopBudgetLedger,
@@ -288,5 +289,73 @@ export function recordDirectorQualityLoopBudgetAttempt(input: {
     },
     entry: updatedEntry,
     nextAction: resolveDirectorQualityLoopBudgetNextAction(updatedEntry),
+  };
+}
+
+/**
+ * 汇总 qualityLoopLedger → DirectorBudgetLedgerSummary（不含 seedPayload 解析，纯函数）。
+ *
+ * 累加所有 ledger entries 的计数，统计已耗尽预算的 entry 数，附带 circuit breaker 摘要。
+ * 返回 null 当 autoExecution 为空或 ledger 不存在。
+ */
+export function buildDirectorBudgetLedgerSummary(
+  autoExecution: DirectorAutoExecutionState | null | undefined,
+): DirectorBudgetLedgerSummary | null {
+  // 熔断状态独立于质量账本：模型/用量故障可打开熔断而不产生任何 ledger entry。
+  // 只要熔断存在就返回摘要（totals 缺省 0），否则账本为空时也会把最需要运维可见的熔断态藏起来。
+  if (!autoExecution?.qualityLoopLedger?.entries && !autoExecution?.circuitBreaker) {
+    return null;
+  }
+  const { qualityLoopLedger, circuitBreaker, transientModelFallbackCount = 0 } = autoExecution;
+  const entries = qualityLoopLedger?.entries ?? [];
+  const { patchRepair, chapterRewrite, windowReplan } = DIRECTOR_QUALITY_LOOP_BUDGET_LIMITS;
+
+  let patchRepairCount = 0;
+  let chapterRewriteCount = 0;
+  let windowReplanCount = 0;
+  let deferredCount = 0;
+  let exhaustedEntryCount = 0;
+
+  for (const entry of entries) {
+    patchRepairCount += entry.patchRepairCount;
+    chapterRewriteCount += entry.chapterRewriteCount;
+    windowReplanCount += entry.windowReplanCount;
+    deferredCount += entry.deferredCount;
+    if (
+      entry.patchRepairCount >= patchRepair
+      || entry.chapterRewriteCount >= chapterRewrite
+      || entry.windowReplanCount >= windowReplan
+    ) {
+      exhaustedEntryCount++;
+    }
+  }
+
+  return {
+    totals: {
+      patchRepairCount,
+      chapterRewriteCount,
+      windowReplanCount,
+      deferredCount,
+    },
+    entryCount: entries.length,
+    exhaustedEntryCount,
+    budgetLimits: {
+      patchRepair,
+      chapterRewrite,
+      windowReplan,
+    },
+    updatedAt: qualityLoopLedger?.updatedAt ?? null,
+    circuitBreaker: circuitBreaker
+      ? {
+        status: circuitBreaker.status,
+        failureCount: circuitBreaker.failureCount ?? 0,
+        patchFailureCount: circuitBreaker.patchFailureCount ?? 0,
+        modelFailureCount: circuitBreaker.modelFailureCount ?? 0,
+        usageAnomalyCount: circuitBreaker.usageAnomalyCount ?? 0,
+        openedAt: circuitBreaker.openedAt ?? null,
+        recoveryAction: circuitBreaker.recoveryAction ?? null,
+      }
+      : null,
+    transientModelFallbackCount,
   };
 }

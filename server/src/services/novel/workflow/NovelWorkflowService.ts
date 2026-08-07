@@ -1,9 +1,10 @@
 import { NovelWorkflowStoreService } from "./NovelWorkflowStoreService";
 import { NovelWorkflowHealingService } from "./NovelWorkflowHealingService";
 import { NovelWorkflowApplicationService } from "./NovelWorkflowApplicationService";
+import { DirectorCommandService } from "../director/commands/DirectorCommandService";
 
 export class NovelWorkflowService extends NovelWorkflowStoreService {
-  private readonly healingService = new NovelWorkflowHealingService(this);
+  private readonly healingService = new NovelWorkflowHealingService(this, new DirectorCommandService(this));
   private readonly applicationService = new NovelWorkflowApplicationService(this);
 
   constructor() {

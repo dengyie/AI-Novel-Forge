@@ -10,6 +10,7 @@ import type {
   DirectorTaskFactSummary,
   DirectorWorkerHealthSummary,
 } from "@ai-novel/shared/types/directorRuntime";
+import type { DirectorBudgetLedgerSummary } from "@ai-novel/shared/types/novelDirector";
 
 type DashboardTaskLike = {
   status: string;
@@ -377,6 +378,7 @@ export function buildDirectorDashboardView(input: {
   activeStep?: DashboardStepLike;
   latestCommand?: DashboardCommandLike;
   workerHealth?: DirectorWorkerHealthSummary | null;
+  budgetLedgerSummary?: DirectorBudgetLedgerSummary | null;
 }): DirectorDashboardView {
   const mode = buildMode(input);
   const progress = buildProgress({
@@ -430,5 +432,6 @@ export function buildDirectorDashboardView(input: {
       checkpointType: input.task.checkpointType ?? null,
       progressSource: progress.source,
     },
+    budgetLedgerSummary: input.budgetLedgerSummary ?? null,
   };
 }

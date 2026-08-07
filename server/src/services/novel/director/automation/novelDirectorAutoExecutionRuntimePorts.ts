@@ -176,4 +176,14 @@ export interface NovelDirectorAutoExecutionRuntimeDeps {
   prepareNextAutoExecutionBatch?: (
     input: PrepareNextAutoExecutionBatchInput,
   ) => Promise<PrepareNextAutoExecutionBatchResult>;
+  /**
+   * autopilot 章节执行/质量修复正文生成前取 book 级内存锁，防同小说并发写正文 OOM。
+   * 任何时刻每本小说最多 1 个高内存阶段（structured_outline / chapter_execution /
+   * quality_repair）在跑。
+   */
+  assertHighMemoryChapterAllowed?: (input: {
+    taskId: string;
+    novelId: string;
+    stage: "chapter_execution" | "quality_repair";
+  }) => Promise<void>;
 }

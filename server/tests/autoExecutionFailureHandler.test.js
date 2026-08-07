@@ -398,6 +398,63 @@ test("方案C Phase3: 消息文本漂移但信封相同 → 预算仍按结构�
   assert.ok(rewriteEntry, "消息文本漂移下仍应按稳定结构累计 patch×2 + rewrite×1");
 });
 
+// ---- 方案D（P1-4）：瞬态模型/服务故障独立 fallback 预算 ----
+
+const TRANSIENT_MODEL_MESSAGE = "章节执行时上游服务瞬时故障：fetch failed (503 Service Unavailable)，请稍后重试。";
+
+function buildTransientJob() {
+  return {
+    id: "job-failed",
+    status: "failed",
+    progress: 0.98,
+    error: TRANSIENT_MODEL_MESSAGE,
+    payload: null,
+  };
+}
+
+test("方案D P1-4: 瞬态模型失败（503）预算内 → 独立 fallback 重投 continue，不污染质量预算/不 markTaskFailed", async () => {
+  const { deps, calls } = buildDeps();
+  const autoExecution = buildAutoExecution({ qualityDebtSummaries: null });
+
+  const result = await handleAutoExecutionFailure(baseHandlerInput({
+    deps,
+    autoExecution,
+    job: buildTransientJob(),
+  }));
+
+  // 走 fallback 分支：重进管线 continue，而非终态停等/质量修复记账
+  assert.equal(result.kind, "continue");
+  assert.equal(calls.markTaskFailed.length, 0);
+  // 独立预算自增，且不写入质量预算阶梯（不污染内容修复阶梯）
+  assert.equal(result.autoExecution.transientModelFallbackCount, 1);
+  assert.equal((result.autoExecution.qualityLoopLedger?.entries ?? []).length, 0);
+});
+
+test("方案D P1-4: 瞬态失败预算耗尽后回落 质量预算阶梯（不再误入 fallback 分支）", async () => {
+  const { deps, calls } = buildDeps();
+  const autoExecution = buildAutoExecution({
+    qualityDebtSummaries: null,
+    // 预耗尽 fallback 预算（跨 run 已累计到上限）
+    transientModelFallbackCount: 3,
+  });
+
+  const result = await handleAutoExecutionFailure(baseHandlerInput({
+    deps,
+    autoExecution,
+    job: buildTransientJob(),
+  }));
+
+  // 预算耗尽：瞬态分支被跳过，落入既有质量预算路径（首次 patch 仍是活动作 → 重进管线 continue）
+  assert.equal(result.kind, "continue");
+  // fallback 预算不再自增
+  assert.equal(result.autoExecution.transientModelFallbackCount, 3);
+  // 本次失败被计入质量系数阶梯（patch_repair），持续故障最终熔断需人工介入
+  const patchEntry = result.autoExecution?.qualityLoopLedger?.entries?.find(
+    (entry) => entry.patchRepairCount === 1,
+  );
+  assert.ok(patchEntry, "fallback 预算耗尽后瞬态失败被计入质量预算阶梯");
+});
+
 test("方案C Phase3 熔断对齐: 通用失败第 4 次同签名（patch×2 + rewrite×1 后）→ 熔断打开保守停止", async () => {
   const { deps, calls } = buildDeps();
   let autoExecution = buildAutoExecution({ qualityDebtSummaries: null });

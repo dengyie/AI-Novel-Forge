@@ -2,6 +2,7 @@ import type {
   AutoDirectorAction,
   AutoDirectorChannelNotificationPayload,
   AutoDirectorEventType,
+  AutoDirectorFollowUpReason,
 } from "@ai-novel/shared/types/autoDirectorFollowUp";
 import type { DirectorAutoApprovalPointCode } from "@ai-novel/shared/types/autoDirectorApproval";
 import type { NovelWorkflowCheckpoint } from "@ai-novel/shared/types/novelWorkflow";
@@ -20,6 +21,15 @@ import {
 } from "./autoDirectorFollowUpEventBuilder";
 import { resolveAutoDirectorFollowUpReason } from "./autoDirectorFollowUpReasonResolver";
 import { extractBlockedAutoDirectorValidationResult } from "./autoDirectorFollowUpValidationResult";
+
+// 触发站内红点的"需处理/关注"事件；progress_changed 是推进噪声，不惊扰红点。
+const IN_APP_ATTENTION_EVENT_TYPES: ReadonlySet<string> = new Set([
+  "auto_director.approval_required",
+  "auto_director.auto_approved",
+  "auto_director.exception",
+  "auto_director.recovered",
+  "auto_director.completed",
+]);
 
 function isMissingTableError(error: unknown): boolean {
   return typeof error === "object"
@@ -138,6 +148,15 @@ export class AutoDirectorFollowUpNotificationService {
       after: input.after,
       channelSettings,
     });
+    await this.recordInAppUnread({
+      eventType: event.eventType,
+      taskId: event.taskId,
+      summary: event.summary,
+      stage: event.stage,
+      reason: event.reason,
+      novelTitle: input.after.novel?.title?.trim() ?? null,
+      occurredAt,
+    });
   }
 
   async notifyAutoApproved(input: {
@@ -202,6 +221,15 @@ export class AutoDirectorFollowUpNotificationService {
       cardTitle: copy.cardTitle,
       reasonLabel: copy.reasonLabel,
       availableActions: [],
+    });
+    await this.recordInAppUnread({
+      eventType: event.eventType,
+      taskId: event.taskId,
+      summary: input.summary,
+      stage: input.stage ?? null,
+      reason: "auto_approval_completed",
+      novelTitle: input.novelTitle ?? null,
+      occurredAt: input.occurredAt,
     });
   }
 
@@ -372,7 +400,56 @@ export class AutoDirectorFollowUpNotificationService {
     }
   }
 
-  private isEventEnabledForChannel(eventTypes: string[] | null | undefined, eventType: AutoDirectorEventType): boolean {
+  /**
+   * 站内红点：仅在"需处理/关注"事件发生时落一条 channelType="inapp" 未读记录。
+   * readAt NULL = 未读 → GET /unread 计数来自这里；用户打开跟进中心后 markAllNotificationsRead 置 readAt。
+   * progress 推进噪声不写，避免红点常亮；外部渠道 dingtalk/wecom 配置与否都独立记录，互不阻塞。
+   */
+  private async recordInAppUnread(input: {
+    eventType: AutoDirectorEventType;
+    taskId: string;
+    summary: string;
+    stage: string | null;
+    reason: AutoDirectorFollowUpReason | null;
+    novelTitle: string | null;
+    occurredAt: Date;
+  }): Promise<void> {
+    if (!IN_APP_ATTENTION_EVENT_TYPES.has(input.eventType)) {
+      return;
+    }
+    const eventId = `${input.taskId}:${input.eventType}:${input.occurredAt.toISOString()}:${Math.random().toString(36).slice(2, 8)}`;
+    const requestPayload = JSON.stringify({
+      summary: input.summary,
+      stage: input.stage,
+      reason: input.reason,
+      novelTitle: input.novelTitle,
+    });
+    try {
+      await prisma.autoDirectorFollowUpNotificationLog.create({
+        data: {
+          eventId,
+          eventType: input.eventType,
+          taskId: input.taskId,
+          channelType: "inapp",
+          target: null,
+          requestPayload,
+          responseBody: null,
+          responseStatus: null,
+          attemptCount: 1,
+          deliveredAt: input.occurredAt,
+          status: "delivered",
+          readAt: null,
+        },
+      });
+    } catch (error) {
+      if (isMissingTableError(error) || isDbUnavailableError(error)) {
+        return;
+      }
+      throw error;
+    }
+  }
+
+  private isEventEnabledForChannel(eventTypes: string[] | undefined, eventType: AutoDirectorEventType): boolean {
     const subscribed = new Set((eventTypes ?? []).map((item) => item.trim()).filter(Boolean));
     if (subscribed.size === 0) {
       return eventType !== "auto_director.progress_changed";

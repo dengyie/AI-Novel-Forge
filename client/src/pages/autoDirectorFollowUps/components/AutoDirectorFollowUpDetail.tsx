@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { AlertTriangle, RefreshCw } from "lucide-react";
 import { AUTO_DIRECTOR_MOBILE_CLASSES } from "@/mobile/autoDirector";
+import { DirectorBudgetLedgerGauge } from "@/components/autoDirector/DirectorBudgetLedgerGauge";
 
 interface AutoDirectorFollowUpDetailPanelProps {
   detail: AutoDirectorFollowUpDetail | null;
@@ -70,6 +71,10 @@ export function AutoDirectorFollowUpDetailPanel({
               <div>当前模型：{detail.currentModel ?? "暂无"}</div>
               <div>来源页：{detail.originDetailUrl}</div>
             </div>
+
+            {detail.budgetLedgerSummary ? (
+              <DirectorBudgetLedgerGauge summary={detail.budgetLedgerSummary} />
+            ) : null}
 
             {selectedItem.section === "needs_validation" ? (
               <div className={`space-y-3 rounded-md border border-yellow-300 bg-yellow-50 p-3 text-sm text-yellow-950 ${AUTO_DIRECTOR_MOBILE_CLASSES.wrapText}`}>
