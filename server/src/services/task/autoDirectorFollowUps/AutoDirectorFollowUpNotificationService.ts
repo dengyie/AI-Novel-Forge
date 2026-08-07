@@ -31,20 +31,41 @@ const IN_APP_ATTENTION_EVENT_TYPES: ReadonlySet<string> = new Set([
   "auto_director.completed",
 ]);
 
-function isMissingTableError(error: unknown): boolean {
-  return typeof error === "object"
-    && error !== null
-    && "code" in error
-    && (error as { code?: string }).code === "P2021";
-}
-
-function isDbUnavailableError(error: unknown): boolean {
+/**
+ * 判断通知写入失败是否属于"可容忍的 schema/infra 漂移"——即只影响红点/外部渠道
+ * 这类非致命记录，绝不应因此打崩自动导演续跑。
+ *
+ * 已知类别：
+ *  - P2021：表不存在（db push 建库、无 SQL 迁移的场景）
+ *  - P2022：列不存在（本次产线事故根因：readAt 后加进 schema 但产库未再 push）
+ *  - P2023：列数据不一致
+ *  - P2009：查询解析失败（schema 漂移）
+ *  - P1001 及 "can't reach database server"：DB 短暂不可达
+ *  - "does not exist / no such column / no such table"：底层驱动抛出的 schema 漂移
+ *
+ * 站内红点与外部渠道通知都是"尽力而为"（best-effort）：写失败只丢一条提醒，
+ * 不应让一条非本质的红点记录把整本书的自动导演标记 failed（详见
+ * NovelWorkflowRuntimeService.resumePendingAutoDirectorTasks 的恢复失败分支）。
+ */
+function isTolerableNotificationWriteError(error: unknown): boolean {
   if (!error || typeof error !== "object") {
     return false;
   }
   const code = "code" in error ? (error as { code?: string }).code : undefined;
+  if (
+    code === "P2021"
+    || code === "P2022"
+    || code === "P2023"
+    || code === "P1001"
+    || code === "P2009"
+  ) {
+    return true;
+  }
   const message = "message" in error ? String((error as { message?: unknown }).message ?? "") : "";
-  return code === "P1001" || /can't reach database server/i.test(message);
+  return /does not exist in the current database/i.test(message)
+    || /no such column/i.test(message)
+    || /no such table/i.test(message)
+    || /can't reach database server/i.test(message);
 }
 
 function parseExecutionScopeLabel(seedPayloadJson: string | null | undefined): string | null {
@@ -393,7 +414,7 @@ export class AutoDirectorFollowUpNotificationService {
         },
       });
     } catch (error) {
-      if (isMissingTableError(error) || isDbUnavailableError(error)) {
+      if (isTolerableNotificationWriteError(error)) {
         return;
       }
       throw error;
@@ -442,7 +463,7 @@ export class AutoDirectorFollowUpNotificationService {
         },
       });
     } catch (error) {
-      if (isMissingTableError(error) || isDbUnavailableError(error)) {
+      if (isTolerableNotificationWriteError(error)) {
         return;
       }
       throw error;

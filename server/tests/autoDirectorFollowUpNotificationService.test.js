@@ -829,3 +829,123 @@ test("auto director follow-up notification service writes inapp unread rows on a
     process.env.APP_BASE_URL = previousEnv.APP_BASE_URL;
   }
 });
+
+test("notification writes that hit missing-column schema drift are swallowed so auto-director resume is not failed", async () => {
+  const originals = {
+    notificationLogCreate: prisma.autoDirectorFollowUpNotificationLog.create,
+    appSettingFindMany: prisma.appSetting.findMany,
+    fetch: global.fetch,
+  };
+  // 复现产线事故：autoDirectorFollowUpNotificationLog 由 db push 建表、readAt 后加
+  // schema 时产库未再 push → create 抛 "column `readAt` does not exist"（P2022）。
+  // must NOT rethrow / fail the book task.
+  prisma.autoDirectorFollowUpNotificationLog.create = async () => {
+    throw Object.assign(new Error("PrismaClientKnownRequestError: \nInvalid `prisma.autoDirectorFollowUpNotificationLog.create()` invocation:\n\n  Column not found in the database.\n\n  The column `readAt` does not exist in the current database."), {
+      code: "P2022",
+    });
+  };
+  prisma.appSetting.findMany = async () => [];
+  global.fetch = async () => new Response(JSON.stringify({ ok: true }), {
+    status: 202,
+    headers: { "content-type": "application/json" },
+  });
+
+  const previousEnv = {
+    AUTO_DIRECTOR_DINGTALK_WEBHOOK_URL: process.env.AUTO_DIRECTOR_DINGTALK_WEBHOOK_URL,
+    AUTO_DIRECTOR_WECOM_WEBHOOK_URL: process.env.AUTO_DIRECTOR_WECOM_WEBHOOK_URL,
+    APP_BASE_URL: process.env.APP_BASE_URL,
+  };
+  delete process.env.AUTO_DIRECTOR_DINGTALK_WEBHOOK_URL;
+  delete process.env.AUTO_DIRECTOR_WECOM_WEBHOOK_URL;
+  process.env.APP_BASE_URL = "https://writer.example.test";
+
+  const service = new AutoDirectorFollowUpNotificationService();
+  try {
+    // 注意：await 不得 reject —— 若回收逻辑重新抛出，会一路向上打崩导演续跑。
+    await service.handleTaskTransition({
+      before: buildWorkflowRow({
+        status: "running",
+        checkpointType: null,
+        checkpointSummary: null,
+        currentItemLabel: "正在执行章节",
+        updatedAt: new Date("2026-04-22T09:55:00.000Z"),
+      }),
+      after: buildWorkflowRow({
+        status: "failed",
+        checkpointType: "chapter_batch_ready",
+        checkpointSummary: "章节执行失败，需重试。",
+        updatedAt: new Date("2026-04-22T10:00:00.000Z"),
+      }),
+    });
+    assert.ok(true, "handleTaskTransition swallowed the missing-column write error");
+  } finally {
+    prisma.autoDirectorFollowUpNotificationLog.create = originals.notificationLogCreate;
+    prisma.appSetting.findMany = originals.appSettingFindMany;
+    global.fetch = originals.fetch;
+    process.env.AUTO_DIRECTOR_DINGTALK_WEBHOOK_URL = previousEnv.AUTO_DIRECTOR_DINGTALK_WEBHOOK_URL;
+    process.env.AUTO_DIRECTOR_WECOM_WEBHOOK_URL = previousEnv.AUTO_DIRECTOR_WECOM_WEBHOOK_URL;
+    process.env.APP_BASE_URL = previousEnv.APP_BASE_URL;
+  }
+});
+
+test("non-tolerable notification write errors still propagate so genuine DB failures are not masked", async () => {
+  const originals = {
+    notificationLogCreate: prisma.autoDirectorFollowUpNotificationLog.create,
+    appSettingFindMany: prisma.appSetting.findMany,
+    fetch: global.fetch,
+  };
+  // 真实约束冲突 / 业务错误不属于"可容忍的 schema/infra 漂移"，必须继续抛出，
+  // 避免把真正的数据问题当成噪音吞掉。
+  prisma.autoDirectorFollowUpNotificationLog.create = async () => {
+    throw Object.assign(new Error("Unique constraint failed on the fields: (`id`)"), {
+      code: "P2002",
+    });
+  };
+  prisma.appSetting.findMany = async () => [];
+  global.fetch = async () => new Response(JSON.stringify({ ok: true }), {
+    status: 202,
+    headers: { "content-type": "application/json" },
+  });
+
+  const previousEnv = {
+    AUTO_DIRECTOR_DINGTALK_WEBHOOK_URL: process.env.AUTO_DIRECTOR_DINGTALK_WEBHOOK_URL,
+    AUTO_DIRECTOR_WECOM_WEBHOOK_URL: process.env.AUTO_DIRECTOR_WECOM_WEBHOOK_URL,
+    APP_BASE_URL: process.env.APP_BASE_URL,
+  };
+  delete process.env.AUTO_DIRECTOR_DINGTALK_WEBHOOK_URL;
+  delete process.env.AUTO_DIRECTOR_WECOM_WEBHOOK_URL;
+  process.env.APP_BASE_URL = "https://writer.example.test";
+
+  const service = new AutoDirectorFollowUpNotificationService();
+  try {
+    let rejected = false;
+    try {
+      await service.handleTaskTransition({
+        before: buildWorkflowRow({
+          status: "running",
+          checkpointType: null,
+          checkpointSummary: null,
+          currentItemLabel: "正在执行章节",
+          updatedAt: new Date("2026-04-22T09:55:00.000Z"),
+        }),
+        after: buildWorkflowRow({
+          status: "failed",
+          checkpointType: "chapter_batch_ready",
+          checkpointSummary: "章节执行失败，需重试。",
+          updatedAt: new Date("2026-04-22T10:00:00.000Z"),
+        }),
+      });
+    } catch (error) {
+      rejected = true;
+      assert.equal(error.code, "P2002");
+    }
+    assert.ok(rejected, "non-tolerable write error should propagate");
+  } finally {
+    prisma.autoDirectorFollowUpNotificationLog.create = originals.notificationLogCreate;
+    prisma.appSetting.findMany = originals.appSettingFindMany;
+    global.fetch = originals.fetch;
+    process.env.AUTO_DIRECTOR_DINGTALK_WEBHOOK_URL = previousEnv.AUTO_DIRECTOR_DINGTALK_WEBHOOK_URL;
+    process.env.AUTO_DIRECTOR_WECOM_WEBHOOK_URL = previousEnv.AUTO_DIRECTOR_WECOM_WEBHOOK_URL;
+    process.env.APP_BASE_URL = previousEnv.APP_BASE_URL;
+  }
+});
