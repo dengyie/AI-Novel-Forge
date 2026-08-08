@@ -38,6 +38,7 @@ import {
   STALE_AUTO_DIRECTOR_RUNNING_MESSAGE,
   isAutoResumableStaleAutoDirectorTask,
   isStaleAutoDirectorRunningTask,
+  resolveStaleRunningTaskMs,
 } from "./autoDirectorStaleTaskRecovery";
 import {
   resolveActiveAutoDirectorAutoExecution,
@@ -407,8 +408,26 @@ export class NovelWorkflowHealingService {
           reason: error instanceof Error ? error.message : String(error),
         });
       }
-      await this.workflow.updateTaskWithRetry({
-        where: { id: taskId },
+      // P0-2 续跑防"取消复活"TOCTOU：enqueue 之后必须用 CAS 守卫写回，而不是
+      // 无条件单行 update。若在 read 与 write 之间任务被并发推进/取消（心跳或
+      // updatedAt 刷新、status 变更、cancelRequestedAt 置位），守卫不命中 →
+      // count=0 → 放弃本次写回，绝不把已取消/已推进的任务重新复活成 running。
+      // enqueue 的 continue 命令在任务处理时遇到取消会自行以 WORKFLOW_TASK_CANCELLED
+      // 409 中止，无需在此回滚；未命中只打 warn 留可观测痕迹。
+      const staleCutoff = new Date(Date.now() - resolveStaleRunningTaskMs());
+      const healed = await this.workflow.updateTaskManyWithRetry({
+        where: {
+          id: taskId,
+          lane: "auto_director",
+          status: "running",
+          pendingManualRecovery: false,
+          cancelRequestedAt: null,
+          OR: [
+            { heartbeatAt: null },
+            { heartbeatAt: { lt: staleCutoff } },
+          ],
+          updatedAt: { lt: staleCutoff },
+        },
         data: {
           status: "running",
           heartbeatAt: new Date(),
@@ -418,6 +437,12 @@ export class NovelWorkflowHealingService {
           cancelRequestedAt: null,
         },
       });
+      if (healed.count === 0) {
+        console.warn("[auto-director.heal] auto-resume write skipped (concurrent state change)", {
+          taskId,
+        });
+        return false;
+      }
       return true;
     }
     const resumeTarget = parseResumeTarget(existing.resumeTargetJson) ?? this.workflow.buildResumeTarget({
