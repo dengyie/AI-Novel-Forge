@@ -21,6 +21,11 @@ import {
 } from "./autoDirectorFollowUpEventBuilder";
 import { resolveAutoDirectorFollowUpReason } from "./autoDirectorFollowUpReasonResolver";
 import { extractBlockedAutoDirectorValidationResult } from "./autoDirectorFollowUpValidationResult";
+import {
+  extractErrorCode,
+  extractErrorMessage,
+  isTolerableNotificationWriteError,
+} from "./autoDirectorFollowUpErrorTolerance";
 
 // 触发站内红点的"需处理/关注"事件；progress_changed 是推进噪声，不惊扰红点。
 const IN_APP_ATTENTION_EVENT_TYPES: ReadonlySet<string> = new Set([
@@ -30,63 +35,6 @@ const IN_APP_ATTENTION_EVENT_TYPES: ReadonlySet<string> = new Set([
   "auto_director.recovered",
   "auto_director.completed",
 ]);
-
-function extractErrorCode(error: unknown): string | undefined {
-  if (typeof error !== "object" || error === null) {
-    return undefined;
-  }
-  return "code" in error ? String((error as { code?: unknown }).code) : undefined;
-}
-
-function extractErrorMessage(error: unknown): string {
-  if (typeof error === "object" && error !== null && "message" in error) {
-    const message = (error as { message?: unknown }).message;
-    if (typeof message === "string" && message.trim()) {
-      return message.trim();
-    }
-  }
-  return String(error);
-}
-
-/**
- * 判断通知写入失败的"可容忍"类别——即只影响红点/外部渠道这类非致命记录，
- * 绝不因此打崩自动导演续跑。容忍并不等于无差别吞错：吞噬路径都会打 console.warn
- * 留下可观测痕迹（P2023/P2009 这类真实数据缺陷尤其要靠告警暴露）。
- *
- * 已知类别（按成因区分，不要混为一谈）：
- *  - schema 漂移，自愈：P2021 表不存在、P2022 列不存在、底层驱动抛出的
- *    "does not exist / no such column / no such table"。根因多为 db push 建库后
- *    再加 schema 字段未回填（见 runtimeMigrations REQUIRED_COLUMN_BACKFILLS），
- *    属自愈、丢了这条记录不影响推进。
- *  - 瞬时基础设施：P1001 及 "can't reach database server"——DB 短暂不可达，
- *    重启/重试后即可恢复，同样不应把整本书标 failed。
- *  - 潜在数据 bug（容忍但掩盖，须告警）：P2023 列数据不一致、P2009 查询解析失败。
- *    容忍是为了不因个别坏数据打崩续跑，但很可能对应真实缺陷，必须可观测。
- *
- * 站内红点与外部渠道通知都是"尽力而为"（best-effort）：写失败只丢一条提醒，
- * 不应让一条非本质的红点记录把整本书的自动导演标记 failed（详见
- * NovelWorkflowRuntimeService.resumePendingAutoDirectorTasks 的恢复失败分支）。
- */
-function isTolerableNotificationWriteError(error: unknown): boolean {
-  if (!error || typeof error !== "object") {
-    return false;
-  }
-  const code = extractErrorCode(error);
-  if (
-    code === "P2021"
-    || code === "P2022"
-    || code === "P2023"
-    || code === "P1001"
-    || code === "P2009"
-  ) {
-    return true;
-  }
-  const message = extractErrorMessage(error);
-  return /does not exist in the current database/i.test(message)
-    || /no such column/i.test(message)
-    || /no such table/i.test(message)
-    || /can't reach database server/i.test(message);
-}
 
 function parseExecutionScopeLabel(seedPayloadJson: string | null | undefined): string | null {
   if (!seedPayloadJson?.trim()) {

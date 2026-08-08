@@ -44,22 +44,7 @@ import {
   type RawFollowUpWorkflowRow,
 } from "./autoDirectorFollowUpProjection";
 import { loadRecentAutoDirectorAutoApprovalRecords } from "./autoDirectorAutoApprovalAudit";
-
-function isMissingTableError(error: unknown): boolean {
-  return typeof error === "object"
-    && error !== null
-    && "code" in error
-    && (error as { code?: string }).code === "P2021";
-}
-
-function isDbUnavailableError(error: unknown): boolean {
-  if (!error || typeof error !== "object") {
-    return false;
-  }
-  const code = "code" in error ? (error as { code?: string }).code : undefined;
-  const message = "message" in error ? String((error as { message?: unknown }).message ?? "") : "";
-  return code === "P1001" || /can't reach database server/i.test(message);
-}
+import { isTolerableNotificationWriteError } from "./autoDirectorFollowUpErrorTolerance";
 
 export class AutoDirectorFollowUpService {
   readonly workflowService = new NovelWorkflowService();
@@ -235,7 +220,7 @@ export class AutoDirectorFollowUpService {
         target: row.target ?? null,
       }));
     } catch (error) {
-      if (isMissingTableError(error) || isDbUnavailableError(error)) {
+      if (isTolerableNotificationWriteError(error)) {
         return [];
       }
       throw error;
@@ -245,7 +230,8 @@ export class AutoDirectorFollowUpService {
   /**
    * 站内未读红点计数。仅统计 channelType="inapp" 且 readAt IS NULL 的行。
    * 外部渠道（dingtalk/wecom）行 readAt 恒为 NULL，但 channelType 过滤排除了它们。
-   * 表不存在或 DB 不可用时安全返回 0（首次部署 / 迁移过渡期）。
+   * 表缺失 / 列缺失（schema 漂移，如 readAt 未回填）/ DB 不可用时安全返回 0
+   * （首次部署 / 迁移过渡期），不因个别红点记录打崩跟进中心接口。
    */
   async getUnreadCount(): Promise<{ unreadCount: number }> {
     try {
@@ -257,7 +243,7 @@ export class AutoDirectorFollowUpService {
       });
       return { unreadCount };
     } catch (error) {
-      if (isMissingTableError(error) || isDbUnavailableError(error)) {
+      if (isTolerableNotificationWriteError(error)) {
         return { unreadCount: 0 };
       }
       throw error;
@@ -282,7 +268,7 @@ export class AutoDirectorFollowUpService {
       });
       return { updated: result.count };
     } catch (error) {
-      if (isMissingTableError(error) || isDbUnavailableError(error)) {
+      if (isTolerableNotificationWriteError(error)) {
         return { updated: 0 };
       }
       throw error;

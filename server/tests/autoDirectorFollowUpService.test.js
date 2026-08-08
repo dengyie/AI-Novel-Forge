@@ -1009,3 +1009,36 @@ test("auto director follow-up service unread getters degrade to zero when table 
     prisma.autoDirectorFollowUpNotificationLog.updateMany = originals.updateMany;
   }
 });
+
+// 回归：产线事故（readAt 缺列 → P2022）曾让 getUnreadCount / markAllNotificationsRead
+// 把 P2022 当不可容忍错误上抛，跟进中心红点接口 500。schema 漂移（列缺失）须与
+// 表缺失一样降级为 0，而不是打崩读路径。
+test("auto director follow-up service unread getters degrade to zero on missing-column schema drift (P2022)", async () => {
+  const originals = {
+    count: prisma.autoDirectorFollowUpNotificationLog.count,
+    updateMany: prisma.autoDirectorFollowUpNotificationLog.updateMany,
+  };
+  prisma.autoDirectorFollowUpNotificationLog.count = async () => {
+    const err = new Error(
+      "PrismaClientKnownRequestError: \nInvalid `prisma.autoDirectorFollowUpNotificationLog.count()` invocation:\n\n  Column not found in the database.\n\n  The column `readAt` does not exist in the current database.",
+    );
+    err.code = "P2022";
+    throw err;
+  };
+  prisma.autoDirectorFollowUpNotificationLog.updateMany = async () => {
+    const err = new Error(
+      "PrismaClientKnownRequestError: \nInvalid `prisma.autoDirectorFollowUpNotificationLog.updateMany()` invocation:\n\n  Column not found in the database.\n\n  The column `readAt` does not exist in the current database.",
+    );
+    err.code = "P2022";
+    throw err;
+  };
+
+  const service = new AutoDirectorFollowUpService();
+  try {
+    assert.deepEqual(await service.getUnreadCount(), { unreadCount: 0 });
+    assert.deepEqual(await service.markAllNotificationsRead(), { updated: 0 });
+  } finally {
+    prisma.autoDirectorFollowUpNotificationLog.count = originals.count;
+    prisma.autoDirectorFollowUpNotificationLog.updateMany = originals.updateMany;
+  }
+});
