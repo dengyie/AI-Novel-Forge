@@ -149,12 +149,12 @@ function buildDeps() {
   return { deps, calls };
 }
 
-function baseHandlerInput({ deps, autoExecution, job }) {
+function baseHandlerInput({ deps, autoExecution, job, request }) {
   return {
     deps,
     taskId: "task-1",
     novelId: "novel-1",
-    request: buildRequest(),
+    request: request ?? buildRequest(),
     range: buildRange(),
     autoExecution,
     pipelineJobId: "job-failed",
@@ -453,6 +453,55 @@ test("方案D P1-4: 瞬态失败预算耗尽后回落 质量预算阶梯（不�
     (entry) => entry.patchRepairCount === 1,
   );
   assert.ok(patchEntry, "fallback 预算耗尽后瞬态失败被计入质量预算阶梯");
+});
+
+// 回归：方案D 曾把 fallback 重投写成"同模型重投"（continue 后原 request 原样再
+// startPipelineJob），持续厂商故障会原样烧掉全部预算。现在必须在预算内写入备用
+// 模型 override，续跑重投时真正切换模型（failover）。
+test("方案D P1-4: 瞬态模型失败预算内 → 真正 failover 到备用模型（transientModelOverride 写入）", async () => {
+  const { deps, calls } = buildDeps();
+  const autoExecution = buildAutoExecution({ qualityDebtSummaries: null });
+
+  const result = await handleAutoExecutionFailure(baseHandlerInput({
+    deps,
+    autoExecution,
+    job: buildTransientJob(),
+    // 真实内置 provider：deepseek 主模型 deepseek-v4-pro → 备用 deepseek-v4-flash
+    request: buildRequest({ provider: "deepseek", model: "deepseek-v4-pro" }),
+  }));
+
+  assert.equal(result.kind, "continue");
+  assert.equal(calls.markTaskFailed.length, 0);
+  assert.equal(result.autoExecution.transientModelFallbackCount, 1);
+  assert.deepEqual(result.autoExecution.transientModelOverride, {
+    provider: "deepseek",
+    model: "deepseek-v4-flash",
+  });
+});
+
+test("resolveTransientFallbackModel 逐次换不同备用模型，耗尽/未知 provider 返回 null", async () => {
+  const {
+    resolveTransientFallbackModel,
+  } = require("../dist/services/novel/director/automation/novelDirectorAutoExecutionFailure.js");
+
+  // deepseek 主模型 → 备用 deepseek-v4-flash
+  assert.deepEqual(
+    resolveTransientFallbackModel({ provider: "deepseek", model: "deepseek-v4-pro", fallbackCount: 1 }),
+    { provider: "deepseek", model: "deepseek-v4-flash" },
+  );
+  // deepseek 仅 1 个备用：第二次 fallback 无新候选 → null（预算再耗尽回落既有熔断路径）
+  assert.equal(
+    resolveTransientFallbackModel({ provider: "deepseek", model: "deepseek-v4-pro", fallbackCount: 2 }),
+    null,
+  );
+  // openai 主模型 gpt-5.6-luna：第一次 fallback 切到列表内不同模型 gpt-5.5
+  assert.deepEqual(
+    resolveTransientFallbackModel({ provider: "openai", model: "gpt-5.6-luna", fallbackCount: 1 }),
+    { provider: "openai", model: "gpt-5.5" },
+  );
+  // 未知 provider / 旧模型不在列表 / 非法计数 → null，不硬造不受支持的模型
+  assert.equal(resolveTransientFallbackModel({ provider: "test-provider", model: "test-model", fallbackCount: 1 }), null);
+  assert.equal(resolveTransientFallbackModel({ provider: "deepseek", model: "deepseek-v4-pro", fallbackCount: 0 }), null);
 });
 
 test("方案C Phase3 熔断对齐: 通用失败第 4 次同签名（patch×2 + rewrite×1 后）→ 熔断打开保守停止", async () => {

@@ -1,6 +1,8 @@
 import type { DirectorAutoExecutionState } from "@ai-novel/shared/types/novelDirector";
+import type { LLMProvider } from "@ai-novel/shared/types/llm";
 import { CONTRACT_REPLAN_WINDOW_MARKER } from "@ai-novel/shared/types/chapterTaskSheetQuality";
 import { isStrictTransientTaskRetryError } from "../../../../llm/transportRetry";
+import { isBuiltInProvider, PROVIDERS } from "../../../../llm/providers";
 
 /**
  * 瞬态模型/服务故障独立 fallback 预算上限（单本书 run 内最多换模重投次数）。
@@ -25,6 +27,41 @@ export function isTransientModelFailure(
     return false;
   }
   return isStrictTransientTaskRetryError(message ?? "");
+}
+
+/**
+ * 为瞬态模型故障 fallback 解析本次重投要切换到的备用模型，实现真正的模型 failover。
+ *
+ * 从当前 provider 的可用模型列表里挑一个与本轮失败模型不同的候选，按
+ * fallbackCount（已自增后的瞬态重投次数，>=1）从备用列表逐次取，保证连续多次
+ * fallback 每次换的模型都不同。无可用候选（provider 未知 / 列表全同 / 超出
+ * 列表长度）时返回 null，表示本次只能按原模型重试——预算耗尽后仍会回落既有
+ * 熔断/质量预算路径，不会无限循环。
+ *
+ * 注意：部分 provider 的 models 列表自带跨厂商候选（如 openai 下列有
+ * deepseek-v4-pro），同一 provider 内切换即可能绕过单一厂商故障；如需跨 provider
+ * 切换，可在此扩展为从其他 provider 的 defaultModel 选取。
+ */
+export function resolveTransientFallbackModel(input: {
+  provider?: LLMProvider | string | null;
+  model?: string | null;
+  fallbackCount: number;
+}): { provider: LLMProvider; model: string } | null {
+  if (!Number.isInteger(input.fallbackCount) || input.fallbackCount < 1) {
+    return null;
+  }
+  const provider = input.provider;
+  if (typeof provider !== "string" || !isBuiltInProvider(provider)) {
+    return null;
+  }
+  const config = PROVIDERS[provider];
+  const currentModel = input.model?.trim();
+  const alternatives = config.models.filter((model) => model !== currentModel);
+  const backupModel = alternatives[input.fallbackCount - 1];
+  if (!backupModel) {
+    return null;
+  }
+  return { provider, model: backupModel };
 }
 
 /**

@@ -497,6 +497,7 @@ export function buildDirectorAutoExecutionState(input: {
       (input.plan as DirectorAutoExecutionState | null | undefined)?.consecutiveBatchRolls,
     ),
     transientModelFallbackCount: (input.plan as DirectorAutoExecutionState | null | undefined)?.transientModelFallbackCount ?? 0,
+    transientModelOverride: (input.plan as DirectorAutoExecutionState | null | undefined)?.transientModelOverride ?? null,
     firstChapterId: selected[0]?.id ?? input.range.firstChapterId,
     startOrder: input.range.startOrder,
     endOrder: input.range.endOrder,

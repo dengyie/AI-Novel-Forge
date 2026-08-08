@@ -35,6 +35,7 @@ import {
   isSkippableAutoExecutionReviewFailure,
   isTransientModelFailure,
   MAX_TRANSIENT_MODEL_FALLBACK,
+  resolveTransientFallbackModel,
 } from "../novelDirectorAutoExecutionFailure";
 import { resolveAutoExecutionRuntimeRangeAndState } from "../novelDirectorAutoExecutionRuntimePreparation";
 import type {
@@ -239,6 +240,21 @@ export async function handleAutoExecutionFailure(input: {
       pipelineJobId: null,
       pipelineStatus: null,
     };
+    // 真正的模型 failover：预算内每次换模重投都解析一个新的备用模型写入状态，
+    // 续跑重投该批次时（AutoExecutionRangeRunner.startPipelineJob）会优先用它，
+    // 而不是重复使用刚失败的原模型。逐次从 provider 备用列表取不同模型（跨厂商
+    // 候选如 openai 下的 deepseek-v4-pro 也覆盖），预算耗尽后回落既有熔断路径。
+    const transientFallbackModel = resolveTransientFallbackModel({
+      provider: request.provider,
+      model: request.model,
+      fallbackCount: autoExecution.transientModelFallbackCount ?? 0,
+    });
+    if (transientFallbackModel) {
+      autoExecution = {
+        ...autoExecution,
+        transientModelOverride: transientFallbackModel,
+      };
+    }
     ({ range, autoExecution } = await resolveAutoExecutionRuntimeRangeAndState(deps, {
       novelId,
       existingState: autoExecution,

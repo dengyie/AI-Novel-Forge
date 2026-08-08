@@ -270,11 +270,14 @@ export class AutoExecutionRangeRunner {
           clearCheckpoint: shouldClearAutoExecutionCheckpoint(input.resumeCheckpointType),
         });
         try {
+          // 瞬态模型故障 fallback（P1-4）：重投该批次时优先用失败处理器解析的
+          // 备用模型（transientModelOverride），真正切换模型而非同模型重试。
+          const modelOverride = autoExecution.transientModelOverride;
           const job = await this.deps.novelService.startPipelineJob(
             input.novelId,
             buildDirectorAutoExecutionPipelineOptions({
-              provider: input.request.provider,
-              model: input.request.model,
+              provider: modelOverride?.provider ?? input.request.provider,
+              model: modelOverride?.model ?? input.request.model,
               temperature: input.request.temperature,
               workflowTaskId: input.taskId,
               taskStyleProfileId: input.request.styleProfileId,

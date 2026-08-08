@@ -303,6 +303,17 @@ export interface DirectorAutoExecutionState extends DirectorAutoExecutionPlan {
    * 缺省 0；每次命中瞬态失败自增，超过上限后回落到既有熔断/质量预算路径（持续故障需人工介入）。
    */
   transientModelFallbackCount?: number;
+  /**
+   * 瞬态模型故障 fallback 时切换到的备用模型（provider + model）。
+   * 命中 transport 类失败（timeout/503/429/reset）且预算未耗尽时，失败处理器写入
+   * 并随 autoExecution 状态持久化；续跑重投该批次时会用此模型，而不是重复使用
+   * 失败的原模型（真正的 failover，而非同模型无限重试）。预算耗尽 / 原模型恢复后
+   * 由失败处理器按需更新或保留，属 run 级降级状态（与 circuitBreaker 同寿命）。
+   */
+  transientModelOverride?: {
+    provider: LLMProvider;
+    model: string;
+  } | null;
 }
 
 export type DirectorQualityRepairRiskLevel =
