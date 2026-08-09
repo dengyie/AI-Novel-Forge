@@ -498,6 +498,7 @@ export function buildDirectorAutoExecutionState(input: {
     ),
     transientModelFallbackCount: (input.plan as DirectorAutoExecutionState | null | undefined)?.transientModelFallbackCount ?? 0,
     transientModelOverride: (input.plan as DirectorAutoExecutionState | null | undefined)?.transientModelOverride ?? null,
+    transientModelAttemptedTargets: (input.plan as DirectorAutoExecutionState | null | undefined)?.transientModelAttemptedTargets ?? [],
     firstChapterId: selected[0]?.id ?? input.range.firstChapterId,
     startOrder: input.range.startOrder,
     endOrder: input.range.endOrder,

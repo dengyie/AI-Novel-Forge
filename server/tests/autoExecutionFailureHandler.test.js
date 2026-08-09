@@ -10,6 +10,7 @@ const {
 const {
   handleAutoExecutionFailure,
 } = require("../dist/services/novel/director/automation/application/AutoExecutionFailureHandler.js");
+const { prisma } = require("../dist/db/prisma.js");
 
 // 预算记账辅助（用于播种"预算已耗尽"状态）
 const {
@@ -117,7 +118,14 @@ function buildJob() {
 }
 
 function buildDeps() {
-  const calls = { replanNovel: [], markTaskFailed: [], bootstrapTask: [], recordEvent: [] };
+  const calls = {
+    replanNovel: [],
+    markTaskFailed: [],
+    bootstrapTask: [],
+    recordEvent: [],
+    recordRepairTicketCreated: [],
+    recordCircuitBreakerOpened: [],
+  };
   const deps = {
     novelContextService: {
       async listChapters() {
@@ -125,11 +133,11 @@ function buildDeps() {
       },
     },
     workflowService: {
-      async bootstrapTask() {
-        calls.bootstrapTask.push(true);
+      async bootstrapTask(input) {
+        calls.bootstrapTask.push(input);
       },
       async markTaskFailed(taskId, message, patch) {
-        calls.markTaskFailed.push({ taskId, message, checkpointType: patch?.checkpointType });
+        calls.markTaskFailed.push({ taskId, message, patch });
       },
     },
     buildDirectorSeedPayload(_request, _novelId, extra) {
@@ -139,8 +147,12 @@ function buildDeps() {
       async recordEvent(input) {
         calls.recordEvent.push(input.type);
       },
-      async recordRepairTicketCreated() {},
-      async recordCircuitBreakerOpened() {},
+      async recordRepairTicketCreated(input) {
+        calls.recordRepairTicketCreated.push(input);
+      },
+      async recordCircuitBreakerOpened(input) {
+        calls.recordCircuitBreakerOpened.push(input);
+      },
     },
     async replanNovel(novelId, input) {
       calls.replanNovel.push({ novelId, input });
@@ -243,7 +255,7 @@ test("同签名 replan_window 失败预算耗尽：不再 replan，保守 markTa
   assert.equal(calls.replanNovel.length, 0);
   // 保守停止：markTaskFailed，checkpointType 为 replan_required
   assert.equal(calls.markTaskFailed.length, 1);
-  assert.equal(calls.markTaskFailed[0].checkpointType, "replan_required");
+  assert.equal(calls.markTaskFailed[0].patch.checkpointType, "replan_required");
   // 关键：不构建/记录误导性 continue_with_risk，也不重复记账
   assert.equal(calls.recordEvent.includes("continue_with_risk"), false);
   assert.equal(calls.recordEvent.length, 0);
@@ -402,13 +414,14 @@ test("方案C Phase3: 消息文本漂移但信封相同 → 预算仍按结构�
 
 const TRANSIENT_MODEL_MESSAGE = "章节执行时上游服务瞬时故障：fetch failed (503 Service Unavailable)，请稍后重试。";
 
-function buildTransientJob() {
+function buildTransientJob(overrides = {}) {
   return {
     id: "job-failed",
     status: "failed",
     progress: 0.98,
     error: TRANSIENT_MODEL_MESSAGE,
     payload: null,
+    ...overrides,
   };
 }
 
@@ -420,6 +433,7 @@ test("方案D P1-4: 瞬态模型失败（503）预算内 → 独立 fallback 重
     deps,
     autoExecution,
     job: buildTransientJob(),
+    request: buildRequest({ provider: "deepseek", model: "deepseek-v4-pro" }),
   }));
 
   // 走 fallback 分支：重进管线 continue，而非终态停等/质量修复记账
@@ -430,29 +444,36 @@ test("方案D P1-4: 瞬态模型失败（503）预算内 → 独立 fallback 重
   assert.equal((result.autoExecution.qualityLoopLedger?.entries ?? []).length, 0);
 });
 
-test("方案D P1-4: 瞬态失败预算耗尽后回落 质量预算阶梯（不再误入 fallback 分支）", async () => {
+test("方案D P1-4: 瞬态失败预算耗尽后停止为 service_unavailable，不污染质量预算", async () => {
   const { deps, calls } = buildDeps();
   const autoExecution = buildAutoExecution({
     qualityDebtSummaries: null,
     // 预耗尽 fallback 预算（跨 run 已累计到上限）
     transientModelFallbackCount: 3,
+    transientModelOverride: { provider: "deepseek", model: "deepseek-v4-flash" },
   });
 
   const result = await handleAutoExecutionFailure(baseHandlerInput({
     deps,
     autoExecution,
-    job: buildTransientJob(),
+    job: buildTransientJob({
+      payload: JSON.stringify({ provider: "deepseek", model: "deepseek-v4-flash" }),
+    }),
+    request: buildRequest({ provider: "deepseek", model: "deepseek-v4-pro" }),
   }));
 
-  // 预算耗尽：瞬态分支被跳过，落入既有质量预算路径（首次 patch 仍是活动作 → 重进管线 continue）
-  assert.equal(result.kind, "continue");
-  // fallback 预算不再自增
-  assert.equal(result.autoExecution.transientModelFallbackCount, 3);
-  // 本次失败被计入质量系数阶梯（patch_repair），持续故障最终熔断需人工介入
-  const patchEntry = result.autoExecution?.qualityLoopLedger?.entries?.find(
-    (entry) => entry.patchRepairCount === 1,
-  );
-  assert.ok(patchEntry, "fallback 预算耗尽后瞬态失败被计入质量预算阶梯");
+  assert.equal(result.kind, "stop");
+  assert.equal(calls.recordRepairTicketCreated.length, 0);
+  assert.equal(calls.recordCircuitBreakerOpened.length, 1);
+  assert.equal(calls.recordCircuitBreakerOpened[0].state.status, "open");
+  assert.equal(calls.recordCircuitBreakerOpened[0].state.reason, "service_unavailable");
+  assert.equal(calls.recordCircuitBreakerOpened[0].state.recoveryAction, "switch_model");
+  assert.equal(calls.markTaskFailed[0].patch.stage, "auto_director");
+  assert.equal(calls.markTaskFailed[0].patch.itemKey, "switch_model");
+  const persisted = calls.bootstrapTask.at(-1).seedPayload.autoExecution;
+  assert.equal(persisted.transientModelFallbackCount, 3);
+  assert.equal(persisted.transientModelOverride, null);
+  assert.equal((persisted.qualityLoopLedger?.entries ?? []).length, 0);
 });
 
 // 回归：方案D 曾把 fallback 重投写成"同模型重投"（continue 后原 request 原样再
@@ -479,29 +500,167 @@ test("方案D P1-4: 瞬态模型失败预算内 → 真正 failover 到备用模
   });
 });
 
-test("resolveTransientFallbackModel 逐次换不同备用模型，耗尽/未知 provider 返回 null", async () => {
+test("方案D P1-4: failed GenerationJob payload is the model fact source and exhausted candidates stop without quality debt", async () => {
+  const { deps, calls } = buildDeps();
+  const result = await handleAutoExecutionFailure(baseHandlerInput({
+    deps,
+    autoExecution: buildAutoExecution({
+      qualityDebtSummaries: null,
+      transientModelFallbackCount: 1,
+      transientModelOverride: { provider: "deepseek", model: "deepseek-v4-flash" },
+    }),
+    job: buildTransientJob({
+      payload: JSON.stringify({ provider: "deepseek", model: "deepseek-v4-flash" }),
+    }),
+    request: buildRequest({ provider: "deepseek", model: "deepseek-v4-pro" }),
+  }));
+
+  assert.equal(result.kind, "stop");
+  assert.equal(calls.recordRepairTicketCreated.length, 0);
+  assert.equal(calls.recordCircuitBreakerOpened.length, 1);
+  assert.equal(calls.recordCircuitBreakerOpened[0].state.reason, "service_unavailable");
+  assert.equal(calls.recordCircuitBreakerOpened[0].state.recoveryAction, "switch_model");
+  const persisted = calls.bootstrapTask.at(-1).seedPayload.autoExecution;
+  assert.equal(persisted.transientModelFallbackCount, 1, "no switch is counted when catalog is exhausted");
+  assert.equal(persisted.transientModelOverride, null, "failed override must not survive candidate exhaustion");
+  assert.deepEqual(persisted.transientModelAttemptedTargets, [
+    { provider: "deepseek", model: "deepseek-v4-pro" },
+    { provider: "deepseek", model: "deepseek-v4-flash" },
+  ]);
+  assert.equal((persisted.qualityLoopLedger?.entries ?? []).length, 0);
+});
+
+test("方案D P1-4: 模型目录不可用时停止为 service_unavailable，不创建质量 repair ticket", async () => {
+  const { deps, calls } = buildDeps();
+  const originalFindUnique = prisma.aPIKey.findUnique;
+  const warn = console.warn;
+  prisma.aPIKey.findUnique = async () => {
+    throw new Error("catalog database unavailable");
+  };
+  console.warn = () => {};
+
+  try {
+    const result = await handleAutoExecutionFailure(baseHandlerInput({
+      deps,
+      autoExecution: buildAutoExecution({ qualityDebtSummaries: null }),
+      job: buildTransientJob({
+        payload: JSON.stringify({ provider: "custom-catalog-broken", model: "model-a" }),
+      }),
+      request: buildRequest({ provider: "custom-catalog-broken", model: "model-a" }),
+    }));
+
+    assert.equal(result.kind, "stop");
+    assert.equal(calls.recordRepairTicketCreated.length, 0);
+    assert.equal(calls.recordCircuitBreakerOpened.length, 1);
+    assert.equal(calls.recordCircuitBreakerOpened[0].state.reason, "service_unavailable");
+    assert.equal(calls.recordCircuitBreakerOpened[0].state.recoveryAction, "switch_model");
+    const persisted = calls.bootstrapTask.at(-1).seedPayload.autoExecution;
+    assert.deepEqual(persisted.transientModelAttemptedTargets, [
+      { provider: "custom-catalog-broken", model: "model-a" },
+    ]);
+    assert.equal((persisted.qualityLoopLedger?.entries ?? []).length, 0);
+  } finally {
+    prisma.aPIKey.findUnique = originalFindUnique;
+    console.warn = warn;
+  }
+});
+
+test("方案D P1-4: request may omit provider/model when failed job payload records the actual model", async () => {
+  const { deps } = buildDeps();
+  const result = await handleAutoExecutionFailure(baseHandlerInput({
+    deps,
+    autoExecution: buildAutoExecution({ qualityDebtSummaries: null }),
+    job: buildTransientJob({
+      payload: JSON.stringify({ provider: "deepseek", model: "deepseek-v4-pro" }),
+    }),
+    request: buildRequest({ provider: undefined, model: undefined }),
+  }));
+
+  assert.equal(result.kind, "continue");
+  assert.deepEqual(result.autoExecution.transientModelOverride, {
+    provider: "deepseek",
+    model: "deepseek-v4-flash",
+  });
+  assert.deepEqual(result.autoExecution.transientModelAttemptedTargets, [
+    { provider: "deepseek", model: "deepseek-v4-pro" },
+  ]);
+});
+
+test("resolveTransientFallbackModel uses catalog candidates for custom providers without inventing models", async () => {
   const {
     resolveTransientFallbackModel,
   } = require("../dist/services/novel/director/automation/novelDirectorAutoExecutionFailure.js");
 
-  // deepseek 主模型 → 备用 deepseek-v4-flash
   assert.deepEqual(
-    resolveTransientFallbackModel({ provider: "deepseek", model: "deepseek-v4-pro", fallbackCount: 1 }),
-    { provider: "deepseek", model: "deepseek-v4-flash" },
+    await resolveTransientFallbackModel({
+      provider: "custom-cpa",
+      currentModel: "model-a",
+      attemptedTargets: [{ provider: "custom-cpa", model: "model-a" }],
+      modelCandidates: ["model-a", "model-b"],
+    }),
+    { provider: "custom-cpa", model: "model-b" },
   );
-  // deepseek 仅 1 个备用：第二次 fallback 无新候选 → null（预算再耗尽回落既有熔断路径）
   assert.equal(
-    resolveTransientFallbackModel({ provider: "deepseek", model: "deepseek-v4-pro", fallbackCount: 2 }),
+    await resolveTransientFallbackModel({
+      provider: "custom-cpa",
+      currentModel: "model-b",
+      attemptedTargets: [
+        { provider: "custom-cpa", model: "model-a" },
+        { provider: "custom-cpa", model: "model-b" },
+      ],
+      modelCandidates: ["model-a", "model-b"],
+    }),
     null,
   );
-  // openai 主模型 gpt-5.6-luna：第一次 fallback 切到列表内不同模型 gpt-5.5
-  assert.deepEqual(
-    resolveTransientFallbackModel({ provider: "openai", model: "gpt-5.6-luna", fallbackCount: 1 }),
-    { provider: "openai", model: "gpt-5.5" },
-  );
-  // 未知 provider / 旧模型不在列表 / 非法计数 → null，不硬造不受支持的模型
-  assert.equal(resolveTransientFallbackModel({ provider: "test-provider", model: "test-model", fallbackCount: 1 }), null);
-  assert.equal(resolveTransientFallbackModel({ provider: "deepseek", model: "deepseek-v4-pro", fallbackCount: 0 }), null);
+});
+
+test("resolveTransientFallbackModel loads a configured custom provider through the shared model catalog", async () => {
+  const {
+    resolveTransientFallbackModel,
+  } = require("../dist/services/novel/director/automation/novelDirectorAutoExecutionFailure.js");
+  const originalFindUnique = prisma.aPIKey.findUnique;
+  const originalFetch = global.fetch;
+  const fetchedUrls = [];
+  prisma.aPIKey.findUnique = async ({ where }) => ({
+    provider: where.provider,
+    displayName: "Custom Catalog",
+    key: "test-key",
+    model: "model-a",
+    baseURL: "https://custom.example.test/v1",
+    isActive: true,
+    reasoningEnabled: true,
+    concurrencyLimit: null,
+    requestIntervalMs: null,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  });
+  global.fetch = async (url) => {
+    fetchedUrls.push(String(url));
+    return {
+      ok: true,
+      async json() {
+        return { data: [{ id: "model-a" }, { id: "model-b" }] };
+      },
+      async text() {
+        return "";
+      },
+    };
+  };
+
+  try {
+    assert.deepEqual(
+      await resolveTransientFallbackModel({
+        provider: "custom-catalog-test",
+        currentModel: "model-a",
+        attemptedTargets: [{ provider: "custom-catalog-test", model: "model-a" }],
+      }),
+      { provider: "custom-catalog-test", model: "model-b" },
+    );
+    assert.deepEqual(fetchedUrls, ["https://custom.example.test/v1/models"]);
+  } finally {
+    prisma.aPIKey.findUnique = originalFindUnique;
+    global.fetch = originalFetch;
+  }
 });
 
 test("方案C Phase3 熔断对齐: 通用失败第 4 次同签名（patch×2 + rewrite×1 后）→ 熔断打开保守停止", async () => {

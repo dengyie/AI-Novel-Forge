@@ -610,33 +610,24 @@ export class NovelWorkflowTaskAdapter {
     resume?: boolean;
     batchAlreadyStartedCount?: number;
   }): Promise<UnifiedTaskDetail> {
-    const { id, llmOverride, resume, batchAlreadyStartedCount } = input;
+    const { id, llmOverride, batchAlreadyStartedCount } = input;
     if (await isTaskArchived("novel_workflow", id)) {
       throw new AppError("Task not found.", 404);
     }
-    const row = await this.workflowService.getTaskById(id);
+    const row = await this.workflowService.getTaskByIdWithoutHealing(id);
     if (!row) {
       throw new AppError("Task not found.", 404);
     }
-    const shouldResumeAutoDirector = row.lane === "auto_director" && (
-      resume === true
-      || (resume !== false && (row.status === "failed" || row.status === "cancelled"))
-    );
-    if (row.lane === "auto_director" && llmOverride) {
-      await this.workflowService.applyAutoDirectorLlmOverride(id, llmOverride);
-    }
-    // retryTask 是唯一 attemptCount 自增/认领点；返回 null = 并发认领失败或状态已变，
-    // 跳过 continue（另一个重试已接管）。
-    const claimed = await this.workflowService.retryTask(id);
-    if (claimed && shouldResumeAutoDirector) {
-      try {
-        await this.novelDirectorService.continueTask(id, {
-          batchAlreadyStartedCount,
-          forceResume: true,
-        });
-      } catch (error) {
-        await this.workflowService.markRetryDispatchFailed(id, claimed.attemptCount, error);
-        throw error;
+    if (row.lane === "auto_director") {
+      await this.directorCommandService.enqueueRetryCommand({
+        taskId: id,
+        llmOverride,
+        batchAlreadyStartedCount,
+      });
+    } else {
+      const claimed = await this.workflowService.retryTask(id, row);
+      if (!claimed) {
+        throw new AppError("Task state changed before retry was accepted.", 409);
       }
     }
     const detail = await this.detail(id);
@@ -650,7 +641,7 @@ export class NovelWorkflowTaskAdapter {
     if (await isTaskArchived("novel_workflow", id)) {
       throw new AppError("Task not found.", 404);
     }
-    const row = await this.workflowService.getTaskById(id);
+    const row = await this.workflowService.getTaskByIdWithoutHealing(id);
     if (!row) {
       throw new AppError("Task not found.", 404);
     }
@@ -670,10 +661,16 @@ export class NovelWorkflowTaskAdapter {
    * P0-2 服务重启自动续跑：对僵死（无心跳）但可恢复的 auto_director 任务
    * enqueue continue，交由命令队列异步重跑，而不是等保留策略取消后人工接管。
    */
-  async resumeStaleAutoDirectorTask(taskId: string): Promise<void> {
+  async resumeStaleAutoDirectorTask(taskId: string, expectedTaskState: {
+    status: "running";
+    updatedAt: Date;
+    heartbeatAt: Date | null;
+  }): Promise<void> {
     await this.directorCommandService.enqueueContinueCommand(taskId, {
       continuationMode: "resume",
       forceResume: true,
+    }, {
+      expectedTaskState,
     });
   }
 

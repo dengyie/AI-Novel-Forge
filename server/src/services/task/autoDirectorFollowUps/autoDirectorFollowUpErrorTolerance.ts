@@ -37,7 +37,7 @@ export function extractErrorMessage(error: unknown): string {
   return String(error);
 }
 
-export function isTolerableNotificationWriteError(error: unknown): boolean {
+export function isTolerableNotificationError(error: unknown): boolean {
   if (!error || typeof error !== "object") {
     return false;
   }

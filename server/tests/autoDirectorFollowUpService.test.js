@@ -1032,12 +1032,19 @@ test("auto director follow-up service unread getters degrade to zero on missing-
     err.code = "P2022";
     throw err;
   };
+  const originalWarn = console.warn;
+  const warnings = [];
+  console.warn = (...args) => warnings.push(args.map(String).join(" "));
 
   const service = new AutoDirectorFollowUpService();
   try {
     assert.deepEqual(await service.getUnreadCount(), { unreadCount: 0 });
     assert.deepEqual(await service.markAllNotificationsRead(), { updated: 0 });
+    assert.equal(warnings.length, 2);
+    assert.match(warnings[0], /notification.*read.*P2022/i);
+    assert.match(warnings[1], /notification.*read.*P2022/i);
   } finally {
+    console.warn = originalWarn;
     prisma.autoDirectorFollowUpNotificationLog.count = originals.count;
     prisma.autoDirectorFollowUpNotificationLog.updateMany = originals.updateMany;
   }

@@ -2,12 +2,14 @@ import type { DirectorAutoExecutionState } from "@ai-novel/shared/types/novelDir
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
 import { CONTRACT_REPLAN_WINDOW_MARKER } from "@ai-novel/shared/types/chapterTaskSheetQuality";
 import { isStrictTransientTaskRetryError } from "../../../../llm/transportRetry";
-import { isBuiltInProvider, PROVIDERS } from "../../../../llm/providers";
+import { getProviderModels } from "../../../../llm/modelCatalog";
+import { isBuiltInProvider } from "../../../../llm/providers";
+import { secretStore } from "../../../settings/secretStore";
 
 /**
  * 瞬态模型/服务故障独立 fallback 预算上限（单本书 run 内最多换模重投次数）。
  * 与质量预算 qualityLoopLedger 完全分开：该预算只缓冲瞬时传输抖动（timeout/503/429/reset），
- * 不污染内容修复阶梯，也不累计熔断信号。耗尽后回落既有熔断/质量预算路径，持续故障由人工介入。
+ * 不污染内容修复阶梯。耗尽或目录不可用后进入独立模型/服务熔断检查点，由用户切换模型后恢复。
  */
 export const MAX_TRANSIENT_MODEL_FALLBACK = 3;
 
@@ -32,36 +34,126 @@ export function isTransientModelFailure(
 /**
  * 为瞬态模型故障 fallback 解析本次重投要切换到的备用模型，实现真正的模型 failover。
  *
- * 从当前 provider 的可用模型列表里挑一个与本轮失败模型不同的候选，按
- * fallbackCount（已自增后的瞬态重投次数，>=1）从备用列表逐次取，保证连续多次
- * fallback 每次换的模型都不同。无可用候选（provider 未知 / 列表全同 / 超出
- * 列表长度）时返回 null，表示本次只能按原模型重试——预算耗尽后仍会回落既有
- * 熔断/质量预算路径，不会无限循环。
+ * 从统一模型目录读取当前 provider 的真实可用模型，并排除本 run 已失败的目标。
+ * 当前失败目标由 GenerationJob payload 提供；尝试集合随 autoExecution 持久化，
+ * 因此服务重启后也不会循环烧同一模型。无新候选时返回 null，由调用方清掉旧
+ * override 并进入独立模型/服务熔断检查点，不伪装成一次成功切模。
  *
- * 注意：部分 provider 的 models 列表自带跨厂商候选（如 openai 下列有
- * deepseek-v4-pro），同一 provider 内切换即可能绕过单一厂商故障；如需跨 provider
- * 切换，可在此扩展为从其他 provider 的 defaultModel 选取。
+ * 内置 provider 使用目录的内置 fallback；合法 custom provider 通过同一目录读取其
+ * `/models`，无法读取或只有当前模型时返回 null，绝不硬造模型名。
  */
-export function resolveTransientFallbackModel(input: {
+export interface TransientModelTarget {
+  provider: LLMProvider;
+  model: string;
+}
+
+function normalizeTarget(input: {
   provider?: LLMProvider | string | null;
   model?: string | null;
-  fallbackCount: number;
-}): { provider: LLMProvider; model: string } | null {
-  if (!Number.isInteger(input.fallbackCount) || input.fallbackCount < 1) {
+}): TransientModelTarget | null {
+  const provider = typeof input.provider === "string" ? input.provider.trim() : "";
+  const model = typeof input.model === "string" ? input.model.trim() : "";
+  if (!provider || !model) {
     return null;
   }
-  const provider = input.provider;
-  if (typeof provider !== "string" || !isBuiltInProvider(provider)) {
+  return { provider: provider as LLMProvider, model };
+}
+
+export function mergeTransientModelAttemptedTargets(
+  existing: DirectorAutoExecutionState["transientModelAttemptedTargets"],
+  ...targets: Array<TransientModelTarget | null | undefined>
+): TransientModelTarget[] {
+  const merged: TransientModelTarget[] = [];
+  const seen = new Set<string>();
+  for (const target of [...(existing ?? []), ...targets]) {
+    const normalized = normalizeTarget(target ?? {});
+    if (!normalized) continue;
+    const key = `${normalized.provider}\u0000${normalized.model}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(normalized);
+  }
+  return merged.slice(-12);
+}
+
+export function resolveFailedPipelineModelTarget(input: {
+  payloadProvider?: LLMProvider | string | null;
+  payloadModel?: string | null;
+  activeOverride?: TransientModelTarget | null;
+  requestProvider?: LLMProvider | string | null;
+  requestModel?: string | null;
+}): TransientModelTarget | null {
+  const payloadTarget = normalizeTarget({
+    provider: input.payloadProvider,
+    model: input.payloadModel,
+  });
+  if (payloadTarget) return payloadTarget;
+  const overrideTarget = normalizeTarget(input.activeOverride ?? {});
+  if (overrideTarget) return overrideTarget;
+  return normalizeTarget({
+    provider: input.requestProvider,
+    model: input.requestModel,
+  });
+}
+
+async function loadTransientFailoverModelCandidates(input: {
+  provider: LLMProvider;
+  currentModel: string;
+}): Promise<string[]> {
+  if (isBuiltInProvider(input.provider)) {
+    return getProviderModels(input.provider, {
+      allowAnonymous: false,
+      fallbackModel: input.currentModel,
+    });
+  }
+  const secret = await secretStore.getProvider(input.provider);
+  if (!secret || !secret.isActive) {
+    return [];
+  }
+  return getProviderModels(input.provider, {
+    apiKey: secret.key ?? undefined,
+    baseURL: secret.baseURL ?? undefined,
+    allowAnonymous: true,
+    fallbackModel: secret.model ?? input.currentModel,
+    includeBuiltInFallback: false,
+  });
+}
+
+export async function resolveTransientFallbackModel(input: {
+  provider?: LLMProvider | string | null;
+  currentModel?: string | null;
+  attemptedTargets?: DirectorAutoExecutionState["transientModelAttemptedTargets"];
+  /** Deterministic catalog seam for tests and owned callers that already loaded a catalog. */
+  modelCandidates?: string[];
+}): Promise<TransientModelTarget | null> {
+  const current = normalizeTarget({ provider: input.provider, model: input.currentModel });
+  if (!current) {
     return null;
   }
-  const config = PROVIDERS[provider];
-  const currentModel = input.model?.trim();
-  const alternatives = config.models.filter((model) => model !== currentModel);
-  const backupModel = alternatives[input.fallbackCount - 1];
-  if (!backupModel) {
+  let candidates: string[];
+  try {
+    candidates = input.modelCandidates ?? await loadTransientFailoverModelCandidates({
+      provider: current.provider,
+      currentModel: current.model,
+    });
+  } catch (error) {
+    console.warn("[auto-director.failover] model catalog unavailable", {
+      provider: current.provider,
+      reason: error instanceof Error ? error.message : String(error),
+    });
     return null;
   }
-  return { provider, model: backupModel };
+  const attempted = new Set(
+    mergeTransientModelAttemptedTargets(input.attemptedTargets)
+      .map((target) => `${target.provider}\u0000${target.model}`),
+  );
+  for (const candidate of candidates) {
+    const normalized = normalizeTarget({ provider: current.provider, model: candidate });
+    if (!normalized || normalized.model === current.model) continue;
+    if (attempted.has(`${normalized.provider}\u0000${normalized.model}`)) continue;
+    return normalized;
+  }
+  return null;
 }
 
 /**

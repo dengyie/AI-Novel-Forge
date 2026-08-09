@@ -24,6 +24,7 @@ import {
 } from "../novelDirectorAutoExecution";
 import {
   buildFailureCircuitBreaker,
+  buildUnavailableModelCircuitBreaker,
   isDirectorCircuitBreakerOpen,
   runFullBookAutopilotReplanNotice,
   stopAutoExecutionForCircuitBreaker,
@@ -35,6 +36,8 @@ import {
   isSkippableAutoExecutionReviewFailure,
   isTransientModelFailure,
   MAX_TRANSIENT_MODEL_FALLBACK,
+  mergeTransientModelAttemptedTargets,
+  resolveFailedPipelineModelTarget,
   resolveTransientFallbackModel,
 } from "../novelDirectorAutoExecutionFailure";
 import { resolveAutoExecutionRuntimeRangeAndState } from "../novelDirectorAutoExecutionRuntimePreparation";
@@ -225,53 +228,95 @@ export async function handleAutoExecutionFailure(input: {
   // 方案 D（P1-4）：瞬态模型/服务故障独立 fallback 重投递。
   // transport 类失败（timeout/503/429/reset，非质量门禁、非用户取消）先走独立预算重投该批次，
   // 不立即计入质量预算阶梯（不污染内容修复阶梯），也不累计 patch/model 熔断信号——瞬时抖动给足自愈窗口。
-  // 预算耗尽（transientModelFallbackCount >= MAX_TRANSIENT_MODEL_FALLBACK）才回落到既有熔断路径，
-  // 持续故障最终停等人工介入。计数持久化在 autoExecution 状态（transientModelFallbackCount），
-  // 跨进程 / 服务重启连续累计，每次自增有界，重放次数有界。
+  // 只有目录中存在尚未失败的新候选且预算未耗尽时才换模重投；候选耗尽、执行事实缺失
+  // 或预算耗尽都会清掉旧 override，并进入独立模型/服务熔断检查点。计数持久化在
+  // autoExecution 状态（transientModelFallbackCount），跨进程 / 服务重启连续累计。
   if (
     autoExecution.autoRepair
     && isFullBookAutopilotRunMode(request.runMode)
     && isTransientModelFailure(failureMessage, job.status)
-    && (autoExecution.transientModelFallbackCount ?? 0) < MAX_TRANSIENT_MODEL_FALLBACK
   ) {
-    autoExecution = {
-      ...autoExecution,
-      transientModelFallbackCount: (autoExecution.transientModelFallbackCount ?? 0) + 1,
-      pipelineJobId: null,
-      pipelineStatus: null,
-    };
-    // 真正的模型 failover：预算内每次换模重投都解析一个新的备用模型写入状态，
-    // 续跑重投该批次时（AutoExecutionRangeRunner.startPipelineJob）会优先用它，
-    // 而不是重复使用刚失败的原模型。逐次从 provider 备用列表取不同模型（跨厂商
-    // 候选如 openai 下的 deepseek-v4-pro 也覆盖），预算耗尽后回落既有熔断路径。
-    const transientFallbackModel = resolveTransientFallbackModel({
-      provider: request.provider,
-      model: request.model,
-      fallbackCount: autoExecution.transientModelFallbackCount ?? 0,
+    const failedPayload = parsePipelinePayload(job.payload);
+    const failedTarget = resolveFailedPipelineModelTarget({
+      payloadProvider: failedPayload.provider,
+      payloadModel: failedPayload.model,
+      activeOverride: autoExecution.transientModelOverride,
+      requestProvider: request.provider,
+      requestModel: request.model,
     });
+    // Legacy states may have an override but no attempted-target ledger. Seed the original
+    // request target before the failed override so a two-model provider cannot cycle back.
+    const legacyOriginalTarget = autoExecution.transientModelOverride
+      ? resolveFailedPipelineModelTarget({
+        requestProvider: request.provider,
+        requestModel: request.model,
+      })
+      : null;
+    const attemptedTargets = mergeTransientModelAttemptedTargets(
+      autoExecution.transientModelAttemptedTargets,
+      legacyOriginalTarget,
+      failedTarget,
+    );
+    const transientFallbackModel = failedTarget
+      && (autoExecution.transientModelFallbackCount ?? 0) < MAX_TRANSIENT_MODEL_FALLBACK
+      ? await resolveTransientFallbackModel({
+        provider: failedTarget.provider,
+        currentModel: failedTarget.model,
+        attemptedTargets,
+      })
+      : null;
     if (transientFallbackModel) {
       autoExecution = {
         ...autoExecution,
+        transientModelFallbackCount: (autoExecution.transientModelFallbackCount ?? 0) + 1,
         transientModelOverride: transientFallbackModel,
+        transientModelAttemptedTargets: attemptedTargets,
+        pipelineJobId: null,
+        pipelineStatus: null,
       };
+      ({ range, autoExecution } = await resolveAutoExecutionRuntimeRangeAndState(deps, {
+        novelId,
+        existingState: autoExecution,
+        pipelineJobId: null,
+        pipelineStatus: "queued",
+        allowLazyChapterPlanning: input.allowLazyChapterPlanning,
+      }));
+      await syncAutoExecutionTaskState(deps, {
+        taskId,
+        novelId,
+        request,
+        range,
+        autoExecution,
+        isBackgroundRunning: true,
+        resumeStage: "pipeline",
+      });
+      return { kind: "continue", range, autoExecution, progressGuard };
     }
-    ({ range, autoExecution } = await resolveAutoExecutionRuntimeRangeAndState(deps, {
-      novelId,
-      existingState: autoExecution,
-      pipelineJobId: null,
-      pipelineStatus: "queued",
-      allowLazyChapterPlanning: input.allowLazyChapterPlanning,
-    }));
-    await syncAutoExecutionTaskState(deps, {
+    // Catalog exhaustion, catalog failure, missing execution facts, or exhausted failover
+    // budget is infrastructure state, not chapter quality debt. Persist the failed targets,
+    // clear the unusable override, and stop at a switch-model recovery checkpoint.
+    const unavailableAutoExecution = {
+      ...autoExecution,
+      transientModelOverride: null,
+      transientModelAttemptedTargets: attemptedTargets,
+      pipelineJobId: input.pipelineJobId,
+      pipelineStatus: job.status,
+    };
+    const unavailableCircuitBreaker = buildUnavailableModelCircuitBreaker({
+      autoExecution: unavailableAutoExecution,
+      jobStatus: job.status,
+      message: failureMessage,
+    });
+    await stopAutoExecutionForCircuitBreaker(deps, {
       taskId,
       novelId,
       request,
       range,
-      autoExecution,
-      isBackgroundRunning: true,
+      autoExecution: unavailableAutoExecution,
+      circuitBreaker: unavailableCircuitBreaker,
       resumeStage: "pipeline",
     });
-    return { kind: "continue", range, autoExecution, progressGuard };
+    return { kind: "stop" };
   }
 
   let budgetedAutoExecution = autoExecution;

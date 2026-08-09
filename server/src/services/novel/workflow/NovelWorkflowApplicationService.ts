@@ -373,20 +373,45 @@ export class NovelWorkflowApplicationService {
     });
   }
 
-  async cancelTask(taskId: string) {
-    const existing = await this.workflow.getTaskById(taskId);
+  async cancelTask(taskId: string, row: WorkflowRow = null) {
+    const existing = row ?? await this.workflow.getTaskByIdWithoutHealing(taskId);
     if (!existing) {
       throw new AppError("Task not found.", 404);
     }
-    return this.workflow.updateWorkflowTaskWithNotifications({
-      before: existing,
+    if (existing.status === "cancelled") {
+      return existing;
+    }
+    if (!["queued", "running", "waiting_approval"].includes(existing.status)) {
+      throw new AppError("Task is no longer cancellable.", 409);
+    }
+    const now = new Date();
+    const claimed = await this.workflow.updateTaskManyWithRetry({
+      where: {
+        id: taskId,
+        status: existing.status,
+        cancelRequestedAt: existing.cancelRequestedAt,
+        updatedAt: existing.updatedAt,
+        attemptCount: existing.attemptCount,
+      },
       data: {
         status: "cancelled",
-        cancelRequestedAt: new Date(),
-        finishedAt: new Date(),
-        heartbeatAt: new Date(),
+        cancelRequestedAt: now,
+        finishedAt: now,
+        heartbeatAt: now,
       },
     });
+    if (claimed.count === 0) {
+      const latest = await this.workflow.getTaskByIdWithoutHealing(taskId);
+      if (latest?.status === "cancelled") {
+        return latest;
+      }
+      throw new AppError("Task state changed before cancellation was accepted.", 409);
+    }
+    const next = await this.workflow.getTaskByIdWithoutHealing(taskId);
+    if (next) {
+      await this.workflow.notifyAutoDirectorTaskTransition({ before: existing, after: next });
+    }
+    return next;
   }
 
   /**
@@ -399,17 +424,21 @@ export class NovelWorkflowApplicationService {
    * 返回认领后的完整行（含 novel，供通知）；行不存在抛 404；条件不满足
    * （已被并发认领/已人工介入/状态已翻回活跃）返回 null，调用方据此跳过 continue。
    */
-  async retryTask(taskId: string) {
-    const existing = await this.workflow.getTaskById(taskId);
+  async retryTask(taskId: string, row: WorkflowRow = null) {
+    const existing = row ?? await this.workflow.getTaskByIdWithoutHealing(taskId);
     if (!existing) {
       throw new AppError("Task not found.", 404);
+    }
+    if (!["failed", "cancelled"].includes(existing.status)) {
+      return null;
     }
     const claimed = await prisma.novelWorkflowTask.updateMany({
       where: {
         id: taskId,
-        status: { in: ["failed", "cancelled"] },
+        status: existing.status,
         pendingManualRecovery: false,
-        cancelRequestedAt: null,
+        cancelRequestedAt: existing.cancelRequestedAt,
+        updatedAt: existing.updatedAt,
         attemptCount: existing.attemptCount,
       },
       data: {
@@ -499,8 +528,9 @@ export class NovelWorkflowApplicationService {
   async applyAutoDirectorLlmOverride(
     taskId: string,
     llmOverride: Pick<DirectorLLMOptions, "provider" | "model" | "temperature">,
+    row: WorkflowRow = null,
   ) {
-    const existing = await this.workflow.getTaskById(taskId);
+    const existing = row ?? await this.workflow.getTaskByIdWithoutHealing(taskId);
     if (!existing) {
       throw new AppError("Workflow task not found.", 404);
     }

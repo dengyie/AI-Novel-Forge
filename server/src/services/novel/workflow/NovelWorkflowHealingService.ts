@@ -34,12 +34,7 @@ import {
   isPreNovelAutoDirectorCandidateTask,
 } from "./novelWorkflow.helpers";
 import { buildRestoreTaskToCheckpointResult } from "./novelWorkflowCheckpoint";
-import {
-  STALE_AUTO_DIRECTOR_RUNNING_MESSAGE,
-  isAutoResumableStaleAutoDirectorTask,
-  isStaleAutoDirectorRunningTask,
-  resolveStaleRunningTaskMs,
-} from "./autoDirectorStaleTaskRecovery";
+import { StaleAutoDirectorRecoveryService } from "./recovery";
 import {
   resolveActiveAutoDirectorAutoExecution,
   syncActiveAutoDirectorAutoExecutionTaskState,
@@ -73,10 +68,14 @@ type AutoDirectorNovelTaskRow = {
 };
 
 export class NovelWorkflowHealingService {
+  private readonly staleRecoveryService: StaleAutoDirectorRecoveryService;
+
   constructor(
     private readonly workflow: NovelWorkflowStoreService,
     private readonly directorCommandService: DirectorCommandService | null = null,
-  ) {}
+  ) {
+    this.staleRecoveryService = new StaleAutoDirectorRecoveryService(workflow, directorCommandService);
+  }
 
   private async resolveStructuredOutlineTaskProgress(input: {
     novelId: string;
@@ -385,83 +384,7 @@ export class NovelWorkflowHealingService {
     taskId: string,
     row = null as AutoDirectorNovelTaskRow | null,
   ): Promise<boolean> {
-    const candidate = row ?? await this.workflow.getTaskByIdWithoutHealing(taskId);
-    if (!candidate || !isStaleAutoDirectorRunningTask(candidate)) {
-      return false;
-    }
-    const existing = await this.workflow.getTaskByIdWithoutHealing(taskId);
-    if (!existing || !isStaleAutoDirectorRunningTask(existing)) {
-      return false;
-    }
-    // P0-2 自动续跑：服务重启/僵死但任务本身可恢复（全书自动执行启用、熔断未开、
-    // 未取消、仍有剩余章节）→ 自动 enqueue continue，而不是标失败等人手点「继续」。
-    // 续跑后刷新心跳，避免下一轮保留扫描重复触发；任务保持 running 由命令队列接管。
-    if (this.directorCommandService && isAutoResumableStaleAutoDirectorTask(existing)) {
-      try {
-        await this.directorCommandService.enqueueContinueCommand(taskId, {
-          continuationMode: "resume",
-          forceResume: true,
-        });
-      } catch (error) {
-        console.warn("[auto-director.heal] auto-resume enqueue failed", {
-          taskId,
-          reason: error instanceof Error ? error.message : String(error),
-        });
-      }
-      // P0-2 续跑防"取消复活"TOCTOU：enqueue 之后必须用 CAS 守卫写回，而不是
-      // 无条件单行 update。若在 read 与 write 之间任务被并发推进/取消（心跳或
-      // updatedAt 刷新、status 变更、cancelRequestedAt 置位），守卫不命中 →
-      // count=0 → 放弃本次写回，绝不把已取消/已推进的任务重新复活成 running。
-      // enqueue 的 continue 命令在任务处理时遇到取消会自行以 WORKFLOW_TASK_CANCELLED
-      // 409 中止，无需在此回滚；未命中只打 warn 留可观测痕迹。
-      const staleCutoff = new Date(Date.now() - resolveStaleRunningTaskMs());
-      const healed = await this.workflow.updateTaskManyWithRetry({
-        where: {
-          id: taskId,
-          lane: "auto_director",
-          status: "running",
-          pendingManualRecovery: false,
-          cancelRequestedAt: null,
-          OR: [
-            { heartbeatAt: null },
-            { heartbeatAt: { lt: staleCutoff } },
-          ],
-          updatedAt: { lt: staleCutoff },
-        },
-        data: {
-          status: "running",
-          heartbeatAt: new Date(),
-          checkpointSummary: "检测到后台执行中断，系统已自动从最近进度继续续跑。",
-          lastError: null,
-          finishedAt: null,
-          cancelRequestedAt: null,
-        },
-      });
-      if (healed.count === 0) {
-        console.warn("[auto-director.heal] auto-resume write skipped (concurrent state change)", {
-          taskId,
-        });
-        return false;
-      }
-      return true;
-    }
-    const resumeTarget = parseResumeTarget(existing.resumeTargetJson) ?? this.workflow.buildResumeTarget({
-      taskId,
-      novelId: existing.novelId,
-      lane: existing.lane ?? "auto_director",
-      stage: "auto_director",
-    });
-    await this.workflow.updateWorkflowTaskWithNotifications({
-      before: existing,
-      data: {
-        status: "failed",
-        finishedAt: new Date(),
-        heartbeatAt: new Date(),
-        resumeTargetJson: stringifyResumeTarget(resumeTarget),
-        lastError: STALE_AUTO_DIRECTOR_RUNNING_MESSAGE,
-      },
-    });
-    return true;
+    return this.staleRecoveryService.heal(taskId, row);
   }
 
   public async healStaleAutoDirectorQueuedProgress(

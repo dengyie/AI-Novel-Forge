@@ -15,6 +15,27 @@ const { taskRetentionConfig } = require("../dist/config/taskRetention.js");
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
 
+function buildResumableZombie(overrides = {}) {
+  return {
+    id: "wf-zombie",
+    lane: "auto_director",
+    status: "running",
+    pendingManualRecovery: false,
+    cancelRequestedAt: null,
+    heartbeatAt: new Date("2026-07-29T00:00:00.000Z"),
+    updatedAt: new Date("2026-07-29T00:00:00.000Z"),
+    seedPayloadJson: JSON.stringify({
+      autoExecution: {
+        enabled: true,
+        autoRepair: true,
+        remainingChapterCount: 3,
+        circuitBreaker: { status: "closed" },
+      },
+    }),
+    ...overrides,
+  };
+}
+
 function makeSummary() {
   return {
     novelWorkflowDeleted: 0,
@@ -33,6 +54,69 @@ function makeSummary() {
     autoRetryBudgetSkipped: 0,
   };
 }
+
+test("cancelZombieRunningTasks leaves resumable task untouched when command enqueue fails", { concurrency: false }, async () => {
+  const service = new TaskRetentionService();
+  const originals = {
+    findMany: prisma.novelWorkflowTask.findMany,
+    updateMany: prisma.novelWorkflowTask.updateMany,
+  };
+  let writes = 0;
+  prisma.novelWorkflowTask.findMany = async () => [buildResumableZombie()];
+  prisma.novelWorkflowTask.updateMany = async () => {
+    writes += 1;
+    return { count: 1 };
+  };
+  service.workflowTaskAdapter = {
+    async resumeStaleAutoDirectorTask() {
+      throw new Error("enqueue failed");
+    },
+  };
+
+  try {
+    const count = await service.cancelZombieRunningTasks(new Date("2026-07-30T12:00:00.000Z"));
+    assert.equal(count, 0);
+    assert.equal(writes, 0);
+  } finally {
+    prisma.novelWorkflowTask.findMany = originals.findMany;
+    prisma.novelWorkflowTask.updateMany = originals.updateMany;
+  }
+});
+
+test("cancelZombieRunningTasks lets command acceptance own the successful resume projection", { concurrency: false }, async () => {
+  const service = new TaskRetentionService();
+  const originals = {
+    findMany: prisma.novelWorkflowTask.findMany,
+    updateMany: prisma.novelWorkflowTask.updateMany,
+  };
+  let writes = 0;
+  const resumes = [];
+  const zombie = buildResumableZombie();
+  prisma.novelWorkflowTask.findMany = async () => [zombie];
+  prisma.novelWorkflowTask.updateMany = async () => {
+    writes += 1;
+    return { count: 1 };
+  };
+  service.workflowTaskAdapter = {
+    async resumeStaleAutoDirectorTask(taskId, expectedTaskState) {
+      resumes.push([taskId, expectedTaskState]);
+    },
+  };
+
+  try {
+    const count = await service.cancelZombieRunningTasks(new Date("2026-07-30T12:00:00.000Z"));
+    assert.equal(count, 0);
+    assert.deepEqual(resumes, [[zombie.id, {
+      status: "running",
+      updatedAt: zombie.updatedAt,
+      heartbeatAt: zombie.heartbeatAt,
+    }]]);
+    assert.equal(writes, 0);
+  } finally {
+    prisma.novelWorkflowTask.findMany = originals.findMany;
+    prisma.novelWorkflowTask.updateMany = originals.updateMany;
+  }
+});
 
 // --- P1a auto-archive ---
 // 注意：stub 共享 prisma 单例，文件内用例必须串行（concurrency: false）。

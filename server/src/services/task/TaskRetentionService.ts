@@ -9,7 +9,7 @@ import {
   isAutoResumableStaleAutoDirectorTask,
   isStaleAutoDirectorRunningTaskBroad,
   resolveStaleRunningTaskMs,
-} from "../novel/workflow/autoDirectorStaleTaskRecovery";
+} from "../novel/workflow/recovery";
 import { NovelWorkflowTaskAdapter } from "./adapters/NovelWorkflowTaskAdapter";
 
 const TERMINAL_WORKFLOW_STATUSES = ["succeeded", "failed", "cancelled"] as const;
@@ -481,7 +481,7 @@ export class TaskRetentionService {
    * are caught too, not just structured-outline stages.
    *
    * P0-2: 可恢复的僵死任务（seedPayload.autoExecution 未完成、熔断未开、未取消）
-   * 直接自动续跑（enqueue continue + 刷新心跳），而不是取消后等人手点「继续」，
+   * 直接自动续跑（enqueue continue，由命令接受统一投影），而不是取消后等人手点「继续」，
    * 防服务重启后全书自动执行静默停摆。
    */
   private async cancelZombieRunningTasks(now: Date): Promise<number> {
@@ -521,26 +521,18 @@ export class TaskRetentionService {
       };
       if (isAutoResumableStaleAutoDirectorTask(row)) {
         try {
-          await this.workflowTaskAdapter.resumeStaleAutoDirectorTask(row.id);
+          await this.workflowTaskAdapter.resumeStaleAutoDirectorTask(row.id, {
+            status: "running",
+            updatedAt: row.updatedAt,
+            heartbeatAt: row.heartbeatAt,
+          });
         } catch (error) {
           console.warn("[task.retention] zombie auto-resume enqueue failed", {
             taskId: row.id,
             reason: error instanceof Error ? error.message : String(error),
           });
-          cancelled += 1;
           continue;
         }
-        await prisma.novelWorkflowTask.updateMany({
-          where: staleGuardWhere,
-          data: {
-            status: "running",
-            heartbeatAt: now,
-            checkpointSummary: "检测到后台执行中断，系统已自动从最近进度继续续跑。",
-            lastError: null,
-            finishedAt: null,
-            cancelRequestedAt: null,
-          },
-        });
         continue;
       }
       const result = await prisma.novelWorkflowTask.updateMany({

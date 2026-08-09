@@ -30,6 +30,11 @@ Web API 只接收命令和返回轻量投影；Worker 负责执行重型生产�
 - 高优先级硬约束：自动导演不是第二套章节生成系统。控制面可以有导演专属 command、projection 和审批策略，但正文生成与正文修复的业务执行链必须与手动单章和批量执行共用同一套 runtime。
 - 继续、恢复、重试、接管、审批、取消等用户动作先转为 command，不各自维护独立业务流程。
 - `DirectorRunCommand` 表达控制面命令、租约和幂等，不表达业务完成事实。
+- Command 内部读取任务时必须使用不触发 healing 的原始事实读取。禁止在 `healing -> enqueue command -> task lookup` 链上再次进入 healing，否则会形成恢复递归、重复命令或无界读取；需要面向用户纠偏的查询入口才允许调用 healing 读取。
+- 僵死任务恢复成功的判据是 durable command 已创建或幂等复用，并完成 command acceptance。`queued`、心跳、手工恢复标记和旧错误清理只能由 command acceptance 单点投影；healing 与周期保留扫描不得在 enqueue 后再写一遍 `running`、刷新心跳或清空诊断。enqueue 或 acceptance 失败时保留原 stale 状态，交给下一轮恢复或人工诊断。
+- Command acceptance 必须用任务状态与 `cancelRequestedAt` 做 CAS。取消先赢时，不得把任务重新投影为 `queued`；未被任务接受的 durable command 应退出 active 状态，避免后续租约把已取消任务复活。
+- 新 command 的持久化与任务 acceptance 投影必须在同一事务内提交，worker 不得看见“有 queued command、但任务尚未接受”的中间态。`TaskDispatcher` 只是事务提交后的 best-effort 唤醒提示，不能成为 durable acceptance 的事实源；同进程唤醒失败时由数据库轮询继续消费。
+- Command lease 的运行、续租、成功、取消和失败终态只能由当前 owner 在租约未过期时用 CAS 提交。续租明确返回失去 ownership 时必须中止当前执行；续租调用本身的瞬态异常只记录告警，不能凭异常猜测已经丢租。取消任务、active command、子步骤 / generation job 收束和取消审计必须在同一事务内提交，任何一步失败都不能留下“任务已取消但 command 仍运行”或相反的半状态。
 - `DirectorRun` 是书级导演运行的根状态，`DirectorStepRun` 是步骤执行记录，`DirectorEvent` 和 `DirectorArtifact` 用于投影和恢复。
 - StepModule 应声明输入、输出、产物、进度检查和恢复策略；Pipeline 只编排，不直接知道具体业务表和 Prompt 细节。
 - StepModule 的只读事实检查必须能用 `novelId` 独立运行。`taskId`、run、command、artifacts 和 projection hints 属于自动导演扩展上下文，不能成为 `inspectReadiness`、`inspectCompletion`、`inspectProgress` 的必需条件；没有导演任务时应返回基于小说事实的最小状态。
@@ -42,13 +47,15 @@ Web API 只接收命令和返回轻量投影；Worker 负责执行重型生产�
 - `DirectorDashboardView` 必须携带 `sourceTrace` 和 `progressSource`，让调试者能看到主状态和主进度来自 task、worker、checkpoint、chapter facts 还是 runtime projection。当前端需要显示驾驶舱、进度弹窗、任务中心、任务抽屉或小说页接管提示时，应优先读取这个最终展示模型。书级自动化投影可以继续暴露旧字段做兼容，但这些字段应由 `DirectorDashboardView` 派生，而不是重新裁决主状态。
 - 工作流提醒、章节标题提醒、缺资源风险和 stale artifact 只能作为诊断或辅助操作展示；当 `DirectorDashboardView.mode` 是 `running` 或 `queued` 时，这些提醒不得把主容器、主 badge 或主按钮改成等待确认。
 - 浏览器桌面提醒只消费“导演跟进”投影中的可处理分组：`needs_validation`、`exception`、`pending`。`auto_progress` 和 `replaced` 仍可显示在跟进中心，但不触发系统级通知。提醒开关属于当前浏览器本地偏好，并且必须受浏览器通知权限约束；前端不得为了弹窗重新推断 task status 或绕过跟进投影。
-- 服务重启后不静默续跑长任务，应从真实产物断点判断可恢复范围，再由用户或策略确认继续。
+- 服务重启后不得只凭旧 `running` 状态静默续跑，应从真实产物断点和持久化自动执行授权判断可恢复范围。没有明确自动执行授权时由用户确认；已启用全书自动执行、未取消、熔断未开且仍有剩余章节时，恢复策略可以提交幂等 continue command，但仍必须服从统一 command acceptance。
 - 自动导演驱动章节生产时，只能通过 `novelService.startPipelineJob(...)` 或 `resumePipelineJob(...)` 进入统一章节执行主链；导演侧不得直接调用 writer、patch repair、heavy repair 或旧手动修文 service。
 - 自动导演遇到章节质量失败时，只能复用统一质量修复规则：patch first，失败后最多一次 `heavy_repair`，再失败则登记质量债务或 recoverable failure 并继续后续章节。导演 runtime 不得再发明独立的“导演专用修文分支”。
 - 自动导演进入下一章前必须服从章节生产链的 `final_content -> timeline_finalization -> next_chapter` 规则。导演可以决定继续、跳过或重规划，但不能绕过 `ChapterTimelineFinalizationService`。
 - 自动导演的“跳过质量修复并继续”不是绕过时间线。达到修复预算上限或用户选择 `skip_quality_repair` 时，执行面必须先基于当前最佳正文提交 degraded timeline checkpoint，再登记质量债务并推进剩余章节。
 - 自动导演不得在 director 内部补写时间线提交逻辑。stable/degraded timeline、`ChapterTimeAnchor`、hook 承接、checkpoint metadata 都属于统一章节 runtime，不属于导演专属恢复逻辑。
 - 自动导演驱动章节生产时，章节 pipeline 的 LLM 用量必须写入导演用量遥测，并带上 `chapterId`。每章累计 token 超过硬预算时，运行时应打开 `usage_anomaly` 熔断并暂停后续自动执行，防止任务重启、质量循环或上下文膨胀继续放大消耗。
+- 瞬态模型故障的 provider / model 事实优先来自失败 `GenerationJob.payload`，因为它记录本次 pipeline 实际使用的执行目标。请求参数和旧 override 只能在 job payload 缺失时兜底，不能反向覆盖已持久化执行事实。
+- 瞬态 failover 必须通过统一模型目录选择真实可用候选，并把本 run 已失败或保守排除的目标随 `autoExecution` 持久化。服务重启后不得循环回已经失败的模型；候选或切换预算耗尽时必须清空旧 override，并进入独立的 `service_unavailable` / `model_unavailable` 恢复检查点，向用户提供 `switch_model`，不能把基础设施不可用写成章节质量债、质量预算、repair ticket 或重规划信号，也不能把旧模型伪装成一次新切换。
 - 自动导演投影必须把 `terminalAction=defer_and_continue` 且非重规划的质量结果视为“已记录质量债务”，不能升级成 `action_required`、`error` 或“出错需处理”。这类质量债务只影响后续优化提示，不阻塞继续执行。
 - 连续质量债数量只能用于观测，不能作为停止全书执行的熔断条件。每次 `defer_and_continue` 后必须比较 `nextChapterId / nextChapterOrder / remainingChapterCount`：游标或剩余量有推进就重置无推进计数并继续；只有连续多次三项均不变，才能按运行时无推进故障停止。禁止用“连续 N 章质量未收敛”替代游标证据。
 - 自动导演执行面只能把明确的 `stop_for_replan` / `replan_required` 接入重规划检查点。章节审核返回 `local_patch_plan`、`continue_with_warning`、`patchable_obligation_gap` 或修复后仍有可记录义务缺口时，应登记为质量债务或局部修复建议并继续剩余章节，不能因为 `recommended=true` 就写入 `replanAlertDetails`。
@@ -111,15 +118,18 @@ Web API 只接收命令和返回轻量投影；Worker 负责执行重型生产�
 - 候选确认或恢复入口回到 `/novels/create`：检查 `resumeTargetToRoute`、书级自动化投影、任务 UI helper 和移动端入口是否仍在生成旧的 `workflowTaskId + mode=director` 链接。正确链接应使用 `/novels/auto-director?taskId=...`，旧链接只应由前端兼容跳转处理。
 - 服务重启后假 running：检查租约过期、active step、command 状态和产物断点是否统一投影。
 - 重复点击继续产生多条执行链：检查 command 幂等键和 active command 复用。
+- stale 恢复后任务在 `running` / `queued` 间反复跳变：检查 healing、保留扫描和 command acceptance 是否仍有多个状态写者，以及 command 内部读取是否误触发 healing。
+- 瞬态模型故障在两个模型间来回切换：先核对失败 job payload 中的 provider / model，再检查 `autoExecution` 是否持久化已尝试目标、模型目录是否返回真实候选，以及候选耗尽时旧 override 是否被清空。
 
 不能用前端禁用按钮或降低轮询频率掩盖执行面阻塞。
 
 ## 相关模块
 
-- `server/src/services/novel/director/DirectorCommandService.ts`
-- `server/src/services/novel/director/DirectorCommandExecutor.ts`
-- `server/src/services/novel/director/DirectorCommandInterpreter.ts`
-- `server/src/services/novel/director/directorSubsystem.ts`
+- `server/src/services/novel/director/commands/`
+- `server/src/services/novel/director/automation/`
+- `server/src/services/novel/workflow/recovery/`
+- `server/src/services/task/TaskRetentionService.ts`
+- `server/src/services/novel/director/runtime/directorSubsystem.ts`
 - `server/src/services/novel/director/runtime/`
 - `server/src/services/novel/director/workflowStepRuntime/`
 - `server/src/workers/`

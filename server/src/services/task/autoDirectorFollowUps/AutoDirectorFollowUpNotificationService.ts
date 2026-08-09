@@ -24,7 +24,7 @@ import { extractBlockedAutoDirectorValidationResult } from "./autoDirectorFollow
 import {
   extractErrorCode,
   extractErrorMessage,
-  isTolerableNotificationWriteError,
+  isTolerableNotificationError,
 } from "./autoDirectorFollowUpErrorTolerance";
 
 // 触发站内红点的"需处理/关注"事件；progress_changed 是推进噪声，不惊扰红点。
@@ -116,7 +116,7 @@ export class AutoDirectorFollowUpNotificationService {
     try {
       return await getAutoDirectorChannelSettings();
     } catch (error) {
-      if (isTolerableNotificationWriteError(error)) {
+      if (isTolerableNotificationError(error)) {
         console.warn(
           `[auto-director.notification] channel settings unavailable (${extractErrorCode(error) ?? "unknown"}): ${extractErrorMessage(error)}; external channels disabled`,
         );
@@ -406,7 +406,7 @@ export class AutoDirectorFollowUpNotificationService {
         },
       });
     } catch (error) {
-      if (isTolerableNotificationWriteError(error)) {
+      if (isTolerableNotificationError(error)) {
         console.warn(
           `[auto-director.notification] notification log write swallowed (${extractErrorCode(error) ?? "unknown"}): channel=${input.channelType} event=${input.eventType} task=${input.taskId} ${extractErrorMessage(error)}`,
         );
@@ -458,7 +458,7 @@ export class AutoDirectorFollowUpNotificationService {
         },
       });
     } catch (error) {
-      if (isTolerableNotificationWriteError(error)) {
+      if (isTolerableNotificationError(error)) {
         console.warn(
           `[auto-director.notification] in-app unread write swallowed (${extractErrorCode(error) ?? "unknown"}): event=${input.eventType} task=${input.taskId} ${extractErrorMessage(error)}`,
         );

@@ -18,6 +18,7 @@ import {
 import {
   buildClosedDirectorCircuitBreakerState,
   isDirectorCircuitBreakerOpen,
+  openDirectorCircuitBreaker,
   recordChapterUsageBudgetExceededSignal,
   recordModelFailureSignal,
   recordPatchFailureSignal,
@@ -45,7 +46,7 @@ type AutomationLedgerEventPort = Pick<
 interface CircuitBreakerWorkflowPort extends AutoExecutionCheckpointRuntimeDeps {
   workflowService: AutoExecutionCheckpointRuntimeDeps["workflowService"] & {
     markTaskFailed(taskId: string, message: string, patch?: {
-      stage?: "quality_repair";
+      stage?: "quality_repair" | "auto_director";
       itemKey?: string | null;
       itemLabel?: string;
       checkpointType?: "chapter_batch_ready" | "replan_required";
@@ -87,15 +88,19 @@ export async function stopAutoExecutionForCircuitBreaker(
   const scopeLabel = buildDirectorAutoExecutionScopeLabelFromState(autoExecution, input.range.totalChapterCount);
   const message = input.circuitBreaker.message?.trim()
     || `${scopeLabel}已暂停，等待处理后再继续。`;
+  const requiresModelSwitch = input.circuitBreaker.reason === "model_unavailable"
+    || input.circuitBreaker.reason === "service_unavailable";
   await ledgerEventService.recordCircuitBreakerOpened({
     taskId: input.taskId,
     novelId: input.novelId,
     state: input.circuitBreaker,
   }).catch(() => null);
   await deps.workflowService.markTaskFailed(input.taskId, message, {
-    stage: "quality_repair",
-    itemKey: "quality_repair",
-    itemLabel: buildDirectorAutoExecutionPausedLabel(autoExecution),
+    stage: requiresModelSwitch ? "auto_director" : "quality_repair",
+    itemKey: requiresModelSwitch ? "switch_model" : "quality_repair",
+    itemLabel: requiresModelSwitch
+      ? "AI 服务暂不可用，请切换模型后继续自动成书"
+      : buildDirectorAutoExecutionPausedLabel(autoExecution),
     checkpointType: input.circuitBreaker.reason === "replan_loop" ? "replan_required" : "chapter_batch_ready",
     checkpointSummary: buildDirectorAutoExecutionPausedSummary({
       scopeLabel,
@@ -188,6 +193,24 @@ export function buildFailureCircuitBreaker(input: {
     reason: input.jobStatus === "failed" ? "service_unavailable" : "model_unavailable",
     message: input.message,
     nodeKey: "chapter_execution_node",
+  });
+}
+
+export function buildUnavailableModelCircuitBreaker(input: {
+  autoExecution: DirectorAutoExecutionState;
+  jobStatus: PipelineJobStatus;
+  message: string;
+}): DirectorCircuitBreakerState {
+  const reason = input.jobStatus === "failed" ? "service_unavailable" : "model_unavailable";
+  const previousModelFailureCount = input.autoExecution.circuitBreaker?.reason === reason
+    ? input.autoExecution.circuitBreaker.modelFailureCount ?? 0
+    : 0;
+  return openDirectorCircuitBreaker({
+    previous: input.autoExecution.circuitBreaker,
+    reason,
+    message: input.message,
+    nodeKey: "chapter_execution_node",
+    modelFailureCount: previousModelFailureCount + 1,
   });
 }
 

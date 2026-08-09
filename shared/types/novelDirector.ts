@@ -307,13 +307,22 @@ export interface DirectorAutoExecutionState extends DirectorAutoExecutionPlan {
    * 瞬态模型故障 fallback 时切换到的备用模型（provider + model）。
    * 命中 transport 类失败（timeout/503/429/reset）且预算未耗尽时，失败处理器写入
    * 并随 autoExecution 状态持久化；续跑重投该批次时会用此模型，而不是重复使用
-   * 失败的原模型（真正的 failover，而非同模型无限重试）。预算耗尽 / 原模型恢复后
-   * 由失败处理器按需更新或保留，属 run 级降级状态（与 circuitBreaker 同寿命）。
+   * 失败的原模型（真正的 failover，而非同模型无限重试）。候选耗尽时必须清空，
+   * 不能把旧 override 当作新一次切模；属 run 级降级状态（与 circuitBreaker 同寿命）。
    */
   transientModelOverride?: {
     provider: LLMProvider;
     model: string;
   } | null;
+  /**
+   * Run-scoped record of models that failed with a transient transport error, plus any
+   * conservatively excluded legacy source target. Persisted with autoExecution so service
+   * restarts cannot cycle back and consume the bounded failover budget on duplicate targets.
+   */
+  transientModelAttemptedTargets?: Array<{
+    provider: LLMProvider;
+    model: string;
+  }>;
 }
 
 export type DirectorQualityRepairRiskLevel =

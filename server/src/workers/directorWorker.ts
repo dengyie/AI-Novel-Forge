@@ -4,6 +4,10 @@ import { loadProviderApiKeys } from "../llm/factory";
 import { initializeRagSettingsCompatibility } from "../services/settings/RagCompatibilityBootstrapService";
 import { qualityDebtSettingsService } from "../services/settings/QualityDebtSettingsService";
 import { DirectorCommandExecutor } from "../services/novel/director/commands/DirectorCommandExecutor";
+import {
+  isDirectorCommandLeaseLost,
+  throwIfDirectorCommandLeaseLost,
+} from "../services/novel/director/commands/DirectorCommandLeaseGuard";
 import { DirectorTaskQueue, type DirectorTaskQueueOptions } from "./DirectorTaskQueue";
 import { taskDispatcher } from "./TaskDispatcher";
 
@@ -117,34 +121,68 @@ export class DirectorWorker {
     if (!leased) return false;
     // If stop raced after lease, still finish this command (lease already held) so state is consistent.
     const { command } = leased;
-    const stopRenewal = this.queue.startLeaseRenewal(command.id, slotId);
+    const renewal = this.queue.startLeaseRenewal(command.id, slotId);
 
     try {
       await this.queue.acquireResourceGate(command.novelId, command.commandType);
       try {
-        await this.queue.markRunning(command.id, slotId);
+        const stillOwnsLease = await this.queue.markRunning(command.id, slotId);
+        if (!stillOwnsLease) {
+          console.warn(
+            `[director.worker] lease lost before execution commandId=${command.id} taskId=${command.taskId} slot=${slotId}`,
+          );
+          return true;
+        }
+        throwIfDirectorCommandLeaseLost(renewal.signal, {
+          commandId: command.id,
+          leaseOwner: `${this.queue.workerId}:${slotId}`,
+        });
 
         console.log(
           `[director.worker] executing commandId=${command.id} type=${command.commandType} taskId=${command.taskId} novelId=${command.novelId} slot=${slotId}`,
         );
 
-        const outcome = await this.commandExecutor.execute(command.id);
+        const outcome = await this.commandExecutor.execute(command.id, {
+          signal: renewal.signal,
+          leaseOwner: `${this.queue.workerId}:${slotId}`,
+          leaseMs: this.queue.leaseMs,
+        });
+        throwIfDirectorCommandLeaseLost(renewal.signal, {
+          commandId: command.id,
+          leaseOwner: `${this.queue.workerId}:${slotId}`,
+        });
 
         if (outcome === "cancelled") {
-          await this.queue.cancelTask(command.id, slotId);
-          console.log(`[director.worker] cancelled commandId=${command.id}`);
+          const cancelled = await this.queue.cancelTask(command.id, slotId);
+          if (!cancelled) {
+            renewal.markLost();
+            console.warn(`[director.worker] lease lost before cancel finalization commandId=${command.id}`);
+          } else {
+            console.log(`[director.worker] cancelled commandId=${command.id}`);
+          }
         } else {
-          await this.queue.completeTask(command.id, slotId);
-          console.log(`[director.worker] completed commandId=${command.id}`);
+          const completed = await this.queue.completeTask(command.id, slotId);
+          if (!completed) {
+            renewal.markLost();
+            console.warn(`[director.worker] lease lost before success finalization commandId=${command.id}`);
+          } else {
+            console.log(`[director.worker] completed commandId=${command.id}`);
+          }
         }
       } finally {
         this.queue.releaseResourceGate(command.novelId, command.commandType);
       }
     } catch (error) {
-      console.error(`[director.worker] command failed commandId=${command.id}`, error);
-      await this.queue.failTask(command.id, slotId, error);
+      if (isDirectorCommandLeaseLost(error, renewal.signal)) {
+        console.warn(
+          `[director.worker] lease lost during execution commandId=${command.id} taskId=${command.taskId} slot=${slotId}`,
+        );
+      } else {
+        console.error(`[director.worker] command failed commandId=${command.id}`, error);
+        await this.queue.failTask(command.id, slotId, error);
+      }
     } finally {
-      stopRenewal();
+      renewal.stop();
     }
 
     return true;

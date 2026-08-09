@@ -21,7 +21,9 @@ waitForWork() → leaseNext() → acquireResourceGate() → markRunning() → ex
 
 ### 3. 持久化与调度层（Services）
 
-- **`DirectorCommandService`** — HTTP 入口，创建 `DirectorRunCommand`，并发出 `taskDispatcher.notify()` 唤醒信号。
+- **`DirectorCommandService`** — 命令应用 facade，校验任务事实、构造幂等键并创建或复用 `DirectorRunCommand`；HTTP 层只调用该 facade，不拥有命令状态机。
+- **`DirectorCommandAcceptanceService`** — 在同一事务内提交新命令与任务 `queued` 投影；取消或终态先赢时让命令退出 active 状态。事务提交后才发送 `taskDispatcher.notify()`，该信号只用于降低同进程延迟，失败时由 durable queue 轮询兜底。
+- **`commands/leases/DirectorCommandLeaseService`** — 统一拥有 command lease、过期恢复、终态 CAS 和取消事务；取消任务、active command、子运行状态与取消审计必须原子收束，facade 和 worker 不得各自维护第二套 lifecycle。
 - **`DirectorCommandExecutor`** — 将命令解释为自动导演管线动作，并调用 `NovelDirectorService` 推进候选、接管、恢复、审批和修复流程。
 - **`DirectorRuntimeStore` / `DirectorRuntimeService`** — 维护自动导演步骤、事件、artifact 和策略快照；不参与后台命令 lease。
 

@@ -35,8 +35,12 @@ test("director worker renews a leased command while waiting for resource budget"
   };
   queue.startLeaseRenewal = (commandId, slotId) => {
     events.push(`start-renewal:${commandId}:${slotId}`);
-    return () => {
-      events.push("stop-renewal");
+    return {
+      signal: new AbortController().signal,
+      markLost: () => events.push("mark-lost"),
+      stop: () => {
+        events.push("stop-renewal");
+      },
     };
   };
   queue.acquireResourceGate = async (novelId, commandType) => {
@@ -49,12 +53,15 @@ test("director worker renews a leased command while waiting for resource budget"
   };
   queue.markRunning = async (commandId, slotId) => {
     events.push(`mark-running:${commandId}:${slotId}`);
+    return true;
   };
   queue.completeTask = async (commandId, slotId) => {
     events.push(`complete:${commandId}:${slotId}`);
+    return true;
   };
   queue.cancelTask = async () => {
     events.push("cancel");
+    return true;
   };
   queue.failTask = async () => {
     events.push("fail");
@@ -101,6 +108,182 @@ test("director worker renews a leased command while waiting for resource budget"
     events.indexOf("start-renewal:command-1:slot-1") < events.indexOf("acquire-gate:novel-1:continue"),
     "renewal should start before waiting for resource gate",
   );
+});
+
+test("director worker stops before executor when the leased command is no longer owned", async () => {
+  const events = [];
+  const command = {
+    id: "command-lost",
+    taskId: "task-1",
+    novelId: "novel-1",
+    commandType: "continue",
+  };
+  const queue = Object.create(DirectorTaskQueue.prototype);
+  queue.leaseNext = async () => ({ command });
+  queue.startLeaseRenewal = () => {
+    events.push("start-renewal");
+    return {
+      signal: new AbortController().signal,
+      markLost: () => events.push("mark-lost"),
+      stop: () => events.push("stop-renewal"),
+    };
+  };
+  queue.acquireResourceGate = async () => {
+    events.push("acquire-gate");
+  };
+  queue.releaseResourceGate = () => {
+    events.push("release-gate");
+  };
+  queue.markRunning = async () => {
+    events.push("mark-running-lost");
+    return false;
+  };
+  queue.completeTask = async () => {
+    events.push("complete");
+    return true;
+  };
+  queue.cancelTask = async () => {
+    events.push("cancel");
+    return true;
+  };
+  queue.failTask = async () => events.push("fail");
+
+  const worker = new DirectorWorker({
+    queue,
+    commandExecutor: {
+      execute: async () => {
+        events.push("execute");
+        return "completed";
+      },
+    },
+  });
+
+  const didWork = await worker.tick("slot-1");
+
+  assert.equal(didWork, true);
+  assert.deepEqual(events, [
+    "start-renewal",
+    "acquire-gate",
+    "mark-running-lost",
+    "release-gate",
+    "stop-renewal",
+  ]);
+});
+
+test("director task queue aborts the lease signal when renewal authoritatively loses ownership", async () => {
+  let renewCalls = 0;
+  const queue = new DirectorTaskQueue(
+    {
+      workerId: "worker-lease-loss",
+      leaseMs: 300,
+      staleScanMs: 60_000,
+    },
+    {
+      renewLease: async () => {
+        renewCalls += 1;
+        return renewCalls === 1;
+      },
+    },
+  );
+
+  const renewal = queue.startLeaseRenewal("command-lease-loss", "slot-1");
+  try {
+    const deadline = Date.now() + 1_000;
+    while (!renewal.signal.aborted && Date.now() < deadline) {
+      await delay(10);
+    }
+
+    assert.ok(renewCalls >= 2, "renewal should observe the authoritative false result");
+    assert.equal(renewal.signal.aborted, true, "lost ownership must abort the execution signal");
+  } finally {
+    if (typeof renewal === "function") renewal();
+    else renewal.stop();
+  }
+});
+
+test("director task queue does not treat a transient renewal exception as lease loss", async () => {
+  let renewCalls = 0;
+  const queue = new DirectorTaskQueue(
+    {
+      workerId: "worker-renew-error",
+      leaseMs: 300,
+      staleScanMs: 60_000,
+    },
+    {
+      renewLease: async () => {
+        renewCalls += 1;
+        throw new Error("temporary database outage");
+      },
+    },
+  );
+
+  const warn = console.warn;
+  console.warn = () => {};
+  const renewal = queue.startLeaseRenewal("command-renew-error", "slot-1");
+  try {
+    await delay(160);
+    assert.ok(renewCalls >= 2, "renewal should continue after a transient exception");
+    assert.equal(renewal.signal.aborted, false, "exceptions do not prove that ownership was lost");
+  } finally {
+    if (typeof renewal === "function") renewal();
+    else renewal.stop();
+    console.warn = warn;
+  }
+});
+
+test("director worker does not project completion or failure after execution-time lease loss", async () => {
+  const events = [];
+  const controller = new AbortController();
+  const command = {
+    id: "command-runtime-lease-loss",
+    taskId: "task-runtime-lease-loss",
+    novelId: "novel-1",
+    commandType: "continue",
+  };
+  const queue = Object.create(DirectorTaskQueue.prototype);
+  queue.leaseNext = async () => ({ command });
+  queue.startLeaseRenewal = () => ({
+    signal: controller.signal,
+    markLost: () => controller.abort(new Error("lease lost")),
+    stop: () => events.push("stop-renewal"),
+  });
+  queue.acquireResourceGate = async () => events.push("acquire-gate");
+  queue.releaseResourceGate = () => events.push("release-gate");
+  queue.markRunning = async () => true;
+  queue.completeTask = async () => {
+    events.push("complete");
+    return true;
+  };
+  queue.cancelTask = async () => {
+    events.push("cancel");
+    return true;
+  };
+  queue.failTask = async () => events.push("fail");
+
+  const worker = new DirectorWorker({
+    queue,
+    commandExecutor: {
+      execute: async (_commandId, context) => {
+        events.push("execute");
+        assert.equal(context.signal, controller.signal, "executor must receive the command lease signal");
+        controller.abort(new Error("lease lost"));
+        await delay(0);
+        events.push("executor-returned");
+        return "completed";
+      },
+    },
+  });
+
+  const didWork = await worker.tick("slot-1");
+
+  assert.equal(didWork, true);
+  assert.deepEqual(events, [
+    "acquire-gate",
+    "execute",
+    "executor-returned",
+    "release-gate",
+    "stop-renewal",
+  ]);
 });
 
 test("director task queue leases directly from director run commands", async (t) => {
@@ -153,7 +336,7 @@ test("director task queue leases directly from director run commands", async (t)
     },
     {
       renewLease: async () => true,
-      markCommandRunning: async () => {},
+      markCommandRunning: async () => true,
       markCommandSucceeded: async () => {},
       markCommandCancelled: async () => {},
       markCommandFailed: async () => {},
@@ -178,7 +361,7 @@ test("stale lease scanner is idempotent and records last successful scan time", 
   let recoverCalls = 0;
   const commandService = {
     renewLease: async () => true,
-    markCommandRunning: async () => {},
+    markCommandRunning: async () => true,
     markCommandSucceeded: async () => {},
     markCommandCancelled: async () => {},
     markCommandFailed: async () => {},
@@ -226,7 +409,7 @@ test("stale lease scanner is idempotent and records last successful scan time", 
 test("stale lease scanner does not advance lastStaleScan when recover fails", async () => {
   const commandService = {
     renewLease: async () => true,
-    markCommandRunning: async () => {},
+    markCommandRunning: async () => true,
     markCommandSucceeded: async () => {},
     markCommandCancelled: async () => {},
     markCommandFailed: async () => {},

@@ -194,24 +194,28 @@ test("auto-director retry resumes failed tasks by default", async () => {
   };
   const adapter = new NovelWorkflowTaskAdapter();
   const originalGetTaskById = adapter.workflowService.getTaskById;
-  const originalRetryTask = adapter.workflowService.retryTask;
-  const originalContinueTask = adapter.novelDirectorService.continueTask;
+  const originalGetTaskByIdWithoutHealing = adapter.workflowService.getTaskByIdWithoutHealing;
+  const originalEnqueueRetryCommand = adapter.directorCommandService.enqueueRetryCommand;
   const originalDetail = adapter.detail;
   const calls = [];
 
   prisma.taskCenterArchive.findUnique = async () => null;
-  adapter.workflowService.getTaskById = async () => ({
+  adapter.workflowService.getTaskById = async () => {
+    throw new Error("retry mutation must not enter healing lookup");
+  };
+  adapter.workflowService.getTaskByIdWithoutHealing = async () => ({
     id: "task_failed_auto_director",
     lane: "auto_director",
     status: "failed",
   });
-  adapter.workflowService.retryTask = async (taskId) => {
-    calls.push(["retry", taskId]);
-    // 真实 retryTask 认领成功返回更新后的行；返回 null 表示并发认领失败会跳过 continue。
-    return { id: taskId, status: "queued" };
-  };
-  adapter.novelDirectorService.continueTask = async (taskId, input) => {
-    calls.push(["continue", taskId, input]);
+  adapter.directorCommandService.enqueueRetryCommand = async (input) => {
+    calls.push(["enqueue-retry", input]);
+    return {
+      commandId: "command-retry-1",
+      taskId: input.taskId,
+      commandType: "retry",
+      status: "queued",
+    };
   };
   adapter.detail = async (taskId) => ({
     id: taskId,
@@ -225,15 +229,89 @@ test("auto-director retry resumes failed tasks by default", async () => {
 
     assert.equal(detail.id, "task_failed_auto_director");
     assert.deepEqual(calls, [
-      ["retry", "task_failed_auto_director"],
-      ["continue", "task_failed_auto_director", { batchAlreadyStartedCount: undefined, forceResume: true }],
+      ["enqueue-retry", {
+        taskId: "task_failed_auto_director",
+        llmOverride: undefined,
+        batchAlreadyStartedCount: undefined,
+      }],
     ]);
   } finally {
     prisma.taskCenterArchive.findUnique = originals.archiveFindUnique;
     adapter.workflowService.getTaskById = originalGetTaskById;
-    adapter.workflowService.retryTask = originalRetryTask;
-    adapter.novelDirectorService.continueTask = originalContinueTask;
+    adapter.workflowService.getTaskByIdWithoutHealing = originalGetTaskByIdWithoutHealing;
+    adapter.directorCommandService.enqueueRetryCommand = originalEnqueueRetryCommand;
     adapter.detail = originalDetail;
+  }
+});
+
+test("generic workflow retry returns 409 when the retry CAS loses", async () => {
+  const adapter = new NovelWorkflowTaskAdapter();
+  const originals = {
+    archiveFindUnique: prisma.taskCenterArchive.findUnique,
+    getTaskByIdWithoutHealing: adapter.workflowService.getTaskByIdWithoutHealing,
+    retryTask: adapter.workflowService.retryTask,
+    detail: adapter.detail,
+  };
+  prisma.taskCenterArchive.findUnique = async () => null;
+  adapter.workflowService.getTaskByIdWithoutHealing = async () => ({
+    id: "task_generic_retry_race",
+    lane: "workspace",
+    status: "failed",
+  });
+  adapter.workflowService.retryTask = async () => null;
+  adapter.detail = async () => {
+    throw new Error("CAS miss must not be reported as a successful detail response");
+  };
+
+  try {
+    await assert.rejects(
+      () => adapter.retry({ id: "task_generic_retry_race" }),
+      (error) => error?.statusCode === 409,
+    );
+  } finally {
+    prisma.taskCenterArchive.findUnique = originals.archiveFindUnique;
+    adapter.workflowService.getTaskByIdWithoutHealing = originals.getTaskByIdWithoutHealing;
+    adapter.workflowService.retryTask = originals.retryTask;
+    adapter.detail = originals.detail;
+  }
+});
+
+test("auto-director cancel uses raw task lookup before enqueueing cancellation", async () => {
+  const adapter = new NovelWorkflowTaskAdapter();
+  const originals = {
+    archiveFindUnique: prisma.taskCenterArchive.findUnique,
+    getTaskById: adapter.workflowService.getTaskById,
+    getTaskByIdWithoutHealing: adapter.workflowService.getTaskByIdWithoutHealing,
+    enqueueCancelCommand: adapter.directorCommandService.enqueueCancelCommand,
+    detail: adapter.detail,
+  };
+  const calls = [];
+
+  prisma.taskCenterArchive.findUnique = async () => null;
+  adapter.workflowService.getTaskById = async () => {
+    throw new Error("cancel mutation must not enter healing lookup");
+  };
+  adapter.workflowService.getTaskByIdWithoutHealing = async () => ({
+    id: "task-running-auto-director",
+    lane: "auto_director",
+    status: "running",
+  });
+  adapter.directorCommandService.enqueueCancelCommand = async (taskId) => {
+    calls.push(["cancel", taskId]);
+  };
+  adapter.detail = async (taskId) => ({ id: taskId, kind: "novel_workflow" });
+
+  try {
+    const detail = await adapter.cancel("task-running-auto-director");
+
+    assert.equal(detail.id, "task-running-auto-director");
+    assert.deepEqual(calls, [["cancel", "task-running-auto-director"]]);
+  } finally {
+    prisma.taskCenterArchive.findUnique = originals.archiveFindUnique;
+    adapter.workflowService.getTaskById = originals.getTaskById;
+    adapter.workflowService.getTaskByIdWithoutHealing = originals.getTaskByIdWithoutHealing;
+    adapter.directorCommandService.enqueueCancelCommand = originals.enqueueCancelCommand;
+    adapter.detail = originals.detail;
   }
 });
 

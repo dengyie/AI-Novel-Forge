@@ -1828,6 +1828,81 @@ test("runFromReady uses the latest auto-execution review toggles instead of stal
   assert.deepEqual(calls[5], ["recordCheckpoint", "task-auto-exec", false, false]);
 });
 
+test("runFromReady passes the persisted transient failover target to startPipelineJob", async () => {
+  const starts = [];
+  let completed = false;
+  const runtime = new NovelDirectorAutoExecutionRuntime({
+    novelContextService: {
+      async listChapters() {
+        return [withExecutionDetail({
+          id: "chapter-1",
+          order: 1,
+          content: completed ? "已完成正文" : "",
+          generationState: completed ? "approved" : "planned",
+          chapterStatus: completed ? "completed" : "pending_generation",
+        })];
+      },
+    },
+    novelService: {
+      async startPipelineJob(_novelId, options) {
+        starts.push({ provider: options.provider, model: options.model });
+        return { id: "job-failover", status: "queued" };
+      },
+      async findActivePipelineJobForRange() {
+        return null;
+      },
+      async getPipelineJobById(jobId) {
+        completed = true;
+        return {
+          id: jobId,
+          status: "succeeded",
+          progress: 1,
+          currentStage: null,
+          currentItemLabel: null,
+          noticeSummary: null,
+          error: null,
+        };
+      },
+      async cancelPipelineJob() {},
+    },
+    workflowService: {
+      async bootstrapTask() {},
+      async getTaskById() {
+        return { status: "running" };
+      },
+      async markTaskRunning() {},
+      async recordCheckpoint() {},
+      async markTaskFailed() {},
+    },
+    buildDirectorSeedPayload(_request, _novelId, extra) {
+      return extra ?? {};
+    },
+  });
+
+  await runtime.runFromReady({
+    taskId: "task-auto-exec",
+    novelId: "novel-1",
+    request: buildRequest({ provider: "deepseek", model: "deepseek-v4-pro" }),
+    existingState: {
+      enabled: true,
+      mode: "chapter_range",
+      startOrder: 1,
+      endOrder: 1,
+      totalChapterCount: 1,
+      nextChapterId: "chapter-1",
+      nextChapterOrder: 1,
+      remainingChapterCount: 1,
+      transientModelFallbackCount: 1,
+      transientModelOverride: { provider: "deepseek", model: "deepseek-v4-flash" },
+      transientModelAttemptedTargets: [{ provider: "deepseek", model: "deepseek-v4-pro" }],
+      pipelineJobId: null,
+      pipelineStatus: null,
+    },
+  });
+
+  assert.deepEqual(starts, [{ provider: "deepseek", model: "deepseek-v4-flash" }]);
+});
+
 test("runFromReady skips the current review-blocked chapter when continuing explicit auto execution", async () => {
   const calls = [];
   const completedOrders = new Set();

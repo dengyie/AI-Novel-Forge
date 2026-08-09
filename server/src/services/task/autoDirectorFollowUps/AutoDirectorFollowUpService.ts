@@ -44,7 +44,11 @@ import {
   type RawFollowUpWorkflowRow,
 } from "./autoDirectorFollowUpProjection";
 import { loadRecentAutoDirectorAutoApprovalRecords } from "./autoDirectorAutoApprovalAudit";
-import { isTolerableNotificationWriteError } from "./autoDirectorFollowUpErrorTolerance";
+import {
+  extractErrorCode,
+  extractErrorMessage,
+  isTolerableNotificationError,
+} from "./autoDirectorFollowUpErrorTolerance";
 
 export class AutoDirectorFollowUpService {
   readonly workflowService = new NovelWorkflowService();
@@ -220,7 +224,10 @@ export class AutoDirectorFollowUpService {
         target: row.target ?? null,
       }));
     } catch (error) {
-      if (isTolerableNotificationWriteError(error)) {
+      if (isTolerableNotificationError(error)) {
+        console.warn(
+          `[auto-director.notification] delivery status read degraded (${extractErrorCode(error) ?? "unknown"}): ${extractErrorMessage(error)}`,
+        );
         return [];
       }
       throw error;
@@ -243,7 +250,10 @@ export class AutoDirectorFollowUpService {
       });
       return { unreadCount };
     } catch (error) {
-      if (isTolerableNotificationWriteError(error)) {
+      if (isTolerableNotificationError(error)) {
+        console.warn(
+          `[auto-director.notification] unread count read degraded (${extractErrorCode(error) ?? "unknown"}): ${extractErrorMessage(error)}`,
+        );
         return { unreadCount: 0 };
       }
       throw error;
@@ -268,7 +278,10 @@ export class AutoDirectorFollowUpService {
       });
       return { updated: result.count };
     } catch (error) {
-      if (isTolerableNotificationWriteError(error)) {
+      if (isTolerableNotificationError(error)) {
+        console.warn(
+          `[auto-director.notification] mark read degraded (${extractErrorCode(error) ?? "unknown"}): ${extractErrorMessage(error)}`,
+        );
         return { updated: 0 };
       }
       throw error;

@@ -8,6 +8,13 @@ const {
   NovelWorkflowService,
 } = require("../dist/services/novel/workflow/NovelWorkflowService.js");
 const {
+  NovelWorkflowApplicationService,
+} = require("../dist/services/novel/workflow/NovelWorkflowApplicationService.js");
+const {
+  isStaleAutoDirectorRunningTask,
+  isStaleAutoDirectorRunningTaskBroad,
+} = require("../dist/services/novel/workflow/recovery/index.js");
+const {
   AutoDirectorFollowUpNotificationService,
 } = require("../dist/services/task/autoDirectorFollowUps/AutoDirectorFollowUpNotificationService.js");
 const { prisma } = require("../dist/db/prisma.js");
@@ -37,6 +44,214 @@ function buildWorkflowRow(overrides = {}) {
     ...overrides,
   };
 }
+
+test("stale auto-director policy uses the latest heartbeat or persisted task activity", () => {
+  const now = new Date("2026-05-04T00:00:00.000Z");
+  const row = buildWorkflowRow({
+    status: "running",
+    currentItemKey: "beat_sheet",
+    pendingManualRecovery: false,
+    cancelRequestedAt: null,
+    heartbeatAt: new Date("2026-05-01T00:00:00.000Z"),
+    updatedAt: new Date("2026-05-03T23:59:00.000Z"),
+  });
+
+  assert.equal(isStaleAutoDirectorRunningTask(row, now), false);
+  assert.equal(isStaleAutoDirectorRunningTaskBroad(row, now), false);
+});
+
+test("workflow cancel mutation reads raw task facts without entering healing", async () => {
+  let row = buildWorkflowRow({
+    status: "running",
+    cancelRequestedAt: null,
+    attemptCount: 1,
+  });
+  let rawReads = 0;
+  const workflow = {
+    getTaskById: async () => {
+      throw new Error("cancel mutation must not invoke healing-aware lookup");
+    },
+    getTaskByIdWithoutHealing: async () => {
+      rawReads += 1;
+      return row;
+    },
+    updateTaskManyWithRetry: async ({ data }) => {
+      row = {
+        ...row,
+        ...data,
+        updatedAt: new Date(row.updatedAt.getTime() + 1),
+      };
+      return { count: 1 };
+    },
+    notifyAutoDirectorTaskTransition: async () => {},
+  };
+  const service = new NovelWorkflowApplicationService(workflow);
+
+  const cancelled = await service.cancelTask(row.id);
+
+  assert.equal(rawReads, 2, "cancel reads the raw snapshot before CAS and the committed row after CAS");
+  assert.equal(cancelled.status, "cancelled");
+  assert.ok(cancelled.cancelRequestedAt instanceof Date);
+});
+
+test("workflow cancel CAS does not overwrite a task that completed after lookup", async () => {
+  const observed = buildWorkflowRow({
+    status: "running",
+    cancelRequestedAt: null,
+    attemptCount: 1,
+  });
+  const completed = {
+    ...observed,
+    status: "succeeded",
+    updatedAt: new Date(observed.updatedAt.getTime() + 1),
+  };
+  let reads = 0;
+  const workflow = {
+    getTaskByIdWithoutHealing: async () => {
+      reads += 1;
+      return reads === 1 ? observed : completed;
+    },
+    updateTaskManyWithRetry: async () => ({ count: 0 }),
+    notifyAutoDirectorTaskTransition: async () => {
+      throw new Error("CAS miss must not notify cancellation");
+    },
+  };
+  const service = new NovelWorkflowApplicationService(workflow);
+
+  await assert.rejects(
+    () => service.cancelTask(observed.id),
+    (error) => error?.statusCode === 409,
+  );
+  assert.equal(completed.status, "succeeded");
+  assert.equal(completed.cancelRequestedAt, null);
+});
+
+test("workflow retry claim reads raw task facts without entering healing", async () => {
+  const row = buildWorkflowRow({
+    status: "failed",
+    attemptCount: 2,
+    pendingManualRecovery: false,
+    cancelRequestedAt: null,
+    checkpointType: null,
+  });
+  const originals = {
+    updateMany: prisma.novelWorkflowTask.updateMany,
+    findUnique: prisma.novelWorkflowTask.findUnique,
+  };
+  let rawReads = 0;
+  const workflow = {
+    getTaskById: async () => {
+      throw new Error("retry mutation must not invoke healing-aware lookup");
+    },
+    getTaskByIdWithoutHealing: async () => {
+      rawReads += 1;
+      return row;
+    },
+    notifyAutoDirectorTaskTransition: async () => {},
+  };
+  prisma.novelWorkflowTask.updateMany = async () => ({ count: 1 });
+  prisma.novelWorkflowTask.findUnique = async () => ({
+    ...row,
+    status: "queued",
+    attemptCount: 3,
+    novel: { title: "测试小说" },
+  });
+
+  try {
+    const service = new NovelWorkflowApplicationService(workflow);
+    const claimed = await service.retryTask(row.id);
+
+    assert.equal(rawReads, 1);
+    assert.equal(claimed.status, "queued");
+    assert.equal(claimed.attemptCount, 3);
+  } finally {
+    prisma.novelWorkflowTask.updateMany = originals.updateMany;
+    prisma.novelWorkflowTask.findUnique = originals.findUnique;
+  }
+});
+
+test("workflow retry claims an explicitly cancelled task by its cancellation snapshot", async () => {
+  const cancelledAt = new Date("2026-05-04T00:00:01.000Z");
+  const row = buildWorkflowRow({
+    status: "cancelled",
+    attemptCount: 2,
+    pendingManualRecovery: false,
+    cancelRequestedAt: cancelledAt,
+    checkpointType: null,
+  });
+  const originals = {
+    updateMany: prisma.novelWorkflowTask.updateMany,
+    findUnique: prisma.novelWorkflowTask.findUnique,
+  };
+  let claimArgs = null;
+  const workflow = {
+    getTaskByIdWithoutHealing: async () => row,
+    notifyAutoDirectorTaskTransition: async () => {},
+  };
+  prisma.novelWorkflowTask.updateMany = async (args) => {
+    claimArgs = args;
+    return { count: 1 };
+  };
+  prisma.novelWorkflowTask.findUnique = async () => ({
+    ...row,
+    status: "queued",
+    attemptCount: 3,
+    cancelRequestedAt: null,
+    novel: { title: "测试小说" },
+  });
+
+  try {
+    const service = new NovelWorkflowApplicationService(workflow);
+    const claimed = await service.retryTask(row.id);
+
+    assert.equal(claimArgs.where.status, "cancelled");
+    assert.equal(claimArgs.where.cancelRequestedAt, cancelledAt);
+    assert.equal(claimArgs.where.updatedAt, row.updatedAt);
+    assert.equal(claimed.status, "queued");
+    assert.equal(claimed.attemptCount, 3);
+    assert.equal(claimed.cancelRequestedAt, null);
+  } finally {
+    prisma.novelWorkflowTask.updateMany = originals.updateMany;
+    prisma.novelWorkflowTask.findUnique = originals.findUnique;
+  }
+});
+
+test("workflow model override reads raw task facts without entering healing", async () => {
+  const row = buildWorkflowRow({
+    seedPayloadJson: JSON.stringify({
+      provider: "deepseek",
+      model: "deepseek-v4-pro",
+      temperature: 0.7,
+    }),
+  });
+  let rawReads = 0;
+  let updateData = null;
+  const workflow = {
+    getTaskById: async () => {
+      throw new Error("model override mutation must not invoke healing-aware lookup");
+    },
+    getTaskByIdWithoutHealing: async () => {
+      rawReads += 1;
+      return row;
+    },
+    updateTaskWithRetry: async ({ data }) => {
+      updateData = data;
+      return { ...row, ...data };
+    },
+  };
+  const service = new NovelWorkflowApplicationService(workflow);
+
+  await service.applyAutoDirectorLlmOverride(row.id, {
+    provider: "deepseek",
+    model: "deepseek-v4-flash",
+    temperature: 0.5,
+  });
+
+  assert.equal(rawReads, 1);
+  const seedPayload = JSON.parse(updateData.seedPayloadJson);
+  assert.equal(seedPayload.model, "deepseek-v4-flash");
+  assert.equal(seedPayload.temperature, 0.5);
+});
 
 test("resumePendingAutoDirectorTasks requeues interrupted running tasks before continuing", async () => {
   const calls = [];
@@ -226,10 +441,10 @@ test("stale running auto director healing does not recurse through markTaskFaile
   const originals = {
     archiveFindUnique: prisma.taskCenterArchive.findUnique,
     taskFindUnique: prisma.novelWorkflowTask.findUnique,
-    taskUpdate: prisma.novelWorkflowTask.update,
+    taskUpdateMany: prisma.novelWorkflowTask.updateMany,
   };
   const updates = [];
-  const staleRow = {
+  let staleRow = {
     id: "task-stale",
     novelId: "novel-1",
     lane: "auto_director",
@@ -251,14 +466,14 @@ test("stale running auto director healing does not recurse through markTaskFaile
 
   prisma.taskCenterArchive.findUnique = async () => null;
   prisma.novelWorkflowTask.findUnique = async () => staleRow;
-  prisma.novelWorkflowTask.update = async ({ data }) => {
+  prisma.novelWorkflowTask.updateMany = async ({ data }) => {
     updates.push(data);
-    return {
+    staleRow = {
       ...staleRow,
       ...data,
-      novel: { title: "测试小说" },
       updatedAt: new Date("2026-05-04T00:00:00.000Z"),
     };
+    return { count: 1 };
   };
 
   try {
@@ -277,7 +492,7 @@ test("stale running auto director healing does not recurse through markTaskFaile
   } finally {
     prisma.taskCenterArchive.findUnique = originals.archiveFindUnique;
     prisma.novelWorkflowTask.findUnique = originals.taskFindUnique;
-    prisma.novelWorkflowTask.update = originals.taskUpdate;
+    prisma.novelWorkflowTask.updateMany = originals.taskUpdateMany;
   }
 });
 
@@ -463,7 +678,7 @@ function buildStaleResumableAutoDirectorRow(overrides = {}) {
   };
 }
 
-test("healStaleAutoDirectorRunningTask auto-resumes resumable stale task with a CAS-guarded write that never nulls cancelRequestedAt on a live row", async () => {
+test("healStaleAutoDirectorRunningTask treats durable command acceptance as the only successful recovery projection", async () => {
   const staleRow = buildStaleResumableAutoDirectorRow();
   const enqueued = [];
   const updateManyCalls = [];
@@ -475,8 +690,8 @@ test("healStaleAutoDirectorRunningTask auto-resumes resumable stale task with a 
     },
   };
   const directorCommandService = {
-    enqueueContinueCommand: async (taskId, opts) => {
-      enqueued.push([taskId, opts]);
+    enqueueContinueCommand: async (taskId, opts, options) => {
+      enqueued.push([taskId, opts, options]);
     },
   };
   const service = new NovelWorkflowHealingService(workflow, directorCommandService);
@@ -485,46 +700,163 @@ test("healStaleAutoDirectorRunningTask auto-resumes resumable stale task with a 
 
   assert.equal(changed, true);
   assert.deepEqual(enqueued, [
-    ["task-stale", { continuationMode: "resume", forceResume: true }],
+    [
+      "task-stale",
+      { continuationMode: "resume", forceResume: true },
+      {
+        expectedTaskState: {
+          status: "running",
+          updatedAt: staleRow.updatedAt,
+          heartbeatAt: staleRow.heartbeatAt,
+          currentItemKey: staleRow.currentItemKey,
+        },
+      },
+    ],
   ]);
-  assert.equal(updateManyCalls.length, 1);
-  const where = updateManyCalls[0].where;
-  // CAS 守卫：只对"仍是僵死 running 且未被取消"的行写回，绝不复活已取消任务。
-  assert.equal(where.id, "task-stale");
-  assert.equal(where.lane, "auto_director");
-  assert.equal(where.status, "running");
-  assert.equal(where.pendingManualRecovery, false);
-  assert.equal(where.cancelRequestedAt, null);
-  assert.ok(Array.isArray(where.OR), "应命中僵死心跳窗口（OR: heartbeatAt null 或早于 cutoff）");
-  assert.ok(where.updatedAt, "应附带 updatedAt 上限守卫");
-  assert.equal(updateManyCalls[0].data.status, "running");
-  assert.equal(updateManyCalls[0].data.cancelRequestedAt, null);
+  assert.equal(updateManyCalls.length, 0, "healing must not compete with command acceptance projection");
 });
 
-test("healStaleAutoDirectorRunningTask does not resurrect a task that changed between read and write (CAS miss returns false)", async () => {
+test("healStaleAutoDirectorRunningTask preserves stale diagnostics when enqueue fails", async () => {
   const staleRow = buildStaleResumableAutoDirectorRow();
-  const enqueued = [];
   const updateManyCalls = [];
   const workflow = {
     getTaskByIdWithoutHealing: async () => staleRow,
-    // 模拟竞态：写入时行已被并发取消/推进 → 守卫不命中 → count=0。
     updateTaskManyWithRetry: async (args) => {
       updateManyCalls.push(args);
-      return { count: 0 };
+      return { count: 1 };
     },
   };
   const directorCommandService = {
-    enqueueContinueCommand: async (taskId, opts) => {
-      enqueued.push([taskId, opts]);
+    enqueueContinueCommand: async () => {
+      throw new Error("command create failed");
     },
   };
   const service = new NovelWorkflowHealingService(workflow, directorCommandService);
 
   const changed = await service.healStaleAutoDirectorRunningTask("task-stale", staleRow);
 
-  // 守卫 miss：不声称已治愈（false），已取消/已推进的任务保持原样，不被复活。
   assert.equal(changed, false);
-  assert.equal(enqueued.length, 1, "continue 命令仍可入队，任务处理时自行 409 中止");
+  assert.equal(updateManyCalls.length, 0);
+  assert.equal(staleRow.status, "running");
+  assert.equal(staleRow.heartbeatAt.toISOString(), "2026-05-01T00:00:00.000Z");
+});
+
+test("healStaleAutoDirectorRunningTask does not overwrite cancellation on the non-resumable failure path", async () => {
+  let currentRow = buildStaleResumableAutoDirectorRow({
+    seedPayloadJson: null,
+  });
+  const updateManyCalls = [];
+  const workflow = {
+    getTaskByIdWithoutHealing: async () => currentRow,
+    buildResumeTarget: () => ({ taskId: currentRow.id, stage: "auto_director" }),
+    updateTaskManyWithRetry: async (args) => {
+      updateManyCalls.push(args);
+      currentRow = {
+        ...currentRow,
+        status: "cancelled",
+        cancelRequestedAt: new Date("2026-05-04T00:00:01.000Z"),
+        updatedAt: new Date("2026-05-04T00:00:01.000Z"),
+      };
+      return { count: 0 };
+    },
+    updateWorkflowTaskWithNotifications: async () => {
+      throw new Error("non-resumable stale recovery must use cancellation-safe CAS");
+    },
+    notifyAutoDirectorTaskTransition: async () => {},
+  };
+  const service = new NovelWorkflowHealingService(workflow, null);
+
+  const changed = await service.healStaleAutoDirectorRunningTask("task-stale", currentRow);
+
+  assert.equal(changed, false);
   assert.equal(updateManyCalls.length, 1);
-  assert.equal(updateManyCalls[0].where.cancelRequestedAt, null, "守卫必须要求行未被取消");
+  assert.equal(currentRow.status, "cancelled");
+  assert.ok(currentRow.cancelRequestedAt instanceof Date);
+});
+
+test("real workflow and command services close stale recovery without recursive healing and reuse one command", async () => {
+  const originals = {
+    transaction: prisma.$transaction,
+    archiveFindUnique: prisma.taskCenterArchive.findUnique,
+    taskFindUnique: prisma.novelWorkflowTask.findUnique,
+    taskUpdateMany: prisma.novelWorkflowTask.updateMany,
+    commandFindMany: prisma.directorRunCommand.findMany,
+    commandFindFirst: prisma.directorRunCommand.findFirst,
+    commandCreate: prisma.directorRunCommand.create,
+  };
+  const staleRow = buildStaleResumableAutoDirectorRow({
+    lastError: "后台执行中断",
+    finishedAt: new Date("2026-05-01T00:01:00.000Z"),
+  });
+  const commands = [];
+  let rawReadCount = 0;
+
+  prisma.$transaction = async (callback) => callback(prisma);
+  prisma.taskCenterArchive.findUnique = async () => null;
+  prisma.novelWorkflowTask.findUnique = async ({ where }) => {
+    rawReadCount += 1;
+    return where.id === staleRow.id ? staleRow : null;
+  };
+  prisma.novelWorkflowTask.updateMany = async ({ where, data }) => {
+    if (where.id !== staleRow.id) return { count: 0 };
+    Object.assign(staleRow, data, { updatedAt: new Date(staleRow.updatedAt.getTime() + 1) });
+    return { count: 1 };
+  };
+  prisma.directorRunCommand.findMany = async () => [];
+  prisma.directorRunCommand.findFirst = async ({ where }) => commands.find((command) => (
+    command.taskId === where.taskId
+    && (typeof where.commandType === "string"
+      ? command.commandType === where.commandType
+      : where.commandType.in.includes(command.commandType))
+    && (!where.status || (typeof where.status === "string"
+      ? command.status === where.status
+      : where.status.in.includes(command.status)))
+  )) ?? null;
+  prisma.directorRunCommand.create = async ({ data }) => {
+    const duplicate = commands.find((command) => (
+      command.taskId === data.taskId
+      && command.commandType === data.commandType
+      && command.idempotencyKey === data.idempotencyKey
+    ));
+    if (duplicate) {
+      const error = new Error("unique constraint");
+      error.code = "P2002";
+      throw error;
+    }
+    const command = {
+      id: `command-${commands.length + 1}`,
+      status: "queued",
+      runAfter: new Date(),
+      attempt: 0,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      ...data,
+    };
+    commands.push(command);
+    return command;
+  };
+
+  try {
+    const service = new NovelWorkflowService();
+    const [first, second] = await Promise.all([
+      service.healStaleAutoDirectorRunningTask(staleRow.id, staleRow),
+      service.healStaleAutoDirectorRunningTask(staleRow.id, staleRow),
+    ]);
+
+    assert.deepEqual([first, second], [true, true]);
+    assert.equal(commands.length, 1);
+    assert.equal(commands[0].commandType, "continue");
+    assert.equal(staleRow.status, "queued");
+    assert.equal(staleRow.lastError, null);
+    assert.equal(staleRow.finishedAt, null);
+    assert.ok(rawReadCount <= 6, `raw lookup count must stay bounded, got ${rawReadCount}`);
+  } finally {
+    prisma.$transaction = originals.transaction;
+    prisma.taskCenterArchive.findUnique = originals.archiveFindUnique;
+    prisma.novelWorkflowTask.findUnique = originals.taskFindUnique;
+    prisma.novelWorkflowTask.updateMany = originals.taskUpdateMany;
+    prisma.directorRunCommand.findMany = originals.commandFindMany;
+    prisma.directorRunCommand.findFirst = originals.commandFindFirst;
+    prisma.directorRunCommand.create = originals.commandCreate;
+  }
 });

@@ -2,46 +2,48 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const { NovelWorkflowTaskAdapter } = require("../dist/services/task/adapters/NovelWorkflowTaskAdapter.js");
+const { prisma } = require("../dist/db/prisma.js");
 
-test("retry dispatch failure marks the claimed task failed and recoverable", async () => {
+test("retry command acceptance failure is propagated without a second compensation mutation", async () => {
   const adapter = new NovelWorkflowTaskAdapter();
   const calls = [];
-  const claimed = { id: "workflow-retry-failure", attemptCount: 3 };
-  const recovered = {
-    id: claimed.id,
+  const task = {
+    id: "workflow-retry-failure",
+    lane: "auto_director",
     status: "failed",
-    pendingManualRecovery: true,
-    attemptCount: claimed.attemptCount,
-    lastError: "重试任务入队失败：queue unavailable",
+    attemptCount: 2,
+  };
+  const originalArchiveFindUnique = prisma.taskCenterArchive.findUnique;
+  const originalGetTaskByIdWithoutHealing = adapter.workflowService.getTaskByIdWithoutHealing;
+  const originalEnqueueRetryCommand = adapter.directorCommandService.enqueueRetryCommand;
+  const originalMarkRetryDispatchFailed = adapter.workflowService.markRetryDispatchFailed;
+
+  prisma.taskCenterArchive.findUnique = async () => null;
+  adapter.workflowService.getTaskByIdWithoutHealing = async () => task;
+  adapter.directorCommandService.enqueueRetryCommand = async (input) => {
+    calls.push(["enqueueRetryCommand", input]);
+    throw new Error("command create failed");
+  };
+  adapter.workflowService.markRetryDispatchFailed = async () => {
+    calls.push(["markRetryDispatchFailed"]);
   };
 
-  adapter.workflowService = {
-    getTaskById: async () => ({
-      id: claimed.id,
-      lane: "auto_director",
-      status: "failed",
-      attemptCount: 2,
-      checkpointType: null,
-    }),
-    retryTask: async () => claimed,
-    markRetryDispatchFailed: async (id, attemptCount, error) => {
-      calls.push(["markRetryDispatchFailed", id, attemptCount, error.message]);
-      return recovered;
-    },
-  };
-  adapter.novelDirectorService.continueTask = async () => {
-    throw new Error("queue unavailable");
-  };
-  adapter.detail = async (id) => {
-    calls.push(["detail", id]);
-    return recovered;
-  };
-
-  await assert.rejects(
-    () => adapter.retry({ id: claimed.id, resume: true }),
-    /queue unavailable/,
-  );
-  assert.deepEqual(calls, [
-    ["markRetryDispatchFailed", claimed.id, claimed.attemptCount, "queue unavailable"],
-  ], "dispatch failure must be reconciled instead of leaving a queued orphan");
+  try {
+    await assert.rejects(
+      () => adapter.retry({ id: task.id, resume: true }),
+      /command create failed/,
+    );
+    assert.deepEqual(calls, [
+      ["enqueueRetryCommand", {
+        taskId: task.id,
+        llmOverride: undefined,
+        batchAlreadyStartedCount: undefined,
+      }],
+    ], "atomic retry owns rollback; the adapter must not issue a second state compensation");
+  } finally {
+    prisma.taskCenterArchive.findUnique = originalArchiveFindUnique;
+    adapter.workflowService.getTaskByIdWithoutHealing = originalGetTaskByIdWithoutHealing;
+    adapter.directorCommandService.enqueueRetryCommand = originalEnqueueRetryCommand;
+    adapter.workflowService.markRetryDispatchFailed = originalMarkRetryDispatchFailed;
+  }
 });

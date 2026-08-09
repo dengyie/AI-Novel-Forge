@@ -12,6 +12,11 @@ import {
   type DirectorWorkflowSeedPayload,
 } from "../runtime/novelDirectorHelpers";
 import type { DirectorTakeoverRequest } from "@ai-novel/shared/types/novelDirector";
+import {
+  DirectorCommandLeaseLostError,
+  throwIfDirectorCommandLeaseLost,
+  type DirectorCommandExecutionContext,
+} from "./DirectorCommandLeaseGuard";
 
 export type DirectorCommandExecutionOutcome = "completed" | "cancelled";
 
@@ -36,21 +41,33 @@ export class DirectorCommandExecutor {
     this.stateStore = deps.stateStore ?? new DirectorStateStore();
   }
 
-  async execute(commandId: string): Promise<DirectorCommandExecutionOutcome> {
+  async execute(
+    commandId: string,
+    context: DirectorCommandExecutionContext = {},
+  ): Promise<DirectorCommandExecutionOutcome> {
+    throwIfDirectorCommandLeaseLost(context.signal, { commandId, leaseOwner: context.leaseOwner });
     const command = await this.commandService.getCommandById(commandId);
+    throwIfDirectorCommandLeaseLost(context.signal, { commandId, leaseOwner: context.leaseOwner });
     if (!command) {
       throw new AppError("Director command not found.", 404);
     }
     const payload = this.commandService.parseCommandPayload(command);
-    return this.dispatch(command, payload);
+    return this.dispatch(command, payload, context);
   }
 
   async dispatch(
     command: NonNullable<Awaited<ReturnType<DirectorCommandService["getCommandById"]>>>,
     payload: DirectorCommandPayload,
+    context: DirectorCommandExecutionContext = {},
   ): Promise<DirectorCommandExecutionOutcome> {
+    const assertLease = () => throwIfDirectorCommandLeaseLost(context.signal, {
+      commandId: command.id,
+      leaseOwner: context.leaseOwner,
+    });
+    assertLease();
     const pipelineCommand = this.interpreter.interpret(command, payload);
     const state = await this.stateStore.readTaskState(pipelineCommand.taskId);
+    assertLease();
     if (!state) {
       throw new AppError("Director workflow task not found.", 404);
     }
@@ -61,10 +78,13 @@ export class DirectorCommandExecutor {
       commandType: pipelineCommand.intent,
       summary: "导演任务已进入单轨执行管线。",
     });
+    assertLease();
 
     switch (pipelineCommand.intent) {
       case "cancel":
+        assertLease();
         await this.workflowService.cancelTask(pipelineCommand.taskId);
+        assertLease();
         return "cancelled";
       case "generate_candidates": {
         const request = pipelineCommand.payload.candidatesRequest;
@@ -75,11 +95,12 @@ export class DirectorCommandExecutor {
           ...request,
           workflowTaskId: pipelineCommand.taskId,
         });
+        assertLease();
         await this.recordCommandResult(pipelineCommand.taskId, pipelineCommand.id, result, {
           batches: [result.batch],
           candidateStage: null,
-        }, true);
-        return this.resolveCommandOutcome(pipelineCommand.taskId);
+        }, true, context);
+        return this.resolveCommandOutcome(pipelineCommand.taskId, context);
       }
       case "refine_candidates": {
         const request = pipelineCommand.payload.refinementRequest;
@@ -90,11 +111,12 @@ export class DirectorCommandExecutor {
           ...request,
           workflowTaskId: pipelineCommand.taskId,
         });
+        assertLease();
         await this.recordCommandResult(pipelineCommand.taskId, pipelineCommand.id, result, {
           batches: request.previousBatches.concat(result.batch),
           candidateStage: null,
-        }, true);
-        return this.resolveCommandOutcome(pipelineCommand.taskId);
+        }, true, context);
+        return this.resolveCommandOutcome(pipelineCommand.taskId, context);
       }
       case "patch_candidate": {
         const request = pipelineCommand.payload.candidatePatchRequest;
@@ -105,14 +127,15 @@ export class DirectorCommandExecutor {
           ...request,
           workflowTaskId: pipelineCommand.taskId,
         });
+        assertLease();
         const nextBatches = request.previousBatches.some((batch) => batch.id === result.batch.id)
           ? request.previousBatches.map((batch) => (batch.id === result.batch.id ? result.batch : batch))
           : request.previousBatches.concat(result.batch);
         await this.recordCommandResult(pipelineCommand.taskId, pipelineCommand.id, result, {
           batches: nextBatches,
           candidateStage: null,
-        }, true);
-        return this.resolveCommandOutcome(pipelineCommand.taskId);
+        }, true, context);
+        return this.resolveCommandOutcome(pipelineCommand.taskId, context);
       }
       case "refine_titles": {
         const request = pipelineCommand.payload.titleRefineRequest;
@@ -123,14 +146,15 @@ export class DirectorCommandExecutor {
           ...request,
           workflowTaskId: pipelineCommand.taskId,
         });
+        assertLease();
         const nextBatches = request.previousBatches.some((batch) => batch.id === result.batch.id)
           ? request.previousBatches.map((batch) => (batch.id === result.batch.id ? result.batch : batch))
           : request.previousBatches.concat(result.batch);
         await this.recordCommandResult(pipelineCommand.taskId, pipelineCommand.id, result, {
           batches: nextBatches,
           candidateStage: null,
-        }, true);
-        return this.resolveCommandOutcome(pipelineCommand.taskId);
+        }, true, context);
+        return this.resolveCommandOutcome(pipelineCommand.taskId, context);
       }
       case "confirm_candidate":
         if (!pipelineCommand.payload.confirmRequest) {
@@ -140,7 +164,8 @@ export class DirectorCommandExecutor {
           ...pipelineCommand.payload.confirmRequest,
           workflowTaskId: pipelineCommand.taskId,
         });
-        return this.resolveCommandOutcome(pipelineCommand.taskId);
+        assertLease();
+        return this.resolveCommandOutcome(pipelineCommand.taskId, context);
       case "takeover": {
         const request = pipelineCommand.takeoverRequest;
         if (!request) {
@@ -149,13 +174,15 @@ export class DirectorCommandExecutor {
         await this.directorService.startTakeover(request, {
           workflowTaskId: pipelineCommand.taskId,
         });
-        return this.resolveCommandOutcome(pipelineCommand.taskId);
+        assertLease();
+        return this.resolveCommandOutcome(pipelineCommand.taskId, context);
       }
       case "repair_chapter_titles":
         await this.directorService.executeChapterTitleRepair(pipelineCommand.taskId, {
           volumeId: pipelineCommand.payload.volumeId,
         });
-        return this.resolveCommandOutcome(pipelineCommand.taskId);
+        assertLease();
+        return this.resolveCommandOutcome(pipelineCommand.taskId, context);
       case "policy_update": {
         const request = pipelineCommand.payload.policyUpdateRequest;
         if (!request) {
@@ -169,8 +196,9 @@ export class DirectorCommandExecutor {
             modelTier: request.modelTier,
           },
         });
-        await this.recordCommandResult(pipelineCommand.taskId, pipelineCommand.id, { snapshot });
-        return this.resolveCommandOutcome(pipelineCommand.taskId);
+        assertLease();
+        await this.recordCommandResult(pipelineCommand.taskId, pipelineCommand.id, { snapshot }, {}, false, context);
+        return this.resolveCommandOutcome(pipelineCommand.taskId, context);
       }
       case "workspace_analysis": {
         const request = pipelineCommand.payload.workspaceAnalysisRequest;
@@ -181,8 +209,9 @@ export class DirectorCommandExecutor {
           workflowTaskId: request.workflowTaskId ?? pipelineCommand.taskId,
           includeAiInterpretation: request.includeAiInterpretation,
         });
-        await this.recordCommandResult(pipelineCommand.taskId, pipelineCommand.id, { analysis });
-        return this.resolveCommandOutcome(pipelineCommand.taskId);
+        assertLease();
+        await this.recordCommandResult(pipelineCommand.taskId, pipelineCommand.id, { analysis }, {}, false, context);
+        return this.resolveCommandOutcome(pipelineCommand.taskId, context);
       }
       case "manual_edit_impact": {
         const request = pipelineCommand.payload.manualEditImpactRequest;
@@ -194,8 +223,9 @@ export class DirectorCommandExecutor {
           chapterId: request.chapterId,
           includeAiInterpretation: request.includeAiInterpretation,
         });
-        await this.recordCommandResult(pipelineCommand.taskId, pipelineCommand.id, { impact });
-        return this.resolveCommandOutcome(pipelineCommand.taskId);
+        assertLease();
+        await this.recordCommandResult(pipelineCommand.taskId, pipelineCommand.id, { impact }, {}, false, context);
+        return this.resolveCommandOutcome(pipelineCommand.taskId, context);
       }
       case "continue":
       case "resume_from_checkpoint":
@@ -206,7 +236,8 @@ export class DirectorCommandExecutor {
           await this.directorService.startTakeover(takeoverRequest, {
             workflowTaskId: pipelineCommand.taskId,
           });
-          return this.resolveCommandOutcome(pipelineCommand.taskId);
+          assertLease();
+          return this.resolveCommandOutcome(pipelineCommand.taskId, context);
         }
         // Command-bus continue/resume/retry/approve_gate always forceResume so
         // pipeline re-enters fact-completed modules with reuseCompletedStep:false
@@ -217,15 +248,21 @@ export class DirectorCommandExecutor {
           continuationMode: pipelineCommand.intent === "approve_gate" ? "resume" : pipelineCommand.payload.continuationMode,
           forceResume: true,
         });
-        return this.resolveCommandOutcome(pipelineCommand.taskId);
+        assertLease();
+        return this.resolveCommandOutcome(pipelineCommand.taskId, context);
       }
       default:
         throw new AppError(`Unsupported director command type: ${pipelineCommand.intent}`, 400);
     }
   }
 
-  private async resolveCommandOutcome(taskId: string): Promise<DirectorCommandExecutionOutcome> {
+  private async resolveCommandOutcome(
+    taskId: string,
+    context: DirectorCommandExecutionContext,
+  ): Promise<DirectorCommandExecutionOutcome> {
+    throwIfDirectorCommandLeaseLost(context.signal, { leaseOwner: context.leaseOwner });
     const row = await this.workflowService.getTaskByIdWithoutHealing(taskId).catch(() => null);
+    throwIfDirectorCommandLeaseLost(context.signal, { leaseOwner: context.leaseOwner });
     return row?.status === "cancelled" || row?.cancelRequestedAt ? "cancelled" : "completed";
   }
 
@@ -244,42 +281,67 @@ export class DirectorCommandExecutor {
     result: unknown,
     seedPatch: Record<string, unknown> = {},
     candidateSelectionReady = false,
+    context: DirectorCommandExecutionContext = {},
   ): Promise<void> {
-    const row = await prisma.novelWorkflowTask.findUnique({
-      where: { id: taskId },
-      select: { seedPayloadJson: true },
-    }).catch(() => null);
-    if (!row) {
-      return;
-    }
-    const current = parseSeedPayload<{ directorCommandResults?: Record<string, unknown> }>(row.seedPayloadJson) ?? {};
-    const directorCommandResults = {
-      ...(current.directorCommandResults ?? {}),
-      [commandId]: {
-        result,
-        completedAt: new Date().toISOString(),
-      },
-    };
-    await prisma.novelWorkflowTask.update({
-      where: { id: taskId },
-      data: {
-        ...(candidateSelectionReady
-          ? {
-            status: "waiting_approval",
-            currentStage: "AI 自动导演",
-            currentItemKey: "candidate_selection_required",
-            currentItemLabel: "书级方向已准备好，请选择一套继续",
-            progress: 0.18,
-            checkpointType: "candidate_selection_required",
-            checkpointSummary: "AI 已生成可选的书级方向。",
-          }
-          : {}),
-        seedPayloadJson: mergeSeedPayload(row.seedPayloadJson, {
-          ...seedPatch,
-          directorCommandResults,
-        }),
-        heartbeatAt: new Date(),
-      },
-    }).catch(() => null);
+    throwIfDirectorCommandLeaseLost(context.signal, { commandId, leaseOwner: context.leaseOwner });
+    await prisma.$transaction(async (tx) => {
+      const now = new Date();
+      if (context.leaseOwner) {
+        const fenced = await tx.directorRunCommand.updateMany({
+          where: {
+            id: commandId,
+            leaseOwner: context.leaseOwner,
+            status: { in: ["leased", "running"] },
+            leaseExpiresAt: { gt: now },
+          },
+          data: {
+            // This conditional update takes the command row lock before the task
+            // projection, closing the check-then-write window on Postgres and SQLite.
+            leaseExpiresAt: new Date(now.getTime() + (context.leaseMs ?? 120_000)),
+          },
+        });
+        if (fenced.count !== 1) {
+          throw new DirectorCommandLeaseLostError(commandId, context.leaseOwner);
+        }
+      }
+
+      const row = await tx.novelWorkflowTask.findUnique({
+        where: { id: taskId },
+        select: { seedPayloadJson: true },
+      });
+      if (!row) {
+        return;
+      }
+      const current = parseSeedPayload<{ directorCommandResults?: Record<string, unknown> }>(row.seedPayloadJson) ?? {};
+      const directorCommandResults = {
+        ...(current.directorCommandResults ?? {}),
+        [commandId]: {
+          result,
+          completedAt: now.toISOString(),
+        },
+      };
+      await tx.novelWorkflowTask.update({
+        where: { id: taskId },
+        data: {
+          ...(candidateSelectionReady
+            ? {
+              status: "waiting_approval",
+              currentStage: "AI 自动导演",
+              currentItemKey: "candidate_selection_required",
+              currentItemLabel: "书级方向已准备好，请选择一套继续",
+              progress: 0.18,
+              checkpointType: "candidate_selection_required",
+              checkpointSummary: "AI 已生成可选的书级方向。",
+            }
+            : {}),
+          seedPayloadJson: mergeSeedPayload(row.seedPayloadJson, {
+            ...seedPatch,
+            directorCommandResults,
+          }),
+          heartbeatAt: now,
+        },
+      });
+    });
+    throwIfDirectorCommandLeaseLost(context.signal, { commandId, leaseOwner: context.leaseOwner });
   }
 }

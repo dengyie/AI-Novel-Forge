@@ -50,7 +50,7 @@ export interface NovelDirectorAutoExecutionWorkflowPort {
      * Batch-roll / execution-loop halt may land on chapter_execution or structured_outline.
      * Quality-repair checkpoints stay on quality_repair. Keep aligned with NovelWorkflowStage.
      */
-    stage?: "quality_repair" | "chapter_execution" | "structured_outline";
+    stage?: "auto_director" | "quality_repair" | "chapter_execution" | "structured_outline";
     itemKey?: string | null;
     itemLabel?: string;
     checkpointType?: "chapter_batch_ready" | "replan_required";

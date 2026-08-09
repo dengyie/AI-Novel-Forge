@@ -2,6 +2,7 @@ import os from "node:os";
 import { prisma } from "../db/prisma";
 import { DirectorCommandService } from "../services/novel/director/commands/DirectorCommandService";
 import { resourceClassForCommand } from "../services/novel/director/commands/DirectorCommandServiceHelpers";
+import { DirectorCommandLeaseLostError } from "../services/novel/director/commands/DirectorCommandLeaseGuard";
 import { taskDispatcher } from "./TaskDispatcher";
 
 function resolveNumberEnv(name: string, fallback: number): number {
@@ -63,6 +64,12 @@ export interface DirectorTaskQueueOptions {
 
 export interface LeasedTask {
   command: NonNullable<Awaited<ReturnType<typeof prisma.directorRunCommand.findUnique>>>;
+}
+
+export interface DirectorCommandLeaseRenewal {
+  signal: AbortSignal;
+  markLost(): void;
+  stop(): void;
 }
 
 export class DirectorTaskQueue {
@@ -192,29 +199,76 @@ export class DirectorTaskQueue {
     }
   }
 
-  startLeaseRenewal(commandId: string, slotId: string): () => void {
-    const renew = () => {
-      void this.commandService.renewLease(commandId, `${this.workerId}:${slotId}`, this.leaseMs).catch((error) => {
-        console.warn(`[task-queue] failed to renew command lease commandId=${commandId}`, error);
-      });
+  startLeaseRenewal(commandId: string, slotId: string): DirectorCommandLeaseRenewal {
+    const leaseOwner = `${this.workerId}:${slotId}`;
+    const controller = new AbortController();
+    let stopped = false;
+    let renewInFlight = false;
+    let timer: NodeJS.Timeout | null = null;
+
+    const stop = () => {
+      if (stopped) {
+        return;
+      }
+      stopped = true;
+      if (timer) {
+        clearInterval(timer);
+        timer = null;
+      }
     };
-    renew();
-    const timer = setInterval(renew, Math.max(100, Math.floor(this.leaseMs / 3)));
-    return () => clearInterval(timer);
+    const markLost = () => {
+      if (!controller.signal.aborted) {
+        controller.abort(new DirectorCommandLeaseLostError(commandId, leaseOwner));
+      }
+      stop();
+    };
+    const renew = async () => {
+      if (stopped || controller.signal.aborted || renewInFlight) {
+        return;
+      }
+      renewInFlight = true;
+      try {
+        const stillOwnsLease = await this.commandService.renewLease(commandId, leaseOwner, this.leaseMs);
+        if (!stopped && !stillOwnsLease) {
+          markLost();
+        }
+      } catch (error) {
+        if (!stopped) {
+          console.warn(`[task-queue] failed to renew command lease commandId=${commandId}`, error);
+        }
+      } finally {
+        renewInFlight = false;
+      }
+    };
+
+    void renew();
+    timer = setInterval(() => {
+      void renew();
+    }, Math.max(100, Math.floor(this.leaseMs / 3)));
+    timer.unref?.();
+    return {
+      signal: controller.signal,
+      markLost,
+      stop,
+    };
   }
 
-  async markRunning(commandId: string, slotId: string): Promise<void> {
-    await this.commandService.markCommandRunning(commandId, `${this.workerId}:${slotId}`, this.leaseMs);
+  async markRunning(commandId: string, slotId: string): Promise<boolean> {
+    return this.commandService.markCommandRunning(commandId, `${this.workerId}:${slotId}`, this.leaseMs);
   }
 
-  async completeTask(commandId: string, slotId: string): Promise<void> {
-    await this.commandService.markCommandSucceeded(commandId, `${this.workerId}:${slotId}`);
+  async completeTask(commandId: string, slotId: string): Promise<boolean> {
+    const completed = await this.commandService.markCommandSucceeded(commandId, `${this.workerId}:${slotId}`);
+    if (!completed) {
+      return false;
+    }
     const command = await this.commandService.getCommandById(commandId);
     taskDispatcher.notify({ taskId: command?.taskId });
+    return true;
   }
 
-  async cancelTask(commandId: string, slotId: string): Promise<void> {
-    await this.commandService.markCommandCancelled(commandId, `${this.workerId}:${slotId}`);
+  async cancelTask(commandId: string, slotId: string): Promise<boolean> {
+    return this.commandService.markCommandCancelled(commandId, `${this.workerId}:${slotId}`);
   }
 
   async failTask(commandId: string, slotId: string, error: unknown): Promise<void> {
