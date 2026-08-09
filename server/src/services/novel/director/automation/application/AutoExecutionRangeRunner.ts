@@ -6,10 +6,8 @@ import { isFullBookAutopilotRunMode } from "@ai-novel/shared/types/novelDirector
 import {
   buildDirectorAutoExecutionScopeLabelFromState,
   buildDirectorAutoExecutionDeferredQualityState,
-  buildDirectorAutoExecutionPipelineOptions,
   isDirectorAutoExecutionPipelineSkipEligibleChapter,
   normalizeConsecutiveBatchRolls,
-  resolveDirectorAutoExecutionRepairMode,
   resolveDirectorAutoExecutionWorkflowState,
 } from "../novelDirectorAutoExecution";
 import {
@@ -27,7 +25,6 @@ import {
 } from "../novelDirectorAutoExecutionCircuitBreakerRuntime";
 import {
   isNoChaptersToGenerateError,
-  resolveSingleChapterExecutionRange,
   shouldClearAutoExecutionCheckpoint,
 } from "../novelDirectorAutoExecutionRuntimeUtils";
 import { prepareRequestedAutoExecution as prepareRequestedAutoExecutionState, resolveAutoExecutionRuntimeRangeAndState, shouldStopAutoExecution } from "../novelDirectorAutoExecutionRuntimePreparation";
@@ -37,6 +34,10 @@ import {
   type AutoExecutionProgressGuardState,
 } from "../domain/AutoExecutionProgressPolicy";
 import {
+  AutoExecutionOwnershipFence,
+  isAutoExecutionOwnershipLost,
+} from "../domain/AutoExecutionOwnershipFence";
+import {
   schedulePendingReviewAutoPromotionIfEnabled,
   stopAutoExecutionForNoProgress,
 } from "../projections/AutoExecutionTaskProjector";
@@ -44,9 +45,12 @@ import { AutoExecutionBatchRollCoordinator } from "./AutoExecutionBatchRollCoord
 import { handleAutoExecutionFailure } from "./AutoExecutionFailureHandler";
 import {
   resolvePipelineJobForExecution,
+  resolveOwnedActiveRangePipeline,
   resolveQualityIssueChapter,
   resolveStuckNoGeneratableChapter,
 } from "./AutoExecutionChapterResolver";
+import { startAutoExecutionPipelineJob } from "./AutoExecutionPipelineJobStarter";
+import { stopAutoExecutionForIterationCap } from "../projections/AutoExecutionRunSafetyProjector";
 
 export { schedulePendingReviewAutoPromotionIfEnabled } from "../projections/AutoExecutionTaskProjector";
 export class AutoExecutionRangeRunner {
@@ -75,8 +79,15 @@ export class AutoExecutionRangeRunner {
     allowSkipReviewBlockedChapter?: boolean;
     approveAutoExecutionScope?: boolean;
     skipCurrentQualityRepair?: boolean;
+    signal?: AbortSignal;
   }): Promise<void> {
     const allowLazyChapterPlanning = isFullBookAutopilotRunMode(input.request.runMode);
+    const ownershipFence = new AutoExecutionOwnershipFence(
+      this.deps,
+      input.taskId,
+      input.signal,
+      input.existingPipelineJobId,
+    );
     let { range, autoExecution, pipelineJobId } = await prepareRequestedAutoExecutionState(this.deps, {
       novelId: input.novelId,
       request: input.request,
@@ -113,6 +124,7 @@ export class AutoExecutionRangeRunner {
         autoExecution,
         circuitBreaker: autoExecution.circuitBreaker,
         resumeStage: input.resumeStage,
+        ownershipFence,
       });
       return;
     }
@@ -136,45 +148,16 @@ export class AutoExecutionRangeRunner {
         autoExecution,
         isBackgroundRunning: true,
         resumeStage: input.resumeStage,
+        ownershipFence,
       });
       if (await shouldStopAutoExecution(this.deps, input.taskId, pipelineJobId || null)) {
         return;
       }
 
-      if (pipelineJobId) {
-        const existingJob = knownPipelineJob
-          ?? await resolvePipelineJobForExecution(this.deps, pipelineJobId);
-        knownPipelineJob = existingJob;
-        if (!existingJob || ["failed", "cancelled"].includes(existingJob.status)) {
-          pipelineJobId = "";
-        }
-      }
-
-      const activeRangeJob = await this.deps.novelService.findActivePipelineJobForRange(
-        input.novelId,
-        resolveSingleChapterExecutionRange(range, autoExecution).startOrder,
-        resolveSingleChapterExecutionRange(range, autoExecution).endOrder,
-        pipelineJobId || null,
-      );
-      if (activeRangeJob) {
-        pipelineJobId = activeRangeJob.id;
-        ({ range, autoExecution } = await resolveAutoExecutionRuntimeRangeAndState(this.deps, {
-          novelId: input.novelId,
-          existingState: autoExecution,
-          pipelineJobId,
-          pipelineStatus: activeRangeJob.status,
-          allowLazyChapterPlanning,
-        }));
-        await syncAutoExecutionTaskState(this.deps, {
-          taskId: input.taskId,
-          novelId: input.novelId,
-          request: input.request,
-          range,
-          autoExecution,
-          isBackgroundRunning: true,
-          resumeStage: input.resumeStage,
-        });
-      }
+      ({ range, autoExecution, pipelineJobId } = await resolveOwnedActiveRangePipeline({
+        deps: this.deps, ownershipFence, ...input, range, autoExecution,
+        pipelineJobId, knownPipelineJob, allowLazyChapterPlanning,
+      }));
 
       let consecutiveStartFailures = 0;
       let progressGuard: AutoExecutionProgressGuardState = {
@@ -196,31 +179,15 @@ export class AutoExecutionRangeRunner {
       while (true) {
       runFromReadyIterations += 1;
       if (runFromReadyIterations > MAX_RUN_FROM_READY_ITERATIONS) {
-        await this.deps.workflowService.markTaskFailed(
-          input.taskId,
-          `自动执行循环已超过 ${MAX_RUN_FROM_READY_ITERATIONS} 次迭代上限，已停止以防止死循环。`,
-          {
-            stage: "chapter_execution",
-            itemKey: "batch_roll_iteration_cap",
-            itemLabel: "自动执行循环超限",
-            checkpointType: "chapter_batch_ready",
-            checkpointSummary: `连续迭代超过 ${MAX_RUN_FROM_READY_ITERATIONS} 次仍未推进，可能存在 readiness 与实际章节数据不一致或决策函数未执行 cap。`,
-            chapterId: autoExecution.nextChapterId ?? range.firstChapterId,
-            progress: 0.93,
-          },
-        );
-        await syncAutoExecutionTaskState(this.deps, {
+        await stopAutoExecutionForIterationCap({
+          deps: this.deps,
+          ownershipFence,
           taskId: input.taskId,
           novelId: input.novelId,
           request: input.request,
           range,
-          autoExecution: {
-            ...autoExecution,
-            pipelineJobId: null,
-            pipelineStatus: null,
-          },
-          isBackgroundRunning: false,
-          resumeStage: "pipeline",
+          autoExecution,
+          maxIterations: MAX_RUN_FROM_READY_ITERATIONS,
         });
         return;
       }
@@ -240,6 +207,7 @@ export class AutoExecutionRangeRunner {
             range,
             autoExecution,
             consecutiveBatchRolls,
+            ownershipFence,
           });
           if (rolled) {
             if (rolled.decision.kind === "halt_for_review") {
@@ -258,10 +226,12 @@ export class AutoExecutionRangeRunner {
             range,
             autoExecution,
             pipelineStatus: "succeeded",
+            ownershipFence,
           });
           return;
         }
 
+        await ownershipFence.assertActive();
         await this.deps.workflowService.markTaskRunning(input.taskId, {
           stage: "chapter_execution",
           itemKey: "chapter_execution",
@@ -270,28 +240,15 @@ export class AutoExecutionRangeRunner {
           clearCheckpoint: shouldClearAutoExecutionCheckpoint(input.resumeCheckpointType),
         });
         try {
-          // 瞬态模型故障 fallback（P1-4）：重投该批次时优先用失败处理器解析的
-          // 备用模型（transientModelOverride），真正切换模型而非同模型重试。
-          const modelOverride = autoExecution.transientModelOverride;
-          const job = await this.deps.novelService.startPipelineJob(
-            input.novelId,
-            buildDirectorAutoExecutionPipelineOptions({
-              provider: modelOverride?.provider ?? input.request.provider,
-              model: modelOverride?.model ?? input.request.model,
-              temperature: input.request.temperature,
-              workflowTaskId: input.taskId,
-              taskStyleProfileId: input.request.styleProfileId,
-              controlAdvanceMode: isFullBookAutopilotRunMode(input.request.runMode)
-                ? "full_book_autopilot"
-                : "auto_to_execution",
-              ...resolveSingleChapterExecutionRange(range, autoExecution),
-              autoReview: autoExecution.autoReview,
-              autoRepair: autoExecution.autoRepair,
-              artifactSyncMode: autoExecution.artifactSyncMode,
-              repairMode: resolveDirectorAutoExecutionRepairMode(autoExecution),
-              settingQualityMode: input.request.settingQualityMode ?? "off",
-            }),
-          );
+          const job = await startAutoExecutionPipelineJob({
+            deps: this.deps,
+            ownershipFence,
+            taskId: input.taskId,
+            novelId: input.novelId,
+            request: input.request,
+            range,
+            autoExecution,
+          });
           pipelineJobId = job.id;
           autoExecution = {
             ...autoExecution,
@@ -304,6 +261,7 @@ export class AutoExecutionRangeRunner {
             consecutiveStartFailures += 1;
             if (consecutiveStartFailures >= MAX_CONSECUTIVE_START_FAILURES) {
               const startErrorMessage = error instanceof Error ? error.message : String(error);
+              await ownershipFence.assertActive();
               await this.deps.workflowService.markTaskFailed(input.taskId,
                 `连续 ${MAX_CONSECUTIVE_START_FAILURES} 次启动章节生成失败，自动执行已停止。最近错误：${startErrorMessage.slice(0, 200)}`,
                 {
@@ -324,6 +282,7 @@ export class AutoExecutionRangeRunner {
                 autoExecution,
                 isBackgroundRunning: false,
                 resumeStage: "pipeline",
+                ownershipFence,
               });
               return;
             }
@@ -344,6 +303,7 @@ export class AutoExecutionRangeRunner {
               range,
               autoExecution,
               consecutiveBatchRolls,
+              ownershipFence,
             });
             if (rolled) {
               if (rolled.decision.kind === "halt_for_review") {
@@ -362,6 +322,7 @@ export class AutoExecutionRangeRunner {
               range,
               autoExecution,
               pipelineStatus: "succeeded",
+              ownershipFence,
             });
             return;
           }
@@ -410,6 +371,7 @@ export class AutoExecutionRangeRunner {
                 autoExecution,
                 maxConsecutiveNoProgress: MAX_CONSECUTIVE_NO_PROGRESS,
                 source: "no-generatable defer",
+                ownershipFence,
               });
               return;
             }
@@ -422,6 +384,7 @@ export class AutoExecutionRangeRunner {
               autoExecution,
               isBackgroundRunning: true,
               resumeStage: input.resumeStage,
+              ownershipFence,
             });
             continue autoExecutionLoop;
           }
@@ -435,6 +398,7 @@ export class AutoExecutionRangeRunner {
           autoExecution,
           isBackgroundRunning: true,
           resumeStage: input.resumeStage,
+          ownershipFence,
         });
       }
 
@@ -448,6 +412,7 @@ export class AutoExecutionRangeRunner {
         }
         if (job.status === "queued" || job.status === "running") {
           const runningState = resolveDirectorAutoExecutionWorkflowState(job, range, autoExecution);
+          await ownershipFence.assertActive();
           await this.deps.workflowService.markTaskRunning(input.taskId, {
             ...runningState,
             clearCheckpoint: shouldClearAutoExecutionCheckpoint(input.resumeCheckpointType),
@@ -467,6 +432,7 @@ export class AutoExecutionRangeRunner {
             autoExecution,
             isBackgroundRunning: true,
             resumeStage: "pipeline",
+            ownershipFence,
           });
           await new Promise((resolve) => setTimeout(resolve, 1500));
           continue;
@@ -495,6 +461,7 @@ export class AutoExecutionRangeRunner {
               autoExecution,
               circuitBreaker: usageCircuitBreaker,
               resumeStage: "pipeline",
+              ownershipFence,
             });
             return;
           }
@@ -506,6 +473,7 @@ export class AutoExecutionRangeRunner {
             autoExecution,
             isBackgroundRunning: true,
             resumeStage: "pipeline",
+            ownershipFence,
           });
         }
 
@@ -544,6 +512,7 @@ export class AutoExecutionRangeRunner {
               autoExecution,
               isBackgroundRunning: true,
               resumeStage: "pipeline",
+              ownershipFence,
             });
             continue autoExecutionLoop;
           }
@@ -559,6 +528,7 @@ export class AutoExecutionRangeRunner {
             checkpointType: noticeAction.checkpointType,
             pauseMessage: job.noticeSummary.trim(),
             qualityRepairRisk: noticeAction.qualityRepairRisk,
+            ownershipFence,
           });
           await syncAutoExecutionTaskState(this.deps, {
             taskId: input.taskId,
@@ -568,6 +538,7 @@ export class AutoExecutionRangeRunner {
             autoExecution: noticeAction.checkpointState,
             isBackgroundRunning: false,
             resumeStage: "pipeline",
+            ownershipFence,
           });
           return;
         }
@@ -578,11 +549,13 @@ export class AutoExecutionRangeRunner {
           progressGuard = { consecutiveNoProgress: 0, shouldStop: false };
           if ((autoExecution.remainingChapterCount ?? 0) > 0) {
             if (this.deps.autoConfirmPendingCandidates) {
+              await ownershipFence.assertActive();
               await this.deps.autoConfirmPendingCandidates(input.novelId).catch(() => null);
             }
             schedulePendingReviewAutoPromotionIfEnabled(this.deps, {
               novelId: input.novelId,
               taskId: input.taskId,
+              ownershipFence,
             });
             await syncAutoExecutionTaskState(this.deps, {
               taskId: input.taskId,
@@ -592,6 +565,7 @@ export class AutoExecutionRangeRunner {
               autoExecution,
               isBackgroundRunning: true,
               resumeStage: "pipeline",
+              ownershipFence,
             });
             continue autoExecutionLoop;
           }
@@ -602,6 +576,7 @@ export class AutoExecutionRangeRunner {
             range,
             autoExecution,
             consecutiveBatchRolls,
+            ownershipFence,
           });
           if (rolledAfterSuccess) {
             if (rolledAfterSuccess.decision.kind === "halt_for_review") {
@@ -621,6 +596,7 @@ export class AutoExecutionRangeRunner {
             autoExecution,
             pipelineJobId: completedPipelineJobId,
             pipelineStatus: job.status,
+            ownershipFence,
           });
           return;
         }
@@ -633,6 +609,7 @@ export class AutoExecutionRangeRunner {
             range,
             autoExecution,
             consecutiveBatchRolls,
+            ownershipFence,
           });
           if (rolledAfterTerminal) {
             if (rolledAfterTerminal.decision.kind === "halt_for_review") {
@@ -652,6 +629,7 @@ export class AutoExecutionRangeRunner {
             autoExecution,
             pipelineJobId,
             pipelineStatus: job.status,
+            ownershipFence,
           });
           return;
         }
@@ -669,6 +647,7 @@ export class AutoExecutionRangeRunner {
           progressGuard,
           maxConsecutiveNoProgress: MAX_CONSECUTIVE_NO_PROGRESS,
           resolveQualityIssueChapter: () => resolveQualityIssueChapter(this.deps, input.novelId, job),
+          ownershipFence,
         });
         if (failureOutcome.kind === "continue") {
           range = failureOutcome.range;
@@ -682,6 +661,9 @@ export class AutoExecutionRangeRunner {
       return;
       }
     } catch (error) {
+      if (isAutoExecutionOwnershipLost(error)) {
+        return;
+      }
       // Safety net: ensure the task is not left in a phantom "running" state
       // (isBackgroundRunning) if runFromReady threw before reaching a terminal
       // markTaskRunning/markTaskFailed/markTaskCompleted call. A lingering running
@@ -701,6 +683,7 @@ export class AutoExecutionRangeRunner {
           },
           isBackgroundRunning: false,
           resumeStage: input.resumeStage,
+          ownershipFence,
         });
       } catch {
         // best-effort cleanup; the original error below is the signal that matters

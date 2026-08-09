@@ -5,6 +5,7 @@ import type {
 import { syncAutoExecutionTaskState } from "../novelDirectorAutoExecutionCheckpointRuntime";
 import type { DirectorAutoExecutionRange } from "../novelDirectorAutoExecution";
 import type { NovelDirectorAutoExecutionRuntimeDeps } from "../novelDirectorAutoExecutionRuntimePorts";
+import type { AutoExecutionOwnershipFence } from "../domain/AutoExecutionOwnershipFence";
 
 export async function stopAutoExecutionForNoProgress(
   deps: NovelDirectorAutoExecutionRuntimeDeps,
@@ -16,8 +17,10 @@ export async function stopAutoExecutionForNoProgress(
     autoExecution: DirectorAutoExecutionState;
     maxConsecutiveNoProgress: number;
     source: "no-generatable defer" | "defer_and_continue";
+    ownershipFence?: AutoExecutionOwnershipFence;
   },
 ): Promise<void> {
+  await input.ownershipFence?.assertActive();
   const count = input.maxConsecutiveNoProgress;
   await deps.workflowService.markTaskFailed(
     input.taskId,
@@ -40,6 +43,7 @@ export async function stopAutoExecutionForNoProgress(
     autoExecution: input.autoExecution,
     isBackgroundRunning: false,
     resumeStage: "pipeline",
+    ownershipFence: input.ownershipFence,
   });
 }
 
@@ -51,6 +55,7 @@ export function schedulePendingReviewAutoPromotionIfEnabled(
   input: {
     novelId: string;
     taskId: string;
+    ownershipFence?: AutoExecutionOwnershipFence;
   },
 ): void {
   if (!deps.isPendingReviewAutoPromotionEnabled || !deps.autoPromotePendingReviewProposals) {
@@ -61,7 +66,8 @@ export function schedulePendingReviewAutoPromotionIfEnabled(
       if (!enabled) {
         return undefined;
       }
-      return deps.autoPromotePendingReviewProposals?.(input);
+      return Promise.resolve(input.ownershipFence?.assertActive())
+        .then(() => deps.autoPromotePendingReviewProposals?.(input));
     })
     .catch(() => null);
 }

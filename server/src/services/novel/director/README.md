@@ -48,6 +48,7 @@ import {
 - `recovery/`：恢复、回填、下游重置和结构化大纲恢复游标。
 - `phases/`：自动导演阶段、阶段节点适配和阶段级质量策略。
 - `runtime/`：接管、确认、候选、继续执行、运行时编排和内存/校验策略。
+- `automation/`：章节批次执行、pipeline job 协调、质量债和任务投影。每次 `AutoExecutionRangeRunner` 调用必须持有 run-local ownership fence；本目录的 checkpoint、批续窗、质量处理和异步投影只能经 fence 写入。pipeline job 终态仍由生产链的 lease/CAS 负责，automation 不得直写覆盖。
 - `http/`：Express 路由映射。
 
 外部模块优先依赖这些目录的门面或稳定入口，不应向 `director/` 根目录继续添加同前缀业务文件。

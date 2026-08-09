@@ -14,6 +14,7 @@ import type {
   PrepareNextAutoExecutionBatchInput,
   PrepareNextAutoExecutionBatchResult,
 } from "./novelDirectorAutoExecutionBatchRollRuntime";
+import type { AutoExecutionOwnershipFence } from "./domain/AutoExecutionOwnershipFence";
 
 export type AutomationLedgerEventPort = Pick<
   typeof directorAutomationLedgerEventService,
@@ -110,6 +111,7 @@ export interface NovelDirectorAutoExecutionVolumeWorkspacePort {
 }
 
 export interface NovelDirectorAutoExecutionRuntimeDeps {
+  ownershipFence?: AutoExecutionOwnershipFence;
   novelContextService: Pick<NovelDirectorAutoExecutionNovelPort, "listChapters">;
   novelService: Pick<
     NovelDirectorAutoExecutionNovelPort,

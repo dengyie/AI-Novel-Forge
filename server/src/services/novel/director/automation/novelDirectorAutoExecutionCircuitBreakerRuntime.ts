@@ -37,6 +37,7 @@ import {
 import { parseContractIssueDescriptor } from "@ai-novel/shared/types/chapterTaskSheetQuality";
 import { directorAutomationLedgerEventService } from "../runtime/DirectorAutomationLedgerEventService";
 import { directorUsageTelemetryQueryService } from "../runtime/DirectorUsageTelemetryQueryService";
+import type { AutoExecutionOwnershipFence } from "./domain/AutoExecutionOwnershipFence";
 
 type AutomationLedgerEventPort = Pick<
   typeof directorAutomationLedgerEventService,
@@ -81,8 +82,10 @@ export async function stopAutoExecutionForCircuitBreaker(
     autoExecution: DirectorAutoExecutionState;
     circuitBreaker: DirectorCircuitBreakerState;
     resumeStage?: AutoExecutionResumeStage;
+    ownershipFence?: AutoExecutionOwnershipFence;
   },
 ): Promise<void> {
+  await input.ownershipFence?.assertActive();
   const ledgerEventService = deps.automationLedgerEventService ?? directorAutomationLedgerEventService;
   const autoExecution = withCircuitBreakerState(input.autoExecution, input.circuitBreaker);
   const scopeLabel = buildDirectorAutoExecutionScopeLabelFromState(autoExecution, input.range.totalChapterCount);
@@ -90,11 +93,13 @@ export async function stopAutoExecutionForCircuitBreaker(
     || `${scopeLabel}已暂停，等待处理后再继续。`;
   const requiresModelSwitch = input.circuitBreaker.reason === "model_unavailable"
     || input.circuitBreaker.reason === "service_unavailable";
+  await input.ownershipFence?.assertActive();
   await ledgerEventService.recordCircuitBreakerOpened({
     taskId: input.taskId,
     novelId: input.novelId,
     state: input.circuitBreaker,
   }).catch(() => null);
+  await input.ownershipFence?.assertActive();
   await deps.workflowService.markTaskFailed(input.taskId, message, {
     stage: requiresModelSwitch ? "auto_director" : "quality_repair",
     itemKey: requiresModelSwitch ? "switch_model" : "quality_repair",
@@ -119,6 +124,7 @@ export async function stopAutoExecutionForCircuitBreaker(
     autoExecution,
     isBackgroundRunning: false,
     resumeStage: input.resumeStage ?? "pipeline",
+    ownershipFence: input.ownershipFence,
   });
 }
 
@@ -225,6 +231,7 @@ export async function runFullBookAutopilotReplanNotice(input: {
   noticeSummary: string;
   /** 重排审计分类，默认按本书合同 replan_window 触发标注。 */
   triggerType?: string;
+  ownershipFence?: AutoExecutionOwnershipFence;
 }): Promise<
   | { stopped: true }
   | {
@@ -234,6 +241,7 @@ export async function runFullBookAutopilotReplanNotice(input: {
     decision?: "auto_replan_window" | "defer_and_continue";
   }
 > {
+  await input.ownershipFence?.assertActive();
   const affectedChapterWindow = buildDirectorQualityLoopBudgetWindow({
     autoExecution: input.autoExecution,
     chapterId: input.autoExecution.nextChapterId,
@@ -316,6 +324,7 @@ export async function runFullBookAutopilotReplanNotice(input: {
   }
   if (input.deps.replanNovel) {
     try {
+      await input.ownershipFence?.assertActive();
       await input.deps.replanNovel(input.novelId, {
         chapterId: input.autoExecution.nextChapterId ?? undefined,
         triggerType: input.triggerType ?? "contract_replan_window",
@@ -341,6 +350,7 @@ export async function runFullBookAutopilotReplanNotice(input: {
           autoExecution: withCircuitBreakerState(budgetResult.state, replanFailureBreaker),
           circuitBreaker: replanFailureBreaker,
           resumeStage: "pipeline",
+          ownershipFence: input.ownershipFence,
         });
         return { stopped: true };
       }

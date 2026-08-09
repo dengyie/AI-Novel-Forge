@@ -52,6 +52,7 @@ import {
 import { isContinuableAutoExecutionQualityDebt } from "../domain/AutoExecutionQualityDebtPolicy";
 import { shouldStopAutoExecutionForQualityAction } from "../domain/AutoExecutionStopPolicy";
 import { stopAutoExecutionForNoProgress } from "../projections/AutoExecutionTaskProjector";
+import type { AutoExecutionOwnershipFence } from "../domain/AutoExecutionOwnershipFence";
 
 export type AutoExecutionFailureOutcome =
   | {
@@ -75,6 +76,7 @@ export async function handleAutoExecutionFailure(input: {
   progressGuard: AutoExecutionProgressGuardState;
   maxConsecutiveNoProgress: number;
   resolveQualityIssueChapter: () => Promise<DirectorAutoExecutionChapterRef | null>;
+  ownershipFence?: AutoExecutionOwnershipFence;
 }): Promise<AutoExecutionFailureOutcome> {
   const { deps, taskId, novelId, request, job } = input;
   let { range, autoExecution, progressGuard } = input;
@@ -89,6 +91,9 @@ export async function handleAutoExecutionFailure(input: {
   // 方案 C（Phase 3）：失败实体携带的结构化描述符（recommendedHandling + issue.targets）。
   // 有则用稳定结构构造预算签名（同结构复现 ⇒ 同签名 ⇒ 阶梯单调升级）；无则回退消息旧签名。
   const parsedContractIssue = parseContractIssueDescriptor(failureMessage);
+  const assertOwnership = async (): Promise<void> => {
+    await input.ownershipFence?.assertActive();
+  };
 
   // 章节执行合同门禁判 replan_window（职责过载）：结构性难题需整窗重排，本地再生成修不好。
   // 复用 runFullBookAutopilotReplanNotice（内含 window_replan 预算记账 + 重排环熔断 + replanNovel）。
@@ -110,6 +115,7 @@ export async function handleAutoExecutionFailure(input: {
       checkpointState: autoExecution,
       noticeSummary: failureMessage,
       triggerType: "contract_replan_window",
+      ownershipFence: input.ownershipFence,
     });
     if (replanResult.stopped) {
       return { kind: "stop" };
@@ -134,6 +140,7 @@ export async function handleAutoExecutionFailure(input: {
         autoExecution,
         isBackgroundRunning: true,
         resumeStage: "pipeline",
+        ownershipFence: input.ownershipFence,
       });
       return { kind: "continue", range, autoExecution, progressGuard };
     }
@@ -146,6 +153,7 @@ export async function handleAutoExecutionFailure(input: {
         pipelineStatus: job.status,
       }, replanResult.circuitBreaker);
       const stopMessage = `${scopeLabel}章节执行合同重排预算已耗尽（重排环熔断），自动成书暂停，等待人工判断后继续。`;
+      await assertOwnership();
       await deps.workflowService.markTaskFailed(taskId, stopMessage, {
         stage: "quality_repair",
         itemKey: "quality_repair",
@@ -168,6 +176,7 @@ export async function handleAutoExecutionFailure(input: {
         autoExecution: stopAutoExecution,
         isBackgroundRunning: false,
         resumeStage: "pipeline",
+        ownershipFence: input.ownershipFence,
       });
       return { kind: "stop" };
     }
@@ -178,6 +187,7 @@ export async function handleAutoExecutionFailure(input: {
     && isSkippableAutoExecutionReviewFailure(failureMessage)
     && deps.resolveStateProposals
   ) {
+    await assertOwnership();
     const resolution = await deps.resolveStateProposals({
       novelId,
       taskId,
@@ -190,6 +200,7 @@ export async function handleAutoExecutionFailure(input: {
     });
     if (resolution.processed) {
       if (resolution.decision === "auto_replan_window" && deps.replanNovel) {
+        await assertOwnership();
         await deps.replanNovel(novelId, {
           chapterId: autoExecution.nextChapterId ?? undefined,
           triggerType: "state_proposal_resolution",
@@ -220,6 +231,7 @@ export async function handleAutoExecutionFailure(input: {
         autoExecution,
         isBackgroundRunning: true,
         resumeStage: "pipeline",
+        ownershipFence: input.ownershipFence,
       });
       return { kind: "continue", range, autoExecution, progressGuard };
     }
@@ -289,6 +301,7 @@ export async function handleAutoExecutionFailure(input: {
         autoExecution,
         isBackgroundRunning: true,
         resumeStage: "pipeline",
+        ownershipFence: input.ownershipFence,
       });
       return { kind: "continue", range, autoExecution, progressGuard };
     }
@@ -315,6 +328,7 @@ export async function handleAutoExecutionFailure(input: {
       autoExecution: unavailableAutoExecution,
       circuitBreaker: unavailableCircuitBreaker,
       resumeStage: "pipeline",
+      ownershipFence: input.ownershipFence,
     });
     return { kind: "stop" };
   }
@@ -391,6 +405,7 @@ export async function handleAutoExecutionFailure(input: {
   }, failureCircuitBreaker);
   if (autoExecution.autoRepair && job.status !== "cancelled") {
     const ledger = deps.automationLedgerEventService ?? directorAutomationLedgerEventService;
+    await assertOwnership();
     await ledger.recordRepairTicketCreated({
       taskId,
       novelId,
@@ -418,6 +433,7 @@ export async function handleAutoExecutionFailure(input: {
     && !isDirectorCircuitBreakerOpen(failureCircuitBreaker)
     && executedBudgetAction !== null
   ) {
+    await assertOwnership();
     ({ range, autoExecution } = await resolveAutoExecutionRuntimeRangeAndState(deps, {
       novelId,
       existingState: {
@@ -437,6 +453,7 @@ export async function handleAutoExecutionFailure(input: {
       autoExecution,
       isBackgroundRunning: true,
       resumeStage: "pipeline",
+      ownershipFence: input.ownershipFence,
     });
     return { kind: "continue", range, autoExecution, progressGuard };
   }
@@ -470,6 +487,7 @@ export async function handleAutoExecutionFailure(input: {
       chapter: qualityIssueChapter,
     });
     const ledger = deps.automationLedgerEventService ?? directorAutomationLedgerEventService;
+    await assertOwnership();
     await ledger.recordEvent({
       type: "continue_with_risk",
       idempotencyKey: [
@@ -526,6 +544,7 @@ export async function handleAutoExecutionFailure(input: {
         autoExecution,
         maxConsecutiveNoProgress: input.maxConsecutiveNoProgress,
         source: "defer_and_continue",
+        ownershipFence: input.ownershipFence,
       });
       return { kind: "stop" };
     }
@@ -537,6 +556,7 @@ export async function handleAutoExecutionFailure(input: {
       autoExecution,
       isBackgroundRunning: true,
       resumeStage: "pipeline",
+      ownershipFence: input.ownershipFence,
     });
     return { kind: "continue", range, autoExecution, progressGuard };
   }
@@ -550,9 +570,11 @@ export async function handleAutoExecutionFailure(input: {
       autoExecution: failedAutoExecution,
       circuitBreaker: failureCircuitBreaker,
       resumeStage: "pipeline",
+      ownershipFence: input.ownershipFence,
     });
     return { kind: "stop" };
   }
+  await assertOwnership();
   await deps.workflowService.markTaskFailed(taskId, failureMessage, {
     stage: "quality_repair",
     itemKey: "quality_repair",
@@ -575,6 +597,7 @@ export async function handleAutoExecutionFailure(input: {
     autoExecution: failedAutoExecution,
     isBackgroundRunning: false,
     resumeStage: "pipeline",
+    ownershipFence: input.ownershipFence,
   });
   return { kind: "stop" };
 }

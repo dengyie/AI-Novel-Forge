@@ -3168,3 +3168,231 @@ test("runFromReady still fails no-generatable when stuck next chapter is replan-
   ]);
   assert.equal(calls.some((call) => call[0] === "recordCheckpoint" && call[2] === "workflow_completed"), false);
 });
+
+test("runFromReady does not let an aborted command execution write a stale completed checkpoint", async () => {
+  const calls = [];
+  const controller = new AbortController();
+  const runtime = new NovelDirectorAutoExecutionRuntime({
+    novelContextService: {
+      async listChapters() {
+        return [
+          withExecutionDetail({ id: "chapter-1", order: 1, content: "正文1", generationState: "approved" }),
+        ];
+      },
+    },
+    novelService: {
+      async startPipelineJob() {
+        calls.push(["startPipelineJob"]);
+        throw new Error("stale execution must not start a pipeline");
+      },
+      async findActivePipelineJobForRange() {
+        calls.push(["findActivePipelineJobForRange"]);
+        return null;
+      },
+      async getPipelineJobById() {
+        controller.abort(new Error("command lease lost"));
+        return { id: "job-old", status: "succeeded", progress: 1 };
+      },
+      async cancelPipelineJob(jobId) {
+        calls.push(["cancelPipelineJob", jobId]);
+      },
+    },
+    workflowService: {
+      async bootstrapTask() {
+        calls.push(["bootstrapTask"]);
+      },
+      async getTaskById() {
+        return { status: "running" };
+      },
+      async markTaskRunning() {
+        calls.push(["markTaskRunning"]);
+      },
+      async recordCheckpoint(_taskId, input) {
+        calls.push(["recordCheckpoint", input.checkpointType]);
+      },
+      async markTaskFailed() {
+        calls.push(["markTaskFailed"]);
+      },
+    },
+    buildDirectorSeedPayload(_request, _novelId, extra) {
+      return extra ?? {};
+    },
+  });
+
+  await runtime.runFromReady({
+    taskId: "task-auto-exec",
+    novelId: "novel-1",
+    request: buildRequest(),
+    existingPipelineJobId: "job-old",
+    existingState: {
+      enabled: true,
+      firstChapterId: "chapter-1",
+      startOrder: 1,
+      endOrder: 1,
+      totalChapterCount: 1,
+      pipelineJobId: "job-old",
+      pipelineStatus: "running",
+    },
+    signal: controller.signal,
+  });
+
+  assert.deepEqual(calls, [["cancelPipelineJob", "job-old"]]);
+});
+
+test("runFromReady stops the new pipeline when task cancellation races after job creation", async () => {
+  const calls = [];
+  let cancelled = false;
+  const runtime = new NovelDirectorAutoExecutionRuntime({
+    novelContextService: {
+      async listChapters() {
+        return [withExecutionDetail({ id: "chapter-1", order: 1, generationState: "planned" })];
+      },
+    },
+    novelService: {
+      async startPipelineJob() {
+        calls.push(["startPipelineJob"]);
+        cancelled = true;
+        return { id: "job-cancelled-race", status: "queued" };
+      },
+      async findActivePipelineJobForRange() {
+        return null;
+      },
+      async getPipelineJobById() {
+        throw new Error("task cancellation must stop before polling");
+      },
+      async cancelPipelineJob(jobId) {
+        calls.push(["cancelPipelineJob", jobId]);
+      },
+    },
+    workflowService: {
+      async bootstrapTask() {
+        calls.push(["bootstrapTask"]);
+      },
+      async getTaskById() {
+        return cancelled
+          ? { status: "cancelled", cancelRequestedAt: new Date() }
+          : { status: "running" };
+      },
+      async markTaskRunning() {
+        calls.push(["markTaskRunning"]);
+      },
+      async recordCheckpoint(_taskId, input) {
+        calls.push(["recordCheckpoint", input.checkpointType]);
+      },
+      async markTaskFailed() {
+        calls.push(["markTaskFailed"]);
+      },
+    },
+    buildDirectorSeedPayload(_request, _novelId, extra) {
+      return extra ?? {};
+    },
+  });
+
+  await runtime.runFromReady({
+    taskId: "task-auto-exec",
+    novelId: "novel-1",
+    request: buildRequest(),
+    existingState: {
+      enabled: true,
+      firstChapterId: "chapter-1",
+      startOrder: 1,
+      endOrder: 1,
+      totalChapterCount: 1,
+      autoReview: true,
+      autoRepair: true,
+    },
+  });
+
+  assert.deepEqual(calls, [
+    ["bootstrapTask"],
+    ["markTaskRunning"],
+    ["startPipelineJob"],
+    ["cancelPipelineJob", "job-cancelled-race"],
+  ]);
+});
+
+test("runFromReady does not record quality debt after its execution ownership is lost", async () => {
+  const calls = [];
+  const controller = new AbortController();
+  const runtime = new NovelDirectorAutoExecutionRuntime({
+    novelContextService: {
+      async listChapters() {
+        return [withExecutionDetail({ id: "chapter-1", order: 1, generationState: "planned" })];
+      },
+    },
+    novelService: {
+      async startPipelineJob() {
+        return { id: "job-quality-old", status: "queued" };
+      },
+      async findActivePipelineJobForRange() {
+        return null;
+      },
+      async getPipelineJobById() {
+        controller.abort(new Error("replacement retry owns the command"));
+        return {
+          id: "job-quality-old",
+          status: "failed",
+          progress: 1,
+          error: "章节质量修复失败",
+        };
+      },
+      async cancelPipelineJob(jobId) {
+        calls.push(["cancelPipelineJob", jobId]);
+      },
+    },
+    workflowService: {
+      async bootstrapTask() {
+        calls.push(["bootstrapTask"]);
+      },
+      async getTaskById() {
+        return { status: "running" };
+      },
+      async markTaskRunning() {
+        calls.push(["markTaskRunning"]);
+      },
+      async recordCheckpoint(_taskId, input) {
+        calls.push(["recordCheckpoint", input.checkpointType]);
+      },
+      async markTaskFailed() {
+        calls.push(["markTaskFailed"]);
+      },
+    },
+    automationLedgerEventService: {
+      async recordRepairTicketCreated() {
+        calls.push(["recordRepairTicketCreated"]);
+      },
+      async recordEvent() {
+        calls.push(["recordEvent"]);
+      },
+      async recordCircuitBreakerOpened() {
+        calls.push(["recordCircuitBreakerOpened"]);
+      },
+    },
+    buildDirectorSeedPayload(_request, _novelId, extra) {
+      return extra ?? {};
+    },
+  });
+
+  await runtime.runFromReady({
+    taskId: "task-auto-exec",
+    novelId: "novel-1",
+    request: buildRequest(),
+    signal: controller.signal,
+    existingState: {
+      enabled: true,
+      firstChapterId: "chapter-1",
+      startOrder: 1,
+      endOrder: 1,
+      totalChapterCount: 1,
+      autoReview: true,
+      autoRepair: true,
+    },
+  });
+
+  assert.deepEqual(calls, [
+    ["bootstrapTask"],
+    ["markTaskRunning"],
+    ["bootstrapTask"],
+    ["cancelPipelineJob", "job-quality-old"],
+  ]);
+});

@@ -13,6 +13,7 @@ import {
   type BatchRollHaltItemKey,
 } from "../novelDirectorAutoExecutionBatchRollRuntime";
 import type { NovelDirectorAutoExecutionRuntimeDeps } from "../novelDirectorAutoExecutionRuntimePorts";
+import type { AutoExecutionOwnershipFence } from "../domain/AutoExecutionOwnershipFence";
 
 function withPersistedBatchRollCount(
   autoExecution: DirectorAutoExecutionState,
@@ -54,12 +55,14 @@ export class AutoExecutionBatchRollCoordinator {
     range: DirectorAutoExecutionRange;
     autoExecution: DirectorAutoExecutionState;
     consecutiveBatchRolls: number;
+    ownershipFence?: AutoExecutionOwnershipFence;
   }): Promise<{
     range: DirectorAutoExecutionRange;
     autoExecution: DirectorAutoExecutionState;
     consecutiveBatchRolls: number;
     decision: BatchRollDecision;
   } | null> {
+    await input.ownershipFence?.assertActive();
     if (!this.isBatchRollEnabled() || !this.deps.resolveBatchRoll) {
       return null;
     }
@@ -85,6 +88,7 @@ export class AutoExecutionBatchRollCoordinator {
         pipelineJobId: null,
         pipelineStatus: null,
       }, nextRolls);
+      await input.ownershipFence?.assertActive();
       await this.deps.workflowService.markTaskFailed(
         input.taskId,
         decision.reason,
@@ -107,6 +111,7 @@ export class AutoExecutionBatchRollCoordinator {
         autoExecution: haltedState,
         isBackgroundRunning: false,
         resumeStage: "pipeline",
+        ownershipFence: input.ownershipFence,
       });
       // Signal stop without completed checkpoint: throw a soft control via special decision
       return {
@@ -135,6 +140,7 @@ export class AutoExecutionBatchRollCoordinator {
           pipelineJobId: null,
           pipelineStatus: null,
         }, nextRolls);
+        await input.ownershipFence?.assertActive();
         await this.deps.workflowService.markTaskFailed(
           input.taskId,
           emptyReason,
@@ -156,6 +162,7 @@ export class AutoExecutionBatchRollCoordinator {
           autoExecution: haltedState,
           isBackgroundRunning: false,
           resumeStage: "pipeline",
+          ownershipFence: input.ownershipFence,
         });
         return {
           range: input.range,
@@ -183,6 +190,7 @@ export class AutoExecutionBatchRollCoordinator {
         autoExecution: expandedState,
         isBackgroundRunning: true,
         resumeStage: "pipeline",
+        ownershipFence: input.ownershipFence,
       });
       return {
         range: expanded.range,
@@ -198,6 +206,7 @@ export class AutoExecutionBatchRollCoordinator {
           pipelineJobId: null,
           pipelineStatus: null,
         }, nextRolls);
+        await input.ownershipFence?.assertActive();
         await this.deps.workflowService.markTaskFailed(
           input.taskId,
           `批续窗需要细化第 ${decision.nextRange.startOrder}-${decision.nextRange.endOrder} 章，但未配置 prepareNextAutoExecutionBatch。`,
@@ -218,6 +227,7 @@ export class AutoExecutionBatchRollCoordinator {
           autoExecution: haltedState,
           isBackgroundRunning: false,
           resumeStage: "pipeline",
+          ownershipFence: input.ownershipFence,
         });
         return {
           range: input.range,
@@ -230,6 +240,7 @@ export class AutoExecutionBatchRollCoordinator {
           },
         };
       }
+      await input.ownershipFence?.assertActive();
       const prepared = await this.deps.prepareNextAutoExecutionBatch({
         novelId: input.novelId,
         taskId: input.taskId,
@@ -247,6 +258,7 @@ export class AutoExecutionBatchRollCoordinator {
         autoExecution: preparedState,
         isBackgroundRunning: true,
         resumeStage: "pipeline",
+        ownershipFence: input.ownershipFence,
       });
       return {
         range: prepared.range,

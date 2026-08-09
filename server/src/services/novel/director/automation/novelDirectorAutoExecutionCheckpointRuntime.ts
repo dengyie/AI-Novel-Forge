@@ -28,6 +28,7 @@ import {
   toVolumeCompletionCheckpointPayload,
 } from "../../volume/volumeSettingCompletionService";
 import { resolveVolumeIdForChapterScope } from "../../quality/settingAlignmentWorkspaceLookup";
+import type { AutoExecutionOwnershipFence } from "./domain/AutoExecutionOwnershipFence";
 
 export type AutoExecutionResumeStage = "chapter" | "pipeline";
 
@@ -51,6 +52,7 @@ export interface AutoExecutionWorkflowCheckpointPort {
 }
 
 export interface AutoExecutionCheckpointRuntimeDeps {
+  ownershipFence?: AutoExecutionOwnershipFence;
   workflowService: AutoExecutionWorkflowCheckpointPort;
   buildDirectorSeedPayload: (
     input: DirectorConfirmRequest,
@@ -80,6 +82,7 @@ export interface AutoExecutionCheckpointBaseInput {
   request: DirectorConfirmRequest;
   range: DirectorAutoExecutionRange;
   autoExecution: DirectorAutoExecutionState;
+  ownershipFence?: AutoExecutionOwnershipFence;
 }
 
 export async function syncAutoExecutionTaskState(
@@ -89,6 +92,7 @@ export async function syncAutoExecutionTaskState(
     resumeStage?: AutoExecutionResumeStage;
   },
 ): Promise<void> {
+  await (deps.ownershipFence ?? input.ownershipFence)?.assertActive();
   const directorSession = buildDirectorSessionState({
     runMode: input.request.runMode,
     phase: "chapter_execution",
@@ -120,6 +124,7 @@ export async function recordCompletedCheckpoint(
     pipelineStatus?: PipelineJobStatus | null;
   },
 ): Promise<void> {
+  await (deps.ownershipFence ?? input.ownershipFence)?.assertActive();
   const completedState = {
     ...input.autoExecution,
     pipelineJobId: input.pipelineJobId ?? input.autoExecution.pipelineJobId ?? null,
@@ -199,6 +204,7 @@ export async function recordQualityRepairCheckpoint(
     qualityRepairRisk: DirectorQualityRepairRisk;
   },
 ): Promise<DirectorAutoExecutionState> {
+  await (deps.ownershipFence ?? input.ownershipFence)?.assertActive();
   const checkpointState = {
     ...input.autoExecution,
     pipelineJobId: input.pipelineJobId,
@@ -256,6 +262,7 @@ export async function resolveQualityRepairNoticeAction(
   checkpointState: DirectorAutoExecutionState;
   qualityRepairRisk: DirectorQualityRepairRisk;
 }> {
+  await (deps.ownershipFence ?? input.ownershipFence)?.assertActive();
   // replan → replan_required；品类 shortfall 等其它硬停仍走 chapter_batch_ready + autoContinuable=false，
   // 避免被 continue/recovery 当成「大纲重规划」路径。
   const checkpointType = input.noticeCode === PIPELINE_REPLAN_NOTICE_CODE
@@ -312,6 +319,7 @@ export async function resolveQualityRepairNoticeAction(
     );
 
   if (canAutoContinueByPolicy || shouldNotifyAndContinueAiDriverQualityNotice) {
+    await (deps.ownershipFence ?? input.ownershipFence)?.assertActive();
     await deps.recordAutoApproval?.({
       taskId: input.taskId,
       checkpointType,

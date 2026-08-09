@@ -35,6 +35,9 @@ Web API 只接收命令和返回轻量投影；Worker 负责执行重型生产�
 - Command acceptance 必须用任务状态与 `cancelRequestedAt` 做 CAS。取消先赢时，不得把任务重新投影为 `queued`。普通 command 如果已经创建但任务拒绝 acceptance，应退出 active 状态；带启动恢复快照的 command 必须先完成任务 CAS 再创建 command，CAS miss 时不得创建、关闭或重写任何 command / runtime。
 - 新 command 的持久化与任务 acceptance 投影必须在同一事务内提交，worker 不得看见“有 queued command、但任务尚未接受”的中间态。`TaskDispatcher` 只是事务提交后的 best-effort 唤醒提示，不能成为 durable acceptance 的事实源；同进程唤醒失败时由数据库轮询继续消费。
 - Command lease 的运行、续租、成功、取消和失败终态只能由当前 owner 在租约未过期时用 CAS 提交。续租明确返回失去 ownership 时必须中止当前执行；续租调用本身的瞬态异常只记录告警，不能凭异常猜测已经丢租。取消任务、active command、子步骤 / generation job 收束和取消审计必须在同一事务内提交，任何一步失败都不能留下“任务已取消但 command 仍运行”或相反的半状态。
+- 章节批次自动执行必须建立 run-local ownership fence。Command lease 的中止信号、任务 `cancelRequestedAt / cancelled` 状态和当前 pipeline job id 共同决定该执行是否仍可写入；`syncAutoExecutionTaskState`、workflow checkpoint、质量债与 repair ticket、重规划调用、批续窗章节准备、异步提案确认及 task terminal 投影都必须在副作用前通过同一个 fence。失去所有权后只允许幂等取消该旧执行跟踪的 pipeline job，并直接退出；禁止再用 best-effort cleanup 把旧 `autoExecution` 状态写回新 retry。
+- Pipeline job 的成功、失败、取消和重排队终态仍由 job 自身的 status / cancel / leaseOwner CAS 决定。自动执行 fence 负责停止导演层后续链路，不得绕过 job CAS 强行覆盖已经成功的终态，也不得把 `leaseOwner=null` 当成跳过 owner 校验。
+- Ownership 丢失是运行时停止条件，不是章节质量结论。它不得创建质量债、repair ticket 或重规划信号；反过来，`local_patch_plan`、`continue_with_warning`、`defer_and_continue` 等局部质量债仍按章节级规则记录并继续，不能因为引入 ownership fence 而升级成全局 `replan_required`。
 - `DirectorRun` 是书级导演运行的根状态，`DirectorStepRun` 是步骤执行记录，`DirectorEvent` 和 `DirectorArtifact` 用于投影和恢复。
 - StepModule 应声明输入、输出、产物、进度检查和恢复策略；Pipeline 只编排，不直接知道具体业务表和 Prompt 细节。
 - StepModule 的只读事实检查必须能用 `novelId` 独立运行。`taskId`、run、command、artifacts 和 projection hints 属于自动导演扩展上下文，不能成为 `inspectReadiness`、`inspectCompletion`、`inspectProgress` 的必需条件；没有导演任务时应返回基于小说事实的最小状态。
@@ -122,6 +125,7 @@ Web API 只接收命令和返回轻量投影；Worker 负责执行重型生产�
 - 重复点击继续产生多条执行链：检查 command 幂等键和 active command 复用。
 - stale 恢复后任务在 `running` / `queued` 间反复跳变：检查 healing、保留扫描和 command acceptance 是否仍有多个状态写者，以及 command 内部读取是否误触发 healing。
 - 服务启动后已取消或已重试的任务又被恢复：先检查 recoverable query 是否排除了 `cancelRequestedAt`，再核对 scanner snapshot 是否完整传到 workflow 终写和 command acceptance；如果 CAS miss 后仍出现 `mark failed`、checkpoint 回写或新 command，说明启动恢复仍有无条件写入旁路。
+- 取消或重试后任务又被旧批次写成完成、失败或新增质量债：先确认 command lease 中止信号是否传到 `AutoExecutionRangeRunner`，再检查对应 checkpoint、质量链或批续窗写入是否绕过 run-local ownership fence。若旧 job 已经成功但被取消覆盖，则继续检查 pipeline terminal CAS，而不是在导演投影层补状态分支。
 - 瞬态模型故障在两个模型间来回切换：先核对失败 job payload 中的 provider / model，再检查 `autoExecution` 是否持久化已尝试目标、模型目录是否返回真实候选，以及候选耗尽时旧 override 是否被清空。
 
 不能用前端禁用按钮或降低轮询频率掩盖执行面阻塞。
