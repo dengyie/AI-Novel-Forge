@@ -24,8 +24,11 @@ interface DirectorCommandAcceptanceOptions {
 }
 
 export interface DirectorTaskAcceptanceExpectation {
-  status: "running";
+  status: "queued" | "running";
   updatedAt: Date;
+  cancelRequestedAt?: Date | null;
+  attemptCount?: number;
+  pendingManualRecovery?: boolean;
   heartbeatAt: Date | null;
   currentItemKey?: string | null;
 }
@@ -55,11 +58,21 @@ export class DirectorCommandAcceptanceService {
   }): Promise<T> {
     const outcome = await withSqliteRetry(
       () => prisma.$transaction(async (tx) => {
+        const projected = input.expectedTaskState
+          ? await this.projectAcceptedTask(tx, input.taskId, input.commandType, {
+            preserveLastError: input.preserveLastError,
+          }, input.expectedTaskState)
+          : true;
+        if (!projected) {
+          return { accepted: false as const, command: null };
+        }
         const command = await input.createCommand(tx);
-        const projected = await this.projectAcceptedTask(tx, input.taskId, input.commandType, {
-          preserveLastError: input.preserveLastError,
-        }, input.expectedTaskState);
-        if (projected) {
+        const projectedAfterCreate = input.expectedTaskState
+          ? true
+          : await this.projectAcceptedTask(tx, input.taskId, input.commandType, {
+            preserveLastError: input.preserveLastError,
+          });
+        if (projectedAfterCreate) {
           return { accepted: true as const, command };
         }
         await this.cancelUnacceptedCommand(tx, command.id);
@@ -208,6 +221,12 @@ export class DirectorCommandAcceptanceService {
         cancelRequestedAt: null,
         ...(expectedTaskState ? {
           updatedAt: expectedTaskState.updatedAt,
+          ...(Object.prototype.hasOwnProperty.call(expectedTaskState, "attemptCount")
+            ? { attemptCount: expectedTaskState.attemptCount }
+            : {}),
+          ...(Object.prototype.hasOwnProperty.call(expectedTaskState, "pendingManualRecovery")
+            ? { pendingManualRecovery: expectedTaskState.pendingManualRecovery }
+            : {}),
           heartbeatAt: expectedTaskState.heartbeatAt,
           ...(Object.prototype.hasOwnProperty.call(expectedTaskState, "currentItemKey")
             ? { currentItemKey: expectedTaskState.currentItemKey ?? null }

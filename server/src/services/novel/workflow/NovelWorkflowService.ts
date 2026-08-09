@@ -80,6 +80,10 @@ export class NovelWorkflowService extends NovelWorkflowStoreService {
     return this.applicationService.markTaskFailed(...args);
   }
 
+  markTaskFailedForRecovery(...args: Parameters<NovelWorkflowApplicationService["markTaskFailedForRecovery"]>) {
+    return this.applicationService.markTaskFailedForRecovery(...args);
+  }
+
   cancelTask(...args: Parameters<NovelWorkflowApplicationService["cancelTask"]>) {
     return this.applicationService.cancelTask(...args);
   }
@@ -94,6 +98,10 @@ export class NovelWorkflowService extends NovelWorkflowStoreService {
 
   restoreTaskToCheckpoint(...args: Parameters<NovelWorkflowApplicationService["restoreTaskToCheckpoint"]>) {
     return this.applicationService.restoreTaskToCheckpoint(...args);
+  }
+
+  restoreTaskToCheckpointForRecovery(...args: Parameters<NovelWorkflowApplicationService["restoreTaskToCheckpointForRecovery"]>) {
+    return this.applicationService.restoreTaskToCheckpointForRecovery(...args);
   }
 
   continueTask(...args: Parameters<NovelWorkflowApplicationService["continueTask"]>) {

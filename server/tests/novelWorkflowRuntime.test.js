@@ -11,6 +11,12 @@ const {
   NovelWorkflowApplicationService,
 } = require("../dist/services/novel/workflow/NovelWorkflowApplicationService.js");
 const {
+  NovelWorkflowStoreService,
+} = require("../dist/services/novel/workflow/NovelWorkflowStoreService.js");
+const {
+  DirectorCommandAcceptanceService,
+} = require("../dist/services/novel/director/commands/DirectorCommandAcceptanceService.js");
+const {
   isStaleAutoDirectorRunningTask,
   isStaleAutoDirectorRunningTaskBroad,
 } = require("../dist/services/novel/workflow/recovery/index.js");
@@ -308,6 +314,220 @@ test("resumePendingAutoDirectorTasks continues queued tasks without marking them
   assert.deepEqual(calls, [
     ["continue", "task-queued"],
   ]);
+});
+
+function buildStartupRecoverySnapshot(overrides = {}) {
+  return buildWorkflowRow({
+    id: "task-startup-recovery",
+    status: "running",
+    pendingManualRecovery: false,
+    cancelRequestedAt: null,
+    attemptCount: 2,
+    heartbeatAt: new Date("2026-05-04T00:00:00.000Z"),
+    updatedAt: new Date("2026-05-04T00:00:00.000Z"),
+    currentItemKey: "chapter_execution",
+    ...overrides,
+  });
+}
+
+function createStartupRecoveryRaceHarness(mutateBeforeRecoveryCas) {
+  const scanned = buildStartupRecoverySnapshot();
+  let current = scanned;
+  let mutationApplied = false;
+  const calls = [];
+  const workflow = {
+    getTaskById: async () => {
+      throw new Error("startup recovery must use raw lookup without healing");
+    },
+    getTaskByIdWithoutHealing: async () => current,
+    updateTaskManyWithRetry: async ({ where, data }) => {
+      if (!mutationApplied && mutateBeforeRecoveryCas) {
+        mutationApplied = true;
+        current = mutateBeforeRecoveryCas(current);
+      }
+      const matches = where.id === current.id
+        && where.status === current.status
+        && where.cancelRequestedAt === current.cancelRequestedAt
+        && where.updatedAt === current.updatedAt
+        && where.attemptCount === current.attemptCount;
+      if (!matches) {
+        return { count: 0 };
+      }
+      current = {
+        ...current,
+        ...data,
+        updatedAt: new Date(current.updatedAt.getTime() + 1),
+      };
+      return { count: 1 };
+    },
+    notifyAutoDirectorTaskTransition: async ({ before, after }) => {
+      calls.push(["notify", before.status, after.status]);
+    },
+  };
+  const applicationService = new NovelWorkflowApplicationService(workflow);
+  const runtimeService = new NovelWorkflowRuntimeService(
+    {
+      async listRecoverableAutoDirectorTasks() {
+        return [scanned];
+      },
+      requeueTaskForRecovery: (...args) => applicationService.requeueTaskForRecovery(...args),
+      async restoreTaskToCheckpoint(taskId) {
+        calls.push(["restore", taskId]);
+      },
+      async markTaskFailed(taskId, message) {
+        calls.push(["failed", taskId, message]);
+      },
+    },
+    {
+      async enqueueRecoveryCommand(taskId) {
+        calls.push(["enqueue", taskId]);
+      },
+    },
+  );
+  return {
+    scanned,
+    calls,
+    runtimeService,
+    getCurrent: () => current,
+  };
+}
+
+test("startup recovery scanner excludes tasks with a cancellation request", async () => {
+  const originals = {
+    taskFindMany: prisma.novelWorkflowTask.findMany,
+    archiveFindMany: prisma.taskCenterArchive.findMany,
+  };
+  let queryWhere = null;
+  prisma.novelWorkflowTask.findMany = async ({ where }) => {
+    queryWhere = where;
+    return [];
+  };
+  prisma.taskCenterArchive.findMany = async () => [];
+
+  try {
+    const store = new NovelWorkflowStoreService();
+    await store.listRecoverableAutoDirectorTasks();
+
+    assert.equal(queryWhere.cancelRequestedAt, null);
+  } finally {
+    prisma.novelWorkflowTask.findMany = originals.taskFindMany;
+    prisma.taskCenterArchive.findMany = originals.archiveFindMany;
+  }
+});
+
+test("startup recovery does not revive a task cancelled after the scan", async () => {
+  const cancelledAt = new Date("2026-05-04T00:00:01.000Z");
+  const harness = createStartupRecoveryRaceHarness((row) => ({
+    ...row,
+    status: "cancelled",
+    cancelRequestedAt: cancelledAt,
+    updatedAt: cancelledAt,
+  }));
+
+  await harness.runtimeService.resumePendingAutoDirectorTasks();
+
+  assert.deepEqual(harness.calls, []);
+  assert.equal(harness.getCurrent().status, "cancelled");
+  assert.equal(harness.getCurrent().cancelRequestedAt, cancelledAt);
+});
+
+test("startup recovery does not overwrite an explicit retry accepted after the scan", async () => {
+  const retriedAt = new Date("2026-05-04T00:00:01.000Z");
+  const harness = createStartupRecoveryRaceHarness((row) => ({
+    ...row,
+    status: "queued",
+    attemptCount: row.attemptCount + 1,
+    updatedAt: retriedAt,
+    heartbeatAt: retriedAt,
+  }));
+
+  await harness.runtimeService.resumePendingAutoDirectorTasks();
+
+  assert.deepEqual(harness.calls, []);
+  assert.equal(harness.getCurrent().status, "queued");
+  assert.equal(harness.getCurrent().attemptCount, 3);
+  assert.equal(harness.getCurrent().updatedAt, retriedAt);
+});
+
+test("startup recovery lets completion win when the task finishes after the scan", async () => {
+  const completedAt = new Date("2026-05-04T00:00:01.000Z");
+  const harness = createStartupRecoveryRaceHarness((row) => ({
+    ...row,
+    status: "succeeded",
+    finishedAt: completedAt,
+    updatedAt: completedAt,
+  }));
+
+  await harness.runtimeService.resumePendingAutoDirectorTasks();
+
+  assert.deepEqual(harness.calls, []);
+  assert.equal(harness.getCurrent().status, "succeeded");
+  assert.equal(harness.getCurrent().finishedAt, completedAt);
+});
+
+test("repeated startup recovery is idempotent for the same scanned snapshot", async () => {
+  const harness = createStartupRecoveryRaceHarness();
+
+  await harness.runtimeService.resumePendingAutoDirectorTasks();
+  await harness.runtimeService.resumePendingAutoDirectorTasks();
+
+  assert.deepEqual(harness.calls, [
+    ["notify", "running", "queued"],
+    ["enqueue", "task-startup-recovery"],
+  ]);
+  assert.equal(harness.getCurrent().status, "queued");
+  assert.equal(harness.getCurrent().attemptCount, 2);
+});
+
+test("startup recovery command CAS miss creates no job and does not close another job", async () => {
+  const originals = {
+    transaction: prisma.$transaction,
+  };
+  let createCalls = 0;
+  let commandUpdateCalls = 0;
+  prisma.$transaction = async (callback) => callback({
+    novelWorkflowTask: {
+      updateMany: async () => ({ count: 0 }),
+    },
+    directorRunCommand: {
+      updateMany: async () => {
+        commandUpdateCalls += 1;
+        return { count: 1 };
+      },
+    },
+  });
+
+  try {
+    const acceptance = new DirectorCommandAcceptanceService();
+    await assert.rejects(
+      () => acceptance.createAndAccept({
+        taskId: "task-startup-recovery",
+        commandType: "resume_from_checkpoint",
+        expectedTaskState: {
+          status: "queued",
+          cancelRequestedAt: null,
+          updatedAt: new Date("2026-05-04T00:00:00.000Z"),
+          attemptCount: 2,
+          heartbeatAt: null,
+          currentItemKey: "chapter_execution",
+        },
+        createCommand: async () => {
+          createCalls += 1;
+          return {
+            id: "new-stale-recovery-command",
+            taskId: "task-startup-recovery",
+            commandType: "resume_from_checkpoint",
+            status: "queued",
+          };
+        },
+      }),
+      (error) => error?.statusCode === 409,
+    );
+    assert.equal(createCalls, 0);
+    assert.equal(commandUpdateCalls, 0);
+  } finally {
+    prisma.$transaction = originals.transaction;
+  }
 });
 
 test("resumePendingAutoDirectorTasks marks failed when recovery throws", async () => {
@@ -799,6 +1019,10 @@ test("real workflow and command services close stale recovery without recursive 
   };
   prisma.novelWorkflowTask.updateMany = async ({ where, data }) => {
     if (where.id !== staleRow.id) return { count: 0 };
+    if (where.status && where.status !== staleRow.status) return { count: 0 };
+    if (where.updatedAt && where.updatedAt.getTime() !== staleRow.updatedAt.getTime()) return { count: 0 };
+    if (Object.prototype.hasOwnProperty.call(where, "cancelRequestedAt")
+      && where.cancelRequestedAt !== staleRow.cancelRequestedAt) return { count: 0 };
     Object.assign(staleRow, data, { updatedAt: new Date(staleRow.updatedAt.getTime() + 1) });
     return { count: 1 };
   };
@@ -843,7 +1067,7 @@ test("real workflow and command services close stale recovery without recursive 
       service.healStaleAutoDirectorRunningTask(staleRow.id, staleRow),
     ]);
 
-    assert.deepEqual([first, second], [true, true]);
+    assert.deepEqual([first, second], [true, false]);
     assert.equal(commands.length, 1);
     assert.equal(commands[0].commandType, "continue");
     assert.equal(staleRow.status, "queued");

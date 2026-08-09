@@ -32,7 +32,7 @@ Web API 只接收命令和返回轻量投影；Worker 负责执行重型生产�
 - `DirectorRunCommand` 表达控制面命令、租约和幂等，不表达业务完成事实。
 - Command 内部读取任务时必须使用不触发 healing 的原始事实读取。禁止在 `healing -> enqueue command -> task lookup` 链上再次进入 healing，否则会形成恢复递归、重复命令或无界读取；需要面向用户纠偏的查询入口才允许调用 healing 读取。
 - 僵死任务恢复成功的判据是 durable command 已创建或幂等复用，并完成 command acceptance。`queued`、心跳、手工恢复标记和旧错误清理只能由 command acceptance 单点投影；healing 与周期保留扫描不得在 enqueue 后再写一遍 `running`、刷新心跳或清空诊断。enqueue 或 acceptance 失败时保留原 stale 状态，交给下一轮恢复或人工诊断。
-- Command acceptance 必须用任务状态与 `cancelRequestedAt` 做 CAS。取消先赢时，不得把任务重新投影为 `queued`；未被任务接受的 durable command 应退出 active 状态，避免后续租约把已取消任务复活。
+- Command acceptance 必须用任务状态与 `cancelRequestedAt` 做 CAS。取消先赢时，不得把任务重新投影为 `queued`。普通 command 如果已经创建但任务拒绝 acceptance，应退出 active 状态；带启动恢复快照的 command 必须先完成任务 CAS 再创建 command，CAS miss 时不得创建、关闭或重写任何 command / runtime。
 - 新 command 的持久化与任务 acceptance 投影必须在同一事务内提交，worker 不得看见“有 queued command、但任务尚未接受”的中间态。`TaskDispatcher` 只是事务提交后的 best-effort 唤醒提示，不能成为 durable acceptance 的事实源；同进程唤醒失败时由数据库轮询继续消费。
 - Command lease 的运行、续租、成功、取消和失败终态只能由当前 owner 在租约未过期时用 CAS 提交。续租明确返回失去 ownership 时必须中止当前执行；续租调用本身的瞬态异常只记录告警，不能凭异常猜测已经丢租。取消任务、active command、子步骤 / generation job 收束和取消审计必须在同一事务内提交，任何一步失败都不能留下“任务已取消但 command 仍运行”或相反的半状态。
 - `DirectorRun` 是书级导演运行的根状态，`DirectorStepRun` 是步骤执行记录，`DirectorEvent` 和 `DirectorArtifact` 用于投影和恢复。
@@ -48,6 +48,8 @@ Web API 只接收命令和返回轻量投影；Worker 负责执行重型生产�
 - 工作流提醒、章节标题提醒、缺资源风险和 stale artifact 只能作为诊断或辅助操作展示；当 `DirectorDashboardView.mode` 是 `running` 或 `queued` 时，这些提醒不得把主容器、主 badge 或主按钮改成等待确认。
 - 浏览器桌面提醒只消费“导演跟进”投影中的可处理分组：`needs_validation`、`exception`、`pending`。`auto_progress` 和 `replaced` 仍可显示在跟进中心，但不触发系统级通知。提醒开关属于当前浏览器本地偏好，并且必须受浏览器通知权限约束；前端不得为了弹窗重新推断 task status 或绕过跟进投影。
 - 服务重启后不得只凭旧 `running` 状态静默续跑，应从真实产物断点和持久化自动执行授权判断可恢复范围。没有明确自动执行授权时由用户确认；已启用全书自动执行、未取消、熔断未开且仍有剩余章节时，恢复策略可以提交幂等 continue command，但仍必须服从统一 command acceptance。
+- 启动恢复扫描必须在查询层排除 `cancelRequestedAt != null` 的任务，并携带 `status / cancelRequestedAt / updatedAt / attemptCount / pendingManualRecovery / heartbeatAt / currentItemKey` 快照进入后续写入。扫描后的重排队、失败收口、checkpoint 恢复和 command acceptance 都必须验证该快照；任何字段已变化都表示取消、重试、完成或新运行时投影先赢，本轮恢复只能 no-op。
+- 启动恢复的任务读取只能走 raw lookup，不能触发 healing。重复扫描同一快照时只允许一个调用完成 CAS 和创建恢复 command；后续调用的 CAS miss 不得清除取消请求、递增重试次数、覆盖完成态，也不得把新 command 标记成旧恢复流程的失败。
 - 自动导演驱动章节生产时，只能通过 `novelService.startPipelineJob(...)` 或 `resumePipelineJob(...)` 进入统一章节执行主链；导演侧不得直接调用 writer、patch repair、heavy repair 或旧手动修文 service。
 - 自动导演遇到章节质量失败时，只能复用统一质量修复规则：patch first，失败后最多一次 `heavy_repair`，再失败则登记质量债务或 recoverable failure 并继续后续章节。导演 runtime 不得再发明独立的“导演专用修文分支”。
 - 自动导演进入下一章前必须服从章节生产链的 `final_content -> timeline_finalization -> next_chapter` 规则。导演可以决定继续、跳过或重规划，但不能绕过 `ChapterTimelineFinalizationService`。
@@ -119,6 +121,7 @@ Web API 只接收命令和返回轻量投影；Worker 负责执行重型生产�
 - 服务重启后假 running：检查租约过期、active step、command 状态和产物断点是否统一投影。
 - 重复点击继续产生多条执行链：检查 command 幂等键和 active command 复用。
 - stale 恢复后任务在 `running` / `queued` 间反复跳变：检查 healing、保留扫描和 command acceptance 是否仍有多个状态写者，以及 command 内部读取是否误触发 healing。
+- 服务启动后已取消或已重试的任务又被恢复：先检查 recoverable query 是否排除了 `cancelRequestedAt`，再核对 scanner snapshot 是否完整传到 workflow 终写和 command acceptance；如果 CAS miss 后仍出现 `mark failed`、checkpoint 回写或新 command，说明启动恢复仍有无条件写入旁路。
 - 瞬态模型故障在两个模型间来回切换：先核对失败 job payload 中的 provider / model，再检查 `autoExecution` 是否持久化已尝试目标、模型目录是否返回真实候选，以及候选耗尽时旧 override 是否被清空。
 
 不能用前端禁用按钮或降低轮询频率掩盖执行面阻塞。

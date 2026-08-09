@@ -17,7 +17,12 @@ import {
 import { buildRestoreTaskToCheckpointResult } from "./novelWorkflowCheckpoint";
 import { applyDirectorLlmOverride, type DirectorWorkflowSeedPayload } from "../director/runtime/novelDirectorHelpers";
 import type { DirectorLLMOptions } from "@ai-novel/shared/types/novelDirector";
-import { NovelWorkflowStoreService } from "./NovelWorkflowStoreService";
+import {
+  NovelWorkflowStoreService,
+  type NovelWorkflowRecoveryTaskSnapshot,
+} from "./NovelWorkflowStoreService";
+import { StartupWorkflowRecoveryService } from "./recovery/StartupWorkflowRecoveryService";
+import { WorkflowRetryService } from "./recovery/WorkflowRetryService";
 
 type WorkflowRow = Awaited<ReturnType<typeof prisma.novelWorkflowTask.findUnique>>;
 
@@ -27,7 +32,13 @@ interface AutoDirectorNovelCreationClaim {
 }
 
 export class NovelWorkflowApplicationService {
-  constructor(private readonly workflow: NovelWorkflowStoreService) {}
+  private readonly startupRecoveryService: StartupWorkflowRecoveryService;
+  private readonly workflowRetryService: WorkflowRetryService;
+
+  constructor(private readonly workflow: NovelWorkflowStoreService) {
+    this.startupRecoveryService = new StartupWorkflowRecoveryService(workflow);
+    this.workflowRetryService = new WorkflowRetryService(workflow);
+  }
 
   private async getNovelTitle(novelId: string): Promise<string | null> {
     return this.workflow.getNovelTitle(novelId);
@@ -373,6 +384,14 @@ export class NovelWorkflowApplicationService {
     });
   }
 
+  async markTaskFailedForRecovery(
+    taskId: string,
+    message: string,
+    expectedState: NovelWorkflowRecoveryTaskSnapshot,
+  ) {
+    return this.startupRecoveryService.markFailed(taskId, message, expectedState);
+  }
+
   async cancelTask(taskId: string, row: WorkflowRow = null) {
     const existing = row ?? await this.workflow.getTaskByIdWithoutHealing(taskId);
     if (!existing) {
@@ -425,44 +444,7 @@ export class NovelWorkflowApplicationService {
    * （已被并发认领/已人工介入/状态已翻回活跃）返回 null，调用方据此跳过 continue。
    */
   async retryTask(taskId: string, row: WorkflowRow = null) {
-    const existing = row ?? await this.workflow.getTaskByIdWithoutHealing(taskId);
-    if (!existing) {
-      throw new AppError("Task not found.", 404);
-    }
-    if (!["failed", "cancelled"].includes(existing.status)) {
-      return null;
-    }
-    const claimed = await prisma.novelWorkflowTask.updateMany({
-      where: {
-        id: taskId,
-        status: existing.status,
-        pendingManualRecovery: false,
-        cancelRequestedAt: existing.cancelRequestedAt,
-        updatedAt: existing.updatedAt,
-        attemptCount: existing.attemptCount,
-      },
-      data: {
-        status: existing.checkpointType ? "waiting_approval" : "queued",
-        pendingManualRecovery: false,
-        attemptCount: existing.attemptCount + 1,
-        lastError: null,
-        finishedAt: null,
-        cancelRequestedAt: null,
-        heartbeatAt: new Date(),
-      },
-    });
-    if (claimed.count === 0) {
-      return null;
-    }
-    const next = await prisma.novelWorkflowTask.findUnique({
-      where: { id: taskId },
-      include: { novel: { select: { title: true } } },
-    });
-    if (!next) {
-      return null;
-    }
-    await this.workflow.notifyAutoDirectorTaskTransition({ before: existing, after: next });
-    return next;
+    return this.workflowRetryService.retry(taskId, row);
   }
 
   async markRetryDispatchFailed(
@@ -470,38 +452,7 @@ export class NovelWorkflowApplicationService {
     claimedAttemptCount: number,
     error: unknown,
   ) {
-    const message = error instanceof Error ? error.message : String(error);
-    // Capture the pre-CAS row for a transition event. The conditional update
-    // remains the source of truth; a concurrent state change simply yields no
-    // notification when the claim no longer matches.
-    const existing = await this.workflow.getTaskByIdWithoutHealing(taskId);
-    const updated = await this.workflow.updateTaskManyWithRetry({
-      where: {
-        id: taskId,
-        status: { in: ["queued", "waiting_approval"] },
-        pendingManualRecovery: false,
-        cancelRequestedAt: null,
-        attemptCount: claimedAttemptCount,
-      },
-      data: {
-        status: "failed",
-        pendingManualRecovery: true,
-        lastError: `重试任务入队失败：${message}`.slice(0, 2000),
-        finishedAt: null,
-        heartbeatAt: new Date(),
-      },
-    });
-    if (updated.count === 0) {
-      return null;
-    }
-    const next = await this.workflow.getTaskById(taskId);
-    if (next) {
-      await this.workflow.notifyAutoDirectorTaskTransition({
-        before: existing,
-        after: next,
-      });
-    }
-    return next;
+    return this.workflowRetryService.markDispatchFailed(taskId, claimedAttemptCount, error);
   }
 
   async restoreTaskToCheckpoint(
@@ -523,6 +474,13 @@ export class NovelWorkflowApplicationService {
       before: existing,
       data: restored.data,
     });
+  }
+
+  async restoreTaskToCheckpointForRecovery(
+    taskId: string,
+    expectedState: NovelWorkflowRecoveryTaskSnapshot,
+  ) {
+    return this.startupRecoveryService.restoreCheckpoint(taskId, expectedState);
   }
 
   async applyAutoDirectorLlmOverride(
@@ -569,22 +527,12 @@ export class NovelWorkflowApplicationService {
     });
   }
 
-  async requeueTaskForRecovery(taskId: string, message: string) {
-    const existing = await this.workflow.getTaskById(taskId);
-    if (!existing) {
-      throw new AppError("Task not found.", 404);
-    }
-    return this.workflow.updateWorkflowTaskWithNotifications({
-      before: existing,
-      data: {
-        status: "queued",
-        pendingManualRecovery: true,
-        finishedAt: null,
-        cancelRequestedAt: null,
-        heartbeatAt: null,
-        lastError: message.trim(),
-      },
-    });
+  async requeueTaskForRecovery(
+    taskId: string,
+    message: string,
+    expectedState: NovelWorkflowRecoveryTaskSnapshot,
+  ) {
+    return this.startupRecoveryService.requeue(taskId, message, expectedState);
   }
 
   async recordCandidateSelectionRequired(taskId: string, input: {

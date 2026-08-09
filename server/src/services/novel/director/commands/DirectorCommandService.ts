@@ -255,7 +255,11 @@ export class DirectorCommandService {
     });
   }
 
-  async enqueueRecoveryCommand(taskId: string, input: DirectorCommandPayload = {}): Promise<DirectorCommandAcceptedResponse> {
+  async enqueueRecoveryCommand(
+    taskId: string,
+    input: DirectorCommandPayload = {},
+    options: { expectedTaskState?: DirectorTaskAcceptanceExpectation } = {},
+  ): Promise<DirectorCommandAcceptedResponse> {
     return this.enqueueExecutionCommand({
       taskId,
       commandType: "resume_from_checkpoint",
@@ -263,6 +267,7 @@ export class DirectorCommandService {
         ...input,
         forceResume: true,
       },
+      expectedTaskState: options.expectedTaskState,
     });
   }
 

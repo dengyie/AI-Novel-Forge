@@ -36,6 +36,17 @@ type NovelWorkflowTaskUpdateManyArgs = Parameters<typeof prisma.novelWorkflowTas
 
 const ACTIVE_STATUSES = ["queued", "running", "waiting_approval"] as const;
 
+export interface NovelWorkflowRecoveryTaskSnapshot {
+  id: string;
+  status: "queued" | "running";
+  pendingManualRecovery: boolean;
+  cancelRequestedAt: Date | null;
+  heartbeatAt: Date | null;
+  updatedAt: Date;
+  attemptCount: number;
+  currentItemKey: string | null;
+}
+
 export class NovelWorkflowStoreService {
   public readonly volumeService = new NovelVolumeService();
 
@@ -257,7 +268,7 @@ export class NovelWorkflowStoreService {
 
   public async listRecoverableAutoDirectorTasks(options: {
     includeStaleRunningFlag?: boolean;
-  } = {}) {
+  } = {}): Promise<Array<NovelWorkflowRecoveryTaskSnapshot & { stale?: boolean }>> {
     const rows = await prisma.novelWorkflowTask.findMany({
       where: {
         lane: "auto_director",
@@ -265,6 +276,7 @@ export class NovelWorkflowStoreService {
           in: ["queued", "running"],
         },
         pendingManualRecovery: false,
+        cancelRequestedAt: null,
       },
       orderBy: [{ updatedAt: "asc" }, { id: "asc" }],
       select: {
@@ -276,6 +288,7 @@ export class NovelWorkflowStoreService {
         cancelRequestedAt: true,
         heartbeatAt: true,
         updatedAt: true,
+        attemptCount: true,
       },
     });
     const archived = await getArchivedTaskIdSet("novel_workflow", rows.map((row) => row.id));
@@ -283,7 +296,13 @@ export class NovelWorkflowStoreService {
       .filter((row) => !archived.has(row.id))
       .map((row) => ({
         id: row.id,
-        status: row.status,
+        status: row.status as "queued" | "running",
+        pendingManualRecovery: row.pendingManualRecovery,
+        cancelRequestedAt: row.cancelRequestedAt,
+        heartbeatAt: row.heartbeatAt,
+        updatedAt: row.updatedAt,
+        attemptCount: row.attemptCount,
+        currentItemKey: row.currentItemKey,
         ...(options.includeStaleRunningFlag
           ? { stale: isStaleAutoDirectorRunningTask(row) }
           : {}),

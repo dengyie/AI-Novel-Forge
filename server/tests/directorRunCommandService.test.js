@@ -600,7 +600,7 @@ test("director command service cancels the durable command when task cancellatio
   }
 });
 
-test("director command service rejects stale recovery when the observed task heartbeat has advanced", async () => {
+test("director command service rejects stale recovery without creating a command when the observed task heartbeat has advanced", async () => {
   const observedAt = new Date("2026-04-29T12:00:00.000Z");
   const harness = createHarness(createTask({
     status: "running",
@@ -628,8 +628,7 @@ test("director command service rejects stale recovery when the observed task hea
       (error) => error?.statusCode === 409,
     );
 
-    assert.equal(harness.commands.length, 1);
-    assert.equal(harness.commands[0].status, "cancelled");
+    assert.equal(harness.commands.length, 0);
     assert.equal(harness.task.status, "running");
     assert.equal(harness.task.updatedAt.toISOString(), "2026-04-29T12:00:05.000Z");
   } finally {
