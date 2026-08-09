@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 require("../dist/app.js");
 const { NovelDirectorService } = require("../dist/services/novel/director/NovelDirectorService.js");
 const { NovelDirectorConfirmRuntime } = require("../dist/services/novel/director/runtime/novelDirectorConfirmRuntime.js");
+const { runWithDirectorExecutionContext } = require("../dist/services/novel/director/runtime/DirectorExecutionContext.js");
 
 function buildDirectorInput(overrides = {}) {
   return {
@@ -279,4 +280,64 @@ test("confirm runtime creates the novel through the standard runtime node", asyn
   )));
   assert.ok(calls.some((call) => call[0] === "analyzeWorkspace" && call[1] === "novel_created_demo"));
   assert.ok(calls.some((call) => call[0] === "attachNovelToTask" && call[1] === "novel_created_demo"));
+});
+
+test("confirm abort does not overwrite the task as failed after the scheduled runner rejects", async () => {
+  const controller = new AbortController();
+  const failure = new Error("command lease lost");
+  const taskFailures = [];
+  const runtime = new NovelDirectorConfirmRuntime({
+    workflowService: {
+      bootstrapTask: async ({ novelId }) => ({
+        id: "task_confirm_abort",
+        novelId: novelId ?? null,
+        seedPayloadJson: buildSeedPayloadJson(),
+        resumeTargetJson: null,
+      }),
+      claimAutoDirectorNovelCreation: async () => ({ status: "claimed" }),
+      markTaskRunning: async () => {},
+      attachNovelToTask: async () => {},
+      markTaskFailed: async (_taskId, message) => {
+        taskFailures.push(message);
+      },
+    },
+    novelContextService: {
+      createNovel: async () => buildNovel("novel_confirm_abort"),
+      getNovelById: async (id) => buildNovel(id),
+    },
+    directorRuntime: {
+      initializeRun: async () => null,
+      analyzeWorkspace: async () => ({ inventory: { artifacts: [] } }),
+    },
+    runtimeOrchestrator: {
+      runStepModule: async ({ runner }) => runner(),
+      markTaskRunning: async () => {},
+    },
+    pipelineRuntime: {
+      runPipeline: async () => {
+        controller.abort(failure);
+        throw failure;
+      },
+    },
+    buildDirectorSeedPayload: () => ({}),
+    enrichDirectorStyleContext: async (value) => value,
+    ensurePrimaryNovelStyleBinding: async () => {},
+    withWorkflowTaskUsage: async (_taskId, runner) => runner(),
+    scheduleBackgroundRun: async (_taskId, runner) => runner(),
+  });
+
+  await assert.rejects(
+    runWithDirectorExecutionContext(
+      { signal: controller.signal, waitForCompletion: true },
+      () => runtime.confirmCandidate(buildDirectorInput({
+        targetAudience: "新手作者",
+        bookSellingPoint: "低门槛完成整本书",
+        competingFeel: "稳定推进",
+        first30ChapterPromise: "前 30 章持续兑现成长",
+        commercialTags: ["AI 写作", "长篇完成"],
+      })),
+    ),
+    failure,
+  );
+  assert.deepEqual(taskFailures, []);
 });

@@ -18,6 +18,7 @@ import {
 import { isChapterChineseProseGateError } from "./chapterChineseProseGateError";
 import type { ChapterContentFinalizationService } from "./ChapterContentFinalizationService";
 import type { ChapterStreamGenerationOrchestrator } from "./ChapterStreamGenerationOrchestrator";
+import { throwIfChapterGenerationAborted } from "./chapterAbortGuard";
 
 export interface ChapterPipelineRuntimeAdapterDeps {
   streamOrchestrator: Pick<
@@ -43,8 +44,11 @@ export class ChapterPipelineRuntimeAdapter {
     options: PipelineRuntimeInput = {},
     hooks: PipelineRuntimeHooks = {},
   ): Promise<PipelineRuntimeResult> {
+    throwIfChapterGenerationAborted(options.signal);
     const { request, assembled } = await this.deps.streamOrchestrator.prepareRuntimeChapter(novelId, chapterId, options);
+    throwIfChapterGenerationAborted(options.signal);
     await this.deps.streamOrchestrator.markChapterStatus(chapterId, "generating");
+    throwIfChapterGenerationAborted(options.signal);
     try {
       return await runPipelineChapterWithRuntime(
         {
@@ -114,6 +118,7 @@ export class ChapterPipelineRuntimeAdapter {
         hooks,
       );
     } catch (error) {
+      throwIfChapterGenerationAborted(options.signal);
       if (isChapterEmptyContentError(error) || isChapterChineseProseGateError(error)) {
         await this.deps.streamOrchestrator.markChapterStatus(chapterId, "pending_generation");
       }

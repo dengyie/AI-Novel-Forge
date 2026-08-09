@@ -31,6 +31,7 @@ import {
 import { isTransientTransportError } from "../../../llm/transportRetry";
 import { runChapterRepairText } from "./repair/chapterRepairRuntime";
 import { getChapterWriterRuntimeSettings } from "../../settings/ChapterWriterRuntimeSettingsService";
+import { throwIfChapterGenerationAborted } from "./chapterAbortGuard";
 import type {
   AssembledRuntimeChapter,
   FinalizedRuntimeResult,
@@ -94,6 +95,7 @@ export async function runPipelineChapterWithRuntime(
     signal: cancelSignal,
     ...requestInput
   } = options;
+  throwIfChapterGenerationAborted(cancelSignal);
   const effectiveMaxRetries = Math.max(0, Math.min(maxRetries, 1));
   const request = deps.validateRequest(requestInput);
   await deps.ensureNovelCharacters(novelId, "run chapter pipeline");
@@ -137,6 +139,7 @@ export async function runPipelineChapterWithRuntime(
       content = generatedDraft.content;
       latestLengthControl = generatedDraft.lengthControl;
       if (!generatedDraft.artifactsAlreadySynced) {
+        throwIfChapterGenerationAborted(cancelSignal);
         const committedDraft = await deps.saveDraftAndArtifacts(novelId, chapterId, content, "drafted", {
           expectedContentRevision: contentRevision,
           scheduleBackgroundSync: false,
@@ -152,6 +155,7 @@ export async function runPipelineChapterWithRuntime(
     }
 
     if (!autoReview) {
+      throwIfChapterGenerationAborted(cancelSignal);
       await syncFinalRetainedChapterArtifacts(deps, novelId, chapterId, content, artifactSyncMode, "confirmed");
       // 跳过审校 ≠ 质量过审：不传 literaryPass → 只 bump generationState，不写 completed，也不误标 needs_repair（A6）
       await deps.markChapterGenerationState(chapterId, "approved", contentRevision);
@@ -174,6 +178,7 @@ export async function runPipelineChapterWithRuntime(
       };
     }
 
+    throwIfChapterGenerationAborted(cancelSignal);
     await hooks.onStageChange?.("reviewing");
     latestResult = await deps.finalizeChapterContent({
       novelId,
@@ -185,7 +190,9 @@ export async function runPipelineChapterWithRuntime(
       lengthControl: latestLengthControl,
       runId: null,
       startMs: null,
+      signal: cancelSignal,
     });
+    throwIfChapterGenerationAborted(cancelSignal);
     const styleLeakageIssues = detectStyleReferenceLeakageIssues(content, latestResult.runtimePackage);
     latestIssues = [
       ...toReviewIssues(latestResult.runtimePackage),
@@ -220,6 +227,7 @@ export async function runPipelineChapterWithRuntime(
       && isQualityPass(latestResult.runtimePackage.audit.score, qualityThreshold)
       && styleLeakageIssues.length === 0;
     if (pass) {
+      throwIfChapterGenerationAborted(cancelSignal);
       // A6 + styleClear：文学 isPass ∧ 文风门皆过才允许 completed
       const styleClear = projectStyleClearFromRuntimePackage(latestResult.runtimePackage);
       await deps.markChapterGenerationState(chapterId, "approved", contentRevision, {
@@ -239,6 +247,7 @@ export async function runPipelineChapterWithRuntime(
     }
 
     if (acceptanceGateUnavailable) {
+      throwIfChapterGenerationAborted(cancelSignal);
       // 接收闸门未真实判定 → 不进入正文修复改写。judge 不可用时没有可据以修补的真实 issue
       // （fallback assessment 的 blockingIssues 仅含中级 acceptance_gate_unavailable 占位，
       // repairDirectives 为空），让 repairDraftContent 跑文本改写属于无效扰动且可退化文本。
@@ -266,6 +275,7 @@ export async function runPipelineChapterWithRuntime(
       break;
     }
 
+    throwIfChapterGenerationAborted(cancelSignal);
     await hooks.onStageChange?.("repairing");
     const repairResult = await repairDraftContent({
       novelTitle: assembled.novel.title,
@@ -278,14 +288,17 @@ export async function runPipelineChapterWithRuntime(
         model: request.model,
         temperature: request.temperature,
         repairMode,
+        signal: cancelSignal,
       },
       forceFullRewrite: styleLeakageIssues.length > 0,
     });
+    throwIfChapterGenerationAborted(cancelSignal);
     // 注：repairDraftContent 不再返回 recoverableFailure（judge-unavailable 已由上方
     // acceptanceGateUnavailable 短路先行处理；repairDraftContent 现在只会改写或抛）
     repairEscalatedFromPatch = repairResult.escalatedFromPatch;
     content = repairResult.content;
     retryCountUsed += 1;
+    throwIfChapterGenerationAborted(cancelSignal);
     const committedRepair = await deps.commitRepairContent(
       novelId,
       chapterId,
@@ -300,6 +313,7 @@ export async function runPipelineChapterWithRuntime(
   }
 
   const contentProvenance: ContentProvenance = pass ? "confirmed" : "debt";
+  throwIfChapterGenerationAborted(cancelSignal);
   await syncFinalRetainedChapterArtifacts(
     deps,
     novelId,
@@ -572,6 +586,7 @@ async function repairDraftContent(input: {
     model?: string;
     temperature?: number;
     repairMode?: "detect_only" | "light_repair" | "heavy_repair" | "continuity_only" | "character_only" | "ending_only";
+    signal?: AbortSignal;
   };
 }): Promise<{
   content: string;
@@ -591,6 +606,7 @@ async function repairDraftContent(input: {
       model: input.options.model,
       temperature: input.options.temperature,
       repairMode: input.options.repairMode,
+      signal: input.options.signal,
     },
   });
   return {

@@ -39,6 +39,7 @@ export interface DirectorPhaseDependencies {
       model?: string;
       temperature?: number;
       storyInput?: string;
+      signal?: AbortSignal;
     }) => Promise<CharacterCastOption>;
     assessCharacterCastOptions: (
       castOptions: CharacterCastOption[],

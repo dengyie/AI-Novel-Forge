@@ -47,6 +47,7 @@ export interface FinalizeChapterContentInput {
   startMs: number | null;
   deferArtifactBackgroundSync?: boolean;
   scheduleDeferredArtifactBackgroundSync?: boolean;
+  signal?: AbortSignal;
 }
 
 export interface FinalizeChapterContentResult {

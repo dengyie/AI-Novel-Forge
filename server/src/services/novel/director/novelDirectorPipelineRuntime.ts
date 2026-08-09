@@ -13,6 +13,7 @@ import {
 import type { BookContractService } from "../BookContractService";
 import type { CharacterPreparationService } from "../characterPrep/CharacterPreparationService";
 import { generateAutoCharacterCastDraft, persistCharacterCastOptionsDraft } from "../characterPrep/characterCastGeneration";
+import { throwIfDirectorExecutionAborted } from "./runtime/DirectorExecutionContext";
 import type { CharacterDynamicsService } from "../dynamics/CharacterDynamicsService";
 import type { NovelContextService } from "../NovelContextService";
 import type { StoryMacroPlanService } from "../storyMacro/StoryMacroPlanService";
@@ -562,12 +563,14 @@ export class NovelDirectorPipelineRuntime {
         model?: string;
         temperature?: number;
         storyInput?: string;
+        signal?: AbortSignal;
       }) => {
         const reusableOption = await this.findReusableDirectorCharacterCastOption(targetNovelId);
         if (reusableOption) {
           return reusableOption;
         }
         const generated = await generateAutoCharacterCastDraft(targetNovelId, options);
+        throwIfDirectorExecutionAborted(options.signal);
         await persistCharacterCastOptionsDraft(targetNovelId, generated.storyInput, {
           options: [generated.parsed.option],
         });

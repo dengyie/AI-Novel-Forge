@@ -1,5 +1,6 @@
 import type { GenerationContextPackage } from "@ai-novel/shared/types/chapterRuntime";
 import type { ChapterRuntimeRequestInput } from "../chapterRuntimeSchema";
+import { throwIfChapterGenerationAborted } from "../chapterAbortGuard";
 import {
   chapterTimelineFinalizationService,
   type ChapterTimelineFinalizationService,
@@ -21,7 +22,9 @@ export class ChapterTimelineProjectionService {
     request: ChapterRuntimeRequestInput;
     qualityDebt: boolean;
     timelineGate?: ChapterTimelineGateResult | null;
+    signal?: AbortSignal;
   }): Promise<void> {
+    throwIfChapterGenerationAborted(input.signal);
     const request = {
       provider: input.request.provider,
       model: input.request.model,
@@ -31,13 +34,16 @@ export class ChapterTimelineProjectionService {
       novelId: input.novelId,
       currentChapterOrder: input.contextPackage.chapter.order,
       request,
+      signal: input.signal,
     }).catch((error) => {
+      throwIfChapterGenerationAborted(input.signal);
       console.warn("[chapter-runtime] previous chapter timeline finalization failed", {
         novelId: input.novelId,
         chapterId: input.chapterId,
         error: error instanceof Error ? error.message : String(error),
       });
     });
+    throwIfChapterGenerationAborted(input.signal);
     await this.finalizer.finalizeCurrentContent({
       novelId: input.novelId,
       chapterId: input.chapterId,
@@ -49,6 +55,8 @@ export class ChapterTimelineProjectionService {
       qualityDebt: input.qualityDebt,
       sourceStage: "chapter_content_finalization",
       reason: input.qualityDebt ? "post_finalize_with_quality_debt" : "post_finalize_async",
+      signal: input.signal,
     });
+    throwIfChapterGenerationAborted(input.signal);
   }
 }

@@ -320,8 +320,9 @@ export class DirectorCoreStepModuleRuntime {
     resumeCheckpointType?: "chapter_batch_ready" | "chapter_batch_ready" | "replan_required" | null;
     previousFailureMessage?: string | null;
     allowSkipReviewBlockedChapter?: boolean;
+    signal?: AbortSignal;
   }): Promise<void> {
-    await this.autoExecutionRuntime.runFromReady({
+    const runInput = {
       taskId: input.taskId,
       novelId: input.novelId,
       request: input.request,
@@ -330,7 +331,9 @@ export class DirectorCoreStepModuleRuntime {
       resumeCheckpointType: input.resumeCheckpointType,
       previousFailureMessage: input.previousFailureMessage,
       allowSkipReviewBlockedChapter: input.allowSkipReviewBlockedChapter,
-    });
+      signal: input.signal,
+    };
+    await this.autoExecutionRuntime.runFromReady(runInput);
   }
 
   async executeManualChapterDraftStep(input: {
@@ -365,4 +368,3 @@ export class DirectorCoreStepModuleRuntime {
     );
   }
 }
-

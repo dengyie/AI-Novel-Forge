@@ -3,6 +3,7 @@ import type { ChapterRuntimePackage, GenerationContextPackage } from "@ai-novel/
 import { directorAutomationLedgerEventService } from "../../director/runtime/DirectorAutomationLedgerEventService";
 import { filterAcceptedFactItems, type FactLedgerExcludedItem } from "../../fact/factLedgerFilter";
 import { novelFactService } from "../../fact/NovelFactService";
+import { throwIfChapterGenerationAborted } from "../chapterAbortGuard";
 
 export class ChapterFactProjectionService {
   async writeAcceptedFacts(input: {
@@ -12,7 +13,9 @@ export class ChapterFactProjectionService {
     runId: string | null;
     contextPackage: GenerationContextPackage;
     runtimePackage: ChapterRuntimePackage;
+    signal?: AbortSignal;
   }): Promise<void> {
+    throwIfChapterGenerationAborted(input.signal);
     const chapterOrder = input.contextPackage.chapter.order;
     const writeCtx = input.contextPackage.chapterWriteContext;
     if (!writeCtx) return;
@@ -35,8 +38,10 @@ export class ChapterFactProjectionService {
         runId: input.runId,
         obligationCoverageStatus: obligationCoverage.status,
         excluded: filtered.excluded,
+        signal: input.signal,
       });
     }
+    throwIfChapterGenerationAborted(input.signal);
     await novelFactService.writeChapterFacts({
       novelId: input.novelId,
       chapterId: input.chapterId,
@@ -44,6 +49,7 @@ export class ChapterFactProjectionService {
       contentRevision: input.contentRevision,
       items: filtered.accepted,
     });
+    throwIfChapterGenerationAborted(input.signal);
   }
 
   private async recordExcludedFactItems(input: {
@@ -53,7 +59,9 @@ export class ChapterFactProjectionService {
     runId: string | null;
     obligationCoverageStatus: ChapterRuntimePackage["obligationCoverage"]["status"];
     excluded: FactLedgerExcludedItem[];
+    signal?: AbortSignal;
   }): Promise<void> {
+    throwIfChapterGenerationAborted(input.signal);
     for (const item of input.excluded) {
       console.warn("[fact-ledger] skipped unverified chapter obligation", {
         novelId: input.novelId,
@@ -75,33 +83,38 @@ export class ChapterFactProjectionService {
       }))))
       .digest("hex")
       .slice(0, 16);
-    await directorAutomationLedgerEventService.recordEvent({
-      type: "continue_with_risk",
-      idempotencyKey: [
-        input.novelId,
-        input.chapterId,
-        input.chapterOrder,
-        "fact-ledger-obligation-filter",
-        fingerprint,
-      ].join(":"),
-      runId: input.runId,
-      novelId: input.novelId,
-      nodeKey: "chapter_execution_node",
-      summary: `本章 ${input.excluded.length} 条义务未由验收确认，未写入事实账本。`,
-      affectedScope: `chapter:${input.chapterId}`,
-      severity: "medium",
-      metadata: {
-        decision: "exclude_unverified_fact_items",
-        chapterOrder: input.chapterOrder,
-        obligationCoverageStatus: input.obligationCoverageStatus,
-        excludedObligations: input.excluded,
-      },
-    }).catch((error) => {
+    throwIfChapterGenerationAborted(input.signal);
+    try {
+      await directorAutomationLedgerEventService.recordEvent({
+        type: "continue_with_risk",
+        idempotencyKey: [
+          input.novelId,
+          input.chapterId,
+          input.chapterOrder,
+          "fact-ledger-obligation-filter",
+          fingerprint,
+        ].join(":"),
+        runId: input.runId,
+        novelId: input.novelId,
+        nodeKey: "chapter_execution_node",
+        summary: `本章 ${input.excluded.length} 条义务未由验收确认，未写入事实账本。`,
+        affectedScope: `chapter:${input.chapterId}`,
+        severity: "medium",
+        metadata: {
+          decision: "exclude_unverified_fact_items",
+          chapterOrder: input.chapterOrder,
+          obligationCoverageStatus: input.obligationCoverageStatus,
+          excludedObligations: input.excluded,
+        },
+      });
+    } catch (error) {
+      throwIfChapterGenerationAborted(input.signal);
       console.warn("[fact-ledger] skipped obligation exclusion event failed", {
         novelId: input.novelId,
         chapterId: input.chapterId,
         error: error instanceof Error ? error.message : String(error),
       });
-    });
+    }
+    throwIfChapterGenerationAborted(input.signal);
   }
 }

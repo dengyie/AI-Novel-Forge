@@ -19,6 +19,7 @@ import {
   normalizeProseQualityTermList,
 } from "../proseQuality/ProseQualityDetector";
 import { isChapterContentConflictError } from "../../chapterContentCas";
+import { throwIfChapterGenerationAborted } from "../chapterAbortGuard";
 
 export interface ChapterQualityProjectionResult {
   runtimePackage: ChapterRuntimePackage;
@@ -44,14 +45,18 @@ export class ChapterQualityProjectionService {
     lengthControl?: ChapterRuntimePackage["lengthControl"];
     runId: string | null;
     styleReview: StyleReviewResult;
+    signal?: AbortSignal;
   }): Promise<ChapterQualityProjectionResult> {
+    throwIfChapterGenerationAborted(input.signal);
     const { acceptance, timelineGate } = await this.deps.qualityGateService.runAcceptanceGateOnly({
       novelId: input.novelId,
       chapterId: input.chapterId,
       contextPackage: input.contextPackage,
       content: input.content,
       request: input.request,
+      signal: input.signal,
     });
+    throwIfChapterGenerationAborted(input.signal);
     const mustAvoidTerms = normalizeProseQualityTermList(
       input.contextPackage.chapter.mustAvoid ?? null,
     );
@@ -88,6 +93,7 @@ export class ChapterQualityProjectionService {
       runId: input.runId,
       plannerService: this.deps.plannerService,
     });
+    throwIfChapterGenerationAborted(input.signal);
     const needsRepair = acceptance.assessment.status === "repairable"
       || acceptance.assessment.status === "needs_manual_review"
       || timelineGate.result.status === "failed"
@@ -99,6 +105,7 @@ export class ChapterQualityProjectionService {
       score: acceptance.score,
       issues: acceptance.issues,
       contentRevision: input.contentRevision,
+      signal: input.signal,
     });
     return {
       runtimePackage,
@@ -144,7 +151,9 @@ export class ChapterQualityProjectionService {
     score: QualityScore;
     issues: ReviewIssue[];
     contentRevision: number;
+    signal?: AbortSignal;
   }): Promise<void> {
+    throwIfChapterGenerationAborted(input.signal);
     try {
       await persistChapterQualityScores({
         novelId: input.novelId,
@@ -158,6 +167,7 @@ export class ChapterQualityProjectionService {
       if (isChapterContentConflictError(error)) {
         throw error;
       }
+      throwIfChapterGenerationAborted(input.signal);
       console.warn("[chapter-runtime] chapter quality score persist failed", {
         novelId: input.novelId,
         chapterId: input.chapterId,

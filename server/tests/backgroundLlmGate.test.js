@@ -76,3 +76,28 @@ test("withBackgroundChapterLlmSlot wait timeout rejects waiter", async () => {
     setBackgroundChapterLlmMaxInFlight(1);
   }
 });
+
+test("withBackgroundChapterLlmSlot aborts a queued runner before it acquires the slot", async () => {
+  setBackgroundChapterLlmMaxInFlight(1);
+  let releaseHolder;
+  let waiterRan = false;
+  const holder = withBackgroundChapterLlmSlot("holder", async () => {
+    await new Promise((resolve) => {
+      releaseHolder = resolve;
+    });
+  });
+  await delay(5);
+
+  const controller = new AbortController();
+  const waiter = withBackgroundChapterLlmSlot("waiter", async () => {
+    waiterRan = true;
+  }, controller.signal);
+  controller.abort(new Error("command lease lost"));
+  setTimeout(() => releaseHolder(), 20);
+
+  await assert.rejects(waiter, /command lease lost/);
+  assert.equal(waiterRan, false);
+  assert.equal(await holder, undefined);
+  assert.equal(getBackgroundChapterLlmStats().inFlight, 0);
+  assert.equal(getBackgroundChapterLlmStats().waiting, 0);
+});

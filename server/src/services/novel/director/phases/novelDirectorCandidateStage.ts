@@ -32,6 +32,10 @@ import {
   type CandidateGenerationContext,
 } from "../runtime/novelDirectorHelpers";
 import { DIRECTOR_PROGRESS } from "../projections/novelDirectorProgress";
+import {
+  getDirectorExecutionContext,
+  throwIfDirectorExecutionAborted,
+} from "../runtime/DirectorExecutionContext";
 
 type WorkflowDependency = Pick<NovelWorkflowService, "bootstrapTask" | "markTaskRunning" | "recordCandidateSelectionRequired">;
 
@@ -164,6 +168,7 @@ export class NovelDirectorCandidateStageService {
     itemLabel: string,
     progress: number,
   ): Promise<void> {
+    throwIfDirectorExecutionAborted();
     if (!workflowTaskId?.trim()) {
       return;
     }
@@ -204,6 +209,7 @@ export class NovelDirectorCandidateStageService {
         provider: context.options.provider,
         model: context.options.model,
         temperature: clampTemperature(context.options.temperature, 0.45),
+        signal: getDirectorExecutionContext()?.signal,
       },
     });
 
@@ -235,6 +241,7 @@ export class NovelDirectorCandidateStageService {
   }
 
   async generateCandidates(input: DirectorCandidatesRequest): Promise<DirectorCandidatesResponse> {
+    throwIfDirectorExecutionAborted();
     if (input.workflowTaskId?.trim()) {
       await this.workflowService.bootstrapTask({
         workflowTaskId: input.workflowTaskId,
@@ -271,6 +278,7 @@ export class NovelDirectorCandidateStageService {
       options: input,
       workflowTaskId: input.workflowTaskId,
     });
+    throwIfDirectorExecutionAborted();
     if (!input.workflowTaskId?.trim()) {
       return result;
     }
@@ -286,6 +294,7 @@ export class NovelDirectorCandidateStageService {
         },
       }),
     });
+    throwIfDirectorExecutionAborted();
     await this.workflowService.recordCandidateSelectionRequired(workflowTask.id, {
       summary: `${result.batch.roundLabel} 已生成 ${result.batch.candidates.length} 套书级方向，并完成每套书名组。`,
       seedPayload: buildWorkflowSeedPayload(input, {
@@ -302,6 +311,7 @@ export class NovelDirectorCandidateStageService {
   }
 
   async refineCandidates(input: DirectorRefinementRequest): Promise<DirectorRefineResponse> {
+    throwIfDirectorExecutionAborted();
     if (input.workflowTaskId?.trim()) {
       await this.workflowService.bootstrapTask({
         workflowTaskId: input.workflowTaskId,
@@ -341,6 +351,7 @@ export class NovelDirectorCandidateStageService {
       options: input,
       workflowTaskId: input.workflowTaskId,
     });
+    throwIfDirectorExecutionAborted();
     if (!input.workflowTaskId?.trim()) {
       return result;
     }
@@ -359,6 +370,7 @@ export class NovelDirectorCandidateStageService {
         },
       }),
     });
+    throwIfDirectorExecutionAborted();
     await this.workflowService.recordCandidateSelectionRequired(workflowTask.id, {
       summary: `${result.batch.roundLabel} 已根据修正意见生成 ${result.batch.candidates.length} 套新方向，并完成标题组增强。`,
       seedPayload: buildWorkflowSeedPayload(input, {
@@ -377,6 +389,7 @@ export class NovelDirectorCandidateStageService {
   }
 
   async patchCandidate(input: DirectorCandidatePatchRequest): Promise<DirectorCandidatePatchResponse> {
+    throwIfDirectorExecutionAborted();
     if (input.workflowTaskId?.trim()) {
       await this.workflowService.bootstrapTask({
         workflowTaskId: input.workflowTaskId,
@@ -432,8 +445,10 @@ export class NovelDirectorCandidateStageService {
         provider: input.provider,
         model: input.model,
         temperature: clampTemperature(input.temperature, 0.4),
+        signal: getDirectorExecutionContext()?.signal,
       },
     });
+    throwIfDirectorExecutionAborted();
 
     await this.markCandidateProgress(
       input.workflowTaskId,
@@ -483,6 +498,7 @@ export class NovelDirectorCandidateStageService {
         },
       }),
     });
+    throwIfDirectorExecutionAborted();
     await this.workflowService.recordCandidateSelectionRequired(workflowTask.id, {
       summary: `已按你的意见定向修正《${targetCandidate.workingTitle}》。`,
       seedPayload: buildWorkflowSeedPayload(input, {
@@ -504,6 +520,7 @@ export class NovelDirectorCandidateStageService {
   }
 
   async refineCandidateTitleOptions(input: DirectorCandidateTitleRefineRequest): Promise<DirectorCandidateTitleRefineResponse> {
+    throwIfDirectorExecutionAborted();
     if (input.workflowTaskId?.trim()) {
       await this.workflowService.bootstrapTask({
         workflowTaskId: input.workflowTaskId,
@@ -544,7 +561,9 @@ export class NovelDirectorCandidateStageService {
       provider: input.provider,
       model: input.model,
       temperature: clampTemperature(input.temperature, 0.85),
+      signal: getDirectorExecutionContext()?.signal,
     });
+    throwIfDirectorExecutionAborted();
 
     const titleOptions = mergeTitleOptions(response.titles, targetCandidate);
     const nextCandidate: DirectorCandidate = {
@@ -580,6 +599,7 @@ export class NovelDirectorCandidateStageService {
         },
       }),
     });
+    throwIfDirectorExecutionAborted();
     await this.workflowService.recordCandidateSelectionRequired(workflowTask.id, {
       summary: `已按你的意见重做《${targetCandidate.workingTitle}》的标题组。`,
       seedPayload: buildWorkflowSeedPayload(input, {

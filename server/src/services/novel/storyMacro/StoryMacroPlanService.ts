@@ -53,6 +53,14 @@ interface LLMOptions {
   provider?: LLMProvider;
   model?: string;
   temperature?: number;
+  signal?: AbortSignal;
+}
+
+function throwIfStoryMacroGenerationAborted(signal: AbortSignal | undefined): void {
+  if (!signal?.aborted) {
+    return;
+  }
+  throw signal.reason instanceof Error ? signal.reason : new Error("故事宏观规划已取消。");
 }
 
 export class StoryMacroPlanService {
@@ -197,6 +205,7 @@ export class StoryMacroPlanService {
         provider: options.provider,
         model: options.model,
         temperature: options.temperature ?? 0.3,
+        signal: options.signal,
       },
     });
     return {
@@ -243,6 +252,7 @@ export class StoryMacroPlanService {
         provider: options.provider,
         model: options.model,
         temperature: options.temperature ?? 0.3,
+        signal: options.signal,
       },
     });
 
@@ -289,6 +299,7 @@ export class StoryMacroPlanService {
       projectContext,
       options,
     );
+    throwIfStoryMacroGenerationAborted(options.signal);
     const locks = previousPlan?.lockedFields ?? {};
     const merged = mergeLockedFields(generated.plan, previousPlan ? toEditablePlan(previousPlan) : null, locks);
     const constraintEngine = isDecompositionComplete(merged.decomposition)
@@ -325,6 +336,7 @@ export class StoryMacroPlanService {
       options,
       formatProjectContext(novel, worldContext),
     );
+    throwIfStoryMacroGenerationAborted(options.signal);
     const nextPlan = setEditablePlanFieldValue(editablePlan, field, nextFieldValue);
     const constraintEngine = isDecompositionComplete(nextPlan.decomposition)
       ? buildStoryConstraintEngine(nextPlan)

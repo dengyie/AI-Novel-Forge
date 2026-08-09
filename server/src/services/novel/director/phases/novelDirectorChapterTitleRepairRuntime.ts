@@ -62,7 +62,7 @@ export class NovelDirectorChapterTitleRepairRuntime {
       scope?: string | null;
       batchAlreadyStartedCount?: number;
     }) => Promise<void>;
-    scheduleBackgroundRun: (taskId: string, runner: () => Promise<void>) => void;
+    scheduleBackgroundRun: (taskId: string, runner: () => Promise<void>) => Promise<void>;
   }) {}
 
   async repairChapterTitles(taskId: string, input?: {
@@ -158,7 +158,7 @@ export class NovelDirectorChapterTitleRepairRuntime {
       progress: DIRECTOR_PROGRESS.chapterList,
       clearCheckpoint: true,
     });
-    this.deps.scheduleBackgroundRun(taskId, async () => {
+    await this.deps.scheduleBackgroundRun(taskId, async () => {
       await repairDirectorChapterTitles({
         taskId,
         novelId,

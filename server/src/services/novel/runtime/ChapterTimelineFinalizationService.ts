@@ -16,6 +16,7 @@ import {
   timelineRepository,
 } from "../../../modules/timeline";
 import { withBackgroundChapterLlmSlot } from "./backgroundLlmGate";
+import { throwIfChapterGenerationAborted } from "./chapterAbortGuard";
 import {
   ChapterProjectionRevisionGuard,
   ChapterProjectionSupersededError,
@@ -66,6 +67,7 @@ interface FinalizeCurrentContentInput {
   reason?: string;
   sourceStage: string;
   qualityDebt?: boolean;
+  signal?: AbortSignal;
 }
 
 function hashContent(content: string): string {
@@ -114,8 +116,12 @@ export class ChapterTimelineFinalizationService {
     chapterId: string;
     expectedContentRevision: number;
     content: string;
+    signal?: AbortSignal;
   }): Promise<boolean> {
-    return Boolean(await this.findCurrentFinalizationMode(input));
+    throwIfChapterGenerationAborted(input.signal);
+    const mode = await this.findCurrentFinalizationMode(input);
+    throwIfChapterGenerationAborted(input.signal);
+    return Boolean(mode);
   }
 
   private async findCurrentFinalizationMode(input: {
@@ -123,16 +129,22 @@ export class ChapterTimelineFinalizationService {
     chapterId: string;
     expectedContentRevision: number;
     content: string;
+    signal?: AbortSignal;
   }): Promise<ChapterTimelineFinalizationMode | null> {
+    throwIfChapterGenerationAborted(input.signal);
     const contentHash = hashContent(input.content.trim());
-    return this.checkpoints.findCurrentMode({ ...input, contentHash });
+    const mode = await this.checkpoints.findCurrentMode({ ...input, contentHash });
+    throwIfChapterGenerationAborted(input.signal);
+    return mode;
   }
 
   async ensurePreviousChapterFinalized(input: {
     novelId: string;
     currentChapterOrder: number;
     request?: TimelineFinalizationRequestOptions;
+    signal?: AbortSignal;
   }): Promise<ChapterTimelineFinalizationResult | null> {
+    throwIfChapterGenerationAborted(input.signal);
     const previousChapter = await prisma.chapter.findFirst({
       where: {
         novelId: input.novelId,
@@ -148,6 +160,7 @@ export class ChapterTimelineFinalizationService {
         expectation: true,
       },
     });
+    throwIfChapterGenerationAborted(input.signal);
     const previousContent = previousChapter?.content?.trim();
     if (!previousChapter || !previousContent) {
       return null;
@@ -157,18 +170,25 @@ export class ChapterTimelineFinalizationService {
       chapterId: previousChapter.id,
       expectedContentRevision: previousChapter.contentRevision,
       content: previousContent,
+      signal: input.signal,
     })) {
       return null;
     }
+    throwIfChapterGenerationAborted(input.signal);
     const novel = await prisma.novel.findUnique({
       where: { id: input.novelId },
       select: { title: true },
     });
+    throwIfChapterGenerationAborted(input.signal);
     const timelineContext = await timelineContextService.buildForChapter({
       novelId: input.novelId,
       chapterId: previousChapter.id,
       chapterIndex: previousChapter.order,
-    }).catch(() => null);
+    }).catch((error) => {
+      throwIfChapterGenerationAborted(input.signal);
+      return null;
+    });
+    throwIfChapterGenerationAborted(input.signal);
     const contextPackage = {
       chapter: {
         id: previousChapter.id,
@@ -190,17 +210,23 @@ export class ChapterTimelineFinalizationService {
       request: input.request,
       sourceStage: "previous_chapter_guard",
       reason: "missing_current_timeline_finalization_checkpoint",
+      signal: input.signal,
     });
   }
 
   async finalizeCurrentContent(input: FinalizeCurrentContentInput): Promise<ChapterTimelineFinalizationResult> {
+    throwIfChapterGenerationAborted(input.signal);
     try {
-      return await this.finalizeCurrentContentOwned(input);
+      const result = await this.finalizeCurrentContentOwned(input);
+      throwIfChapterGenerationAborted(input.signal);
+      return result;
     } catch (error) {
+      throwIfChapterGenerationAborted(input.signal);
       if (!(error instanceof ChapterProjectionSupersededError)) {
         throw error;
       }
       const contentHash = hashContent(input.content.trim());
+      throwIfChapterGenerationAborted(input.signal);
       const checkpointWritten = await this.checkpoints.markSuperseded({
         novelId: input.novelId,
         chapterId: input.chapterId,
@@ -208,6 +234,7 @@ export class ChapterTimelineFinalizationService {
         contentHash,
         sourceStage: input.sourceStage,
       });
+      throwIfChapterGenerationAborted(input.signal);
       return {
         syncMode: "degraded",
         contentHash,
@@ -220,6 +247,7 @@ export class ChapterTimelineFinalizationService {
   }
 
   private async finalizeCurrentContentOwned(input: FinalizeCurrentContentInput): Promise<ChapterTimelineFinalizationResult> {
+    throwIfChapterGenerationAborted(input.signal);
     const content = input.content.trim();
     const contentHash = hashContent(content);
     await new ChapterProjectionRevisionGuard().assertCurrent({
@@ -227,12 +255,15 @@ export class ChapterTimelineFinalizationService {
       chapterId: input.chapterId,
       expectedContentRevision: input.expectedContentRevision,
     });
+    throwIfChapterGenerationAborted(input.signal);
     const existingMode = await this.findCurrentFinalizationMode({
       novelId: input.novelId,
       chapterId: input.chapterId,
       expectedContentRevision: input.expectedContentRevision,
       content,
+      signal: input.signal,
     });
+    throwIfChapterGenerationAborted(input.signal);
     if (existingMode === "stable" || (existingMode === "degraded" && input.mode === "degraded")) {
       return {
         syncMode: existingMode,
@@ -258,14 +289,19 @@ export class ChapterTimelineFinalizationService {
     }
 
     const chapter = input.contextPackage?.chapter;
-    const chapterIndex = chapter?.order ?? await this.resolveChapterOrder(input.chapterId);
+    const chapterIndex = chapter?.order ?? await this.resolveChapterOrder(input.chapterId, input.signal);
+    throwIfChapterGenerationAborted(input.signal);
     const timelineContext = input.timelineGate?.timelineContext
       ?? input.contextPackage?.timelineContext
       ?? await timelineContextService.buildForChapter({
         novelId: input.novelId,
         chapterId: input.chapterId,
         chapterIndex,
-      }).catch(() => null);
+      }).catch((error) => {
+        throwIfChapterGenerationAborted(input.signal);
+        return null;
+      });
+    throwIfChapterGenerationAborted(input.signal);
 
     if (input.mode === "degraded") {
       return this.finalizeDegraded({
@@ -280,6 +316,7 @@ export class ChapterTimelineFinalizationService {
       });
     }
 
+    throwIfChapterGenerationAborted(input.signal);
     const stableClaim = await this.checkpoints.claim({
       novelId: input.novelId,
       chapterId: input.chapterId,
@@ -292,6 +329,7 @@ export class ChapterTimelineFinalizationService {
         sourceStage: input.sourceStage,
       },
     });
+    throwIfChapterGenerationAborted(input.signal);
     if (stableClaim === "already_done") {
       return {
         syncMode: "stable",
@@ -323,9 +361,12 @@ export class ChapterTimelineFinalizationService {
       content,
       timelineContext,
       request: input.request,
+      signal: input.signal,
     });
+    throwIfChapterGenerationAborted(input.signal);
 
     if (!gate.timelineContext || !gate.extractorSucceeded || gate.result.status === "failed") {
+      throwIfChapterGenerationAborted(input.signal);
       await this.checkpoints.markFailed({
         novelId: input.novelId,
         chapterId: input.chapterId,
@@ -339,6 +380,7 @@ export class ChapterTimelineFinalizationService {
           extractorSucceeded: gate.extractorSucceeded,
         },
       });
+      throwIfChapterGenerationAborted(input.signal);
       return this.finalizeDegraded({
         ...input,
         content,
@@ -353,6 +395,7 @@ export class ChapterTimelineFinalizationService {
     }
 
     try {
+      throwIfChapterGenerationAborted(input.signal);
       await storyTimelineService.commitChapterTimeline({
         novelId: input.novelId,
         chapterId: input.chapterId,
@@ -366,10 +409,13 @@ export class ChapterTimelineFinalizationService {
         timelineContext: gate.timelineContext,
         checkResult: gate.result,
       });
+      throwIfChapterGenerationAborted(input.signal);
     } catch (error) {
+      throwIfChapterGenerationAborted(input.signal);
       if (error instanceof ChapterProjectionSupersededError) {
         throw error;
       }
+      throwIfChapterGenerationAborted(input.signal);
       await this.checkpoints.markFailed({
         novelId: input.novelId,
         chapterId: input.chapterId,
@@ -383,6 +429,7 @@ export class ChapterTimelineFinalizationService {
           extractorSucceeded: gate.extractorSucceeded,
         },
       });
+      throwIfChapterGenerationAborted(input.signal);
       return this.finalizeDegraded({
         ...input,
         content,
@@ -396,6 +443,7 @@ export class ChapterTimelineFinalizationService {
       });
     }
 
+    throwIfChapterGenerationAborted(input.signal);
     await this.checkpoints.markSucceeded({
       novelId: input.novelId,
       chapterId: input.chapterId,
@@ -413,6 +461,7 @@ export class ChapterTimelineFinalizationService {
         qualityDebt: Boolean(input.qualityDebt),
       },
     });
+    throwIfChapterGenerationAborted(input.signal);
     return {
       syncMode: "stable",
       contentHash,
@@ -433,7 +482,9 @@ export class ChapterTimelineFinalizationService {
     content: string;
     timelineContext: TimelineContextForChapter | null;
     request?: TimelineFinalizationRequestOptions;
+    signal?: AbortSignal;
   }): Promise<ChapterTimelineGateResult> {
+    throwIfChapterGenerationAborted(input.signal);
     if (!input.timelineContext) {
       return {
         result: {
@@ -462,8 +513,9 @@ export class ChapterTimelineFinalizationService {
     // Narrowed after early return above; local const keeps TS happy across the async slot.
     const timelineContext = input.timelineContext;
     try {
-      const extracted = await withBackgroundChapterLlmSlot("timeline_extract", () => (
-        timelineExtractorService.extractFromChapter({
+      const extracted = await withBackgroundChapterLlmSlot("timeline_extract", async () => {
+        throwIfChapterGenerationAborted(input.signal);
+        const output = await timelineExtractorService.extractFromChapter({
           novelId: input.novelId,
           chapterId: input.chapterId,
           chapterIndex: input.chapterIndex,
@@ -475,8 +527,12 @@ export class ChapterTimelineFinalizationService {
           provider: input.request?.provider,
           model: input.request?.model,
           temperature: input.request?.temperature,
-        })
-      ));
+          signal: input.signal,
+        });
+        throwIfChapterGenerationAborted(input.signal);
+        return output;
+      }, input.signal);
+      throwIfChapterGenerationAborted(input.signal);
       const extractedEvents = timelineExtractorService.normalizeEvents(extracted);
       const extractedHooks = timelineExtractorService.normalizeHooks(extracted);
       const result = timelineCheckerService.checkChapter({
@@ -499,6 +555,7 @@ export class ChapterTimelineFinalizationService {
         timelineContext: input.timelineContext,
       };
     } catch (error) {
+      throwIfChapterGenerationAborted(input.signal);
       const message = error instanceof Error ? error.message : String(error);
       const result: TimelineCheckResult = {
         status: "warning",
@@ -535,10 +592,14 @@ export class ChapterTimelineFinalizationService {
     hookCount: number;
     anchorFallbackUsed: boolean;
   }): Promise<ChapterTimelineFinalizationResult> {
-    const chapterIndex = input.contextPackage?.chapter.order ?? await this.resolveChapterOrder(input.chapterId);
+    throwIfChapterGenerationAborted(input.signal);
+    const chapterIndex = input.contextPackage?.chapter.order
+      ?? await this.resolveChapterOrder(input.chapterId, input.signal);
+    throwIfChapterGenerationAborted(input.signal);
     if (!timelineRepository.commitDegradedChapterTimeline) {
       throw new Error("Timeline repository does not support revision-owned degraded commits");
     }
+    throwIfChapterGenerationAborted(input.signal);
     await timelineRepository.commitDegradedChapterTimeline({
       owner: {
         novelId: input.novelId,
@@ -566,6 +627,7 @@ export class ChapterTimelineFinalizationService {
         input.qualityDebt || input.sourceStage === "defer_and_continue",
       ),
     });
+    throwIfChapterGenerationAborted(input.signal);
     await this.checkpoints.markSucceeded({
       novelId: input.novelId,
       chapterId: input.chapterId,
@@ -583,6 +645,7 @@ export class ChapterTimelineFinalizationService {
         qualityDebt: Boolean(input.qualityDebt),
       },
     });
+    throwIfChapterGenerationAborted(input.signal);
     return {
       syncMode: "degraded",
       contentHash: input.contentHash,
@@ -593,11 +656,13 @@ export class ChapterTimelineFinalizationService {
     };
   }
 
-  private async resolveChapterOrder(chapterId: string): Promise<number> {
+  private async resolveChapterOrder(chapterId: string, signal?: AbortSignal): Promise<number> {
+    throwIfChapterGenerationAborted(signal);
     const chapter = await prisma.chapter.findUnique({
       where: { id: chapterId },
       select: { order: true },
     });
+    throwIfChapterGenerationAborted(signal);
     return chapter?.order ?? 0;
   }
 

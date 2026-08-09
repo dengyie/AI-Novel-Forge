@@ -17,6 +17,7 @@ import {
   throwIfDirectorCommandLeaseLost,
   type DirectorCommandExecutionContext,
 } from "./DirectorCommandLeaseGuard";
+import { runWithDirectorExecutionContext } from "../runtime/DirectorExecutionContext";
 
 export type DirectorCommandExecutionOutcome = "completed" | "cancelled";
 
@@ -52,7 +53,10 @@ export class DirectorCommandExecutor {
       throw new AppError("Director command not found.", 404);
     }
     const payload = this.commandService.parseCommandPayload(command);
-    return this.dispatch(command, payload, context);
+    return runWithDirectorExecutionContext(
+      { signal: context.signal, waitForCompletion: true },
+      () => this.dispatch(command, payload, context),
+    );
   }
 
   async dispatch(

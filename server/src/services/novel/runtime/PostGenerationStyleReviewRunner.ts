@@ -16,6 +16,7 @@ import {
   selectPronounHotspotParagraphs,
   stitchParagraphs,
 } from "./styleReview/HotspotParagraphRewrite";
+import { throwIfChapterGenerationAborted } from "./chapterAbortGuard";
 
 // 首轮改写触发阈值：detect 后 riskScore 达到此值且有可改写项才启动首轮改写。
 const FIRST_ROUND_REWRITE_THRESHOLD = 35;
@@ -41,6 +42,7 @@ export interface PostGenerationStyleReviewInput {
   request: ChapterRuntimeRequestInput;
   contextPackage: GenerationContextPackage;
   content: string;
+  signal?: AbortSignal;
 }
 
 interface PostGenerationStyleReviewRunnerDeps {
@@ -62,6 +64,7 @@ export class PostGenerationStyleReviewRunner {
   }
 
   async run(input: PostGenerationStyleReviewInput): Promise<StyleReviewResult> {
+    throwIfChapterGenerationAborted(input.signal);
     // 先做无 IO 的短路：没有 styleContext 就无可审内容，直接返回，避免空跑 policy
     // resolve 的 prisma 查询（finalize 路径里无 styleContext 的场景不应触发 DB 读）。
     if (!input.contextPackage.styleContext?.compiledBlocks) {
@@ -75,6 +78,7 @@ export class PostGenerationStyleReviewRunner {
       secondRoundThreshold: DEFAULT_SECOND_ROUND_THRESHOLD,
       hotspotRewriteEnabled: true,
     } satisfies PostGenerationStyleReviewPolicy));
+    throwIfChapterGenerationAborted(input.signal);
     if (!policy.enabled) {
       return this.noRewriteResult(null, input.content);
     }
@@ -82,7 +86,8 @@ export class PostGenerationStyleReviewRunner {
     let report: RuntimeStyleDetectionReport | null = null;
     try {
       report = await this.detect(input, input.content);
-    } catch {
+    } catch (error) {
+      throwIfChapterGenerationAborted(input.signal);
       return this.noRewriteResult(null, input.content);
     }
 
@@ -104,7 +109,10 @@ export class PostGenerationStyleReviewRunner {
         // finalContent / residualReport 始终指向"当前采纳的交付内容及其检测分"。
         finalContent = firstRoundContent;
         if (policy.secondRoundEnabled) {
-          const firstResidual = await this.detect(input, firstRoundContent).catch(() => null);
+          const firstResidual = await this.detect(input, firstRoundContent).catch((error) => {
+            throwIfChapterGenerationAborted(input.signal);
+            return null;
+          });
           residualReport = firstResidual;
 
           if (firstResidual) {
@@ -124,7 +132,10 @@ export class PostGenerationStyleReviewRunner {
                 // 质量回退门：二轮产物必须重检确认 riskScore 真的低于首轮残留才采纳，
                 // 否则保留首轮，避免二轮改写把内容改差（保障"不降低质量"）。
                 // 二轮重检失败（LLM 出错）时保守回退首轮，不赌未验证的产物。
-                const secondResidual = await this.detect(input, secondRoundContent).catch(() => null);
+                const secondResidual = await this.detect(input, secondRoundContent).catch((error) => {
+                  throwIfChapterGenerationAborted(input.signal);
+                  return null;
+                });
                 if (secondResidual && secondResidual.riskScore < firstResidual.riskScore) {
                   finalContent = secondRoundContent;
                   residualReport = secondResidual;
@@ -145,7 +156,10 @@ export class PostGenerationStyleReviewRunner {
       if (hotspotResult.adoptedCount > 0) {
         finalContent = hotspotResult.content;
         hotspotRewrites = hotspotResult.adoptedCount;
-        residualReport = await this.detect(input, finalContent).catch(() => residualReport);
+        residualReport = await this.detect(input, finalContent).catch((error) => {
+          throwIfChapterGenerationAborted(input.signal);
+          return residualReport;
+        });
       }
     }
 
@@ -252,10 +266,12 @@ export class PostGenerationStyleReviewRunner {
         provider: input.request.provider,
         model: input.request.model,
         temperature: Math.min(input.request.temperature ?? 0.5, 0.7),
+        signal: input.signal,
       });
       const trimmed = rewritten.content.trim();
       return trimmed || null;
-    } catch {
+    } catch (error) {
+      throwIfChapterGenerationAborted(input.signal);
       return null;
     }
   }
@@ -289,6 +305,7 @@ export class PostGenerationStyleReviewRunner {
       provider: input.request.provider,
       model: input.request.model,
       temperature: 0.2,
+      signal: input.signal,
     });
   }
 
@@ -312,10 +329,12 @@ export class PostGenerationStyleReviewRunner {
         provider: input.request.provider,
         model: input.request.model,
         temperature: Math.min(input.request.temperature ?? 0.5, 0.7),
+        signal: input.signal,
       });
       const trimmed = rewritten.content.trim();
       return trimmed || null;
-    } catch {
+    } catch (error) {
+      throwIfChapterGenerationAborted(input.signal);
       return null;
     }
   }

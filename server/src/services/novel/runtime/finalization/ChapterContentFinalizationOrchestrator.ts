@@ -7,6 +7,7 @@ import { ChapterFactProjectionService } from "./ChapterFactProjectionService";
 import { ChapterQualityProjectionService } from "./ChapterQualityProjectionService";
 import { ChapterStyleReviewFinalizer } from "./ChapterStyleReviewFinalizer";
 import { ChapterTimelineProjectionService } from "./ChapterTimelineProjectionService";
+import { throwIfChapterGenerationAborted } from "../chapterAbortGuard";
 
 export class ChapterContentFinalizationOrchestrator {
   constructor(private readonly deps: {
@@ -28,7 +29,9 @@ export class ChapterContentFinalizationOrchestrator {
   }) {}
 
   async finalize(input: FinalizeChapterContentInput): Promise<FinalizeChapterContentResult> {
+    throwIfChapterGenerationAborted(input.signal);
     const { styleReview, committed } = await this.deps.styleFinalizer.finalize(input);
+    throwIfChapterGenerationAborted(input.signal);
     const projected = await this.deps.qualityProjection.project({
       novelId: input.novelId,
       chapterId: input.chapterId,
@@ -39,12 +42,15 @@ export class ChapterContentFinalizationOrchestrator {
       lengthControl: input.lengthControl,
       runId: input.runId,
       styleReview,
+      signal: input.signal,
     });
+    throwIfChapterGenerationAborted(input.signal);
     await this.deps.markChapterStatus(
       input.chapterId,
       projected.needsRepair ? "needs_repair" : "pending_review",
       committed.contentRevision,
     );
+    throwIfChapterGenerationAborted(input.signal);
 
     void this.deps.timelineProjection.schedule({
       novelId: input.novelId,
@@ -55,7 +61,11 @@ export class ChapterContentFinalizationOrchestrator {
       request: input.request,
       qualityDebt: projected.needsRepair,
       timelineGate: projected.timelineGate,
+      signal: input.signal,
     }).catch((error) => {
+      if (input.signal?.aborted) {
+        return;
+      }
       console.warn("[chapter-runtime] timeline finalization schedule failed", {
         novelId: input.novelId,
         chapterId: input.chapterId,
@@ -64,6 +74,7 @@ export class ChapterContentFinalizationOrchestrator {
     });
 
     if (!projected.needsRepair) {
+      throwIfChapterGenerationAborted(input.signal);
       try {
         await this.deps.factProjection.writeAcceptedFacts({
           novelId: input.novelId,
@@ -72,8 +83,10 @@ export class ChapterContentFinalizationOrchestrator {
           runId: input.runId,
           contextPackage: input.contextPackage,
           runtimePackage: projected.runtimePackage,
+          signal: input.signal,
         });
       } catch (error) {
+        throwIfChapterGenerationAborted(input.signal);
         console.warn("[chapter-runtime] fact ledger write failed", {
           novelId: input.novelId,
           chapterId: input.chapterId,
@@ -87,6 +100,7 @@ export class ChapterContentFinalizationOrchestrator {
       && input.deferArtifactBackgroundSync
       && input.scheduleDeferredArtifactBackgroundSync !== false
     ) {
+      throwIfChapterGenerationAborted(input.signal);
       await this.deps.artifactSyncService.syncChapterArtifacts(
         input.novelId,
         input.chapterId,
@@ -102,6 +116,7 @@ export class ChapterContentFinalizationOrchestrator {
       );
     }
 
+    throwIfChapterGenerationAborted(input.signal);
     await this.deps.finishTraceRun(input.runId, committed.content.length, input.startMs);
     return {
       finalContent: committed.content,

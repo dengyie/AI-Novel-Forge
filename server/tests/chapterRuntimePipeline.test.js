@@ -16,6 +16,18 @@ const {
 const {
   mergeChapterPatchForGenerationStateBump,
 } = require("../dist/services/novel/chapterLifecycleState.js");
+const {
+  ChapterQualityProjectionService,
+} = require("../dist/services/novel/runtime/finalization/ChapterQualityProjectionService.js");
+const {
+  ChapterContentFinalizationOrchestrator,
+} = require("../dist/services/novel/runtime/finalization/ChapterContentFinalizationOrchestrator.js");
+const {
+  ChapterFactProjectionService,
+} = require("../dist/services/novel/runtime/finalization/ChapterFactProjectionService.js");
+const {
+  ChapterTimelineProjectionService,
+} = require("../dist/services/novel/runtime/finalization/ChapterTimelineProjectionService.js");
 
 async function runPipelineChapterWithRuntime(deps, novelId, chapterId, options, hooks) {
   let contentRevision = 0;
@@ -1981,6 +1993,213 @@ test("pipeline automatic repair commits through revision CAS instead of authorit
   assert.doesNotMatch(
     pipelineSrc,
     /saveDraftAndArtifacts\(\s*novelId\s*,\s*chapterId\s*,\s*content\s*,\s*"repaired"/,
+  );
+});
+
+test("pipeline abort after writer completion prevents chapter, quality, and projection writes", async () => {
+  const controller = new AbortController();
+  const writes = [];
+
+  await assert.rejects(
+    runPipelineChapterWithRuntime(
+      {
+        validateRequest(input) {
+          return input;
+        },
+        async ensureNovelCharacters() {},
+        async assemble() {
+          return {
+            novel: { id: "novel-1", title: "测试小说" },
+            chapter: {
+              id: "chapter-1",
+              title: "第一章",
+              order: 1,
+              content: null,
+              contentRevision: 0,
+              expectation: null,
+            },
+            contextPackage: {},
+          };
+        },
+        async generateDraftFromWriter() {
+          controller.abort(new Error("command lease lost"));
+          return { content: "不应落库的正文" };
+        },
+        async saveDraftAndArtifacts() {
+          writes.push("chapter");
+          return { novelId: "novel-1", chapterId: "chapter-1", contentRevision: 1 };
+        },
+        async syncFinalChapterArtifacts() {
+          writes.push("artifacts");
+        },
+        async finalizeChapterContent() {
+          writes.push("quality");
+          throw new Error("quality should not run after abort");
+        },
+        async markChapterGenerationState() {
+          writes.push("projection");
+        },
+        async markChapterNeedsRepair() {
+          writes.push("repair_projection");
+        },
+      },
+      "novel-1",
+      "chapter-1",
+      {
+        autoReview: true,
+        autoRepair: true,
+        signal: controller.signal,
+      },
+    ),
+    /command lease lost/,
+  );
+
+  assert.deepEqual(writes, []);
+});
+
+test("quality projection abort after acceptance does not persist quality state", async () => {
+  const controller = new AbortController();
+  const failure = new Error("command lease lost");
+  let plannerUsed = false;
+  const projection = new ChapterQualityProjectionService({
+    qualityGateService: {
+      async runAcceptanceGateOnly(input) {
+        assert.equal(input.signal, controller.signal);
+        controller.abort(failure);
+        return {
+          acceptance: {
+            assessment: { status: "accepted" },
+            score: { coherence: 100, pacing: 100, repetition: 100, engagement: 100, voice: 100, overall: 100 },
+            issues: [],
+            auditReports: [],
+          },
+          timelineGate: { result: { status: "passed", score: 1, issues: [] } },
+        };
+      },
+    },
+    plannerService: {
+      buildRuntimePackage() {
+        plannerUsed = true;
+      },
+    },
+  });
+
+  await assert.rejects(
+    projection.project({
+      novelId: "novel-1",
+      chapterId: "chapter-1",
+      request: {},
+      contextPackage: { chapter: { order: 1, mustAvoid: [] } },
+      content: "不应写入质量结果的正文",
+      contentRevision: 1,
+      runId: null,
+      styleReview: { report: null, residualReport: null, autoRewritten: false, originalContent: null, finalContent: "" },
+      signal: controller.signal,
+    }),
+    /command lease lost/,
+  );
+  assert.equal(plannerUsed, false);
+});
+
+test("finalization abort after quality work prevents chapter, timeline, and fact projections", async () => {
+  const controller = new AbortController();
+  const failure = new Error("command lease lost");
+  const writes = [];
+  const finalizer = new ChapterContentFinalizationOrchestrator({
+    styleFinalizer: {
+      async finalize() {
+        return {
+          styleReview: { report: null, residualReport: null, autoRewritten: false, originalContent: null, finalContent: "正文" },
+          committed: { novelId: "novel-1", chapterId: "chapter-1", content: "正文", contentRevision: 1 },
+        };
+      },
+    },
+    qualityProjection: {
+      async project(input) {
+        assert.equal(input.signal, controller.signal);
+        controller.abort(failure);
+        return {
+          runtimePackage: {},
+          score: { coherence: 100, pacing: 100, repetition: 100, engagement: 100, voice: 100, overall: 100 },
+          issues: [],
+          needsRepair: false,
+          timelineGate: { result: { status: "passed", score: 1, issues: [] } },
+        };
+      },
+    },
+    timelineProjection: { schedule: async () => writes.push("timeline") },
+    factProjection: { writeAcceptedFacts: async () => writes.push("facts") },
+    artifactSyncService: { syncChapterArtifacts: async () => writes.push("artifacts") },
+    markChapterStatus: async () => writes.push("chapter_status"),
+    finishTraceRun: async () => writes.push("trace"),
+  });
+
+  await assert.rejects(
+    finalizer.finalize({
+      novelId: "novel-1",
+      chapterId: "chapter-1",
+      request: {},
+      contextPackage: {},
+      content: "正文",
+      expectedContentRevision: 1,
+      runId: null,
+      startMs: null,
+      signal: controller.signal,
+    }),
+    /command lease lost/,
+  );
+  assert.deepEqual(writes, []);
+});
+
+test("timeline projection abort after scheduling does not finalize the chapter timeline", async () => {
+  const controller = new AbortController();
+  const failure = new Error("command lease lost");
+  const writes = [];
+  const projection = new ChapterTimelineProjectionService({
+    async ensurePreviousChapterFinalized() {
+      controller.abort(failure);
+    },
+    async finalizeCurrentContent() {
+      writes.push("timeline");
+    },
+  });
+
+  await assert.rejects(
+    projection.schedule({
+      novelId: "novel-1",
+      chapterId: "chapter-1",
+      expectedContentRevision: 1,
+      content: "不应写入时间线的正文",
+      contextPackage: { chapter: { order: 1 } },
+      request: {},
+      qualityDebt: false,
+      signal: controller.signal,
+    }),
+    /command lease lost/,
+  );
+  assert.deepEqual(writes, []);
+});
+
+test("fact projection aborts before evaluating a pending fact write", async () => {
+  const controller = new AbortController();
+  const failure = new Error("command lease lost");
+  const projection = new ChapterFactProjectionService();
+  controller.abort(failure);
+
+  await assert.rejects(
+    projection.writeAcceptedFacts({
+      novelId: "novel-1",
+      chapterId: "chapter-1",
+      contentRevision: 1,
+      runId: null,
+      contextPackage: {
+        chapter: { order: 1 },
+        chapterWriteContext: null,
+      },
+      runtimePackage: {},
+      signal: controller.signal,
+    }),
+    /command lease lost/,
   );
 });
 

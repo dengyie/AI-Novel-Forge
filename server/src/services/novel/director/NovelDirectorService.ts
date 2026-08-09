@@ -103,6 +103,10 @@ import { prisma } from "../../../db/prisma";
 import { loadPersistentDirectorRuntimeProjection } from "./projections/novelDirectorRuntimeProjection";
 import { qualityDebtSettingsService } from "../../settings/QualityDebtSettingsService";
 import { pendingReviewAutoPromotionService } from "../state/PendingReviewAutoPromotionService";
+import {
+  getDirectorExecutionContext,
+  throwIfDirectorExecutionAborted,
+} from "./runtime/DirectorExecutionContext";
 
 function isWorkflowTaskCancelledError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
@@ -368,25 +372,51 @@ export class NovelDirectorService {
     });
   }
 
-  private scheduleBackgroundRun(taskId: string, runner: () => Promise<void>) {
+  private scheduleBackgroundRun(taskId: string, runner: () => Promise<void>): Promise<void> {
+    const execution = getDirectorExecutionContext();
+    if (execution?.waitForCompletion) {
+      return this.runScheduledBackgroundRun(taskId, runner, true);
+    }
     setImmediate(() => {
       void this.runScheduledBackgroundRun(taskId, runner);
     });
+    return Promise.resolve();
   }
 
-  private async runScheduledBackgroundRun(taskId: string, runner: () => Promise<void>): Promise<void> {
+  private async runScheduledBackgroundRun(
+    taskId: string,
+    runner: () => Promise<void>,
+    propagateErrors = false,
+  ): Promise<void> {
     try {
+      throwIfDirectorExecutionAborted();
+      const usageContext = await this.buildDirectorUsageContext(taskId);
+      throwIfDirectorExecutionAborted();
       await runWithLlmUsageTracking(
-        await this.buildDirectorUsageContext(taskId),
-        runner,
+        usageContext,
+        async () => {
+          throwIfDirectorExecutionAborted();
+          await runner();
+          throwIfDirectorExecutionAborted();
+        },
       );
+      throwIfDirectorExecutionAborted();
     } catch (error) {
+      if (getDirectorExecutionContext()?.signal?.aborted) {
+        if (propagateErrors) {
+          throw error;
+        }
+        return;
+      }
       if (isWorkflowTaskCancelledError(error) || isDirectorRuntimeGateError(error)) {
         return;
       }
       const message = error instanceof Error ? error.message : "自动导演后台任务执行失败。";
       await this.workflowService.markTaskFailed(taskId, message);
       console.error(`[director.background] task failed taskId=${taskId}`, error);
+      if (propagateErrors) {
+        throw error;
+      }
     } finally {
       await releaseHighMemoryDirectorReservations(taskId);
     }

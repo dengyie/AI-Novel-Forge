@@ -25,6 +25,7 @@ import {
   isMustOnPageMissingText,
   isSoftOffscreenCharacterAppearanceMissing,
 } from "../../../prompting/prompts/novel/characterAppearanceObligation";
+import { throwIfChapterGenerationAborted } from "./chapterAbortGuard";
 
 export interface ChapterAcceptanceAssessmentInput {
   novelId: string;
@@ -38,6 +39,7 @@ export interface ChapterAcceptanceAssessmentInput {
   provider?: LLMProvider;
   model?: string;
   temperature?: number;
+  signal?: AbortSignal;
 }
 
 export interface NormalizeAssessmentOptions {
@@ -475,7 +477,13 @@ function buildFallbackAssessment(
 
 export class ChapterAcceptanceAssessmentService {
   async assess(input: ChapterAcceptanceAssessmentInput): Promise<ChapterAcceptanceAssessmentResult> {
-    const assessment = await this.invokeAssessment(input).catch(() => buildFallbackAssessment(input.content, input.targetWordCount));
+    throwIfChapterGenerationAborted(input.signal);
+    const assessment = await this.invokeAssessment(input).catch((error) => {
+      if (input.signal?.aborted) {
+        throw error;
+      }
+      return buildFallbackAssessment(input.content, input.targetWordCount);
+    });
     const requiredCharacterAppearances = resolveRequiredCharacterAppearances(input.contextPackage);
     const scenePlan = input.contextPackage.chapterWriteContext?.scenePlan
       ?? input.contextPackage.chapterReviewContext?.scenePlan
@@ -503,7 +511,9 @@ export class ChapterAcceptanceAssessmentService {
     })).concat(normalized.missingObligations.map((obligation) => (
       missingObligationToReviewIssue(obligation, normalizeOptions)
     )));
+    throwIfChapterGenerationAborted(input.signal);
     const auditReports = await this.persistAcceptanceReports(input, normalized, score);
+    throwIfChapterGenerationAborted(input.signal);
     await openConflictService.syncFromAuditReports({
       novelId: input.novelId,
       chapterId: input.chapterId,
@@ -553,6 +563,7 @@ export class ChapterAcceptanceAssessmentService {
         chapterId: input.chapterId,
         stage: "chapter_acceptance",
         triggerReason: "chapter_acceptance_assessment",
+        signal: input.signal,
       },
     });
     return result.output;
@@ -563,6 +574,7 @@ export class ChapterAcceptanceAssessmentService {
     assessment: ChapterAcceptanceAssessmentOutput,
     score: QualityScore,
   ): Promise<AuditReport[]> {
+    throwIfChapterGenerationAborted(input.signal);
     const grouped = new Map<AuditType, AcceptanceIssue[]>();
     for (const issue of assessment.blockingIssues) {
       const auditType = categoryToAuditType(issue.category);
@@ -611,6 +623,7 @@ export class ChapterAcceptanceAssessmentService {
         });
       }
     });
+    throwIfChapterGenerationAborted(input.signal);
     return prisma.auditReport.findMany({
       where: {
         novelId: input.novelId,

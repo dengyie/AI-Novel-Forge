@@ -23,6 +23,7 @@ export interface TimelineExtractorServiceInput {
   provider?: LLMProvider;
   model?: string;
   temperature?: number;
+  signal?: AbortSignal;
 }
 
 export class TimelineExtractorService {
@@ -48,6 +49,7 @@ export class TimelineExtractorService {
         novelId: input.novelId,
         chapterId: input.chapterId,
         stage: "timeline_extraction",
+        signal: input.signal,
       },
     });
     return generated.output;

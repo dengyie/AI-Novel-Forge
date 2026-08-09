@@ -21,6 +21,7 @@ export interface TitleGenerationLLMOptions {
   model?: string;
   temperature?: number;
   maxTokens?: number;
+  signal?: AbortSignal;
 }
 
 export interface GenerateTitleIdeasInput extends TitleGenerationLLMOptions {
@@ -147,6 +148,7 @@ export class TitleGenerationService {
       model: input.model,
       temperature: input.temperature,
       maxTokens: input.maxTokens,
+      signal: input.signal,
     });
   }
 
@@ -218,6 +220,7 @@ export class TitleGenerationService {
             model: llmOptions.model,
             temperature: llmOptions.temperature ?? 0.85,
             maxTokens: llmOptions.maxTokens,
+            signal: llmOptions.signal,
           },
         });
 

@@ -107,11 +107,12 @@ export async function runDirectorCharacterSetupPhase(input: {
     itemLabel: "正在生成角色阵容",
     progress: DIRECTOR_PROGRESS.characterSetup,
     callbacks,
-    run: async () => dependencies.characterPreparationService.generateAutoCharacterCastOption(novelId, {
+    run: async ({ signal }) => dependencies.characterPreparationService.generateAutoCharacterCastOption(novelId, {
       provider: request.provider,
       model: request.model,
       temperature: request.temperature,
       storyInput,
+      signal,
     }),
   });
   if (reusableOption) {

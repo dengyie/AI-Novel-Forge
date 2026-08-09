@@ -48,6 +48,7 @@ export interface ChapterStreamGenerationOrchestratorDeps {
     novelId: string;
     currentChapterOrder: number;
     request: ChapterRuntimeRequestInput;
+    signal?: AbortSignal;
   }) => Promise<unknown>;
 }
 
@@ -73,17 +74,24 @@ export class ChapterStreamGenerationOrchestrator {
     onDone: (fullContent: string, helpers: StreamDoneHelpers) => Promise<void | StreamDonePayload>;
   }> {
     const cancelSignal = options.signal;
+    throwIfChapterGenerationAborted(cancelSignal, "章节生成已取消。");
     const { request, assembled } = await this.prepareRuntimeChapter(novelId, chapterId, options);
+    throwIfChapterGenerationAborted(cancelSignal, "章节生成已取消。");
     await this.markChapterStatus(chapterId, "generating");
+    throwIfChapterGenerationAborted(cancelSignal, "章节生成已取消。");
 
     let traceRunId: string | null = null;
     try {
+      throwIfChapterGenerationAborted(cancelSignal, "章节生成已取消。");
       traceRunId = await this.deps.agentRuntime.createChapterGenRun(novelId, chapterId, assembled.chapter.order);
-    } catch {
+      throwIfChapterGenerationAborted(cancelSignal, "章节生成已取消。");
+    } catch (error) {
+      throwIfChapterGenerationAborted(cancelSignal, "章节生成已取消。");
       traceRunId = null;
     }
 
     const startMs = Date.now();
+    throwIfChapterGenerationAborted(cancelSignal, "章节生成已取消。");
     const writerResult = await this.deps.chapterWritingGraph.createChapterStream({
       novelId,
       novelTitle: assembled.novel.title,
@@ -94,6 +102,7 @@ export class ChapterStreamGenerationOrchestrator {
         signal: cancelSignal,
       },
     });
+    throwIfChapterGenerationAborted(cancelSignal, "章节生成已取消。");
 
     return {
       stream: writerResult.stream,
@@ -140,7 +149,9 @@ export class ChapterStreamGenerationOrchestrator {
           // 与 pipeline 适配器的 false 对称，避免隐式默认造成歧义）。
           deferArtifactBackgroundSync: true,
           scheduleDeferredArtifactBackgroundSync: true,
+          signal: cancelSignal,
         });
+        throwIfChapterGenerationAborted(cancelSignal);
         // 流式定稿不经 pipeline：finalize 只拍平列，此处写终态 QualityReport 一行。
         // 直接调 persist（writeReport:true），避免经 novelCoreReviewService 造成循环依赖。
         try {
@@ -153,12 +164,14 @@ export class ChapterStreamGenerationOrchestrator {
             writeReport: true,
           });
         } catch (error) {
+          throwIfChapterGenerationAborted(cancelSignal);
           console.warn("[chapter-runtime] stream quality report persist failed", {
             novelId,
             chapterId,
             error: error instanceof Error ? error.message : String(error),
           });
         }
+        throwIfChapterGenerationAborted(cancelSignal);
         this.emitRunStatus(helpers, buildChapterRunStatusFrame({
           runId: runStatusId,
           // P1-1：对齐 F9 repair 流契约（ChapterRepairStreamRuntime:569）——audit 检出
@@ -189,10 +202,13 @@ export class ChapterStreamGenerationOrchestrator {
     options: ChapterRuntimeCallOptions = {},
   ): Promise<PreparedRuntimeChapter> {
     // signal 不可序列化，不进 zod；从 call options 剥离后再 validate 请求体字段
-    const { signal: _signal, ...requestInput } = options;
+    const { signal, ...requestInput } = options;
+    throwIfChapterGenerationAborted(signal, "章节生成已取消。");
     const request = this.deps.validateRequest(requestInput);
     await this.deps.ensureNovelCharacters(novelId, "generate chapter content");
+    throwIfChapterGenerationAborted(signal, "章节生成已取消。");
     const assembled = await this.deps.assembler.assemble(novelId, chapterId, request);
+    throwIfChapterGenerationAborted(signal, "章节生成已取消。");
     // 下章入口硬守卫：上章尚无 timeline checkpoint 时先补齐（stable/degraded），失败只告警。
     // 与定稿后 async schedule 互补，覆盖「异步未完成就开下一章」的长跑缺口。
     if (this.deps.ensurePreviousChapterTimeline && assembled.chapter.order > 1) {
@@ -200,7 +216,9 @@ export class ChapterStreamGenerationOrchestrator {
         novelId,
         currentChapterOrder: assembled.chapter.order,
         request,
+        signal,
       }).catch((error) => {
+        throwIfChapterGenerationAborted(signal, "章节生成已取消。");
         console.warn("[chapter-runtime] previous chapter timeline guard failed before write", {
           novelId,
           chapterId,
@@ -209,6 +227,7 @@ export class ChapterStreamGenerationOrchestrator {
         });
       });
     }
+    throwIfChapterGenerationAborted(signal, "章节生成已取消。");
     this.deps.readinessService.assertReady(assembled.contextPackage);
     this.assertStateDrivenReady(assembled.contextPackage, request);
     return {

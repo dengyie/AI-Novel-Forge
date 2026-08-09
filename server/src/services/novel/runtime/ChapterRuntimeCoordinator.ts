@@ -98,7 +98,7 @@ export class ChapterRuntimeCoordinator {
       agentRuntime,
       validateRequest,
       ensureNovelCharacters,
-      ensurePreviousChapterTimeline: async ({ novelId, currentChapterOrder, request }) => {
+      ensurePreviousChapterTimeline: async ({ novelId, currentChapterOrder, request, signal }) => {
         await chapterTimelineFinalizationService.ensurePreviousChapterFinalized({
           novelId,
           currentChapterOrder,
@@ -107,6 +107,7 @@ export class ChapterRuntimeCoordinator {
             model: request.model,
             temperature: request.temperature,
           },
+          signal,
         });
       },
     });

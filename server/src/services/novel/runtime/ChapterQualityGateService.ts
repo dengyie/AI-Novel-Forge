@@ -17,6 +17,7 @@ import {
   rememberCacheValue,
   type TimelineGateResult,
 } from "./chapterRuntimePackageBuilders";
+import { throwIfChapterGenerationAborted } from "./chapterAbortGuard";
 
 export interface ChapterQualityGateAgentRuntime {
   createChapterGenRun: (novelId: string, chapterId: string, chapterOrder: number) => Promise<string>;
@@ -33,6 +34,7 @@ export interface RunChapterQualityGatesInput {
   contextPackage: GenerationContextPackage;
   content: string;
   request: ChapterRuntimeRequestInput;
+  signal?: AbortSignal;
 }
 
 export interface RunChapterQualityGatesResult {
@@ -60,6 +62,7 @@ export class ChapterQualityGateService {
   }
 
   async runGates(input: RunChapterQualityGatesInput): Promise<RunChapterQualityGatesResult> {
+    throwIfChapterGenerationAborted(input.signal);
     const contentHash = hashContent(input.content);
     const [acceptance, timelineGate] = await Promise.all([
       this.traceChapterGate({
@@ -83,6 +86,7 @@ export class ChapterQualityGateService {
         run: () => this.runTimelineGate(input),
       }),
     ]);
+    throwIfChapterGenerationAborted(input.signal);
 
     return {
       acceptance,
@@ -111,6 +115,7 @@ export class ChapterQualityGateService {
   }
 
   async runAcceptanceGateOnly(input: RunChapterQualityGatesInput): Promise<RunChapterQualityGatesResult> {
+    throwIfChapterGenerationAborted(input.signal);
     const contentHash = hashContent(input.content);
     const acceptance = await this.traceChapterGate({
       novelId: input.novelId,
@@ -122,6 +127,7 @@ export class ChapterQualityGateService {
       promptAssetKey: "novel.chapter.acceptance_assessment",
       run: () => this.runAcceptanceGate(input),
     });
+    throwIfChapterGenerationAborted(input.signal);
     return {
       acceptance,
       timelineGate: this.buildDeferredTimelineGate(input),
@@ -341,10 +347,12 @@ export class ChapterQualityGateService {
       provider: input.request.provider,
       model: input.request.model,
       temperature: input.request.temperature,
+      signal: input.signal,
     });
     rememberCacheValue(this.acceptanceGateCache, key, assessmentPromise);
     try {
       const assessment = await assessmentPromise;
+      throwIfChapterGenerationAborted(input.signal);
       if (this.isCacheableAcceptanceResult(assessment)) {
         await this.writePersistentGateCache({
           gate: "acceptance",
@@ -364,6 +372,7 @@ export class ChapterQualityGateService {
   }
 
   private async runTimelineGate(input: RunChapterQualityGatesInput): Promise<TimelineGateResult> {
+    throwIfChapterGenerationAborted(input.signal);
     const key = this.buildGateCacheKey({
       gate: "timeline",
       novelId: input.novelId,
@@ -374,7 +383,9 @@ export class ChapterQualityGateService {
     });
     const cached = this.timelineGateCache.get(key);
     if (cached) {
-      return normalizeTimelineGateResult(await cached, input.contextPackage.timelineContext ?? null);
+      const normalized = normalizeTimelineGateResult(await cached, input.contextPackage.timelineContext ?? null);
+      throwIfChapterGenerationAborted(input.signal);
+      return normalized;
     }
     const persisted = await this.readPersistentGateCache<TimelineGateResult>({
       gate: "timeline",
@@ -383,6 +394,7 @@ export class ChapterQualityGateService {
       content: input.content,
       request: input.request,
     });
+    throwIfChapterGenerationAborted(input.signal);
     if (persisted) {
       const normalized = normalizeTimelineGateResult(persisted, input.contextPackage.timelineContext ?? null);
       rememberCacheValue(this.timelineGateCache, key, normalized);
@@ -393,6 +405,7 @@ export class ChapterQualityGateService {
     rememberCacheValue(this.timelineGateCache, key, checkPromise);
     try {
       const check = await checkPromise;
+      throwIfChapterGenerationAborted(input.signal);
       if (this.isCacheableTimelineResult(check)) {
         await this.writePersistentGateCache({
           gate: "timeline",
@@ -402,6 +415,7 @@ export class ChapterQualityGateService {
           request: input.request,
           result: check,
         });
+        throwIfChapterGenerationAborted(input.signal);
       }
       rememberCacheValue(this.timelineGateCache, key, check);
       return check;
@@ -412,6 +426,7 @@ export class ChapterQualityGateService {
   }
 
   private async executeTimelineGate(input: RunChapterQualityGatesInput): Promise<TimelineGateResult> {
+    throwIfChapterGenerationAborted(input.signal);
     const timelineContext = input.contextPackage.timelineContext;
     if (!timelineContext) {
       return {
@@ -462,7 +477,9 @@ export class ChapterQualityGateService {
         provider: input.request.provider,
         model: input.request.model,
         temperature: input.request.temperature,
+        signal: input.signal,
       });
+      throwIfChapterGenerationAborted(input.signal);
       extractedEvents = timelineExtractorService.normalizeEvents(extracted);
       extractedHooks = timelineExtractorService.normalizeHooks(extracted);
       timeAnchor = extracted.timeAnchor ?? null;
@@ -478,6 +495,7 @@ export class ChapterQualityGateService {
         chapterContent: input.content,
       });
     } catch (error) {
+      throwIfChapterGenerationAborted(input.signal);
       const message = error instanceof Error ? error.message : String(error);
       extractorError = message;
       result = {
@@ -495,18 +513,21 @@ export class ChapterQualityGateService {
       };
     }
 
+    throwIfChapterGenerationAborted(input.signal);
     await storyTimelineService.saveCheckReport({
       novelId: input.novelId,
       chapterId: input.chapterId,
       chapterIndex: input.contextPackage.chapter.order,
       result,
     }).catch((error) => {
+      throwIfChapterGenerationAborted(input.signal);
       console.warn("[chapter-runtime] timeline report save skipped", {
         novelId: input.novelId,
         chapterId: input.chapterId,
         error: error instanceof Error ? error.message : String(error),
       });
     });
+    throwIfChapterGenerationAborted(input.signal);
     return {
       result,
       extractedEvents,

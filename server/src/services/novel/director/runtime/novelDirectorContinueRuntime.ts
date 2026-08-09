@@ -37,6 +37,7 @@ import type { DirectorPipelineRunInput, NovelDirectorPipelineRuntime } from "../
 import type { NovelDirectorRuntimeOrchestrator } from "./novelDirectorRuntimeOrchestrator";
 import type { DirectorRuntimeService } from "./DirectorRuntimeService";
 import { buildDefaultDirectorPolicy } from "./directorRuntimeDefaults";
+import { getDirectorExecutionContext } from "./DirectorExecutionContext";
 
 export type DirectorAssetFirstRecovery =
   | {
@@ -191,7 +192,7 @@ export class NovelDirectorContinueRuntime {
       scope?: string | null;
       batchAlreadyStartedCount?: number;
     }) => Promise<void>;
-    scheduleBackgroundRun: (taskId: string, runner: () => Promise<void>) => void;
+    scheduleBackgroundRun: (taskId: string, runner: () => Promise<void>) => Promise<void>;
   }) {}
 
   private async resumeApprovedChapterExecutionNode(input: {
@@ -219,7 +220,7 @@ export class NovelDirectorContinueRuntime {
         requiresApprovalByDefault: adapter.requiresApprovalByDefault,
         supportsAutoRetry: adapter.supportsAutoRetry,
         run: async () => {
-          await this.deps.autoExecutionRuntime.runFromReady({
+          const runInput = {
             taskId: input.taskId,
             novelId: input.novelId,
             request: input.request,
@@ -229,7 +230,9 @@ export class NovelDirectorContinueRuntime {
             previousFailureMessage: input.previousFailureMessage,
             allowSkipReviewBlockedChapter: input.allowSkipReviewBlockedChapter,
             approveAutoExecutionScope: input.approveAutoExecutionScope,
-          });
+            signal: getDirectorExecutionContext()?.signal,
+          };
+          await this.deps.autoExecutionRuntime.runFromReady(runInput);
         },
       },
       {
@@ -395,7 +398,7 @@ export class NovelDirectorContinueRuntime {
           autoExecution: sanitizedAutoExecution,
         }),
       });
-      this.deps.scheduleBackgroundRun(taskId, async () => {
+      await this.deps.scheduleBackgroundRun(taskId, async () => {
         const shouldResumeApprovedExecutionNode = (
           row.status === "waiting_approval"
           && assetFirstRecovery.resumeCheckpointType === "chapter_batch_ready"
@@ -415,7 +418,7 @@ export class NovelDirectorContinueRuntime {
           });
           return;
         }
-        await this.deps.autoExecutionRuntime.runFromReady({
+        const runInput = {
           taskId,
           novelId,
           request: effectiveDirectorInput,
@@ -426,7 +429,9 @@ export class NovelDirectorContinueRuntime {
           allowSkipReviewBlockedChapter: canSkipReviewBlockedChapter,
           approveAutoExecutionScope: requestedAutoExecutionContinue || isFullBookAutopilot,
           skipCurrentQualityRepair: requestedSkipQualityRepair,
-        });
+          signal: getDirectorExecutionContext()?.signal,
+        };
+        await this.deps.autoExecutionRuntime.runFromReady(runInput);
       });
       return;
     }
@@ -489,7 +494,7 @@ export class NovelDirectorContinueRuntime {
       // this makes the phase branch symmetric.
       clearCheckpoint: true,
     });
-    this.deps.scheduleBackgroundRun(taskId, async () => {
+    await this.deps.scheduleBackgroundRun(taskId, async () => {
       await this.runDirectorPipeline({
         taskId,
         novelId,

@@ -159,6 +159,7 @@ export interface RunPipelineChapterDeps {
     lengthControl?: ChapterRuntimePackage["lengthControl"];
     runId: string | null;
     startMs: number | null;
+    signal?: AbortSignal;
   }) => Promise<FinalizedRuntimeResult>;
   markChapterGenerationState: (
     chapterId: string,

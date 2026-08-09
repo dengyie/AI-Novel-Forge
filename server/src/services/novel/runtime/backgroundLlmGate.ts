@@ -16,6 +16,8 @@ type Waiter = {
   reject: (error: Error) => void;
   label: string;
   timer: NodeJS.Timeout | null;
+  signal?: AbortSignal;
+  abortListener?: () => void;
 };
 
 let maxInFlight = resolveMaxInFlight();
@@ -53,16 +55,39 @@ export function setBackgroundChapterLlmMaxInFlight(next: number): void {
 export async function withBackgroundChapterLlmSlot<T>(
   label: string,
   runner: () => Promise<T>,
+  signal?: AbortSignal,
 ): Promise<T> {
-  await acquireSlot(label);
+  await acquireSlot(label, signal);
   try {
+    throwIfBackgroundChapterLlmAborted(signal, label);
     return await runner();
   } finally {
     releaseSlot();
   }
 }
 
-function acquireSlot(label: string): Promise<void> {
+function throwIfBackgroundChapterLlmAborted(signal: AbortSignal | undefined, label: string): void {
+  if (!signal?.aborted) {
+    return;
+  }
+  throw signal.reason instanceof Error
+    ? signal.reason
+    : new Error(`background LLM slot cancelled (${label})`);
+}
+
+function cleanupWaiter(waiter: Waiter): void {
+  if (waiter.timer) {
+    clearTimeout(waiter.timer);
+    waiter.timer = null;
+  }
+  if (waiter.signal && waiter.abortListener) {
+    waiter.signal.removeEventListener("abort", waiter.abortListener);
+    waiter.abortListener = undefined;
+  }
+}
+
+function acquireSlot(label: string, signal?: AbortSignal): Promise<void> {
+  throwIfBackgroundChapterLlmAborted(signal, label);
   if (inFlight < maxInFlight) {
     inFlight += 1;
     return Promise.resolve();
@@ -72,22 +97,31 @@ function acquireSlot(label: string): Promise<void> {
     const waiter: Waiter = {
       label,
       timer: null,
+      signal,
       resolve: () => {
-        if (waiter.timer) {
-          clearTimeout(waiter.timer);
-          waiter.timer = null;
-        }
+        cleanupWaiter(waiter);
         inFlight += 1;
         resolve();
       },
       reject: (error) => {
-        if (waiter.timer) {
-          clearTimeout(waiter.timer);
-          waiter.timer = null;
-        }
+        cleanupWaiter(waiter);
         reject(error);
       },
     };
+    if (signal) {
+      waiter.abortListener = () => {
+        const idx = waiters.indexOf(waiter);
+        if (idx >= 0) {
+          waiters.splice(idx, 1);
+        }
+        try {
+          throwIfBackgroundChapterLlmAborted(signal, label);
+        } catch (error) {
+          waiter.reject(error instanceof Error ? error : new Error(String(error)));
+        }
+      };
+      signal.addEventListener("abort", waiter.abortListener, { once: true });
+    }
     waiter.timer = setTimeout(() => {
       const idx = waiters.indexOf(waiter);
       if (idx >= 0) {
@@ -106,6 +140,10 @@ function acquireSlot(label: string): Promise<void> {
     }, waitTimeoutMs);
     waiter.timer.unref?.();
     waiters.push(waiter);
+    if (signal?.aborted) {
+      waiter.abortListener?.();
+      return;
+    }
     if (waiters.length === 1 || waiters.length % 5 === 0) {
       console.info("[background-llm-gate] waiting for slot", {
         label,

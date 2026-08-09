@@ -5,6 +5,7 @@ import {
   type StyleReviewResult,
 } from "../PostGenerationStyleReviewRunner";
 import type { FinalizeChapterContentInput } from "../ChapterContentFinalizationService";
+import { throwIfChapterGenerationAborted } from "../chapterAbortGuard";
 
 export class ChapterStyleReviewFinalizer {
   constructor(private readonly deps: {
@@ -16,6 +17,7 @@ export class ChapterStyleReviewFinalizer {
     styleReview: StyleReviewResult;
     committed: CommittedChapterContent;
   }> {
+    throwIfChapterGenerationAborted(input.signal);
     let styleReview: StyleReviewResult;
     try {
       styleReview = await (this.deps.runner ?? new PostGenerationStyleReviewRunner()).run({
@@ -24,6 +26,7 @@ export class ChapterStyleReviewFinalizer {
         request: input.request,
         contextPackage: input.contextPackage,
         content: input.content,
+        signal: input.signal,
       });
     } catch (error) {
       console.warn("[chapter-runtime] post-generation style review failed, fallback to raw content", {
@@ -39,6 +42,7 @@ export class ChapterStyleReviewFinalizer {
         finalContent: input.content,
       };
     }
+    throwIfChapterGenerationAborted(input.signal);
 
     if (!styleReview.autoRewritten) {
       return {
@@ -51,6 +55,7 @@ export class ChapterStyleReviewFinalizer {
         },
       };
     }
+    throwIfChapterGenerationAborted(input.signal);
     return {
       styleReview,
       committed: await this.deps.contentCommitService.commit({

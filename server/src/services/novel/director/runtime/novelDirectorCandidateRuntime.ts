@@ -18,6 +18,7 @@ import {
   type NovelDirectorRuntimeOrchestrator,
 } from "./novelDirectorRuntimeOrchestrator";
 import { getDirectorCandidateStepModule } from "../workflowStepRuntime/directorWorkflowStepModules";
+import { getDirectorExecutionContext } from "./DirectorExecutionContext";
 
 type WorkflowTaskFailurePort = Pick<NovelWorkflowService, "markTaskFailed">;
 
@@ -31,7 +32,7 @@ export class NovelDirectorCandidateRuntime {
     candidateStageService: NovelDirectorCandidateStageService;
     directorRuntime: DirectorRuntimeService;
     runtimeOrchestrator: NovelDirectorRuntimeOrchestrator;
-    scheduleBackgroundRun: (taskId: string, runner: () => Promise<void>) => void;
+    scheduleBackgroundRun: (taskId: string, runner: () => Promise<void>) => Promise<void>;
     withWorkflowTaskUsage: <T>(workflowTaskId: string | null | undefined, runner: () => Promise<T>) => Promise<T>;
   }) {}
 
@@ -70,7 +71,7 @@ export class NovelDirectorCandidateRuntime {
       throw new Error("自动导演候选阶段任务缺少恢复模式。");
     }
 
-    this.deps.scheduleBackgroundRun(taskId, async () => {
+    await this.deps.scheduleBackgroundRun(taskId, async () => {
       if (mode === "generate") {
         await this.deps.candidateStageService.generateCandidates(baseRequest);
         return;
@@ -139,7 +140,7 @@ export class NovelDirectorCandidateRuntime {
       }
       return await this.deps.withWorkflowTaskUsage(workflowTaskId, runner);
     } catch (error) {
-      if (taskId && !isDirectorRuntimeGateError(error)) {
+      if (taskId && !isDirectorRuntimeGateError(error) && !getDirectorExecutionContext()?.signal?.aborted) {
         const message = error instanceof Error ? error.message : "自动导演候选阶段执行失败。";
         await this.deps.workflowService.markTaskFailed(taskId, message);
       }

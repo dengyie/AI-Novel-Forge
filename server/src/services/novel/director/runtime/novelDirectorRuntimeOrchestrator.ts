@@ -25,6 +25,10 @@ import { directorWorkflowStepModuleRegistry } from "../workflowStepRuntime/direc
 import { DIRECTOR_EXECUTION_STEP_IDS } from "../workflowStepRuntime/directorWorkflowStepIds";
 import { isInitializationPlaceholderVolumeStrategyArtifact } from "./DirectorWorkspaceArtifactInventory";
 import { DirectorStateCommitter } from "../DirectorStateCommitter";
+import {
+  getDirectorExecutionContext,
+  throwIfDirectorExecutionAborted,
+} from "./DirectorExecutionContext";
 
 const BACKGROUND_ARTIFACT_PROJECTION_STEP_IDS = new Set([
   DIRECTOR_EXECUTION_STEP_IDS.chapter_state_commit,
@@ -99,6 +103,7 @@ export class NovelDirectorRuntimeOrchestrator {
       novelId?: string | null;
     },
   ): Promise<void> {
+    throwIfDirectorExecutionAborted();
     await this.deps.workflowService.markTaskRunning(taskId, {
       stage,
       itemKey,
@@ -107,6 +112,7 @@ export class NovelDirectorRuntimeOrchestrator {
       chapterId: options?.chapterId,
       volumeId: options?.volumeId,
     });
+    throwIfDirectorExecutionAborted();
     await this.deps.directorRuntime.recordStepStarted({
       taskId,
       novelId: options?.novelId,
@@ -124,11 +130,13 @@ export class NovelDirectorRuntimeOrchestrator {
     label: string;
     artifacts?: DirectorArtifactRef[];
   }): Promise<void> {
+    throwIfDirectorExecutionAborted();
     const analysis = await this.deps.directorRuntime.analyzeWorkspace({
       novelId: input.novelId,
       workflowTaskId: input.taskId,
       includeAiInterpretation: false,
     });
+    throwIfDirectorExecutionAborted();
     await this.deps.directorRuntime.recordStepCompleted({
       taskId: input.taskId,
       novelId: input.novelId,
@@ -164,6 +172,7 @@ export class NovelDirectorRuntimeOrchestrator {
     runner: () => Promise<T>;
     collectArtifacts?: (output: T) => Promise<DirectorArtifactRef[]> | DirectorArtifactRef[];
   }): Promise<T> {
+    throwIfDirectorExecutionAborted();
     const affectedArtifacts = input.mayModifyUserContent
       ? await this.collectAffectedArtifactsBeforeNode({
         taskId: input.taskId,
@@ -196,7 +205,9 @@ export class NovelDirectorRuntimeOrchestrator {
         requiresApprovalByDefault: input.requiresApprovalByDefault ?? false,
         supportsAutoRetry: input.supportsAutoRetry ?? false,
         run: async () => {
+          throwIfDirectorExecutionAborted();
           const output = await input.runner();
+          throwIfDirectorExecutionAborted();
           const artifacts = input.collectArtifacts
             ? await input.collectArtifacts(output)
             : await this.collectArtifactsAfterNode({
@@ -218,6 +229,7 @@ export class NovelDirectorRuntimeOrchestrator {
       (output) => output.artifacts,
     );
 
+    throwIfDirectorExecutionAborted();
     if (result.status === "completed") {
       return result.output?.output as T;
     }
@@ -296,6 +308,7 @@ export class NovelDirectorRuntimeOrchestrator {
     runner?: () => Promise<TOutput>;
     collectArtifacts?: (output: TOutput) => Promise<DirectorArtifactRef[]> | DirectorArtifactRef[];
   }): Promise<TOutput> {
+    throwIfDirectorExecutionAborted();
     const preloadedArtifacts = input.collectArtifacts && input.collectArtifacts.length === 0
       ? await Promise.resolve(input.collectArtifacts(undefined as TOutput)).catch(() => [])
       : [];
@@ -305,6 +318,7 @@ export class NovelDirectorRuntimeOrchestrator {
       targetType: input.targetType ?? input.module.targetType,
       targetId: input.targetId ?? null,
       artifacts: preloadedArtifacts,
+      signal: getDirectorExecutionContext()?.signal,
     };
     // When facts are incomplete, do not reuse a historical succeeded step by
     // idempotency key (DirectorNodeRunner). That short-circuit previously caused
@@ -313,12 +327,14 @@ export class NovelDirectorRuntimeOrchestrator {
     let reuseCompletedStep = input.reuseCompletedStep;
     if (reuseCompletedStep !== false) {
       const completion = await input.module.inspectCompletion(context);
+      throwIfDirectorExecutionAborted();
       if (completion.completed) {
         return undefined as TOutput;
       }
       reuseCompletedStep = false;
     }
     const readiness = await input.module.inspectReadiness(context);
+    throwIfDirectorExecutionAborted();
     if (!readiness.ready) {
       const blocker = readiness.blockers[0] ?? null;
       const reason = blocker?.reason || input.module.defaultWaitingState?.itemLabel || "当前导演步骤需要补齐上游条件。";
@@ -341,9 +357,11 @@ export class NovelDirectorRuntimeOrchestrator {
     }
 
     const builtInput = await input.module.buildInput(context);
+    throwIfDirectorExecutionAborted();
     const preconditions = input.module.validatePreconditions
       ? await input.module.validatePreconditions(builtInput, context)
       : { status: "ready" as const };
+    throwIfDirectorExecutionAborted();
     if (preconditions.status !== "ready") {
       const reason = preconditions.reason;
       if (input.module.defaultWaitingState) {
@@ -382,9 +400,11 @@ export class NovelDirectorRuntimeOrchestrator {
         const output = input.runner
           ? await input.runner()
           : await input.module.execute(builtInput, context);
+        throwIfDirectorExecutionAborted();
         const validation = input.module.validateOutput
           ? await input.module.validateOutput(output, context)
           : { valid: true };
+        throwIfDirectorExecutionAborted();
         if (!validation.valid) {
           throw new Error(validation.reason || `${input.module.id} produced an invalid output.`);
         }
@@ -399,6 +419,7 @@ export class NovelDirectorRuntimeOrchestrator {
             throw new Error(`${input.module.id} 未满足其完成标准。`);
           }
         }
+        throwIfDirectorExecutionAborted();
         const commit = input.module.commit
           ? await input.module.commit(output, context)
           : undefined;
@@ -431,7 +452,9 @@ export class NovelDirectorRuntimeOrchestrator {
     allowSkipReviewBlockedChapter?: boolean;
     approveCurrentGate?: boolean;
     approveAutoExecutionScope?: boolean;
+    signal?: AbortSignal;
   }): Promise<void> {
+    throwIfDirectorExecutionAborted();
     const isQualityRepair = input.resumeCheckpointType === "replan_required";
     const workflowPlan = buildChapterPipelineWorkflowTemplate(
       isQualityRepair ? "quality_repair" : "chapter_execution",
@@ -443,6 +466,10 @@ export class NovelDirectorRuntimeOrchestrator {
     if (!entryAdapter) {
       throw new Error("章节执行节点序列为空，无法继续自动导演运行。");
     }
+    const executionInput = {
+      ...input,
+      signal: input.signal ?? getDirectorExecutionContext()?.signal,
+    };
     await this.runStepModule({
       module: entryAdapter,
       taskId: input.taskId,
@@ -451,7 +478,7 @@ export class NovelDirectorRuntimeOrchestrator {
       approveCurrentGate: input.approveCurrentGate,
       approveAutoExecutionScope: input.approveAutoExecutionScope,
       reuseCompletedStep: false,
-      runner: () => this.deps.autoExecutionRuntime.runFromReady(input),
+      runner: () => this.deps.autoExecutionRuntime.runFromReady(executionInput),
     });
 
     if (projectionAdapters.length === 0) {
@@ -459,6 +486,7 @@ export class NovelDirectorRuntimeOrchestrator {
     }
 
     for (const adapter of projectionAdapters) {
+      throwIfDirectorExecutionAborted();
       const artifacts = await this.waitForProjectionFacts({
         module: adapter,
         taskId: input.taskId,
@@ -485,6 +513,7 @@ export class NovelDirectorRuntimeOrchestrator {
     novelId: string;
     targetId?: string | null;
   }): Promise<DirectorArtifactRef[]> {
+    throwIfDirectorExecutionAborted();
     let artifacts = await this.collectArtifactsAfterNode({
       taskId: input.taskId,
       novelId: input.novelId,
@@ -501,6 +530,7 @@ export class NovelDirectorRuntimeOrchestrator {
     const startedAt = Date.now();
 
     while (true) {
+      throwIfDirectorExecutionAborted();
       const context: WorkflowStepExecutionContext = {
         taskId: input.taskId,
         novelId: input.novelId,

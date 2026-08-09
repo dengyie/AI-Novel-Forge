@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const {
   startDirectorTakeoverExecution,
 } = require("../dist/services/novel/director/runtime/novelDirectorTakeoverExecution.js");
+const { runWithDirectorExecutionContext } = require("../dist/services/novel/director/runtime/DirectorExecutionContext.js");
 
 function buildTakeoverState() {
   return {
@@ -112,6 +113,57 @@ test("restart_current_step prepares reset before bootstrapping execution", async
   await Promise.all(scheduled.map((runner) => runner()));
   assert.ok(calls.includes("auto_execution"));
   assert.equal(runFromReadyInput.existingState, null);
+});
+
+test("chapter takeover waits for the scheduled runner instead of detaching it", async () => {
+  let releaseRunner;
+  let runnerStarted = false;
+  let settled = false;
+  const execution = startDirectorTakeoverExecution({
+    request: {
+      novelId: "novel_takeover_demo",
+      entryStep: "chapter",
+      strategy: "restart_current_step",
+    },
+    takeoverState: buildTakeoverState(),
+    directorInput: {
+      candidate: { workingTitle: "Neon Archive" },
+      runMode: "auto_to_execution",
+      autoExecutionPlan: { mode: "chapter_range" },
+    },
+    workflowService: {
+      bootstrapTask: async () => ({ id: "workflow_takeover_wait_demo" }),
+      markTaskRunning: async () => {},
+    },
+    autoExecutionRuntime: {
+      prepareRequestedAutoExecution: async () => {},
+      runFromReady: async () => {
+        runnerStarted = true;
+        await new Promise((resolve) => {
+          releaseRunner = resolve;
+        });
+      },
+    },
+    buildDirectorSeedPayload: () => ({}),
+    scheduleBackgroundRun: async (_taskId, runner) => runner(),
+    runDirectorPipeline: async () => {},
+    prepareRestartStep: async () => {},
+    createRewriteSnapshot: async () => ({
+      snapshotId: "snapshot_wait_demo",
+      label: "自动导演重写前备份",
+      restoreEntry: "version_history",
+    }),
+  }).then(() => {
+    settled = true;
+  });
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(runnerStarted, true, "the real chapter runner should start");
+  assert.equal(settled, false, "the command path must retain the runner promise");
+
+  releaseRunner();
+  await execution;
+  assert.equal(settled, true);
 });
 
 test("restart_current_step stores rewrite snapshot reference in task seed and milestone", async () => {
@@ -577,4 +629,50 @@ test("takeover startup failure after bootstrap marks the replacement task failed
     "cancel_replaced_runs",
     ["mark_failed", "workflow_takeover_demo", "已有自动导演任务正在处理同一范围"],
   ]);
+});
+
+test("takeover abort does not mark the replacement task failed", async () => {
+  const controller = new AbortController();
+  const failure = new Error("command lease lost");
+  const taskFailures = [];
+
+  await assert.rejects(
+    runWithDirectorExecutionContext(
+      { signal: controller.signal, waitForCompletion: true },
+      () => startDirectorTakeoverExecution({
+        request: {
+          novelId: "novel_takeover_demo",
+          entryStep: "chapter",
+          strategy: "continue_existing",
+        },
+        takeoverState: buildTakeoverState(),
+        directorInput: {
+          candidate: { workingTitle: "Neon Archive" },
+          runMode: "auto_to_execution",
+          autoExecutionPlan: { mode: "chapter_range" },
+        },
+        workflowService: {
+          bootstrapTask: async () => ({ id: "workflow_takeover_abort" }),
+          markTaskRunning: async () => {},
+          markTaskFailed: async (_taskId, message) => {
+            taskFailures.push(message);
+          },
+        },
+        autoExecutionRuntime: {
+          prepareRequestedAutoExecution: async () => {},
+          runFromReady: async (input) => {
+            assert.equal(input.signal, controller.signal);
+            controller.abort(failure);
+            throw failure;
+          },
+        },
+        buildDirectorSeedPayload: () => ({}),
+        scheduleBackgroundRun: async (_taskId, runner) => runner(),
+        runDirectorPipeline: async () => {},
+      }),
+    ),
+    failure,
+  );
+
+  assert.deepEqual(taskFailures, []);
 });

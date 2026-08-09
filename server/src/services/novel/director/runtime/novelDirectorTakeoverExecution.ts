@@ -19,6 +19,7 @@ import {
   buildContinueExistingDownstreamReset,
   buildRestartCurrentStepDownstreamReset,
 } from "./novelDirectorTakeoverContinue";
+import { getDirectorExecutionContext } from "./DirectorExecutionContext";
 
 interface TakeoverBootstrapTaskResult {
   id: string;
@@ -74,6 +75,7 @@ interface TakeoverExecutionAutoRuntimePort {
     resumeStage?: "chapter" | "pipeline";
     approveCurrentGate?: boolean;
     approveAutoExecutionScope?: boolean;
+    signal?: AbortSignal;
   }): Promise<void>;
 }
 
@@ -89,7 +91,7 @@ interface StartDirectorTakeoverExecutionInput {
     novelId: string,
     extra?: Record<string, unknown>,
   ) => Record<string, unknown>;
-  scheduleBackgroundRun: (taskId: string, runner: () => Promise<void>) => void;
+  scheduleBackgroundRun: (taskId: string, runner: () => Promise<void>) => Promise<void>;
   runDirectorPipeline: (input: {
     taskId: string;
     novelId: string;
@@ -439,7 +441,7 @@ export async function startDirectorTakeoverExecution(
         });
       }
       await input.workflowService.markTaskRunning(workflowTask.id, resolveDirectorRunningStateForPhase(plan.phase ?? plan.startPhase));
-      input.scheduleBackgroundRun(workflowTask.id, async () => {
+      await input.scheduleBackgroundRun(workflowTask.id, async () => {
         await input.runDirectorPipeline({
           taskId: workflowTask.id,
           novelId: request.novelId,
@@ -457,7 +459,7 @@ export async function startDirectorTakeoverExecution(
         existingState: plan.usesCurrentBatch ? (input.takeoverState.latestAutoExecutionState ?? null) : null,
       });
       await input.workflowService.markTaskRunning(workflowTask.id, buildAutoExecutionRunningState(plan));
-      input.scheduleBackgroundRun(workflowTask.id, async () => {
+      await input.scheduleBackgroundRun(workflowTask.id, async () => {
         await input.autoExecutionRuntime.runFromReady({
           taskId: workflowTask.id,
           novelId: request.novelId,
@@ -468,6 +470,7 @@ export async function startDirectorTakeoverExecution(
           resumeStage: plan.resumeStage === "pipeline" ? "pipeline" : "chapter",
           approveCurrentGate: isFullBookAutopilot,
           approveAutoExecutionScope: isFullBookAutopilot,
+          signal: getDirectorExecutionContext()?.signal,
         });
       });
     }
@@ -486,6 +489,9 @@ export async function startDirectorTakeoverExecution(
       },
     };
   } catch (error) {
+    if (getDirectorExecutionContext()?.signal?.aborted) {
+      throw error;
+    }
     await input.workflowService.markTaskFailed?.(workflowTask.id, getErrorMessage(error)).catch(() => null);
     throw error;
   }

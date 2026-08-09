@@ -18,6 +18,7 @@ import {
   DIRECTOR_PROGRESS,
 } from "../projections/novelDirectorProgress";
 import type { DirectorMarkTaskRunningCallback } from "./novelDirectorPhaseTypes";
+import { throwIfDirectorExecutionAborted } from "../runtime/DirectorExecutionContext";
 
 interface DirectorStoryMacroDependencies {
   storyMacroService: StoryMacroPlanService;
@@ -32,14 +33,21 @@ async function ensureDirectorConstraintEngine(
   storyMacroService: StoryMacroPlanService,
   novelId: string,
   plan: StoryMacroPlan,
+  signal?: AbortSignal,
 ): Promise<StoryMacroPlan> {
+  throwIfDirectorExecutionAborted(signal);
   if (plan.constraintEngine) {
     return plan;
   }
 
   try {
-    return await storyMacroService.buildConstraintEngine(novelId);
-  } catch {
+    const nextPlan = await storyMacroService.buildConstraintEngine(novelId);
+    throwIfDirectorExecutionAborted(signal);
+    return nextPlan;
+  } catch (error) {
+    if (signal?.aborted) {
+      throw error;
+    }
     return plan;
   }
 }
@@ -49,6 +57,7 @@ async function generateDirectorBookContract(input: {
   novelId: string;
   storyMacroService: StoryMacroPlanService;
   storyMacroPlan: StoryMacroPlan | null;
+  signal?: AbortSignal;
 }): Promise<BookContractDraft> {
   const { request, storyMacroPlan } = input;
   const bookSpec = toBookSpec(request.candidate, request.idea, request.estimatedChapterCount);
@@ -75,6 +84,7 @@ async function generateDirectorBookContract(input: {
       provider: request.provider,
       model: request.model,
       temperature,
+      signal: input.signal,
     },
   });
   return normalizeBookContract(parsed.output);
@@ -97,7 +107,10 @@ export async function runDirectorStoryMacroAssetPhase(input: {
     itemLabel: "正在生成故事宏观规划",
     progress: DIRECTOR_PROGRESS.storyMacro,
     callbacks,
-    run: async () => dependencies.storyMacroService.decompose(novelId, storyInput, request),
+    run: async ({ signal }) => dependencies.storyMacroService.decompose(novelId, storyInput, {
+      ...request,
+      signal,
+    }),
   });
   const hydratedStoryMacroPlan = await runDirectorTrackedStep({
     taskId,
@@ -106,10 +119,11 @@ export async function runDirectorStoryMacroAssetPhase(input: {
     itemLabel: "正在构建约束引擎",
     progress: DIRECTOR_PROGRESS.constraintEngine,
     callbacks,
-    run: async () => ensureDirectorConstraintEngine(
+    run: async ({ signal }) => ensureDirectorConstraintEngine(
       dependencies.storyMacroService,
       novelId,
       storyMacroPlan,
+      signal,
     ),
   });
   return hydratedStoryMacroPlan;
@@ -133,11 +147,12 @@ export async function runDirectorBookContractPhase(input: {
     itemLabel: "正在生成 Book Contract",
     progress: DIRECTOR_PROGRESS.bookContract,
     callbacks,
-    run: async () => generateDirectorBookContract({
+    run: async ({ signal }) => generateDirectorBookContract({
       request,
       novelId,
       storyMacroService: dependencies.storyMacroService,
       storyMacroPlan: hydratedStoryMacroPlan,
+      signal,
     }),
   });
   await dependencies.bookContractService.upsert(novelId, bookContractDraft);

@@ -38,6 +38,7 @@ import type {
   DirectorBookContractParsed,
   DirectorCandidateResponse,
 } from "./novelDirectorSchemas";
+import { getDirectorExecutionContext } from "./DirectorExecutionContext";
 
 export type LLMOptions = Pick<DirectorCandidatesRequest, "provider" | "model" | "temperature">;
 
@@ -248,6 +249,7 @@ export async function enhanceCandidateTitles(
   candidate: DirectorCandidate,
   context: CandidateGenerationContext,
 ): Promise<DirectorCandidate> {
+  const signal = getDirectorExecutionContext()?.signal;
   const fallbackOptions = [buildFallbackTitleOption(candidate)];
 
   try {
@@ -258,6 +260,7 @@ export async function enhanceCandidateTitles(
       count: 4,
       provider: context.options.provider,
       model: context.options.model,
+      signal,
     });
     const mergedOptions = mergeTitleOptions(response.titles, candidate);
     const primaryTitle = mergedOptions[0]?.title?.trim();
@@ -266,7 +269,10 @@ export async function enhanceCandidateTitles(
       workingTitle: primaryTitle || candidate.workingTitle,
       titleOptions: mergedOptions,
     };
-  } catch {
+  } catch (error) {
+    if (signal?.aborted) {
+      throw error;
+    }
     return {
       ...candidate,
       titleOptions: fallbackOptions,

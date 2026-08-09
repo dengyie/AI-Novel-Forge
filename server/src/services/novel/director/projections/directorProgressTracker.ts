@@ -3,6 +3,10 @@ import type {
   DirectorMarkTaskRunningCallback,
   DirectorMutatingStage,
 } from "../phases/novelDirectorPhaseTypes";
+import {
+  getDirectorExecutionContext,
+  throwIfDirectorExecutionAborted,
+} from "../runtime/DirectorExecutionContext";
 
 export type DirectorTrackedStage = DirectorMutatingStage;
 
@@ -55,9 +59,17 @@ export async function runDirectorTrackedStep<T>(input: {
     signal: AbortSignal;
   }) => Promise<T>;
 }): Promise<T> {
+  const executionSignal = getDirectorExecutionContext()?.signal;
+  throwIfDirectorExecutionAborted(executionSignal);
   const startedAt = Date.now();
   const heartbeatMs = Math.max(5000, input.heartbeatMs ?? 15000);
   const abortController = new AbortController();
+  const abortFromExecution = () => {
+    if (!abortController.signal.aborted) {
+      abortController.abort(executionSignal?.reason);
+    }
+  };
+  executionSignal?.addEventListener("abort", abortFromExecution, { once: true });
   let currentItemKey = input.itemKey;
   let currentLabel = input.itemLabel;
   let currentProgress = input.progress;
@@ -74,6 +86,7 @@ export async function runDirectorTrackedStep<T>(input: {
     itemLabel?: string;
     progress?: number;
   }) => {
+    throwIfDirectorExecutionAborted(executionSignal);
     currentItemKey = nextStatus.itemKey ?? currentItemKey;
     currentLabel = nextStatus.itemLabel ?? currentLabel;
     currentProgress = nextStatus.progress ?? currentProgress;
@@ -89,6 +102,7 @@ export async function runDirectorTrackedStep<T>(input: {
           volumeId: input.volumeId ?? null,
         },
       );
+      throwIfDirectorExecutionAborted(executionSignal);
     } catch (error) {
       if (isWorkflowTaskCancelledSignal(error)) {
         abortAsCancelled();
@@ -107,7 +121,7 @@ export async function runDirectorTrackedStep<T>(input: {
   );
 
   const heartbeatTimer = setInterval(() => {
-    if (heartbeatInFlight) {
+    if (heartbeatInFlight || executionSignal?.aborted) {
       return;
     }
     heartbeatInFlight = true;
@@ -141,6 +155,7 @@ export async function runDirectorTrackedStep<T>(input: {
       startedAt,
       signal: abortController.signal,
     });
+    throwIfDirectorExecutionAborted(executionSignal);
     console.info(
       `[director.step] event=done taskId=${input.taskId} stage=${input.stage} itemKey=${currentItemKey} elapsedMs=${Date.now() - startedAt} finalLabel=${JSON.stringify(currentLabel)}`,
     );
@@ -152,5 +167,6 @@ export async function runDirectorTrackedStep<T>(input: {
     throw error;
   } finally {
     clearInterval(heartbeatTimer);
+    executionSignal?.removeEventListener("abort", abortFromExecution);
   }
 }

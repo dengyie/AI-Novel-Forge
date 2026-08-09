@@ -37,6 +37,7 @@ export interface CharacterPrepOptions {
   storyInput?: string;
   useWorldContext?: boolean;
   worldFocusHints?: CharacterWorldFocusHints;
+  signal?: AbortSignal;
 }
 
 type CharacterCastGenerationContextBlocks = ReturnType<typeof buildCharacterCastContextBlocks>;
@@ -206,6 +207,7 @@ async function normalizeCharacterCastOptions(
       provider: options.provider,
       model: options.model,
       temperature: 0.2,
+      signal: options.signal,
     },
   });
   return result.output;
@@ -228,6 +230,7 @@ async function repairCharacterCastOptions(input: {
       provider: input.options.provider,
       model: input.options.model,
       temperature: Math.max(0.2, Math.min(input.options.temperature ?? 0.55, 0.6)),
+      signal: input.options.signal,
     },
   });
   return result.output;
@@ -246,6 +249,7 @@ async function normalizeAutoCharacterCastOption(
       provider: options.provider,
       model: options.model,
       temperature: 0.2,
+      signal: options.signal,
     },
   });
   return result.output;
@@ -264,6 +268,7 @@ async function generateAutoCharacterCastDraftViaStagedPrompts(
       provider: options.provider,
       model: options.model,
       temperature: memberTemperature,
+      signal: options.signal,
     },
   });
 
@@ -285,6 +290,7 @@ async function generateAutoCharacterCastDraftViaStagedPrompts(
       provider: options.provider,
       model: options.model,
       temperature: 0.3,
+      signal: options.signal,
     },
   });
 
@@ -313,6 +319,7 @@ async function repairAutoCharacterCastOption(input: {
       provider: input.options.provider,
       model: input.options.model,
       temperature: Math.max(0.2, Math.min(input.options.temperature ?? 0.55, 0.6)),
+      signal: input.options.signal,
     },
   });
   return result.output;
@@ -333,6 +340,7 @@ export async function generateCharacterCastOptionsDraft(
       provider: options.provider,
       model: options.model,
       temperature: options.temperature ?? 0.5,
+      signal: options.signal,
     },
   });
 
@@ -345,7 +353,12 @@ export async function generateCharacterCastOptionsDraft(
       assessment,
       contextBlocks: context.contextBlocks,
       options,
-    }).catch(() => parsed);
+    }).catch((error) => {
+      if (options.signal?.aborted) {
+        throw error;
+      }
+      return parsed;
+    });
     assessment = assessCharacterCastBatch(parsed.options, context.storyInput);
   }
 
@@ -370,10 +383,14 @@ export async function generateAutoCharacterCastDraft(
         provider: options.provider,
         model: options.model,
         temperature: options.temperature ?? 0.5,
+        signal: options.signal,
       },
     });
     parsed = generation.output;
   } catch (error) {
+    if (options.signal?.aborted) {
+      throw error;
+    }
     if (!shouldFallbackToStagedAutoCast(error)) {
       throw error;
     }
@@ -397,7 +414,12 @@ export async function generateAutoCharacterCastDraft(
       assessment,
       contextBlocks: context.contextBlocks,
       options,
-    }).catch(() => parsed);
+    }).catch((error) => {
+      if (options.signal?.aborted) {
+        throw error;
+      }
+      return parsed;
+    });
     assessment = assessCharacterCastBatch([parsed.option], context.storyInput);
   }
 

@@ -6,6 +6,10 @@ import type {
 import { runWithLlmUsageTracking } from "../../../../llm/usageTracking";
 import { DirectorPolicyEngine, type DirectorPolicyRequest } from "./DirectorPolicyEngine";
 import { DirectorRuntimeStore } from "./DirectorRuntimeStore";
+import {
+  getDirectorExecutionContext,
+  throwIfDirectorExecutionAborted,
+} from "./DirectorExecutionContext";
 
 function buildNodeIdempotencyKey(input: {
   taskId: string;
@@ -57,6 +61,7 @@ export class DirectorNodeRunner {
     input: DirectorNodeRunInput<TInput>,
     collectArtifacts?: (output: TOutput) => DirectorArtifactRef[],
   ): Promise<DirectorNodeRunResult<TOutput>> {
+    throwIfDirectorExecutionAborted();
     const snapshot = input.taskId?.trim()
       ? await this.runtimeStore.getSnapshot(input.taskId.trim())
       : null;
@@ -96,6 +101,7 @@ export class DirectorNodeRunner {
       };
     }
     if (!policyDecision.canRun || policyDecision.requiresApproval) {
+      throwIfDirectorExecutionAborted();
       let runtimeSnapshot: DirectorRuntimeSnapshot | null = snapshot;
       if (input.taskId?.trim()) {
         await this.runtimeStore.recordNodeGate({
@@ -119,6 +125,7 @@ export class DirectorNodeRunner {
     }
 
     if (input.taskId?.trim()) {
+      throwIfDirectorExecutionAborted();
       await this.runtimeStore.recordStepStarted({
         taskId: input.taskId.trim(),
         novelId: input.novelId,
@@ -130,6 +137,7 @@ export class DirectorNodeRunner {
     }
 
     try {
+      throwIfDirectorExecutionAborted();
       const output = input.taskId?.trim()
         ? await runWithLlmUsageTracking({
           workflowTaskId: input.taskId.trim(),
@@ -140,9 +148,11 @@ export class DirectorNodeRunner {
           directorNodeKey: contract.nodeKey,
         }, () => contract.run(input.input))
         : await contract.run(input.input);
+      throwIfDirectorExecutionAborted();
       const producedArtifacts = collectArtifacts?.(output) ?? [];
       let runtimeSnapshot: DirectorRuntimeSnapshot | null = null;
       if (input.taskId?.trim()) {
+        throwIfDirectorExecutionAborted();
         await this.runtimeStore.recordStepCompleted({
           taskId: input.taskId.trim(),
           novelId: input.novelId,
@@ -161,6 +171,9 @@ export class DirectorNodeRunner {
         producedArtifacts,
       };
     } catch (error) {
+      if (getDirectorExecutionContext()?.signal?.aborted) {
+        throw error;
+      }
       const message = error instanceof Error ? error.message : String(error);
       if (input.taskId?.trim()) {
         await this.runtimeStore.recordStepFailed({

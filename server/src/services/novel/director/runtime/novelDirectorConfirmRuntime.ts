@@ -25,6 +25,7 @@ import type { DirectorRuntimeService } from "./DirectorRuntimeService";
 import type { NovelDirectorRuntimeOrchestrator } from "./novelDirectorRuntimeOrchestrator";
 import type { NovelDirectorPipelineRuntime } from "../novelDirectorPipelineRuntime";
 import { getDirectorConfirmNovelCreateStepModule } from "../workflowStepRuntime/directorWorkflowStepModules";
+import { getDirectorExecutionContext } from "./DirectorExecutionContext";
 
 type WorkflowTaskSnapshot = Awaited<ReturnType<NovelWorkflowService["getTaskByIdWithoutHealing"]>>;
 
@@ -50,7 +51,7 @@ export class NovelDirectorConfirmRuntime {
     enrichDirectorStyleContext: (input: DirectorConfirmRequest) => Promise<DirectorConfirmRequest>;
     ensurePrimaryNovelStyleBinding: (novelId: string, styleProfileId: string | null | undefined) => Promise<void>;
     withWorkflowTaskUsage: <T>(workflowTaskId: string | null | undefined, runner: () => Promise<T>) => Promise<T>;
-    scheduleBackgroundRun: (taskId: string, runner: () => Promise<void>) => void;
+    scheduleBackgroundRun: (taskId: string, runner: () => Promise<void>) => Promise<void>;
   }) {}
 
   async confirmCandidate(input: DirectorConfirmRequest): Promise<DirectorConfirmApiResponse> {
@@ -243,7 +244,7 @@ export class NovelDirectorConfirmRuntime {
           "正在准备 Book Contract 与故事宏观规划",
           DIRECTOR_PROGRESS.bookContract,
         );
-        this.deps.scheduleBackgroundRun(workflowTask.id, async () => {
+        await this.deps.scheduleBackgroundRun(workflowTask.id, async () => {
           await this.deps.pipelineRuntime.runPipeline({
             taskId: workflowTask.id,
             novelId: createdNovel.id,
@@ -279,6 +280,9 @@ export class NovelDirectorConfirmRuntime {
         };
       });
     } catch (error) {
+      if (getDirectorExecutionContext()?.signal?.aborted) {
+        throw error;
+      }
       const message = error instanceof Error ? error.message : "自动导演确认链执行失败。";
       await this.deps.workflowService.markTaskFailed(workflowTask.id, message);
       throw error;

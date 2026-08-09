@@ -35,6 +35,7 @@ interface DetectionInput {
   provider?: LLMProvider;
   model?: string;
   temperature?: number;
+  signal?: AbortSignal;
 }
 
 // 命中 ≥3 个不同规则即判定 AI 痕迹成簇（humanizer：clusters not isolated tells）。
@@ -355,6 +356,7 @@ export class StyleDetectionService {
         provider: input.provider,
         model: input.model,
         temperature: input.temperature ?? 0.2,
+        signal: input.signal,
       },
     });
     const parsed = result.output;

@@ -72,6 +72,7 @@ interface RewriteInput {
   provider?: LLMProvider;
   model?: string;
   temperature?: number;
+  signal?: AbortSignal;
 }
 
 export class StyleRewriteService {
@@ -112,6 +113,7 @@ export class StyleRewriteService {
         provider: input.provider ?? "deepseek",
         model: input.model,
         temperature: input.temperature ?? 0.5,
+        signal: input.signal,
       },
     });
 
