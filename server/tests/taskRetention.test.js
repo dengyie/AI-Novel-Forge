@@ -5,7 +5,7 @@ const {
   selectDeletableTaskIds,
   selectSupersededTaskIds,
   selectSupersededGenerationJobIds,
-} = require("../dist/services/task/TaskRetentionService.js");
+} = require("../dist/services/task/retention/domain/retentionPolicy.js");
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const CFG = { keepPerNovel: 20, succeededDays: 7, failedDays: 30 };

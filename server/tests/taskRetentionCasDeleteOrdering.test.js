@@ -2,7 +2,9 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const { prisma } = require("../dist/db/prisma.js");
-const { TaskRetentionService } = require("../dist/services/task/TaskRetentionService.js");
+const {
+  TaskRetentionCleanupStore,
+} = require("../dist/services/task/retention/infrastructure/TaskRetentionCleanupStore.js");
 
 function makeSummary() {
   return {
@@ -24,7 +26,7 @@ function makeSummary() {
 }
 
 test("retention rechecks terminal status and deletes task before dependents/archive rows", { concurrency: false }, async () => {
-  const service = new TaskRetentionService();
+  const service = new TaskRetentionCleanupStore();
   const events = [];
   const originals = { transaction: prisma.$transaction };
   prisma.$transaction = async (callback) => callback({
@@ -72,7 +74,7 @@ test("retention rechecks terminal status and deletes task before dependents/arch
 });
 
 test("retention CAS recheck skips rows that became active before deletion", { concurrency: false }, async () => {
-  const service = new TaskRetentionService();
+  const service = new TaskRetentionCleanupStore();
   const originals = { transaction: prisma.$transaction };
   let deleteCalled = false;
   prisma.$transaction = async (callback) => callback({

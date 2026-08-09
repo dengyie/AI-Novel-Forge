@@ -33,6 +33,8 @@ Wiki 记录稳定规则，计划和检查点保留历史语境。模块治理以
 - 小说编辑页只负责组合视图。workspace 查询、pipeline、导演任务、任务抽屉和展示模型分别由 `client/src/pages/novels/hooks/novelEdit/` 内的控制器拥有；导演任务选择规则由 `automation/directorTaskSelection.ts` 单点拥有。其事实源只允许显式 URL 导演任务、当前活动导演任务和书级导演投影，手动 workspace lane 的 `workspaceTaskId` 不能作为导演任务 id 兜底。
 - `server/src/routes/` 只保留尚未迁移的传统 HTTP 入口。小说主链、自动导演、小说导出和世界设定的 HTTP 映射必须进入对应业务模块的 `http/` 目录，并由 `app.ts` 直接挂载模块入口；不要在 `routes/` 根目录保留 re-export shim。
 - 小说业务应用入口应通过 `server/src/services/novel/application/` 的 capability 层组合。`NovelService` 只作为兼容 facade，路由和后台服务不得重新依赖完整 God Object。
+- `server/src/services/task/retention/` 按 domain、application、infrastructure 拥有任务保留能力：策略选择器不得访问 Prisma；清理与孤儿适配器拥有数据库副作用；自动导演恢复/重试由 application coordinator 编排；`TaskRetentionService.ts` 只作为外部稳定 facade。生产模块不得深链 retention 内部文件，测试可以直接实例化 owned module 验证真实实现。
+- 任务保留的 `runOnce` 步骤顺序由 `TaskRetentionRunner` 单点编排；新增保留规则应先进入 domain 合同，再由 runner 组合，不能在 timer facade 或生产路由中追加数据库分支。
 - `ChapterRuntimeCoordinator` 是章节 runtime 的外部稳定门面；流编排、质量门禁、终稿定稿、pipeline 适配和 runtime package 构建只能在 `server/src/services/novel/runtime/` 内部模块中协作，外部不得深链到这些内部服务。
 - 新增业务能力优先通过模块门面或 `index.ts` 暴露，不从外部深链到其他模块内部文件。
 - 涉及自动导演、章节执行、Prompt、RAG、任务状态或前端投影的边界变化，应同步更新 Wiki 或模块 README。

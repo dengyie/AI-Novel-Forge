@@ -2,7 +2,15 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const { prisma } = require("../dist/db/prisma.js");
-const { TaskRetentionService } = require("../dist/services/task/TaskRetentionService.js");
+const {
+  AutoDirectorRetentionCoordinator,
+} = require("../dist/services/task/retention/application/AutoDirectorRetentionCoordinator.js");
+const {
+  TaskRetentionCleanupStore,
+} = require("../dist/services/task/retention/infrastructure/TaskRetentionCleanupStore.js");
+const {
+  TaskRetentionOrphanStore,
+} = require("../dist/services/task/retention/infrastructure/TaskRetentionOrphanStore.js");
 const { taskRetentionConfig } = require("../dist/config/taskRetention.js");
 
 // 任务中心 autopilot P1 回归：
@@ -56,7 +64,7 @@ function makeSummary() {
 }
 
 test("cancelZombieRunningTasks leaves resumable task untouched when command enqueue fails", { concurrency: false }, async () => {
-  const service = new TaskRetentionService();
+  const service = new AutoDirectorRetentionCoordinator();
   const originals = {
     findMany: prisma.novelWorkflowTask.findMany,
     updateMany: prisma.novelWorkflowTask.updateMany,
@@ -84,7 +92,7 @@ test("cancelZombieRunningTasks leaves resumable task untouched when command enqu
 });
 
 test("cancelZombieRunningTasks lets command acceptance own the successful resume projection", { concurrency: false }, async () => {
-  const service = new TaskRetentionService();
+  const service = new AutoDirectorRetentionCoordinator();
   const originals = {
     findMany: prisma.novelWorkflowTask.findMany,
     updateMany: prisma.novelWorkflowTask.updateMany,
@@ -122,7 +130,7 @@ test("cancelZombieRunningTasks lets command acceptance own the successful resume
 // 注意：stub 共享 prisma 单例，文件内用例必须串行（concurrency: false）。
 
 test("autoArchiveTerminalTasks archives aged terminal tasks, keeps fresh ones visible", { concurrency: false }, async () => {
-  const service = new TaskRetentionService();
+  const service = new TaskRetentionCleanupStore();
   const now = new Date("2026-07-30T00:00:00.000Z");
   const archived = [];
   const originals = {
@@ -174,7 +182,7 @@ test("autoArchiveTerminalTasks archives aged terminal tasks, keeps fresh ones vi
 });
 
 test("autoArchiveTerminalTasks honors disabled windows (0 = off)", { concurrency: false }, async () => {
-  const service = new TaskRetentionService();
+  const service = new TaskRetentionCleanupStore();
   const now = new Date("2026-07-30T00:00:00.000Z");
   const originals = {
     workflowFind: prisma.novelWorkflowTask.findMany,
@@ -201,7 +209,7 @@ test("autoArchiveTerminalTasks honors disabled windows (0 = off)", { concurrency
 // --- P2 status projection self-heal ---
 
 test("projectStaleActiveWorkflowTasks: fake-running manual lane → failed+recoverable; auto_director untouched", { concurrency: false }, async () => {
-  const service = new TaskRetentionService();
+  const service = new AutoDirectorRetentionCoordinator();
   const now = new Date("2026-07-30T00:00:00.000Z");
   const originals = {
     find: prisma.novelWorkflowTask.findMany,
@@ -247,7 +255,7 @@ test("projectStaleActiveWorkflowTasks: fake-running manual lane → failed+recov
 });
 
 test("projectStaleActiveWorkflowTasks: stale waiting_approval → pendingManualRecovery attention flag, status untouched", { concurrency: false }, async () => {
-  const service = new TaskRetentionService();
+  const service = new AutoDirectorRetentionCoordinator();
   const now = new Date("2026-07-30T00:00:00.000Z");
   const originals = {
     find: prisma.novelWorkflowTask.findMany,
@@ -284,7 +292,7 @@ test("projectStaleActiveWorkflowTasks: stale waiting_approval → pendingManualR
 });
 
 test("projectStaleActiveWorkflowTasks: no stale rows → no writes", { concurrency: false }, async () => {
-  const service = new TaskRetentionService();
+  const service = new AutoDirectorRetentionCoordinator();
   const originals = {
     find: prisma.novelWorkflowTask.findMany,
     update: prisma.novelWorkflowTask.updateMany,
@@ -336,7 +344,7 @@ function makeFailedWorkflowRow(overrides = {}) {
 }
 
 test("autoRetryTransientFailedWorkflowTasks: disabled by default — no query at all", { concurrency: false }, async () => {
-  const service = new TaskRetentionService();
+  const service = new AutoDirectorRetentionCoordinator();
   const originals = { find: prisma.novelWorkflowTask.findMany };
   let queried = false;
   prisma.novelWorkflowTask.findMany = async () => { queried = true; return []; };
@@ -353,7 +361,7 @@ test("autoRetryTransientFailedWorkflowTasks: disabled by default — no query at
 });
 
 test("autoRetryTransientFailedWorkflowTasks: retries transient failures via adapter, skips permanent/code-defect/exhausted", { concurrency: false }, async () => {
-  const service = new TaskRetentionService();
+  const service = new AutoDirectorRetentionCoordinator();
   const now = new Date("2026-07-30T12:00:00.000Z");
   const originals = {
     find: prisma.novelWorkflowTask.findMany,
@@ -393,7 +401,7 @@ test("autoRetryTransientFailedWorkflowTasks: retries transient failures via adap
 });
 
 test("autoRetryTransientFailedWorkflowTasks: daily token budget reached → flag for manual, no retry", { concurrency: false }, async () => {
-  const service = new TaskRetentionService();
+  const service = new AutoDirectorRetentionCoordinator();
   const now = new Date("2026-07-30T12:00:00.000Z");
   const originals = {
     find: prisma.novelWorkflowTask.findMany,
@@ -432,7 +440,7 @@ test("autoRetryTransientFailedWorkflowTasks: daily token budget reached → flag
 });
 
 test("autoRetryTransientFailedWorkflowTasks: maxPerRun caps retries per retention run", { concurrency: false }, async () => {
-  const service = new TaskRetentionService();
+  const service = new AutoDirectorRetentionCoordinator();
   const now = new Date("2026-07-30T12:00:00.000Z");
   const originals = {
     find: prisma.novelWorkflowTask.findMany,
@@ -463,7 +471,7 @@ test("autoRetryTransientFailedWorkflowTasks: maxPerRun caps retries per retentio
 // adapter 的 retry，而是用真实 adapter + stub 其下游（workflowService.retryTask /
 // novelDirectorService.continueTask），断言 retention 自身不再发 updateMany 自增。
 test("autoRetryTransientFailedWorkflowTasks: retention does not self-claim — single attempt increment owned by retryTask", { concurrency: false }, async () => {
-  const service = new TaskRetentionService();
+  const service = new AutoDirectorRetentionCoordinator();
   const now = new Date("2026-07-30T12:00:00.000Z");
   const originals = {
     find: prisma.novelWorkflowTask.findMany,
@@ -506,7 +514,7 @@ test("autoRetryTransientFailedWorkflowTasks: retention does not self-claim — s
 // --- P1b orphan agent runs ---
 
 test("reconcileOrphanAgentRuns cancels+archives runs with terminal/deleted hosts, spares writing hosts", { concurrency: false }, async () => {
-  const service = new TaskRetentionService();
+  const service = new TaskRetentionOrphanStore();
   const now = new Date("2026-07-30T00:00:00.000Z");
   const stale = new Date(now.getTime() - 2 * HOUR);
   const originals = {
@@ -574,7 +582,7 @@ test("reconcileOrphanAgentRuns cancels+archives runs with terminal/deleted hosts
 });
 
 test("reconcileOrphanAgentRuns no-ops when no stale active runs", { concurrency: false }, async () => {
-  const service = new TaskRetentionService();
+  const service = new TaskRetentionOrphanStore();
   const now = new Date("2026-07-30T00:00:00.000Z");
   const originals = {
     agentFind: prisma.agentRun.findMany,
