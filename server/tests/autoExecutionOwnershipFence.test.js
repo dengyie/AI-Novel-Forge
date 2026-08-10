@@ -124,3 +124,28 @@ test("CAS miss after assertActive loses ownership without pipeline cleanup", { c
   }), (error) => error?.code === "AUTO_EXECUTION_OWNERSHIP_LOST");
   assert.equal(cancelCalls, 0);
 });
+
+test("ownership token mismatch stops the stale runner without cancelling the pipeline job", { concurrency: false }, async () => {
+  let lookupCount = 0;
+  let cancelCalls = 0;
+  const fence = new AutoExecutionOwnershipFence({
+    workflowService: {
+      getTaskByIdWithoutHealing: async () => {
+        lookupCount += 1;
+        return task({ ownershipVersion: lookupCount === 1 ? 7 : 8 });
+      },
+    },
+    novelService: {
+      cancelPipelineJob: async () => {
+        cancelCalls += 1;
+      },
+    },
+  }, "task-1", undefined, "job-1");
+
+  await fence.assertActive();
+  await assert.rejects(
+    () => fence.assertActive(),
+    (error) => error?.code === "AUTO_EXECUTION_OWNERSHIP_LOST",
+  );
+  assert.equal(cancelCalls, 0);
+});

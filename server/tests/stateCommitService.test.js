@@ -79,6 +79,38 @@ test("StateCommitService validate auto-commits low-risk runtime updates", () => 
   assert.equal(result.accepted[0].status, "committed");
 });
 
+test("StateCommitService scopes an owned proposal commit to the workflow task novel", async () => {
+  const service = new StateCommitService();
+  const originalTransaction = prisma.$transaction;
+  let ownershipWhere;
+
+  prisma.$transaction = async (callback) => callback({
+    novelWorkflowTask: {
+      async updateMany({ where }) {
+        ownershipWhere = where;
+        return { count: 0 };
+      },
+    },
+  });
+
+  try {
+    await assert.rejects(() => service.commitExistingProposals({
+      novelId: "novel-1",
+      proposalIds: ["proposal-1"],
+      reason: "owned-scope-regression",
+      ownership: {
+        taskId: "task-1",
+        attemptCount: 2,
+        ownershipVersion: 7,
+      },
+    }), (error) => error?.code === "WORKFLOW_TASK_OWNERSHIP_LOST");
+
+    assert.equal(ownershipWhere.novelId, "novel-1");
+  } finally {
+    prisma.$transaction = originalTransaction;
+  }
+});
+
 test("StateCommitService validate routes debt runtime updates into pending review", () => {
   const service = new StateCommitService();
   const result = service.validate([
@@ -370,6 +402,7 @@ test("StateCommitService commitExistingProposals applies ledger update and write
         },
       },
       stateChangeProposal: {
+        findMany: async () => [proposalRow],
         update: async (args) => {
           calls.proposalUpdate += 1;
           assert.equal(args.where.id, "proposal-1");

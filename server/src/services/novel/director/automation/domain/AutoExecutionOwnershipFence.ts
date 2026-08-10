@@ -63,12 +63,12 @@ export class AutoExecutionOwnershipFence {
       throw new AutoExecutionOwnershipLostError(this.taskId, this.pipelineJobId);
     }
     if (this.signal?.aborted) {
-      return this.failOwnership();
+      return this.failOwnershipWithPipelineCancellation();
     }
 
     const task = await this.deps.workflowService.getTaskByIdWithoutHealing(this.taskId);
     if (!task || task.status === "cancelled" || Boolean(task.cancelRequestedAt)) {
-      return this.failOwnership();
+      return this.failOwnershipWithPipelineCancellation();
     }
 
     const current = {
@@ -80,7 +80,7 @@ export class AutoExecutionOwnershipFence {
       current.attemptCount !== this.ownership.attemptCount
       || current.ownershipVersion !== this.ownership.ownershipVersion
     )) {
-      return this.failOwnership();
+      return this.loseOwnership();
     }
     this.ownership = current;
     return current;
@@ -171,7 +171,12 @@ export class AutoExecutionOwnershipFence {
     return ownership;
   }
 
-  private async failOwnership(): Promise<never> {
+  private loseOwnership(): never {
+    this.lost = true;
+    throw new AutoExecutionOwnershipLostError(this.taskId, this.pipelineJobId);
+  }
+
+  private async failOwnershipWithPipelineCancellation(): Promise<never> {
     this.lost = true;
     const pipelineJobId = this.pipelineJobId;
     if (pipelineJobId) {

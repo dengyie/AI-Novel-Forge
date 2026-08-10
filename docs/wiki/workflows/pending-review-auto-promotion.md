@@ -59,7 +59,7 @@ flowchart TD
   K --> L["写入 pending_review_auto_promotion 导演事件"]
 ```
 
-自动导演接入点是章节批次成功后的命令内维护动作，必须在当前命令中 `await` 完成。预演后的读侧 `beforeCommit` 只用于尽早响应 AbortSignal，不能作为最终写授权；最终授权必须由 `StateCommitService` 在同一数据库事务内用 `taskId + lane + active status + cancelRequestedAt=null + attemptCount + ownershipVersion` 做 CAS。CAS 成功后，事务才可以同时标记 superseded 提案、提交 promoted 提案并写 canonical state；返回的新 ownership snapshot 必须更新当前 fence。取消、重试接管或 CAS miss 时事务整体不得提交 proposal/canonical 变更，也不得继续写入留痕。开关读取、候选扫描、事务 CAS、proposal/canonical 写入和留痕的基础设施错误必须向命令执行器传播，进入失败/重试/恢复链路。
+自动导演接入点是章节批次成功后的命令内维护动作，必须在当前命令中 `await` 完成。预演后的读侧 `beforeCommit` 只用于尽早响应 AbortSignal，不能作为最终写授权；最终授权必须由 `StateCommitService` 在同一数据库事务内用 `taskId + novelId + lane + active status + cancelRequestedAt=null + attemptCount + ownershipVersion` 做 CAS，禁止用一本书的 workflow ownership 授权另一本书的提案提交。CAS 成功后，事务才可以同时标记 superseded 提案、提交 promoted 提案并写 canonical state；返回的新 ownership snapshot 必须更新当前 fence。取消、重试接管或 CAS miss 时事务整体不得提交 proposal/canonical 变更，也不得继续写入留痕。开关读取、候选扫描、事务 CAS、proposal/canonical 写入和留痕的基础设施错误必须向命令执行器传播，进入失败/重试/恢复链路。
 
 ## Settings Contract
 

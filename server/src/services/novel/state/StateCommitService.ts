@@ -195,6 +195,7 @@ export class StateCommitService {
         const claimed = await tx.novelWorkflowTask.updateMany({
           where: {
             id: input.ownership.taskId,
+            novelId: input.novelId,
             lane: "auto_director",
             status: { in: ["queued", "running", "waiting_approval", "failed"] },
             cancelRequestedAt: null,

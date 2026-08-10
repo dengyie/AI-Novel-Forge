@@ -9,6 +9,7 @@ import {
   isDirectorAutoExecutionPipelineSkipEligibleChapter,
   normalizeConsecutiveBatchRolls,
   resolveDirectorAutoExecutionWorkflowState,
+  type DirectorAutoExecutionRange,
 } from "../novelDirectorAutoExecution";
 import {
   recordCompletedCheckpoint,
@@ -36,8 +37,6 @@ import {
 import {
   AutoExecutionOwnershipFence,
   AutoExecutionRunFailureError,
-  isAutoExecutionOwnershipLost,
-  isAutoExecutionRunFailure,
 } from "../domain/AutoExecutionOwnershipFence";
 import {
   schedulePendingReviewAutoPromotionIfEnabled,
@@ -45,6 +44,7 @@ import {
 } from "../projections/AutoExecutionTaskProjector";
 import { AutoExecutionBatchRollCoordinator } from "./AutoExecutionBatchRollCoordinator";
 import { handleAutoExecutionFailure } from "./AutoExecutionFailureHandler";
+import { handleAutoExecutionRunFailure } from "./AutoExecutionRunFailureHandler";
 import {
   resolvePipelineJobForExecution,
   resolveOwnedActiveRangePipeline,
@@ -57,7 +57,6 @@ import { stopAutoExecutionForIterationCap } from "../projections/AutoExecutionRu
 export { schedulePendingReviewAutoPromotionIfEnabled } from "../projections/AutoExecutionTaskProjector";
 export class AutoExecutionRangeRunner {
   constructor(private readonly deps: NovelDirectorAutoExecutionRuntimeDeps) {}
-
   async prepareRequestedAutoExecution(
     input: Parameters<typeof prepareRequestedAutoExecutionState>[1],
   ) {
@@ -91,32 +90,49 @@ export class AutoExecutionRangeRunner {
       workflowService: ownershipFence.bindWorkflowService(this.deps.workflowService),
     };
     const batchRollCoordinator = new AutoExecutionBatchRollCoordinator(runDeps);
-    let { range, autoExecution, pipelineJobId } = await prepareRequestedAutoExecutionState(runDeps, {
-      novelId: input.novelId,
-      request: input.request,
-      existingState: input.existingState,
-      existingPipelineJobId: input.existingPipelineJobId,
-      previousFailureMessage: input.previousFailureMessage,
-      allowSkipReviewBlockedChapter: input.allowSkipReviewBlockedChapter,
-    });
-    let knownPipelineJob: PipelineJobSnapshot = null;
-    if (pipelineJobId) {
-      knownPipelineJob = await resolvePipelineJobForExecution(runDeps, pipelineJobId);
-      if (!knownPipelineJob || ["failed", "cancelled"].includes(knownPipelineJob.status)) {
-        pipelineJobId = "";
-        ({ range, autoExecution } = await resolveAutoExecutionRuntimeRangeAndState(runDeps, {
-          novelId: input.novelId,
-          existingState: {
-            ...autoExecution,
+    let range: DirectorAutoExecutionRange;
+    let autoExecution: DirectorAutoExecutionState;
+    let pipelineJobId: string;
+    let knownPipelineJob: PipelineJobSnapshot;
+    try {
+      ({ range, autoExecution, pipelineJobId } = await prepareRequestedAutoExecutionState(runDeps, {
+        novelId: input.novelId,
+        request: input.request,
+        existingState: input.existingState,
+        existingPipelineJobId: input.existingPipelineJobId,
+        previousFailureMessage: input.previousFailureMessage,
+        allowSkipReviewBlockedChapter: input.allowSkipReviewBlockedChapter,
+      }));
+      knownPipelineJob = null;
+      if (pipelineJobId) {
+        knownPipelineJob = await resolvePipelineJobForExecution(runDeps, pipelineJobId);
+        if (!knownPipelineJob || ["failed", "cancelled"].includes(knownPipelineJob.status)) {
+          pipelineJobId = "";
+          ({ range, autoExecution } = await resolveAutoExecutionRuntimeRangeAndState(runDeps, {
+            novelId: input.novelId,
+            existingState: {
+              ...autoExecution,
+              pipelineJobId: null,
+              pipelineStatus: null,
+              circuitBreaker: null,
+            },
             pipelineJobId: null,
-            pipelineStatus: null,
-            circuitBreaker: null,
-          },
-          pipelineJobId: null,
-          pipelineStatus: "queued",
-          allowLazyChapterPlanning,
-        }));
+            pipelineStatus: "queued",
+            allowLazyChapterPlanning,
+          }));
+        }
       }
+    } catch (error) {
+      await handleAutoExecutionRunFailure({
+        error,
+        deps: runDeps,
+        ownershipFence,
+        taskId: input.taskId,
+        novelId: input.novelId,
+        request: input.request,
+        resumeStage: input.resumeStage,
+      });
+      return;
     }
     try {
       if (isDirectorCircuitBreakerOpen(autoExecution.circuitBreaker)) {
@@ -234,7 +250,6 @@ export class AutoExecutionRangeRunner {
           return;
         }
 
-        await ownershipFence.assertActive();
         await runDeps.workflowService.markTaskRunning(input.taskId, {
           stage: "chapter_execution",
           itemKey: "chapter_execution",
@@ -265,7 +280,6 @@ export class AutoExecutionRangeRunner {
             if (consecutiveStartFailures >= MAX_CONSECUTIVE_START_FAILURES) {
               const startErrorMessage = error instanceof Error ? error.message : String(error);
               try {
-                await ownershipFence.assertActive();
                 await runDeps.workflowService.markTaskFailed(input.taskId,
                   `连续 ${MAX_CONSECUTIVE_START_FAILURES} 次启动章节生成失败，自动执行已停止。最近错误：${startErrorMessage.slice(0, 200)}`,
                   {
@@ -419,7 +433,6 @@ export class AutoExecutionRangeRunner {
         }
         if (job.status === "queued" || job.status === "running") {
           const runningState = resolveDirectorAutoExecutionWorkflowState(job, range, autoExecution);
-          await ownershipFence.assertActive();
           await runDeps.workflowService.markTaskRunning(input.taskId, {
             ...runningState,
             clearCheckpoint: shouldClearAutoExecutionCheckpoint(input.resumeCheckpointType),
@@ -521,6 +534,9 @@ export class AutoExecutionRangeRunner {
               resumeStage: "pipeline",
               ownershipFence,
             });
+            if (noticeAction.autoApproval) {
+              await runDeps.recordAutoApproval?.(noticeAction.autoApproval);
+            }
             continue autoExecutionLoop;
           }
 
@@ -668,51 +684,16 @@ export class AutoExecutionRangeRunner {
       return;
       }
     } catch (error) {
-      if (isAutoExecutionRunFailure(error)) {
-        throw error;
-      }
-      if (isAutoExecutionOwnershipLost(error)) {
-        return;
-      }
-      // Safety net: ensure the task is not left in a phantom "running" state
-      // (isBackgroundRunning) if runFromReady threw before reaching a terminal
-      // markTaskRunning/markTaskFailed/markTaskCompleted call. A lingering running
-      // state would block forceResume on the next continue. The original error is
-      // re-thrown so the caller still sees the real root cause — this does not mask
-      // or swallow it, only guarantees the persisted auto-execution flag is cleared.
-      let cleanupError: unknown;
-      try {
-        await syncAutoExecutionTaskState(runDeps, {
-          taskId: input.taskId,
-          novelId: input.novelId,
-          request: input.request,
-          range,
-          autoExecution: {
-            ...autoExecution,
-            pipelineJobId: null,
-            pipelineStatus: null,
-          },
-          isBackgroundRunning: false,
-          resumeStage: input.resumeStage,
-          ownershipFence,
-        });
-      } catch (caught) {
-        cleanupError = caught;
-      }
-      try {
-        await runDeps.workflowService.markTaskFailed(
-          input.taskId,
-          error instanceof Error ? error.message : "自动执行基础设施失败。",
-          {
-            stage: "chapter_execution",
-            itemKey: "auto_execution_failure",
-            itemLabel: "自动执行失败，等待重试或恢复",
-          },
-        );
-      } catch (projectionError) {
-        throw new AutoExecutionRunFailureError(error, projectionError);
-      }
-      throw new AutoExecutionRunFailureError(error, cleanupError);
+      await handleAutoExecutionRunFailure({
+        error,
+        deps: runDeps,
+        ownershipFence,
+        taskId: input.taskId,
+        novelId: input.novelId,
+        request: input.request,
+        resumeStage: input.resumeStage,
+        cleanupState: { range, autoExecution },
+      });
     }
   }
 

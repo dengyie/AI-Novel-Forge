@@ -94,12 +94,6 @@ export async function stopAutoExecutionForCircuitBreaker(
   const requiresModelSwitch = input.circuitBreaker.reason === "model_unavailable"
     || input.circuitBreaker.reason === "service_unavailable";
   await input.ownershipFence?.assertActive();
-  await ledgerEventService.recordCircuitBreakerOpened({
-    taskId: input.taskId,
-    novelId: input.novelId,
-    state: input.circuitBreaker,
-  }).catch(() => null);
-  await input.ownershipFence?.assertActive();
   await deps.workflowService.markTaskFailed(input.taskId, message, {
     stage: requiresModelSwitch ? "auto_director" : "quality_repair",
     itemKey: requiresModelSwitch ? "switch_model" : "quality_repair",
@@ -116,6 +110,11 @@ export async function stopAutoExecutionForCircuitBreaker(
     chapterId: autoExecution.nextChapterId ?? input.range.firstChapterId,
     progress: 0.98,
   });
+  await ledgerEventService.recordCircuitBreakerOpened({
+    taskId: input.taskId,
+    novelId: input.novelId,
+    state: input.circuitBreaker,
+  }).catch(() => null);
   await syncAutoExecutionTaskState(deps, {
     taskId: input.taskId,
     novelId: input.novelId,

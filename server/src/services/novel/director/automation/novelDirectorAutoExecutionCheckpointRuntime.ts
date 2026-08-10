@@ -261,11 +261,17 @@ export async function resolveQualityRepairNoticeAction(
   checkpointType: "chapter_batch_ready" | "replan_required";
   checkpointState: DirectorAutoExecutionState;
   qualityRepairRisk: DirectorQualityRepairRisk;
+  autoApproval: {
+    taskId: string;
+    checkpointType: NovelWorkflowCheckpoint;
+    qualityRepairRisk: DirectorQualityRepairRisk;
+    checkpointSummary: string;
+  } | null;
 }> {
   await (deps.ownershipFence ?? input.ownershipFence)?.assertActive();
   // replan → replan_required；品类 shortfall 等其它硬停仍走 chapter_batch_ready + autoContinuable=false，
   // 避免被 continue/recovery 当成「大纲重规划」路径。
-  const checkpointType = input.noticeCode === PIPELINE_REPLAN_NOTICE_CODE
+  const checkpointType: "chapter_batch_ready" | "replan_required" = input.noticeCode === PIPELINE_REPLAN_NOTICE_CODE
     ? "replan_required"
     : "chapter_batch_ready";
   const qualityRepairRisk = buildDirectorQualityRepairRisk({
@@ -318,15 +324,9 @@ export async function resolveQualityRepairNoticeAction(
       })
     );
 
-  if (canAutoContinueByPolicy || shouldNotifyAndContinueAiDriverQualityNotice) {
-    await (deps.ownershipFence ?? input.ownershipFence)?.assertActive();
-    await deps.recordAutoApproval?.({
-      taskId: input.taskId,
-      checkpointType,
-      qualityRepairRisk,
-      checkpointSummary: input.noticeSummary,
-    });
-  }
+  const autoApproval = canAutoContinueByPolicy || shouldNotifyAndContinueAiDriverQualityNotice
+    ? { taskId: input.taskId, checkpointType, qualityRepairRisk, checkpointSummary: input.noticeSummary }
+    : null;
 
   if (canContinueAfterExplicitApproval || canAutoContinueByPolicy) {
     return {
@@ -334,6 +334,7 @@ export async function resolveQualityRepairNoticeAction(
       checkpointType,
       checkpointState,
       qualityRepairRisk,
+      autoApproval,
     };
   }
 
@@ -343,6 +344,7 @@ export async function resolveQualityRepairNoticeAction(
       checkpointType,
       checkpointState,
       qualityRepairRisk,
+      autoApproval,
     };
   }
 
@@ -351,5 +353,6 @@ export async function resolveQualityRepairNoticeAction(
     checkpointType,
     checkpointState,
     qualityRepairRisk,
+    autoApproval: null,
   };
 }

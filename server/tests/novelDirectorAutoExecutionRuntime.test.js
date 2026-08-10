@@ -783,6 +783,12 @@ test("runFromReady notifies and continues low-risk quality repair in AI-driver e
 
   assert.ok(calls.some((call) => call[0] === "recordAutoApproval" && call[1] === "chapter_batch_ready" && call[2] === "low"));
   assert.ok(calls.some((call) => call[0] === "recordAutoApproval" && /quality threshold/.test(String(call[3]))));
+  const autoApprovalIndex = calls.findIndex((call) => call[0] === "recordAutoApproval");
+  const startIndexes = calls.flatMap((call, index) => call[0] === "startPipelineJob" ? [index] : []);
+  const lastProjectionBeforeFollowUp = Math.max(...calls.flatMap((call, index) => (
+    call[0] === "bootstrapTask" && index < startIndexes[1] ? [index] : []
+  )));
+  assert.ok(lastProjectionBeforeFollowUp < autoApprovalIndex && autoApprovalIndex < startIndexes[1]);
   assert.deepEqual(calls.filter((call) => call[0] === "startPipelineJob").map((call) => call.slice(1)), [
     [1, 1, 1, true],
     [2, 2, 1, true],
@@ -3520,10 +3526,7 @@ test("runFromReady treats an initial circuit-breaker terminal CAS miss as owners
     },
   });
 
-  assert.deepEqual(calls, [
-    ["recordCircuitBreakerOpened"],
-    ["markTaskFailed"],
-  ]);
+  assert.deepEqual(calls, [["markTaskFailed"]]);
 });
 
 test("runFromReady propagates infrastructure failure when retry wins before fenced failure projection", async () => {
@@ -3591,4 +3594,61 @@ test("runFromReady propagates infrastructure failure when retry wins before fenc
 
   assert.equal(calls.filter((call) => call[0] === "markTaskFailed").length, 1);
   assert.equal(calls.some((call) => call[0] === "cancelPipelineJob"), false);
+});
+
+test("runFromReady fences failures raised during initial execution preparation", async () => {
+  const failure = new Error("chapter inventory unavailable");
+  const calls = [];
+  const runtime = createRuntime({
+    novelContextService: {
+      async listChapters() {
+        throw failure;
+      },
+    },
+    novelService: {
+      async startPipelineJob() {
+        throw new Error("pipeline must not start");
+      },
+      async findActivePipelineJobForRange() {
+        return null;
+      },
+      async getPipelineJobById() {
+        return null;
+      },
+      async cancelPipelineJob(jobId) {
+        calls.push(["cancelPipelineJob", jobId]);
+      },
+    },
+    workflowService: {
+      async bootstrapTask() {
+        calls.push(["bootstrapTask"]);
+      },
+      async getTaskByIdWithoutHealing() {
+        return { status: "running" };
+      },
+      async markTaskRunning() {
+        calls.push(["markTaskRunning"]);
+      },
+      async recordCheckpoint() {
+        calls.push(["recordCheckpoint"]);
+      },
+      async markTaskFailed() {
+        calls.push(["markTaskFailed"]);
+        const ownershipLost = new Error("retry claimed the task");
+        ownershipLost.code = "WORKFLOW_TASK_OWNERSHIP_LOST";
+        throw ownershipLost;
+      },
+    },
+    buildDirectorSeedPayload(_request, _novelId, extra) {
+      return extra ?? {};
+    },
+  });
+
+  await assert.rejects(() => runtime.runFromReady({
+    taskId: "task-auto-exec",
+    novelId: "novel-1",
+    request: buildRequest(),
+  }), (error) => error?.code === "AUTO_EXECUTION_RUN_FAILED" && error.cause === failure);
+
+  assert.deepEqual(calls, [["markTaskFailed"]]);
 });

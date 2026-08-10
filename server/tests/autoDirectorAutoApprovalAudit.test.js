@@ -80,6 +80,7 @@ test("auto director auto-approval audit records the event, appends a milestone, 
     assert.equal(milestones.length, 1);
     assert.equal(milestones[0].checkpointType, "character_setup_required");
     assert.match(milestones[0].summary, /AI 已自动通过「角色准备通过后继续」/);
+    assert.equal(taskUpdates[0].ownershipVersion, undefined);
   } finally {
     prisma.novelWorkflowTask.findUnique = originals.taskFindUnique;
     prisma.novelWorkflowTask.update = originals.taskUpdate;
