@@ -272,8 +272,11 @@ test("projectStaleActiveWorkflowTasks: stale waiting_approval → pendingManualR
     return [];
   };
   prisma.novelWorkflowTask.updateMany = async (args) => {
-    // 只置 pendingManualRecovery，不动 status（审批语义保留）
-    assert.deepEqual(Object.keys(args.data), ["pendingManualRecovery"]);
+    // 保留审批 status，但人工恢复接管必须推进 ownership token。
+    assert.deepEqual(args.data, {
+      pendingManualRecovery: true,
+      ownershipVersion: { increment: 1 },
+    });
     flaggedIds.push(...args.where.id.in);
     assert.equal(args.where.status, "waiting_approval");
     return { count: args.where.id.in.length };
@@ -420,8 +423,11 @@ test("autoRetryTransientFailedWorkflowTasks: daily token budget reached → flag
     return [{ novelId: "n1", _sum: { totalTokens: 600_000 } }];
   };
   prisma.novelWorkflowTask.updateMany = async (args) => {
-    // 超预算 → 只置 pendingManualRecovery，不动 status
-    assert.deepEqual(Object.keys(args.data), ["pendingManualRecovery"]);
+    // 超预算保留 failed status，但人工恢复接管必须推进 ownership token。
+    assert.deepEqual(args.data, {
+      pendingManualRecovery: true,
+      ownershipVersion: { increment: 1 },
+    });
     return { count: 1 };
   };
 
