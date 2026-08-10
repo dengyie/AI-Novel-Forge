@@ -74,13 +74,14 @@ export function buildDefaultDirectorCoreStepModuleRuntimeDeps(): DirectorCoreSte
     autoPromotePendingReviewProposals: async (input) => {
       const settings = await qualityDebtSettingsService.getAutoPromotionSettings();
       if (!settings.enabled || !settings.baselineAt) {
-        return;
+        return { ownership: input.ownership ?? null };
       }
-      await pendingReviewAutoPromotionService.apply(input.novelId, {
+      return pendingReviewAutoPromotionService.apply(input.novelId, {
         since: settings.baselineAt,
         dryRun: false,
         taskId: input.taskId,
         beforeCommit: input.beforeCommit,
+        ownership: input.ownership,
       });
     },
   });

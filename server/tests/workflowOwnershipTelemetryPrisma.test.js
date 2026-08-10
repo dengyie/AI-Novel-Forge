@@ -66,6 +66,7 @@ async function main() {
   const { runWithLlmUsageTracking, recordTrackedLlmUsage } = require(path.join(root, "server/dist/llm/usageTracking.js"));
   const { NovelWorkflowService } = require(path.join(root, "server/dist/services/novel/workflow/NovelWorkflowService.js"));
   const { AutoExecutionOwnershipFence } = require(path.join(root, "server/dist/services/novel/director/automation/domain/AutoExecutionOwnershipFence.js"));
+  const { StateCommitService } = require(path.join(root, "server/dist/services/novel/state/StateCommitService.js"));
 
   const workflowService = new NovelWorkflowService();
   workflowService.getTaskByIdWithoutHealing = (taskId) => prisma.novelWorkflowTask.findUnique({ where: { id: taskId } });
@@ -101,6 +102,34 @@ async function main() {
     itemLabel: "ownership retained",
   }, ownership));
   assert.equal(checkpoint.ownershipVersion, before.ownershipVersion + 1);
+
+  const promotionTask = await prisma.novelWorkflowTask.create({
+    data: {
+      lane: "auto_director",
+      title: "promotion ownership fixture",
+      status: "running",
+      attemptCount: 1,
+    },
+  });
+  const stalePromotionOwnership = {
+    taskId: promotionTask.id,
+    attemptCount: promotionTask.attemptCount,
+    ownershipVersion: promotionTask.ownershipVersion,
+  };
+  await prisma.novelWorkflowTask.update({
+    where: { id: promotionTask.id },
+    data: {
+      status: "cancelled",
+      cancelRequestedAt: new Date(),
+      ownershipVersion: { increment: 1 },
+    },
+  });
+  await assert.rejects(() => new StateCommitService().commitExistingProposals({
+    novelId: "novel-1",
+    proposalIds: ["proposal-must-not-commit"],
+    reason: "ownership-race-regression",
+    ownership: stalePromotionOwnership,
+  }), (error) => error?.code === "WORKFLOW_TASK_OWNERSHIP_LOST");
   await prisma.$disconnect();
 }
 

@@ -65,11 +65,17 @@ export async function schedulePendingReviewAutoPromotionIfEnabled(
   if (!enabled) {
     return;
   }
-  await input.ownershipFence?.assertActive();
-  await deps.autoPromotePendingReviewProposals({
-    ...input,
-    beforeCommit: async () => {
-      await input.ownershipFence?.assertActive();
-    },
-  });
+  if (input.ownershipFence) {
+    await input.ownershipFence.runOwnedOperation((ownership) => (
+      deps.autoPromotePendingReviewProposals!({
+        ...input,
+        ownership,
+        beforeCommit: async () => {
+          await input.ownershipFence?.assertActive();
+        },
+      })
+    ));
+    return;
+  }
+  await deps.autoPromotePendingReviewProposals(input);
 }

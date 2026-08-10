@@ -169,7 +169,8 @@ export interface NovelDirectorAutoExecutionRuntimeDeps {
     novelId: string;
     taskId: string;
     beforeCommit?: () => Promise<void>;
-  }) => Promise<void>;
+    ownership?: WorkflowTaskOwnershipSnapshot;
+  }) => Promise<{ ownership?: WorkflowTaskOwnershipSnapshot | null }>;
   /**
    * When true (default if resolveBatchRoll is injected), remaining=0 may expand/reenter
    * instead of always recording workflow_completed.

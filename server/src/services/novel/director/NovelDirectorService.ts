@@ -41,6 +41,7 @@ import { NovelVolumeService } from "../volume/NovelVolumeService";
 import { projectVolumeSettingCompletion } from "../volume/volumeSettingCompletionService";
 import { resolveVolumeIdForChapterScope } from "../quality/settingAlignmentWorkspaceLookup";
 import { NovelWorkflowService } from "../workflow/NovelWorkflowService";
+import type { WorkflowTaskOwnershipSnapshot } from "../workflow/ownership/WorkflowTaskOwnership";
 import { NovelDirectorCandidateStageService } from "./phases/novelDirectorCandidateStage";
 import { resolveDirectorBookFraming } from "./runtime/novelDirectorFraming";
 import {
@@ -322,16 +323,18 @@ export class NovelDirectorService {
     novelId: string;
     taskId: string;
     beforeCommit?: () => Promise<void>;
-  }): Promise<void> {
+    ownership?: WorkflowTaskOwnershipSnapshot;
+  }): Promise<{ ownership?: WorkflowTaskOwnershipSnapshot | null }> {
     const settings = await qualityDebtSettingsService.getAutoPromotionSettings();
     if (!settings.enabled || !settings.baselineAt) {
-      return;
+      return { ownership: input.ownership ?? null };
     }
-    await pendingReviewAutoPromotionService.apply(input.novelId, {
+    return pendingReviewAutoPromotionService.apply(input.novelId, {
       since: settings.baselineAt,
       dryRun: false,
       taskId: input.taskId,
       beforeCommit: input.beforeCommit,
+      ownership: input.ownership,
     });
   }
 

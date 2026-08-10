@@ -86,6 +86,25 @@ export class AutoExecutionOwnershipFence {
     }
   }
 
+  async runOwnedOperation<T extends { ownership?: WorkflowTaskOwnershipSnapshot | null }>(
+    writer: (ownership: WorkflowTaskOwnershipSnapshot) => Promise<T>,
+  ): Promise<T> {
+    const ownership = await this.assertActive();
+    try {
+      const result = await writer(ownership);
+      if (result?.ownership) {
+        this.ownership = this.validateOwnershipSnapshot(result.ownership);
+      }
+      return result;
+    } catch (error) {
+      if (isWorkflowTaskOwnershipLost(error)) {
+        this.lost = true;
+        throw new AutoExecutionOwnershipLostError(this.taskId, this.pipelineJobId);
+      }
+      throw error;
+    }
+  }
+
   bindWorkflowService(
     workflowService: NovelDirectorAutoExecutionWorkflowPort,
   ): NovelDirectorAutoExecutionWorkflowPort {
@@ -115,11 +134,24 @@ export class AutoExecutionOwnershipFence {
     ) {
       throw new Error("Owned workflow write did not return a valid ownership snapshot.");
     }
-    return {
+    return this.validateOwnershipSnapshot({
       taskId: this.taskId,
       attemptCount: row.attemptCount as number,
       ownershipVersion: row.ownershipVersion as number,
-    };
+    });
+  }
+
+  private validateOwnershipSnapshot(
+    ownership: WorkflowTaskOwnershipSnapshot,
+  ): WorkflowTaskOwnershipSnapshot {
+    if (
+      ownership.taskId !== this.taskId
+      || !Number.isInteger(ownership.attemptCount)
+      || !Number.isInteger(ownership.ownershipVersion)
+    ) {
+      throw new Error("Owned operation did not return a valid ownership snapshot.");
+    }
+    return ownership;
   }
 
   private async failOwnership(): Promise<never> {

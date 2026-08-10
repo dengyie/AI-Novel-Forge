@@ -1,8 +1,13 @@
 import type { StateChangeProposal, StateCommitResult } from "@ai-novel/shared/types/canonicalState";
 import { prisma } from "../../../db/prisma";
-import { withSqliteRetry } from "../../../db/sqliteRetry";
 import { directorAutomationLedgerEventService } from "../director/runtime/DirectorAutomationLedgerEventService";
-import { stateCommitService, type CommitExistingProposalsInput, type StateCommitService } from "./StateCommitService";
+import {
+  stateCommitService,
+  type CommitExistingProposalsInput,
+  type OwnedStateCommitResult,
+  type StateCommitService,
+} from "./StateCommitService";
+import type { WorkflowTaskOwnershipSnapshot } from "../workflow/ownership/WorkflowTaskOwnership";
 import {
   PENDING_REVIEW_AUTO_PROMOTION_ELIGIBLE_AFTER_DAYS,
   PENDING_REVIEW_AUTO_PROMOTION_PROPOSAL_TYPES,
@@ -73,6 +78,7 @@ export interface PendingReviewAutoPromotionOptions {
   taskId?: string | null;
   runId?: string | null;
   beforeCommit?: () => Promise<void>;
+  ownership?: WorkflowTaskOwnershipSnapshot;
 }
 
 export interface PendingReviewAutoPromotionCandidate {
@@ -119,6 +125,7 @@ export interface PendingReviewAutoPromotionResult {
   deferredByRunLimit: PendingReviewAutoPromotionCandidate[];
   dryRun: boolean;
   commitResult?: StateCommitResult | null;
+  ownership: WorkflowTaskOwnershipSnapshot | null;
 }
 
 interface PendingReviewAutoPromotionServiceDeps {
@@ -316,24 +323,21 @@ export class PendingReviewAutoPromotionService {
     const supersededIds = preview.superseded.map((item) => item.proposalId);
     const promotedIds = preview.promotable.map((item) => item.proposalId);
 
-    for (const proposalId of supersededIds) {
-      await options.beforeCommit?.();
-      await withSqliteRetry(
-        () => this.rejectSupersededProposal(proposalId),
-        { label: "pendingReviewAutoPromotion.rejectSupersededProposal" },
-      );
-    }
-
-    let commitResult: StateCommitResult | null = null;
-    if (promotedIds.length > 0) {
+    let commitResult: OwnedStateCommitResult | null = null;
+    let ownership = options.ownership ?? null;
+    if (promotedIds.length > 0 || supersededIds.length > 0) {
       await options.beforeCommit?.();
       commitResult = await this.getCommitService().commitExistingProposals({
           novelId,
           proposalIds: promotedIds,
+          supersededProposalIds: supersededIds,
+          supersededReason: SUPERSEDED_REASON,
           sourceType: "auto_director",
           sourceStage: "pending_review_auto_promotion",
           reason: "pending_review_auto_promotion:no_open_conflict_after_age_gate",
+          ownership: options.ownership,
         } satisfies CommitExistingProposalsInput);
+      ownership = commitResult.ownership ?? ownership;
     }
 
     await this.recordLedgerEvent({
@@ -354,6 +358,7 @@ export class PendingReviewAutoPromotionService {
     return {
       ...preview,
       commitResult,
+      ownership,
     };
   }
 
@@ -473,32 +478,8 @@ export class PendingReviewAutoPromotionService {
       deferredByRunLimit,
       dryRun: Boolean(options.dryRun),
       commitResult: null,
+      ownership: options.ownership ?? null,
     };
-  }
-
-  private async rejectSupersededProposal(proposalId: string): Promise<void> {
-    const rows = await this.getProposalStore().findMany({
-      where: {
-        id: proposalId,
-        status: "pending_review" satisfies ProposalStatus,
-      },
-      take: 1,
-    });
-    const row = rows[0];
-    if (!row) {
-      return;
-    }
-    const notes = appendUnique(
-      parseStringArray(row.validationNotesJson),
-      `pending_review_auto_promotion:superseded:${SUPERSEDED_REASON}`,
-    );
-    await this.getProposalStore().update({
-      where: { id: proposalId },
-      data: {
-        status: "rejected" satisfies ProposalStatus,
-        validationNotesJson: JSON.stringify(notes),
-      },
-    });
   }
 
   private async recordLedgerEvent(input: {

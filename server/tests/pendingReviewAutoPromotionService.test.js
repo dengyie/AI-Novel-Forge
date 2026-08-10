@@ -218,11 +218,21 @@ test("PendingReviewAutoPromotionService apply supersedes older proposals and com
     stateCommitService: {
       async commitExistingProposals(input) {
         calls.commit = input;
+        for (const id of input.supersededProposalIds ?? []) {
+          const proposal = rows.find((item) => item.id === id);
+          if (proposal) {
+            proposal.status = "rejected";
+            proposal.validationNotesJson = JSON.stringify([
+              "pending_review_auto_promotion:superseded:已被更新提案覆盖",
+            ]);
+          }
+        }
         return {
           versionRecord: null,
           committed: input.proposalIds.map((id) => ({ id })),
           pendingReview: [],
-          rejected: [],
+          rejected: (input.supersededProposalIds ?? []).map((id) => ({ id })),
+          ownership: input.ownership ?? null,
         };
       },
     },
@@ -249,6 +259,7 @@ test("PendingReviewAutoPromotionService apply supersedes older proposals and com
   assert.equal(rows[0].status, "rejected");
   assert.match(rows[0].validationNotesJson, /已被更新提案覆盖/);
   assert.deepEqual(calls.commit.proposalIds, ["relation-latest"]);
+  assert.deepEqual(calls.commit.supersededProposalIds, ["relation-old"]);
   assert.equal(ledgerEvents.length, 1);
   assert.equal(ledgerEvents[0].type, "pending_review_auto_promotion");
   assert.equal(calls.warnDetails.promotedCount, 1);
@@ -291,4 +302,55 @@ test("PendingReviewAutoPromotionService aborts before proposal commit when owner
   assert.equal(calls.commit, undefined);
   assert.equal(calls.ledger, undefined);
   assert.equal(calls.update, undefined);
+});
+
+test("PendingReviewAutoPromotionService delegates promoted and superseded writes with one ownership snapshot", async () => {
+  const rows = [
+    row({
+      id: "relation-old",
+      createdAt: "2026-06-02T00:00:00.000Z",
+      payload: { sourceCharacterId: "char-1", targetCharacterId: "char-2" },
+    }),
+    row({
+      id: "relation-latest",
+      createdAt: "2026-06-03T00:00:00.000Z",
+      payload: { sourceCharacterId: "char-1", targetCharacterId: "char-2" },
+    }),
+  ];
+  const ownership = {
+    taskId: "task-1",
+    attemptCount: 3,
+    ownershipVersion: 9,
+  };
+  let commitInput;
+  const service = new PendingReviewAutoPromotionService({
+    proposalStore: buildProposalStore(rows),
+    conflictStore: { async findMany() { return []; } },
+    stateCommitService: {
+      async commitExistingProposals(input) {
+        commitInput = input;
+        return {
+          versionRecord: null,
+          committed: input.proposalIds.map((id) => ({ id })),
+          pendingReview: [],
+          rejected: input.supersededProposalIds.map((id) => ({ id })),
+          ownership: { ...ownership, ownershipVersion: 10 },
+        };
+      },
+    },
+    ledgerEventService: { async recordEvent() {} },
+    now: () => new Date("2026-07-01T00:00:00.000Z"),
+  });
+
+  const result = await service.apply("novel-1", {
+    since: "2026-06-01T00:00:00.000Z",
+    dryRun: false,
+    eligibleAfterDays: 14,
+    ownership,
+  });
+
+  assert.deepEqual(commitInput.proposalIds, ["relation-latest"]);
+  assert.deepEqual(commitInput.supersededProposalIds, ["relation-old"]);
+  assert.deepEqual(commitInput.ownership, ownership);
+  assert.equal(result.ownership.ownershipVersion, 10);
 });
