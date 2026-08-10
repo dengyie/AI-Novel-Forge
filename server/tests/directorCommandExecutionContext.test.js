@@ -7,6 +7,9 @@ const {
 const {
   DirectorCommandExecutor,
 } = require("../dist/services/novel/director/commands/DirectorCommandExecutor.js");
+const {
+  AutoExecutionRunFailureError,
+} = require("../dist/services/novel/director/automation/domain/AutoExecutionOwnershipFence.js");
 
 function buildExecutor(directorService) {
   return new DirectorCommandExecutor({
@@ -113,6 +116,28 @@ test("DirectorCommandExecutor propagates abort without overwriting task state as
 
   await assert.rejects(
     buildExecutor(service).execute("command-1", { signal: controller.signal }),
+    failure,
+  );
+  assert.deepEqual(taskFailures, []);
+});
+
+test("DirectorCommandExecutor does not apply an unfenced outer failure projection for auto execution", async () => {
+  const service = new NovelDirectorService();
+  const failure = new Error("auto execution infrastructure failed");
+  const taskFailures = [];
+  service.buildDirectorUsageContext = async () => ({
+    workflowTaskId: "task-command",
+    directorTelemetry: true,
+  });
+  service.workflowService.markTaskFailed = async (_taskId, message) => {
+    taskFailures.push(message);
+  };
+  service.confirmCandidate = async () => service.scheduleBackgroundRun("task-command", async () => {
+    throw new AutoExecutionRunFailureError(failure);
+  });
+
+  await assert.rejects(
+    buildExecutor(service).execute("command-1"),
     failure,
   );
   assert.deepEqual(taskFailures, []);

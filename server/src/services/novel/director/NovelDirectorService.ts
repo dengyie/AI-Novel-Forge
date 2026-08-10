@@ -55,6 +55,9 @@ import {
 } from "./runtime/novelDirectorTakeover";
 import { NovelDirectorAutoExecutionRuntime } from "./automation/novelDirectorAutoExecutionRuntime";
 import {
+  isAutoExecutionRunFailure,
+} from "./automation/domain/AutoExecutionOwnershipFence";
+import {
   buildBatchRollReadinessFromChapters,
   mergeWorkspaceChapterWithExecRow,
   resolveNextAutoExecutionBatchRoll,
@@ -407,6 +410,14 @@ export class NovelDirectorService {
         return;
       }
       if (isWorkflowTaskCancelledError(error) || isDirectorRuntimeGateError(error)) {
+        return;
+      }
+      if (isAutoExecutionRunFailure(error)) {
+        const originalError = error.cause;
+        console.error(`[director.background] auto execution failed taskId=${taskId}`, originalError);
+        if (propagateErrors) {
+          throw originalError;
+        }
         return;
       }
       const message = error instanceof Error ? error.message : "自动导演后台任务执行失败。";

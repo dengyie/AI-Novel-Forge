@@ -18,6 +18,23 @@ export function isAutoExecutionOwnershipLost(error: unknown): boolean {
   return error instanceof AutoExecutionOwnershipLostError;
 }
 
+export class AutoExecutionRunFailureError extends Error {
+  readonly code = "AUTO_EXECUTION_RUN_FAILED";
+
+  constructor(
+    override readonly cause: unknown,
+    readonly projectionError?: unknown,
+  ) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = "AutoExecutionRunFailureError";
+  }
+}
+
+export function isAutoExecutionRunFailure(error: unknown): error is AutoExecutionRunFailureError {
+  return error instanceof AutoExecutionRunFailureError
+    || (error as { code?: unknown } | null)?.code === "AUTO_EXECUTION_RUN_FAILED";
+}
+
 /**
  * A run-local write fence. Every state projection or terminal write must pass
  * through this check so a cancelled task or aborted command cannot publish the

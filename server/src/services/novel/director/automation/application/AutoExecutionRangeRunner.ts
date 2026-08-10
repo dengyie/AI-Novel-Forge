@@ -35,7 +35,9 @@ import {
 } from "../domain/AutoExecutionProgressPolicy";
 import {
   AutoExecutionOwnershipFence,
+  AutoExecutionRunFailureError,
   isAutoExecutionOwnershipLost,
+  isAutoExecutionRunFailure,
 } from "../domain/AutoExecutionOwnershipFence";
 import {
   schedulePendingReviewAutoPromotionIfEnabled,
@@ -262,29 +264,33 @@ export class AutoExecutionRangeRunner {
             consecutiveStartFailures += 1;
             if (consecutiveStartFailures >= MAX_CONSECUTIVE_START_FAILURES) {
               const startErrorMessage = error instanceof Error ? error.message : String(error);
-              await ownershipFence.assertActive();
-              await runDeps.workflowService.markTaskFailed(input.taskId,
-                `连续 ${MAX_CONSECUTIVE_START_FAILURES} 次启动章节生成失败，自动执行已停止。最近错误：${startErrorMessage.slice(0, 200)}`,
-                {
-                  stage: "quality_repair",
-                  itemKey: "chapter_execution",
-                  itemLabel: "章节自动执行失败",
-                  checkpointType: "chapter_batch_ready",
-                  checkpointSummary: `连续启动失败 ${MAX_CONSECUTIVE_START_FAILURES} 次，可能存在章节规划或生成条件问题。`,
-                  chapterId: autoExecution.nextChapterId ?? range.firstChapterId,
-                  progress: 0.93,
-                },
-              );
-              await syncAutoExecutionTaskState(runDeps, {
-                taskId: input.taskId,
-                novelId: input.novelId,
-                request: input.request,
-                range,
-                autoExecution,
-                isBackgroundRunning: false,
-                resumeStage: "pipeline",
-                ownershipFence,
-              });
+              try {
+                await ownershipFence.assertActive();
+                await runDeps.workflowService.markTaskFailed(input.taskId,
+                  `连续 ${MAX_CONSECUTIVE_START_FAILURES} 次启动章节生成失败，自动执行已停止。最近错误：${startErrorMessage.slice(0, 200)}`,
+                  {
+                    stage: "quality_repair",
+                    itemKey: "chapter_execution",
+                    itemLabel: "章节自动执行失败",
+                    checkpointType: "chapter_batch_ready",
+                    checkpointSummary: `连续启动失败 ${MAX_CONSECUTIVE_START_FAILURES} 次，可能存在章节规划或生成条件问题。`,
+                    chapterId: autoExecution.nextChapterId ?? range.firstChapterId,
+                    progress: 0.93,
+                  },
+                );
+                await syncAutoExecutionTaskState(runDeps, {
+                  taskId: input.taskId,
+                  novelId: input.novelId,
+                  request: input.request,
+                  range,
+                  autoExecution,
+                  isBackgroundRunning: false,
+                  resumeStage: "pipeline",
+                  ownershipFence,
+                });
+              } catch (projectionError) {
+                throw new AutoExecutionRunFailureError(error, projectionError);
+              }
               return;
             }
             continue autoExecutionLoop;
@@ -662,6 +668,9 @@ export class AutoExecutionRangeRunner {
       return;
       }
     } catch (error) {
+      if (isAutoExecutionRunFailure(error)) {
+        throw error;
+      }
       if (isAutoExecutionOwnershipLost(error)) {
         return;
       }
@@ -671,6 +680,7 @@ export class AutoExecutionRangeRunner {
       // state would block forceResume on the next continue. The original error is
       // re-thrown so the caller still sees the real root cause — this does not mask
       // or swallow it, only guarantees the persisted auto-execution flag is cleared.
+      let cleanupError: unknown;
       try {
         await syncAutoExecutionTaskState(runDeps, {
           taskId: input.taskId,
@@ -686,10 +696,23 @@ export class AutoExecutionRangeRunner {
           resumeStage: input.resumeStage,
           ownershipFence,
         });
-      } catch {
-        // best-effort cleanup; the original error below is the signal that matters
+      } catch (caught) {
+        cleanupError = caught;
       }
-      throw error;
+      try {
+        await runDeps.workflowService.markTaskFailed(
+          input.taskId,
+          error instanceof Error ? error.message : "自动执行基础设施失败。",
+          {
+            stage: "chapter_execution",
+            itemKey: "auto_execution_failure",
+            itemLabel: "自动执行失败，等待重试或恢复",
+          },
+        );
+      } catch (projectionError) {
+        throw new AutoExecutionRunFailureError(error, projectionError);
+      }
+      throw new AutoExecutionRunFailureError(error, cleanupError);
     }
   }
 
