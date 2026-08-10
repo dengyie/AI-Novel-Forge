@@ -80,6 +80,7 @@ export function buildDefaultDirectorCoreStepModuleRuntimeDeps(): DirectorCoreSte
         since: settings.baselineAt,
         dryRun: false,
         taskId: input.taskId,
+        beforeCommit: input.beforeCommit,
       });
     },
   });

@@ -255,3 +255,40 @@ test("PendingReviewAutoPromotionService apply supersedes older proposals and com
   assert.equal(calls.warnDetails.supersededCount, 1);
 });
 
+test("PendingReviewAutoPromotionService aborts before proposal commit when ownership is lost after preview", async () => {
+  const calls = {};
+  const rows = [row({
+    id: "relation-latest",
+    createdAt: "2026-06-03T00:00:00.000Z",
+    payload: { sourceCharacterId: "char-1", targetCharacterId: "char-2" },
+  })];
+  const ownershipLost = new Error("AUTO_EXECUTION_OWNERSHIP_LOST");
+  const service = new PendingReviewAutoPromotionService({
+    proposalStore: buildProposalStore(rows, calls),
+    conflictStore: { async findMany() { return []; } },
+    stateCommitService: {
+      async commitExistingProposals() {
+        calls.commit = true;
+        return null;
+      },
+    },
+    ledgerEventService: {
+      async recordEvent() {
+        calls.ledger = true;
+      },
+    },
+    now: () => new Date("2026-07-01T00:00:00.000Z"),
+  });
+
+  await assert.rejects(() => service.apply("novel-1", {
+    since: "2026-06-01T00:00:00.000Z",
+    dryRun: false,
+    eligibleAfterDays: 14,
+    beforeCommit: async () => {
+      throw ownershipLost;
+    },
+  }), (error) => error === ownershipLost);
+  assert.equal(calls.commit, undefined);
+  assert.equal(calls.ledger, undefined);
+  assert.equal(calls.update, undefined);
+});

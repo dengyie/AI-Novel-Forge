@@ -59,7 +59,7 @@ flowchart TD
   K --> L["写入 pending_review_auto_promotion 导演事件"]
 ```
 
-自动导演接入点是章节批次成功后的后台维护动作，采用 fire-and-forget 调用。失败不会改变章节生成、质量修复、暂停或继续执行的控制流。
+自动导演接入点是章节批次成功后的命令内维护动作，必须在当前命令中 `await` 完成。调度器在预演后、标记覆盖提案前以及提交提案前都重新检查 AbortSignal 与 auto-execution ownership fence；取消、重试接管或 CAS miss 时不得提交提案、覆盖旧提案或继续写入留痕。开关读取、候选扫描、覆盖写入、提交和留痕的基础设施错误必须向命令执行器传播，进入失败/重试/恢复链路。
 
 ## Settings Contract
 
@@ -98,4 +98,3 @@ flowchart TD
 - `server/src/services/novel/director/automation/novelDirectorAutoExecutionRuntime.ts`
 - `server/src/services/novel/state/StateCommitService.ts`
 - `server/src/services/state/OpenConflictService.ts`
-

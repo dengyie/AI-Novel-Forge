@@ -3442,3 +3442,83 @@ test("runFromReady does not record quality debt after its execution ownership is
     ["cancelPipelineJob", "job-quality-old"],
   ]);
 });
+
+test("runFromReady treats an initial circuit-breaker terminal CAS miss as ownership loss", async () => {
+  const calls = [];
+  const runtime = createRuntime({
+    novelContextService: {
+      async listChapters() {
+        return [withExecutionDetail({ id: "chapter-1", order: 1, generationState: "planned" })];
+      },
+    },
+    novelService: {
+      async startPipelineJob() {
+        calls.push(["startPipelineJob"]);
+        throw new Error("ownership loss must stop before pipeline start");
+      },
+      async findActivePipelineJobForRange() {
+        return null;
+      },
+      async getPipelineJobById() {
+        return null;
+      },
+      async cancelPipelineJob(jobId) {
+        calls.push(["cancelPipelineJob", jobId]);
+      },
+    },
+    workflowService: {
+      async bootstrapTask() {
+        calls.push(["bootstrapTask"]);
+      },
+      async getTaskByIdWithoutHealing() {
+        return { status: "running" };
+      },
+      async markTaskRunning() {
+        calls.push(["markTaskRunning"]);
+      },
+      async recordCheckpoint() {
+        calls.push(["recordCheckpoint"]);
+      },
+      async markTaskFailed() {
+        calls.push(["markTaskFailed"]);
+        const error = new Error("retry won before circuit-breaker projection");
+        error.code = "WORKFLOW_TASK_OWNERSHIP_LOST";
+        throw error;
+      },
+    },
+    automationLedgerEventService: {
+      async recordCircuitBreakerOpened() {
+        calls.push(["recordCircuitBreakerOpened"]);
+      },
+    },
+    buildDirectorSeedPayload(_request, _novelId, extra) {
+      return extra ?? {};
+    },
+  });
+
+  await runtime.runFromReady({
+    taskId: "task-auto-exec",
+    novelId: "novel-1",
+    request: buildRequest(),
+    existingState: {
+      enabled: true,
+      firstChapterId: "chapter-1",
+      startOrder: 1,
+      endOrder: 1,
+      totalChapterCount: 1,
+      autoReview: true,
+      autoRepair: true,
+      circuitBreaker: {
+        status: "open",
+        reason: "patch_failure",
+        message: "repair budget exhausted",
+        recoveryAction: "manual_review",
+      },
+    },
+  });
+
+  assert.deepEqual(calls, [
+    ["recordCircuitBreakerOpened"],
+    ["markTaskFailed"],
+  ]);
+});

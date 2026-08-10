@@ -51,7 +51,7 @@ export type PrepareNextAutoExecutionBatchDeps = {
   characterDynamicsService?: {
     rebuildDynamics: (novelId: string, options?: { sourceType?: string }) => Promise<unknown>;
   };
-  /** Best-effort progress; failures must not block prepare. */
+  /** Progress is part of the owned auto-execution projection. */
   onProgress?: (label: string, progress: number) => Promise<void>;
 };
 
@@ -278,11 +278,7 @@ export async function prepareNextAutoExecutionBatch(
     if (!deps.onProgress) {
       return;
     }
-    try {
-      await deps.onProgress(label, progress);
-    } catch {
-      // best-effort
-    }
+    await deps.onProgress(label, progress);
   };
 
   // full_book_autopilot: JIT — do not pre-generate chapter_detail; titles must already exist.

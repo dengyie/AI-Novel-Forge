@@ -72,6 +72,7 @@ export interface PendingReviewAutoPromotionOptions {
   scanLimit?: number;
   taskId?: string | null;
   runId?: string | null;
+  beforeCommit?: () => Promise<void>;
 }
 
 export interface PendingReviewAutoPromotionCandidate {
@@ -316,21 +317,24 @@ export class PendingReviewAutoPromotionService {
     const promotedIds = preview.promotable.map((item) => item.proposalId);
 
     for (const proposalId of supersededIds) {
+      await options.beforeCommit?.();
       await withSqliteRetry(
         () => this.rejectSupersededProposal(proposalId),
         { label: "pendingReviewAutoPromotion.rejectSupersededProposal" },
       );
     }
 
-    const commitResult = promotedIds.length > 0
-      ? await this.getCommitService().commitExistingProposals({
+    let commitResult: StateCommitResult | null = null;
+    if (promotedIds.length > 0) {
+      await options.beforeCommit?.();
+      commitResult = await this.getCommitService().commitExistingProposals({
           novelId,
           proposalIds: promotedIds,
           sourceType: "auto_director",
           sourceStage: "pending_review_auto_promotion",
           reason: "pending_review_auto_promotion:no_open_conflict_after_age_gate",
-        } satisfies CommitExistingProposalsInput)
-      : null;
+        } satisfies CommitExistingProposalsInput);
+    }
 
     await this.recordLedgerEvent({
       novelId,
@@ -531,7 +535,7 @@ export class PendingReviewAutoPromotionService {
         executedAt: input.preview.evaluatedAt,
       },
       occurredAt: input.preview.evaluatedAt,
-    }).catch(() => undefined);
+    });
   }
 
   private warnApply(input: {
@@ -591,4 +595,3 @@ export class PendingReviewAutoPromotionService {
 }
 
 export const pendingReviewAutoPromotionService = new PendingReviewAutoPromotionService();
-

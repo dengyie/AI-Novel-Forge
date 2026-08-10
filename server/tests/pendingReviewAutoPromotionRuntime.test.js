@@ -5,14 +5,10 @@ const {
   schedulePendingReviewAutoPromotionIfEnabled,
 } = require("../dist/services/novel/director/automation/novelDirectorAutoExecutionRuntime.js");
 
-function flushMicrotasks() {
-  return new Promise((resolve) => setImmediate(resolve));
-}
-
 test("pending review auto-promotion scheduler does not call service when disabled", async () => {
   let calls = 0;
 
-  schedulePendingReviewAutoPromotionIfEnabled({
+  await schedulePendingReviewAutoPromotionIfEnabled({
     isPendingReviewAutoPromotionEnabled: async () => false,
     autoPromotePendingReviewProposals: async () => {
       calls += 1;
@@ -21,15 +17,13 @@ test("pending review auto-promotion scheduler does not call service when disable
     novelId: "novel-1",
     taskId: "task-1",
   });
-  await flushMicrotasks();
-
   assert.equal(calls, 0);
 });
 
 test("pending review auto-promotion scheduler calls service when enabled", async () => {
   const calls = [];
 
-  schedulePendingReviewAutoPromotionIfEnabled({
+  await schedulePendingReviewAutoPromotionIfEnabled({
     isPendingReviewAutoPromotionEnabled: () => true,
     autoPromotePendingReviewProposals: async (input) => {
       calls.push(input);
@@ -38,11 +32,22 @@ test("pending review auto-promotion scheduler calls service when enabled", async
     novelId: "novel-1",
     taskId: "task-1",
   });
-  await flushMicrotasks();
-
-  assert.deepEqual(calls, [{
-    novelId: "novel-1",
-    taskId: "task-1",
-  }]);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].novelId, "novel-1");
+  assert.equal(calls[0].taskId, "task-1");
+  assert.equal(typeof calls[0].beforeCommit, "function");
 });
 
+test("pending review auto-promotion scheduler propagates promotion errors", async () => {
+  const infrastructureError = new Error("proposal store unavailable");
+
+  await assert.rejects(() => schedulePendingReviewAutoPromotionIfEnabled({
+    isPendingReviewAutoPromotionEnabled: () => true,
+    autoPromotePendingReviewProposals: async () => {
+      throw infrastructureError;
+    },
+  }, {
+    novelId: "novel-1",
+    taskId: "task-1",
+  }), (error) => error === infrastructureError);
+});

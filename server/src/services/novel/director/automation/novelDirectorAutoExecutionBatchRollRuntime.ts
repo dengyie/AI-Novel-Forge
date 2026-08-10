@@ -566,6 +566,7 @@ export type PrepareNextAutoExecutionBatchInput = {
   previousRange: DirectorAutoExecutionRange;
   /** 批续窗 prepare 需要 provider/model/runMode；runtime 必传 */
   request: DirectorConfirmRequest;
+  reportProgress?: (label: string, progress: number) => Promise<void>;
 };
 
 export type PrepareNextAutoExecutionBatchResult = {

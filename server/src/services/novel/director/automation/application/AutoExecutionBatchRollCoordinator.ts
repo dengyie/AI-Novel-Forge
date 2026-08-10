@@ -248,6 +248,14 @@ export class AutoExecutionBatchRollCoordinator {
         previousState: withPersistedBatchRollCount(input.autoExecution, nextRolls),
         previousRange: input.range,
         request: input.request,
+        reportProgress: async (label, progress) => {
+          await this.deps.workflowService.markTaskRunning(input.taskId, {
+            stage: "chapter_execution",
+            itemKey: "batch_roll_prepare",
+            itemLabel: label,
+            progress,
+          });
+        },
       });
       const preparedState = withPersistedBatchRollCount(prepared.autoExecution, nextRolls);
       await syncAutoExecutionTaskState(this.deps, {

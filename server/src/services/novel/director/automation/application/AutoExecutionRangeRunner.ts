@@ -54,12 +54,7 @@ import { stopAutoExecutionForIterationCap } from "../projections/AutoExecutionRu
 
 export { schedulePendingReviewAutoPromotionIfEnabled } from "../projections/AutoExecutionTaskProjector";
 export class AutoExecutionRangeRunner {
-  private readonly batchRollCoordinator: AutoExecutionBatchRollCoordinator;
-
-  constructor(private readonly deps: NovelDirectorAutoExecutionRuntimeDeps) {
-    this.batchRollCoordinator = new AutoExecutionBatchRollCoordinator(deps);
-  }
-
+  constructor(private readonly deps: NovelDirectorAutoExecutionRuntimeDeps) {}
 
   async prepareRequestedAutoExecution(
     input: Parameters<typeof prepareRequestedAutoExecutionState>[1],
@@ -88,7 +83,13 @@ export class AutoExecutionRangeRunner {
       input.signal,
       input.existingPipelineJobId,
     );
-    let { range, autoExecution, pipelineJobId } = await prepareRequestedAutoExecutionState(this.deps, {
+    const runDeps: NovelDirectorAutoExecutionRuntimeDeps = {
+      ...this.deps,
+      ownershipFence,
+      workflowService: ownershipFence.bindWorkflowService(this.deps.workflowService),
+    };
+    const batchRollCoordinator = new AutoExecutionBatchRollCoordinator(runDeps);
+    let { range, autoExecution, pipelineJobId } = await prepareRequestedAutoExecutionState(runDeps, {
       novelId: input.novelId,
       request: input.request,
       existingState: input.existingState,
@@ -98,10 +99,10 @@ export class AutoExecutionRangeRunner {
     });
     let knownPipelineJob: PipelineJobSnapshot = null;
     if (pipelineJobId) {
-        knownPipelineJob = await resolvePipelineJobForExecution(this.deps, pipelineJobId);
+      knownPipelineJob = await resolvePipelineJobForExecution(runDeps, pipelineJobId);
       if (!knownPipelineJob || ["failed", "cancelled"].includes(knownPipelineJob.status)) {
         pipelineJobId = "";
-        ({ range, autoExecution } = await resolveAutoExecutionRuntimeRangeAndState(this.deps, {
+        ({ range, autoExecution } = await resolveAutoExecutionRuntimeRangeAndState(runDeps, {
           novelId: input.novelId,
           existingState: {
             ...autoExecution,
@@ -115,32 +116,32 @@ export class AutoExecutionRangeRunner {
         }));
       }
     }
-    if (isDirectorCircuitBreakerOpen(autoExecution.circuitBreaker)) {
-      await stopAutoExecutionForCircuitBreaker(this.deps, {
-        taskId: input.taskId,
-        novelId: input.novelId,
-        request: input.request,
-        range,
-        autoExecution,
-        circuitBreaker: autoExecution.circuitBreaker,
-        resumeStage: input.resumeStage,
-        ownershipFence,
-      });
-      return;
-    }
-
-    // 章节执行/质量修复正文生成是内存最高峰：进入前取 book 级内存锁（每小说同时
-    // 最多 1 个高内存阶段），并在 scheduleBackgroundRun 的 finally 释放。
-    if (this.deps.assertHighMemoryChapterAllowed) {
-      await this.deps.assertHighMemoryChapterAllowed({
-        taskId: input.taskId,
-        novelId: input.novelId,
-        stage: input.resumeCheckpointType === "replan_required" ? "quality_repair" : "chapter_execution",
-      });
-    }
-
     try {
-      await syncAutoExecutionTaskState(this.deps, {
+      if (isDirectorCircuitBreakerOpen(autoExecution.circuitBreaker)) {
+        await stopAutoExecutionForCircuitBreaker(runDeps, {
+          taskId: input.taskId,
+          novelId: input.novelId,
+          request: input.request,
+          range,
+          autoExecution,
+          circuitBreaker: autoExecution.circuitBreaker,
+          resumeStage: input.resumeStage,
+          ownershipFence,
+        });
+        return;
+      }
+
+      // 章节执行/质量修复正文生成是内存最高峰：进入前取 book 级内存锁（每小说同时
+      // 最多 1 个高内存阶段），并在 scheduleBackgroundRun 的 finally 释放。
+      if (runDeps.assertHighMemoryChapterAllowed) {
+        await runDeps.assertHighMemoryChapterAllowed({
+          taskId: input.taskId,
+          novelId: input.novelId,
+          stage: input.resumeCheckpointType === "replan_required" ? "quality_repair" : "chapter_execution",
+        });
+      }
+
+      await syncAutoExecutionTaskState(runDeps, {
         taskId: input.taskId,
         novelId: input.novelId,
         request: input.request,
@@ -150,12 +151,12 @@ export class AutoExecutionRangeRunner {
         resumeStage: input.resumeStage,
         ownershipFence,
       });
-      if (await shouldStopAutoExecution(this.deps, input.taskId, pipelineJobId || null)) {
+      if (await shouldStopAutoExecution(runDeps, input.taskId, pipelineJobId || null)) {
         return;
       }
 
       ({ range, autoExecution, pipelineJobId } = await resolveOwnedActiveRangePipeline({
-        deps: this.deps, ownershipFence, ...input, range, autoExecution,
+        deps: runDeps, ownershipFence, ...input, range, autoExecution,
         pipelineJobId, knownPipelineJob, allowLazyChapterPlanning,
       }));
 
@@ -180,7 +181,7 @@ export class AutoExecutionRangeRunner {
       runFromReadyIterations += 1;
       if (runFromReadyIterations > MAX_RUN_FROM_READY_ITERATIONS) {
         await stopAutoExecutionForIterationCap({
-          deps: this.deps,
+          deps: runDeps,
           ownershipFence,
           taskId: input.taskId,
           novelId: input.novelId,
@@ -192,7 +193,7 @@ export class AutoExecutionRangeRunner {
         return;
       }
       if (!pipelineJobId) {
-        ({ range, autoExecution } = await resolveAutoExecutionRuntimeRangeAndState(this.deps, {
+        ({ range, autoExecution } = await resolveAutoExecutionRuntimeRangeAndState(runDeps, {
           novelId: input.novelId,
           existingState: autoExecution,
           pipelineJobId: null,
@@ -200,7 +201,7 @@ export class AutoExecutionRangeRunner {
           allowLazyChapterPlanning,
         }));
         if ((autoExecution.remainingChapterCount ?? 0) === 0) {
-          const rolled = await this.batchRollCoordinator.tryBatchRollOnRangeExhausted({
+          const rolled = await batchRollCoordinator.tryBatchRollOnRangeExhausted({
             taskId: input.taskId,
             novelId: input.novelId,
             request: input.request,
@@ -219,7 +220,7 @@ export class AutoExecutionRangeRunner {
             pipelineJobId = "";
             continue autoExecutionLoop;
           }
-          await recordCompletedCheckpoint(this.deps, {
+          await recordCompletedCheckpoint(runDeps, {
             taskId: input.taskId,
             novelId: input.novelId,
             request: input.request,
@@ -232,7 +233,7 @@ export class AutoExecutionRangeRunner {
         }
 
         await ownershipFence.assertActive();
-        await this.deps.workflowService.markTaskRunning(input.taskId, {
+        await runDeps.workflowService.markTaskRunning(input.taskId, {
           stage: "chapter_execution",
           itemKey: "chapter_execution",
           itemLabel: `正在自动执行${buildDirectorAutoExecutionScopeLabelFromState(autoExecution, range.totalChapterCount)}`,
@@ -241,7 +242,7 @@ export class AutoExecutionRangeRunner {
         });
         try {
           const job = await startAutoExecutionPipelineJob({
-            deps: this.deps,
+            deps: runDeps,
             ownershipFence,
             taskId: input.taskId,
             novelId: input.novelId,
@@ -262,7 +263,7 @@ export class AutoExecutionRangeRunner {
             if (consecutiveStartFailures >= MAX_CONSECUTIVE_START_FAILURES) {
               const startErrorMessage = error instanceof Error ? error.message : String(error);
               await ownershipFence.assertActive();
-              await this.deps.workflowService.markTaskFailed(input.taskId,
+              await runDeps.workflowService.markTaskFailed(input.taskId,
                 `连续 ${MAX_CONSECUTIVE_START_FAILURES} 次启动章节生成失败，自动执行已停止。最近错误：${startErrorMessage.slice(0, 200)}`,
                 {
                   stage: "quality_repair",
@@ -274,7 +275,7 @@ export class AutoExecutionRangeRunner {
                   progress: 0.93,
                 },
               );
-              await syncAutoExecutionTaskState(this.deps, {
+              await syncAutoExecutionTaskState(runDeps, {
                 taskId: input.taskId,
                 novelId: input.novelId,
                 request: input.request,
@@ -288,7 +289,7 @@ export class AutoExecutionRangeRunner {
             }
             continue autoExecutionLoop;
           }
-          ({ range, autoExecution } = await resolveAutoExecutionRuntimeRangeAndState(this.deps, {
+          ({ range, autoExecution } = await resolveAutoExecutionRuntimeRangeAndState(runDeps, {
             novelId: input.novelId,
             existingState: autoExecution,
             pipelineJobId: null,
@@ -296,7 +297,7 @@ export class AutoExecutionRangeRunner {
             allowLazyChapterPlanning,
           }));
           if ((autoExecution.remainingChapterCount ?? 0) === 0) {
-            const rolled = await this.batchRollCoordinator.tryBatchRollOnRangeExhausted({
+            const rolled = await batchRollCoordinator.tryBatchRollOnRangeExhausted({
               taskId: input.taskId,
               novelId: input.novelId,
               request: input.request,
@@ -315,7 +316,7 @@ export class AutoExecutionRangeRunner {
               pipelineJobId = "";
               continue autoExecutionLoop;
             }
-            await recordCompletedCheckpoint(this.deps, {
+            await recordCompletedCheckpoint(runDeps, {
               taskId: input.taskId,
               novelId: input.novelId,
               request: input.request,
@@ -330,7 +331,7 @@ export class AutoExecutionRangeRunner {
           // terminalAction=defer_and_continue（无 replan）时，startPipeline 会空跑；
           // 强制登记 skipped 债务后重算 next，推进到下一空章，禁止 rethrow 死锁。
           const stuckChapter = await resolveStuckNoGeneratableChapter(
-            this.deps,
+            runDeps,
             input.novelId,
             autoExecution,
           );
@@ -349,7 +350,7 @@ export class AutoExecutionRangeRunner {
               source: "quality_loop",
               chapter: stuckChapter,
             });
-            ({ range, autoExecution } = await resolveAutoExecutionRuntimeRangeAndState(this.deps, {
+            ({ range, autoExecution } = await resolveAutoExecutionRuntimeRangeAndState(runDeps, {
               novelId: input.novelId,
               existingState: deferredState,
               pipelineJobId: null,
@@ -363,7 +364,7 @@ export class AutoExecutionRangeRunner {
               maxConsecutiveNoProgress: MAX_CONSECUTIVE_NO_PROGRESS,
             });
             if (progressGuard.shouldStop) {
-              await stopAutoExecutionForNoProgress(this.deps, {
+              await stopAutoExecutionForNoProgress(runDeps, {
                 taskId: input.taskId,
                 novelId: input.novelId,
                 request: input.request,
@@ -376,7 +377,7 @@ export class AutoExecutionRangeRunner {
               return;
             }
             pipelineJobId = "";
-            await syncAutoExecutionTaskState(this.deps, {
+            await syncAutoExecutionTaskState(runDeps, {
               taskId: input.taskId,
               novelId: input.novelId,
               request: input.request,
@@ -390,7 +391,7 @@ export class AutoExecutionRangeRunner {
           }
           throw error;
         }
-        await syncAutoExecutionTaskState(this.deps, {
+        await syncAutoExecutionTaskState(runDeps, {
           taskId: input.taskId,
           novelId: input.novelId,
           request: input.request,
@@ -403,28 +404,28 @@ export class AutoExecutionRangeRunner {
       }
 
       while (pipelineJobId) {
-        if (await shouldStopAutoExecution(this.deps, input.taskId, pipelineJobId)) {
+        if (await shouldStopAutoExecution(runDeps, input.taskId, pipelineJobId)) {
           return;
         }
-        const job = await resolvePipelineJobForExecution(this.deps, pipelineJobId);
+        const job = await resolvePipelineJobForExecution(runDeps, pipelineJobId);
         if (!job) {
           throw new Error("自动执行章节批次时未能找到对应的批量任务。");
         }
         if (job.status === "queued" || job.status === "running") {
           const runningState = resolveDirectorAutoExecutionWorkflowState(job, range, autoExecution);
           await ownershipFence.assertActive();
-          await this.deps.workflowService.markTaskRunning(input.taskId, {
+          await runDeps.workflowService.markTaskRunning(input.taskId, {
             ...runningState,
             clearCheckpoint: shouldClearAutoExecutionCheckpoint(input.resumeCheckpointType),
           });
-          ({ range, autoExecution } = await resolveAutoExecutionRuntimeRangeAndState(this.deps, {
+          ({ range, autoExecution } = await resolveAutoExecutionRuntimeRangeAndState(runDeps, {
             novelId: input.novelId,
             existingState: autoExecution,
             pipelineJobId,
             pipelineStatus: job.status,
             allowLazyChapterPlanning,
           }));
-          await syncAutoExecutionTaskState(this.deps, {
+          await syncAutoExecutionTaskState(runDeps, {
             taskId: input.taskId,
             novelId: input.novelId,
             request: input.request,
@@ -438,7 +439,7 @@ export class AutoExecutionRangeRunner {
           continue;
         }
 
-        ({ range, autoExecution } = await resolveAutoExecutionRuntimeRangeAndState(this.deps, {
+        ({ range, autoExecution } = await resolveAutoExecutionRuntimeRangeAndState(runDeps, {
           novelId: input.novelId,
           existingState: autoExecution,
           pipelineJobId,
@@ -453,7 +454,7 @@ export class AutoExecutionRangeRunner {
         if (usageCircuitBreaker) {
           autoExecution = withCircuitBreakerState(autoExecution, usageCircuitBreaker);
           if (isDirectorCircuitBreakerOpen(usageCircuitBreaker)) {
-            await stopAutoExecutionForCircuitBreaker(this.deps, {
+            await stopAutoExecutionForCircuitBreaker(runDeps, {
               taskId: input.taskId,
               novelId: input.novelId,
               request: input.request,
@@ -465,7 +466,7 @@ export class AutoExecutionRangeRunner {
             });
             return;
           }
-          await syncAutoExecutionTaskState(this.deps, {
+          await syncAutoExecutionTaskState(runDeps, {
             taskId: input.taskId,
             novelId: input.novelId,
             request: input.request,
@@ -478,8 +479,8 @@ export class AutoExecutionRangeRunner {
         }
 
         if (job.status === "succeeded" && job.noticeSummary?.trim()) {
-          const qualityIssueChapter = await resolveQualityIssueChapter(this.deps, input.novelId, job);
-          const noticeAction = await resolveQualityRepairNoticeAction(this.deps, {
+          const qualityIssueChapter = await resolveQualityIssueChapter(runDeps, input.novelId, job);
+          const noticeAction = await resolveQualityRepairNoticeAction(runDeps, {
             taskId: input.taskId,
             novelId: input.novelId,
             request: input.request,
@@ -497,14 +498,14 @@ export class AutoExecutionRangeRunner {
           if (noticeAction.action === "auto_continue") {
             pipelineJobId = "";
             progressGuard = { consecutiveNoProgress: 0, shouldStop: false };
-            ({ range, autoExecution } = await resolveAutoExecutionRuntimeRangeAndState(this.deps, {
+            ({ range, autoExecution } = await resolveAutoExecutionRuntimeRangeAndState(runDeps, {
               novelId: input.novelId,
               existingState: noticeAction.checkpointState,
               pipelineJobId: null,
               pipelineStatus: "queued",
               allowLazyChapterPlanning,
             }));
-            await syncAutoExecutionTaskState(this.deps, {
+            await syncAutoExecutionTaskState(runDeps, {
               taskId: input.taskId,
               novelId: input.novelId,
               request: input.request,
@@ -517,7 +518,7 @@ export class AutoExecutionRangeRunner {
             continue autoExecutionLoop;
           }
 
-          await recordQualityRepairCheckpoint(this.deps, {
+          await recordQualityRepairCheckpoint(runDeps, {
             taskId: input.taskId,
             novelId: input.novelId,
             request: input.request,
@@ -530,7 +531,7 @@ export class AutoExecutionRangeRunner {
             qualityRepairRisk: noticeAction.qualityRepairRisk,
             ownershipFence,
           });
-          await syncAutoExecutionTaskState(this.deps, {
+          await syncAutoExecutionTaskState(runDeps, {
             taskId: input.taskId,
             novelId: input.novelId,
             request: input.request,
@@ -548,16 +549,16 @@ export class AutoExecutionRangeRunner {
           pipelineJobId = "";
           progressGuard = { consecutiveNoProgress: 0, shouldStop: false };
           if ((autoExecution.remainingChapterCount ?? 0) > 0) {
-            if (this.deps.autoConfirmPendingCandidates) {
+            if (runDeps.autoConfirmPendingCandidates) {
               await ownershipFence.assertActive();
-              await this.deps.autoConfirmPendingCandidates(input.novelId).catch(() => null);
+              await runDeps.autoConfirmPendingCandidates(input.novelId).catch(() => null);
             }
-            schedulePendingReviewAutoPromotionIfEnabled(this.deps, {
+            await schedulePendingReviewAutoPromotionIfEnabled(runDeps, {
               novelId: input.novelId,
               taskId: input.taskId,
               ownershipFence,
             });
-            await syncAutoExecutionTaskState(this.deps, {
+            await syncAutoExecutionTaskState(runDeps, {
               taskId: input.taskId,
               novelId: input.novelId,
               request: input.request,
@@ -569,7 +570,7 @@ export class AutoExecutionRangeRunner {
             });
             continue autoExecutionLoop;
           }
-          const rolledAfterSuccess = await this.batchRollCoordinator.tryBatchRollOnRangeExhausted({
+          const rolledAfterSuccess = await batchRollCoordinator.tryBatchRollOnRangeExhausted({
             taskId: input.taskId,
             novelId: input.novelId,
             request: input.request,
@@ -588,7 +589,7 @@ export class AutoExecutionRangeRunner {
             pipelineJobId = "";
             continue autoExecutionLoop;
           }
-          await recordCompletedCheckpoint(this.deps, {
+          await recordCompletedCheckpoint(runDeps, {
             taskId: input.taskId,
             novelId: input.novelId,
             request: input.request,
@@ -602,7 +603,7 @@ export class AutoExecutionRangeRunner {
         }
 
         if ((autoExecution.remainingChapterCount ?? 0) === 0) {
-          const rolledAfterTerminal = await this.batchRollCoordinator.tryBatchRollOnRangeExhausted({
+          const rolledAfterTerminal = await batchRollCoordinator.tryBatchRollOnRangeExhausted({
             taskId: input.taskId,
             novelId: input.novelId,
             request: input.request,
@@ -621,7 +622,7 @@ export class AutoExecutionRangeRunner {
             pipelineJobId = "";
             continue autoExecutionLoop;
           }
-          await recordCompletedCheckpoint(this.deps, {
+          await recordCompletedCheckpoint(runDeps, {
             taskId: input.taskId,
             novelId: input.novelId,
             request: input.request,
@@ -635,7 +636,7 @@ export class AutoExecutionRangeRunner {
         }
 
         const failureOutcome = await handleAutoExecutionFailure({
-          deps: this.deps,
+          deps: runDeps,
           taskId: input.taskId,
           novelId: input.novelId,
           request: input.request,
@@ -646,7 +647,7 @@ export class AutoExecutionRangeRunner {
           allowLazyChapterPlanning,
           progressGuard,
           maxConsecutiveNoProgress: MAX_CONSECUTIVE_NO_PROGRESS,
-          resolveQualityIssueChapter: () => resolveQualityIssueChapter(this.deps, input.novelId, job),
+          resolveQualityIssueChapter: () => resolveQualityIssueChapter(runDeps, input.novelId, job),
           ownershipFence,
         });
         if (failureOutcome.kind === "continue") {
@@ -671,7 +672,7 @@ export class AutoExecutionRangeRunner {
       // re-thrown so the caller still sees the real root cause — this does not mask
       // or swallow it, only guarantees the persisted auto-execution flag is cleared.
       try {
-        await syncAutoExecutionTaskState(this.deps, {
+        await syncAutoExecutionTaskState(runDeps, {
           taskId: input.taskId,
           novelId: input.novelId,
           request: input.request,

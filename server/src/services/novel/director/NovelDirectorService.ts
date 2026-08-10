@@ -248,14 +248,7 @@ export class NovelDirectorService {
         volumeService: this.volumeService,
         novelContextService: this.novelContextService,
         characterDynamicsService: this.characterDynamicsService,
-        onProgress: async (label, progress) => {
-          await this.workflowService.markTaskRunning(input.taskId, {
-            stage: "chapter_execution",
-            itemKey: "batch_roll_prepare",
-            itemLabel: label,
-            progress,
-          }).catch(() => undefined);
-        },
+        onProgress: input.reportProgress,
       },
       input,
     ),
@@ -328,6 +321,7 @@ export class NovelDirectorService {
   private async autoPromotePendingReviewProposals(input: {
     novelId: string;
     taskId: string;
+    beforeCommit?: () => Promise<void>;
   }): Promise<void> {
     const settings = await qualityDebtSettingsService.getAutoPromotionSettings();
     if (!settings.enabled || !settings.baselineAt) {
@@ -337,6 +331,7 @@ export class NovelDirectorService {
       since: settings.baselineAt,
       dryRun: false,
       taskId: input.taskId,
+      beforeCommit: input.beforeCommit,
     });
   }
 

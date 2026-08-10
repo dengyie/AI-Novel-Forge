@@ -69,7 +69,11 @@ test("workflow write CAS miss raises ownership loss before notification or stale
   await assert.rejects(() => service.markTaskRunning("task-1", {
     stage: "chapter_execution",
     itemLabel: "running",
-  }, { taskId: "task-1", attemptCount: 3 }), (error) => error?.code === "WORKFLOW_TASK_OWNERSHIP_LOST");
+  }, {
+    taskId: "task-1",
+    attemptCount: 3,
+    updatedAt: new Date("2026-08-10T00:00:00.000Z"),
+  }), (error) => error?.code === "WORKFLOW_TASK_OWNERSHIP_LOST");
   assert.equal(notifications.length, 0);
 });
 

@@ -47,7 +47,7 @@ export async function stopAutoExecutionForNoProgress(
   });
 }
 
-export function schedulePendingReviewAutoPromotionIfEnabled(
+export async function schedulePendingReviewAutoPromotionIfEnabled(
   deps: Pick<
     NovelDirectorAutoExecutionRuntimeDeps,
     "isPendingReviewAutoPromotionEnabled" | "autoPromotePendingReviewProposals"
@@ -57,17 +57,19 @@ export function schedulePendingReviewAutoPromotionIfEnabled(
     taskId: string;
     ownershipFence?: AutoExecutionOwnershipFence;
   },
-): void {
+): Promise<void> {
   if (!deps.isPendingReviewAutoPromotionEnabled || !deps.autoPromotePendingReviewProposals) {
     return;
   }
-  void Promise.resolve(deps.isPendingReviewAutoPromotionEnabled())
-    .then((enabled) => {
-      if (!enabled) {
-        return undefined;
-      }
-      return Promise.resolve(input.ownershipFence?.assertActive())
-        .then(() => deps.autoPromotePendingReviewProposals?.(input));
-    })
-    .catch(() => null);
+  const enabled = await deps.isPendingReviewAutoPromotionEnabled();
+  if (!enabled) {
+    return;
+  }
+  await input.ownershipFence?.assertActive();
+  await deps.autoPromotePendingReviewProposals({
+    ...input,
+    beforeCommit: async () => {
+      await input.ownershipFence?.assertActive();
+    },
+  });
 }
