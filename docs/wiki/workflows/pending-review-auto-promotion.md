@@ -54,12 +54,12 @@ flowchart TD
   F --> G["按 subject 保留最新提案"]
   G --> H{"最新提案命中未解决冲突?"}
   H -->|是| I["整组保持 pending_review"]
-  H -->|否| J["更早同组提案标记 rejected"]
-  J --> K["最新提案复用 commitExistingProposals 提交"]
+  H -->|否| J["事务内 CAS 当前 workflow ownership"]
+  J --> K["同一事务标记旧提案 rejected 并提交最新提案"]
   K --> L["写入 pending_review_auto_promotion 导演事件"]
 ```
 
-自动导演接入点是章节批次成功后的命令内维护动作，必须在当前命令中 `await` 完成。调度器在预演后、标记覆盖提案前以及提交提案前都重新检查 AbortSignal 与 auto-execution ownership fence；取消、重试接管或 CAS miss 时不得提交提案、覆盖旧提案或继续写入留痕。开关读取、候选扫描、覆盖写入、提交和留痕的基础设施错误必须向命令执行器传播，进入失败/重试/恢复链路。
+自动导演接入点是章节批次成功后的命令内维护动作，必须在当前命令中 `await` 完成。预演后的读侧 `beforeCommit` 只用于尽早响应 AbortSignal，不能作为最终写授权；最终授权必须由 `StateCommitService` 在同一数据库事务内用 `taskId + lane + active status + cancelRequestedAt=null + attemptCount + ownershipVersion` 做 CAS。CAS 成功后，事务才可以同时标记 superseded 提案、提交 promoted 提案并写 canonical state；返回的新 ownership snapshot 必须更新当前 fence。取消、重试接管或 CAS miss 时事务整体不得提交 proposal/canonical 变更，也不得继续写入留痕。开关读取、候选扫描、事务 CAS、proposal/canonical 写入和留痕的基础设施错误必须向命令执行器传播，进入失败/重试/恢复链路。
 
 ## Settings Contract
 
