@@ -293,7 +293,7 @@ test("auto director follow-up action executor retries with the route model and r
   prisma.novelWorkflowTask.update = originals.workflowUpdate;
 });
 
-test("novel workflow retry forces auto director resume after retry state healing", async () => {
+test("novel workflow retry enqueues auto director retry command on cancelled task", async () => {
   const adapter = new NovelWorkflowTaskAdapter();
   const retryCommands = [];
   const originals = {

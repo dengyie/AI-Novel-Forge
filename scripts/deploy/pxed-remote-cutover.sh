@@ -47,18 +47,26 @@ need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "missing command: $1"
 }
 
-# 只清超龄 pre-* 快照目录（保留最近 $keep 个），不动 auto/ 与顶层手动还原点
+# 只清超龄自动快照 pre-<sha12>-<ts>（保留最近 $keep 个）。
+# 只认严格格式，手动还原点（如 pre-eb76582，无 -<ts> 后缀）与 auto/ 日备不参与。
 prune_old_snapshots() {
   local keep="$1"
   local snaps=()
-  local d
-  # ls -dt 按 mtime 降序（新→旧）；pre-* 目录名无空格，可安全按行切
+  local name
+  local names
   local IFS=$'\n'
-  shopt -s nullglob
-  for d in $(ls -dt "$SNAPSHOT_ROOT"/pre-*/ 2>/dev/null); do
-    [[ -d "$d" ]] && snaps+=("$d")
+  # ls -dt 按 mtime 降序（新→旧）；仅匹配自动快照格式，手动还原点排除
+  names="$(cd "$SNAPSHOT_ROOT" 2>/dev/null \
+    && ls -dt pre-* 2>/dev/null \
+    | grep -E '^pre-[0-9a-f]{12}-[0-9]{8}T[0-9]{6}Z$' \
+    || true)"
+  if [[ -z "$names" ]]; then
+    log "snapshot retention: no auto pre-* snapshots, nothing to prune"
+    return 0
+  fi
+  for name in $names; do
+    [[ -d "$SNAPSHOT_ROOT/$name" ]] && snaps+=("$SNAPSHOT_ROOT/$name")
   done
-  shopt -u nullglob
   local total="${#snaps[@]}"
   if (( total <= keep )); then
     log "snapshot retention: keep $total (<= $keep), nothing to prune"
@@ -66,11 +74,11 @@ prune_old_snapshots() {
   fi
   local i removed=0
   for (( i=keep; i<total; i++ )); do
-    d="${snaps[$i]}"
-    rm -rf -- "$d"
+    name="${snaps[$i]}"
+    rm -rf -- "$SNAPSHOT_ROOT/$name"
     removed=$(( removed + 1 ))
   done
-  log "snapshot retention: pruned $removed pre-* dirs (kept $keep of $total)"
+  log "snapshot retention: pruned $removed auto pre-* snapshots (kept $keep of $total)"
 }
 
 # 避免 curl|head SIGPIPE（pipefail 下 exit 141）假失败
@@ -181,15 +189,25 @@ if [[ -f "$SERVER_DIR/dev.db" ]] && command -v sqlite3 >/dev/null 2>&1; then
     # 只拷 dev.db + wal/shm，别 cp -a dev.db* 把 live 目录陈旧 .bak 拖进快照
     cp -a "$SERVER_DIR/dev.db" "$SNAP_DIR/db/dev.db" 2>/dev/null || true
     cp -a "$SERVER_DIR/dev.db-wal" "$SERVER_DIR/dev.db-shm" "$SNAP_DIR/db/" 2>/dev/null || true
-    gzip -f "$SNAP_DIR/db/dev.db" 2>/dev/null || true
+    if gzip -f "$SNAP_DIR/db/dev.db" 2>/dev/null; then
+      echo "db_snapshot_gzip=1" >>"$SNAP_DIR/META"
+      log "warn: sqlite3 .backup failed; fell back to cp dev.db + wal/shm + gzip"
+    else
+      echo "db_snapshot_gzip=0" >>"$SNAP_DIR/META"
+      log "warn: sqlite3 .backup failed; fell back to cp dev.db + wal/shm (gzip failed, kept uncompressed)"
+    fi
     echo "db_snapshot=best_effort_live_copy" >>"$SNAP_DIR/META"
-    log "warn: sqlite3 .backup failed; fell back to cp dev.db + wal/shm + gzip"
   fi
 elif compgen -G "$SERVER_DIR/dev.db" >/dev/null; then
   cp -a "$SERVER_DIR/dev.db" "$SNAP_DIR/db/dev.db" || true
   cp -a "$SERVER_DIR/dev.db-wal" "$SERVER_DIR/dev.db-shm" "$SNAP_DIR/db/" 2>/dev/null || true
-  gzip -f "$SNAP_DIR/db/dev.db" 2>/dev/null || true
-  log "db snapshot via cp dev.db + wal/shm (no sqlite3)"
+  if gzip -f "$SNAP_DIR/db/dev.db" 2>/dev/null; then
+    echo "db_snapshot_gzip=1" >>"$SNAP_DIR/META"
+    log "db snapshot via cp dev.db + wal/shm (no sqlite3) + gzip"
+  else
+    echo "db_snapshot_gzip=0" >>"$SNAP_DIR/META"
+    log "db snapshot via cp dev.db + wal/shm (no sqlite3, gzip failed, kept uncompressed)"
+  fi
 else
   log "warn: no server/dev.db found (still continue)"
 fi
@@ -403,7 +421,11 @@ fi
 
 log "done sha=$(git rev-parse --short HEAD 2>/dev/null || echo "$SHORT_SHA") snap=$SNAP_DIR"
 log "rollback: tar xzf $SNAP_DIR/server-dist/dist.tgz -C $SERVER_DIR  (after rm -rf dist) then supervisorctl restart novel-server"
-log "rollback DB: zcat $SNAP_DIR/db/dev.db.gz > $SERVER_DIR/dev.db (best_effort 需一并放回 dev.db-wal/shm) then supervisorctl restart novel-server"
+if [[ -f "$SNAP_DIR/db/dev.db.gz" ]]; then
+  log "rollback DB: zcat $SNAP_DIR/db/dev.db.gz > $SERVER_DIR/dev.db (best_effort 需一并放回 dev.db-wal/shm) then supervisorctl restart novel-server"
+else
+  log "rollback DB: cp $SNAP_DIR/db/dev.db $SERVER_DIR/dev.db (best_effort 需一并放回 dev.db-wal/shm) then supervisorctl restart novel-server"
+fi
 log "note: failed cutover does NOT auto-rollback; use snap above. Drain long director/TTS jobs before approving next deploy."
 
 # 部署成功后才清超龄 pre-* 快照（set -e 下失败会在 health 前 exit，本次快照保留供回滚）
