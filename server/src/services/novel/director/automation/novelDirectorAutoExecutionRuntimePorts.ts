@@ -15,6 +15,7 @@ import type {
   PrepareNextAutoExecutionBatchResult,
 } from "./novelDirectorAutoExecutionBatchRollRuntime";
 import type { AutoExecutionOwnershipFence } from "./domain/AutoExecutionOwnershipFence";
+import type { WorkflowTaskOwnershipSnapshot } from "../../workflow/ownership/WorkflowTaskOwnership";
 
 export type AutomationLedgerEventPort = Pick<
   typeof directorAutomationLedgerEventService,
@@ -28,15 +29,20 @@ export interface NovelDirectorAutoExecutionWorkflowPort {
     lane: "auto_director";
     title: string;
     seedPayload?: Record<string, unknown>;
-  }): Promise<unknown>;
-  getTaskById(taskId: string): Promise<{ status: string } | null>;
+  }, ownership?: WorkflowTaskOwnershipSnapshot): Promise<unknown>;
+  getTaskByIdWithoutHealing(taskId: string): Promise<{
+    status: string;
+    attemptCount: number;
+    updatedAt: Date;
+    cancelRequestedAt?: Date | null;
+  } | null>;
   markTaskRunning(taskId: string, input: {
     stage: "chapter_execution" | "quality_repair";
     itemLabel: string;
     itemKey?: string | null;
     progress?: number;
     clearCheckpoint?: boolean;
-  }): Promise<unknown>;
+  }, ownership?: WorkflowTaskOwnershipSnapshot): Promise<unknown>;
   recordCheckpoint(taskId: string, input: {
     stage: "quality_repair";
     checkpointType: "workflow_completed" | "chapter_batch_ready" | "replan_required";
@@ -45,7 +51,7 @@ export interface NovelDirectorAutoExecutionWorkflowPort {
     progress?: number;
     chapterId?: string | null;
     seedPayload?: Record<string, unknown>;
-  }): Promise<unknown>;
+  }, ownership?: WorkflowTaskOwnershipSnapshot): Promise<unknown>;
   markTaskFailed(taskId: string, message: string, patch?: {
     /**
      * Batch-roll / execution-loop halt may land on chapter_execution or structured_outline.
@@ -58,7 +64,7 @@ export interface NovelDirectorAutoExecutionWorkflowPort {
     checkpointSummary?: string | null;
     chapterId?: string | null;
     progress?: number;
-  }): Promise<unknown>;
+  }, ownership?: WorkflowTaskOwnershipSnapshot): Promise<unknown>;
 }
 
 export interface NovelDirectorAutoExecutionNovelPort {
@@ -161,6 +167,7 @@ export interface NovelDirectorAutoExecutionRuntimeDeps {
   autoPromotePendingReviewProposals?: (input: {
     novelId: string;
     taskId: string;
+    beforeCommit?: () => Promise<void>;
   }) => Promise<void>;
   /**
    * When true (default if resolveBatchRoll is injected), remaining=0 may expand/reenter

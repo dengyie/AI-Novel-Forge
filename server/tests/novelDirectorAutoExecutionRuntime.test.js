@@ -48,6 +48,52 @@ function buildRequest(overrides = {}) {
   };
 }
 
+function createRuntime(deps) {
+  const workflow = deps.workflowService;
+  const rawLookup = workflow.getTaskByIdWithoutHealing?.bind(workflow);
+  let taskId = "task-1";
+  let attemptCount = 1;
+  let version = 0;
+  let updatedAt = new Date("2026-08-10T00:00:00.000Z");
+  workflow.getTaskByIdWithoutHealing = async (requestedTaskId) => {
+    taskId = requestedTaskId;
+    const row = rawLookup ? await rawLookup(requestedTaskId) : { status: "running" };
+    if (!row) {
+      return null;
+    }
+    attemptCount = Number.isInteger(row.attemptCount) ? row.attemptCount : attemptCount;
+    return {
+      cancelRequestedAt: null,
+      ...row,
+      attemptCount,
+      updatedAt,
+    };
+  };
+  for (const method of ["bootstrapTask", "markTaskRunning", "recordCheckpoint", "markTaskFailed"]) {
+    const original = workflow[method]?.bind(workflow);
+    if (!original) {
+      continue;
+    }
+    workflow[method] = async (...args) => {
+      const result = await original(...args);
+      taskId = method === "bootstrapTask" ? (args[0]?.workflowTaskId ?? taskId) : (args[0] ?? taskId);
+      version += 1;
+      updatedAt = new Date(Date.parse("2026-08-10T00:00:00.000Z") + version);
+      return {
+        id: taskId,
+        status: method === "recordCheckpoint" && args[1]?.checkpointType === "workflow_completed"
+          ? "succeeded"
+          : (method === "markTaskFailed" ? "failed" : "running"),
+        attemptCount,
+        updatedAt,
+        cancelRequestedAt: null,
+        ...(result && typeof result === "object" ? result : {}),
+      };
+    };
+  }
+  return new NovelDirectorAutoExecutionRuntime(deps);
+}
+
 function buildSceneCards(order) {
   return JSON.stringify({
     targetWordCount: 2800,
@@ -150,7 +196,7 @@ function buildPreparedWorkspace() {
 
 test("runFromReady completes immediately when repaired chapters leave no remaining auto-execution work", async () => {
   const calls = [];
-  const runtime = new NovelDirectorAutoExecutionRuntime({
+  const runtime = createRuntime({
     novelContextService: {
       async listChapters() {
         return [
@@ -178,7 +224,7 @@ test("runFromReady completes immediately when repaired chapters leave no remaini
       async bootstrapTask(input) {
         calls.push(["bootstrapTask", input.seedPayload.autoExecution.remainingChapterCount]);
       },
-      async getTaskById() {
+      async getTaskByIdWithoutHealing() {
         return { status: "waiting_approval" };
       },
       async markTaskRunning() {
@@ -227,7 +273,7 @@ test("runFromReady completes immediately when repaired chapters leave no remaini
 test("runFromReady reuses an existing active range job before starting a new pipeline", async () => {
   const calls = [];
   let pipelineCompleted = false;
-  const runtime = new NovelDirectorAutoExecutionRuntime({
+  const runtime = createRuntime({
     novelContextService: {
       async listChapters() {
         return [
@@ -268,7 +314,7 @@ test("runFromReady reuses an existing active range job before starting a new pip
       async bootstrapTask(input) {
         calls.push(["bootstrapTask", input.seedPayload.autoExecution.pipelineJobId, input.seedPayload.autoExecution.pipelineStatus]);
       },
-      async getTaskById() {
+      async getTaskByIdWithoutHealing() {
         return { status: "running" };
       },
       async markTaskRunning() {
@@ -314,7 +360,7 @@ test("runFromReady reuses an existing active range job before starting a new pip
 
 test("runFromReady treats explicit range continuation as approval for quality-alerted completed jobs", async () => {
   const calls = [];
-  const runtime = new NovelDirectorAutoExecutionRuntime({
+  const runtime = createRuntime({
     novelContextService: {
       async listChapters() {
         return [
@@ -363,7 +409,7 @@ test("runFromReady treats explicit range continuation as approval for quality-al
           input.seedPayload.autoExecution.remainingChapterCount,
         ]);
       },
-      async getTaskById() {
+      async getTaskByIdWithoutHealing() {
         return { status: "waiting_approval" };
       },
       async markTaskRunning(taskId, input) {
@@ -415,7 +461,7 @@ test("runFromReady resumes a pending manual-recovery pipeline job before waiting
   const calls = [];
   let pipelineCompleted = false;
   let jobReadCount = 0;
-  const runtime = new NovelDirectorAutoExecutionRuntime({
+  const runtime = createRuntime({
     novelContextService: {
       async listChapters() {
         return [
@@ -479,7 +525,7 @@ test("runFromReady resumes a pending manual-recovery pipeline job before waiting
       async bootstrapTask(input) {
         calls.push(["bootstrapTask", input.seedPayload.autoExecution.pipelineJobId, input.seedPayload.autoExecution.pipelineStatus]);
       },
-      async getTaskById() {
+      async getTaskByIdWithoutHealing() {
         return { status: "running" };
       },
       async markTaskRunning() {
@@ -526,7 +572,7 @@ test("runFromReady resumes a pending manual-recovery pipeline job before waiting
 
 test("runFromReady records a normal checkpoint when pipeline completes with quality notices", async () => {
   const calls = [];
-  const runtime = new NovelDirectorAutoExecutionRuntime({
+  const runtime = createRuntime({
     novelContextService: {
       async listChapters() {
         return [
@@ -564,7 +610,7 @@ test("runFromReady records a normal checkpoint when pipeline completes with qual
       async bootstrapTask(input) {
         calls.push(["bootstrapTask", input.seedPayload.autoExecution.pipelineStatus]);
       },
-      async getTaskById() {
+      async getTaskByIdWithoutHealing() {
         return { status: "running" };
       },
       async markTaskRunning(_taskId, input) {
@@ -621,7 +667,7 @@ test("runFromReady records a normal checkpoint when pipeline completes with qual
 test("runFromReady notifies and continues low-risk quality repair in AI-driver execution", async () => {
   const calls = [];
   let phase = "quality_notice";
-  const runtime = new NovelDirectorAutoExecutionRuntime({
+  const runtime = createRuntime({
     novelContextService: {
       async listChapters() {
         if (phase === "completed") {
@@ -689,7 +735,7 @@ test("runFromReady notifies and continues low-risk quality repair in AI-driver e
       async bootstrapTask(input) {
         calls.push(["bootstrapTask", input.seedPayload.autoExecution.qualityRepairRisk?.riskLevel ?? null]);
       },
-      async getTaskById() {
+      async getTaskByIdWithoutHealing() {
         return { status: "running" };
       },
       async markTaskRunning() {
@@ -744,7 +790,7 @@ test("runFromReady notifies and continues low-risk quality repair in AI-driver e
 
 test("runFromReady notifies final low-risk quality repair without pausing AI-driver execution", async () => {
   const calls = [];
-  const runtime = new NovelDirectorAutoExecutionRuntime({
+  const runtime = createRuntime({
     novelContextService: {
       async listChapters() {
         return [
@@ -785,7 +831,7 @@ test("runFromReady notifies final low-risk quality repair without pausing AI-dri
       async bootstrapTask(input) {
         calls.push(["bootstrapTask", input.seedPayload.autoExecution?.remainingChapterCount ?? null]);
       },
-      async getTaskById() {
+      async getTaskByIdWithoutHealing() {
         return { status: "running" };
       },
       async markTaskRunning() {
@@ -831,7 +877,7 @@ test("runFromReady notifies final low-risk quality repair without pausing AI-dri
 test("runFromReady honors approval selection for low-risk quality repair outside AI-driver execution", async () => {
   const calls = [];
   let phase = "initial";
-  const runtime = new NovelDirectorAutoExecutionRuntime({
+  const runtime = createRuntime({
     novelContextService: {
       async listChapters() {
         if (phase === "initial") {
@@ -900,7 +946,7 @@ test("runFromReady honors approval selection for low-risk quality repair outside
       async bootstrapTask(input) {
         calls.push(["bootstrapTask", input.seedPayload.autoExecution?.pipelineJobId ?? null]);
       },
-      async getTaskById() {
+      async getTaskByIdWithoutHealing() {
         return { status: "running" };
       },
       async markTaskRunning(_taskId, input) {
@@ -960,7 +1006,7 @@ test("runFromReady honors approval selection for low-risk quality repair outside
 test("runFromReady pauses replan notices in AI-driver execution", async () => {
   const calls = [];
   let phase = "initial";
-  const runtime = new NovelDirectorAutoExecutionRuntime({
+  const runtime = createRuntime({
     novelContextService: {
       async listChapters() {
         if (phase === "initial") {
@@ -1029,7 +1075,7 @@ test("runFromReady pauses replan notices in AI-driver execution", async () => {
       async bootstrapTask(input) {
         calls.push(["bootstrapTask", input.seedPayload.autoExecution?.qualityRepairRisk?.riskLevel ?? null]);
       },
-      async getTaskById() {
+      async getTaskByIdWithoutHealing() {
         return { status: "running" };
       },
       async markTaskRunning() {
@@ -1077,7 +1123,7 @@ test("runFromReady pauses replan notices in AI-driver execution", async () => {
 test("runFromReady cannot skip a replan hard-pause notice via skipCurrentQualityRepair", async () => {
   const calls = [];
   const completedOrders = new Set();
-  const runtime = new NovelDirectorAutoExecutionRuntime({
+  const runtime = createRuntime({
     novelContextService: {
       async listChapters() {
         return [1, 2, 3].map((order) => (
@@ -1143,7 +1189,7 @@ test("runFromReady cannot skip a replan hard-pause notice via skipCurrentQuality
           input.seedPayload.autoExecution?.qualityDebtChapterOrders ?? [],
         ]);
       },
-      async getTaskById() {
+      async getTaskByIdWithoutHealing() {
         return { status: "running" };
       },
       async markTaskRunning() {
@@ -1194,7 +1240,7 @@ test("runFromReady cannot auto-continue soft quality via skipCurrentQualityRepai
   // review_skip quality-debt bypass. Soft quality pauses at chapter_batch_ready.
   const calls = [];
   const completedOrders = new Set();
-  const runtime = new NovelDirectorAutoExecutionRuntime({
+  const runtime = createRuntime({
     novelContextService: {
       async listChapters() {
         return [1, 2].map((order) => (
@@ -1260,7 +1306,7 @@ test("runFromReady cannot auto-continue soft quality via skipCurrentQualityRepai
           input.seedPayload.autoExecution?.qualityDebtSummaries ?? [],
         ]);
       },
-      async getTaskById() {
+      async getTaskByIdWithoutHealing() {
         return { status: "running" };
       },
       async markTaskRunning() {
@@ -1370,7 +1416,7 @@ test("auto-execution state drops blank chapters from skipped quality debt", () =
 test("runFromReady keeps full-book replan notices blocking instead of auto-completing the range", async () => {
   const calls = [];
   let phase = "initial";
-  const runtime = new NovelDirectorAutoExecutionRuntime({
+  const runtime = createRuntime({
     novelContextService: {
       async listChapters() {
         if (phase === "initial") {
@@ -1437,7 +1483,7 @@ test("runFromReady keeps full-book replan notices blocking instead of auto-compl
       async bootstrapTask(input) {
         calls.push(["bootstrapTask", input.seedPayload.autoExecution?.qualityRepairRisk?.riskLevel ?? null]);
       },
-      async getTaskById() {
+      async getTaskByIdWithoutHealing() {
         return { status: "running" };
       },
       async markTaskRunning() {
@@ -1491,7 +1537,7 @@ test("runFromReady keeps repeated full-book replan loops as replan checkpoints",
   const calls = [];
   const completedOrders = new Set();
   const jobOrderById = new Map();
-  const runtime = new NovelDirectorAutoExecutionRuntime({
+  const runtime = createRuntime({
     novelContextService: {
       async listChapters() {
         return [
@@ -1567,7 +1613,7 @@ test("runFromReady keeps repeated full-book replan loops as replan checkpoints",
           input.seedPayload.autoExecution?.qualityDebtChapterOrders ?? [],
         ]);
       },
-      async getTaskById() {
+      async getTaskByIdWithoutHealing() {
         return { status: "running" };
       },
       async markTaskRunning() {
@@ -1645,7 +1691,7 @@ test("runFromReady keeps repeated full-book replan loops as replan checkpoints",
 
 test("runFromReady records replan_required outside AI-driver execution when pipeline completes with replan notice", async () => {
   const calls = [];
-  const runtime = new NovelDirectorAutoExecutionRuntime({
+  const runtime = createRuntime({
     novelContextService: {
       async listChapters() {
         return [
@@ -1683,7 +1729,7 @@ test("runFromReady records replan_required outside AI-driver execution when pipe
       async bootstrapTask(input) {
         calls.push(["bootstrapTask", input.seedPayload.autoExecution.pipelineStatus]);
       },
-      async getTaskById() {
+      async getTaskByIdWithoutHealing() {
         return { status: "running" };
       },
       async markTaskRunning() {
@@ -1731,7 +1777,7 @@ test("runFromReady records replan_required outside AI-driver execution when pipe
 test("runFromReady uses the latest auto-execution review toggles instead of stale saved state when starting a new batch", async () => {
   const calls = [];
   let pipelineCompleted = false;
-  const runtime = new NovelDirectorAutoExecutionRuntime({
+  const runtime = createRuntime({
     novelContextService: {
       async listChapters() {
         return Array.from({ length: 10 }, (_, index) => withExecutionDetail({
@@ -1774,7 +1820,7 @@ test("runFromReady uses the latest auto-execution review toggles instead of stal
           input.seedPayload.autoExecution?.autoRepair ?? null,
         ]);
       },
-      async getTaskById() {
+      async getTaskByIdWithoutHealing() {
         return { status: "running" };
       },
       async markTaskRunning() {
@@ -1831,7 +1877,7 @@ test("runFromReady uses the latest auto-execution review toggles instead of stal
 test("runFromReady passes the persisted transient failover target to startPipelineJob", async () => {
   const starts = [];
   let completed = false;
-  const runtime = new NovelDirectorAutoExecutionRuntime({
+  const runtime = createRuntime({
     novelContextService: {
       async listChapters() {
         return [withExecutionDetail({
@@ -1867,7 +1913,7 @@ test("runFromReady passes the persisted transient failover target to startPipeli
     },
     workflowService: {
       async bootstrapTask() {},
-      async getTaskById() {
+      async getTaskByIdWithoutHealing() {
         return { status: "running" };
       },
       async markTaskRunning() {},
@@ -1907,7 +1953,7 @@ test("runFromReady skips the current review-blocked chapter when continuing expl
   const calls = [];
   const completedOrders = new Set();
   const jobOrderById = new Map();
-  const runtime = new NovelDirectorAutoExecutionRuntime({
+  const runtime = createRuntime({
     novelContextService: {
       async listChapters() {
         return [
@@ -1960,7 +2006,7 @@ test("runFromReady skips the current review-blocked chapter when continuing expl
           input.seedPayload.autoExecution?.skippedChapterOrders ?? [],
         ]);
       },
-      async getTaskById() {
+      async getTaskByIdWithoutHealing() {
         return { status: "running" };
       },
       async markTaskRunning() {
@@ -2016,7 +2062,7 @@ test("runFromReady skips the current review-blocked chapter when continuing expl
 });
 
 test("prepareRequestedAutoExecution resolves the selected volume range instead of falling back to chapter_range", async () => {
-  const runtime = new NovelDirectorAutoExecutionRuntime({
+  const runtime = createRuntime({
     novelContextService: {
       async listChapters() {
         return [
@@ -2054,7 +2100,7 @@ test("prepareRequestedAutoExecution resolves the selected volume range instead o
       async bootstrapTask() {
         throw new Error("should not bootstrap in prepareRequestedAutoExecution");
       },
-      async getTaskById() {
+      async getTaskByIdWithoutHealing() {
         return { status: "waiting_approval" };
       },
       async markTaskRunning() {
@@ -2102,7 +2148,7 @@ test("prepareRequestedAutoExecution resolves the selected volume range instead o
 });
 
 test("prepareRequestedAutoExecution refreshes a stale volume range after chapter planning grows", async () => {
-  const runtime = new NovelDirectorAutoExecutionRuntime({
+  const runtime = createRuntime({
     novelContextService: {
       async listChapters() {
         return [
@@ -2150,7 +2196,7 @@ test("prepareRequestedAutoExecution refreshes a stale volume range after chapter
       async bootstrapTask() {
         throw new Error("should not bootstrap in prepareRequestedAutoExecution");
       },
-      async getTaskById() {
+      async getTaskByIdWithoutHealing() {
         return { status: "waiting_approval" };
       },
       async markTaskRunning() {
@@ -2196,7 +2242,7 @@ test("prepareRequestedAutoExecution refreshes a stale volume range after chapter
 });
 
 test("prepareRequestedAutoExecution reruns the earliest ungenerated chapter instead of preserving stale skips", async () => {
-  const runtime = new NovelDirectorAutoExecutionRuntime({
+  const runtime = createRuntime({
     novelContextService: {
       async listChapters() {
         return [
@@ -2225,7 +2271,7 @@ test("prepareRequestedAutoExecution reruns the earliest ungenerated chapter inst
       async bootstrapTask() {
         throw new Error("should not bootstrap in prepareRequestedAutoExecution");
       },
-      async getTaskById() {
+      async getTaskByIdWithoutHealing() {
         return { status: "waiting_approval" };
       },
       async markTaskRunning() {
@@ -2273,7 +2319,7 @@ test("prepareRequestedAutoExecution reruns the earliest ungenerated chapter inst
 });
 
 test("prepareRequestedAutoExecution does not let stale skips bypass execution detail checks", async () => {
-  const runtime = new NovelDirectorAutoExecutionRuntime({
+  const runtime = createRuntime({
     novelContextService: {
       async listChapters() {
         return [
@@ -2301,7 +2347,7 @@ test("prepareRequestedAutoExecution does not let stale skips bypass execution de
       async bootstrapTask() {
         throw new Error("should not bootstrap in prepareRequestedAutoExecution");
       },
-      async getTaskById() {
+      async getTaskByIdWithoutHealing() {
         return { status: "waiting_approval" };
       },
       async markTaskRunning() {
@@ -2344,7 +2390,7 @@ test("prepareRequestedAutoExecution does not let stale skips bypass execution de
 });
 
 test("prepareRequestedAutoExecution rejects skipping to a later volume while earlier volumes are unfinished", async () => {
-  const runtime = new NovelDirectorAutoExecutionRuntime({
+  const runtime = createRuntime({
     novelContextService: {
       async listChapters() {
         return [
@@ -2382,7 +2428,7 @@ test("prepareRequestedAutoExecution rejects skipping to a later volume while ear
       async bootstrapTask() {
         throw new Error("should not bootstrap in prepareRequestedAutoExecution");
       },
-      async getTaskById() {
+      async getTaskByIdWithoutHealing() {
         return { status: "waiting_approval" };
       },
       async markTaskRunning() {
@@ -2415,7 +2461,7 @@ test("prepareRequestedAutoExecution rejects skipping to a later volume while ear
 });
 
 test("prepareRequestedAutoExecution rejects chapter ranges with incomplete execution detail", async () => {
-  const runtime = new NovelDirectorAutoExecutionRuntime({
+  const runtime = createRuntime({
     novelContextService: {
       async listChapters() {
         return [
@@ -2507,7 +2553,7 @@ test("prepareRequestedAutoExecution rejects chapter ranges with incomplete execu
       async bootstrapTask() {
         throw new Error("should not bootstrap in prepareRequestedAutoExecution");
       },
-      async getTaskById() {
+      async getTaskByIdWithoutHealing() {
         return { status: "waiting_approval" };
       },
       async markTaskRunning() {
@@ -2549,7 +2595,7 @@ test("prepareRequestedAutoExecution rejects chapter ranges with incomplete execu
 });
 
 test("prepareRequestedAutoExecution allows full-book autopilot JIT chapters with outline seeds", async () => {
-  const runtime = new NovelDirectorAutoExecutionRuntime({
+  const runtime = createRuntime({
     novelContextService: {
       async listChapters() {
         return [
@@ -2600,7 +2646,7 @@ test("prepareRequestedAutoExecution allows full-book autopilot JIT chapters with
       async bootstrapTask() {
         throw new Error("should not bootstrap in prepareRequestedAutoExecution");
       },
-      async getTaskById() {
+      async getTaskByIdWithoutHealing() {
         return { status: "waiting_approval" };
       },
       async markTaskRunning() {
@@ -2674,7 +2720,7 @@ test("runFromReady keeps persisted replan budget failures blocking after worker 
     chapterOrder: 6,
     occurredAt: "2026-05-02T00:00:00.000Z",
   }).state;
-  const runtime = new NovelDirectorAutoExecutionRuntime({
+  const runtime = createRuntime({
     novelContextService: {
       async listChapters() {
         return [
@@ -2746,7 +2792,7 @@ test("runFromReady keeps persisted replan budget failures blocking after worker 
           input.seedPayload.autoExecution?.qualityLoopLedger?.entries?.[0]?.deferredCount ?? 0,
         ]);
       },
-      async getTaskById() {
+      async getTaskByIdWithoutHealing() {
         return { status: "running" };
       },
       async markTaskRunning() {
@@ -2806,7 +2852,7 @@ test("runFromReady keeps persisted replan budget failures blocking after worker 
 test("runFromReady resolves pending state proposals before retrying full-book autopilot chapter execution", async () => {
   const calls = [];
   let proposalsResolved = false;
-  const runtime = new NovelDirectorAutoExecutionRuntime({
+  const runtime = createRuntime({
     novelContextService: {
       async listChapters() {
         return [
@@ -2858,7 +2904,7 @@ test("runFromReady resolves pending state proposals before retrying full-book au
       async bootstrapTask(input) {
         calls.push(["bootstrapTask", input.seedPayload.autoExecution?.nextChapterOrder ?? null]);
       },
-      async getTaskById() {
+      async getTaskByIdWithoutHealing() {
         return { status: "running" };
       },
       async markTaskRunning() {
@@ -2930,7 +2976,7 @@ test("runFromReady defers contentful pipeline-skip-eligible next chapter on no-g
     },
   });
   let listPhase = "stuck";
-  const runtime = new NovelDirectorAutoExecutionRuntime({
+  const runtime = createRuntime({
     novelContextService: {
       async listChapters() {
         if (listPhase === "after_gen") {
@@ -3010,7 +3056,7 @@ test("runFromReady defers contentful pipeline-skip-eligible next chapter on no-g
           input.seedPayload.autoExecution?.remainingChapterCount ?? null,
         ]);
       },
-      async getTaskById() {
+      async getTaskByIdWithoutHealing() {
         return { status: "running" };
       },
       async markTaskRunning() {
@@ -3082,7 +3128,7 @@ test("runFromReady still fails no-generatable when stuck next chapter is replan-
       terminalAction: "defer_and_continue",
     },
   });
-  const runtime = new NovelDirectorAutoExecutionRuntime({
+  const runtime = createRuntime({
     novelContextService: {
       async listChapters() {
         return [
@@ -3124,7 +3170,7 @@ test("runFromReady still fails no-generatable when stuck next chapter is replan-
       async bootstrapTask(input) {
         calls.push(["bootstrapTask", input.seedPayload.autoExecution?.nextChapterOrder ?? null]);
       },
-      async getTaskById() {
+      async getTaskByIdWithoutHealing() {
         return { status: "running" };
       },
       async markTaskRunning() {
@@ -3172,7 +3218,7 @@ test("runFromReady still fails no-generatable when stuck next chapter is replan-
 test("runFromReady does not let an aborted command execution write a stale completed checkpoint", async () => {
   const calls = [];
   const controller = new AbortController();
-  const runtime = new NovelDirectorAutoExecutionRuntime({
+  const runtime = createRuntime({
     novelContextService: {
       async listChapters() {
         return [
@@ -3201,7 +3247,7 @@ test("runFromReady does not let an aborted command execution write a stale compl
       async bootstrapTask() {
         calls.push(["bootstrapTask"]);
       },
-      async getTaskById() {
+      async getTaskByIdWithoutHealing() {
         return { status: "running" };
       },
       async markTaskRunning() {
@@ -3242,7 +3288,7 @@ test("runFromReady does not let an aborted command execution write a stale compl
 test("runFromReady stops the new pipeline when task cancellation races after job creation", async () => {
   const calls = [];
   let cancelled = false;
-  const runtime = new NovelDirectorAutoExecutionRuntime({
+  const runtime = createRuntime({
     novelContextService: {
       async listChapters() {
         return [withExecutionDetail({ id: "chapter-1", order: 1, generationState: "planned" })];
@@ -3268,7 +3314,7 @@ test("runFromReady stops the new pipeline when task cancellation races after job
       async bootstrapTask() {
         calls.push(["bootstrapTask"]);
       },
-      async getTaskById() {
+      async getTaskByIdWithoutHealing() {
         return cancelled
           ? { status: "cancelled", cancelRequestedAt: new Date() }
           : { status: "running" };
@@ -3314,7 +3360,7 @@ test("runFromReady stops the new pipeline when task cancellation races after job
 test("runFromReady does not record quality debt after its execution ownership is lost", async () => {
   const calls = [];
   const controller = new AbortController();
-  const runtime = new NovelDirectorAutoExecutionRuntime({
+  const runtime = createRuntime({
     novelContextService: {
       async listChapters() {
         return [withExecutionDetail({ id: "chapter-1", order: 1, generationState: "planned" })];
@@ -3344,7 +3390,7 @@ test("runFromReady does not record quality debt after its execution ownership is
       async bootstrapTask() {
         calls.push(["bootstrapTask"]);
       },
-      async getTaskById() {
+      async getTaskByIdWithoutHealing() {
         return { status: "running" };
       },
       async markTaskRunning() {

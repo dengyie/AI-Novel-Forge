@@ -1,4 +1,9 @@
 import type { NovelDirectorAutoExecutionRuntimeDeps } from "../novelDirectorAutoExecutionRuntimePorts";
+import type { NovelDirectorAutoExecutionWorkflowPort } from "../novelDirectorAutoExecutionRuntimePorts";
+import {
+  isWorkflowTaskOwnershipLost,
+  type WorkflowTaskOwnershipSnapshot,
+} from "../../../workflow/ownership/WorkflowTaskOwnership";
 
 export class AutoExecutionOwnershipLostError extends Error {
   readonly code = "AUTO_EXECUTION_OWNERSHIP_LOST";
@@ -21,6 +26,7 @@ export function isAutoExecutionOwnershipLost(error: unknown): boolean {
 export class AutoExecutionOwnershipFence {
   private pipelineJobId: string | null;
   private lost = false;
+  private ownership: WorkflowTaskOwnershipSnapshot | null = null;
 
   constructor(
     private readonly deps: Pick<NovelDirectorAutoExecutionRuntimeDeps, "workflowService" | "novelService">,
@@ -35,21 +41,94 @@ export class AutoExecutionOwnershipFence {
     this.pipelineJobId = pipelineJobId?.trim() || null;
   }
 
-  async assertActive(): Promise<void> {
+  async assertActive(): Promise<WorkflowTaskOwnershipSnapshot> {
     if (this.lost) {
       throw new AutoExecutionOwnershipLostError(this.taskId, this.pipelineJobId);
     }
-    const task = await this.deps.workflowService.getTaskById(this.taskId).catch(() => null);
-    const cancelled = !task
-      || task.status === "cancelled"
-      || Boolean((task as { cancelRequestedAt?: unknown } | null)?.cancelRequestedAt);
-    if (this.signal?.aborted || cancelled) {
-      this.lost = true;
-      const pipelineJobId = this.pipelineJobId;
-      if (pipelineJobId) {
-        await this.deps.novelService.cancelPipelineJob(pipelineJobId).catch(() => null);
-      }
-      throw new AutoExecutionOwnershipLostError(this.taskId, pipelineJobId);
+    if (this.signal?.aborted) {
+      return this.failOwnership();
     }
+
+    const task = await this.deps.workflowService.getTaskByIdWithoutHealing(this.taskId);
+    if (!task || task.status === "cancelled" || Boolean(task.cancelRequestedAt)) {
+      return this.failOwnership();
+    }
+
+    const current = {
+      taskId: this.taskId,
+      attemptCount: task.attemptCount,
+      updatedAt: task.updatedAt,
+    };
+    if (this.ownership && (
+      current.attemptCount !== this.ownership.attemptCount
+      || current.updatedAt.getTime() !== this.ownership.updatedAt.getTime()
+    )) {
+      return this.failOwnership();
+    }
+    this.ownership = current;
+    return current;
+  }
+
+  async runOwnedWrite<T>(
+    writer: (ownership: WorkflowTaskOwnershipSnapshot) => Promise<T>,
+  ): Promise<T> {
+    const ownership = await this.assertActive();
+    try {
+      const result = await writer(ownership);
+      this.ownership = this.readOwnershipFromWriteResult(result);
+      return result;
+    } catch (error) {
+      if (isWorkflowTaskOwnershipLost(error)) {
+        this.lost = true;
+        throw new AutoExecutionOwnershipLostError(this.taskId, this.pipelineJobId);
+      }
+      throw error;
+    }
+  }
+
+  bindWorkflowService(
+    workflowService: NovelDirectorAutoExecutionWorkflowPort,
+  ): NovelDirectorAutoExecutionWorkflowPort {
+    return {
+      getTaskByIdWithoutHealing: (taskId) => workflowService.getTaskByIdWithoutHealing(taskId),
+      bootstrapTask: (input) => this.runOwnedWrite(
+        (ownership) => workflowService.bootstrapTask(input, ownership),
+      ),
+      markTaskRunning: (taskId, input) => this.runOwnedWrite(
+        (ownership) => workflowService.markTaskRunning(taskId, input, ownership),
+      ),
+      recordCheckpoint: (taskId, input) => this.runOwnedWrite(
+        (ownership) => workflowService.recordCheckpoint(taskId, input, ownership),
+      ),
+      markTaskFailed: (taskId, message, patch) => this.runOwnedWrite(
+        (ownership) => workflowService.markTaskFailed(taskId, message, patch, ownership),
+      ),
+    };
+  }
+
+  private readOwnershipFromWriteResult(result: unknown): WorkflowTaskOwnershipSnapshot {
+    const row = result as { id?: unknown; attemptCount?: unknown; updatedAt?: unknown } | null;
+    if (
+      row?.id !== this.taskId
+      || !Number.isInteger(row.attemptCount)
+      || !(row.updatedAt instanceof Date)
+      || Number.isNaN(row.updatedAt.getTime())
+    ) {
+      throw new Error("Owned workflow write did not return a valid ownership snapshot.");
+    }
+    return {
+      taskId: this.taskId,
+      attemptCount: row.attemptCount as number,
+      updatedAt: row.updatedAt,
+    };
+  }
+
+  private async failOwnership(): Promise<never> {
+    this.lost = true;
+    const pipelineJobId = this.pipelineJobId;
+    if (pipelineJobId) {
+      await this.deps.novelService.cancelPipelineJob(pipelineJobId);
+    }
+    throw new AutoExecutionOwnershipLostError(this.taskId, pipelineJobId);
   }
 }

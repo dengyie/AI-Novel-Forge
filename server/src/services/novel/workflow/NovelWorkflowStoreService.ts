@@ -26,6 +26,10 @@ import {
   stageLabel,
 } from "./novelWorkflow.helpers";
 import { isStaleAutoDirectorRunningTask } from "./autoDirectorStaleTaskRecovery";
+import {
+  WorkflowTaskOwnershipLostError,
+  type WorkflowTaskOwnershipSnapshot,
+} from "./ownership/WorkflowTaskOwnership";
 
 export interface NovelWorkflowHealingPort {
   healAutoDirectorTaskState(taskId: string, row?: unknown): Promise<boolean>;
@@ -180,6 +184,67 @@ export class NovelWorkflowStoreService {
         },
       }),
       { label: "novelWorkflowTask.update" },
+    ) as unknown as T;
+    await this.notifyAutoDirectorTaskTransition({
+      before: input.before,
+      after: next,
+    });
+    return next;
+  }
+
+  /**
+   * Persist an auto-director projection only while the run still owns the exact
+   * task attempt and row version it read. Notifications happen after the CAS,
+   * so a stale worker cannot publish a transition for a newer retry.
+   */
+  public async updateWorkflowTaskWithOwnership<T extends {
+      id: string;
+      novelId: string | null;
+      lane: string;
+      status: string;
+      progress?: number | null;
+      currentStage: string | null;
+      checkpointType: string | null;
+      checkpointSummary?: string | null;
+      currentItemLabel?: string | null;
+      pendingManualRecovery: boolean;
+      updatedAt: Date;
+      seedPayloadJson?: string | null;
+      novel?: { title?: string | null } | null;
+    }>(input: {
+    before: T;
+    ownership: WorkflowTaskOwnershipSnapshot;
+    data: NovelWorkflowTaskUpdateArgs["data"];
+  }): Promise<T> {
+    if (input.before.id !== input.ownership.taskId) {
+      throw new WorkflowTaskOwnershipLostError(input.ownership.taskId);
+    }
+    const next = await withSqliteRetry(
+      () => prisma.$transaction(async (tx) => {
+        const claimed = await tx.novelWorkflowTask.updateMany({
+          where: {
+            id: input.ownership.taskId,
+            lane: "auto_director",
+            status: { in: ["queued", "running", "waiting_approval", "failed"] },
+            cancelRequestedAt: null,
+            attemptCount: input.ownership.attemptCount,
+            updatedAt: input.ownership.updatedAt,
+          },
+          data: input.data,
+        });
+        if (claimed.count !== 1) {
+          throw new WorkflowTaskOwnershipLostError(input.ownership.taskId);
+        }
+        const row = await tx.novelWorkflowTask.findUnique({
+          where: { id: input.ownership.taskId },
+          include: { novel: { select: { title: true } } },
+        });
+        if (!row) {
+          throw new WorkflowTaskOwnershipLostError(input.ownership.taskId);
+        }
+        return row;
+      }),
+      { label: "novelWorkflowTask.ownedUpdate" },
     ) as unknown as T;
     await this.notifyAutoDirectorTaskTransition({
       before: input.before,

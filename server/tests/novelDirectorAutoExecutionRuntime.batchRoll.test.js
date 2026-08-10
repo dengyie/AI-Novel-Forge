@@ -5,6 +5,52 @@ const {
   NovelDirectorAutoExecutionRuntime,
 } = require("../dist/services/novel/director/automation/novelDirectorAutoExecutionRuntime.js");
 
+function createRuntime(deps) {
+  const workflow = deps.workflowService;
+  const rawLookup = workflow.getTaskByIdWithoutHealing?.bind(workflow);
+  let taskId = "task-1";
+  let attemptCount = 1;
+  let version = 0;
+  let updatedAt = new Date("2026-08-10T00:00:00.000Z");
+  workflow.getTaskByIdWithoutHealing = async (requestedTaskId) => {
+    taskId = requestedTaskId;
+    const row = rawLookup ? await rawLookup(requestedTaskId) : { status: "running" };
+    if (!row) {
+      return null;
+    }
+    attemptCount = Number.isInteger(row.attemptCount) ? row.attemptCount : attemptCount;
+    return {
+      cancelRequestedAt: null,
+      ...row,
+      attemptCount,
+      updatedAt,
+    };
+  };
+  for (const method of ["bootstrapTask", "markTaskRunning", "recordCheckpoint", "markTaskFailed"]) {
+    const original = workflow[method]?.bind(workflow);
+    if (!original) {
+      continue;
+    }
+    workflow[method] = async (...args) => {
+      const result = await original(...args);
+      taskId = method === "bootstrapTask" ? (args[0]?.workflowTaskId ?? taskId) : (args[0] ?? taskId);
+      version += 1;
+      updatedAt = new Date(Date.parse("2026-08-10T00:00:00.000Z") + version);
+      return {
+        id: taskId,
+        status: method === "recordCheckpoint" && args[1]?.checkpointType === "workflow_completed"
+          ? "succeeded"
+          : (method === "markTaskFailed" ? "failed" : "running"),
+        attemptCount,
+        updatedAt,
+        cancelRequestedAt: null,
+        ...(result && typeof result === "object" ? result : {}),
+      };
+    };
+  }
+  return new NovelDirectorAutoExecutionRuntime(deps);
+}
+
 function buildSceneCards(order) {
   return JSON.stringify({
     targetWordCount: 2800,
@@ -72,7 +118,7 @@ function withExecutionDetail(chapter) {
 test("runFromReady expands to next prepared window when batch roll is enabled", async () => {
   const calls = [];
   const completed = new Set();
-  const runtime = new NovelDirectorAutoExecutionRuntime({
+  const runtime = createRuntime({
     novelContextService: {
       async listChapters() {
         return [1, 2].map((order) => (
@@ -120,7 +166,7 @@ test("runFromReady expands to next prepared window when batch roll is enabled", 
     },
     workflowService: {
       async bootstrapTask() {},
-      async getTaskById() {
+      async getTaskByIdWithoutHealing() {
         return { status: "running" };
       },
       async markTaskRunning() {
@@ -196,7 +242,7 @@ test("runFromReady expands to next prepared window when batch roll is enabled", 
 
 test("runFromReady without resolveBatchRoll keeps legacy workflow_completed on empty remaining", async () => {
   const calls = [];
-  const runtime = new NovelDirectorAutoExecutionRuntime({
+  const runtime = createRuntime({
     novelContextService: {
       async listChapters() {
         return [withExecutionDetail({
@@ -220,7 +266,7 @@ test("runFromReady without resolveBatchRoll keeps legacy workflow_completed on e
     },
     workflowService: {
       async bootstrapTask() {},
-      async getTaskById() { return { status: "running" }; },
+      async getTaskByIdWithoutHealing() { return { status: "running" }; },
       async markTaskRunning() {},
       async recordCheckpoint(_id, input) {
         calls.push(["recordCheckpoint", input.checkpointType]);
@@ -287,7 +333,7 @@ function buildMinimalRequest(overrides = {}) {
 test("runFromReady reenter prepares next window then continues loop", async () => {
   const calls = [];
   const completed = new Set([1]);
-  const runtime = new NovelDirectorAutoExecutionRuntime({
+  const runtime = createRuntime({
     novelContextService: {
       async listChapters() {
         return [1, 2].map((order) => (
@@ -335,7 +381,7 @@ test("runFromReady reenter prepares next window then continues loop", async () =
     },
     workflowService: {
       async bootstrapTask() {},
-      async getTaskById() {
+      async getTaskByIdWithoutHealing() {
         return { status: "running" };
       },
       async markTaskRunning() {
@@ -440,7 +486,7 @@ test("runFromReady reenter prepares next window then continues loop", async () =
 
 test("runFromReady reenter without prepare port fails and does not expand", async () => {
   const calls = [];
-  const runtime = new NovelDirectorAutoExecutionRuntime({
+  const runtime = createRuntime({
     novelContextService: {
       async listChapters() {
         return [withExecutionDetail({
@@ -464,7 +510,7 @@ test("runFromReady reenter without prepare port fails and does not expand", asyn
     },
     workflowService: {
       async bootstrapTask() {},
-      async getTaskById() { return { status: "running" }; },
+      async getTaskByIdWithoutHealing() { return { status: "running" }; },
       async markTaskRunning() {},
       async recordCheckpoint(_id, input) {
         calls.push(["recordCheckpoint", input.checkpointType]);
@@ -510,7 +556,7 @@ test("runFromReady reenter without prepare port fails and does not expand", asyn
 
 test("runFromReady expand into empty persisted window halts without thrashing", async () => {
   const calls = [];
-  const runtime = new NovelDirectorAutoExecutionRuntime({
+  const runtime = createRuntime({
     novelContextService: {
       async listChapters() {
         // Window 1 exists; window 2 is "prepared" only in decision, not in execution table.
@@ -535,7 +581,7 @@ test("runFromReady expand into empty persisted window halts without thrashing", 
     },
     workflowService: {
       async bootstrapTask() {},
-      async getTaskById() { return { status: "running" }; },
+      async getTaskByIdWithoutHealing() { return { status: "running" }; },
       async markTaskRunning() {},
       async recordCheckpoint(_id, input) {
         calls.push(["recordCheckpoint", input.checkpointType]);

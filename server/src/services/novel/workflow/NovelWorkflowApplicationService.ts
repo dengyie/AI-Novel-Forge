@@ -23,8 +23,15 @@ import {
 } from "./NovelWorkflowStoreService";
 import { StartupWorkflowRecoveryService } from "./recovery/StartupWorkflowRecoveryService";
 import { WorkflowRetryService } from "./recovery/WorkflowRetryService";
+import {
+  WorkflowTaskOwnershipLostError,
+  type WorkflowTaskOwnershipSnapshot,
+} from "./ownership/WorkflowTaskOwnership";
 
 type WorkflowRow = Awaited<ReturnType<typeof prisma.novelWorkflowTask.findUnique>>;
+type WorkflowTaskUpdateData = Parameters<
+  NovelWorkflowStoreService["updateWorkflowTaskWithOwnership"]
+>[0]["data"];
 
 interface AutoDirectorNovelCreationClaim {
   status: "claimed" | "attached" | "in_progress";
@@ -74,11 +81,16 @@ export class NovelWorkflowApplicationService {
     });
   }
 
-  async bootstrapTask(input: BootstrapWorkflowInput) {
+  async bootstrapTask(input: BootstrapWorkflowInput, ownership?: WorkflowTaskOwnershipSnapshot) {
     if (input.workflowTaskId?.trim()) {
-      const existing = await this.workflow.getTaskById(input.workflowTaskId.trim());
+      const existing = ownership
+        ? await this.workflow.getTaskByIdWithoutHealing(input.workflowTaskId.trim())
+        : await this.workflow.getTaskById(input.workflowTaskId.trim());
       if (existing) {
         if (existing.lane !== input.lane) {
+          if (ownership) {
+            throw new WorkflowTaskOwnershipLostError(ownership.taskId);
+          }
           throw new AppError("Workflow task lane mismatch.", 409, {
             taskId: existing.id,
             existingLane: existing.lane,
@@ -86,31 +98,37 @@ export class NovelWorkflowApplicationService {
           });
         }
         if (input.novelId?.trim() && existing.novelId !== input.novelId.trim()) {
+          if (ownership) {
+            throw new WorkflowTaskOwnershipLostError(ownership.taskId);
+          }
           if (isPreNovelAutoDirectorCandidateTask(existing)) {
             return existing;
           }
           const attached = await this.attachNovelToTask(existing.id, input.novelId.trim());
           if (input.seedPayload) {
-            return this.workflow.updateTaskWithRetry({
-              where: { id: attached.id },
-              data: {
-                seedPayloadJson: mergeSeedPayload(attached.seedPayloadJson, input.seedPayload),
-                heartbeatAt: new Date(),
-              },
-            });
+            const data: WorkflowTaskUpdateData = {
+              seedPayloadJson: mergeSeedPayload(attached.seedPayloadJson, input.seedPayload),
+              heartbeatAt: new Date(),
+            };
+            return ownership
+              ? this.workflow.updateWorkflowTaskWithOwnership({ before: attached, ownership, data })
+              : this.workflow.updateTaskWithRetry({ where: { id: attached.id }, data });
           }
           return attached;
         }
         if (input.seedPayload) {
-          return this.workflow.updateTaskWithRetry({
-            where: { id: existing.id },
-            data: {
-              seedPayloadJson: mergeSeedPayload(existing.seedPayloadJson, input.seedPayload),
-              heartbeatAt: new Date(),
-            },
-          });
+          const data: WorkflowTaskUpdateData = {
+            seedPayloadJson: mergeSeedPayload(existing.seedPayloadJson, input.seedPayload),
+            heartbeatAt: new Date(),
+          };
+          return ownership
+            ? this.workflow.updateWorkflowTaskWithOwnership({ before: existing, ownership, data })
+            : this.workflow.updateTaskWithRetry({ where: { id: existing.id }, data });
         }
         return existing;
+      }
+      if (ownership) {
+        throw new WorkflowTaskOwnershipLostError(ownership.taskId);
       }
     }
 
@@ -257,12 +275,20 @@ export class NovelWorkflowApplicationService {
     chapterId?: string | null;
     volumeId?: string | null;
     seedPayload?: Record<string, unknown>;
-  }) {
-    const existing = await this.workflow.getTaskById(taskId);
+  }, ownership?: WorkflowTaskOwnershipSnapshot) {
+    const existing = ownership
+      ? await this.workflow.getTaskByIdWithoutHealing(taskId)
+      : await this.workflow.getTaskById(taskId);
     if (!existing) {
+      if (ownership) {
+        throw new WorkflowTaskOwnershipLostError(ownership.taskId);
+      }
       throw new AppError("Workflow task not found.", 404);
     }
     if (isTaskCancellationRequested(existing)) {
+      if (ownership) {
+        throw new WorkflowTaskOwnershipLostError(ownership.taskId);
+      }
       throw new AppError("WORKFLOW_TASK_CANCELLED", 409);
     }
     const resumeTarget = this.workflow.buildResumeTarget({
@@ -273,9 +299,7 @@ export class NovelWorkflowApplicationService {
       chapterId: input.chapterId,
       volumeId: input.volumeId,
     });
-    return this.workflow.updateWorkflowTaskWithNotifications({
-      before: existing,
-      data: {
+    const data: WorkflowTaskUpdateData = {
         status: "running",
         startedAt: existing.startedAt ?? new Date(),
         finishedAt: null,
@@ -293,8 +317,10 @@ export class NovelWorkflowApplicationService {
           : existing.seedPayloadJson,
         lastError: null,
         cancelRequestedAt: null,
-      },
-    });
+      };
+    return ownership
+      ? this.workflow.updateWorkflowTaskWithOwnership({ before: existing, ownership, data })
+      : this.workflow.updateWorkflowTaskWithNotifications({ before: existing, data });
   }
 
   async markTaskWaitingApproval(taskId: string, input: {
@@ -308,12 +334,20 @@ export class NovelWorkflowApplicationService {
     chapterId?: string | null;
     volumeId?: string | null;
     seedPayload?: Record<string, unknown>;
-  }) {
-    const existing = await this.workflow.getTaskById(taskId);
+  }, ownership?: WorkflowTaskOwnershipSnapshot) {
+    const existing = ownership
+      ? await this.workflow.getTaskByIdWithoutHealing(taskId)
+      : await this.workflow.getTaskById(taskId);
     if (!existing) {
+      if (ownership) {
+        throw new WorkflowTaskOwnershipLostError(ownership.taskId);
+      }
       throw new AppError("Workflow task not found.", 404);
     }
     if (isTaskCancellationRequested(existing)) {
+      if (ownership) {
+        throw new WorkflowTaskOwnershipLostError(ownership.taskId);
+      }
       throw new AppError("WORKFLOW_TASK_CANCELLED", 409);
     }
     const resumeTarget = this.workflow.buildResumeTarget({
@@ -324,9 +358,7 @@ export class NovelWorkflowApplicationService {
       chapterId: input.chapterId,
       volumeId: input.volumeId,
     });
-    return this.workflow.updateWorkflowTaskWithNotifications({
-      before: existing,
-      data: {
+    const data: WorkflowTaskUpdateData = {
         status: "waiting_approval",
         finishedAt: null,
         heartbeatAt: new Date(),
@@ -346,16 +378,31 @@ export class NovelWorkflowApplicationService {
           : existing.seedPayloadJson,
         lastError: null,
         cancelRequestedAt: null,
-      },
-    });
+      };
+    return ownership
+      ? this.workflow.updateWorkflowTaskWithOwnership({ before: existing, ownership, data })
+      : this.workflow.updateWorkflowTaskWithNotifications({ before: existing, data });
   }
 
-  async markTaskFailed(taskId: string, message: string, patch?: Partial<SyncWorkflowStageInput>) {
-    const existing = await this.workflow.getTaskById(taskId);
+  async markTaskFailed(
+    taskId: string,
+    message: string,
+    patch?: Partial<SyncWorkflowStageInput>,
+    ownership?: WorkflowTaskOwnershipSnapshot,
+  ) {
+    const existing = ownership
+      ? await this.workflow.getTaskByIdWithoutHealing(taskId)
+      : await this.workflow.getTaskById(taskId);
     if (!existing) {
+      if (ownership) {
+        throw new WorkflowTaskOwnershipLostError(ownership.taskId);
+      }
       return null;
     }
     if (isTaskCancellationRequested(existing)) {
+      if (ownership) {
+        throw new WorkflowTaskOwnershipLostError(ownership.taskId);
+      }
       return existing;
     }
     const stage = patch?.stage ?? "auto_director";
@@ -367,9 +414,7 @@ export class NovelWorkflowApplicationService {
       chapterId: patch?.chapterId,
       volumeId: patch?.volumeId,
     });
-    return this.workflow.updateWorkflowTaskWithNotifications({
-      before: existing,
-      data: {
+    const data: WorkflowTaskUpdateData = {
         status: "failed",
         finishedAt: new Date(),
         heartbeatAt: new Date(),
@@ -380,8 +425,10 @@ export class NovelWorkflowApplicationService {
         checkpointSummary: patch?.checkpointSummary ?? existing.checkpointSummary,
         resumeTargetJson: stringifyResumeTarget(resumeTarget),
         lastError: message.trim(),
-      },
-    });
+      };
+    return ownership
+      ? this.workflow.updateWorkflowTaskWithOwnership({ before: existing, ownership, data })
+      : this.workflow.updateWorkflowTaskWithNotifications({ before: existing, data });
   }
 
   async markTaskFailedForRecovery(
@@ -601,12 +648,20 @@ export class NovelWorkflowApplicationService {
     volumeId?: string | null;
     progress?: number;
     seedPayload?: Record<string, unknown>;
-  }) {
-    const existing = await this.workflow.getTaskById(taskId);
+  }, ownership?: WorkflowTaskOwnershipSnapshot) {
+    const existing = ownership
+      ? await this.workflow.getTaskByIdWithoutHealing(taskId)
+      : await this.workflow.getTaskById(taskId);
     if (!existing) {
+      if (ownership) {
+        throw new WorkflowTaskOwnershipLostError(ownership.taskId);
+      }
       throw new AppError("Workflow task not found.", 404);
     }
     if (isTaskCancellationRequested(existing)) {
+      if (ownership) {
+        throw new WorkflowTaskOwnershipLostError(ownership.taskId);
+      }
       throw new AppError("WORKFLOW_TASK_CANCELLED", 409);
     }
     const resumeTarget = this.workflow.buildResumeTarget({
@@ -617,9 +672,7 @@ export class NovelWorkflowApplicationService {
       chapterId: input.chapterId,
       volumeId: input.volumeId,
     });
-    return this.workflow.updateWorkflowTaskWithNotifications({
-      before: existing,
-      data: {
+    const data: WorkflowTaskUpdateData = {
         status: input.checkpointType === "workflow_completed" ? "succeeded" : "waiting_approval",
         progress: input.progress ?? defaultProgressForStage(input.stage),
         currentStage: stageLabel(input.stage),
@@ -635,8 +688,10 @@ export class NovelWorkflowApplicationService {
           : existing.seedPayloadJson,
         milestonesJson: appendMilestone(existing.milestonesJson, input.checkpointType, input.checkpointSummary),
         lastError: null,
-      },
-    });
+      };
+    return ownership
+      ? this.workflow.updateWorkflowTaskWithOwnership({ before: existing, ownership, data })
+      : this.workflow.updateWorkflowTaskWithNotifications({ before: existing, data });
   }
 
   async syncStageByNovelId(novelId: string, input: SyncWorkflowStageInput) {

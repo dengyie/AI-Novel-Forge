@@ -92,12 +92,16 @@ export async function shouldStopAutoExecution(
   taskId: string,
   pipelineJobId?: string | null,
 ): Promise<boolean> {
-  const row = await deps.workflowService.getTaskById(taskId);
+  if (deps.ownershipFence) {
+    await deps.ownershipFence.assertActive();
+    return false;
+  }
+  const row = await deps.workflowService.getTaskByIdWithoutHealing(taskId);
   if (!row || row.status !== "cancelled") {
     return false;
   }
   if (pipelineJobId) {
-    await deps.novelService.cancelPipelineJob(pipelineJobId).catch(() => null);
+    await deps.novelService.cancelPipelineJob(pipelineJobId);
   }
   return true;
 }
