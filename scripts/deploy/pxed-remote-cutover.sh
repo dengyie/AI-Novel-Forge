@@ -12,6 +12,7 @@
 #   APP_DIR             默认 /personal/pxed/ai-novel
 #   SUPERVISOR_CONF     默认 /personal/pxed/supervisord.conf
 #   SNAPSHOT_ROOT       默认 /data/ainovel/db-snapshots
+#   SNAPSHOT_RETENTION_COUNT  保留的 pre-* 快照数（默认 10；仅部署成功后自清超龄，失败不动）
 #   SKIP_GIT_RESET=1    跳过 git reset（仅 overlay dist；不推荐）
 #   ALLOW_LOCKFILE_DRIFT=1  允许 pnpm-lock 相对 prev tip 变更而不失败（默认失败，需人工 install）
 #   RUN_PNPM_INSTALL=1  lockfile 变更时尝试 pnpm install --frozen-lockfile（慢）
@@ -20,6 +21,7 @@ set -euo pipefail
 APP_DIR="${APP_DIR:-/personal/pxed/ai-novel}"
 SUPERVISOR_CONF="${SUPERVISOR_CONF:-/personal/pxed/supervisord.conf}"
 SNAPSHOT_ROOT="${SNAPSHOT_ROOT:-/data/ainovel/db-snapshots}"
+SNAPSHOT_RETENTION_COUNT="${SNAPSHOT_RETENTION_COUNT:-10}"
 DEPLOY_SHA="${DEPLOY_SHA:?DEPLOY_SHA required}"
 DEPLOY_COMPONENTS="${DEPLOY_COMPONENTS:-server}"
 SERVER_TGZ="${SERVER_TGZ:?SERVER_TGZ required}"
@@ -31,6 +33,9 @@ RUN_PNPM_INSTALL="${RUN_PNPM_INSTALL:-0}"
 # 允许在活跃 auto_director 任务时强行 restart（默认拒绝，防止打断在途章节生成）
 ALLOW_RESTART_WITH_ACTIVE_DIRECTOR="${ALLOW_RESTART_WITH_ACTIVE_DIRECTOR:-0}"
 
+[[ "$SNAPSHOT_RETENTION_COUNT" =~ ^[0-9]+$ ]] && (( SNAPSHOT_RETENTION_COUNT >= 1 )) \
+  || die "SNAPSHOT_RETENTION_COUNT must be a positive integer, got '$SNAPSHOT_RETENTION_COUNT'"
+
 log() { printf '[pxed-cutover] %s\n' "$*"; }
 die() { printf '[pxed-cutover] ERROR: %s\n' "$*" >&2; exit 1; }
 
@@ -40,6 +45,32 @@ need_file() {
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "missing command: $1"
+}
+
+# 只清超龄 pre-* 快照目录（保留最近 $keep 个），不动 auto/ 与顶层手动还原点
+prune_old_snapshots() {
+  local keep="$1"
+  local snaps=()
+  local d
+  # ls -dt 按 mtime 降序（新→旧）；pre-* 目录名无空格，可安全按行切
+  local IFS=$'\n'
+  shopt -s nullglob
+  for d in $(ls -dt "$SNAPSHOT_ROOT"/pre-*/ 2>/dev/null); do
+    [[ -d "$d" ]] && snaps+=("$d")
+  done
+  shopt -u nullglob
+  local total="${#snaps[@]}"
+  if (( total <= keep )); then
+    log "snapshot retention: keep $total (<= $keep), nothing to prune"
+    return 0
+  fi
+  local i removed=0
+  for (( i=keep; i<total; i++ )); do
+    d="${snaps[$i]}"
+    rm -rf -- "$d"
+    removed=$(( removed + 1 ))
+  done
+  log "snapshot retention: pruned $removed pre-* dirs (kept $keep of $total)"
 }
 
 # 避免 curl|head SIGPIPE（pipefail 下 exit 141）假失败
@@ -138,19 +169,29 @@ log "snapshot → $SNAP_DIR"
 # DB：热拷 best-effort（服务可能仍在写）。优先 sqlite .backup 若可用。
 if [[ -f "$SERVER_DIR/dev.db" ]] && command -v sqlite3 >/dev/null 2>&1; then
   if sqlite3 "$SERVER_DIR/dev.db" ".backup '$SNAP_DIR/db/dev.db'" 2>/dev/null; then
-    # 一并留 wal/shm 参考（backup 已合并进 dev.db）
+    # .backup 已合并进 dev.db；gzip 压缩（约 330M → 80M），恢复时 gunzip
     echo "db_snapshot=sqlite3_backup" >>"$SNAP_DIR/META"
-    log "db snapshot via sqlite3 .backup"
+    if gzip -f "$SNAP_DIR/db/dev.db" 2>/dev/null; then
+      echo "db_snapshot_gzip=1" >>"$SNAP_DIR/META"
+      log "db snapshot via sqlite3 .backup + gzip"
+    else
+      log "warn: gzip failed; snapshot dev.db left uncompressed"
+    fi
   else
-    cp -a "$SERVER_DIR"/dev.db* "$SNAP_DIR/db/" 2>/dev/null || true
+    # 只拷 dev.db + wal/shm，别 cp -a dev.db* 把 live 目录陈旧 .bak 拖进快照
+    cp -a "$SERVER_DIR/dev.db" "$SNAP_DIR/db/dev.db" 2>/dev/null || true
+    cp -a "$SERVER_DIR/dev.db-wal" "$SERVER_DIR/dev.db-shm" "$SNAP_DIR/db/" 2>/dev/null || true
+    gzip -f "$SNAP_DIR/db/dev.db" 2>/dev/null || true
     echo "db_snapshot=best_effort_live_copy" >>"$SNAP_DIR/META"
-    log "warn: sqlite3 .backup failed; fell back to cp -a dev.db*"
+    log "warn: sqlite3 .backup failed; fell back to cp dev.db + wal/shm + gzip"
   fi
-elif compgen -G "$SERVER_DIR/dev.db*" >/dev/null; then
-  cp -a "$SERVER_DIR"/dev.db* "$SNAP_DIR/db/" || true
-  log "db snapshot via cp -a (no sqlite3 or no dev.db)"
+elif compgen -G "$SERVER_DIR/dev.db" >/dev/null; then
+  cp -a "$SERVER_DIR/dev.db" "$SNAP_DIR/db/dev.db" || true
+  cp -a "$SERVER_DIR/dev.db-wal" "$SERVER_DIR/dev.db-shm" "$SNAP_DIR/db/" 2>/dev/null || true
+  gzip -f "$SNAP_DIR/db/dev.db" 2>/dev/null || true
+  log "db snapshot via cp dev.db + wal/shm (no sqlite3)"
 else
-  log "warn: no server/dev.db* found (still continue)"
+  log "warn: no server/dev.db found (still continue)"
 fi
 
 if [[ -d "$SERVER_DIR/dist" ]]; then
@@ -362,4 +403,8 @@ fi
 
 log "done sha=$(git rev-parse --short HEAD 2>/dev/null || echo "$SHORT_SHA") snap=$SNAP_DIR"
 log "rollback: tar xzf $SNAP_DIR/server-dist/dist.tgz -C $SERVER_DIR  (after rm -rf dist) then supervisorctl restart novel-server"
+log "rollback DB: zcat $SNAP_DIR/db/dev.db.gz > $SERVER_DIR/dev.db (best_effort 需一并放回 dev.db-wal/shm) then supervisorctl restart novel-server"
 log "note: failed cutover does NOT auto-rollback; use snap above. Drain long director/TTS jobs before approving next deploy."
+
+# 部署成功后才清超龄 pre-* 快照（set -e 下失败会在 health 前 exit，本次快照保留供回滚）
+prune_old_snapshots "$SNAPSHOT_RETENTION_COUNT"
