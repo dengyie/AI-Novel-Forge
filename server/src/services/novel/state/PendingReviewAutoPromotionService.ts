@@ -323,10 +323,10 @@ export class PendingReviewAutoPromotionService {
     const supersededIds = preview.superseded.map((item) => item.proposalId);
     const promotedIds = preview.promotable.map((item) => item.proposalId);
 
+    await options.beforeCommit?.();
     let commitResult: OwnedStateCommitResult | null = null;
     let ownership = options.ownership ?? null;
     if (promotedIds.length > 0 || supersededIds.length > 0) {
-      await options.beforeCommit?.();
       commitResult = await this.getCommitService().commitExistingProposals({
           novelId,
           proposalIds: promotedIds,

@@ -304,6 +304,40 @@ test("PendingReviewAutoPromotionService aborts before proposal commit when owner
   assert.equal(calls.update, undefined);
 });
 
+test("PendingReviewAutoPromotionService does not write a no-candidate ledger after ownership is lost during preview", async () => {
+  const calls = {};
+  const ownershipLost = new Error("AUTO_EXECUTION_OWNERSHIP_LOST");
+  const service = new PendingReviewAutoPromotionService({
+    proposalStore: buildProposalStore([], calls),
+    conflictStore: { async findMany() { return []; } },
+    stateCommitService: {
+      async commitExistingProposals() {
+        calls.commit = true;
+        return null;
+      },
+    },
+    ledgerEventService: {
+      async recordEvent() {
+        calls.ledger = true;
+      },
+    },
+    now: () => new Date("2026-07-01T00:00:00.000Z"),
+  });
+
+  await assert.rejects(() => service.apply("novel-1", {
+    since: "2026-06-01T00:00:00.000Z",
+    dryRun: false,
+    eligibleAfterDays: 14,
+    beforeCommit: async () => {
+      calls.beforeCommit = (calls.beforeCommit ?? 0) + 1;
+      throw ownershipLost;
+    },
+  }), (error) => error === ownershipLost);
+  assert.equal(calls.beforeCommit, 1);
+  assert.equal(calls.commit, undefined);
+  assert.equal(calls.ledger, undefined);
+});
+
 test("PendingReviewAutoPromotionService delegates promoted and superseded writes with one ownership snapshot", async () => {
   const rows = [
     row({
