@@ -100,6 +100,7 @@ export async function applyAutoDirectorSafeFix(input: {
       pendingManualRecovery: false,
       heartbeatAt: new Date(),
       lastError: null,
+      ownershipVersion: { increment: 1 },
     },
   });
 

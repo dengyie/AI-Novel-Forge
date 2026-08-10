@@ -53,7 +53,7 @@ function createRuntime(deps) {
   const rawLookup = workflow.getTaskByIdWithoutHealing?.bind(workflow);
   let taskId = "task-1";
   let attemptCount = 1;
-  let version = 0;
+  let ownershipVersion = 0;
   let updatedAt = new Date("2026-08-10T00:00:00.000Z");
   workflow.getTaskByIdWithoutHealing = async (requestedTaskId) => {
     taskId = requestedTaskId;
@@ -62,10 +62,12 @@ function createRuntime(deps) {
       return null;
     }
     attemptCount = Number.isInteger(row.attemptCount) ? row.attemptCount : attemptCount;
+    ownershipVersion = Number.isInteger(row.ownershipVersion) ? row.ownershipVersion : ownershipVersion;
     return {
       cancelRequestedAt: null,
       ...row,
       attemptCount,
+      ownershipVersion,
       updatedAt,
     };
   };
@@ -77,14 +79,15 @@ function createRuntime(deps) {
     workflow[method] = async (...args) => {
       const result = await original(...args);
       taskId = method === "bootstrapTask" ? (args[0]?.workflowTaskId ?? taskId) : (args[0] ?? taskId);
-      version += 1;
-      updatedAt = new Date(Date.parse("2026-08-10T00:00:00.000Z") + version);
+      ownershipVersion += 1;
+      updatedAt = new Date(Date.parse("2026-08-10T00:00:00.000Z") + ownershipVersion);
       return {
         id: taskId,
         status: method === "recordCheckpoint" && args[1]?.checkpointType === "workflow_completed"
           ? "succeeded"
           : (method === "markTaskFailed" ? "failed" : "running"),
         attemptCount,
+        ownershipVersion,
         updatedAt,
         cancelRequestedAt: null,
         ...(result && typeof result === "object" ? result : {}),

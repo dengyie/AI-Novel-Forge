@@ -1,7 +1,7 @@
 export interface WorkflowTaskOwnershipSnapshot {
   taskId: string;
   attemptCount: number;
-  updatedAt: Date;
+  ownershipVersion: number;
 }
 
 export class WorkflowTaskOwnershipLostError extends Error {

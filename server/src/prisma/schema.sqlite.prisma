@@ -1919,6 +1919,7 @@ model NovelWorkflowTask {
   finishedAt         DateTime?
   cancelRequestedAt  DateTime?
   attemptCount       Int                     @default(0)
+  ownershipVersion   Int                     @default(0)
   maxAttempts        Int                     @default(3)
   lastError          String?
   promptTokens       Int                     @default(0)

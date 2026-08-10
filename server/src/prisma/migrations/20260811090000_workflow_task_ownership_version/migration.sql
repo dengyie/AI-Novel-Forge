@@ -1,0 +1,2 @@
+ALTER TABLE "NovelWorkflowTask"
+  ADD COLUMN IF NOT EXISTS "ownershipVersion" INTEGER NOT NULL DEFAULT 0;

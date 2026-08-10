@@ -29,6 +29,7 @@ export class WorkflowRetryService {
         status: existing.checkpointType ? "waiting_approval" : "queued",
         pendingManualRecovery: false,
         attemptCount: existing.attemptCount + 1,
+        ownershipVersion: { increment: 1 },
         lastError: null,
         finishedAt: null,
         cancelRequestedAt: null,

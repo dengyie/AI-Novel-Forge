@@ -180,6 +180,7 @@ async function appendAutoApprovalMilestone(input: {
     where: { id: input.taskId },
     data: {
       milestonesJson: appendMilestone(task.milestonesJson, input.checkpointType, input.summary),
+      ownershipVersion: { increment: 1 },
     },
   });
 }

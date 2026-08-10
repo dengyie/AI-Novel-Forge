@@ -139,6 +139,7 @@ export class DirectorCommandAcceptanceService {
             cancelRequestedAt: null,
             heartbeatAt: new Date(),
             ...(input.seedPayloadJson ? { seedPayloadJson: input.seedPayloadJson } : {}),
+            ownershipVersion: { increment: 1 },
           },
         });
         if (projected.count !== 1) {
@@ -241,6 +242,7 @@ export class DirectorCommandAcceptanceService {
         heartbeatAt: new Date(),
         finishedAt: null,
         cancelRequestedAt: null,
+        ownershipVersion: { increment: 1 },
       },
     });
     return result.count > 0;

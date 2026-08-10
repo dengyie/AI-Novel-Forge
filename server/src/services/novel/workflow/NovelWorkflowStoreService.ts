@@ -64,14 +64,26 @@ export class NovelWorkflowStoreService {
 
   public updateTaskWithRetry(args: NovelWorkflowTaskUpdateArgs) {
     return withSqliteRetry(
-      () => prisma.novelWorkflowTask.update(args),
+      () => prisma.novelWorkflowTask.update({
+        ...args,
+        data: {
+          ...args.data,
+          ownershipVersion: { increment: 1 },
+        },
+      }),
       { label: "novelWorkflowTask.update" },
     );
   }
 
   public updateTaskManyWithRetry(args: NovelWorkflowTaskUpdateManyArgs) {
     return withSqliteRetry(
-      () => prisma.novelWorkflowTask.updateMany(args),
+      () => prisma.novelWorkflowTask.updateMany({
+        ...args,
+        data: {
+          ...args.data,
+          ownershipVersion: { increment: 1 },
+        },
+      }),
       { label: "novelWorkflowTask.updateMany" },
     );
   }
@@ -174,7 +186,10 @@ export class NovelWorkflowStoreService {
     const next = await withSqliteRetry(
       () => prisma.novelWorkflowTask.update({
         where: { id: input.before.id },
-        data: input.data,
+        data: {
+          ...input.data,
+          ownershipVersion: { increment: 1 },
+        },
         include: {
           novel: {
             select: {
@@ -228,9 +243,12 @@ export class NovelWorkflowStoreService {
             status: { in: ["queued", "running", "waiting_approval", "failed"] },
             cancelRequestedAt: null,
             attemptCount: input.ownership.attemptCount,
-            updatedAt: input.ownership.updatedAt,
+            ownershipVersion: input.ownership.ownershipVersion,
           },
-          data: input.data,
+          data: {
+            ...input.data,
+            ownershipVersion: { increment: 1 },
+          },
         });
         if (claimed.count !== 1) {
           throw new WorkflowTaskOwnershipLostError(input.ownership.taskId);

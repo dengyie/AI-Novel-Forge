@@ -117,7 +117,7 @@ export class DirectorCommandLeaseService {
               },
               data: row.cancelRequestedAt
                 ? { updatedAt: row.updatedAt }
-                : { cancelRequestedAt: now },
+                : { cancelRequestedAt: now, ownershipVersion: { increment: 1 } },
             });
             if (claimed.count !== 1) {
               throw new AppError("Task state changed before cancellation was accepted.", 409);
@@ -144,6 +144,7 @@ export class DirectorCommandLeaseService {
                 cancelRequestedAt: now,
                 finishedAt: now,
                 heartbeatAt: now,
+                ownershipVersion: { increment: 1 },
               },
             });
             if (claimed.count !== 1) {
@@ -307,6 +308,7 @@ export class DirectorCommandLeaseService {
                 lastError: null,
                 heartbeatAt: now,
                 finishedAt: null,
+                ownershipVersion: { increment: 1 },
               }
               : {
                 status: "queued",
@@ -314,6 +316,7 @@ export class DirectorCommandLeaseService {
                 lastError: STALE_COMMAND_MANUAL_RECOVERY_MESSAGE,
                 heartbeatAt: null,
                 finishedAt: null,
+                ownershipVersion: { increment: 1 },
               },
           });
 
@@ -530,6 +533,7 @@ export class DirectorCommandLeaseService {
           cancelRequestedAt: null,
           heartbeatAt: null,
           lastError: message.trim(),
+          ownershipVersion: { increment: 1 },
         },
       });
       if (projected.count !== 1) {

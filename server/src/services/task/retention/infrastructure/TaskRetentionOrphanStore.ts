@@ -38,6 +38,7 @@ export class TaskRetentionOrphanStore {
           finishedAt: now,
           heartbeatAt: now,
           lastError: NULL_NOVEL_ORPHAN_MESSAGE,
+          ownershipVersion: { increment: 1 },
         },
       });
       if (cancelled.count > 0) {

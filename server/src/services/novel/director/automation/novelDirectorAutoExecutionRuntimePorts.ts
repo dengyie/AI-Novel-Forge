@@ -33,6 +33,7 @@ export interface NovelDirectorAutoExecutionWorkflowPort {
   getTaskByIdWithoutHealing(taskId: string): Promise<{
     status: string;
     attemptCount: number;
+    ownershipVersion: number;
     updatedAt: Date;
     cancelRequestedAt?: Date | null;
   } | null>;

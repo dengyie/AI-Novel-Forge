@@ -46,6 +46,7 @@ export class DirectorStateCommitter {
       data: {
         status: "waiting_approval",
         currentItemLabel: input.message,
+        ownershipVersion: { increment: 1 },
       },
     }).catch(() => undefined);
     await prisma.directorEvent.create({

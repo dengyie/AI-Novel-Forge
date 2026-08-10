@@ -343,6 +343,7 @@ export class DirectorCommandExecutor {
             directorCommandResults,
           }),
           heartbeatAt: now,
+          ownershipVersion: { increment: 1 },
         },
       });
     });

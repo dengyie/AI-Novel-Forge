@@ -254,6 +254,7 @@ export async function cancelContinueExistingReplacedRuns(input: {
       heartbeatAt: now,
       lastError: replacementSummary,
       currentItemLabel: "已由新的自动导演任务接管",
+      ownershipVersion: { increment: 1 },
       seedPayloadJson: mergeSeedPayload(task.seedPayloadJson, {
         replacementTaskId,
         replacementReason: CONTINUE_EXISTING_REPLACEMENT_REASON,

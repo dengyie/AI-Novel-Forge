@@ -200,6 +200,7 @@ export async function syncActiveAutoDirectorAutoExecutionTaskState(input: {
       cancelRequestedAt: null,
       seedPayloadJson: activeExecution.seedPayloadJson,
       lastError: null,
+      ownershipVersion: { increment: 1 },
     },
   }), { label: "novelWorkflowTask.update" });
   return { active: true, healed: true };
@@ -370,6 +371,7 @@ export async function syncAutoDirectorChapterBatchCheckpoint(input: {
         seedPayloadJson: nextSeedPayloadJson,
         milestonesJson: appendMilestone(existing.milestonesJson, "workflow_completed", reconciliation.checkpointSummary),
         lastError: null,
+        ownershipVersion: { increment: 1 },
       },
     }), { label: "novelWorkflowTask.update" });
     return true;
@@ -392,6 +394,7 @@ export async function syncAutoDirectorChapterBatchCheckpoint(input: {
       resumeTargetJson: nextResumeTargetJson,
       heartbeatAt: new Date(),
       seedPayloadJson: nextSeedPayloadJson,
+      ownershipVersion: { increment: 1 },
     },
   }), { label: "novelWorkflowTask.update" });
   return true;

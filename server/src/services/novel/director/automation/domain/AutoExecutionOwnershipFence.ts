@@ -57,11 +57,11 @@ export class AutoExecutionOwnershipFence {
     const current = {
       taskId: this.taskId,
       attemptCount: task.attemptCount,
-      updatedAt: task.updatedAt,
+      ownershipVersion: task.ownershipVersion,
     };
     if (this.ownership && (
       current.attemptCount !== this.ownership.attemptCount
-      || current.updatedAt.getTime() !== this.ownership.updatedAt.getTime()
+      || current.ownershipVersion !== this.ownership.ownershipVersion
     )) {
       return this.failOwnership();
     }
@@ -107,19 +107,18 @@ export class AutoExecutionOwnershipFence {
   }
 
   private readOwnershipFromWriteResult(result: unknown): WorkflowTaskOwnershipSnapshot {
-    const row = result as { id?: unknown; attemptCount?: unknown; updatedAt?: unknown } | null;
+    const row = result as { id?: unknown; attemptCount?: unknown; ownershipVersion?: unknown } | null;
     if (
       row?.id !== this.taskId
       || !Number.isInteger(row.attemptCount)
-      || !(row.updatedAt instanceof Date)
-      || Number.isNaN(row.updatedAt.getTime())
+      || !Number.isInteger(row.ownershipVersion)
     ) {
       throw new Error("Owned workflow write did not return a valid ownership snapshot.");
     }
     return {
       taskId: this.taskId,
       attemptCount: row.attemptCount as number,
-      updatedAt: row.updatedAt,
+      ownershipVersion: row.ownershipVersion as number,
     };
   }
 

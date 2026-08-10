@@ -76,6 +76,7 @@ export class AutoDirectorRetentionCoordinator {
           finishedAt: now,
           heartbeatAt: now,
           lastError: STALE_AUTO_DIRECTOR_RUNNING_MESSAGE,
+          ownershipVersion: { increment: 1 },
         },
       });
       cancelled += result.count;
@@ -123,6 +124,7 @@ export class AutoDirectorRetentionCoordinator {
           status: "failed",
           finishedAt: now,
           heartbeatAt: now,
+          ownershipVersion: { increment: 1 },
           pendingManualRecovery: true,
           lastError: "任务长时间没有心跳，可能已因服务重启或执行器异常中断。可在恢复候选中继续或重试。",
         },
@@ -151,7 +153,7 @@ export class AutoDirectorRetentionCoordinator {
       const ids = staleApproval.map((row) => row.id);
       const flagged = await prisma.novelWorkflowTask.updateMany({
         where: { id: { in: ids }, status: "waiting_approval", pendingManualRecovery: false },
-        data: { pendingManualRecovery: true },
+        data: { pendingManualRecovery: true, ownershipVersion: { increment: 1 } },
       });
       summary.waitingApprovalFlagged += flagged.count;
       if (flagged.count > 0) {
@@ -230,7 +232,7 @@ export class AutoDirectorRetentionCoordinator {
       ) {
         const flagged = await prisma.novelWorkflowTask.updateMany({
           where: { id: row.id, status: "failed", pendingManualRecovery: false },
-          data: { pendingManualRecovery: true },
+          data: { pendingManualRecovery: true, ownershipVersion: { increment: 1 } },
         });
         if (flagged.count > 0) {
           summary.autoRetryBudgetSkipped += 1;
