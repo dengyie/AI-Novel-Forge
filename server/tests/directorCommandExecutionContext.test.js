@@ -165,3 +165,22 @@ test("DirectorCommandExecutor does not start the runner after abort during usage
   );
   assert.equal(runnerStarted, false);
 });
+
+test("DirectorCommandExecutor propagates raw task lookup infrastructure errors at command completion", async () => {
+  const service = new NovelDirectorService();
+  const infrastructureError = new Error("workflow database unavailable");
+  service.buildDirectorUsageContext = async () => ({
+    workflowTaskId: "task-command",
+    directorTelemetry: true,
+  });
+  service.confirmCandidate = async () => undefined;
+  const executor = buildExecutor(service);
+  executor.workflowService.getTaskByIdWithoutHealing = async () => {
+    throw infrastructureError;
+  };
+
+  await assert.rejects(
+    executor.execute("command-1"),
+    (error) => error === infrastructureError,
+  );
+});

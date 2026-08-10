@@ -265,7 +265,7 @@ export class DirectorCommandExecutor {
     context: DirectorCommandExecutionContext,
   ): Promise<DirectorCommandExecutionOutcome> {
     throwIfDirectorCommandLeaseLost(context.signal, { leaseOwner: context.leaseOwner });
-    const row = await this.workflowService.getTaskByIdWithoutHealing(taskId).catch(() => null);
+    const row = await this.workflowService.getTaskByIdWithoutHealing(taskId);
     throwIfDirectorCommandLeaseLost(context.signal, { leaseOwner: context.leaseOwner });
     return row?.status === "cancelled" || row?.cancelRequestedAt ? "cancelled" : "completed";
   }
