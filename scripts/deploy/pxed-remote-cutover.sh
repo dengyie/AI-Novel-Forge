@@ -183,6 +183,7 @@ if [[ -f "$SERVER_DIR/dev.db" ]] && command -v sqlite3 >/dev/null 2>&1; then
       echo "db_snapshot_gzip=1" >>"$SNAP_DIR/META"
       log "db snapshot via sqlite3 .backup + gzip"
     else
+      echo "db_snapshot_gzip=0" >>"$SNAP_DIR/META"
       log "warn: gzip failed; snapshot dev.db left uncompressed"
     fi
   else
