@@ -101,6 +101,12 @@ test("six advancing defer-and-continue chapters do not fail the full-book run", 
   let finalChapterCompleted = false;
   let currentOrder = 1;
   let exposeCurrentDebt = false;
+  const workflowUpdatedAt = new Date("2026-08-10T00:00:00.000Z");
+  const workflowOwnershipRow = (taskId = "task-quality-debt") => ({
+    id: taskId,
+    attemptCount: 0,
+    updatedAt: workflowUpdatedAt,
+  });
   const originalUsageFindMany = prisma.directorLlmUsageRecord.findMany;
   prisma.directorLlmUsageRecord.findMany = async () => [];
 
@@ -169,16 +175,21 @@ test("six advancing defer-and-continue chapters do not fail the full-book run", 
           nextOrder,
           input.seedPayload.autoExecution?.skippedChapterOrders ?? [],
         ]);
+        return workflowOwnershipRow(input.workflowTaskId);
       },
-      async getTaskById() {
-        return { status: "running" };
+      async getTaskByIdWithoutHealing() {
+        return { status: "running", ...workflowOwnershipRow() };
       },
-      async markTaskRunning() {},
+      async markTaskRunning(taskId) {
+        return workflowOwnershipRow(taskId);
+      },
       async recordCheckpoint(_taskId, input) {
         calls.push(["recordCheckpoint", input.checkpointType]);
+        return workflowOwnershipRow(_taskId);
       },
       async markTaskFailed(_taskId, message) {
         calls.push(["markTaskFailed", message]);
+        return workflowOwnershipRow(_taskId);
       },
     },
     buildDirectorSeedPayload(_request, _novelId, extra) {
