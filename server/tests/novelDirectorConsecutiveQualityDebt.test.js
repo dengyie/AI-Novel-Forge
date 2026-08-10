@@ -105,6 +105,7 @@ test("six advancing defer-and-continue chapters do not fail the full-book run", 
   const workflowOwnershipRow = (taskId = "task-quality-debt") => ({
     id: taskId,
     attemptCount: 0,
+    ownershipVersion: 0,
     updatedAt: workflowUpdatedAt,
   });
   const originalUsageFindMany = prisma.directorLlmUsageRecord.findMany;
