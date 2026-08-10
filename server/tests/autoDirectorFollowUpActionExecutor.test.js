@@ -295,12 +295,16 @@ test("auto director follow-up action executor retries with the route model and r
 
 test("novel workflow retry forces auto director resume after retry state healing", async () => {
   const adapter = new NovelWorkflowTaskAdapter();
-  const calls = [];
-  const retryCalls = [];
-  const originalArchiveFindUnique = prisma.taskCenterArchive.findUnique;
+  const retryCommands = [];
+  const originals = {
+    archiveFindUnique: prisma.taskCenterArchive.findUnique,
+    getTaskByIdWithoutHealing: adapter.workflowService.getTaskByIdWithoutHealing,
+    enqueueRetryCommand: adapter.directorCommandService.enqueueRetryCommand,
+    detail: adapter.detail,
+  };
 
   prisma.taskCenterArchive.findUnique = async () => null;
-  adapter.workflowService.getTaskById = async () => buildWorkflowRow({
+  adapter.workflowService.getTaskByIdWithoutHealing = async () => buildWorkflowRow({
     id: "task_cancelled_structured",
     status: "cancelled",
     checkpointType: null,
@@ -308,13 +312,14 @@ test("novel workflow retry forces auto director resume after retry state healing
     currentItemKey: "chapter_list",
     currentItemLabel: "正在生成第 1 卷节奏段：开卷抓手",
   });
-  adapter.workflowService.retryTask = async (taskId) => {
-    retryCalls.push(taskId);
-    // 真实 retryTask 认领成功返回更新后的行；返回 null 会跳过 continue。
-    return { id: taskId, status: "queued" };
-  };
-  adapter.novelDirectorService.continueTask = async (taskId, input) => {
-    calls.push({ taskId, input });
+  adapter.directorCommandService.enqueueRetryCommand = async (input) => {
+    retryCommands.push(input);
+    return {
+      commandId: "command-retry-1",
+      taskId: input.taskId,
+      commandType: "retry",
+      status: "queued",
+    };
   };
   adapter.detail = async (taskId) => buildTaskDetail(taskId, {
     status: "running",
@@ -323,22 +328,24 @@ test("novel workflow retry forces auto director resume after retry state healing
     currentItemLabel: "正在生成第 1 卷节奏段：开卷抓手",
   });
 
-  const result = await adapter.retry({
-    id: "task_cancelled_structured",
-    resume: true,
-  });
+  try {
+    const result = await adapter.retry({
+      id: "task_cancelled_structured",
+      resume: true,
+    });
 
-  assert.equal(result.id, "task_cancelled_structured");
-  assert.deepEqual(retryCalls, ["task_cancelled_structured"]);
-  assert.deepEqual(calls, [{
-    taskId: "task_cancelled_structured",
-    input: {
+    assert.equal(result.id, "task_cancelled_structured");
+    assert.deepEqual(retryCommands, [{
+      taskId: "task_cancelled_structured",
+      llmOverride: undefined,
       batchAlreadyStartedCount: undefined,
-      forceResume: true,
-    },
-  }]);
-
-  prisma.taskCenterArchive.findUnique = originalArchiveFindUnique;
+    }]);
+  } finally {
+    prisma.taskCenterArchive.findUnique = originals.archiveFindUnique;
+    adapter.workflowService.getTaskByIdWithoutHealing = originals.getTaskByIdWithoutHealing;
+    adapter.directorCommandService.enqueueRetryCommand = originals.enqueueRetryCommand;
+    adapter.detail = originals.detail;
+  }
 });
 
 test("auto director follow-up action executor returns forbidden when the action is not allowed for the current reason", async () => {

@@ -14,7 +14,7 @@ function makeStoreStub(existing) {
   const notifications = [];
   return {
     notifications,
-    getTaskById: async () => existing,
+    getTaskByIdWithoutHealing: async () => existing,
     notifyAutoDirectorTaskTransition: async (input) => {
       notifications.push(input);
     },
@@ -31,6 +31,7 @@ function makeExisting(overrides = {}) {
     pendingManualRecovery: false,
     attemptCount: 1,
     maxAttempts: 3,
+    cancelRequestedAt: null,
     updatedAt: new Date("2026-07-30T00:00:00.000Z"),
     ...overrides,
   };
@@ -55,10 +56,11 @@ test("retryTask claims exactly once: conditional updateMany increments attemptCo
   try {
     const result = await service.retryTask("wf-1");
     assert.equal(claimArgs.length, 1, "single conditional claim");
-    // 防竞态 + 幂等守卫
-    assert.deepEqual(claimArgs[0].where.status.in.sort(), ["cancelled", "failed"]);
+    // 防竞态 + 幂等守卫（822b001 起为精确状态 + updatedAt CAS，非 in 宽匹配）
+    assert.equal(claimArgs[0].where.status, "failed", "status guard pins the read value");
     assert.equal(claimArgs[0].where.pendingManualRecovery, false);
     assert.equal(claimArgs[0].where.cancelRequestedAt, null);
+    assert.equal(claimArgs[0].where.updatedAt, existing.updatedAt, "updatedAt CAS guard pins the read value");
     assert.equal(claimArgs[0].where.attemptCount, 1, "attempt guard pins the read value");
     assert.equal(claimArgs[0].data.attemptCount, 2, "increments exactly once");
     // 通知用 fresh 行
