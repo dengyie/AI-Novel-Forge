@@ -168,6 +168,56 @@ test("display state keeps running mode when task is running despite stale approv
   assert.equal(displayState.steps[4].status, "running");
 });
 
+test("completed display state prefers task terminal facts over a trailing runtime projection", () => {
+  const displayState = buildDirectorDisplayState({
+    task: {
+      status: "succeeded",
+      currentStage: "quality_repair",
+      currentItemKey: "quality_repair",
+      currentItemLabel: "第 11-12 章自动执行完成",
+      progress: 1,
+      checkpointType: "workflow_completed",
+      checkpointSummary: "本轮章节执行、审核与修复已完成。",
+      lastError: null,
+      pendingManualRecovery: false,
+    },
+    projection: {
+      status: "completed",
+      currentLabel: "同步角色资源状态完成。",
+      currentAction: "同步角色资源状态完成。",
+      lastEventSummary: "同步角色资源状态完成。",
+      requiresUserAction: false,
+      progressBreakdown: {
+        totalPercent: 32,
+        activeJobProgress: 1,
+      },
+    },
+    factSummary: {
+      allStepsCompleted: true,
+      completedStepCount: 10,
+      totalStepCount: 10,
+      hasNovelProject: true,
+      hasStoryMacro: true,
+      hasBookContract: true,
+      characterCount: 3,
+      hasVolumeStrategy: true,
+      volumeCount: 1,
+      outlineFacts: null,
+      chapterExecutionFacts: null,
+      repairFacts: null,
+      steps: [],
+    },
+    activeStepNodeKey: null,
+    currentFactStepId: null,
+    currentFactStepLabel: null,
+    factStep: null,
+    chapterProgress: null,
+  });
+
+  assert.equal(displayState.mode, "completed");
+  assert.equal(displayState.currentAction, "第 11-12 章自动执行完成");
+});
+
 test("display state does not mark succeeded task as completed before facts close", () => {
   const displayState = buildDirectorDisplayState({
     task: {
