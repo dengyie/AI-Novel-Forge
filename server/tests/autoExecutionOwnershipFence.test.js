@@ -5,6 +5,9 @@ const {
   AutoExecutionOwnershipFence,
 } = require("../dist/services/novel/director/automation/domain/AutoExecutionOwnershipFence.js");
 const {
+  DirectorCommandLeaseLostError,
+} = require("../dist/services/novel/director/commands/DirectorCommandLeaseGuard.js");
+const {
   NovelWorkflowApplicationService,
 } = require("../dist/services/novel/workflow/NovelWorkflowApplicationService.js");
 const {
@@ -35,6 +38,48 @@ function commandExecution(overrides = {}) {
     ...overrides,
   };
 }
+
+test("command lease loss does not cancel a pipeline job that may be reused by the replacement worker", { concurrency: false }, async () => {
+  const controller = new AbortController();
+  controller.abort(new DirectorCommandLeaseLostError("command-1", "worker-a:slot-1"));
+  let cancelCalls = 0;
+  const fence = new AutoExecutionOwnershipFence({
+    workflowService: {
+      getTaskByIdWithoutHealing: async () => task(),
+    },
+    novelService: {
+      cancelPipelineJob: async () => {
+        cancelCalls += 1;
+      },
+    },
+  }, "task-1", controller.signal, "job-reused", commandExecution());
+
+  await assert.rejects(
+    () => fence.assertActive(),
+    (error) => error?.code === "AUTO_EXECUTION_OWNERSHIP_LOST",
+  );
+  assert.equal(cancelCalls, 0);
+});
+
+test("task cancellation still cancels the owned pipeline job", { concurrency: false }, async () => {
+  let cancelCalls = 0;
+  const fence = new AutoExecutionOwnershipFence({
+    workflowService: {
+      getTaskByIdWithoutHealing: async () => task({ status: "cancelled" }),
+    },
+    novelService: {
+      cancelPipelineJob: async () => {
+        cancelCalls += 1;
+      },
+    },
+  }, "task-1", undefined, "job-cancelled");
+
+  await assert.rejects(
+    () => fence.assertActive(),
+    (error) => error?.code === "AUTO_EXECUTION_OWNERSHIP_LOST",
+  );
+  assert.equal(cancelCalls, 1);
+});
 
 test("non-ownership telemetry updates do not invalidate the active attempt", { concurrency: false }, async () => {
   let lookupCount = 0;

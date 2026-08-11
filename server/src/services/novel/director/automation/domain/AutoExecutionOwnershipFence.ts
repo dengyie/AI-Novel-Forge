@@ -7,6 +7,13 @@ import {
   type WorkflowTaskOwnershipSnapshot,
 } from "../../../workflow/ownership/WorkflowTaskOwnership";
 import { isWorkflowTaskCommandExecutionActive } from "../../../workflow/ownership/WorkflowTaskExecutionFence";
+import { DirectorCommandLeaseLostError } from "../../commands/DirectorCommandLeaseGuard";
+
+function isCommandLeaseLossAbort(signal?: AbortSignal): boolean {
+  const reason = signal?.reason as { code?: unknown } | undefined;
+  return reason instanceof DirectorCommandLeaseLostError
+    || reason?.code === "DIRECTOR_COMMAND_LEASE_LOST";
+}
 
 export class AutoExecutionOwnershipLostError extends Error {
   readonly code = "AUTO_EXECUTION_OWNERSHIP_LOST";
@@ -207,7 +214,9 @@ export class AutoExecutionOwnershipFence {
 
   private async failOwnershipWithPipelineCancellation(): Promise<never> {
     this.lost = true;
-    const pipelineJobId = this.pipelineJobId;
+    const pipelineJobId = isCommandLeaseLossAbort(this.signal)
+      ? null
+      : this.pipelineJobId;
     if (pipelineJobId) {
       await this.deps.novelService.cancelPipelineJob(pipelineJobId);
     }
