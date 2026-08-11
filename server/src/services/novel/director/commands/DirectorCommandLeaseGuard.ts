@@ -15,6 +15,7 @@ export class DirectorCommandLeaseLostError extends Error {
 export interface DirectorCommandExecutionContext {
   signal?: AbortSignal;
   leaseOwner?: string;
+  leaseAttempt?: number;
   leaseMs?: number;
 }
 

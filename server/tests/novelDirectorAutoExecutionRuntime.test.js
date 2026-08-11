@@ -13,6 +13,9 @@ const {
   buildDirectorQualityLoopIssueSignature,
   recordDirectorQualityLoopBudgetAttempt,
 } = require("../dist/services/novel/director/runtime/DirectorQualityLoopBudgetLedgerService.js");
+const {
+  runWithDirectorExecutionContext,
+} = require("../dist/services/novel/director/runtime/DirectorExecutionContext.js");
 
 const originalUsageFindMany = prisma.directorLlmUsageRecord.findMany;
 
@@ -3651,4 +3654,104 @@ test("runFromReady fences failures raised during initial execution preparation",
   }), (error) => error?.code === "AUTO_EXECUTION_RUN_FAILED" && error.cause === failure);
 
   assert.deepEqual(calls, [["markTaskFailed"]]);
+});
+
+test("runFromReady rejects a replacement worker before stale seed merge, notification, or cleanup", async () => {
+  const calls = [];
+  const runtime = createRuntime({
+    novelContextService: {
+      async listChapters() {
+        calls.push(["listChapters"]);
+        return [{
+          id: "chapter-1",
+          order: 1,
+          generationState: "approved",
+          chapterStatus: "completed",
+          content: "正文1",
+        }];
+      },
+    },
+    novelService: {
+      async startPipelineJob() {
+        calls.push(["startPipelineJob"]);
+        return { id: "job-stale", status: "queued" };
+      },
+      async findActivePipelineJobForRange() {
+        calls.push(["findActivePipelineJobForRange"]);
+        return null;
+      },
+      async getPipelineJobById() {
+        calls.push(["getPipelineJobById"]);
+        return null;
+      },
+      async cancelPipelineJob() {
+        calls.push(["cancelPipelineJob"]);
+      },
+    },
+    workflowService: {
+      async getDirectorCommandLeaseWithoutHealing(commandId) {
+        calls.push(["getDirectorCommandLeaseWithoutHealing", commandId]);
+        return {
+          id: commandId,
+          taskId: "task-auto-exec",
+          status: "running",
+          leaseOwner: "worker-b:slot-2",
+          leaseExpiresAt: new Date("2099-08-11T00:00:00.000Z"),
+          attempt: 4,
+        };
+      },
+      async getTaskByIdWithoutHealing() {
+        calls.push(["getTaskByIdWithoutHealing"]);
+        return {
+          status: "running",
+          attemptCount: 4,
+          ownershipVersion: 8,
+        };
+      },
+      async bootstrapTask() {
+        calls.push(["bootstrapTask"]);
+      },
+      async markTaskRunning() {
+        calls.push(["markTaskRunning"]);
+      },
+      async recordCheckpoint() {
+        calls.push(["recordCheckpoint"]);
+      },
+      async markTaskFailed() {
+        calls.push(["markTaskFailed"]);
+      },
+    },
+    buildDirectorSeedPayload(_request, _novelId, extra) {
+      calls.push(["buildDirectorSeedPayload"]);
+      return extra ?? {};
+    },
+  });
+
+  await runWithDirectorExecutionContext({
+    waitForCompletion: true,
+    commandExecution: {
+      commandId: "command-1",
+      leaseOwner: "worker-a:slot-1",
+      leaseAttempt: 3,
+      leaseMs: 120_000,
+    },
+  }, () => runtime.runFromReady({
+    taskId: "task-auto-exec",
+    novelId: "novel-1",
+    request: buildRequest(),
+    existingState: {
+      enabled: true,
+      firstChapterId: "chapter-1",
+      startOrder: 1,
+      endOrder: 1,
+      totalChapterCount: 1,
+      nextChapterId: null,
+      nextChapterOrder: null,
+      remainingChapterCount: 0,
+      pipelineJobId: null,
+      pipelineStatus: null,
+    },
+  }));
+
+  assert.deepEqual(calls, [["getDirectorCommandLeaseWithoutHealing", "command-1"]]);
 });

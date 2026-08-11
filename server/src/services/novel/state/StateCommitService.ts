@@ -25,9 +25,15 @@ import {
   type ChapterProjectionOwner,
 } from "../runtime/projections";
 import {
-  WorkflowTaskOwnershipLostError,
-  type WorkflowTaskOwnershipSnapshot,
-} from "../workflow/ownership/WorkflowTaskOwnership";
+  ExistingProposalCommitService,
+  type CommitExistingProposalsInput,
+  type OwnedStateCommitResult,
+} from "./commit/ExistingProposalCommitService";
+
+export type {
+  CommitExistingProposalsInput,
+  OwnedStateCommitResult,
+} from "./commit/ExistingProposalCommitService";
 
 const AUTO_COMMIT_TYPES = new Set<StateChangeProposal["proposalType"]>([
   "event_record",
@@ -80,23 +86,6 @@ export interface StateCommitServiceInput extends ChapterFactExtractorInput {
   projectionOwner?: ChapterProjectionOwner;
 }
 
-export interface CommitExistingProposalsInput {
-  novelId: string;
-  proposalIds: string[];
-  supersededProposalIds?: string[];
-  supersededReason?: string;
-  chapterId?: string | null;
-  chapterOrder?: number | null;
-  sourceType?: string;
-  sourceStage?: string | null;
-  reason: string;
-  ownership?: WorkflowTaskOwnershipSnapshot;
-}
-
-export interface OwnedStateCommitResult extends StateCommitResult {
-  ownership: WorkflowTaskOwnershipSnapshot | null;
-}
-
 interface PersistedProposalRow {
   id: string;
   novelId: string;
@@ -114,6 +103,11 @@ interface PersistedProposalRow {
 }
 
 export class StateCommitService {
+  private readonly existingProposalCommitService = new ExistingProposalCommitService({
+    applyCommittedProposal: (tx, proposal) => this.applyCommittedProposal(tx, proposal),
+    buildVersionSummary,
+  });
+
   async proposeAndCommit(input: StateCommitServiceInput): Promise<StateCommitResult> {
     const extractedProposals = input.skipFactExtraction ? [] : await chapterFactExtractor.extract(input);
     const rawProposals = input.proposals
@@ -175,160 +169,7 @@ export class StateCommitService {
   }
 
   async commitExistingProposals(input: CommitExistingProposalsInput): Promise<OwnedStateCommitResult> {
-    const proposalIds = Array.from(new Set(input.proposalIds.map((id) => compactText(id)).filter(Boolean)));
-    const supersededProposalIds = Array.from(new Set(
-      (input.supersededProposalIds ?? []).map((id) => compactText(id)).filter(Boolean),
-    ));
-    if (proposalIds.length === 0 && supersededProposalIds.length === 0) {
-      return {
-        versionRecord: null,
-        committed: [],
-        pendingReview: [],
-        rejected: [],
-        ownership: input.ownership ?? null,
-      };
-    }
-
-    const transactionResult = await prisma.$transaction(async (tx) => {
-      let ownership = input.ownership ?? null;
-      if (input.ownership) {
-        const claimed = await tx.novelWorkflowTask.updateMany({
-          where: {
-            id: input.ownership.taskId,
-            novelId: input.novelId,
-            lane: "auto_director",
-            status: { in: ["queued", "running", "waiting_approval", "failed"] },
-            cancelRequestedAt: null,
-            attemptCount: input.ownership.attemptCount,
-            ownershipVersion: input.ownership.ownershipVersion,
-          },
-          data: { ownershipVersion: { increment: 1 } },
-        });
-        if (claimed.count !== 1) {
-          throw new WorkflowTaskOwnershipLostError(input.ownership.taskId);
-        }
-        const task = await tx.novelWorkflowTask.findUnique({
-          where: { id: input.ownership.taskId },
-          select: { id: true, attemptCount: true, ownershipVersion: true },
-        });
-        if (!task) {
-          throw new WorkflowTaskOwnershipLostError(input.ownership.taskId);
-        }
-        ownership = {
-          taskId: task.id,
-          attemptCount: task.attemptCount,
-          ownershipVersion: task.ownershipVersion,
-        };
-      }
-
-      const rows = proposalIds.length > 0
-        ? await tx.stateChangeProposal.findMany({
-          where: {
-            novelId: input.novelId,
-            id: { in: proposalIds },
-            status: "pending_review",
-          },
-        })
-        : [];
-      const supersededRows = supersededProposalIds.length > 0
-        ? await tx.stateChangeProposal.findMany({
-          where: {
-            novelId: input.novelId,
-            id: { in: supersededProposalIds },
-            status: "pending_review",
-          },
-        })
-        : [];
-      const committed = rows.map((row) => {
-        const proposal = this.toProposal(row);
-        return {
-          ...proposal,
-          status: "committed" as const,
-          validationNotes: proposal.validationNotes.concat(`proposal_commit:${input.reason}`),
-        };
-      });
-      const rejected = supersededRows.map((row) => {
-        const proposal = this.toProposal(row);
-        return {
-          ...proposal,
-          status: "rejected" as const,
-          validationNotes: proposal.validationNotes.concat(
-            `pending_review_auto_promotion:superseded:${input.supersededReason ?? "superseded"}`,
-          ),
-        };
-      });
-
-      for (const proposal of rejected) {
-        if (!proposal.id) {
-          continue;
-        }
-        await tx.stateChangeProposal.update({
-          where: { id: proposal.id },
-          data: {
-            status: "rejected",
-            validationNotesJson: JSON.stringify(proposal.validationNotes),
-          },
-        });
-      }
-      for (const proposal of committed) {
-        await this.applyCommittedProposal(tx, proposal);
-        if (!proposal.id) {
-          continue;
-        }
-        await tx.stateChangeProposal.update({
-          where: { id: proposal.id },
-          data: {
-            status: "committed",
-            validationNotesJson: JSON.stringify(proposal.validationNotes),
-          },
-        });
-      }
-      return { committed, rejected, ownership };
-    });
-
-    const { committed, rejected, ownership } = transactionResult;
-    if (committed.length === 0) {
-      return {
-        versionRecord: null,
-        committed: [],
-        pendingReview: [],
-        rejected,
-        ownership,
-      };
-    }
-
-    const snapshot = await canonicalStateService.getSnapshot(input.novelId, {
-      chapterId: input.chapterId ?? committed[0]?.chapterId ?? undefined,
-      chapterOrder: input.chapterOrder ?? undefined,
-      includeCurrentChapterState: true,
-    });
-    const versionRecord = await stateVersionLog.createVersion({
-      novelId: input.novelId,
-      chapterId: input.chapterId ?? committed[0]?.chapterId ?? null,
-      sourceType: input.sourceType ?? "manual_state_commit",
-      sourceStage: input.sourceStage ?? "proposal_confirmation",
-      summary: buildVersionSummary(input.chapterOrder ?? undefined, committed),
-      acceptedProposalIds: committed.map((proposal) => proposal.id).filter((id): id is string => Boolean(id)),
-      snapshot,
-    });
-    await prisma.stateChangeProposal.updateMany({
-      where: {
-        id: {
-          in: committed.map((proposal) => proposal.id).filter((id): id is string => Boolean(id)),
-        },
-      },
-      data: {
-        committedVersionId: versionRecord.id,
-      },
-    });
-
-    return {
-      versionRecord,
-      committed,
-      pendingReview: [],
-      rejected,
-      ownership,
-    };
+    return this.existingProposalCommitService.commit(input);
   }
 
   validate(proposals: StateChangeProposal[]): {

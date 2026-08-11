@@ -7,6 +7,9 @@ const {
 const {
   buildStateProposalSubjectKey,
 } = require("../dist/services/novel/state/stateProposalSubjectKey.js");
+const {
+  AutoExecutionOwnershipFence,
+} = require("../dist/services/novel/director/automation/domain/AutoExecutionOwnershipFence.js");
 
 function row(overrides = {}) {
   const payload = overrides.payload ?? {};
@@ -338,6 +341,40 @@ test("PendingReviewAutoPromotionService does not write a no-candidate ledger aft
   assert.equal(calls.ledger, undefined);
 });
 
+test("PendingReviewAutoPromotionService fences a zero-candidate ledger immediately before recording", async () => {
+  const calls = [];
+  const service = new PendingReviewAutoPromotionService({
+    proposalStore: buildProposalStore([]),
+    conflictStore: { async findMany() { return []; } },
+    stateCommitService: {
+      async commitExistingProposals() {
+        throw new Error("zero candidates must not enter proposal commit");
+      },
+    },
+    ledgerEventService: {
+      async recordEvent(input) {
+        calls.push(["ledger", input.metadata.promotedIds, input.metadata.supersededIds]);
+      },
+    },
+    warn: () => undefined,
+    now: () => new Date("2026-07-01T00:00:00.000Z"),
+  });
+
+  await service.apply("novel-1", {
+    since: "2026-06-01T00:00:00.000Z",
+    dryRun: false,
+    eligibleAfterDays: 14,
+    beforeCommit: async () => {
+      calls.push(["beforeCommit"]);
+    },
+  });
+
+  assert.deepEqual(calls, [
+    ["beforeCommit"],
+    ["ledger", [], []],
+  ]);
+});
+
 test("PendingReviewAutoPromotionService delegates promoted and superseded writes with one ownership snapshot", async () => {
   const rows = [
     row({
@@ -387,4 +424,105 @@ test("PendingReviewAutoPromotionService delegates promoted and superseded writes
   assert.deepEqual(commitInput.supersededProposalIds, ["relation-old"]);
   assert.deepEqual(commitInput.ownership, ownership);
   assert.equal(result.ownership.ownershipVersion, 10);
+});
+
+test("PendingReviewAutoPromotionService preserves committed ownership when ledger recording fails", async () => {
+  const rows = [row({
+    id: "relation-latest",
+    createdAt: "2026-06-03T00:00:00.000Z",
+    payload: { sourceCharacterId: "char-1", targetCharacterId: "char-2" },
+  })];
+  const ledgerError = new Error("automation ledger unavailable after proposal commit");
+  let persistedOwnershipVersion = 7;
+  const fence = new AutoExecutionOwnershipFence({
+    workflowService: {
+      async getTaskByIdWithoutHealing() {
+        return {
+          status: "running",
+          attemptCount: 3,
+          ownershipVersion: persistedOwnershipVersion,
+          cancelRequestedAt: null,
+          updatedAt: new Date(),
+        };
+      },
+    },
+    novelService: { async cancelPipelineJob() {} },
+  }, "task-1");
+  const service = new PendingReviewAutoPromotionService({
+    proposalStore: buildProposalStore(rows),
+    conflictStore: { async findMany() { return []; } },
+    stateCommitService: {
+      async commitExistingProposals(input) {
+        persistedOwnershipVersion = 8;
+        return {
+          versionRecord: null,
+          committed: input.proposalIds.map((id) => ({ id })),
+          pendingReview: [],
+          rejected: [],
+          ownership: {
+            taskId: "task-1",
+            attemptCount: 3,
+            ownershipVersion: persistedOwnershipVersion,
+          },
+        };
+      },
+    },
+    ledgerEventService: {
+      async recordEvent() {
+        throw ledgerError;
+      },
+    },
+    now: () => new Date("2026-07-01T00:00:00.000Z"),
+  });
+
+  await assert.rejects(() => fence.runOwnedOperation((ownership) => service.apply("novel-1", {
+    since: "2026-06-01T00:00:00.000Z",
+    dryRun: false,
+    eligibleAfterDays: 14,
+    taskId: "task-1",
+    ownership,
+  })), (error) => error === ledgerError);
+
+  const current = await fence.assertActive();
+  assert.equal(current.ownershipVersion, 8);
+});
+
+test("PendingReviewAutoPromotionService does not ledger proposals lost to a manual decision", async () => {
+  const rows = [row({
+    id: "relation-latest",
+    createdAt: "2026-06-03T00:00:00.000Z",
+    payload: { sourceCharacterId: "char-1", targetCharacterId: "char-2" },
+  })];
+  let ledgerCalls = 0;
+  const service = new PendingReviewAutoPromotionService({
+    proposalStore: buildProposalStore(rows),
+    conflictStore: { async findMany() { return []; } },
+    stateCommitService: {
+      async commitExistingProposals(input) {
+        return {
+          versionRecord: null,
+          committed: [],
+          pendingReview: [],
+          rejected: [],
+          ownership: input.ownership ?? null,
+        };
+      },
+    },
+    ledgerEventService: {
+      async recordEvent() {
+        ledgerCalls += 1;
+      },
+    },
+    warn: () => undefined,
+    now: () => new Date("2026-07-01T00:00:00.000Z"),
+  });
+
+  const result = await service.apply("novel-1", {
+    since: "2026-06-01T00:00:00.000Z",
+    dryRun: false,
+    eligibleAfterDays: 14,
+  });
+
+  assert.equal(result.commitResult.committed.length, 0);
+  assert.equal(ledgerCalls, 0);
 });

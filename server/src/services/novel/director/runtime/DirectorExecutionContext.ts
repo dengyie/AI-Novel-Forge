@@ -1,8 +1,10 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import type { WorkflowTaskCommandExecution } from "../../workflow/ownership/WorkflowTaskOwnership";
 
 export interface DirectorExecutionContext {
   signal?: AbortSignal;
   waitForCompletion?: boolean;
+  commandExecution?: WorkflowTaskCommandExecution;
 }
 
 const storage = new AsyncLocalStorage<DirectorExecutionContext>();

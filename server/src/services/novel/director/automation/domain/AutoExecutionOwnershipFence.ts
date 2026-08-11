@@ -1,9 +1,12 @@
 import type { NovelDirectorAutoExecutionRuntimeDeps } from "../novelDirectorAutoExecutionRuntimePorts";
 import type { NovelDirectorAutoExecutionWorkflowPort } from "../novelDirectorAutoExecutionRuntimePorts";
 import {
+  bindWorkflowTaskOwnershipRuntime,
   isWorkflowTaskOwnershipLost,
+  type WorkflowTaskCommandExecution,
   type WorkflowTaskOwnershipSnapshot,
 } from "../../../workflow/ownership/WorkflowTaskOwnership";
+import { isWorkflowTaskCommandExecutionActive } from "../../../workflow/ownership/WorkflowTaskExecutionFence";
 
 export class AutoExecutionOwnershipLostError extends Error {
   readonly code = "AUTO_EXECUTION_OWNERSHIP_LOST";
@@ -50,6 +53,7 @@ export class AutoExecutionOwnershipFence {
     private readonly taskId: string,
     private readonly signal?: AbortSignal,
     pipelineJobId?: string | null,
+    private readonly commandExecution?: WorkflowTaskCommandExecution,
   ) {
     this.pipelineJobId = pipelineJobId?.trim() || null;
   }
@@ -65,6 +69,8 @@ export class AutoExecutionOwnershipFence {
     if (this.signal?.aborted) {
       return this.failOwnershipWithPipelineCancellation();
     }
+
+    await this.assertCommandExecutionActive();
 
     const task = await this.deps.workflowService.getTaskByIdWithoutHealing(this.taskId);
     if (!task || task.status === "cancelled" || Boolean(task.cancelRequestedAt)) {
@@ -83,7 +89,12 @@ export class AutoExecutionOwnershipFence {
       return this.loseOwnership();
     }
     this.ownership = current;
-    return current;
+    return bindWorkflowTaskOwnershipRuntime(current, {
+      execution: this.commandExecution,
+      onCommitted: (committed) => {
+        this.ownership = this.validateOwnershipSnapshot(committed);
+      },
+    });
   }
 
   async runOwnedWrite<T>(
@@ -174,6 +185,24 @@ export class AutoExecutionOwnershipFence {
   private loseOwnership(): never {
     this.lost = true;
     throw new AutoExecutionOwnershipLostError(this.taskId, this.pipelineJobId);
+  }
+
+  private async assertCommandExecutionActive(): Promise<void> {
+    if (!this.commandExecution) {
+      return;
+    }
+    const lookup = this.deps.workflowService.getDirectorCommandLeaseWithoutHealing;
+    if (!lookup) {
+      throw new Error("Auto-execution command ownership lookup is unavailable.");
+    }
+    const command = await lookup(this.commandExecution.commandId);
+    if (!isWorkflowTaskCommandExecutionActive(
+      command,
+      this.taskId,
+      this.commandExecution,
+    )) {
+      this.loseOwnership();
+    }
   }
 
   private async failOwnershipWithPipelineCancellation(): Promise<never> {

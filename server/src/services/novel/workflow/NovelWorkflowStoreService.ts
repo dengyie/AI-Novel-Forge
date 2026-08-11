@@ -27,9 +27,11 @@ import {
 } from "./novelWorkflow.helpers";
 import { isStaleAutoDirectorRunningTask } from "./autoDirectorStaleTaskRecovery";
 import {
+  publishWorkflowTaskOwnershipCommitted,
   WorkflowTaskOwnershipLostError,
   type WorkflowTaskOwnershipSnapshot,
 } from "./ownership/WorkflowTaskOwnership";
+import { fenceWorkflowTaskCommandExecution } from "./ownership/WorkflowTaskExecutionFence";
 
 export interface NovelWorkflowHealingPort {
   healAutoDirectorTaskState(taskId: string, row?: unknown): Promise<boolean>;
@@ -217,6 +219,8 @@ export class NovelWorkflowStoreService {
       novelId: string | null;
       lane: string;
       status: string;
+      attemptCount: number;
+      ownershipVersion: number;
       progress?: number | null;
       currentStage: string | null;
       checkpointType: string | null;
@@ -236,6 +240,7 @@ export class NovelWorkflowStoreService {
     }
     const next = await withSqliteRetry(
       () => prisma.$transaction(async (tx) => {
+        await fenceWorkflowTaskCommandExecution(tx, input.ownership);
         const claimed = await tx.novelWorkflowTask.updateMany({
           where: {
             id: input.ownership.taskId,
@@ -264,6 +269,11 @@ export class NovelWorkflowStoreService {
       }),
       { label: "novelWorkflowTask.ownedUpdate" },
     ) as unknown as T;
+    publishWorkflowTaskOwnershipCommitted(input.ownership, {
+      taskId: next.id,
+      attemptCount: next.attemptCount,
+      ownershipVersion: next.ownershipVersion,
+    });
     await this.notifyAutoDirectorTaskTransition({
       before: input.before,
       after: next,
@@ -398,6 +408,20 @@ export class NovelWorkflowStoreService {
 
   public async getTaskByIdWithoutHealing(taskId: string) {
     return this.getVisibleRowByIdRaw(taskId);
+  }
+
+  public async getDirectorCommandLeaseWithoutHealing(commandId: string) {
+    return prisma.directorRunCommand.findUnique({
+      where: { id: commandId },
+      select: {
+        id: true,
+        taskId: true,
+        status: true,
+        leaseOwner: true,
+        leaseExpiresAt: true,
+        attempt: true,
+      },
+    });
   }
 
   public async getNovelTitle(novelId: string): Promise<string | null> {

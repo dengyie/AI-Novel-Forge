@@ -10,6 +10,9 @@ const {
 const {
   AutoExecutionRunFailureError,
 } = require("../dist/services/novel/director/automation/domain/AutoExecutionOwnershipFence.js");
+const {
+  getDirectorExecutionContext,
+} = require("../dist/services/novel/director/runtime/DirectorExecutionContext.js");
 
 function buildExecutor(directorService) {
   return new DirectorCommandExecutor({
@@ -183,4 +186,26 @@ test("DirectorCommandExecutor propagates raw task lookup infrastructure errors a
     executor.execute("command-1"),
     (error) => error === infrastructureError,
   );
+});
+
+test("DirectorCommandExecutor carries the immutable worker lease attempt into director execution context", async () => {
+  let observedExecution;
+  const directorService = {
+    async confirmCandidate() {
+      observedExecution = getDirectorExecutionContext();
+    },
+  };
+
+  await buildExecutor(directorService).execute("command-1", {
+    leaseOwner: "worker-a:slot-1",
+    leaseAttempt: 3,
+    leaseMs: 120_000,
+  });
+
+  assert.deepEqual(observedExecution?.commandExecution, {
+    commandId: "command-1",
+    leaseOwner: "worker-a:slot-1",
+    leaseAttempt: 3,
+    leaseMs: 120_000,
+  });
 });

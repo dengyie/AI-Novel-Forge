@@ -35,16 +35,15 @@ import {
   type AutoExecutionProgressGuardState,
 } from "../domain/AutoExecutionProgressPolicy";
 import {
-  AutoExecutionOwnershipFence,
   AutoExecutionRunFailureError,
 } from "../domain/AutoExecutionOwnershipFence";
 import {
   schedulePendingReviewAutoPromotionIfEnabled,
   stopAutoExecutionForNoProgress,
 } from "../projections/AutoExecutionTaskProjector";
-import { AutoExecutionBatchRollCoordinator } from "./AutoExecutionBatchRollCoordinator";
 import { handleAutoExecutionFailure } from "./AutoExecutionFailureHandler";
 import { handleAutoExecutionRunFailure } from "./AutoExecutionRunFailureHandler";
+import { createAutoExecutionRunContext } from "./AutoExecutionRunContext";
 import {
   resolvePipelineJobForExecution,
   resolveOwnedActiveRangePipeline,
@@ -78,23 +77,16 @@ export class AutoExecutionRangeRunner {
     signal?: AbortSignal;
   }): Promise<void> {
     const allowLazyChapterPlanning = isFullBookAutopilotRunMode(input.request.runMode);
-    const ownershipFence = new AutoExecutionOwnershipFence(
+    const { ownershipFence, runDeps, batchRollCoordinator } = createAutoExecutionRunContext(
       this.deps,
-      input.taskId,
-      input.signal,
-      input.existingPipelineJobId,
+      input,
     );
-    const runDeps: NovelDirectorAutoExecutionRuntimeDeps = {
-      ...this.deps,
-      ownershipFence,
-      workflowService: ownershipFence.bindWorkflowService(this.deps.workflowService),
-    };
-    const batchRollCoordinator = new AutoExecutionBatchRollCoordinator(runDeps);
     let range: DirectorAutoExecutionRange;
     let autoExecution: DirectorAutoExecutionState;
     let pipelineJobId: string;
     let knownPipelineJob: PipelineJobSnapshot;
     try {
+      await ownershipFence.assertActive();
       ({ range, autoExecution, pipelineJobId } = await prepareRequestedAutoExecutionState(runDeps, {
         novelId: input.novelId,
         request: input.request,

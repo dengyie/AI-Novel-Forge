@@ -7,6 +7,9 @@ const {
 const { prisma } = require("../dist/db/prisma.js");
 const { canonicalStateService } = require("../dist/services/novel/state/CanonicalStateService.js");
 const { stateVersionLog } = require("../dist/services/novel/state/StateVersionLog.js");
+const {
+  AutoExecutionOwnershipFence,
+} = require("../dist/services/novel/director/automation/domain/AutoExecutionOwnershipFence.js");
 
 function makeResourceProposal(overrides = {}) {
   const { payload: payloadOverrides = {}, ...proposalOverrides } = overrides;
@@ -48,6 +51,113 @@ function makeResourceProposal(overrides = {}) {
     validationNotes: [],
     ...proposalOverrides,
   };
+}
+
+function makePersistedPendingProposal(overrides = {}) {
+  const now = new Date("2026-08-11T00:00:00.000Z");
+  return {
+    id: "proposal-1",
+    novelId: "novel-1",
+    chapterId: "chapter-5",
+    sourceSnapshotId: null,
+    sourceType: "chapter_background_sync",
+    sourceStage: "chapter_execution",
+    proposalType: "information_disclosure",
+    riskLevel: "medium",
+    status: "pending_review",
+    summary: "reader learns the hidden employer",
+    payloadJson: JSON.stringify({ fact: "the employer is the prince" }),
+    evidenceJson: JSON.stringify(["the reveal is on page"]),
+    validationNotesJson: JSON.stringify(["requires manual review"]),
+    createdAt: now,
+    updatedAt: now,
+    ...overrides,
+  };
+}
+
+async function assertOwnedCommitPostFailurePreservesOwnership(failAt) {
+  const service = new StateCommitService();
+  const originalTransaction = prisma.$transaction;
+  const originalProposalUpdateMany = prisma.stateChangeProposal.updateMany;
+  const originalGetSnapshot = canonicalStateService.getSnapshot;
+  const originalCreateVersion = stateVersionLog.createVersion;
+  const postCommitError = new Error(`${failAt} unavailable after task CAS`);
+  const proposalRow = makePersistedPendingProposal();
+  let persistedOwnershipVersion = 7;
+
+  prisma.$transaction = async (callback) => callback({
+    novelWorkflowTask: {
+      async updateMany() {
+        persistedOwnershipVersion = 8;
+        return { count: 1 };
+      },
+      async findUnique() {
+        return {
+          id: "task-1",
+          attemptCount: 3,
+          ownershipVersion: persistedOwnershipVersion,
+        };
+      },
+    },
+    stateChangeProposal: {
+      async findMany({ where }) {
+        return where.id?.in?.includes("proposal-1") ? [proposalRow] : [];
+      },
+      async update() {
+        return proposalRow;
+      },
+      async updateMany() {
+        return { count: 1 };
+      },
+    },
+  });
+  prisma.stateChangeProposal.updateMany = async () => ({ count: 1 });
+  canonicalStateService.getSnapshot = async () => {
+    if (failAt === "snapshot") {
+      throw postCommitError;
+    }
+    return { novelId: "novel-1", snapshot: true };
+  };
+  stateVersionLog.createVersion = async () => {
+    if (failAt === "version") {
+      throw postCommitError;
+    }
+    return { id: "version-1" };
+  };
+
+  try {
+    const fence = new AutoExecutionOwnershipFence({
+      workflowService: {
+        async getTaskByIdWithoutHealing() {
+          return {
+            status: "running",
+            attemptCount: 3,
+            ownershipVersion: persistedOwnershipVersion,
+            cancelRequestedAt: null,
+            updatedAt: new Date(),
+          };
+        },
+      },
+      novelService: { async cancelPipelineJob() {} },
+    }, "task-1");
+
+    await assert.rejects(() => fence.runOwnedOperation((ownership) => (
+      service.commitExistingProposals({
+        novelId: "novel-1",
+        proposalIds: ["proposal-1"],
+        reason: `post-cas-${failAt}-failure`,
+        ownership,
+      })
+    )), (error) => error === postCommitError);
+
+    const current = await fence.assertActive();
+    assert.equal(current.ownershipVersion, 8);
+  } finally {
+    prisma.$transaction = originalTransaction;
+    prisma.stateChangeProposal.updateMany = originalProposalUpdateMany;
+    canonicalStateService.getSnapshot = originalGetSnapshot;
+    stateVersionLog.createVersion = originalCreateVersion;
+  }
 }
 
 test("StateCommitService validate auto-commits low-risk runtime updates", () => {
@@ -106,6 +216,78 @@ test("StateCommitService scopes an owned proposal commit to the workflow task no
     }), (error) => error?.code === "WORKFLOW_TASK_OWNERSHIP_LOST");
 
     assert.equal(ownershipWhere.novelId, "novel-1");
+  } finally {
+    prisma.$transaction = originalTransaction;
+  }
+});
+
+test("StateCommitService fences the active command before task and proposal mutation", { concurrency: false }, async () => {
+  const service = new StateCommitService();
+  const originalTransaction = prisma.$transaction;
+  let taskClaims = 0;
+  let proposalReads = 0;
+
+  prisma.$transaction = async (callback) => callback({
+    directorRunCommand: {
+      async updateMany() {
+        return { count: 0 };
+      },
+    },
+    novelWorkflowTask: {
+      async updateMany() {
+        taskClaims += 1;
+        return { count: 1 };
+      },
+    },
+    stateChangeProposal: {
+      async findMany() {
+        proposalReads += 1;
+        return [];
+      },
+    },
+  });
+
+  try {
+    const fence = new AutoExecutionOwnershipFence({
+      workflowService: {
+        async getDirectorCommandLeaseWithoutHealing() {
+          return {
+            id: "command-1",
+            taskId: "task-1",
+            status: "running",
+            leaseOwner: "worker-a:slot-1",
+            leaseExpiresAt: new Date("2099-08-11T00:00:00.000Z"),
+            attempt: 3,
+          };
+        },
+        async getTaskByIdWithoutHealing() {
+          return {
+            status: "running",
+            attemptCount: 2,
+            ownershipVersion: 7,
+            cancelRequestedAt: null,
+            updatedAt: new Date(),
+          };
+        },
+      },
+      novelService: { async cancelPipelineJob() {} },
+    }, "task-1", undefined, null, {
+      commandId: "command-1",
+      leaseOwner: "worker-a:slot-1",
+      leaseAttempt: 3,
+      leaseMs: 120_000,
+    });
+
+    await assert.rejects(() => fence.runOwnedOperation((ownership) => (
+      service.commitExistingProposals({
+        novelId: "novel-1",
+        proposalIds: ["proposal-1"],
+        reason: "command-takeover-before-state-commit",
+        ownership,
+      })
+    )), (error) => error?.code === "AUTO_EXECUTION_OWNERSHIP_LOST");
+    assert.equal(taskClaims, 0);
+    assert.equal(proposalReads, 0);
   } finally {
     prisma.$transaction = originalTransaction;
   }
@@ -403,10 +585,13 @@ test("StateCommitService commitExistingProposals applies ledger update and write
       },
       stateChangeProposal: {
         findMany: async () => [proposalRow],
-        update: async (args) => {
+        updateMany: async (args) => {
           calls.proposalUpdate += 1;
           assert.equal(args.where.id, "proposal-1");
+          assert.equal(args.where.novelId, "novel-1");
+          assert.equal(args.where.status, "pending_review");
           assert.equal(args.data.status, "committed");
+          return { count: 1 };
         },
       },
     });
@@ -445,5 +630,96 @@ test("StateCommitService commitExistingProposals applies ledger update and write
     prisma.stateChangeProposal.updateMany = originals.proposalUpdateMany;
     canonicalStateService.getSnapshot = originals.getSnapshot;
     stateVersionLog.createVersion = originals.createVersion;
+  }
+});
+
+test("StateCommitService preserves committed ownership when canonical snapshot fails after CAS", { concurrency: false }, async () => {
+  await assertOwnedCommitPostFailurePreservesOwnership("snapshot");
+});
+
+test("StateCommitService preserves committed ownership when version logging fails after CAS", { concurrency: false }, async () => {
+  await assertOwnedCommitPostFailurePreservesOwnership("version");
+});
+
+test("StateCommitService cannot overwrite a concurrent manual proposal decision", { concurrency: false }, async () => {
+  const service = new StateCommitService();
+  const originalTransaction = prisma.$transaction;
+  const originalProposalUpdateMany = prisma.stateChangeProposal.updateMany;
+  const originalGetSnapshot = canonicalStateService.getSnapshot;
+  const originalCreateVersion = stateVersionLog.createVersion;
+  const proposalRow = makePersistedPendingProposal({
+    proposalType: "character_state_update",
+    payloadJson: JSON.stringify({
+      characterId: "character-1",
+      currentState: "manual decision must win",
+      currentGoal: "preserve reviewer choice",
+    }),
+  });
+  const calls = {
+    unconditionalProposalUpdate: 0,
+    conditionalProposalClaim: 0,
+    canonicalApply: 0,
+    snapshot: 0,
+    version: 0,
+    versionLink: 0,
+  };
+
+  prisma.$transaction = async (callback) => callback({
+    stateChangeProposal: {
+      async findMany({ where }) {
+        return where.id?.in?.includes("proposal-1") ? [proposalRow] : [];
+      },
+      async update() {
+        calls.unconditionalProposalUpdate += 1;
+        return proposalRow;
+      },
+      async updateMany({ where }) {
+        calls.conditionalProposalClaim += 1;
+        assert.equal(where.id, "proposal-1");
+        assert.equal(where.novelId, "novel-1");
+        assert.equal(where.status, "pending_review");
+        return { count: 0 };
+      },
+    },
+    character: {
+      async update() {
+        calls.canonicalApply += 1;
+      },
+    },
+  });
+  prisma.stateChangeProposal.updateMany = async () => {
+    calls.versionLink += 1;
+    return { count: 1 };
+  };
+  canonicalStateService.getSnapshot = async () => {
+    calls.snapshot += 1;
+    return { novelId: "novel-1" };
+  };
+  stateVersionLog.createVersion = async () => {
+    calls.version += 1;
+    return { id: "version-1" };
+  };
+
+  try {
+    const result = await service.commitExistingProposals({
+      novelId: "novel-1",
+      proposalIds: ["proposal-1"],
+      reason: "auto-promotion-manual-decision-race",
+    });
+
+    assert.equal(result.committed.length, 0);
+    assert.deepEqual(calls, {
+      unconditionalProposalUpdate: 0,
+      conditionalProposalClaim: 1,
+      canonicalApply: 0,
+      snapshot: 0,
+      version: 0,
+      versionLink: 0,
+    });
+  } finally {
+    prisma.$transaction = originalTransaction;
+    prisma.stateChangeProposal.updateMany = originalProposalUpdateMany;
+    canonicalStateService.getSnapshot = originalGetSnapshot;
+    stateVersionLog.createVersion = originalCreateVersion;
   }
 });

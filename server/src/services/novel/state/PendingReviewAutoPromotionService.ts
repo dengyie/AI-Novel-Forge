@@ -7,7 +7,10 @@ import {
   type OwnedStateCommitResult,
   type StateCommitService,
 } from "./StateCommitService";
-import type { WorkflowTaskOwnershipSnapshot } from "../workflow/ownership/WorkflowTaskOwnership";
+import {
+  publishWorkflowTaskOwnershipCommitted,
+  type WorkflowTaskOwnershipSnapshot,
+} from "../workflow/ownership/WorkflowTaskOwnership";
 import {
   PENDING_REVIEW_AUTO_PROMOTION_ELIGIBLE_AFTER_DAYS,
   PENDING_REVIEW_AUTO_PROMOTION_PROPOSAL_TYPES,
@@ -326,6 +329,8 @@ export class PendingReviewAutoPromotionService {
     await options.beforeCommit?.();
     let commitResult: OwnedStateCommitResult | null = null;
     let ownership = options.ownership ?? null;
+    let claimedPromotedIds = promotedIds;
+    let claimedSupersededIds = supersededIds;
     if (promotedIds.length > 0 || supersededIds.length > 0) {
       commitResult = await this.getCommitService().commitExistingProposals({
           novelId,
@@ -338,19 +343,30 @@ export class PendingReviewAutoPromotionService {
           ownership: options.ownership,
         } satisfies CommitExistingProposalsInput);
       ownership = commitResult.ownership ?? ownership;
+      publishWorkflowTaskOwnershipCommitted(options.ownership, ownership);
+      claimedPromotedIds = commitResult.committed
+        .map((proposal) => proposal.id)
+        .filter((id): id is string => Boolean(id));
+      claimedSupersededIds = commitResult.rejected
+        .map((proposal) => proposal.id)
+        .filter((id): id is string => Boolean(id));
     }
 
-    await this.recordLedgerEvent({
-      novelId,
-      options,
-      preview,
-      promotedIds,
-      supersededIds,
-    });
+    const attemptedWriteCount = promotedIds.length + supersededIds.length;
+    const claimedWriteCount = claimedPromotedIds.length + claimedSupersededIds.length;
+    if (attemptedWriteCount === 0 || claimedWriteCount > 0) {
+      await this.recordLedgerEvent({
+        novelId,
+        options,
+        preview,
+        promotedIds: claimedPromotedIds,
+        supersededIds: claimedSupersededIds,
+      });
+    }
     this.warnApply({
       novelId,
-      promotedIds,
-      supersededIds,
+      promotedIds: claimedPromotedIds,
+      supersededIds: claimedSupersededIds,
       conflictSkippedCount: preview.conflictSkipped.length,
       deferredByRunLimitCount: preview.deferredByRunLimit.length,
     });

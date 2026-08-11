@@ -37,6 +37,14 @@ export interface NovelDirectorAutoExecutionWorkflowPort {
     updatedAt: Date;
     cancelRequestedAt?: Date | null;
   } | null>;
+  getDirectorCommandLeaseWithoutHealing?(commandId: string): Promise<{
+    id: string;
+    taskId: string;
+    status: string;
+    leaseOwner: string | null;
+    leaseExpiresAt: Date | null;
+    attempt: number;
+  } | null>;
   markTaskRunning(taskId: string, input: {
     stage: "chapter_execution" | "quality_repair";
     itemLabel: string;

@@ -145,6 +145,7 @@ export class DirectorWorker {
         const outcome = await this.commandExecutor.execute(command.id, {
           signal: renewal.signal,
           leaseOwner: `${this.queue.workerId}:${slotId}`,
+          leaseAttempt: command.attempt,
           leaseMs: this.queue.leaseMs,
         });
         throwIfDirectorCommandLeaseLost(renewal.signal, {

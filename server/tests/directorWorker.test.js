@@ -18,6 +18,7 @@ test("director worker renews a leased command while waiting for resource budget"
     taskId: "task-1",
     novelId: "novel-1",
     commandType: "continue",
+    attempt: 3,
   };
 
   const queue = Object.create(DirectorTaskQueue.prototype);
@@ -71,8 +72,9 @@ test("director worker renews a leased command while waiting for resource budget"
   };
 
   const commandExecutor = {
-    execute: async (commandId) => {
+    execute: async (commandId, context) => {
       events.push(`execute:${commandId}`);
+      events.push(`execute-lease-attempt:${context.leaseAttempt}`);
       return "completed";
     },
   };
@@ -95,6 +97,10 @@ test("director worker renews a leased command while waiting for resource budget"
     "should mark the leased command as running",
   );
   assert.ok(events.includes("execute:command-1"), "should execute the leased command");
+  assert.ok(
+    events.includes("execute-lease-attempt:3"),
+    "should bind execution to the exact leased command attempt",
+  );
   assert.ok(
     events.includes("complete:command-1:slot-1"),
     "should complete the leased command",

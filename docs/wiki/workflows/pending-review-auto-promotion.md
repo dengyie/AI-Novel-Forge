@@ -54,12 +54,15 @@ flowchart TD
   F --> G["按 subject 保留最新提案"]
   G --> H{"最新提案命中未解决冲突?"}
   H -->|是| I["整组保持 pending_review"]
-  H -->|否| J["事务内 CAS 当前 workflow ownership"]
-  J --> K["同一事务标记旧提案 rejected 并提交最新提案"]
-  K --> L["写入 pending_review_auto_promotion 导演事件"]
+  H -->|否| J["事务内 CAS 当前 command lease 与 workflow ownership"]
+  J --> K["按 id + novelId + pending_review 条件认领最终状态"]
+  K --> L["只应用认领成功的 canonical proposal"]
+  L --> M["按实际提交结果写 pending_review_auto_promotion 导演事件"]
 ```
 
-自动导演接入点是章节批次成功后的命令内维护动作，必须在当前命令中 `await` 完成。预演后的读侧 `beforeCommit` 只用于尽早响应 AbortSignal，不能作为最终写授权；最终授权必须由 `StateCommitService` 在同一数据库事务内用 `taskId + novelId + lane + active status + cancelRequestedAt=null + attemptCount + ownershipVersion` 做 CAS，禁止用一本书的 workflow ownership 授权另一本书的提案提交。CAS 成功后，事务才可以同时标记 superseded 提案、提交 promoted 提案并写 canonical state；返回的新 ownership snapshot 必须更新当前 fence。取消、重试接管或 CAS miss 时事务整体不得提交 proposal/canonical 变更，也不得继续写入留痕。开关读取、候选扫描、事务 CAS、proposal/canonical 写入和留痕的基础设施错误必须向命令执行器传播，进入失败/重试/恢复链路。
+自动导演接入点是章节批次成功后的命令内维护动作，必须在当前命令中 `await` 完成。预演后的读侧 `beforeCommit` 只用于尽早响应 AbortSignal，不能作为最终写授权；最终授权必须由既有提案提交模块在同一数据库事务内先校验稳定 command lease，再用 `taskId + novelId + lane + active status + cancelRequestedAt=null + attemptCount + ownershipVersion` 做 workflow CAS，禁止用一本书的 ownership 授权另一本书的提案提交。
+
+预演读取到 `pending_review` 也不是提案最终写授权。人工确认或拒绝可能在预演后先完成，因此 promoted 与 superseded 提案都必须用 `id + novelId + status=pending_review` 做最终 `updateMany` 认领；认领失败的提案不得应用 canonical 变更、创建状态版本或进入自动放行 ledger。task CAS 事务提交后，返回的新 ownership 必须在 snapshot/version/ledger 开始前更新当前 fence；这些后置错误继续原样传播。自然的零候选运行可以在 `beforeCommit` fence 后记录空结果审计，但如果预演有候选而最终全部输给人工决策，则不写误导性的放行 ledger。
 
 ## Settings Contract
 
@@ -72,7 +75,7 @@ flowchart TD
 
 ## Trace Contract
 
-每次非 dry-run 执行都会记录 `DirectorEvent.type = pending_review_auto_promotion`。metadata 至少包含：
+非 dry-run 的自然零候选运行，或至少有一条提案完成最终状态认领的运行，会记录 `DirectorEvent.type = pending_review_auto_promotion`。metadata 只列实际认领成功的 proposal id，至少包含：
 
 - 判定门槛：baseline、14 天 age gate、run limit、proposal types。
 - promoted proposal ids。

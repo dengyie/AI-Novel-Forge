@@ -53,8 +53,16 @@ export class DirectorCommandExecutor {
       throw new AppError("Director command not found.", 404);
     }
     const payload = this.commandService.parseCommandPayload(command);
+    const commandExecution = context.leaseOwner && Number.isInteger(context.leaseAttempt)
+      ? {
+        commandId,
+        leaseOwner: context.leaseOwner,
+        leaseAttempt: context.leaseAttempt as number,
+        leaseMs: context.leaseMs ?? 120_000,
+      }
+      : undefined;
     return runWithDirectorExecutionContext(
-      { signal: context.signal, waitForCompletion: true },
+      { signal: context.signal, waitForCompletion: true, commandExecution },
       () => this.dispatch(command, payload, context),
     );
   }
