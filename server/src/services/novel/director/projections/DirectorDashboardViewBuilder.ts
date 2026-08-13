@@ -135,6 +135,9 @@ function buildMode(input: {
   ) {
     return "failed";
   }
+  if (input.factSummary && !input.factSummary.allStepsCompleted) {
+    return "idle";
+  }
   if (
     input.task.status === "succeeded"
     || input.task.checkpointType === "workflow_completed"

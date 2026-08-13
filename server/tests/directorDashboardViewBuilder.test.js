@@ -137,6 +137,58 @@ test("completed dashboard prefers task terminal facts over a trailing runtime pr
   assert.equal(view.currentAction, "第 11-12 章自动执行完成");
 });
 
+test("dashboard does not trust terminal task progress before workflow facts close", () => {
+  const view = buildView({
+    task: {
+      status: "succeeded",
+      progress: 1,
+      currentStage: "story_macro",
+      currentItemKey: "story.macro.plan",
+      currentItemLabel: "故事宏观规划完成",
+      checkpointType: "workflow_completed",
+      checkpointSummary: "workflow completed",
+    },
+    projection: {
+      status: "idle",
+      currentLabel: "等待章节任务单完成",
+      requiresUserAction: false,
+      policyMode: "auto_safe_scope",
+      updatedAt: "2026-08-13T00:00:00.000Z",
+      recentEvents: [],
+      progressBreakdown: { totalPercent: 70, activeJobProgress: 0 },
+    },
+    displayState: {
+      ...baseDisplayState,
+      mode: "idle",
+      currentAction: "等待章节任务单完成",
+      progressPercent: 70,
+      isLiveRunning: false,
+    },
+    factSummary: {
+      allStepsCompleted: false,
+      completedStepCount: 7,
+      totalStepCount: 10,
+      hasNovelProject: true,
+      hasStoryMacro: true,
+      hasBookContract: true,
+      characterCount: 3,
+      hasVolumeStrategy: true,
+      volumeCount: 1,
+      outlineFacts: null,
+      chapterExecutionFacts: null,
+      repairFacts: null,
+      steps: [],
+    },
+    activeStep: null,
+    latestCommand: null,
+  });
+
+  assert.equal(view.mode, "idle");
+  assert.equal(view.progressPercent, 70);
+  assert.equal(view.progressSource, "runtime_projection");
+  assert.equal(view.currentAction, "等待章节任务单完成");
+});
+
 test("dashboard keeps running mode when task is running despite stale approval projection", () => {
   const view = buildView({
     projection: {
