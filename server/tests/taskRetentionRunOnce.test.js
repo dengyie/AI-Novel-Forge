@@ -14,6 +14,7 @@ function pnpmExecutable() {
 function setupTempSqliteDatabase(tempDir) {
   const databasePath = path.join(tempDir, "task-retention-runonce.db");
   const databaseUrl = `file:${databasePath.replace(/\\/g, "/")}`;
+  fs.closeSync(fs.openSync(databasePath, "a"));
   childProcess.execFileSync(pnpmExecutable(), ["--filter", "@ai-novel/server", "prisma:push"], {
     cwd: repoRoot,
     env: {
