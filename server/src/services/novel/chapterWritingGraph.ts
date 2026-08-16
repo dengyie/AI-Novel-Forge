@@ -22,6 +22,7 @@ import { prisma } from "../../db/prisma";
 import { assertChapterContentNotEmpty } from "./runtime/chapterEmptyContentError";
 import { buildChapterChineseProseGateError } from "./runtime/chapterChineseProseGateError";
 import { throwIfChapterGenerationAborted } from "./runtime/chapterAbortGuard";
+import { resolveWriterTimeoutMs } from "./writerTimeoutBudget";
 import { assessChineseProse } from "../../utils/chineseProseGate";
 import type { CommittedChapterContent } from "./runtime/content/ChapterContentCommitTypes";
 import {
@@ -36,32 +37,10 @@ import {
 
 export { trimContinuationOverlap } from "./runtime/writer/ChapterContinuationTextPolicy";
 
-/**
- * writer 单次 LLM 调用的墙钟预算，按目标字数线性放大。
- *
- * 背景（生产 P0）：12000 字目标章节用默认 300s/480s 预算，deepseek-v4-pro 流式
- * （~15-20 tok/s）根本写不完，单次调用必撞墙 → 此前超时还会打崩整个进程（已在
- * invokeTimeout 修复崩溃）。这里给 writer 一个随 target 放大的预算：
- * - 经验吞吐按 ~25 字/秒保守估计（CJK 长章 deepseek-v4-pro 偏慢），
- * - 再乘 1.6 安全裕度覆盖首 token 延迟 + 慢渠道，
- * - 下限 480s（短章不退化），上限 1500s（仍受 invokeTimeout env 3600s 钳制内）。
- * 只对 writer 传显式 timeoutMs；其它 prompt 调用方仍走 DEFAULT_ENFORCED_TIMEOUT_MS。
- */
-const WRITER_TIMEOUT_MIN_MS = 480_000;
-const WRITER_TIMEOUT_MAX_MS = 1_500_000;
-const WRITER_CHARS_PER_SECOND = 25;
-const WRITER_TIMEOUT_HEADROOM = 1.6;
-
-function resolveWriterTimeoutMs(targetWordCount?: number | null): number {
-  const target = typeof targetWordCount === "number" && Number.isFinite(targetWordCount)
-    ? Math.max(0, targetWordCount)
-    : 0;
-  if (target <= 0) {
-    return WRITER_TIMEOUT_MIN_MS;
-  }
-  const estimated = (target / WRITER_CHARS_PER_SECOND) * 1000 * WRITER_TIMEOUT_HEADROOM;
-  return Math.min(WRITER_TIMEOUT_MAX_MS, Math.max(WRITER_TIMEOUT_MIN_MS, Math.ceil(estimated)));
-}
+// writer 墙钟预算已抽到 ./writerTimeoutBudget（D1 重构）：按 model 维度登记实测吞吐参数，
+// 不再用单一乐观常量 25 字/秒（对 gemini-3.7-flash-high 实测 13.5 字/秒乐观 1.85×，整章 draft 撞墙）。
+// draft 与 extend 统一走同一 factory，避免两处各写各的漂移。floor 480s / ceiling 1500s /
+// headroom 1.6 语义不变；只调超时预算，不调字数下限/节奏（产品铁律）。
 
 /** 判断错误是否墙钟超时（TimeoutError），用于 writer 阶段观测日志归类。 */
 function isWriterTimeoutError(error: unknown): boolean {
@@ -454,7 +433,11 @@ export class ChapterWritingGraph {
       // P2 修复：续写改走 streamTextPrompt。旧 runTextPrompt 非流式整段等待，建立请求无
       // transport retry、无 live 进度，body 静默 hang 只能等墙钟兜底；流式与 writer_draft
       // 同构——establish 走 runWithTransportRetry，token 逐个进 live session，超时/abort 语义一致。
-      const extendTimeoutMs = resolveWriterTimeoutMs(Math.max(missingWordGap, lengthGoal.minWordCount ?? 0));
+      const extendTimeoutMs = resolveWriterTimeoutMs({
+        targetWordCount: Math.max(missingWordGap, lengthGoal.minWordCount ?? 0),
+        provider: input.options.provider,
+        model: input.options.model,
+      });
       const extendStartedAt = Date.now();
       // P3 观测：writer 每阶段 start/complete/fail 结构化日志，超时单独归类，
       // 让「慢」与「挂」在日志里一眼可分（不再只能事后翻 err.log 对时间戳）。
@@ -706,9 +689,11 @@ export class ChapterWritingGraph {
     );
 
     // P3 观测：writer_draft 同样记 start/fail（complete 在 onDone 侧记录产出字数）。
-    const draftTimeoutMs = resolveWriterTimeoutMs(
-      chapterWriteContext.chapterMission.targetWordCount ?? targetRange.minWordCount,
-    );
+    const draftTimeoutMs = resolveWriterTimeoutMs({
+      targetWordCount: chapterWriteContext.chapterMission.targetWordCount ?? targetRange.minWordCount,
+      provider: input.options.provider,
+      model: input.options.model,
+    });
     const draftStartedAt = Date.now();
     this.deps.logInfo("Writer stage started", {
       novelId: input.novelId,
