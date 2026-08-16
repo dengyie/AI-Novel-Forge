@@ -158,6 +158,34 @@ function resolveSessionLogPath(kind: "llm" | "llm-repair"): string | null {
   return resolved;
 }
 
+/**
+ * E4：append 失败时降级到 stderr 的 entry 摘要。只取定位维度，不输出 payload（可能很大）。
+ * entry 形状见 buildFileLogBlock（debugLogging.ts）：{timestamp,event,requestId,method,
+ * provider,model,taskType,promptMeta,latencyMs,error}。
+ */
+function summarizeEntryForFallback(entry: unknown): Record<string, unknown> | null {
+  if (!entry || typeof entry !== "object") {
+    return null;
+  }
+  const record = entry as Record<string, unknown>;
+  const promptMeta = record.promptMeta;
+  const promptId = (promptMeta && typeof promptMeta === "object"
+    ? (promptMeta as Record<string, unknown>).promptId
+    : undefined) ?? record.taskType;
+  const summary: Record<string, unknown> = {};
+  if (typeof record.timestamp === "string") summary.timestamp = record.timestamp;
+  if (typeof record.event === "string") summary.event = record.event;
+  if (typeof record.method === "string") summary.method = record.method;
+  if (typeof record.provider === "string") summary.provider = record.provider;
+  if (typeof record.model === "string") summary.model = record.model;
+  if (typeof record.taskType === "string") summary.taskType = record.taskType;
+  if (promptId !== undefined) summary.promptId = promptId;
+  if (typeof record.requestId === "string") summary.requestId = record.requestId;
+  if (typeof record.latencyMs === "number") summary.latencyMs = record.latencyMs;
+  if (record.error != null) summary.error = record.error;
+  return Object.keys(summary).length > 0 ? summary : null;
+}
+
 function appendSessionLog(kind: "llm" | "llm-repair", entry: unknown): void {
   if (!shouldWriteLlmFileLog()) {
     return;
@@ -184,6 +212,17 @@ function appendSessionLog(kind: "llm" | "llm-repair", entry: unknown): void {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.warn(`[llm.debug] failed to append dedicated ${kind} log: ${message}`);
+    // E4：append 失败（如 pxed errno -122 EDQUOT）时降级到 stderr，把 entry 关键字段
+    // 输出，避免 llm.jsonl 写不进去时 planner 调用全无记录、可观测性丢失。
+    // 不输出完整 payload（可能很大），只输出定位维度。
+    try {
+      const summary = summarizeEntryForFallback(entry);
+      if (summary) {
+        console.warn(`[llm.debug] ${kind} log fallback summary: ${JSON.stringify(summary)}`);
+      }
+    } catch {
+      // 降级本身失败不得再引发副作用。
+    }
   }
 }
 

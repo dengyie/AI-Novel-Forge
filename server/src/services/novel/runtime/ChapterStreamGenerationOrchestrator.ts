@@ -207,7 +207,26 @@ export class ChapterStreamGenerationOrchestrator {
     const request = this.deps.validateRequest(requestInput);
     await this.deps.ensureNovelCharacters(novelId, "generate chapter content");
     throwIfChapterGenerationAborted(signal, "章节生成已取消。");
-    const assembled = await this.deps.assembler.assemble(novelId, chapterId, request);
+    // E2：prepare 阶段（planner / context 装配 / state snapshot）失败时给错误打
+    // failurePhase 标记，路由层据此返回结构化 JSON（含 failurePhase=prepare），
+    // 而非让请求拖到 CF 524 或返回无 phase 的 500。见 §E2 开发优化文档。
+    let assembled;
+    try {
+      assembled = await this.deps.assembler.assemble(novelId, chapterId, request);
+    } catch (error) {
+      // abort（客户端断连/主动取消）不得标 failurePhase=prepare——不是 prepare 失败。
+      if (error && typeof error === "object" && !signal?.aborted) {
+        try {
+          Object.defineProperty(error, "chapterGenerationFailurePhase", {
+            value: "prepare",
+            configurable: true,
+          });
+        } catch {
+          // Ignore non-extensible errors.
+        }
+      }
+      throw error;
+    }
     throwIfChapterGenerationAborted(signal, "章节生成已取消。");
     // 下章入口硬守卫：上章尚无 timeline checkpoint 时先补齐（stable/degraded），失败只告警。
     // 与定稿后 async schedule 互补，覆盖「异步未完成就开下一章」的长跑缺口。
