@@ -29,6 +29,35 @@ import { buildQualityLoopRiskFlagsSnapshot } from "../../pipelineExecutionHelper
 type VolumeDocument = Awaited<ReturnType<NovelVolumeService["getVolumes"]>>;
 type RangeDebtRow = { order: number; riskFlags: string | null };
 
+/**
+ * D3：非 setting-debt 持久化失败路径下 DB riskFlags 不落库仅内存，重启后 director 读旧值。
+ * 与 setting-debt 路径对称补一条 stub 落库，plain update 直接写 riskFlags。
+ *
+ * 设计抉择（code-review #2）：不用 contentRevision CAS。原因：recordAssessment 落库失败的
+ * 常见触发正是 contentRevision 并发冲突（章节已被别路 bump revision）；stub 用同一旧 revision
+ * 去 CAS 几乎必然 count=0 跳过覆盖——等于没修。用户选了「对称 stub 落库」方向，本意是
+ * 「把内存评估落进 DB」，CAS 与该方向矛盾。故 plain update，接受覆盖风险，日志如实标注。
+ *
+ * 不动 chapterStatus：非 setting-debt 路径不一定有债，强行置 needs_repair 会误伤无债章
+ * （监管只监控不代写/不误伤）。setting-debt 路径仍按原语义置 needs_repair。
+ *
+ * 返回 null 表示无 stub 可写（缺 chapterId / memoryRiskFlags），调用方跳过。
+ */
+export function buildNonSettingDebtStubUpdate(input: {
+  chapterId: string | null | undefined;
+  memoryRiskFlags: string | null | undefined;
+  expectedContentRevision?: number | null;
+}): { kind: "plain"; where: { id: string }; data: { riskFlags: string } } | null {
+  if (!input.chapterId || input.memoryRiskFlags == null) {
+    return null;
+  }
+  return {
+    kind: "plain",
+    where: { id: input.chapterId },
+    data: { riskFlags: input.memoryRiskFlags },
+  };
+}
+
 export async function projectPipelineChapterQuality(input: {
   jobId: string;
   novelId: string;
@@ -276,6 +305,43 @@ export async function projectPipelineChapterQuality(input: {
           chapterOrder: chapter.order,
           error: stubError instanceof Error ? stubError.message : String(stubError),
         });
+      }
+    } else {
+      // D3：非 setting-debt 持久化失败路径——此前只写内存 rangeDebtByChapterId，
+      // DB riskFlags 停在旧值，重启后 director 读到过期 riskFlags。对称补一条 stub 落库
+      // （plain update，不用 CAS：recordAssessment 失败常见触发是 contentRevision 冲突，
+      // CAS 用旧 revision 必然 miss=没修；用户选对称 stub 方向，本意就是落库，接受覆盖风险）。
+      // 不动 chapterStatus（非 setting-debt 不一定有债，误置 needs_repair 会误伤无债章）。
+      const stubUpdate = buildNonSettingDebtStubUpdate({
+        chapterId: chapter.id,
+        memoryRiskFlags,
+        expectedContentRevision: chapterResult.contentRevision,
+      });
+      if (stubUpdate) {
+        try {
+          await prisma.chapter.update({
+            where: stubUpdate.where,
+            data: stubUpdate.data,
+          });
+          // code-review #1：主路径 failOpen 仍记 failOpen:true，但补一条 warn 标注
+          // riskFlags 已 stub 落库，避免运维误判「完全未持久化」。
+          logPipelineWarn("非设定债 stub riskFlags 已落库（主路径失败兜底）", {
+            jobId,
+            novelId,
+            chapterId: chapter.id,
+            chapterOrder: chapter.order,
+            stubRiskFlagsPersisted: true,
+            expectedContentRevision: chapterResult.contentRevision ?? null,
+          });
+        } catch (stubError) {
+          logPipelineError("非设定债 stub riskFlags 二次落库失败", {
+            jobId,
+            novelId,
+            chapterId: chapter.id,
+            chapterOrder: chapter.order,
+            error: stubError instanceof Error ? stubError.message : String(stubError),
+          });
+        }
       }
     }
     rangeDebtByChapterId.set(chapter.id, {

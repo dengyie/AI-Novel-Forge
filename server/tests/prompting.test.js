@@ -1386,7 +1386,9 @@ test("prompt runner records failed executions without swallowing the original er
     const telemetry = getSinglePromptQualityEntry();
     assert.equal(telemetry.completedCount, 0);
     assert.equal(telemetry.failedCount, 1);
-    assert.equal(telemetry.failuresByKind.llm_error, 1);
+    // "provider timeout" 是超时错误描述：D2 后超时被单独归类为 timeout，不再落 llm_error。
+    assert.equal(telemetry.failuresByKind.timeout, 1);
+    assert.equal(telemetry.failuresByKind.llm_error, 0);
   } finally {
     setPromptRunnerLLMFactoryForTests();
   }

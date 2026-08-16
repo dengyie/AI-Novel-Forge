@@ -15,6 +15,7 @@ export type PromptQualityFailureKind =
   | "schema_repair_failed"
   | "post_validate_failed"
   | "empty_output"
+  | "timeout"
   | "unknown";
 
 export interface PromptQualityEvent {
@@ -131,6 +132,7 @@ function createAggregate(event: PromptQualityEvent, key: string): MutablePromptQ
       schema_repair_failed: 0,
       post_validate_failed: 0,
       empty_output: 0,
+      timeout: 0,
       unknown: 0,
     },
     latencySamples: 0,
