@@ -262,7 +262,7 @@ export const chapterWriterPrompt: PromptAsset<ChapterWriterPromptInput, string, 
         "(1) 结尾是否形成了新的悬念或钩子？",
         "(2) 本章结果约束是否已在场景中成立（非提纲措辞复现；不要输出内部 code）？",
         "(3) 是否违反了任何禁止规则（新角色、场景模式重复、未铺垫转折）？",
-        "确认通过后再开始输出，不需要在正文中输出核查结果。",
+        "确认通过后再开始输出。输出只允许包含章节正文本身：绝对禁止在开头、结尾或任意位置输出自查说明、确认清单、验收结论、『已确认满足全部要求』之类的任何元文字，也不要复述上述（1）（2）（3）的答案。",
       ].filter((line) => line !== "").join("\n")),
       new HumanMessage([
         `小说：${input.novelTitle}`,

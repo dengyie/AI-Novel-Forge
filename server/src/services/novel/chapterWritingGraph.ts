@@ -69,6 +69,56 @@ function isWriterTimeoutError(error: unknown): boolean {
     && (error.name === "TimeoutError" || /timed out after \d+ms/i.test(error.message));
 }
 
+/**
+ * 剥离 writer 模型误输出到正文尾部的「自检答复」块。
+ * 部分模型（如 gemini-3.7-flash-high）无视 prompt「不需要在正文中输出核查结果」，
+ * 把开头形如「已确认满足全部要求：1.…2.…3.…」的验收清单直接接在正文后，
+ * 若原样落库会被 quality-debt 审成说明句/八股打回。
+ * 判别标准：自检块只占正文尾部极小比例（实测约 1.7%，上限 10%）；若某 marker 出现在
+ * 文中/中段，其后必跟大段正文，占比远超 10%，不剥。以此避免误伤正文内对术语的引用。
+ */
+const SELF_CHECK_LEAK_MARKERS = [
+  "已确认满足全部要求",
+  "确认满足全部要求",
+  "已满足全部要求",
+  "自查结果：",
+  "自查结果:",
+  "核查结果：",
+  "核查结果:",
+];
+
+function stripTrailingSelfCheckReport(content: string): string {
+  const trimmed = content.trimEnd();
+  if (!trimmed) {
+    return content;
+  }
+  let cut = -1;
+  for (const marker of SELF_CHECK_LEAK_MARKERS) {
+    const idx = trimmed.lastIndexOf(marker);
+    if (idx < 0) {
+      continue;
+    }
+    const fracAfter = (trimmed.length - idx) / trimmed.length;
+    if (fracAfter > 0.1) {
+      continue;
+    }
+    if (cut === -1 || idx < cut) {
+      cut = idx;
+    }
+  }
+  if (cut < 0) {
+    return content;
+  }
+  // 回退到该 marker 段落前的空行（若存在），整体剥掉自检块，保留正文。
+  const blankBefore = trimmed.lastIndexOf("\n\n", cut);
+  const from = blankBefore >= 0 ? blankBefore + 2 : cut;
+  const cleaned = trimmed.slice(0, from).trimEnd();
+  if (!cleaned) {
+    return content;
+  }
+  return cleaned;
+}
+
 export interface ChapterGraphLLMOptions {
   provider?: LLMProvider;
   model?: string;
@@ -737,7 +787,8 @@ export class ChapterWritingGraph {
           });
           throw error;
         }
-        const rawContent = completed?.output ?? fullContent;
+        // 防模型把自检答复/验收清单接在正文尾部泄漏：落库前剥离，避免被 quality-debt 审成八股。
+        const rawContent = stripTrailingSelfCheckReport(completed?.output ?? fullContent);
         this.deps.logInfo("Writer stage completed", {
           novelId: input.novelId,
           chapterId: input.chapter.id,

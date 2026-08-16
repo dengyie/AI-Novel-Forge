@@ -68,7 +68,7 @@ const DEFAULT_ROUTES: Record<ModelRouteTaskType | "default", Omit<ResolvedModel,
   },
   writer: {
     provider: "openai",
-    model: "gpt-5.6-luna",
+    model: "gemini-3.7-flash-high",
     temperature: 0.8,
     requestProtocol: "auto",
     structuredResponseFormat: "auto",
