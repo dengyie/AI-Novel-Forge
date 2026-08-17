@@ -60,7 +60,7 @@ GitHub → Actions → **Deploy pxed** → **Run workflow**
 2. **build-artifacts**：Ubuntu 构建 `shared`/`server`（及需要时 `client`），打 `*-dist-<sha>.tgz`  
 3. **deploy / Cutover pxed**（自动，无审批）：  
    - scp 包 + `scripts/deploy/pxed-remote-cutover.sh`  
-   - 远端：DB+dist 快照 → `git reset --hard <sha>` → **原子解包** dist → `prisma generate` → **单次** `supervisorctl restart novel-server` → 本机 health  
+   - 远端：DB+dist 快照 → `git reset --hard <sha>` → **原子解包** dist → 仅在 Prisma schema/config/依赖变更时执行 `prisma generate` → **单次** `supervisorctl restart novel-server` → 本机 health
    - runner：公网 `https://ainovel.mangoqwq.com/api/health` + ready  
 
 **不做**：pxed 上 tsc；`NODE_ENV=production`；`git add -A`；改 `.env`/`dev.db` 进 git；自动 migrate 写生产 schema；**失败自动回滚**（只留 snap，人工按日志 rollback）。
