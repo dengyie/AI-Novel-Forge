@@ -5,6 +5,8 @@ const {
   GenerationContextAssembler,
   buildBlockingPendingReviewProposalWhere,
   resolveChapterResourceCharacterIds,
+  splitPriorChapterContextRows,
+  buildPriorChapterContextQuery,
 } = require("../dist/services/novel/runtime/GenerationContextAssembler.js");
 const { prisma } = require("../dist/db/prisma.js");
 const { plannerService } = require("../dist/services/planner/PlannerService.js");
@@ -865,4 +867,53 @@ test("assembler falls back to null timelineContext when buildForChapter fails", 
     novelFactService.listForChapter = originals.listFactsForChapter;
     timelineContextService.buildForChapter = originals.buildForChapter;
   }
+});
+
+test("prior chapter queries keep anchor lookback independent from feedback lookback", () => {
+  const anchorQuery = buildPriorChapterContextQuery({
+    novelId: "novel-1",
+    chapterOrder: 30,
+    includeNeedsRepair: false,
+  });
+  const feedbackQuery = buildPriorChapterContextQuery({
+    novelId: "novel-1",
+    chapterOrder: 30,
+    includeNeedsRepair: true,
+  });
+
+  assert.deepEqual(anchorQuery.where.chapterStatus, { not: "needs_repair" });
+  assert.equal(feedbackQuery.where.chapterStatus, undefined);
+  assert.equal(anchorQuery.take, feedbackQuery.take);
+  assert.deepEqual(anchorQuery.select, feedbackQuery.select);
+});
+
+test("needs_repair chapters feed QFP but never direct continuation anchors", () => {
+  const failed = {
+    order: 6,
+    chapterStatus: "needs_repair",
+    content: "不合格正文尾段不应成为承接锚点",
+    riskFlags: JSON.stringify({
+      qualityLoop: {
+        feedback: [{
+          version: 1,
+          chapterOrder: 6,
+          chapterId: "chapter-6",
+          signature: "qfb:ch6",
+          severity: "soft",
+          rootCause: "length_drift",
+          codes: ["length_under_soft"],
+          evidence: ["正文低于合同区间"],
+          mustFix: ["补关键节拍，不要机械凑字"],
+          planHints: ["补必要在场与因果"],
+          failedPatchCount: 0,
+          avoidRetry: false,
+          evaluatedAt: "2026-08-17T16:16:46.928Z",
+        }],
+      },
+    }),
+  };
+  const result = splitPriorChapterContextRows([failed]);
+
+  assert.deepEqual(result.anchorRows, []);
+  assert.deepEqual(result.feedbackRows, [failed]);
 });

@@ -67,6 +67,45 @@ import {
 export { buildBlockingPendingReviewProposalWhere } from "./context/pendingReviewContext";
 export { resolveChapterResourceCharacterIds } from "./context/GenerationContextProjection";
 
+/**
+ * Keep invalid chapter bodies out of the direct continuation anchor while retaining
+ * their structured quality feedback for the next writer attempt.
+ */
+export function splitPriorChapterContextRows<
+  T extends { chapterStatus?: string | null },
+>(rows: T[]): { anchorRows: T[]; feedbackRows: T[] } {
+  return {
+    anchorRows: rows.filter((row) => row.chapterStatus !== "needs_repair"),
+    feedbackRows: rows,
+  };
+}
+
+export function buildPriorChapterContextQuery(input: {
+  novelId: string;
+  chapterOrder: number;
+  includeNeedsRepair: boolean;
+}) {
+  return {
+    where: {
+      novelId: input.novelId,
+      order: { lt: input.chapterOrder },
+      content: { not: null },
+      ...(input.includeNeedsRepair
+        ? {}
+        : { chapterStatus: { not: "needs_repair" as const } }),
+    },
+    orderBy: { order: "desc" as const },
+    take: Math.max(QUALITY_FEEDBACK_PRIOR_LOOKBACK, 20),
+    select: {
+      order: true,
+      title: true,
+      content: true,
+      riskFlags: true,
+      chapterStatus: true,
+    },
+  };
+}
+
 export class GenerationContextAssembler {
   private readonly continuationService = new NovelContinuationService();
   private readonly worldContextGateway = new WorldContextGateway();
@@ -145,7 +184,8 @@ export class GenerationContextAssembler {
       pendingCharacterHardFactReviews,
       openAuditIssues,
       summaries,
-      recentChapters,
+      priorChapterAnchorRows,
+      priorChapterFeedbackRows,
       sceneDiversitySourceChapters,
       decisions,
       characterDynamics,
@@ -179,20 +219,18 @@ export class GenerationContextAssembler {
         orderBy: { chapter: { order: "desc" } },
         take: 3,
       }),
-      // A3 QFP + previous_chapter_tail：排除 needs_repair 后扩大 lookback，
-      // 避免连续 ≤3 章 needs_repair 时尾段锚点整空；QFP 展示仍只取前 PRIOR_LOOKBACK 条。
-      prisma.chapter.findMany({
-        where: {
-          novelId,
-          order: { lt: chapter.order },
-          content: { not: null },
-          // 排除 needs_repair：不合格章的尾段不应作为下一章「必须直接承接」的锚点
-          chapterStatus: { not: "needs_repair" },
-        },
-        orderBy: { order: "desc" },
-        take: Math.max(QUALITY_FEEDBACK_PRIOR_LOOKBACK, 20),
-        select: { order: true, title: true, content: true, riskFlags: true },
-      }),
+      // A3：承接锚点与 QFP 反馈使用独立 lookback。锚点查询先在数据库排除 needs_repair，
+      // 避免连续失败章占满固定窗口；反馈查询保留 needs_repair，确保其结构化纠偏仍可到达 writer。
+      prisma.chapter.findMany(buildPriorChapterContextQuery({
+        novelId,
+        chapterOrder: chapter.order,
+        includeNeedsRepair: false,
+      })),
+      prisma.chapter.findMany(buildPriorChapterContextQuery({
+        novelId,
+        chapterOrder: chapter.order,
+        includeNeedsRepair: true,
+      })),
       // 写作近邻多样性：当前章前序 N 章 title/taskSheet + summary（≠ 债板前 30 观测窗）
       prisma.chapter.findMany({
         where: {
@@ -249,6 +287,9 @@ export class GenerationContextAssembler {
         return null;
       }),
     ]);
+
+    const recentChapters = splitPriorChapterContextRows(priorChapterAnchorRows).anchorRows;
+    const qualityFeedbackChapters = priorChapterFeedbackRows;
 
     const resolvedStateDrivenContext = await contextAssemblyService.build({
       novelId,
@@ -457,9 +498,10 @@ export class GenerationContextAssembler {
         eligiblePriorCount: recentChapters.length,
       });
     }
-    // A3：近邻章 QFP 投影 → writer/repair「上章纠偏」（确定性模板，非第二 blocking 引擎）
-    // 仅取最近 PRIOR_LOOKBACK 条合格章的 feedback，避免扩大 lookback 后纠偏噪声膨胀
-    const priorQualityPackets: QualityFeedbackPacket[] = recentChapters
+    // A3：近邻章 QFP 投影 → writer/repair「上章纠偏」（确定性模板，非第二 blocking 引擎）。
+    // 反馈允许来自 needs_repair 章，但其正文仍被排除在 previous_chapter_tail 之外；这样失败章
+    // 的最新根因不会丢失，也不会把不合格正文误当作直接承接锚点。
+    const priorQualityPackets: QualityFeedbackPacket[] = qualityFeedbackChapters
       .slice(0, QUALITY_FEEDBACK_PRIOR_LOOKBACK)
       .flatMap((row) => extractQualityFeedbackFromRiskFlags(row.riskFlags));
     const priorQualityFeedback = formatPriorQualityFeedbackLines(priorQualityPackets);

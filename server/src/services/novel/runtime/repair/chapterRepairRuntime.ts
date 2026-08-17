@@ -9,6 +9,13 @@ import {
   ChapterPatchRepairService,
   type PatchRepairMode,
 } from "../../chapterPatchRepairService";
+import {
+  buildRepairIssuesPayload,
+  resolveRepairIssueCodes,
+} from "./repairFeedbackPayload";
+import type { QualityFeedbackPacket } from "@ai-novel/shared/types/qualityFeedback";
+
+export { buildRepairIssuesPayload } from "./repairFeedbackPayload";
 
 export interface ChapterRepairExecutionOptions {
   provider?: LLMProvider;
@@ -30,6 +37,8 @@ export interface PrepareChapterRepairExecutionInput {
   /** 审计层开放硬伤 code（来自 assembled ContextPackage.openAuditIssues，非 LLM 重跑）。
    * streaming repair 无完整 runtimePackage，但可据此让 heavy 候选见到精确硬伤 code。 */
   auditOpenIssueCodes?: string[] | null;
+  /** 当前章节最近一次质量环反馈；只供 repair prompt，不进入新的质量评估。 */
+  qualityFeedback?: QualityFeedbackPacket[] | null;
   repairContext?: ChapterRepairContext | null;
   bibleContent?: string | null;
   forceFullRewrite?: boolean;
@@ -101,60 +110,6 @@ function normalizeRepairIssues(issues: ReviewIssue[]): ReviewIssue[] {
       }];
 }
 
-function resolveIssueCodes(runtimePackage: ChapterRuntimePackage | null | undefined): string[] {
-  return runtimePackage?.audit.openIssues
-    ?.map((issue) => issue.code)
-    .filter((code): code is string => typeof code === "string" && code.trim().length > 0)
-    ?? [];
-}
-
-/**
- * 构建修复 prompt 所用的结构化 issuesJson。
- *
- * Root A 修复：在 ReviewIssue 列表之外，额外透传：
- *  - missingObligations：本章未兑现的义务（kind/summary/evidence），修复器可据此定向补写
- *  - blockingIssueCodes：审计层给出的精确 code（如 OBLIGATION_UNMET / LENGTH_OVER_HARD_MAX），
- *    避免修复器只看压扁文本猜问题类型
- *
- * streaming repair 路径无完整 ChapterRuntimePackage（避免重跑 audit 烧 600s），
- * 但可透传 assembledContextPackage.openAuditIssues 的 code 集合作 auditOpenIssueCodes，
- * 仍让 heavy 候选见到精确硬伤 code（定向修而非漂移重写）。
- */
-function buildRepairIssuesPayload(
-  issues: ReviewIssue[],
-  runtimePackage: ChapterRuntimePackage | null | undefined,
-  auditOpenIssueCodes?: string[] | null,
-): string {
-  const missingObligations = runtimePackage?.obligationCoverage?.missing ?? [];
-  const blockingIssueCodes = [
-    ...resolveIssueCodes(runtimePackage),
-    ...(Array.isArray(auditOpenIssueCodes) ? auditOpenIssueCodes.filter(Boolean) : []),
-  ];
-  const extraCodes = Array.from(new Set(blockingIssueCodes));
-
-  if (missingObligations.length === 0 && extraCodes.length === 0) {
-    return JSON.stringify(issues, null, 2);
-  }
-
-  return JSON.stringify(
-    {
-      issues,
-      ...(missingObligations.length > 0
-        ? {
-          missingObligations: missingObligations.map((o) => ({
-            kind: o.kind,
-            summary: o.summary,
-            ...(o.evidence ? { evidence: o.evidence } : {}),
-          })),
-        }
-        : {}),
-      ...(extraCodes.length > 0 ? { blockingIssueCodes: extraCodes } : {}),
-    },
-    null,
-    2,
-  );
-}
-
 function resolveRepairContext(input: {
   repairContext?: ChapterRepairContext | null;
   runtimePackage?: ChapterRuntimePackage | null;
@@ -218,7 +173,10 @@ export async function prepareChapterRepairExecution(
   input: PrepareChapterRepairExecutionInput,
 ): Promise<PreparedChapterRepairExecution> {
   const issues = normalizeRepairIssues(input.issues);
-  const issueCodes = resolveIssueCodes(input.runtimePackage);
+  const issueCodes = resolveRepairIssueCodes(
+    input.runtimePackage,
+    input.auditOpenIssueCodes,
+  );
   let activeRepairMode = input.options.repairMode ?? "light_repair";
   let modeHint = getRepairModeHint(activeRepairMode, issueCodes);
 
@@ -238,7 +196,9 @@ export async function prepareChapterRepairExecution(
         content: input.content,
         issues,
         runtimePackage: input.runtimePackage,
+        auditOpenIssueCodes: input.auditOpenIssueCodes,
         repairContext: input.repairContext,
+        qualityFeedback: input.qualityFeedback,
         provider: input.options.provider,
         model: input.options.model,
         temperature: input.options.temperature,
@@ -275,7 +235,9 @@ export async function prepareChapterRepairExecution(
           content: input.content,
           issues,
           runtimePackage: input.runtimePackage,
+          auditOpenIssueCodes: input.auditOpenIssueCodes,
           repairContext: input.repairContext,
+          qualityFeedback: input.qualityFeedback,
           provider: input.options.provider,
           model: input.options.model,
           temperature: input.options.temperature,
@@ -313,7 +275,12 @@ export async function prepareChapterRepairExecution(
             bibleContent: resolveBibleContent(input),
             chapterTitle: input.chapterTitle,
             chapterContent: input.content,
-            issuesJson: buildRepairIssuesPayload(issues, input.runtimePackage, input.auditOpenIssueCodes),
+            issuesJson: buildRepairIssuesPayload(
+              issues,
+              input.runtimePackage,
+              input.auditOpenIssueCodes,
+              input.qualityFeedback,
+            ),
             ragContext: buildRepairRagContext(input),
             modeHint,
             repairMode: activeRepairMode,
@@ -350,7 +317,12 @@ export async function prepareChapterRepairExecution(
         bibleContent: resolveBibleContent(input),
         chapterTitle: input.chapterTitle,
         chapterContent: input.content,
-        issuesJson: buildRepairIssuesPayload(issues, input.runtimePackage, input.auditOpenIssueCodes),
+        issuesJson: buildRepairIssuesPayload(
+          issues,
+          input.runtimePackage,
+          input.auditOpenIssueCodes,
+          input.qualityFeedback,
+        ),
         ragContext: buildRepairRagContext(input),
         modeHint,
         repairMode: activeRepairMode,

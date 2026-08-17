@@ -85,6 +85,14 @@ keyMilestoneGuards: z.array(volumeKeyMilestoneGuardSchema).default([])
 
 **输出**：`repetitionClusters`、`openingPatternClusters`、`hasCriticalIssues` 和修复建议。
 
+### 八、质量反馈与承接锚点边界
+
+章节质量环产生的 `QualityFeedbackPacket` 是结构化纠偏输入，不是新的质量证据。它可以被后续 writer 和当前章节 repair 消费，用于传递 `rootCause`、`codes`、`evidence`、`mustFix` 与 `planHints`；repair 载荷只保留当前最新 packet，避免历史反馈淹没当前问题。
+
+`chapterStatus=needs_repair` 的正文不得作为下一章的 `previousChapterTail` 或其它直接承接锚点，否则未通过质量门的尾段会被再次当作事实承接。但该章节的 QFP 仍应进入近期反馈窗口，让下一次写作知道上一轮失败的根因。承接正文与反馈来源必须在上下文组装阶段分离。
+
+当前章节的 QFP 只注入 patch/heavy repair prompt，不得注入新的 review/acceptance/quality-loop 评估 prompt。修复后必须基于新正文重新评估；旧反馈不能被当作新正文的通过证据，也不能绕过 `literaryPass`、`l0Clear` 或 `qualityLoop` 质量门。反馈中的篇幅建议只表达场景完整度与因果推进，禁止转化为机械凑字数或固定剧情规则。
+
 ## 失效模式
 
 - `completedMilestones` 和 `recentScenePatterns` 依赖上游服务在构建上下文时正确填入，若上游不填，这两个守卫就不生效。本次修改只建立了接口契约，数据填充需要在章节运行时协调器中实现。

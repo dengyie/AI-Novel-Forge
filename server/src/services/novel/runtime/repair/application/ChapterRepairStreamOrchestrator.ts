@@ -1,5 +1,8 @@
 import type { BaseMessageChunk } from "@langchain/core/messages";
-import { isAutoPatchAvoidedByRiskFlags } from "@ai-novel/shared/types/qualityFeedback";
+import {
+  extractQualityFeedbackFromRiskFlags,
+  isAutoPatchAvoidedByRiskFlags,
+} from "@ai-novel/shared/types/qualityFeedback";
 import type { StreamDoneHelpers } from "../../../../../llm/streaming";
 import { prisma } from "../../../../../db/prisma";
 import { streamTextPrompt } from "../../../../../prompting/core/promptRunner";
@@ -146,6 +149,7 @@ export class ChapterRepairStreamOrchestrator {
         auditOpenIssueCodes: (assembledContextPackage.openAuditIssues ?? [])
           .map((item) => item?.code)
           .filter((code): code is string => typeof code === "string" && code.trim().length > 0),
+        qualityFeedback: extractQualityFeedbackFromRiskFlags(chapter.riskFlags),
         options: {
           provider: options.provider,
           model: options.model,

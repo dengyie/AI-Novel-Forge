@@ -9,6 +9,8 @@ import {
 import { runStructuredPrompt } from "../../prompting/core/promptRunner";
 import { buildChapterRepairContextBlocks } from "../../prompting/prompts/novel/chapterLayeredContext";
 import { chapterPatchRepairPrompt } from "../../prompting/prompts/novel/chapterPatchRepair.prompts";
+import { buildRepairIssuesPayload } from "./runtime/repair/repairFeedbackPayload";
+import type { QualityFeedbackPacket } from "@ai-novel/shared/types/qualityFeedback";
 
 export type PatchRepairMode =
   | "detect_only"
@@ -28,10 +30,13 @@ export interface ChapterPatchRepairInput {
   modeHint?: string;
   repairContext?: ChapterRepairContext | null;
   runtimePackage?: ChapterRuntimePackage | null;
+  auditOpenIssueCodes?: string[] | null;
   provider?: LLMProvider;
   model?: string;
   temperature?: number;
   repairMode?: PatchRepairMode;
+  /** 当前章节最近一次质量环反馈；只供 patch prompt，不进入新的质量评估。 */
+  qualityFeedback?: QualityFeedbackPacket[] | null;
 }
 
 export interface ChapterPatchRepairResult {
@@ -75,7 +80,12 @@ export class ChapterPatchRepairService {
           novelTitle: input.novelTitle,
           chapterTitle: input.chapterTitle,
           chapterContent: input.content,
-          issuesJson: JSON.stringify(input.issues, null, 2),
+          issuesJson: buildRepairIssuesPayload(
+            input.issues,
+            input.runtimePackage,
+            input.auditOpenIssueCodes,
+            input.qualityFeedback,
+          ),
           modeHint: input.modeHint,
         },
         contextBlocks,
