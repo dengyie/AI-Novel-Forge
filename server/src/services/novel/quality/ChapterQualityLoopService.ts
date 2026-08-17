@@ -29,7 +29,7 @@ interface RecordChapterQualityLoopInput {
   score: QualityScore;
   issues: ReviewIssue[];
   runtimePackage?: ChapterRuntimePackage | null;
-  source: "manual_review" | "pipeline_review" | "repair_recheck";
+  source: "manual_review" | "pipeline_review" | "repair_recheck" | "generate_acceptance";
   terminalAction?: "defer_and_continue" | null;
   taskId?: string | null;
   runId?: string | null;

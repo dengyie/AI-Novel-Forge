@@ -261,6 +261,60 @@ test("writer context block protects same-chapter feedback from summary drops", (
   const priorBlocks = buildChapterWriterContextBlocks(priorOnly);
   const priorBlock = priorBlocks.find((b) => b.id === "prior_quality_feedback");
   assert.ok(priorBlock);
-  assert.equal(priorBlock.allowSummary, true);
-  assert.equal(priorBlock.required, false);
+  // QFP 是纠偏关键输入（单行 ~15 token、总量 ~150 token），不允许因预算被无声裁剪；
+  // ch6 实证：required=false 时 writer_draft droppedContextBlockIds 含 prior_quality_feedback。
+  assert.equal(priorBlock.allowSummary, false);
+  assert.equal(priorBlock.required, true);
+});
+
+test("prior_quality_feedback survives writer budget pressure", () => {
+  // 复刻 ch6 writer_draft 裁剪场景：必填块吃满预算后，prior_quality_feedback 仍须保留。
+  const { selectContextBlocks } = require("../dist/prompting/core/contextSelection.js");
+  const { createContextBlock } = require("../dist/prompting/core/contextBudget.js");
+  const { RUNTIME_PROMPT_BUDGET_PROFILES } = require("../dist/prompting/prompts/novel/promptBudgetProfiles.js");
+
+  const writerProfile = RUNTIME_PROMPT_BUDGET_PROFILES.find((p) => p.promptId === "novel.chapter.writer");
+  assert.ok(writerProfile);
+
+  // 构造一组必填块刚好顶满预算，模拟 ch6 实际 prompt 压力。
+  const bigRequired = (id, group) => createContextBlock({
+    id,
+    group,
+    priority: 100,
+    required: true,
+    allowSummary: false,
+    content: "占位正文 ".repeat(700), // ~1400 中文字 ≈ 350+ token
+  });
+  const feedbackBlock = createContextBlock({
+    id: "prior_quality_feedback",
+    group: "prior_quality_feedback",
+    priority: 98,
+    required: true,
+    allowSummary: false,
+    content: [
+      "纠偏反馈（上章质量债 / 本章上枪失败；按建议规避同类硬伤，禁止 skip_quality / 同签连 patch）：",
+      "- 第5章 [blocking/structure] 补齐关键节拍",
+      "- 第6章 [soft/length_drift] 补必要在场与因果",
+    ].join("\n"),
+  });
+
+  const result = selectContextBlocks(
+    [
+      bigRequired("chapter_mission", "chapter_mission"),
+      bigRequired("previous_chapter_tail", "previous_chapter_tail"),
+      bigRequired("obligation_contract", "obligation_contract"),
+      feedbackBlock,
+    ],
+    {
+      maxTokensBudget: writerProfile.maxTokensBudget,
+      preferredGroups: writerProfile.preferredGroups,
+      dropOrder: writerProfile.dropOrder,
+    },
+  );
+
+  assert.ok(
+    result.selectedBlocks.some((b) => b.id === "prior_quality_feedback"),
+    `prior_quality_feedback must survive budget pressure; dropped=${result.droppedBlockIds.join(",")}`,
+  );
+  assert.ok(!result.droppedBlockIds.includes("prior_quality_feedback"));
 });

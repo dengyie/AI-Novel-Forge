@@ -29,6 +29,7 @@ import {
   type FinalizeChapterContentResult,
 } from "./ChapterContentFinalizationService";
 import { persistChapterQualityScores } from "../quality/chapterQualityScorePersist";
+import { chapterQualityLoopService } from "../quality/ChapterQualityLoopService";
 import { buildChapterRunStatusFrame } from "./chapterRunStatusFrame";
 
 export interface ChapterStreamGenerationAgentRuntime {
@@ -171,6 +172,15 @@ export class ChapterStreamGenerationOrchestrator {
             error: error instanceof Error ? error.message : String(error),
           });
         }
+        // 质量环回写：persist 只更新 score/status，qualityLoop/QFP 必须基于新正文
+        // 重新评估（acceptance 已跑），否则 riskFlags.qualityLoop 停留旧 revision，
+        // 下游 writer/repair 看到的是过期反馈。CAS 用 finalized.contentRevision。
+        await this.runPostStreamQualityAssessment({
+          novelId,
+          chapterId,
+          chapterOrder: assembled.chapter.order,
+          finalized,
+        });
         throwIfChapterGenerationAborted(cancelSignal);
         this.emitRunStatus(helpers, buildChapterRunStatusFrame({
           runId: runStatusId,
@@ -194,6 +204,47 @@ export class ChapterStreamGenerationOrchestrator {
         };
       },
     };
+  }
+
+  /**
+   * 流式 generate 定稿后的质量环回写。
+   *
+   * persistChapterQualityScores 只更新 qualityScore/chapterStatus，不写
+   * riskFlags.qualityLoop/QFP。若跳过此步，新正文的 acceptance 结果不会沉淀为
+   * 新 QFP，下游 writer/repair 会继续读到旧 revision 的过期反馈（ch6 实证：
+   * 重写后 evaluatedAt/signature 均未变）。
+   *
+   * CAS 用 finalized.contentRevision；冲突时只记日志不抛出——新正文已落库，
+   * 质量环回写失败不应回滚正文，但必须可观测（manual review / repair recheck
+   * 路径仍会基于最新 revision 重新评估）。
+   */
+  async runPostStreamQualityAssessment(input: {
+    novelId: string;
+    chapterId: string;
+    chapterOrder: number;
+    finalized: FinalizeChapterContentResult;
+  }): Promise<void> {
+    const { novelId, chapterId, chapterOrder, finalized } = input;
+    try {
+      await chapterQualityLoopService.recordAssessment({
+        novelId,
+        chapterId,
+        chapterOrder,
+        score: finalized.score,
+        issues: finalized.issues,
+        runtimePackage: finalized.runtimePackage,
+        source: "generate_acceptance",
+        expectedContentRevision: finalized.contentRevision,
+      });
+    } catch (error) {
+      console.warn("[chapter-runtime] stream quality loop record failed", {
+        novelId,
+        chapterId,
+        chapterOrder,
+        expectedContentRevision: finalized.contentRevision,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   async prepareRuntimeChapter(

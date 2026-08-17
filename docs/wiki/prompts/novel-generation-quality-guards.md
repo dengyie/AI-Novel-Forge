@@ -93,6 +93,12 @@ keyMilestoneGuards: z.array(volumeKeyMilestoneGuardSchema).default([])
 
 当前章节的 QFP 只注入 patch/heavy repair prompt，不得注入新的 review/acceptance/quality-loop 评估 prompt。修复后必须基于新正文重新评估；旧反馈不能被当作新正文的通过证据，也不能绕过 `literaryPass`、`l0Clear` 或 `qualityLoop` 质量门。反馈中的篇幅建议只表达场景完整度与因果推进，禁止转化为机械凑字数或固定剧情规则。
 
+### 九、反馈块预算与质量环回写边界
+
+`prior_quality_feedback` 在 writer prompt 中必须 `required: true` 且 `allowSummary: false`。QFP 单行约 15 token、整窗不超过 8 条（约 150 token），成本极低，但它是 writer 唯一能看到「上一章为何失败」的结构化输入；一旦因预算被裁剪，writer 会重复同类硬伤。本章上枪失败反馈与上章 QFP 同等保护，不再区分 required 等级。
+
+流式 `/generate` 定稿后必须调用 `ChapterQualityLoopService.recordAssessment()` 回写 `riskFlags.qualityLoop` 与 QFP。`persistChapterQualityScores` 只更新 `qualityScore` / `chapterStatus`，不写质量环；若跳过回写，下游 writer/repair 会继续读到旧 revision 的过期反馈，修复决策基于失效证据。CAS 必须使用 `finalized.contentRevision`；冲突时记日志不抛出，由 manual review / repair recheck 路径基于最新 revision 重新评估兜底。
+
 ## 失效模式
 
 - `completedMilestones` 和 `recentScenePatterns` 依赖上游服务在构建上下文时正确填入，若上游不填，这两个守卫就不生效。本次修改只建立了接口契约，数据填充需要在章节运行时协调器中实现。
