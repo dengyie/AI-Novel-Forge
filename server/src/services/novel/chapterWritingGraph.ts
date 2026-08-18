@@ -48,6 +48,15 @@ function isWriterTimeoutError(error: unknown): boolean {
     && (error.name === "TimeoutError" || /timed out after \d+ms/i.test(error.message));
 }
 
+function hasConcreteChapterBoundary(
+  boundary: NonNullable<NonNullable<GenerationContextPackage["chapterWriteContext"]>["chapterBoundary"]> | null | undefined,
+): boolean {
+  return Boolean(
+    boundary
+    && (boundary.endingState?.trim() || boundary.doNotCross.some((item) => item.trim().length > 0)),
+  );
+}
+
 /**
  * 剥离 writer 模型误输出到正文尾部的「自检答复」块。
  * 部分模型（如 gemini-3.7-flash-high）无视 prompt「不需要在正文中输出核查结果」，
@@ -369,6 +378,29 @@ export class ChapterWritingGraph {
     let currentLength = countChapterCharacters(content);
     if (currentLength >= lengthGoal.minWordCount) {
       return { content };
+    }
+
+    // A concrete ending state is a stronger stop signal than the soft length floor.
+    // Do not make a completed scene cross its chapter boundary just to repay length debt;
+    // leave the debt visible for quality review and repair instead.
+    if (hasConcreteChapterBoundary(writeContext.chapterBoundary)) {
+      this.deps.logWarn("Chapter length recovery skipped at concrete boundary", {
+        novelId: input.novelId,
+        chapterId: input.chapter.id,
+        chapterOrder: input.chapter.order,
+        targetWordCount: lengthGoal.targetWordCount,
+        minWordCount: lengthGoal.minWordCount,
+        finalWordCount: currentLength,
+      });
+      return {
+        content,
+        lengthDebt: {
+          targetWordCount: lengthGoal.targetWordCount,
+          minWordCount: lengthGoal.minWordCount,
+          finalWordCount: currentLength,
+          attempts: 0,
+        },
+      };
     }
 
     const builtBlocks = buildChapterWriterContextBlocks(writeContext);

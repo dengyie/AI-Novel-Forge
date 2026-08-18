@@ -99,6 +99,14 @@ keyMilestoneGuards: z.array(volumeKeyMilestoneGuardSchema).default([])
 
 流式 `/generate` 定稿后必须调用 `ChapterQualityLoopService.recordAssessment()` 回写 `riskFlags.qualityLoop` 与 QFP。`persistChapterQualityScores` 只更新 `qualityScore` / `chapterStatus`，不写质量环；若跳过回写，下游 writer/repair 会继续读到旧 revision 的过期反馈，修复决策基于失效证据。CAS 必须使用 `finalized.contentRevision`；冲突时记日志不抛出，由 manual review / repair recheck 路径基于最新 revision 重新评估兜底。
 
+### 十、章节边界优先于长度债
+
+`chapter_boundary.endingState` 或 `chapter_boundary.doNotCross` 有具体内容时，它们是写作阶段的停止信号，优先于 `targetWordCount` / `minWordCount`。writer prompt 必须允许戏核完成并抵达结束态后自然收束，不能为补足篇幅越过结束态、开启新场景或偷跑后续章节。
+
+运行时若正文低于长度下限但上下文已有具体边界，不再自动发起 `writer_extend`。系统保留 `chapterLengthDebt`，交由质量门和 repair 评估是否需要在边界内补足；这不是自动通过，也不改变长度质量风险。没有具体边界契约时，旧的长度恢复路径仍可运行，但不得把长度恢复提示写成重复注水。
+
+边界字段为空或退化为抽象钩子时，不能假定 writer 拥有可靠停止坐标；应优先修复章节执行合同/场景卡来源，而不是在续写器里硬编码章节号或字数特例。
+
 ## 失效模式
 
 - `completedMilestones` 和 `recentScenePatterns` 依赖上游服务在构建上下文时正确填入，若上游不填，这两个守卫就不生效。本次修改只建立了接口契约，数据填充需要在章节运行时协调器中实现。
@@ -117,6 +125,7 @@ keyMilestoneGuards: z.array(volumeKeyMilestoneGuardSchema).default([])
 - `server/src/agents/tools/bookAnalysisTools.ts`（`audit_chapter_continuity`）
 - `server/src/prompting/prompts/novel/chapterLayeredContext.ts`
 - `server/src/prompting/prompts/novel/chapterWriter.prompts.ts`
+- `server/src/services/novel/chapterWritingGraph.ts`（长度恢复与边界停止）
 - `shared/types/chapterRuntime.ts`（`ChapterWriteContext`、`VolumeWindowContext`）
 
 ## 源文档

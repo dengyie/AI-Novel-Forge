@@ -8,7 +8,7 @@ const promptRunner = require("../dist/prompting/core/promptRunner.js");
 // 无 live 进度，652s 墙钟超时只留一行 err.log。修复后必须与 writer_draft 同构走
 // streamTextPrompt，超时 reject 直接冒泡为章节失败（不落半截续写）。
 
-function buildContextPackageWithTarget(targetWordCount) {
+function buildContextPackageWithTarget(targetWordCount, chapterBoundary = null) {
   return {
     chapter: { title: "第20章", targetWordCount, sceneCards: null, expectation: "推进。" },
     chapterWriteContext: {
@@ -31,7 +31,7 @@ function buildContextPackageWithTarget(targetWordCount) {
         mustHitNow: [], mustPreserve: [], requiredPayoffTouches: [],
         requiredCharacterAppearances: [], requiredGoalChanges: [], canDefer: [], forbiddenCrossings: [],
       },
-      chapterBoundary: null, lengthBudget: null, scenePlan: null,
+      chapterBoundary, lengthBudget: null, scenePlan: null,
       participants: [], characterHardFacts: [], characterBehaviorGuides: [],
       activeRelationStages: [], pendingCandidateGuards: [],
       localStateSummary: "无", openConflictSummaries: [],
@@ -92,6 +92,41 @@ test("writer_extend uses streamTextPrompt and appends continuation output", asyn
     assert.equal(typeof extendCall.options.timeoutMs, "number");
     assert.ok(extendCall.options.timeoutMs >= 480_000, "extend timeout must respect writer floor");
     assert.match(done.finalContent, /续写正文/, "continuation must be merged into final content");
+  } finally {
+    promptRunner.streamTextPrompt = originalStream;
+  }
+});
+
+test("writer_extend does not cross a concrete chapter boundary to repay length debt", async () => {
+  const originalStream = promptRunner.streamTextPrompt;
+  const streamCalls = [];
+  const continuationText = "不应越过边界的续写。".repeat(1500);
+
+  promptRunner.streamTextPrompt = async (input) => {
+    streamCalls.push(input);
+    const isDraft = input.promptInput.mode === "draft";
+    return {
+      stream: (async function* () { yield { content: "chunk" }; })(),
+      complete: Promise.resolve({ output: isDraft ? SHORT_DRAFT : continuationText }),
+    };
+  };
+
+  try {
+    const graph = buildGraph();
+    const result = await graph.createChapterStream({
+      novelId: "novel-1",
+      novelTitle: "源世界",
+      chapter: { id: "chapter-20", title: "第20章", order: 20, targetWordCount: 7000 },
+      contextPackage: buildContextPackageWithTarget(7000, {
+        endingState: "手电光已经扫到巷口，追兵即将进入视野",
+        doNotCross: ["不得进入巷口后的正面交锋"],
+      }),
+      options: {},
+    });
+    const done = await result.onDone(SHORT_DRAFT);
+
+    assert.equal(streamCalls.filter((call) => call.promptInput.mode === "continue").length, 0);
+    assert.equal(done.finalContent, SHORT_DRAFT);
   } finally {
     promptRunner.streamTextPrompt = originalStream;
   }
