@@ -24,6 +24,7 @@ Wiki 不记录单次提交改了什么，也不替代 release notes。它只记�
 - [图片生成 Provider](./architecture/image-generation-providers.md)
 - [模型选择与厂商默认模型边界](./architecture/model-selection.md)
 - [Novel 应用服务层](./architecture/novel-application-services.md)
+- [进程级全局错误兜底](./architecture/process-global-error-handling.md)
 - [读路径性能边界](./architecture/read-path-performance-boundaries.md)
 - [服务架构迁移计划](./architecture/server-architecture-migration-plan.md)
 - [World Context Gateway](./architecture/world-context-gateway.md)
