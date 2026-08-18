@@ -30,6 +30,19 @@ export interface ChapterRepairPromptInput {
   modeHint?: string;
   /** 本次修文模式（heavy_repair / light_repair / continuity_only / …）。仅用于 system 文案分支。 */
   repairMode?: string;
+  /**
+   * 章节篇幅合同（来自 targetWordCount 经 resolveLengthBudgetContract）。
+   * 仅 heavy_repair 注入：让 AI 知晓目标/软区间/硬下限，主动写够篇幅。
+   * light_repair 是局部补丁，结构上无力扩写整章，故不注入扩写指令
+   * （由拦截层把短候选升级为 heavy 后由 heavy prompt 承担扩写）。
+   * hardMin（target×0.6）是不可破客观下限——剧情边界优先于凑字数，但不豁免 hardMin。
+   */
+  lengthBudget?: {
+    targetWordCount: number;
+    softMinWordCount: number;
+    softMaxWordCount: number;
+    hardMinWordCount: number;
+  } | null;
 }
 
 export const chapterSummaryPrompt: PromptAsset<
@@ -209,6 +222,11 @@ export const chapterRepairPrompt: PromptAsset<ChapterRepairPromptInput, string, 
     const rewriteBoundary = isHeavy
       ? "必要时可重写句段乃至重组段落次序，但保持剧情方向、核心事件次序与角色状态不变；优先复用原章有效推进，不要凭空发明新主线。"
       : "修文以‘最小必要修改’为原则，不要无关重写，不要把原章整体推翻重来。";
+    // 篇幅合同指令：仅 heavy_repair 且有 lengthBudget 时注入。
+    // 语义同 task #27 writer 口径：剧情边界优先于凑字数，但 hardMin（target×0.6）不可破。
+    const lengthBudgetLine = isHeavy && input.lengthBudget
+      ? `7. 本章篇幅合同：目标 ${input.lengthBudget.targetWordCount} 字（建议区间 ${input.lengthBudget.softMinWordCount}–${input.lengthBudget.softMaxWordCount} 字）；正文不得低于硬下限 ${input.lengthBudget.hardMinWordCount} 字。戏核与边界完整时以自然收束为准，但不可短于硬下限——若原章过短，须用场景、动作、反应与细节把推进落到实处，写够篇幅，禁止靠注水、重复或离题支线凑字。`
+      : null;
     return [
     new SystemMessage([
       "你是资深网络小说修文编辑。",
@@ -233,6 +251,7 @@ export const chapterRepairPrompt: PromptAsset<ChapterRepairPromptInput, string, 
       "4. 若存在逻辑、动机、衔接问题，应补足必要过桥与因果，而不是额外发明大设定。",
       "5. 若存在钩子不足、结尾无力问题，应在不违背既有走向的前提下加强章末压力、悬念或决策点。",
       input.modeHint ? `6. 本次修复重点：${input.modeHint}` : "",
+      lengthBudgetLine,
       "",
       "【风格要求】",
       "1. 保持与原章相近的叙述视角、语言风格与人物说话方式。",

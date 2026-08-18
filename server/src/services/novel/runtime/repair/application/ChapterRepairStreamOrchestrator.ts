@@ -145,6 +145,7 @@ export class ChapterRepairStreamOrchestrator {
         issues,
         repairContext: repairContextPackage.chapterRepairContext,
         bibleContent: bible?.rawContent ?? "",
+        targetWordCount: chapter.targetWordCount ?? null,
         forceFullRewrite: patchAvoid.avoided,
         auditOpenIssueCodes: (assembledContextPackage.openAuditIssues ?? [])
           .map((item) => item?.code)

@@ -1,6 +1,10 @@
 import type { ChapterRepairContext, ChapterRuntimePackage } from "@ai-novel/shared/types/chapterRuntime";
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
 import type { ReviewIssue } from "@ai-novel/shared/types/novel";
+import {
+  resolveHardMinWordCount,
+  resolveLengthBudgetContract,
+} from "@ai-novel/shared/types/chapterLengthControl";
 import { runTextPrompt } from "../../../../prompting/core/promptRunner";
 import { buildChapterRepairContextBlocks } from "../../../../prompting/prompts/novel/chapterLayeredContext";
 import { chapterRepairPrompt } from "../../../../prompting/prompts/novel/review.prompts";
@@ -41,6 +45,11 @@ export interface PrepareChapterRepairExecutionInput {
   qualityFeedback?: QualityFeedbackPacket[] | null;
   repairContext?: ChapterRepairContext | null;
   bibleContent?: string | null;
+  /**
+   * 章节目标字数（来自 chapter.targetWordCount）。heavy_repair 据此解析篇幅合同
+   * 注入 prompt，让 AI 主动写够（hardMin=target×0.6 不可破）。null/缺失则不设篇幅门。
+   */
+  targetWordCount?: number | null;
   forceFullRewrite?: boolean;
   options: ChapterRepairExecutionOptions;
 }
@@ -56,6 +65,16 @@ export interface ChapterHeavyRepairPromptRequest {
     modeHint: string;
     /** heavy_repair / light_repair — 让 prompt.render 走差异化改写边界（heavy 允许重写句段）。 */
     repairMode?: string;
+    /**
+     * 篇幅合同（target/softMin/softMax/hardMin）。仅 heavy_repair 注入到 prompt.render，
+     * 让 AI 写够篇幅、不破 hardMin。light_repair 不传（结构上无力扩写整章）。
+     */
+    lengthBudget?: {
+      targetWordCount: number;
+      softMinWordCount: number;
+      softMaxWordCount: number;
+      hardMinWordCount: number;
+    } | null;
   };
   contextBlocks?: ReturnType<typeof buildChapterRepairContextBlocks>;
   options: {
@@ -97,6 +116,29 @@ export interface ExecutedChapterRepair {
   finalRepairMode: PatchRepairMode;
   escalatedFromPatch: boolean;
   patchFailure: ChapterPatchRepairFailedError | null;
+}
+
+/**
+ * 解析 repair 用的篇幅合同（target/softMin/softMax/hardMin）。
+ * 无 targetWordCount（旧数据/无合同）返回 null → 不注入篇幅门。
+ * 仅 heavy_repair 使用（见 prepareChapterRepairExecution）。
+ */
+function resolveRepairLengthBudget(targetWordCount: number | null | undefined): {
+  targetWordCount: number;
+  softMinWordCount: number;
+  softMaxWordCount: number;
+  hardMinWordCount: number;
+} | null {
+  const budget = resolveLengthBudgetContract(targetWordCount);
+  if (!budget) {
+    return null;
+  }
+  return {
+    targetWordCount: budget.targetWordCount,
+    softMinWordCount: budget.softMinWordCount,
+    softMaxWordCount: budget.softMaxWordCount,
+    hardMinWordCount: resolveHardMinWordCount(budget.targetWordCount),
+  };
 }
 
 function normalizeRepairIssues(issues: ReviewIssue[]): ReviewIssue[] {
@@ -179,6 +221,8 @@ export async function prepareChapterRepairExecution(
   );
   let activeRepairMode = input.options.repairMode ?? "light_repair";
   let modeHint = getRepairModeHint(activeRepairMode, issueCodes);
+  // 篇幅合同仅 heavy_repair 使用（见下方两处 promptInput）。
+  const lengthBudget = resolveRepairLengthBudget(input.targetWordCount ?? null);
 
   if (input.forceFullRewrite && activeRepairMode !== "heavy_repair") {
     activeRepairMode = "heavy_repair";
@@ -284,6 +328,7 @@ export async function prepareChapterRepairExecution(
             ragContext: buildRepairRagContext(input),
             modeHint,
             repairMode: activeRepairMode,
+            lengthBudget,
           },
           contextBlocks: resolveRepairContext(input)
             ? buildChapterRepairContextBlocks(resolveRepairContext(input) as ChapterRepairContext)
@@ -326,6 +371,7 @@ export async function prepareChapterRepairExecution(
         ragContext: buildRepairRagContext(input),
         modeHint,
         repairMode: activeRepairMode,
+        lengthBudget,
       },
       contextBlocks: resolveRepairContext(input)
         ? buildChapterRepairContextBlocks(resolveRepairContext(input) as ChapterRepairContext)

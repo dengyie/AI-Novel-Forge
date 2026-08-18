@@ -442,7 +442,9 @@ test("chapter writer prompt does not expose scene contract controls", () => {
   const systemContent = String(messages[0].content);
   const humanContent = String(messages[1].content);
   assert.match(systemContent, /本章目标长度：约 3000 字/);
-  assert.match(systemContent, /不得明显超过上限/);
+  // task #27：边界优先于字数硬合同。旧的「不得明显超过上限」措辞已改为
+  // 「边界优先于篇幅」。断言改为现行措辞。
+  assert.match(systemContent, /边界优先于篇幅/);
   assert.doesNotMatch(systemContent, /当前场景合同/);
   assert.doesNotMatch(systemContent, /场景标题/);
   assert.doesNotMatch(systemContent, /控字数模式/);
@@ -547,7 +549,9 @@ test("chapter writer prompt carries explicit target length and continuation inst
     estimatedInputTokens: 0,
   });
   assert.match(String(continueMessages[0].content), /不得重写章节开头/);
-  assert.match(String(continueMessages[0].content), /至少缺少约 900 字/);
+  // task #27：续写篇幅缺口指令已改为边界感知口径（约 N 字缺口、不越边界、确有叙事价值才补）。
+  // 旧的「至少缺少约 900 字」措辞已改为「当前仍有约 900 字的篇幅缺口」。断言改为现行措辞。
+  assert.match(String(continueMessages[0].content), /当前仍有约 900 字的篇幅缺口/);
   assert.match(String(continueMessages[1].content), /任务模式：补写当前章节/);
 });
 

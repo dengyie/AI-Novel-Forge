@@ -600,6 +600,7 @@ async function repairDraftContent(input: {
     content: input.content,
     issues: input.issues,
     runtimePackage: input.runtimePackage,
+    targetWordCount: input.runtimePackage.context?.chapterMission?.targetWordCount ?? null,
     forceFullRewrite: input.forceFullRewrite,
     options: {
       provider: input.options.provider,

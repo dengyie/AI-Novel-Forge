@@ -107,6 +107,16 @@ keyMilestoneGuards: z.array(volumeKeyMilestoneGuardSchema).default([])
 
 边界字段为空或退化为抽象钩子时，不能假定 writer 拥有可靠停止坐标；应优先修复章节执行合同/场景卡来源，而不是在续写器里硬编码章节号或字数特例。
 
+### 十一、字数硬门在 generate 与 repair 路径共用（hardMin = target×0.6 不可破）
+
+字数硬下限 `hardMin = floor(targetWordCount × LENGTH_HARD_UNDER_RATIO=0.6)` 是不可由 LLM 分数推翻的客观事实：
+
+- **generate/acceptance 路径**：`ChapterAcceptanceAssessmentService.reconcileLengthAssessment` 在 `evaluateLengthBudget` 判 `under_hard` 时注入 `length_under_hard`（severity high），并把 overall 压到 ≤49，禁止静默 `completed`。
+- **repair 复检路径**：`ChapterRepairFinalizer` 在 `decideRepairContentAdoption` **之前**对候选跑同一个 `evaluateLengthBudget`；命中 `under_hard` 时强制判 discard（不写新正文，正文保持 baseline），并通过 `recordRepairFeedbackDecision(repairDecision: "discard")` 让 QFP `avoidRetry` 生效——下一轮 repair 被 `isAutoPatchAvoidedByRiskFlags` 强制升级为 `heavy_repair`，避免 light_repair 局部补丁反复产出短候选。
+- **引导层**：`chapterRepairPrompt` 在 `heavy_repair` 且带 `lengthBudget` 时注入篇幅合同（目标 / 软区间 / 硬下限），让 AI 主动写够；`light_repair` 不注入扩写指令（结构上无力扩写整章）。
+
+剧情边界优先于凑字数（见第十节），但**不豁免 hardMin**：戏核完整、抵达结束态时以自然收束为准，可低于 `target`/`softMin`，**但不得低于 `hardMin`**；候选低于 `hardMin` 一律 discard。无 `targetWordCount`（旧数据 / 无合同）时 `evaluateLengthBudget` 返回 null，不设字数门，兼容旧章节。
+
 ## 失效模式
 
 - `completedMilestones` 和 `recentScenePatterns` 依赖上游服务在构建上下文时正确填入，若上游不填，这两个守卫就不生效。本次修改只建立了接口契约，数据填充需要在章节运行时协调器中实现。
