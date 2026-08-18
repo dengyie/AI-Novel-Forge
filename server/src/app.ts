@@ -65,6 +65,8 @@ import {
 } from "./services/bootstrap/SystemResourceBootstrapService";
 import { initializeRagSettingsCompatibility } from "./services/settings/RagCompatibilityBootstrapService";
 import { qualityDebtSettingsService } from "./services/settings/QualityDebtSettingsService";
+import { createGlobalErrorHandlers } from "./services/globalErrorHandler";
+import { logPipelineError } from "./services/novel/novelCoreShared";
 import { DirectorWorker } from "./workers/directorWorker";
 import { cleanupLogDirectory, resolveLogRetentionConfig } from "./platform/logging/logRetention";
 import { resolveClientDistPath, resolveLogsRoot } from "./runtime/appPaths";
@@ -488,7 +490,20 @@ export async function startServer(options?: ServerStartOptions): Promise<Started
   };
 }
 
+/**
+ * 进程级全局错误兜底（NET）。必须在 startServer() 之前注册——兜住 boot 期任何逃逸的
+ * promise rejection 或同步异常。此前整个进程没有任何 uncaughtException/unhandledRejection
+ * handler，逃逸即走 Node 20 默认 throw → 无声 exit-1（生产 supervisord 记多次）。
+ * handler 行为见 services/globalErrorHandler.ts；不替换既有 per-point `.catch` 防线。
+ */
+function registerGlobalErrorHandlers(): void {
+  const handlers = createGlobalErrorHandlers({ log: logPipelineError, exit: (code) => process.exit(code) });
+  process.on("unhandledRejection", handlers.handleUnhandledRejection);
+  process.on("uncaughtException", handlers.handleUncaughtException);
+}
+
 async function bootstrap(): Promise<void> {
+  registerGlobalErrorHandlers();
   const started = await startServer();
   let shuttingDown = false;
 
