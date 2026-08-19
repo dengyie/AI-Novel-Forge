@@ -22,11 +22,11 @@ const WRITER_TIMEOUT_HEADROOM = 1.6;
  * 实测吞吐登记表（字/秒）。新增模型须登记实测值，不得沿用乐观默认。
  * - gemini-3.7-flash-high：2026-08-17 CPA oauth2 修复后实测 117-145 字/秒，登记 35 字/秒，
  *   给认证链路抖动、长 context 退化和多渠道路由波动保留约 3.3x 余量。
- * - deepseek-v4-pro：注释记录 ~15-20 tok/s（CJK 1 tok≈1-2 字），取保守下限 15 字/秒。
+ * - deepseek-v4-flash：沿用 deepseek 家族保守档 15 字/秒（CJK 1 tok≈1-2 字，注释记录 ~15-20 tok/s）。
  */
 const WRITER_MODEL_CHARS_PER_SECOND: Record<string, number> = {
   "gemini-3.7-flash-high": 35,
-  "deepseek-v4-pro": 15,
+  "deepseek-v4-flash": 15,
 };
 
 /**

@@ -23,9 +23,8 @@ export const PROVIDERS: Record<BuiltinLLMProvider, ProviderConfig> = {
   deepseek: {
     name: "DeepSeek",
     baseURL: "https://api.deepseek.com/v1",
-    // Prefer pro: flash often 300s-aborts on style.rewrite / long repair on slow gateways.
-    defaultModel: "deepseek-v4-pro",
-    models: ["deepseek-v4-pro", "deepseek-v4-flash"],
+    defaultModel: "deepseek-v4-flash",
+    models: ["deepseek-v4-flash", "deepseek-v4-pro"],
     envKey: "DEEPSEEK_API_KEY",
     envBaseURLKey: "DEEPSEEK_BASE_URL",
     envModelKey: "DEEPSEEK_MODEL",

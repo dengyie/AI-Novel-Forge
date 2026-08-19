@@ -92,9 +92,9 @@ test("budget is monotonic non-decreasing in target word count", () => {
   assert.ok(c >= b, "budget must not shrink as target grows");
 });
 
-test("deepseek-v4-pro uses its own throughput, distinct from gemini", () => {
+test("deepseek-v4-flash uses its own throughput, distinct from gemini", () => {
   const gemini = resolveWriterTimeoutMs({ targetWordCount: 12_000, model: "gemini-3.7-flash-high" });
-  const deepseek = resolveWriterTimeoutMs({ targetWordCount: 12_000, model: "deepseek-v4-pro" });
+  const deepseek = resolveWriterTimeoutMs({ targetWordCount: 12_000, model: "deepseek-v4-flash" });
   assert.ok(gemini > FLOOR_MS);
   assert.ok(deepseek > FLOOR_MS);
   assert.ok(deepseek !== gemini, "deepseek should use its own throughput param");

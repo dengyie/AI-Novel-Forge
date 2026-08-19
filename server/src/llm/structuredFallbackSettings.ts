@@ -35,13 +35,13 @@ export interface StructuredFallbackSettings {
 const DEFAULT_STRUCTURED_FALLBACK_SETTINGS: StructuredFallbackSettings = {
   enabled: false,
   provider: "deepseek",
-  model: "deepseek-v4-pro",
+  model: "deepseek-v4-flash",
   temperature: 0.2,
   maxTokens: null,
   chain: [
     {
       provider: "deepseek",
-      model: "deepseek-v4-pro",
+      model: "deepseek-v4-flash",
       temperature: 0.2,
       maxTokens: null,
     },
