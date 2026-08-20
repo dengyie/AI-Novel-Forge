@@ -40,6 +40,7 @@ import {
   computeDeterministicResidualRiskScore,
 } from "../styleEngine/StyleDetectionService";
 import { detectProseQuality } from "./runtime/proseQuality/ProseQualityDetector";
+import { anchorReviewIssues } from "./runtime/evidenceAnchoring";
 
 /**
  * 审校/流水线写 QualityReport，并拍平到 Chapter 可运营分数字段。
@@ -87,12 +88,28 @@ export class NovelCoreReviewService {
       chapterId,
     );
 
-    // evaluateOnly：修文候选可用性评估，禁止副作用写库（避免 discard 污染 baseline）。
+    // evaluateOnly：仅候选可用性评估，禁止副作用写库（避免污染 baseline）。
+    // 锚定只作用于「正式写库」的 issues（候选草稿可能尚未进正文，不宜被证据锚定裁决）。
     if (options.evaluateOnly) {
       return review;
     }
 
-    // 双门：文学 isPass ∧ styleClear；styleClear 由 L0 pronoun + 确定性 residual 投影（fail-closed）。
+    // 证据锚定对位校验：LLM 产出的 high/critical 若在正文无行为锚点（幻觉/拼串/反向误读），
+    // 降为 low 防其升级为 QL invalid；真硬伤（正文确有过该行为）带锚点，绝不误伤。
+    // 覆盖 audit 路径（repaired 章走 auditService）与纯 review 路径 issues。
+    const contentForReview = options.content ?? chapter.content ?? "";
+    const anchored = anchorReviewIssues(review.issues, contentForReview);
+    if (anchored.downgradedCount > 0) {
+      review.issues = anchored.issues;
+      logPipelineError("Evidence anchoring downgraded LLM review issues.", {
+        novelId,
+        chapterId,
+        downgradedCount: anchored.downgradedCount,
+        evAnchor: "unverified",
+      });
+    }
+
+    // 双门：文学 isPass ∧ style；style 由 L0 pronoun + 确定性 residual 投影（fail-closed）。
     const contentForStyle = options.content ?? chapter.content ?? "";
     const literaryPass = isPass(review.score);
     const styleClear = projectStyleClearFromManualReview({

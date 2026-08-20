@@ -331,7 +331,7 @@ export const chapterAcceptanceAssessmentPrompt: PromptAsset<
       "3. 可通过局部补丁解决的问题使用 repairable，并给出 repairDirectives。",
       "4. 章节可以继续但存在后续风险时使用 continue_with_risk，并用 riskTags 说明风险。",
       "5. blockingIssues 保留最关键的 0-5 条，每条必须有明确证据和可执行修复建议。",
-      "6. 义务缺口看剧情结果是否在正文中成立，不要求出现与 obligation/taskSheet 相同的措辞；场面已完成功能、仅缺标签式点题或说明书总结时，不要记入 missingObligations；evidence 须指向可观察情节，而非「未出现某某提纲句」。",
+      "6. 义务缺口看剧情结果是否在正文中成立，不要求出现与 obligation/taskSheet 相同的措辞；场面已完成功能、仅缺标签式点题或说明书总结时，不要记入 missingObligations；evidence 须指向可观察情节，而非「未出现某某提纲句」。凡涉及禁止越界/角色行为出场（如『某人进入某地 / 现身对质 / 展示某物』）的判定，正文中没有原句与动作时不得据此报告禁止越界，禁止将『未展示 / 离开 / 无法确认后』等否定句或方向词反读成相反含义。",
       "7. obligation contract 是本章语义层契约（结果须成立）。must hit now 与 forbidden crossing 缺口必须写入 missingObligations；可后续承接的 payoff、角色露面或目标变化缺口，只有会影响下一章入口时才写入 missingObligations，否则放入 riskTags。",
       "8. 角色出场：仅「must_on_page / 本章计划出场 / 核心角色连续高风险缺席」的 character_appearance 记为必须补齐；标注可延后、offscreen、他章计划的角色缺席不得升为 high，summary 中写明「可延后出场/offscreen」。",
       "9. repairability 只能用 none、patchable_obligation_gap、rewrite_needed、plan_misalignment。局部漏写但不阻断下一章时优先 continue_with_risk；只有需要当前章节立刻补齐时才用 patchable_obligation_gap。",
