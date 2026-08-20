@@ -178,12 +178,18 @@ export function buildChapterQualityLoopChapterUpdate(
 ): Prisma.ChapterUpdateManyMutationInput {
   const nextRepairHistory = appendRepairHistory(chapter.repairHistory, assessment, terminalAction);
   const shouldContinueChapter = assessment.recommendedAction === "continue" || terminalAction === "defer_and_continue";
+  // A6b（Bug 1）: generationState 已 approved/published 的章节，pipeline 质量门已过，
+  // quality loop 的 patch_repair 只应记「可读可续」债（pending_review），
+  // 不得单方面打回 needs_repair 撤销这次批准（否则产生 approved|needs_repair 矛盾态）。
+  const isApprovedGeneration = chapter.generationState === "approved" || chapter.generationState === "published";
   const nextChapterStatus: ChapterStatus | undefined = shouldContinueChapter
     ? resolveContinuableChapterStatus(chapter, {
       recommendedAction: assessment.recommendedAction,
       terminalAction,
     })
-    : "needs_repair";
+    : isApprovedGeneration
+      ? "pending_review"
+      : "needs_repair";
   return {
     riskFlags: serializeRiskFlags(
       chapter.riskFlags,

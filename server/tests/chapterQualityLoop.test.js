@@ -694,3 +694,61 @@ test("critical prose openIssues map to prose_quality invalid", () => {
   assert.equal(proseSignal?.status, "invalid");
   assert.equal(assessment.recommendedAction, "patch_repair");
 });
+
+// ===== Bug 1: approved|needs_repair 矛盾态 =====
+// 章节 generationState=approved（pipeline 已过审）时, quality loop 的 patch_repair
+// 只应记可读债 pending_review, 不得打回 needs_repair（approved 不可被 quality 单方面撤销）。
+test("buildChapterQualityLoopChapterUpdate keeps approved chapter as pending_review on patch_repair (Bug 1)", () => {
+  // 构造 patch_repair assessment（与 line 72 test 同 pattern: engagement 68 < 75 floor → risk
+  const assessment = buildChapterQualityLoopAssessment({
+    chapterId: "chapter-bug1-approved",
+    chapterOrder: 5,
+    score: score({ engagement: 68, overall: 70 }),
+    issues: [{
+      severity: "high",
+      category: "pacing",
+      evidence: "结尾缺少推进和拉力。",
+      fixSuggestion: "补强结尾钩子。",
+    }],
+    evaluatedAt: "2026-08-21T00:00:00.000Z",
+  });
+  assert.equal(assessment.recommendedAction, "patch_repair");
+
+  // approved + patch_repair（Bug 1 实证: ch7/ch5/ch13 的 approved|needs_repair）
+  const update = buildChapterQualityLoopChapterUpdate({
+    riskFlags: null,
+    repairHistory: null,
+    chapterStatus: "needs_repair",
+    generationState: "approved",
+  }, assessment, "pipeline_review");
+
+  // 不应打回 needs_repair; approved 已过 pipeline 质量门, 只记可读债
+  assert.equal(update.chapterStatus, "pending_review");
+});
+
+test("test_chapterQualityLoop_chapter_keepsReviewedChapterAsNeedsRepair_originalSemantics (Bug 1 regression guard)", () => {
+  // 未批准章节（reviewed）遇到 patch_repair, 仍需 needs_repair（本来就没过审）
+  const assessment = buildChapterQualityLoopAssessment({
+    chapterId: "chapter-bug1-reviewed",
+    chapterOrder: 6,
+    score: score({ engagement: 68, overall: 70 }),
+    issues: [{
+      severity: "high",
+      category: "pacing",
+      evidence: "结尾推进不足。",
+      fixSuggestion: "补足收束。",
+    }],
+    evaluatedAt: "2026-08-21T00:00:00.000Z",
+  });
+  assert.equal(assessment.recommendedAction, "patch_repair");
+
+  const update = buildChapterQualityLoopChapterUpdate({
+    riskFlags: null,
+    repairHistory: null,
+    chapterStatus: "needs_repair",
+    generationState: "reviewed",
+  }, assessment, "pipeline_review");
+
+  // 未过审章节维持重修语义
+  assert.equal(update.chapterStatus, "needs_repair");
+});
