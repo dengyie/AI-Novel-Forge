@@ -1,5 +1,4 @@
 import type { AuditReport, AuditType, QualityScore, ReviewIssue } from "@ai-novel/shared/types/novel";
-import { anchorReviewIssues } from "./evidenceAnchoring";
 import type {
   ChapterExecutionMissingObligation,
   GenerationContextPackage,
@@ -504,17 +503,14 @@ export class ChapterAcceptanceAssessmentService {
       normalizeOptions,
     );
     const score = normalizeScore(normalized.score);
-    const issues = anchorReviewIssues(
-      normalized.blockingIssues.map((issue) => ({
-        severity: issue.severity,
-        category: categoryToReviewIssueCategory(issue.category),
-        evidence: issue.evidence,
-        fixSuggestion: issue.fixSuggestion,
-      })).concat(normalized.missingObligations.map((obligation) => (
-        missingObligationToReviewIssue(obligation, normalizeOptions)
-      ))),
-      input.content,
-    ).issues;
+    const issues = normalized.blockingIssues.map((issue) => ({
+      severity: issue.severity,
+      category: categoryToReviewIssueCategory(issue.category),
+      evidence: issue.evidence,
+      fixSuggestion: issue.fixSuggestion,
+    })).concat(normalized.missingObligations.map((obligation) => (
+      missingObligationToReviewIssue(obligation, normalizeOptions)
+    )));
     throwIfChapterGenerationAborted(input.signal);
     const auditReports = await this.persistAcceptanceReports(input, normalized, score);
     throwIfChapterGenerationAborted(input.signal);
