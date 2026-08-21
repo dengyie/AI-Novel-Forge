@@ -452,6 +452,39 @@ test("chapter writer prompt does not expose scene contract controls", () => {
   assert.doesNotMatch(humanContent, /只写当前场景/);
 });
 
+test("chapter writer prompt forbids system-panel HUD 【】 blocks in narrative body", () => {
+  const messages = chapterWriterPrompt.render({
+    novelTitle: "测试小说",
+    chapterOrder: 4,
+    chapterTitle: "闸机",
+    mode: "draft",
+    targetWordCount: 3000,
+    minWordCount: 2550,
+    maxWordCount: 3450,
+  }, {
+    blocks: [
+      createContextBlock({
+        id: "chapter-mission",
+        group: "chapter_mission",
+        priority: 100,
+        required: true,
+        content: "本章职责：何屿在校园闸机被读卡器拦截。",
+      }),
+    ],
+    selectedBlockIds: ["chapter-mission"],
+    droppedBlockIds: [],
+    summarizedBlockIds: [],
+    estimatedInputTokens: 0,
+  });
+
+  const systemContent = String(messages[0].content);
+  // 禁止正文里出现【…】系统面板/状态栏/键值块（终端/读卡器/屏幕报错一律改角色可感描写）。
+  // 根因：writer prompt 自身用【】当段落分隔符，writer 会镜像格式进叙事，撞 prose_system_hud 硬门。
+  assert.match(systemContent, /正文/);
+  assert.match(systemContent, /【.*系统面板|状态栏|HUD|读卡|终端.*】/);
+  assert.match(systemContent, /禁止.*正文.*【/);
+});
+
 test("novel main-chain prompt assets declare explicit non-zero context budgets", () => {
   const expectedBudgets = new Map([
     ["novel.director.candidates@v1", NOVEL_PROMPT_BUDGETS.directorCandidates],
