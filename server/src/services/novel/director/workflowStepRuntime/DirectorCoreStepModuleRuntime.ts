@@ -294,6 +294,10 @@ export class DirectorCoreStepModuleRuntime {
 
   async executeChapterExecutionContractSyncStep(input: {
     novelId: string;
+    executionContractChapterRange?: {
+      startOrder: number;
+      endOrder: number;
+    } | null;
   }): Promise<void> {
     const workspace = await this.getVolumeWorkspace(input.novelId);
     if (!workspace) {
@@ -305,6 +309,7 @@ export class DirectorCoreStepModuleRuntime {
         volumes: workspace.volumes,
         preserveContent: true,
         applyDeletes: false,
+        executionContractChapterRange: input.executionContractChapterRange ?? undefined,
       },
       {
         emitEvent: false,
