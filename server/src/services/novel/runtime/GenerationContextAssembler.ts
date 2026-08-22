@@ -137,6 +137,7 @@ export class GenerationContextAssembler {
       taskSheet: string | null;
       sceneCards: string | null;
       hook: string | null;
+      riskFlags: string | null;
     };
     contextPackage: GenerationContextPackage;
   }> {
@@ -704,6 +705,7 @@ export class GenerationContextAssembler {
         taskSheet: chapter.taskSheet ?? null,
         sceneCards: chapter.sceneCards ?? null,
         hook: chapter.hook ?? null,
+        riskFlags: chapter.riskFlags ?? null,
       },
       contextPackage,
     };

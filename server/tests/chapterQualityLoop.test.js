@@ -752,3 +752,318 @@ test("test_chapterQualityLoop_chapter_keepsReviewedChapterAsNeedsRepair_original
   // 未过审章节维持重修语义
   assert.equal(update.chapterStatus, "needs_repair");
 });
+
+// ===== Phase 1a: 结构性根因路由（rootCause-driven repair routing）=====
+// draft_obligation_unmet / draft_repair_exhausted 属结构性根因：局部 patch 在方向上
+// 无法修复（如硬义务未落地的 forbidden_crossing 漂移，patch 候选会被自动 discard），
+// 故 patchFirstRequired=false 且 budget.nextAction 起步即 rewrite_chapter。
+
+test("Phase 1a: draft_obligation_unmet 跳过 patch-first，budget 起步 rewrite_chapter", () => {
+  const assessment = buildChapterQualityLoopAssessment({
+    chapterId: "chapter-structural",
+    chapterOrder: 5,
+    score: score({ engagement: 68, overall: 70 }),
+    issues: [],
+    evaluatedAt: "2026-08-22T00:00:00.000Z",
+    runtimePackage: {
+      context: { chapter: { order: 5 } },
+      audit: { reports: [], openIssues: [], hasBlockingIssues: false },
+      failureClassification: {
+        code: "draft_obligation_unmet",
+        summary: "硬义务未落地。",
+        blockingObligations: [{
+          kind: "forbidden_crossing",
+          summary: "主角未按合同退守，反而强取 P5。",
+        }],
+      },
+    },
+  });
+
+  // 结构性根因：不得 patch-first
+  assert.equal(assessment.rootCauseCode, "draft_obligation_unmet");
+  assert.equal(assessment.patchFirstRequired, false);
+  // budget 起步即整章重写，不浪费在注定被 discard 的局部补丁上
+  assert.equal(assessment.budget.nextAction, "rewrite_chapter");
+  assert.ok(assessment.budget.attempt >= 1);
+});
+
+test("Phase 1a: draft_repair_exhausted 同样跳过 patch-first", () => {
+  const assessment = buildChapterQualityLoopAssessment({
+    chapterId: "chapter-exhausted",
+    chapterOrder: 7,
+    score: score({ coherence: 60, overall: 64 }),
+    issues: [],
+    evaluatedAt: "2026-08-22T00:00:00.000Z",
+    runtimePackage: {
+      context: { chapter: { order: 7 } },
+      audit: { reports: [], openIssues: [], hasBlockingIssues: true },
+      failureClassification: {
+        code: "draft_repair_exhausted",
+        summary: "阻塞性问题仍在。",
+        blockingObligations: [],
+      },
+    },
+  });
+
+  assert.equal(assessment.rootCauseCode, "draft_repair_exhausted");
+  assert.equal(assessment.patchFirstRequired, false);
+  assert.equal(assessment.budget.nextAction, "rewrite_chapter");
+});
+
+test("Phase 1a: 非结构性根因（none）仍走 patch-first", () => {
+  const assessment = buildChapterQualityLoopAssessment({
+    chapterId: "chapter-local",
+    chapterOrder: 2,
+    score: score({ engagement: 68, overall: 70 }),
+    issues: [{
+      severity: "high",
+      category: "pacing",
+      evidence: "结尾缺少推进和拉力。",
+      fixSuggestion: "补强结尾钩子。",
+    }],
+    evaluatedAt: "2026-08-22T00:00:00.000Z",
+    runtimePackage: {
+      context: { chapter: { order: 2 } },
+      audit: { reports: [], openIssues: [], hasBlockingIssues: false },
+      failureClassification: { code: "none", blockingObligations: [] },
+    },
+  });
+
+  // 非结构性：保留 patch-first 行为
+  assert.equal(assessment.rootCauseCode, "none");
+  assert.equal(assessment.patchFirstRequired, true);
+  assert.equal(assessment.budget.nextAction, "patch_repair");
+});
+
+// ===== Phase 1b: 连续 discard 自动升级重写（auto-escalation）=====
+// discard 走 projection-only 路径不写 [quality_loop] signature 行，旧实现 attempt 永不增长、
+// 卡在 patch_repair。叠加 countTrailingRepairNoImprove 后，连续被 discard 的 patch 推进预算。
+
+test("Phase 1b: 连续 2 次 discard 后升级 rewrite_chapter（覆盖 attempt=3 的 replan_window）", () => {
+  const discardHistory = [
+    "[repair_adopt 2026-08-22T00:00:00.000Z] decision=discard overall=70->72 base=aaa cand=bbb reason=候选 L1 硬伤类目膨胀",
+    "[repair_adopt 2026-08-22T00:01:00.000Z] decision=discard overall=70->71 base=aaa cand=ccc reason=候选 L1 硬伤类目膨胀",
+  ].join("\n");
+
+  const assessment = buildChapterQualityLoopAssessment({
+    chapterId: "chapter-stall",
+    chapterOrder: 5,
+    score: score({ engagement: 68, overall: 70 }),
+    issues: [],
+    previousRepairHistory: discardHistory,
+    evaluatedAt: "2026-08-22T00:02:00.000Z",
+    runtimePackage: {
+      context: { chapter: { order: 5 } },
+      audit: { reports: [], openIssues: [], hasBlockingIssues: false },
+      failureClassification: { code: "none", blockingObligations: [] },
+    },
+  });
+
+  // 非结构性根因但连续 patch 无改善：trailing=2 ≥ 阈值 → 覆盖 replan_window 强制整章重写
+  assert.equal(assessment.rootCauseCode, "none");
+  assert.equal(assessment.budget.nextAction, "rewrite_chapter");
+  // attempt 已反映 2 次 discard：signatureHits(0) + trailing(2) + 1
+  assert.equal(assessment.budget.attempt, 3);
+  // 升级到 rewrite 后不再 patch-first
+  assert.equal(assessment.patchFirstRequired, false);
+});
+
+test("Phase 1b: 单次 discard 已推进 attempt，下轮即 rewrite_chapter", () => {
+  const discardHistory = [
+    "[repair_adopt 2026-08-22T00:00:00.000Z] decision=discard overall=70->71 base=aaa cand=bbb reason=候选未达文学门",
+  ].join("\n");
+
+  const assessment = buildChapterQualityLoopAssessment({
+    chapterId: "chapter-one-discard",
+    chapterOrder: 5,
+    score: score({ engagement: 68, overall: 70 }),
+    issues: [],
+    previousRepairHistory: discardHistory,
+    evaluatedAt: "2026-08-22T00:01:00.000Z",
+    runtimePackage: {
+      context: { chapter: { order: 5 } },
+      audit: { reports: [], openIssues: [], hasBlockingIssues: false },
+      failureClassification: { code: "none", blockingObligations: [] },
+    },
+  });
+
+  // discard 计入 attempt：signatureHits(0) + trailing(1) + 1 = 2 → 阶梯升级 rewrite_chapter
+  // （这正是 ch5 卡死修复：discard 不再让 attempt 停留 1、白耗在 patch 上）
+  assert.equal(assessment.budget.attempt, 2);
+  assert.equal(assessment.budget.nextAction, "rewrite_chapter");
+  assert.equal(assessment.patchFirstRequired, false);
+});
+
+test("Phase 1b: adopt 打断尾部连续 discard，attempt 不虚增", () => {
+  const history = [
+    "[repair_adopt 2026-08-22T00:00:00.000Z] decision=discard overall=70->71 base=aaa cand=bbb reason=未改进",
+    "[repair_adopt 2026-08-22T00:01:00.000Z] decision=adopt overall=70->85 base=aaa cand=ddd reason=采纳",
+    "[repair_adopt 2026-08-22T00:02:00.000Z] decision=discard overall=85->83 base=aaa cand=eee reason=回退",
+  ].join("\n");
+
+  const assessment = buildChapterQualityLoopAssessment({
+    chapterId: "chapter-adopt-break",
+    chapterOrder: 5,
+    score: score({ engagement: 68, overall: 70 }),
+    issues: [],
+    previousRepairHistory: history,
+    evaluatedAt: "2026-08-22T00:03:00.000Z",
+    runtimePackage: {
+      context: { chapter: { order: 5 } },
+      audit: { reports: [], openIssues: [], hasBlockingIssues: false },
+      failureClassification: { code: "none", blockingObligations: [] },
+    },
+  });
+
+  // adopt 打断后尾部连续 discard=1（而非 2）：attempt=0+1+1=2，不是 3
+  assert.equal(assessment.budget.attempt, 2);
+  // attempt=2 阶梯即 rewrite_chapter；但若 adopt 未打断（trailing=2）会 attempt=3 → replan_window，
+  // 此断言确保 adopt 正确重置了连续计数
+  assert.equal(assessment.budget.nextAction, "rewrite_chapter");
+});
+
+// ===== M3：生产态历史测试（[quality_loop] + [repair_adopt] 交错）=====
+// 11b 旧测试 history 全为 [repair_adopt] 行，signature 命中恒 0。以下用真实生产历史验证
+// M2 单一尾部窗口：早期已解决的 signature 评估不再虚增 attempt，也不因全历史多行过早熔断。
+
+test("M3: 尾部 signature 行 + discard 行交错，attempt 不跨全历史虚增", () => {
+  const input = {
+    chapterId: "chapter-m3-interleave",
+    chapterOrder: 5,
+    score: score({ engagement: 68, overall: 70 }),
+    issues: [{
+      severity: "high",
+      category: "pacing",
+      evidence: "结尾缺少推进和拉力。",
+      fixSuggestion: "补强结尾钩子。",
+    }],
+    evaluatedAt: "2026-08-22T00:04:00.000Z",
+    runtimePackage: {
+      context: { chapter: { order: 5 } },
+      audit: { reports: [], openIssues: [], hasBlockingIssues: false },
+      failureClassification: { code: "none", blockingObligations: [] },
+    },
+  };
+  // 先无历史评估一次拿签名（attempt=1 → budget=patch_repair）
+  const baseline = buildChapterQualityLoopAssessment({ ...input, previousRepairHistory: null });
+  const signature = baseline.budget.signature;
+  assert.equal(typeof signature, "string");
+  assert.equal(baseline.budget.nextAction, "patch_repair");
+
+  // 真实生产历史：早期同 signature 评估（已被 adopt 解决）+ 尾部同 signature 评估（被 discard）
+  const history = [
+    `[quality_loop 2026-08-22T00:00:00.000Z] status=risk action=patch_repair signature=${signature} attempt=1/3 budget=patch_repair`,
+    "[repair_adopt 2026-08-22T00:01:00.000Z] decision=adopt overall=70->85 base=aaa cand=ddd reason=采纳",
+    `[quality_loop 2026-08-22T00:02:00.000Z] status=risk action=patch_repair signature=${signature} attempt=2/3 budget=rewrite_chapter`,
+    "[repair_adopt 2026-08-22T00:03:00.000Z] decision=discard overall=70->71 base=aaa cand=ccc reason=候选未达文学门",
+  ].join("\n");
+
+  const assessment = buildChapterQualityLoopAssessment({
+    ...input,
+    previousRepairHistory: history,
+  });
+
+  // 尾部窗口只算：同 signature 评估行 1 + 尾部（同失败周期）discard 1 + 当前 1 = 3。
+  // 说明：HEAD 旧实现只数全历史 signature=2 行代入也得到 attempt=3（非 4/hard_stop，旧注释有误）。
+  // 真正区分新旧的是：patchFirstRequired 断言——旧实现 `nextAction===patch_repair ||
+  // effectiveAction===patch_repair` 在本场景为 true；新实现只认 budget.nextAction===patch_repair
+  // （本场景 replan_window）→ false，见下方断言；以及 signatureHits 单尾部窗口（早期 adopt 之前
+  // 的同签名评估行不计入当前尾部窗口）。
+  assert.equal(assessment.budget.attempt, 3);
+  // attempt=3 非结构性 → replan_window；trailingNoImprove=1 < 2 无 discard 升级覆盖
+  assert.equal(assessment.budget.nextAction, "replan_window");
+  assert.equal(assessment.budget.exhausted, false);
+  // nextAction!=hard_stop → effectiveAction 维持 patch_repair（章节留在 needs_repair 供执行器拾取）
+  assert.equal(assessment.recommendedAction, "patch_repair");
+  assert.equal(assessment.patchFirstRequired, false);
+});
+
+test("M3: 全历史多 signature 行不熔断过早", () => {
+  const input = {
+    chapterId: "chapter-m3-old-sigs",
+    chapterOrder: 5,
+    score: score({ engagement: 68, overall: 70 }),
+    issues: [{
+      severity: "high",
+      category: "pacing",
+      evidence: "结尾缺少推进和拉力。",
+      fixSuggestion: "补强结尾钩子。",
+    }],
+    evaluatedAt: "2026-08-22T00:05:00.000Z",
+    runtimePackage: {
+      context: { chapter: { order: 5 } },
+      audit: { reports: [], openIssues: [], hasBlockingIssues: false },
+      failureClassification: { code: "none", blockingObligations: [] },
+    },
+  };
+  const baseline = buildChapterQualityLoopAssessment({ ...input, previousRepairHistory: null });
+  const signature = baseline.budget.signature;
+
+  // 3 行老 signature（各被 adopt 解决、属早期）+ 尾部 1 行当前 signature。
+  // 旧实现 signatureHits 数全历史 4 行 → attempt=5 → 过早 hard_stop。
+  const history = [
+    `[quality_loop 2026-08-21T00:00:00.000Z] status=risk action=patch_repair signature=${signature} attempt=1/3 budget=patch_repair`,
+    "[repair_adopt 2026-08-21T00:01:00.000Z] decision=adopt overall=70->85 base=aaa cand=ddd reason=采纳",
+    `[quality_loop 2026-08-21T00:02:00.000Z] status=risk action=patch_repair signature=${signature} attempt=2/3 budget=rewrite_chapter`,
+    "[repair_adopt 2026-08-21T00:03:00.000Z] decision=adopt overall=70->86 base=aaa cand=eee reason=采纳",
+    `[quality_loop 2026-08-21T00:04:00.000Z] status=risk action=patch_repair signature=${signature} attempt=3/3 budget=replan_window`,
+    "[repair_adopt 2026-08-21T00:05:00.000Z] decision=adopt overall=70->87 base=aaa cand=fff reason=采纳",
+    `[quality_loop 2026-08-22T00:00:00.000Z] status=risk action=patch_repair signature=${signature} attempt=1/3 budget=patch_repair`,
+  ].join("\n");
+
+  const assessment = buildChapterQualityLoopAssessment({
+    ...input,
+    previousRepairHistory: history,
+  });
+
+  // 尾部窗口只数到最后一次 adopt 之后的 1 行：signature 1 + trailing 0 + 1 = 2。
+  // 历史 3 行老 signature 被 adopt 打断排除，不触发 hard_stop。
+  assert.equal(assessment.budget.attempt, 2);
+  assert.equal(assessment.budget.nextAction, "rewrite_chapter");
+  assert.equal(assessment.budget.exhausted, false);
+  assert.equal(assessment.recommendedAction, "patch_repair");
+});
+
+// ===== Phase 3: deferred/pending_async 不暴露为 blocking risk =====
+// clean chapter（其它信号全 valid）+ 仅 timeline_extraction_deferred 的 continuity risk：
+// 异步定稿补齐，不挡 auto-execution，投影为 non_blocking_quality_debt。
+
+test("Phase 3: clean chapter + 仅 deferred timeline → 投影 non_blocking 而非 blocking", () => {
+  const riskFlags = JSON.stringify({
+    qualityLoop: {
+      overallStatus: "risk",
+      recommendedAction: "continue",
+      rootCauseCode: "none",
+      signals: [
+        { artifactType: "chapter_retention_contract", status: "valid", issueCodes: [] },
+        { artifactType: "literary_score", status: "valid", issueCodes: [] },
+        { artifactType: "continuity_state", status: "risk", issueCodes: ["timeline_extraction_deferred"] },
+        { artifactType: "prose_quality", status: "valid", issueCodes: [] },
+        { artifactType: "rolling_window_review", status: "valid", issueCodes: [] },
+        { artifactType: "style_pronoun", status: "valid", issueCodes: [] },
+        { artifactType: "style_residual", status: "valid", issueCodes: [] },
+      ],
+    },
+  });
+
+  // deferred-only：非阻塞债，不挡写流
+  assert.equal(classifyChapterQualityLoopRiskFlags(riskFlags), "non_blocking_quality_debt");
+  assert.equal(hasContinuableChapterQualityLoopRiskFlags(riskFlags), true);
+});
+
+test("Phase 3: deferred timeline + 其它真 risk 仍 blocking（不误放行）", () => {
+  const riskFlags = JSON.stringify({
+    qualityLoop: {
+      overallStatus: "risk",
+      recommendedAction: "patch_repair",
+      rootCauseCode: "none",
+      signals: [
+        { artifactType: "continuity_state", status: "risk", issueCodes: ["timeline_extraction_deferred"] },
+        { artifactType: "literary_score", status: "risk", issueCodes: ["literary:coherence"] },
+      ],
+    },
+  });
+
+  // 有其它真 risk + 非 continue：deferred 不应单独放行
+  assert.equal(classifyChapterQualityLoopRiskFlags(riskFlags), "blocking");
+});

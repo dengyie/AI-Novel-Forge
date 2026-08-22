@@ -1029,6 +1029,196 @@ test("runPipelineChapterWithRuntime forces full rewrite when style source entiti
   }
 });
 
+test("runPipelineChapterWithRuntime forces full rewrite when qualityLoop budget 要求 rewrite_chapter", async () => {
+  const originalRunStructuredPrompt = promptRunner.runStructuredPrompt;
+  const stages = [];
+  const savedDrafts = [];
+  let patchRepairCalled = false;
+  let reviewCount = 0;
+
+  promptRunner.runStructuredPrompt = async () => {
+    patchRepairCalled = true;
+    throw new Error("patch repair should not run when budget demands rewrite");
+  };
+  promptRunner.setPromptRunnerLLMFactoryForTests(async () => ({
+    invoke: async () => ({
+      content: "budget-forced rewritten chapter body",
+    }),
+  }));
+
+  try {
+    const result = await runPipelineChapterWithRuntime(
+      {
+        validateRequest(input) {
+          return input;
+        },
+        async ensureNovelCharacters() {},
+        async assemble() {
+          return {
+            novel: { id: "novel-1", title: "test novel" },
+            chapter: {
+              id: "chapter-1",
+              title: "chapter one",
+              order: 1,
+              content: null,
+              expectation: null,
+              riskFlags: '{"qualityLoop":{"budget":{"nextAction":"rewrite_chapter"}}}',
+            },
+            contextPackage: {},
+          };
+        },
+        async generateDraftFromWriter() {
+          return { content: "first pass draft" };
+        },
+        async saveDraftAndArtifacts(_novelId, _chapterId, content, generationState) {
+          savedDrafts.push({ content, generationState });
+        },
+        async syncFinalChapterArtifacts() {},
+        async finalizeChapterContent({ content }) {
+          reviewCount += 1;
+          return {
+            finalContent: content,
+            runtimePackage: createRuntimePackage(reviewCount === 1 ? 72 : 90),
+          };
+        },
+        async markChapterGenerationState() {},
+        async markChapterNeedsRepair() {},
+      },
+      "novel-1",
+      "chapter-1",
+      {
+        autoReview: true,
+        autoRepair: true,
+      },
+      {
+        async onStageChange(stage) {
+          stages.push(stage);
+        },
+      },
+    );
+
+    assert.equal(patchRepairCalled, false);
+    assert.deepEqual(stages, ["generating_chapters", "reviewing", "repairing", "reviewing"]);
+    assert.equal(reviewCount, 2);
+    assert.equal(result.pass, true);
+    assert.equal(result.retryCountUsed, 1);
+    assert.deepEqual(savedDrafts, [{
+      content: "first pass draft",
+      generationState: "drafted",
+    }, {
+      content: "budget-forced rewritten chapter body",
+      generationState: "repaired",
+    }]);
+  } finally {
+    promptRunner.runStructuredPrompt = originalRunStructuredPrompt;
+    promptRunner.setPromptRunnerLLMFactoryForTests();
+  }
+});
+
+test("runPipelineChapterWithRuntime keeps light patch repair when budget nextAction is not rewrite", async () => {
+  const originalRunStructuredPrompt = promptRunner.runStructuredPrompt;
+  const stages = [];
+  const savedDrafts = [];
+  let patchRepairCalled = false;
+  let heavyRewriteCalled = false;
+  let reviewCount = 0;
+
+  promptRunner.runStructuredPrompt = async () => {
+    patchRepairCalled = true;
+    return {
+      output: {
+        strategy: "patch_first",
+        summary: "补足承接。",
+        patches: [{
+          id: "patch-1",
+          targetExcerpt: "初审正文需要承接。",
+          replacement: "修后正文补足承接。",
+          reason: "补足承接。",
+          issueIds: [],
+        }],
+        requiresFullRewrite: false,
+        escalationReason: null,
+      },
+    };
+  };
+  // 不应走 heavy 重写：如果走到整章重写，立即失败
+  promptRunner.setPromptRunnerLLMFactoryForTests(async () => ({
+    invoke: async () => {
+      heavyRewriteCalled = true;
+      throw new Error("heavy rewrite should not run when budget says patch_repair");
+    },
+  }));
+
+  try {
+    const result = await runPipelineChapterWithRuntime(
+      {
+        validateRequest(input) {
+          return input;
+        },
+        async ensureNovelCharacters() {},
+        async assemble() {
+          return {
+            novel: { id: "novel-1", title: "test novel" },
+            chapter: {
+              id: "chapter-1",
+              title: "chapter one",
+              order: 1,
+              content: null,
+              expectation: null,
+              riskFlags: '{"qualityLoop":{"budget":{"nextAction":"patch_repair"}}}',
+            },
+            contextPackage: {},
+          };
+        },
+        async generateDraftFromWriter() {
+          return { content: "生成后的正文" };
+        },
+        async saveDraftAndArtifacts(_novelId, _chapterId, content, generationState) {
+          savedDrafts.push({ content, generationState });
+        },
+        async syncFinalChapterArtifacts() {},
+        async finalizeChapterContent({ content }) {
+          reviewCount += 1;
+          return {
+            finalContent: reviewCount === 1 ? "初审正文需要承接。" : "修后正文补足承接。",
+            runtimePackage: createRuntimePackage(reviewCount === 1 ? 72 : 73),
+          };
+        },
+        async markChapterGenerationState() {},
+        async markChapterNeedsRepair() {},
+      },
+      "novel-1",
+      "chapter-1",
+      {
+        autoReview: true,
+        autoRepair: true,
+      },
+      {
+        async onStageChange(stage) {
+          stages.push(stage);
+        },
+      },
+    );
+
+    assert.equal(patchRepairCalled, true);
+    assert.equal(heavyRewriteCalled, false);
+    assert.deepEqual(stages, ["generating_chapters", "reviewing", "repairing", "reviewing"]);
+    assert.equal(reviewCount, 2);
+    assert.equal(result.pass, false);
+    assert.equal(result.retryCountUsed, 1);
+    assert.deepEqual(savedDrafts, [{
+      content: "生成后的正文",
+      generationState: "drafted",
+    }, {
+      content: "修后正文补足承接。",
+      generationState: "repaired",
+    }]);
+  } finally {
+    promptRunner.runStructuredPrompt = originalRunStructuredPrompt;
+    promptRunner.setPromptRunnerLLMFactoryForTests();
+  }
+});
+
 test("runPipelineChapterWithRuntime does not save a generated draft twice when writer already synced artifacts", async () => {
   const savedDrafts = [];
   const finalSyncs = [];

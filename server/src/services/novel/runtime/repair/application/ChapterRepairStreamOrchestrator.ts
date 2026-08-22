@@ -8,6 +8,7 @@ import { prisma } from "../../../../../db/prisma";
 import { streamTextPrompt } from "../../../../../prompting/core/promptRunner";
 import { withChapterRepairContext } from "../../../../../prompting/prompts/novel/chapterLayeredContext";
 import { logPipelineError, logPipelineInfo, type RepairOptions } from "../../../novelCoreShared";
+import { parseQualityLoopFromRiskFlags } from "../../../quality/qualityDebtBoard";
 import type { ChapterArtifactSyncService } from "../../ChapterArtifactSyncService";
 import type { ChapterContentCommitService } from "../../content/ChapterContentCommitService";
 import type { GenerationContextAssembler } from "../../GenerationContextAssembler";
@@ -31,6 +32,10 @@ export interface ChapterRepairStreamOrchestratorDeps {
   artifactSyncService: Pick<ChapterArtifactSyncService, "syncChapterArtifacts">;
   reviewChapterAfterRepair: ReviewChapterAfterRepair;
   resolveAuditIssues?: (novelId: string, issueIds: string[]) => Promise<unknown>;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 export class ChapterRepairStreamOrchestrator {
@@ -136,6 +141,28 @@ export class ChapterRepairStreamOrchestrator {
           reason: patchAvoid.reason,
         });
       }
+      // M1：结构性根因接线——budget.nextAction=rewrite_chapter / replan_window / hard_stop 时
+      // 强制整章重写（forceFullRewrite），不再走 light patch。与 QFP avoidRetry 是 OR 叠加：
+      // avoidRetry 仍管 discard 之后的升级；budget 起步即重写（结构性根因/连续 discard 升级）
+      // 覆盖首次结构性修复，让 Phase 1a「首次即重写」真正生效。
+      const qualityLoop = parseQualityLoopFromRiskFlags(chapter.riskFlags);
+      const budgetNextAction = isRecord(qualityLoop?.budget)
+        ? (qualityLoop!.budget as Record<string, unknown>).nextAction
+        : null;
+      const budgetDemandsRewrite = budgetNextAction === "rewrite_chapter"
+        || budgetNextAction === "replan_window"
+        || budgetNextAction === "hard_stop";
+      const forceFullRewrite = patchAvoid.avoided || budgetDemandsRewrite;
+      if (budgetDemandsRewrite && !patchAvoid.avoided) {
+        logPipelineInfo("budget.nextAction 要求重写，结构性强制 heavy_repair。", {
+          novelId,
+          chapterId,
+          operation: "repair",
+          provider: options.provider ?? null,
+          model: options.model ?? null,
+          budgetNextAction,
+        });
+      }
       const prepared = await prepareChapterRepairExecution({
         novelId,
         chapterId,
@@ -146,7 +173,7 @@ export class ChapterRepairStreamOrchestrator {
         repairContext: repairContextPackage.chapterRepairContext,
         bibleContent: bible?.rawContent ?? "",
         targetWordCount: chapter.targetWordCount ?? null,
-        forceFullRewrite: patchAvoid.avoided,
+        forceFullRewrite,
         auditOpenIssueCodes: (assembledContextPackage.openAuditIssues ?? [])
           .map((item) => item?.code)
           .filter((code): code is string => typeof code === "string" && code.trim().length > 0),
@@ -155,7 +182,7 @@ export class ChapterRepairStreamOrchestrator {
           provider: options.provider,
           model: options.model,
           temperature: options.temperature,
-          repairMode: patchAvoid.avoided ? "heavy_repair" : options.repairMode,
+          repairMode: forceFullRewrite ? "heavy_repair" : options.repairMode,
           signal: options.signal,
         },
       });

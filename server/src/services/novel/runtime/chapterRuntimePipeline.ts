@@ -30,6 +30,7 @@ import {
 } from "./sameChapterWriteFeedback";
 import { isTransientTransportError } from "../../../llm/transportRetry";
 import { runChapterRepairText } from "./repair/chapterRepairRuntime";
+import { parseQualityLoopFromRiskFlags } from "../quality/qualityDebtBoard";
 import { getChapterWriterRuntimeSettings } from "../../settings/ChapterWriterRuntimeSettingsService";
 import { throwIfChapterGenerationAborted } from "./chapterAbortGuard";
 import type {
@@ -76,6 +77,10 @@ const AUDIT_CATEGORY_MAP: Record<"continuity" | "character" | "plot" | "mode_fit
   plot: "pacing",
   mode_fit: "coherence",
 };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
 
 export async function runPipelineChapterWithRuntime(
   deps: RunPipelineChapterDeps,
@@ -277,6 +282,15 @@ export async function runPipelineChapterWithRuntime(
 
     throwIfChapterGenerationAborted(cancelSignal);
     await hooks.onStageChange?.("repairing");
+    // 生成期 inline repair 也读 QL 预算：budget.nextAction=rewrite_chapter / replan_window /
+    // hard_stop 时进入 forceFullRewrite → prepareChapterRepairExecution 自动升级 heavy_repair
+    // 整章重写，而不是用 light patch 做无效扰动（与执行器 fileRepair 的 M1 逻辑同源）。
+    const qualityLoopForRewrite = parseQualityLoopFromRiskFlags(assembled.chapter.riskFlags);
+    const budgetNextAction = isRecord(qualityLoopForRewrite?.budget)
+      ? (qualityLoopForRewrite!.budget as Record<string, unknown>).nextAction
+      : null;
+    const budgetDemandsRewrite = budgetNextAction === "rewrite_chapter"
+      || budgetNextAction === "replan_window" || budgetNextAction === "hard_stop";
     const repairResult = await repairDraftContent({
       novelTitle: assembled.novel.title,
       chapterTitle: assembled.chapter.title,
@@ -290,7 +304,7 @@ export async function runPipelineChapterWithRuntime(
         repairMode,
         signal: cancelSignal,
       },
-      forceFullRewrite: styleLeakageIssues.length > 0,
+      forceFullRewrite: styleLeakageIssues.length > 0 || budgetDemandsRewrite,
     });
     throwIfChapterGenerationAborted(cancelSignal);
     // 注：repairDraftContent 不再返回 recoverableFailure（judge-unavailable 已由上方

@@ -495,18 +495,129 @@ function buildLoopSignature(action: ChapterQualityLoopAction, signals: ChapterQu
   return `ql:${stableHash(signatureSource)}`;
 }
 
-function countPreviousLoopAttempts(previousRepairHistory: string | null | undefined, signature: string): number {
+/**
+ * 单次**尾部逆向扫描**，同时结算同 signature 的 [quality_loop] 评估命中与
+ * 尾部 discard/plateau 未改进（M2 修复核心，替代旧「countTrailingLoopAttempts +
+ * shared countTrailingRepairNoImprove 双函数求和」）。
+ *
+ * 从历史末尾向前遍历：
+ * 1. `[repair_adopt] decision=adopt`（上一修复周期已解决）→ 结算当前 pending 后 break；
+ *    边界之后（更旧）的 discard/评估一律不计入当前 signature。
+ * 2. `[repair_adopt] decision=discard|plateau_stop` → 只进 pending，不直接计数；
+ *    pending 统一在遇到当前 signature 的评估行（规则 3）或扫描自然结束（规则 5）时结算。
+ * 3. `[quality_loop] signature=<当前签名>` → 先结算 pending（同失败周期内连续被 discard
+ *    的 patch 推进预算，保留 Phase1b 语义），signatureHits+1。
+ * 4. `[quality_loop]` 不含当前 signature → break 且**丢弃 pending**：跨签名周期的 discard
+ *    残留不虚增当前签名 attempt（就是 caseM 修的 bug——旧实现数同 sig 命中后再叠加
+ *    countTrailingRepairNoImprove 的跨签名 discard，首次评估即误判 hard_stop）。
+ * 5. 扫描自然结束（未 break）→ 剩余 pending 结算进 trailingNoImprove（纯 discard 历史，
+ *    保持 Phase1b 的 attempt=trailing+1 正确性）。
+ *
+ * 不再调用 shared 版 countTrailingRepairNoImprove：其尾部计数不感知 signature 边界，
+ * 会把旧周期的 discard 算子叠进当前 signature 的 attempt。
+ */
+function countTrailingLoopSegment(
+  previousRepairHistory: string | null | undefined,
+  signature: string,
+): { signatureHits: number; trailingNoImprove: number } {
   if (!previousRepairHistory?.trim()) {
-    return 0;
+    return { signatureHits: 0, trailingNoImprove: 0 };
   }
-  return previousRepairHistory
+  const lines = previousRepairHistory
     .split(/\r?\n/)
     .map((line) => line.trim())
-    .filter((line) => line.includes(`signature=${signature}`))
-    .length;
+    .filter(Boolean);
+  let signatureHits = 0;
+  let trailingNoImprove = 0;
+  let pendingDiscards = 0;
+  // 是否在扫描中遇到边界（adopt 或非当前签名的评估行）而提前停止。若为 true，
+  // 循环结束时不再把剩余 pending 结算进 trailing——adopt 处已结算，非当前签名
+  // 处则按「不虚增当前 signature」丢弃（caseM）。
+  let stoppedAtBoundary = false;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index] ?? "";
+    if (/\[repair_adopt\b/.test(line)) {
+      if (/decision=adopt\b/.test(line)) {
+        // adopt：上一修复周期已解决。adopt **之前**（时间上前置）的 discard 归属旧周期，
+        // 不再计入当前 signature；而 adopt 到历史末尾之间已积累的 pending（最新一轮）
+        // 属于当前未解决周期，先结算再 break（Phase 1b「adopt 打断」语义）。
+        trailingNoImprove += pendingDiscards;
+        stoppedAtBoundary = true;
+        break;
+      }
+      if (/decision=discard\b/.test(line) || /decision=plateau_stop\b/.test(line)) {
+        // 只进 pending：归属随后的同签名评估行，或扫描自然结束时结算（Phase1b 语义）。
+        // 绝不因「此前看过当前签名的评估行」直接贴现计数（active pending 统一结算）。
+        pendingDiscards += 1;
+      }
+      continue;
+    }
+    if (!/\[quality_loop\b/.test(line)) {
+      continue;
+    }
+    if (line.includes(`signature=${signature}`)) {
+      trailingNoImprove += pendingDiscards;
+      pendingDiscards = 0;
+      signatureHits += 1;
+      continue;
+    }
+    // 跨到非当前 signature 的评估行 → 旧周期边界：丢弃 pending。
+    stoppedAtBoundary = true;
+    break;
+  }
+  // 扫描自然结束（未 break）：剩下的 pending discard 归属当前评估周期（纯 discard 历史）。
+  if (!stoppedAtBoundary) {
+    trailingNoImprove += pendingDiscards;
+  }
+  return { signatureHits, trailingNoImprove };
 }
 
-function resolveBudgetAction(attempt: number): ChapterQualityLoopBudgetAction {
+/**
+ * 结构性根因：局部 patch 在方向上无法修复，必须直接整章重写。
+ * - draft_obligation_unmet：硬义务（含 forbidden_crossing / must_hit / payoff）未落地，
+ *   patch 候选常因 L1 硬伤类目膨胀被自动 discard → 无限 stall（ch5 卡死机制）。
+ * - draft_repair_exhausted：阻塞性问题仍在，本身就是「patch 已走到头」的信号。
+ * replan_required 不在此集合：它已由 resolveAction 路由到 replan，不进 patch 流。
+ */
+const STRUCTURAL_ROOT_CAUSES: ReadonlySet<ChapterFailureClassification["code"]> = new Set([
+  "draft_obligation_unmet",
+  "draft_repair_exhausted",
+]);
+
+/**
+ * 连续 discard/plateau 后升级到整章重写的阈值。
+ * patch 候选若连续 {@link DISCARD_ESCALATION_THRESHOLD} 次未改善，下一轮不再 patch，
+ * 直接 rewrite_chapter——避免局部补丁反复产出被 discard 的候选而预算（attempt）不涨。
+ */
+const DISCARD_ESCALATION_THRESHOLD = 2;
+
+function isStructuralRootCause(
+  code: ChapterFailureClassification["code"] | null | undefined,
+): boolean {
+  return Boolean(code && STRUCTURAL_ROOT_CAUSES.has(code));
+}
+
+/**
+ * @param attempt 1-based 累计尝试次数（signature 命中 + 连续 discard 叠加）
+ * @param structural 结构性根因 → 起步即 rewrite_chapter，跳过 patch_repair
+ */
+function resolveBudgetAction(
+  attempt: number,
+  structural: boolean,
+): ChapterQualityLoopBudgetAction {
+  if (structural) {
+    // 结构性：patch 在方向上不可行，直接整章重写；attempt 仍递增以保留熔断语义
+    if (attempt <= 1) {
+      return "rewrite_chapter";
+    }
+    if (attempt === 2) {
+      return "rewrite_chapter";
+    }
+    if (attempt === 3) {
+      return "replan_window";
+    }
+    return "hard_stop";
+  }
   if (attempt <= 1) {
     return "patch_repair";
   }
@@ -523,22 +634,42 @@ function buildLoopBudget(input: {
   recommendedAction: ChapterQualityLoopAction;
   signals: ChapterQualityLoopSignal[];
   previousRepairHistory?: string | null;
+  rootCauseCode?: ChapterFailureClassification["code"] | null;
 }): ChapterQualityLoopBudget | null {
   if (input.recommendedAction === "continue") {
     return null;
   }
   const signature = buildLoopSignature(input.recommendedAction, input.signals);
-  const attempt = countPreviousLoopAttempts(input.previousRepairHistory, signature) + 1;
-  const nextAction = resolveBudgetAction(attempt);
+  const structural = isStructuralRootCause(input.rootCauseCode);
+  // attempt = 单次尾部逆向扫描同时结算：同 signature 的 [quality_loop] 命中（signatureHits）
+  // + 归属当前签名的 discard/plateau 未改进（trailingNoImprove）+ 当前这一次。
+  // 不再调用 shared countTrailingRepairNoImprove（其尾部窗口不感知签名边界），
+  // 改由 countTrailingLoopSegment 一步得出两个计数（M2 修复核心）。
+  const { signatureHits, trailingNoImprove } = countTrailingLoopSegment(
+    input.previousRepairHistory,
+    signature,
+  );
+  const attempt = signatureHits + trailingNoImprove + 1;
+  const nextAction = resolveBudgetAction(attempt, structural);
+  // 连续被 discard 的 patch：强制升级整章重写，覆盖 attempt 阶梯（如 attempt=3 的 replan_window）。
+  // 语义：多次局部补丁无改进说明方向性错误，应先重写而非直接跳到窗口级 replan。
+  // hard_stop 例外（预算已尽则不再覆盖）。
+  const escalatedByDiscard = !structural
+    && trailingNoImprove >= DISCARD_ESCALATION_THRESHOLD
+    && nextAction !== "hard_stop";
   return {
     signature,
     attempt,
     maxAttempts: 3,
-    nextAction,
+    nextAction: escalatedByDiscard ? "rewrite_chapter" : nextAction,
     exhausted: nextAction === "hard_stop",
     reason: nextAction === "hard_stop"
       ? "quality loop budget exhausted for the same failure signature"
-      : "quality loop budget selected the next escalation step",
+      : structural
+        ? "structural root cause requires chapter rewrite, not a local patch"
+        : escalatedByDiscard
+          ? `连续 ${trailingNoImprove} 次 patch 未改善，升级为整章重写`
+          : "quality loop budget selected the next escalation step",
   };
 }
 
@@ -1061,11 +1192,17 @@ export function buildChapterQualityLoopAssessment(
     "valid",
   );
   const recommendedAction = resolveAction(overallStatus, signals, orderNum);
+  const rootCauseCode = input.runtimePackage?.failureClassification.code ?? null;
   const budget = buildLoopBudget({
     recommendedAction,
     signals,
     previousRepairHistory: input.previousRepairHistory,
+    rootCauseCode,
   });
+  // 重写升级由 budget 维驱动（budget.nextAction=rewrite_chapter）：执行器读 budget.nextAction
+  // 决定跑 heavy_repair 还是 light patch。顶层 effectiveAction 只在预算耗尽时落 manual_gate 停自动；
+  // 结构性根因时 budget.nextAction=rewrite_chapter（非 hard_stop），故 effectiveAction 保持
+  // recommendedAction（patch_repair），章节留在 needs_repair 供自动执行器拾取并按 budget 走重写。
   const effectiveAction = budget?.nextAction === "hard_stop" ? "manual_gate" : recommendedAction;
   const observabilityTags = extractLengthObservabilityTags(input.runtimePackage);
   const settingOnlyAdvisory = settingSignal
@@ -1088,7 +1225,13 @@ export function buildChapterQualityLoopAssessment(
       ? "risk"
       : overallStatus,
     recommendedAction: effectiveAction,
-    patchFirstRequired: budget?.nextAction === "patch_repair" || effectiveAction === "patch_repair",
+    // patchFirstRequired 当前反映 budget 意图：budget.nextAction=patch_repair 才需要先 patch。
+    // 结构性根因（draft_obligation_unmet / draft_repair_exhausted）budget 起步即 rewrite_chapter；
+    // 连续 discard 升级时 budget 也转 rewrite_chapter——两者均 patchFirstRequired=false。
+    // 本字段供债板/运营观测，**不驱动执行层**：执行器 ChapterRepairStreamOrchestrator 直接读
+    // riskFlags.qualityLoop.budget.nextAction 决定 forceFullRewrite（M1 已接线），
+    // 不再依赖本字段做 light/heavy 路由。
+    patchFirstRequired: budget?.nextAction === "patch_repair",
     recheckRequired: effectiveAction !== "continue",
     pauseReason,
     rootCauseCode: input.runtimePackage?.failureClassification.code ?? null,
