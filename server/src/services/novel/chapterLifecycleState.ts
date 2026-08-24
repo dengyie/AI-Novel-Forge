@@ -57,15 +57,23 @@ export function chapterStatePairAfterLiteraryQualityGate(literaryPass: boolean):
 }
 
 /**
- * 双门质量过审：literaryPass ∧ styleClear 才允许 completed。
+ * 双门质量过审：literaryPass ∧ styleClear ∧ lengthPass 才允许 completed。
  * - 任一门 false → reviewed + needs_repair
- * - 两门皆 true → approved + completed
+ * - 三门皆 true → approved + completed
+ *
+ * `lengthPass` 是**自动修复出口**的强制长度硬门（见 {@link ChapterRepairFinalizer}）：
+ * 正文低于 softMin 即视为不通过，落 needs_repair，避免「内容对但短 15%+」的章长期不收口。
+ * 默认 true 以保持向后兼容——未显式传 `lengthPass` 的既有调用方（含流水线生成路径）
+ * 行为不变；人工 review 路径请用 {@link chapterStatePairAfterManualQualityReview}，
+ * 其长度为软提示，人工可显式接受短章，故此门不用于人工出口。
  */
 export function chapterStatePairAfterQualityGates(input: {
   literaryPass: boolean;
   styleClear: boolean;
+  lengthPass?: boolean;
 }): ChapterStatePairPatch {
-  return input.literaryPass && input.styleClear
+  const lengthPass = input.lengthPass ?? true;
+  return input.literaryPass && input.styleClear && lengthPass
     ? chapterStatePairAfterPipelineApproval()
     : {
       generationState: "reviewed",

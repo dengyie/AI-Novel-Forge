@@ -113,5 +113,33 @@ export async function persistChapterQualityScores(
     }
   });
 
+  // 章节收口（chapterStatus=completed）时，归档该章剩余的 pending_review 提案。
+  // 已完成的章不会再有人审校，pending 提案留着只会在 StateChangeProposal 表里堆积
+  // （原来靠 14 天自动提升或 autopilot 清理，太慢）。
+  // 归档放在事务提交之后单独执行：若 updateMany 抛 DB 错误，Prisma 会把事务标记为
+  // failed，即使事务内 catch 吞掉，后续提交仍可能失败、反而阻断收口。因此移出事务，
+  // 用独立 try/catch fail-open——归档失败不阻断收口，只 log。
+  if (input.chapterPatch?.chapterStatus === "completed") {
+    try {
+      await prisma.stateChangeProposal.updateMany({
+        where: {
+          novelId: input.novelId,
+          chapterId: input.chapterId,
+          status: "pending_review",
+        },
+        data: {
+          status: "rejected",
+          validationNotesJson: JSON.stringify({
+            reason: "chapter_completed_auto_archive",
+            note: "章节已收口（chapterStatus=completed），pending_review 提案自动归档。",
+          }),
+        },
+      });
+    } catch (error) {
+      // 归档失败不阻断收口主流程，仅记录日志
+      console.warn("[chapterQualityScorePersist] 提案归档失败（fail-open），章节收口已提交：", error);
+    }
+  }
+
   return columns;
 }

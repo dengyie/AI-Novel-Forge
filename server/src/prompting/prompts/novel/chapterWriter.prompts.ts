@@ -1,6 +1,7 @@
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import type { PromptAsset } from "../../core/promptTypes";
 import { renderSelectedContextBlocks } from "../../core/renderContextBlocks";
+import { renderProseBanBlock } from "./proseBanRules";
 import { NOVEL_PROMPT_BUDGETS } from "./promptBudgetProfiles";
 
 export interface ChapterWriterPromptInput {
@@ -257,6 +258,7 @@ export const chapterWriterPrompt: PromptAsset<ChapterWriterPromptInput, string, 
         // 一律改写成角色可感的视觉/听觉/触觉或他人口述，不得用【读卡状态：…】【姓名：…】
         // 这类全角方括号包的键值/字段/状态块（会被 prose_system_hud 硬门判定为系统面板）。
         "禁止在正文里使用【】全角方括号包裹的系统面板/状态栏/键值字段结构（如【读卡状态：异常】【错误代码：ERR-…】【姓名：…】【学号：…】【证件状态：挂起】等）。终端、屏幕、读卡器、核验系统等设备信息必须改写成角色可感知的描写：他看见屏幕上跳出红字、读卡器发出短促的报错音、闸口的指示灯骤然转红、值班员念出屏幕上的提示，而非直接铺排系统面板文本。短专名（如招式名、地名单称）可用书名号或直接叙述，不得套用面板格式。",
+        renderProseBanBlock(),
         antiClicherEnabled ? `\n【额外套路禁区】\n${antiClicherCopy}` : "",
         "",
         "【反模式替换】",

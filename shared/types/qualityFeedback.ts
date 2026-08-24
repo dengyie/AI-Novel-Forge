@@ -10,6 +10,13 @@ import type { ChapterQualityLoopAssessment } from "./chapterQualityLoop.js";
 
 export const QUALITY_FEEDBACK_VERSION = 1 as const;
 export const QUALITY_FEEDBACK_ROLLING_MAX = 3;
+/**
+ * rootCause=unknown（评估器无法归类根因）时的自动修复重试上限。
+ * unknown 说明没有明确 codes/归因可定向，一次 discard 就 avoidRetry 会让自动修复
+ * 白白放弃；在未达到该阈值前保持 avoidRetry=false，让管道降级换策略（换角度、补
+ * 长度、删冗余）继续尝试，打满 N 次仍修不好才 avoidRetry 收手。
+ */
+export const QUALITY_FEEDBACK_UNKNOWN_RETRY_MAX = 3;
 export const QUALITY_FEEDBACK_PRIOR_LOOKBACK = 3;
 export const QUALITY_FEEDBACK_PRIOR_MAX_ITEMS = 5;
 export const QUALITY_FEEDBACK_EVIDENCE_MAX = 3;
@@ -597,11 +604,18 @@ export function buildQualityFeedbackPacket(
   if (input.repairDecision === "discard" || input.repairDecision === "plateau_stop") {
     failedPatchCount += 1;
   }
-  // plateau always avoids further auto patch; single discard also blocks same signature auto re-patch (plan A)
+  // plateau always avoids further auto patch; single discard also blocks same signature auto re-patch (plan A).
+  // But rootCause=unknown 不应无条件终止：unknown 意味着评估器无法归类根因（缺 codes/
+  // 归因），一次 discard 就 avoidRetry 会让自动修复白放弃。改成「打满
+  // QUALITY_FEEDBACK_UNKNOWN_RETRY_MAX 次 Discard 才 avoidRetry」，期间管道降级换策略
+  // （换角度/补长度/删冗余）继续重试；非 unknown 根因保留原 plan A 硬门（单 Discard 即阻）。
+  const unknownStillRetryable = rootCause === "unknown"
+    && failedPatchCount < QUALITY_FEEDBACK_UNKNOWN_RETRY_MAX
+    && input.repairDecision !== "plateau_stop";
   const avoidRetry = Boolean(
     previous?.avoidRetry
     || input.repairDecision === "plateau_stop"
-    || failedPatchCount >= 1
+    || (failedPatchCount >= 1 && !unknownStillRetryable)
     || (input.assessment.budget?.exhausted === true),
   );
 

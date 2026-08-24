@@ -2,6 +2,7 @@ import type { ChapterRepairContext, ChapterRuntimePackage } from "@ai-novel/shar
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
 import type { ReviewIssue } from "@ai-novel/shared/types/novel";
 import {
+  evaluateLengthBudget,
   resolveHardMinWordCount,
   resolveLengthBudgetContract,
 } from "@ai-novel/shared/types/chapterLengthControl";
@@ -17,7 +18,10 @@ import {
   buildRepairIssuesPayload,
   resolveRepairIssueCodes,
 } from "./repairFeedbackPayload";
-import type { QualityFeedbackPacket } from "@ai-novel/shared/types/qualityFeedback";
+import {
+  QUALITY_FEEDBACK_UNKNOWN_RETRY_MAX,
+  type QualityFeedbackPacket,
+} from "@ai-novel/shared/types/qualityFeedback";
 
 export { buildRepairIssuesPayload } from "./repairFeedbackPayload";
 
@@ -219,14 +223,73 @@ export async function prepareChapterRepairExecution(
     input.runtimePackage,
     input.auditOpenIssueCodes,
   );
+  // 自动补长度分支（改进二）：确定性实测当前正文是否未达 soft 下界
+  // （length_under_soft / under_hard），或 qualityFeedback/issueCodes 已带 length_under_*。
+  // 命中则把 LENGTH_UNDER_SOFT_MIN 折进 issueCodes（让 getRepairModeHint 自动选
+  // extend_for_length），并让局部补丁走新的 length_expansion 扩写类型，而不是改写替换。
+  // 这防止短候选被 finalizer 的 length_under_hard 强制 discard 后进入死循环。
+  const isUnderLength = (() => {
+    const lengthEval = evaluateLengthBudget({
+      content: input.content,
+      targetWordCount: input.targetWordCount ?? null,
+    });
+    const codeUnder = issueCodes.some((code) =>
+      code.toLowerCase().includes("length_under"));
+    const feedbackUnder = (input.qualityFeedback ?? []).some((packet) =>
+      packet.codes.some((code) => code.toLowerCase().includes("length_under")));
+    return Boolean((lengthEval?.band === "under_soft" || lengthEval?.band === "under_hard") || codeUnder || feedbackUnder);
+  })();
+
   let activeRepairMode = input.options.repairMode ?? "light_repair";
-  let modeHint = getRepairModeHint(activeRepairMode, issueCodes);
+  // 改进二：确定性检测到未达 soft 下界时，非 forceFullRewrite 的局部补丁切到扩写类型。
+  const wantLengthExpansion = isUnderLength
+    && !input.forceFullRewrite
+    && activeRepairMode !== "heavy_repair"
+    && (activeRepairMode === "light_repair" || activeRepairMode === "length_expansion");
+  if (wantLengthExpansion) {
+    activeRepairMode = "length_expansion";
+  }
+  let issueCodesWithLength = issueCodes;
+  if (wantLengthExpansion && !issueCodesWithLength.includes("LENGTH_UNDER_SOFT_MIN")) {
+    issueCodesWithLength = [...issueCodesWithLength, "LENGTH_UNDER_SOFT_MIN"];
+  }
+  // 改进一降级换策略：rootCause=unknown 且未 reachRetry 上限时，下一轮 patch 换角度。
+  // 最新 feedback 包的 failedPatchCount < QUALITY_FEEDBACK_UNKNOWN_RETRY_MAX 且
+  // avoidRetry=false（见 qualityFeedback.buildQualityFeedbackPacket）说明系统允许继续重试；
+  // 这里把同一 signature 第 2 次起的策略从「修复连贯性」轮换到「补长度」或「删冗余」，
+  // 避免同路径空转。
+  const unknownStillRetryable = (() => {
+    const latest = input.qualityFeedback?.at(-1);
+    if (!latest) {
+      return false;
+    }
+    return latest.rootCause === "unknown"
+      && latest.avoidRetry === false
+      && latest.failedPatchCount > 0
+      && latest.failedPatchCount < QUALITY_FEEDBACK_UNKNOWN_RETRY_MAX;
+  })();
+  let resolveModeHint = (mode: PatchRepairMode): string => getRepairModeHint(mode, issueCodesWithLength);
+  let modeHint = resolveModeHint(activeRepairMode);
   // 篇幅合同仅 heavy_repair 使用（见下方两处 promptInput）。
   const lengthBudget = resolveRepairLengthBudget(input.targetWordCount ?? null);
 
   if (input.forceFullRewrite && activeRepairMode !== "heavy_repair") {
     activeRepairMode = "heavy_repair";
-    modeHint = getRepairModeHint(activeRepairMode, issueCodes);
+    modeHint = resolveModeHint(activeRepairMode);
+  }
+
+  if (
+    unknownStillRetryable
+    && !isUnderLength
+    && activeRepairMode !== "heavy_repair"
+    // 仅当当前仍为「通用」mode 时才旋转策略。调用方显式指定的专项模式
+    // （character_only / continuity_only / ending_only）需被保留，不得被静默覆盖。
+    && (activeRepairMode === "light_repair")
+  ) {
+    // 换一个修复角度：若当前是默认 light_repair，则兜底为「删冗余/压缩」互补方向，
+    // 让 LLM 从不同切入点重试，而非重复同一 patch 路径。
+    activeRepairMode = "light_repair";
+    modeHint = "unknown_retry_rotate：根因未被归类，NPATCH 换角度重试——消除重复/冗余表达、收敛疑似未兑现义务的对话回合，避免重放上轮同一 patch 思路。";
   }
 
   if (!input.forceFullRewrite && activeRepairMode !== "heavy_repair") {
@@ -455,6 +518,13 @@ export function getRepairModeHint(
     return "compress_tail_for_length：优先回收尾段冗余展开，保留结尾 hook 和关键冲突。";
   }
   if (issueCodes.includes("LENGTH_UNDER_SOFT_MIN")) {
+    // 原 switch 里 "length_expansion" 的 case 在此分支出现前即被拦截，属死代码；
+    // 此处按 mode 区分合并保留其语义：wantLengthExpansion 时 issueCodes 必带
+    // LENGTH_UNDER_SOFT_MIN（见 prepareChapterRepairExecution），故 mode=length_expansion
+    // 走到这里必然命中该 if，返回扩写专属提示。
+    if (repairMode === "length_expansion") {
+      return "extend_for_length（自动补长度）：章节未达目标篇幅（length_under_soft/under_hard）。在指定薄弱处扩写——补足义务场景的关键节拍、动作、反应与细节，把推进落到实处；禁止注水、重复或离题支线凑字，禁止把结尾 hook 推后。";
+    }
     return "extend_for_length：只补最后的义务场景或结尾 hook，增加有效推进，不要回顾性凑字数。";
   }
   switch (repairMode) {

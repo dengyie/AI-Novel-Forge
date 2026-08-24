@@ -18,7 +18,14 @@ export type PatchRepairMode =
   | "heavy_repair"
   | "continuity_only"
   | "character_only"
-  | "ending_only";
+  | "ending_only"
+  /**
+   * 自动补长度：检测到章节字数未达 soft 下界（length_under_soft / under_hard /
+   * chapterLengthDebt）时，指示 LLM 在指定位置**扩写**而非改写替换，把关键节拍、
+   * 动作、反应与细节写实以补足推进。这是质量环自动修复的分支，防止短候选因
+   * length_under_hard 被 finalizer 强制 discard 后陷入死循环。
+   */
+  | "length_expansion";
 
 export interface ChapterPatchRepairInput {
   novelId?: string;

@@ -231,6 +231,12 @@ export class ChapterRepairFinalizer {
       content: repairedContent,
       targetWordCount: baselineChapter.targetWordCount ?? null,
     });
+    // lengthPass：自动修复出口的软下限长度硬门。修复有补长度能力，短于 softMin
+    // （band === under_soft / under_hard）一律不算过审，落 needs_repair 继续补写，
+    // 避免「内容对但短 15%」的章长期挂 pending_review 不收口。
+    // 无长度合同（lengthGate === null，旧数据无 targetWordCount）时不设长度门。
+    const lengthPass = lengthGate == null
+      || (lengthGate.band !== "under_soft" && lengthGate.band !== "under_hard");
 
     let adoptDecision = decideRepairContentAdoption({
       baselineScore: baselineReview.score,
@@ -389,7 +395,7 @@ export class ChapterRepairFinalizer {
         expectedContentRevision: committed.contentRevision,
         score: review.score,
         issues: review.issues,
-        chapterPatch: chapterStatePairAfterQualityGates({ literaryPass, styleClear }),
+        chapterPatch: chapterStatePairAfterQualityGates({ literaryPass, styleClear, lengthPass }),
         writeReport: true,
       });
       await chapterQualityLoopService.recordAssessment({
