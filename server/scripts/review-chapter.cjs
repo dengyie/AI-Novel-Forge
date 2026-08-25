@@ -80,8 +80,8 @@ function sendReview() {
   });
 }
 
-// ── 轮询 DB 等待 review 结果落库 ──────────────────────────
-function pollDB() {
+// ── 打开只读 sqlite（优先脚本旁 / server node_modules 的 better-sqlite3） ──
+function openDb() {
   let Database;
   try {
     Database = require(path.resolve(
@@ -95,13 +95,33 @@ function pollDB() {
       "../node_modules/better-sqlite3/lib/database.js",
     ));
   }
-  const db = new Database(dbPath, { readonly: true });
+  return new Database(dbPath, { readonly: true });
+}
 
-  const before = db
-    .prepare("SELECT chapterStatus, generationState FROM Chapter WHERE id=?")
-    .get(chapterId);
-  console.log(`[轮询] 初始状态: ${before?.chapterStatus}/${before?.generationState}`);
+// ── 读取章节当前快照（chapterStatus + generationState） ──
+function readDbState() {
+  let db;
+  try {
+    db = openDb();
+  } catch (e) {
+    throw new Error(`无法打开 DB（${dbPath}）: ${e.message}`);
+  }
+  try {
+    const row = db
+      .prepare("SELECT chapterStatus st, generationState gs FROM Chapter WHERE id=?")
+      .get(chapterId);
+    return row ? { chapterStatus: row.st, generationState: row.gs } : null;
+  } finally {
+    db.close();
+  }
+}
 
+// ── 轮询 DB 等待 review 终态落库 ──────────────────────────
+// before 必须在 POST /review 之前读取：POST 是同步全链路，响应返回时 DB 已写终态，
+// 若 POST 返回后再读 before，会把终态当 baseline，`row !== before` 恒不成立 → 必走
+// 300s 超时分支。拿到终态后轮询很快命中：状态相对 before 有变化，或已到 complete/needs_repair。
+function pollDB(before) {
+  const db = openDb();
   const start = Date.now();
   const intervalMs = 5000;
 
@@ -120,9 +140,13 @@ function pollDB() {
         return;
       }
 
-      // 状态变了（不再是最初的 pending_review/needs_repair/drafted）
-      if (row.st !== before?.chapterStatus || row.gs !== before?.generationState) {
-        console.log(`[轮询] 状态变更 (${elapsed}s): ${row.st}/${row.gs}`);
+      const changedFromBefore = row.st !== before.chapterStatus
+        || row.gs !== before.generationState;
+      const isTerminal = row.st === "completed" || row.st === "needs_repair";
+
+      // 命中终态，或状态相对 POST 前基线有变化，即 review 判定已落库
+      if (changedFromBefore || isTerminal) {
+        console.log(`[轮询] 终态 (${elapsed}s): ${row.st}/${row.gs}`);
         clearInterval(timer);
         db.close();
         resolve({ status: row.st, generationState: row.gs, elapsedSec: elapsed });
@@ -146,6 +170,20 @@ async function main() {
   console.log(`chapterId: ${chapterId}`);
   console.log(`target:    http://${host}:${port}`);
   console.log(`wait:      ${wait}`);
+
+  // before 快照必须在 POST 之前落定（POST 同步返回时 DB 已写终态，见 pollDB 注释）。
+  let before;
+  try {
+    before = readDbState();
+  } catch (e) {
+    console.error(`[错误] ${e.message}`);
+    process.exit(1);
+  }
+  if (!before) {
+    console.error(`[错误] 章节 ${chapterId} 不存在于数据库，无法 review。`);
+    process.exit(1);
+  }
+  console.log(`\n[轮询] POST 前状态: ${before.chapterStatus}/${before.generationState}`);
 
   console.log(`\n[1/2] 发送 POST /review ...`);
   let resp;
@@ -185,8 +223,8 @@ async function main() {
     process.exit(0);
   }
 
-  console.log(`\n[2/2] 轮询 DB 等待状态变更（超时 ${timeoutSec}s）...`);
-  const result = await pollDB();
+  console.log(`\n[2/2] 轮询 DB 等待终态落库（超时 ${timeoutSec}s）...`);
+  const result = await pollDB(before);
   if (result?.status) {
     console.log(`\n=== 最终结果 ===`);
     console.log(`chapterStatus:    ${result.status}`);

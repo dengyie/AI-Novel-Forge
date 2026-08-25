@@ -419,16 +419,17 @@ export class ChapterRepairFinalizer {
       }));
       return;
     }
-    if (literaryPass && styleClear && input.options.auditIssueIds?.length) {
+    const passAll = literaryPass && styleClear && lengthPass;
+    if (passAll && input.options.auditIssueIds?.length) {
       const resolveAuditIssues = this.deps.resolveAuditIssues
         ?? ((novelId: string, issueIds: string[]) => auditService.resolveIssues(novelId, issueIds));
       await resolveAuditIssues(input.novelId, input.options.auditIssueIds).catch(() => null);
     }
     input.helpers.writeFrame(buildRepairRunStatusFrame({
       chapterId: input.chapterId,
-      status: literaryPass && styleClear ? "succeeded" : "failed",
+      status: passAll ? "succeeded" : "failed",
       phase: "completed",
-      message: literaryPass && styleClear
+      message: passAll
         ? "修复候选已采纳，本章已达到可继续推进状态。"
         : "修复候选已采纳并保存，但仍有问题待继续处理。",
     }));
