@@ -13,6 +13,12 @@ export interface ChapterWriterPromptInput {
   minWordCount?: number | null;
   maxWordCount?: number | null;
   missingWordGap?: number | null;
+  /**
+   * 书级禁词（SoT 设定 + styleTone 并集，由 loadNovelBannedTerms 统一加载）。
+   * 缺省/空 → 不渲染【书级禁词】块。与评价侧 detectProseQuality 的 bannedTerms
+   * 同一来源，保证「生成时 prompt 禁的词」==「评价时 penalize 的词」。
+   */
+  bannedTerms?: string[];
 }
 
 export const chapterWriterPrompt: PromptAsset<ChapterWriterPromptInput, string, string> = {
@@ -195,6 +201,13 @@ export const chapterWriterPrompt: PromptAsset<ChapterWriterPromptInput, string, 
         ].filter(Boolean).join("\n")
       : "";
 
+    // F5：书级禁词动态块。与评价侧 detectProseQuality 的 bannedTerms 同源（SoT ∪ styleToneSafe）。
+    // 空/缺省不渲染；渲染时每词一行，与 renderProseBanBlock 的「- …」行共存在【禁止事项】区块。
+    const bannedTerms = input.bannedTerms ?? [];
+    const sotBanBlock = bannedTerms.length > 0
+      ? `【书级禁词（SoT 设定 + styleTone）】以下词汇不得以任何形式出现在正文中：\n${bannedTerms.map((term) => `- ${term}`).join("\n")}`
+      : "";
+
     return [
       new SystemMessage([
         "你是中文长篇网络小说写作助手。",
@@ -259,6 +272,7 @@ export const chapterWriterPrompt: PromptAsset<ChapterWriterPromptInput, string, 
         // 这类全角方括号包的键值/字段/状态块（会被 prose_system_hud 硬门判定为系统面板）。
         "禁止在正文里使用【】全角方括号包裹的系统面板/状态栏/键值字段结构（如【读卡状态：异常】【错误代码：ERR-…】【姓名：…】【学号：…】【证件状态：挂起】等）。终端、屏幕、读卡器、核验系统等设备信息必须改写成角色可感知的描写：他看见屏幕上跳出红字、读卡器发出短促的报错音、闸口的指示灯骤然转红、值班员念出屏幕上的提示，而非直接铺排系统面板文本。短专名（如招式名、地名单称）可用书名号或直接叙述，不得套用面板格式。",
         renderProseBanBlock(),
+        sotBanBlock,
         antiClicherEnabled ? `\n【额外套路禁区】\n${antiClicherCopy}` : "",
         "",
         "【反模式替换】",

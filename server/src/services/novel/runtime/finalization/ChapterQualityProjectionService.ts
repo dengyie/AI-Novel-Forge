@@ -1,10 +1,9 @@
 import type { ChapterRuntimePackage, GenerationContextPackage } from "@ai-novel/shared/types/chapterRuntime";
 import type { QualityScore, ReviewIssue } from "@ai-novel/shared/types/novel";
-import { extractSotBannedTermsFromNovel } from "@ai-novel/shared/types/sotBannedTerms";
-import { extractBannedTermsFromStyleToneSafe } from "@ai-novel/shared/types/styleToneBannedTerms";
 import { prisma } from "../../../../db/prisma";
 import { openConflictService } from "../../../state/OpenConflictService";
 import { persistChapterQualityScores } from "../../quality/chapterQualityScorePersist";
+import { loadNovelBannedTerms } from "../../quality/loadNovelBannedTerms";
 import type { ChapterRuntimeRequestInput } from "../chapterRuntimeSchema";
 import type { ChapterTimelineGateResult } from "../ChapterTimelineFinalizationService";
 import { ChapterQualityGateService } from "../ChapterQualityGateService";
@@ -116,32 +115,9 @@ export class ChapterQualityProjectionService {
     };
   }
 
+  /** 书级禁词统一来源：SoT ∪ StyleToneSafe（质量评分侧消费）。 */
   private async loadNovelBannedTerms(novelId: string): Promise<string[]> {
-    try {
-      const novel = await prisma.novel.findUnique({
-        where: { id: novelId },
-        select: {
-          storyWorldSliceJson: true,
-          storyWorldSliceOverridesJson: true,
-          styleTone: true,
-        },
-      });
-      const seen = new Set<string>();
-      return [
-        ...extractSotBannedTermsFromNovel(novel),
-        ...extractBannedTermsFromStyleToneSafe(novel),
-      ].filter((term) => {
-        if (seen.has(term)) return false;
-        seen.add(term);
-        return true;
-      });
-    } catch (error) {
-      console.warn("[chapter-runtime] load novel banned terms failed; treating as empty", {
-        novelId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      return [];
-    }
+    return loadNovelBannedTerms(novelId);
   }
 
   private async persistScores(input: {

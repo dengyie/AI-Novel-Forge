@@ -485,6 +485,52 @@ test("chapter writer prompt forbids system-panel HUD 【】 blocks in narrative 
   assert.match(systemContent, /禁止.*正文.*【/);
 });
 
+test("chapter writer prompt renders injected book-level banned terms alongside prose ban block", () => {
+  const messages = chapterWriterPrompt.render({
+    novelTitle: "测试小说",
+    chapterOrder: 2,
+    chapterTitle: "初见",
+    mode: "draft",
+    bannedTerms: ["旧术语甲", "称重", "过秤"],
+  }, {
+    blocks: [],
+    selectedBlockIds: [],
+    droppedBlockIds: [],
+    summarizedBlockIds: [],
+    estimatedInputTokens: 0,
+  });
+
+  const systemContent = String(messages[0].content);
+  // 动态书级禁词块（F5）与固定 renderProseBanBlock 共存
+  assert.match(systemContent, /【书级禁词/);
+  assert.match(systemContent, /- 旧术语甲/);
+  assert.match(systemContent, /- 称重/);
+  assert.match(systemContent, /- 过秤/);
+  // 固定 prose 禁项块仍在（renderProseBanBlock）
+  assert.match(systemContent, /【正文 prose 禁项】/);
+  // 语义核心：书级禁词必然是「禁止以任何形式出现在正文」的措辞
+  assert.match(systemContent, /不得以任何形式出现在正文中/);
+});
+
+test("chapter writer prompt omits book-level banned block when bannedTerms empty", () => {
+  const messages = chapterWriterPrompt.render({
+    novelTitle: "第一章",
+    chapterOrder: 2,
+    chapterTitle: "初见",
+    mode: "draft",
+  }, {
+    blocks: [],
+    selectedBlockIds: [],
+    droppedBlockIds: [],
+    summarizedBlockIds: [],
+    estimatedInputTokens: 0,
+  });
+  const systemContent = String(messages[0].content);
+  assert.doesNotMatch(systemContent, /书级禁词/);
+  // 固定 prose 禁项仍在
+  assert.match(systemContent, /【正文 prose 禁项】/);
+});
+
 test("novel main-chain prompt assets declare explicit non-zero context budgets", () => {
   const expectedBudgets = new Map([
     ["novel.director.candidates@v1", NOVEL_PROMPT_BUDGETS.directorCandidates],

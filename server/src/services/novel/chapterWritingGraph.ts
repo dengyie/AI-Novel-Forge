@@ -23,6 +23,7 @@ import { assertChapterContentNotEmpty } from "./runtime/chapterEmptyContentError
 import { buildChapterChineseProseGateError } from "./runtime/chapterChineseProseGateError";
 import { throwIfChapterGenerationAborted } from "./runtime/chapterAbortGuard";
 import { resolveWriterTimeoutMs } from "./writerTimeoutBudget";
+import { loadNovelBannedTerms } from "./quality/loadNovelBannedTerms";
 import { assessChineseProse } from "../../utils/chineseProseGate";
 import type { CommittedChapterContent } from "./runtime/content/ChapterContentCommitTypes";
 import {
@@ -498,6 +499,7 @@ export class ChapterWritingGraph {
           minWordCount: lengthGoal.minWordCount,
           maxWordCount: lengthGoal.maxWordCount,
           missingWordGap,
+          bannedTerms: await loadNovelBannedTerms(input.novelId),
         },
         contextBlocks: resolvedContext.blocks,
         options: {
@@ -749,6 +751,7 @@ export class ChapterWritingGraph {
         targetWordCount: chapterWriteContext.chapterMission.targetWordCount ?? null,
         minWordCount: targetRange.minWordCount,
         maxWordCount: targetRange.maxWordCount,
+        bannedTerms: await loadNovelBannedTerms(input.novelId),
       },
       contextBlocks: resolvedContext.blocks,
       options: {
