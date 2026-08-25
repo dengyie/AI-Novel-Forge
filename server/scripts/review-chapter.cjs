@@ -7,7 +7,7 @@
  *
  * 选项：
  *   --host <addr>     server 地址（默认 127.0.0.1）
- *   --port <num>      server 端口（默认 3001）
+ *   --port <num>      server 端口（优先 CLI arg，其次 $PORT 环境变量，默认 3001）
  *   --no-wait         只发 POST 不轮询 DB（默认会轮询等结果）
  *   --db <path>       DB 路径（默认 /data/ainovel/app/ai-novel/server/dev.db）
  *   --timeout <sec>   等待 review 落库的超时秒数（默认 300）
@@ -36,7 +36,8 @@ const novelId = argv[0];
 const chapterId = argv[1];
 
 let host = "127.0.0.1";
-let port = 3001;
+let port;
+let portSource = "default";
 let wait = true;
 let dbPath = "/data/ainovel/app/ai-novel/server/dev.db";
 let timeoutSec = 300;
@@ -44,11 +45,23 @@ let timeoutSec = 300;
 for (let i = 2; i < argv.length; i++) {
   const a = argv[i];
   if (a === "--host") host = argv[++i];
-  else if (a === "--port") port = parseInt(argv[++i], 10);
+  else if (a === "--port") { port = parseInt(argv[++i], 10); portSource = "cli-arg"; }
   else if (a === "--no-wait") wait = false;
   else if (a === "--db") dbPath = argv[++i];
   else if (a === "--timeout") timeoutSec = parseInt(argv[++i], 10);
   else { console.error(`未知参数: ${a}`); process.exit(1); }
+}
+
+// 端口解析优先级：--port CLI arg > $PORT 环境变量（存在且为数字端口）> 默认 3001。
+if (port === undefined) {
+  const envPort = Number(process.env.PORT);
+  if (process.env.PORT !== undefined && Number.isInteger(envPort) && envPort > 0 && envPort <= 65535) {
+    port = envPort;
+    portSource = "PORT-env";
+  } else {
+    port = 3001;
+    portSource = "default";
+  }
 }
 
 // ── 发送 review POST（原生 http，不走代理） ────────────────
@@ -168,7 +181,7 @@ async function main() {
   console.log(`\n=== review-chapter CLI ===`);
   console.log(`novelId:   ${novelId}`);
   console.log(`chapterId: ${chapterId}`);
-  console.log(`target:    http://${host}:${port}`);
+  console.log(`target:    http://${host}:${port}（端口来源: ${portSource}）`);
   console.log(`wait:      ${wait}`);
 
   // before 快照必须在 POST 之前落定（POST 同步返回时 DB 已写终态，见 pollDB 注释）。

@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 
 const {
   buildRepairIssuesPayload,
+  getRepairModeHint,
 } = require("../dist/services/novel/runtime/repair/chapterRepairRuntime.js");
 
 test("repair issues payload carries the latest current-chapter quality feedback", () => {
@@ -41,4 +42,22 @@ test("repair issues payload carries the latest current-chapter quality feedback"
 test("repair issues payload omits absent or malformed quality feedback", () => {
   const payload = JSON.parse(buildRepairIssuesPayload([], null, [], null));
   assert.deepEqual(payload, { issues: [] });
+});
+
+test("getRepairModeHint: length_expansion returns exclusive extend_for_length hint", () => {
+  // 死代码修复后可达分支：wantLengthExpansion 时 issueCodes 必带 LENGTH_UNDER_SOFT_MIN，
+  // mode=length_expansion 走扩写专属提示（非通用 extend_for_length）。
+  const hint = getRepairModeHint("length_expansion", ["LENGTH_UNDER_SOFT_MIN"]);
+  assert.match(hint, /extend_for_length/);
+  assert.match(hint, /扩写|补足/);
+  // 专属提示应区别于「只补结尾」的通用 extend_for_length（后者走上一级 if 的 else）
+  const generic = getRepairModeHint("light_repair", ["LENGTH_UNDER_SOFT_MIN"]);
+  assert.notEqual(hint, generic);
+  assert.match(generic, /extend_for_length/);
+});
+
+test("getRepairModeHint: length_expansion without LENGTH_UNDER_SOFT_MIN falls through", () => {
+  // 若 issueCodes 缺 LENGTH_UNDER_SOFT_MIN，不应命中扩写专属 if，回到 switch 默认分支。
+  const hint = getRepairModeHint("length_expansion", []);
+  assert.equal(hint, "以轻修为主，优先保持原有内容框架和事件顺序。");
 });

@@ -16,6 +16,7 @@ const {
   mergeQualityFeedbackList,
   QUALITY_FEEDBACK_PREPARE_SUMMARY_CHARS,
   QUALITY_FEEDBACK_ROLLING_MAX,
+  QUALITY_FEEDBACK_UNKNOWN_RETRY_MAX,
 } = require("../../shared/dist/types/qualityFeedback.js");
 
 function assessment(overrides = {}) {
@@ -467,4 +468,100 @@ test("prose_ban planHints never spell banned term 称重", () => {
   const joined = [...hints.mustFix, ...hints.planHints].join("\n");
   assert.equal(joined.includes("称重"), false);
   assert.match(joined, /废弃术语|禁词|mustAvoid|prose ban/i);
+});
+
+test("unknown 根因在未达 retry 上限前 keep avoidRetry=false", () => {
+  // rootCause=unknown（评估器无法归类根因，rootCauseCode 置 null）→ 单次 discard
+  // 不应 terminate：QUALITY_FEEDBACK_UNKNOWN_RETRY_MAX 前保持 avoidRetry=false，
+  // 让管道降级换策略（换角度/补长度/删冗余）继续重试同 signature。
+  const unknownAssessment = () => assessment({
+    rootCauseCode: null,
+    recommendedAction: "repair",
+    signals: [{
+      artifactType: "literary_score",
+      status: "invalid",
+      issueCodes: [],
+      reason: "综合审校不达标，未归类到单一根因。",
+    }],
+  });
+
+  const packet = buildQualityFeedbackPacket({
+    assessment: unknownAssessment(),
+    repairDecision: "discard",
+  });
+  assert.ok(packet);
+  assert.equal(packet.rootCause, "unknown");
+  assert.equal(packet.failedPatchCount, 1);
+  assert.equal(packet.avoidRetry, false, `unknown 未完 QA_FEEDBACK cap 前第一次 discard 不应 avoidRetry：${packet.avoidRetry}`);
+
+  // 确认仍可重试：章节级+同签名的 isAutoPatchAvoidedByFeedback 均不拦截
+  assert.equal(isAutoPatchAvoidedByFeedback([packet]).avoided, false);
+  assert.equal(isAutoPatchAvoidedByFeedback([packet], packet.signature).avoided, false);
+});
+
+test("unknown 根因打满 QUALITY_FEEDBACK_UNKNOWN_RETRY_MAX 次 Discard 后 avoidRetry=true", () => {
+  const unknownAssessment = () => assessment({
+    rootCauseCode: null,
+    recommendedAction: "repair",
+    signals: [{
+      artifactType: "literary_score",
+      status: "invalid",
+      issueCodes: [],
+      reason: "综合审校不达标，未归类到单一根因。",
+    }],
+  });
+
+  // 构造同一个 signature 的既有反馈链：failedPatchCount = MAX-1（2），未 avoidRetry
+  const seed = buildQualityFeedbackPacket({
+    assessment: unknownAssessment(),
+    repairDecision: "discard",
+  });
+  assert.ok(seed);
+  assert.equal(seed.rootCause, "unknown");
+  assert.equal(seed.failedPatchCount, 1);
+  assert.equal(seed.avoidRetry, false);
+
+  const previous = {
+    ...seed,
+    failedPatchCount: QUALITY_FEEDBACK_UNKNOWN_RETRY_MAX - 1, // =2
+    avoidRetry: false,
+    evaluatedAt: "2026-08-20T00:00:00.000Z",
+  };
+
+  // 同 signature 再 discard 一次 → failedPatchCount 达 MAX(=3)，unknown 不再豁免
+  const packet = buildQualityFeedbackPacket({
+    assessment: unknownAssessment(),
+    repairDecision: "discard",
+    previousFeedback: [previous],
+  });
+  assert.ok(packet);
+  assert.equal(packet.rootCause, "unknown");
+  assert.equal(packet.failedPatchCount, QUALITY_FEEDBACK_UNKNOWN_RETRY_MAX);
+  assert.equal(packet.avoidRetry, true, "打满未知根因重试上限后应 avoidRetry 收手");
+
+  // 打满后同签名应真的被拦截
+  const avoided = isAutoPatchAvoidedByFeedback([packet], packet.signature);
+  assert.equal(avoided.avoided, true);
+  assert.match(avoided.reason, /avoidRetry|rewrite|patch/i);
+});
+
+test("plateau_stop 不分根因一律 avoidRetry（unknown 不豁免）", () => {
+  // plateau_stop 表示同路径已无进展：即使 rootCause=unknown 也应立即 avoidRetry，
+  // 不依赖 QUALITY_FEEDBACK_UNKNOWN_RETRY_MAX 计数。
+  const packet = buildQualityFeedbackPacket({
+    assessment: assessment({
+      rootCauseCode: null,
+      recommendedAction: "repair",
+      signals: [{
+        artifactType: "literary_score",
+        status: "invalid",
+        issueCodes: [],
+        reason: "综合审校不达标，未归类到单一根因。",
+      }],
+    }),
+    repairDecision: "plateau_stop",
+  });
+  assert.ok(packet);
+  assert.equal(packet.rootCause, "unknown");
+  assert.equal(packet.avoidRetry, true);
 });

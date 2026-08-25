@@ -173,3 +173,51 @@ test("chapterStatePairAfterQualityGates dual-gate matrix", () => {
     chapterStatus: "needs_repair",
   });
 });
+
+test("chapterStatePairAfterQualityGates lengthPass: 三门缺一即 needs_repair", () => {
+  // 文学 ∧ 文风都过，但 lengthPass=false（自动修复出口的强制长度硬门）→ 不得 completed
+  assert.deepEqual(
+    chapterStatePairAfterQualityGates({ literaryPass: true, styleClear: true, lengthPass: false }),
+    {
+      generationState: "reviewed",
+      chapterStatus: "needs_repair",
+    },
+  );
+  // literaryPass 或 styleClear 任一 false，即使 lengthPass=true 也需 repair
+  assert.deepEqual(
+    chapterStatePairAfterQualityGates({ literaryPass: true, styleClear: false, lengthPass: true }),
+    {
+      generationState: "reviewed",
+      chapterStatus: "needs_repair",
+    },
+  );
+  assert.deepEqual(
+    chapterStatePairAfterQualityGates({ literaryPass: false, styleClear: true, lengthPass: true }),
+    {
+      generationState: "reviewed",
+      chapterStatus: "needs_repair",
+    },
+  );
+});
+
+test("chapterStatePairAfterQualityGates lengthPass: 三门皆 up", () => {
+  assert.deepEqual(
+    chapterStatePairAfterQualityGates({ literaryPass: true, styleClear: true, lengthPass: true }),
+    {
+      generationState: "approved",
+      chapterStatus: "completed",
+    },
+  );
+});
+
+test("chapterStatePairAfterQualityGates lengthPass 省略 → 向后兼容 equivalent to true", () => {
+  // 未显式传 lengthPass 的既有调用方（含流水线生成路径）行为与 lengthPass: true 一致
+  assert.deepEqual(
+    chapterStatePairAfterQualityGates({ literaryPass: true, styleClear: true }),
+    chapterStatePairAfterQualityGates({ literaryPass: true, styleClear: true, lengthPass: true }),
+  );
+  assert.deepEqual(
+    chapterStatePairAfterQualityGates({ literaryPass: true, styleClear: false }),
+    chapterStatePairAfterQualityGates({ literaryPass: true, styleClear: false, lengthPass: true }),
+  );
+});

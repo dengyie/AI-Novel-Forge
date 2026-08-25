@@ -228,16 +228,25 @@ export async function prepareChapterRepairExecution(
   // 命中则把 LENGTH_UNDER_SOFT_MIN 折进 issueCodes（让 getRepairModeHint 自动选
   // extend_for_length），并让局部补丁走新的 length_expansion 扩写类型，而不是改写替换。
   // 这防止短候选被 finalizer 的 length_under_hard 强制 discard 后进入死循环。
+  // 守卫：targetWordCount==null（旧数据/无长度合同）时 evaluateLengthBudget 返回 null，
+  // 此时不得仅凭可能 stale 的 length_under_* code 兜底触发 length_expansion，故需同时
+  // 满足「存在权威长度合同」才允许 band/code 证据生效，避免无合同章节被误判扩写。
+  const lengthEvalForUnder = evaluateLengthBudget({
+    content: input.content,
+    targetWordCount: input.targetWordCount ?? null,
+  });
+  const hasLengthContract = input.targetWordCount != null && lengthEvalForUnder !== null;
   const isUnderLength = (() => {
-    const lengthEval = evaluateLengthBudget({
-      content: input.content,
-      targetWordCount: input.targetWordCount ?? null,
-    });
     const codeUnder = issueCodes.some((code) =>
       code.toLowerCase().includes("length_under"));
     const feedbackUnder = (input.qualityFeedback ?? []).some((packet) =>
       packet.codes.some((code) => code.toLowerCase().includes("length_under")));
-    return Boolean((lengthEval?.band === "under_soft" || lengthEval?.band === "under_hard") || codeUnder || feedbackUnder);
+    const bandEvidence = (lengthEvalForUnder?.band === "under_soft" || lengthEvalForUnder?.band === "under_hard");
+    // 无权威长度合同时一律不算 under length，length_expansion 不会被 stale 的 length_under_* code 触发。
+    if (!hasLengthContract) {
+      return false;
+    }
+    return Boolean(bandEvidence || codeUnder || feedbackUnder);
   })();
 
   let activeRepairMode = input.options.repairMode ?? "light_repair";
@@ -286,10 +295,9 @@ export async function prepareChapterRepairExecution(
     // （character_only / continuity_only / ending_only）需被保留，不得被静默覆盖。
     && (activeRepairMode === "light_repair")
   ) {
-    // 换一个修复角度：若当前是默认 light_repair，则兜底为「删冗余/压缩」互补方向，
-    // 让 LLM 从不同切入点重试，而非重复同一 patch 路径。
-    activeRepairMode = "light_repair";
-    modeHint = "unknown_retry_rotate：根因未被归类，NPATCH 换角度重试——消除重复/冗余表达、收敛疑似未兑现义务的对话回合，避免重放上轮同一 patch 思路。";
+    // 该分支仅换提示词切入点（modeHint），不改变实际 repairMode；activeRepairMode 保持 light_repair 不变。
+    // 当前已必然为 light_repair（守卫在上方），仅注入「换角度重试」提示，避免重复上轮同一 patch 思路。
+    modeHint = "unknown_retry_rotate：根因未被归类，按换角度重试——消除重复/冗余表达、收敛疑似未兑现义务的对话回合，避免重放上轮同一 patch 思路。";
   }
 
   if (!input.forceFullRewrite && activeRepairMode !== "heavy_repair") {

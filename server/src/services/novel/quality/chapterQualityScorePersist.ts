@@ -116,6 +116,13 @@ export async function persistChapterQualityScores(
   // 章节收口（chapterStatus=completed）时，归档该章剩余的 pending_review 提案。
   // 已完成的章不会再有人审校，pending 提案留着只会在 StateChangeProposal 表里堆积
   // （原来靠 14 天自动提升或 autopilot 清理，太慢）。
+  // F4 语义说明：StateChangeProposal.status 是自由字符串（schema 中 `String @default("validated")`，
+  // 无 DB enum），现有合法取值全集为 validated / pending_review / rejected / committed
+  // （四处来源：ExistingProposalCommitService、StateCommitService、PendingReviewAutoPromotionService、
+  // DirectorStateProposalResolutionService）。没有任何「已归档/closed」类 status，且建枚举/造值
+  // 会导致 DB 无 default 约束的 insert 行为不一致，故保持 status="rejected"，仅靠
+  // validationNotesJson.reason 唯一 marker「chapter_completed_auto_archive」（全仓唯一）区分
+  // 「自动归档」与人工真正否决（人工否决不写该 marker）。审计侧按该 marker 判别即可。
   // 归档放在事务提交之后单独执行：若 updateMany 抛 DB 错误，Prisma 会把事务标记为
   // failed，即使事务内 catch 吞掉，后续提交仍可能失败、反而阻断收口。因此移出事务，
   // 用独立 try/catch fail-open——归档失败不阻断收口，只 log。
