@@ -1271,7 +1271,9 @@ export class AudiobookPipelineService {
       // R2-2: m4b 封装是单次长时 spawn，progress 五元组冻结会被 watchdog 误杀。
       // ffmpeg 每 10s 上报 `.part` 增长，这里转成 finalizing progress touch，喂给推进信号。
       onProgress: (p) => {
-        void input.onProgress({
+        // input.onProgress 类型为 Promise<void> | void，直接 .catch 会 TS2339；
+        // Promise.resolve 归一化后再捕错，onProgress 抛错不中断 ffmpeg。
+        void Promise.resolve(input.onProgress({
           phase: "finalizing",
           chapterIndex: orderedChapters.length - 1,
           chapterCount: orderedChapters.length,
@@ -1286,7 +1288,7 @@ export class AudiobookPipelineService {
           fullAudioPath,
           qualityWarnings,
           chapterProgress: snapshotChapterProgress(),
-        }).catch(() => {
+        })).catch(() => {
           // onProgress 抛错不中断 ffmpeg
         });
       },
