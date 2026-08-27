@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import type {
   AudiobookChapterAnnotation,
   AudiobookChapterReprocessMode,
@@ -70,7 +71,47 @@ const AUDIOBOOK_WATCHDOG_STALL_PERIODS = Math.max(
   Number(process.env.AUDIOBOOK_WATCHDOG_STALL_PERIODS ?? 10) || 10,
 );
 
-const DEFAULT_MAX_RETRIES = 1;
+/**
+ * finalizing / m4b 封装期的容忍周期数。
+ *
+ * 现在 status=running + currentStage="finalizing" 的任务是单次长时 ffmpeg（大书 m4b 封装
+ * 数分钟至十几分钟）。progress=98 已越过合并门槛，且 m4b 封装期间 onProgress 只写
+ * 五元组里的 progress 递增、其它字段不再变化——固定 stallPeriods=10 时 60s×10=10min 不到
+ * 就会误杀。R2-2 宽限到 40 周期（60s×40=40min），并配合 m4b `.part` 增长心跳兜底。
+ * env `AUDIOBOOK_WATCHDOG_FINALIZE_STALL_PERIODS` 可调。
+ */
+export const AUDIOBOOK_WATCHDOG_FINALIZE_STALL_PERIODS = Math.max(
+  2,
+  Number(process.env.AUDIOBOOK_WATCHDOG_FINALIZE_STALL_PERIODS ?? 40) || 40,
+);
+
+/**
+ * 是否该行的 watchdog 对 finalizing/m4b 编码放宽容忍（纯函数，无 fs 依赖）。
+ *
+ * 宽松判据：
+ * - `currentStage === "finalizing" && progress >= 98`：已越过合并进入封装期
+ * - 或 `m4bEncoding` 置真：调用方把「`full-book.m4b.part` 存在」的磁盘判定传入。
+ *
+ * 这里把「宽限容忍」整体做在**决策层**：命中该分支时 stallPeriods 放宽到
+ * AUDIOBOOK_WATCHDOG_FINALIZE_STALL_PERIODS（默认 40），60s×40=40min 内不误杀。
+ */
+export function isWatchdogFinalizingTolerant(input: {
+  currentStage: string | null;
+  progress: number | null;
+  /** ffmpeg 正在写盘：调用方将磁盘探测结果传入 */
+  m4bEncodingOnDisk?: boolean;
+}): boolean {
+  const { currentStage, progress } = input;
+  if (currentStage === "finalizing" && typeof progress === "number" && progress >= 98) {
+    return true;
+  }
+  if (input.m4bEncodingOnDisk === true) {
+    return true;
+  }
+  return false;
+}
+
+const DEFAULT_MAX_RETRIES = 3;
 
 /** listByNovel 可见条数上限（API take 钳制后）。 */
 const LIST_BY_NOVEL_VISIBLE_MAX = 100;
@@ -987,6 +1028,38 @@ export class AudiobookTaskService {
     });
     this.enqueueTask(taskId);
     const detail = await this.getTask(taskId);
+    if (!detail) {
+      throw new AppError("有声书任务不存在。", 404);
+    }
+    return detail;
+  }
+
+  /**
+   * P0-3：受控提高任务 retry 额度。默认 DEFAULT_MAX_RETRIES=3（原 1 太紧）。
+   * 校验：
+   * - maxRetries 整数 0-10（0=禁止重跑，仅用于显式关闭）
+   * - 非 running 状态可改（queued/running 中被改会与排队语义冲突）
+   * - 终态任务提高额度后可直接 retryTask
+   * 返回更新后的 AudiobookTaskDetail。
+   */
+  async updateTaskMaxRetries(taskId: string, maxRetries: number): Promise<AudiobookTaskDetail> {
+    if (!Number.isInteger(maxRetries) || maxRetries < 0 || maxRetries > 10) {
+      throw new AppError("maxRetries 必须是 0-10 的整数。", 400);
+    }
+    const task = await prisma.audiobookTask.findUnique({ where: { id: taskId } });
+    if (!task) {
+      throw new AppError("有声书任务不存在。", 404);
+    }
+    const isAlive = task.status === "running" || task.status === "queued";
+    if (isAlive) {
+      throw new AppError("仅非运行中的有声书任务可调整重试额度。", 400);
+    }
+    const updated = await prisma.audiobookTask.update({
+      where: { id: taskId },
+      data: { maxRetries, currentItemLabel: task.currentItemLabel },
+      include: { novel: { select: { id: true, title: true } } },
+    });
+    const detail = toDetail(updated as AudiobookTaskRow);
     if (!detail) {
       throw new AppError("有声书任务不存在。", 404);
     }
@@ -2460,7 +2533,92 @@ export class AudiobookTaskService {
   }
 
   /** @returns 实际翻 failed 的行数（0 = CAS 未命中，任务已被别的路径终态化） */
+  /**
+   * P1-5：失败时尽力自检产物，写进 resultJson.artifacts，供前端/运维区分
+   * 「整本全废」与「完成了 N/M，只是没攒成全本」——失败不再抹掉已有成果信息。
+   * 纯现场快照：readyChapterCount / totalChapterCount / fullWavBytes / m4bPresent。
+   * 任何 IO 异常都吞掉，绝不影响真正把任务翻 failed 的 CAS。
+   */
+  private buildFailureArtifacts(input: {
+    outputDir: string | null;
+    novelId: string;
+    taskId: string;
+    chapterIds: string[];
+  }): {
+    readyChapterCount: number;
+    totalChapterCount: number;
+    fullWavBytes: number | null;
+    m4bPresent: boolean;
+  } {
+    try {
+      const taskDir = input.outputDir?.trim()
+      || resolveAudiobookTaskDir(input.novelId, input.taskId);
+      const ready = listReadyChapterAudioIds(taskDir, input.chapterIds).length;
+      let fullWavBytes: number | null = null;
+      if (isFullBookAudioReady(taskDir)) {
+        try {
+          fullWavBytes = fs.statSync(resolveFullBookAudioPath(taskDir)).size;
+        } catch {
+          fullWavBytes = null;
+        }
+      }
+      let m4bPresent = false;
+      try {
+        m4bPresent = fs.existsSync(resolveFullBookM4bPath(taskDir));
+      } catch {
+        m4bPresent = false;
+      }
+      return {
+        readyChapterCount: ready,
+        totalChapterCount: input.chapterIds.length,
+        fullWavBytes,
+        m4bPresent,
+      };
+    } catch {
+      return {
+        readyChapterCount: 0,
+        totalChapterCount: input.chapterIds.length,
+        fullWavBytes: null,
+        m4bPresent: false,
+      };
+    }
+  }
+
+  /**
+   * 把任务翻 failed（CAS running→failed），同时尽力合并产物自检到 resultJson。
+   * 自检失败/异常绝不阻塞翻终态——纯尽力。
+   */
   private async markFailedIfRunning(taskId: string, message: string): Promise<number> {
+    // 先取行解析 outputDir/chapterIds 供产物自检（best-effort，失败则空 artifact）
+    let audit: {
+      readyChapterCount: number;
+      totalChapterCount: number;
+      fullWavBytes: number | null;
+      m4bPresent: boolean;
+    } | null = null;
+    let row: {
+      novelId: string;
+      outputDir: string | null;
+      chapterIdsJson: string | null;
+      resultJson: string | null;
+    } | null = null;
+    try {
+      row = await prisma.audiobookTask.findUnique({
+        where: { id: taskId },
+        select: { novelId: true, outputDir: true, chapterIdsJson: true, resultJson: true },
+      });
+      if (row) {
+        audit = this.buildFailureArtifacts({
+          chapterIds: parseChapterIds(row.chapterIdsJson),
+          novelId: row.novelId,
+          outputDir: row.outputDir,
+          taskId,
+        });
+      }
+    } catch {
+      audit = null;
+    }
+
     const claimed = await prisma.audiobookTask.updateMany({
       where: {
         id: taskId,
@@ -2474,9 +2632,39 @@ export class AudiobookTaskService {
         currentItemLabel: "失败",
         error: message,
         heartbeatAt: new Date(),
+        // P1-5 产物自检——仅 merge，不覆盖已有 success/m4b 等
+        resultJson: audit
+          ? this.mergeFailureArtifactsIntoResultJson(row?.resultJson ?? null, audit)
+          : undefined,
       },
     });
     return claimed.count;
+  }
+
+  /**
+   * P1-5：把产物自检 merge 进既有 resultJson（读-改-写）。
+   */
+  private mergeFailureArtifactsIntoResultJson(
+    resultJson: string | null | undefined,
+    artifacts: {
+      readyChapterCount: number;
+      totalChapterCount: number;
+      fullWavBytes: number | null;
+      m4bPresent: boolean;
+    },
+  ): string {
+    let base: Record<string, unknown> = {};
+    if (resultJson?.trim()) {
+      try {
+        const parsed = JSON.parse(resultJson) as unknown;
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          base = parsed as Record<string, unknown>;
+        }
+      } catch {
+        base = {};
+      }
+    }
+    return JSON.stringify({ ...base, artifacts });
   }
 
   /**
@@ -2519,6 +2707,8 @@ export class AudiobookTaskService {
       currentItemKey: string | null;
       completedChapterCount: number | null;
       progressJson: string | null;
+      outputDir: string | null;
+      novelId: string;
     }>;
     try {
       rows = await prisma.audiobookTask.findMany({
@@ -2530,6 +2720,8 @@ export class AudiobookTaskService {
           currentItemKey: true,
           completedChapterCount: true,
           progressJson: true,
+          outputDir: true,
+          novelId: true,
         },
       });
     } catch (error) {
@@ -2547,10 +2739,27 @@ export class AudiobookTaskService {
       alive.add(row.id);
       const curr = projectWatchdogSignal(row);
       const prev = this.watchdogStallState.get(row.id) ?? null;
+      // R2-2: finalizing/m4b 编码阶段放宽容忍（m4b 封装期五元组冻结属正常）
+      let m4bEncodingOnDisk = false;
+      try {
+        const taskDir = row.outputDir?.trim()
+          || resolveAudiobookTaskDir(row.novelId, row.id);
+        m4bEncodingOnDisk = fs.existsSync(`${resolveFullBookM4bPath(taskDir)}.part`);
+      } catch {
+        m4bEncodingOnDisk = false;
+      }
+      const finalizeTolerant = isWatchdogFinalizingTolerant({
+        currentStage: row.currentStage,
+        progress: row.progress,
+        m4bEncodingOnDisk,
+      });
+      const stallPeriods = finalizeTolerant
+        ? AUDIOBOOK_WATCHDOG_FINALIZE_STALL_PERIODS
+        : AUDIOBOOK_WATCHDOG_STALL_PERIODS;
       const decision = computeWatchdogDecision({
         prev,
         curr,
-        stallPeriods: AUDIOBOOK_WATCHDOG_STALL_PERIODS,
+        stallPeriods,
       });
       this.watchdogStallState.set(row.id, {
         signal: decision.signal,

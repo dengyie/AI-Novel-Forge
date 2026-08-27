@@ -443,31 +443,85 @@ async function throwIfCancelled(
  *
  * 痛点：全局串行队列被超长章独占——pipeline 每章串行跑 annotate 两轮 + N chunk × 120s，
  * 无单章总墙钟时超长章可数小时堵死全队列。墙钟把「无限期」压成「≤budget」，
- * 超限抛 AppError(408) → executeTask catch 走 markFailedIfRunning 翻终态、释放队列。
+ * 超限抛 AppError(408) → executeTask catch 走回 markFailedIfRunning 转终态、释放队列。
+ *
+ * 生产实测（2026-08 全量 19 章，ch10/15/17/18 连续撞 20min 墙）：合成速度约 3-3.5 chunks/min，
+ * 单章 200+ chunk 需 60-100min，固定 20min 必超。糟点在于「长章被硬 budget 掐死」
+ * 而非「短章浪费」。因此改为**动态按 chunk 数计算**：
+ *   budget = max(固定下限 20min, nChunks * 单 chunk 预算)
+ * - nChunks 由该章待合成 chunk 数预估（标注完成即可得 expandSegmentsToChunkJobs().length）。
+ * - 每 chunk 预算默认 26s/块（3.5 chunks/min ≈ 17s/块；26s 预留 TTS 抖动余量）。
+ * - `AUDIOBOOK_CHAPTER_BUDGET_MS` env 仍为**绝对上限**覆盖：短章不浪费、长章不必然超时。
  */
-const AUDIOBOOK_CHAPTER_BUDGET_MS = Math.max(
+const AUDIOBOOK_CHAPTER_BUDGET_MS_ABSOLUTE = Math.max(
   60_000,
-  Number(process.env.AUDIOBOOK_CHAPTER_BUDGET_MS ?? 20 * 60_000) || 20 * 60_000,
+  Number(process.env.AUDIOBOOK_CHAPTER_BUDGET_MS ?? 24 * 60 * 60_000) || 24 * 60 * 60_000,
 );
 
+/** 每 chunk 墙钟预算（ms）。env `AUDIOBOOK_CHAPTER_PER_CHUNK_BUDGET_MS` 可调的恒定值。 */
+export const AUDIOBOOK_CHAPTER_PER_CHUNK_BUDGET_MS = Math.max(
+  10_000,
+  Number(process.env.AUDIOBOOK_CHAPTER_PER_CHUNK_BUDGET_MS ?? 26_000) || 26_000,
+);
+
+/** 动态预算下限：短章（<40 chunk）至少给满 20min；长章按 chunk 数缩放。 */
+export function computeChapterBudgetMs(
+  chunkCount: number,
+  options?: { perChunkMs?: number; minBudgetMs?: number; maxBudgetMs?: number },
+): number {
+  const minBudgetMs = Math.max(
+    60_000,
+    options?.minBudgetMs ?? 20 * 60_000,
+  );
+  const perChunkMs = Math.max(10_000, options?.perChunkMs ?? AUDIOBOOK_CHAPTER_PER_CHUNK_BUDGET_MS);
+  const built = chunkCount >= 0 ? chunkCount * perChunkMs : minBudgetMs;
+  const budget = Math.max(minBudgetMs, built);
+  // maxBudget 来源优先级：options.maxBudgetMs > env AUDIOBOOK_CHAPTER_BUDGET_MS > 默认 24h
+  let maxBudgetMs: number;
+  if (options?.maxBudgetMs != null && options.maxBudgetMs > 0) {
+    maxBudgetMs = options.maxBudgetMs;
+  } else {
+    const envMs = Number(process.env.AUDIOBOOK_CHAPTER_BUDGET_MS);
+    maxBudgetMs = Number.isFinite(envMs) && envMs > 0
+      ? envMs
+      : AUDIOBOOK_CHAPTER_BUDGET_MS_ABSOLUTE;
+  }
+  return Math.max(minBudgetMs, Math.min(budget, maxBudgetMs));
+}
+
 /**
- * 单章墙钟守卫工厂：返回 `() => Promise<void>`，超限抛 AppError(408)。
- * 与 `throwIfCancelled` 同型签名（无参 → 可 await），插入章循环三处检查点。
- * 纯函数、无 prisma 依赖，便于单测直接 require。
+ * 单章墙钟守卫句柄：可调用（`await guard()`）且可动态放宽 `setBudgetMs`。
+ *
+ * 纯函数、无 prisma 依赖，便于单测直接 require。旧单测 `await guard()` 直接兼容。
+ */
+export interface ChapterBudgetHandle {
+  (): Promise<void>;
+  setBudgetMs: (budgetMs: number) => void;
+}
+
+/**
+ * 单章墙钟守卫工厂（返回 `ChapterBudgetHandle`，超限抛 AppError(408)）。
+ * 与 `throwIfCancelled` 同型签名（无参 → 可丢），插入章循环三处检查点。
+ * 标注完成后 chunk 数已知，调用方可用 `.setBudgetMs(computeChapterBudgetMs(nChunks))` 放宽。
  */
 export function makeChapterBudgetGuard(
   budgetMs: number,
   startedAt: number,
   label: () => string,
-): () => Promise<void> {
-  return async () => {
-    if (Date.now() - startedAt > budgetMs) {
+): ChapterBudgetHandle {
+  let current = Math.max(60_000, Math.floor(budgetMs));
+  const guard = (async () => {
+    if (Date.now() - startedAt > current) {
       throw new AppError(
-        `章节墙钟超限（${Math.round(budgetMs / 60_000)}min）：${label()}`,
+        `章节墙钟超限（${Math.round(current / 60_000)}min）：${label()}`,
         408,
       );
     }
+  }) as ChapterBudgetHandle;
+  guard.setBudgetMs = (next) => {
+    current = Math.max(60_000, Math.floor(next));
   };
+  return guard;
 }
 
 function loadExistingAnnotations(annotationsJson: string | null | undefined): AudiobookChapterAnnotation[] {
@@ -801,9 +855,11 @@ export class AudiobookPipelineService {
       await throwIfCancelled(input.signal, input.isCancelRequested);
       const chapter = orderedChapters[chapterIndex];
 
-      // R2：单章墙钟预算——标注+合成+合并全程不得超 AUDIOBOOK_CHAPTER_BUDGET_MS
+      // R2：单章墙钟预算——标注+合成+合并全程不得超动态预算。
+      // 标注前未知 chunk 数，先给 floor（20min）兜底；标注完成拿到该章预估 chunk 数后
+      // setBudgetMs 放宽为 computeChapterBudgetMs(nChunks)（长章按 26s/chunk 扩容）。
       const chapterBudgetGuard = makeChapterBudgetGuard(
-        AUDIOBOOK_CHAPTER_BUDGET_MS,
+        computeChapterBudgetMs(0),
         Date.now(),
         () => `第 ${chapter.order} 章：${chapter.title}`,
       );
@@ -923,6 +979,9 @@ export class AudiobookPipelineService {
       writeAnnotationFileSafe(taskDir, annotationForPersist);
 
       const chunkJobsPreview = expandSegmentsToChunkJobs(reconciledSegments);
+      // R2 动态预算：标注完成即可知该章预估 chunk 数，按 26s/块扩容（floor 20min 不变）。
+      // env AUDIOBOOK_CHAPTER_BUDGET_MS 为绝对上限；单 chunk 预算见 computeChapterBudgetMs。
+      chapterBudgetGuard.setBudgetMs(computeChapterBudgetMs(chunkJobsPreview.length));
       const layoutFp = chunkLayoutFingerprint(chunkJobsPreview);
       const prevFp = readChunkLayoutFingerprint(taskDir, chapter.id);
       // 章 wav 存在也必须对照指纹；不一致则 wipe 后重合成（防改 annotation 后 resume 复用旧音）
@@ -1023,6 +1082,22 @@ export class AudiobookPipelineService {
           throw new AppError(`MiMo TTS 返回了非法 WAV（chunk ${i}）。`, 502);
         }
         writeWavFileAtomic(resolveChunkAudioPath(taskDir, chapter.id, i), audioBuffer);
+
+        // P1-5: chunk 合成落地后立即回报一次推进——TTS 单块可能很慢（几十秒），
+        // 若等整章合成完再回报，DB 五元组会长时间冻结，watchdog 误判 / 前端进度迟滞。
+        await input.onProgress({
+          phase: "synthesizing",
+          chapterIndex,
+          chapterCount: orderedChapters.length,
+          chapterId: chapter.id,
+          chapterTitle: chapter.title,
+          completedChapters: chapterIndex,
+          completedChunks: completedChunks + i + 1,
+          totalChunksEstimate,
+          message: `第 ${chapter.order} 章 chunk ${i + 1}/${chunkJobs.length} 完成（${job.segment.speakerLabel}）`,
+          chapterAudioPaths: chapterAudioPaths.map((item) => ({ chapterId: item.chapterId, path: item.path })),
+          chapterProgress: snapshotChapterProgress(),
+        });
       }
 
       const allChunkPaths = chunkJobs.map((_, i) => resolveChunkAudioPath(taskDir, chapter.id, i));
@@ -1193,6 +1268,28 @@ export class AudiobookPipelineService {
           wavPath: found?.path ?? resolveChapterAudioPath(taskDir, chapter.id),
         };
       }),
+      // R2-2: m4b 封装是单次长时 spawn，progress 五元组冻结会被 watchdog 误杀。
+      // ffmpeg 每 10s 上报 `.part` 增长，这里转成 finalizing progress touch，喂给推进信号。
+      onProgress: (p) => {
+        void input.onProgress({
+          phase: "finalizing",
+          chapterIndex: orderedChapters.length - 1,
+          chapterCount: orderedChapters.length,
+          chapterId: orderedChapters[orderedChapters.length - 1].id,
+          chapterTitle: orderedChapters[orderedChapters.length - 1].title,
+          completedChapters: orderedChapters.length,
+          completedChunks,
+          totalChunksEstimate,
+          message: `封装 m4b 中（${(p.partBytes / 1024 / 1024).toFixed(1)}MB）`,
+          annotations,
+          chapterAudioPaths: chapterAudioPaths.map((item) => ({ chapterId: item.chapterId, path: item.path })),
+          fullAudioPath,
+          qualityWarnings,
+          chapterProgress: snapshotChapterProgress(),
+        }).catch(() => {
+          // onProgress 抛错不中断 ffmpeg
+        });
+      },
     });
 
     await input.onProgress({
