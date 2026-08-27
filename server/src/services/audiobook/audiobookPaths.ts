@@ -336,6 +336,56 @@ export function resolveFullBookM4bPath(taskDir: string): string {
   return path.join(taskDir, "full-book.m4b");
 }
 
+/**
+ * taskDir 内是否存在任一 `full-book.m4b*.part` 半成品（唯一 run part 名或 legacy 名）。
+ * 供 watchdog 磁盘探针与 stale GC 共用：唯一 part 名（full-book.m4b.<runId>.part）下
+ * 不再只认固定 `full-book.m4b.part`。
+ */
+export function hasInFlightM4bPart(taskDir: string): boolean {
+  try {
+    for (const name of fs.readdirSync(taskDir)) {
+      if (name.startsWith("full-book.m4b") && name.endsWith(".part")) {
+        return true;
+      }
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+/** stale m4b part GC 的默认保留窗口：默认超时的 2 倍（40 分钟）。 */
+const M4B_STALE_PART_DEFAULT_TIMEOUT_MS = 2 * 20 * 60_000;
+
+/**
+ * 清理 taskDir 内陈旧的 `full-book.m4b*.part` 半成品。
+ * 唯一 part 名下，本次 run 新生成的 part（mtime 新）不会被误删；只删 mtime 早于
+ * timeoutMs（默认 2×DEFAULT_FFMPEG_TIMEOUT_MS，即 40 分钟）的旧 part——宿主重启/孤儿
+ * ffmpeg 残留、或更早 run 中断留下的半成品。best-effort，失败不抛错。
+ */
+export function cleanupStaleM4bParts(taskDir: string, outPath: string, timeoutMs?: number): void {
+  const threshold = timeoutMs ?? M4B_STALE_PART_DEFAULT_TIMEOUT_MS;
+  const outBase = path.basename(outPath);
+  const now = Date.now();
+  try {
+    for (const name of fs.readdirSync(taskDir)) {
+      if (!name.startsWith(outBase) || !name.endsWith(".part")) {
+        continue;
+      }
+      const full = path.join(taskDir, name);
+      try {
+        if (now - fs.statSync(full).mtimeMs >= threshold) {
+          fs.unlinkSync(full);
+        }
+      } catch {
+        // ignore：文件已被并发清理或删除
+      }
+    }
+  } catch {
+    // ignore：taskDir 不存在/无权限，best-effort
+  }
+}
+
 export function resolveChapterAnnotationPath(taskDir: string, chapterId: string): string {
   const safeChapterId = assertSafePathSegment(chapterId, "chapterId");
   return path.join(taskDir, "annotations", `${safeChapterId}.json`);
