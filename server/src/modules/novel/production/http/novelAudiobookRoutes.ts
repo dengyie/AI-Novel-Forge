@@ -1270,6 +1270,37 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
     },
   );
 
+  // P0-3：受控提高 retry 额度（默认 3 次仍不够时用户在终态任务上调到最快 10）。
+  router.patch(
+    "/:id/audiobook/tasks/:taskId/maxRetries",
+    validate({
+      params: taskParamsSchema,
+      body: z.object({ maxRetries: z.number().int().min(0).max(10) }),
+    }),
+    async (req, res, next) => {
+      try {
+        const { id, taskId } = req.params as z.infer<typeof taskParamsSchema>;
+        const body = req.body as { maxRetries: number };
+        const existing = await audiobookTaskService.getTask(taskId);
+        if (!existing || existing.novelId !== id) {
+          res.status(404).json({
+            success: false,
+            error: "有声书任务不存在。",
+          } satisfies ApiResponse<null>);
+          return;
+        }
+        const data = await audiobookTaskService.updateTaskMaxRetries(taskId, body.maxRetries);
+        res.status(200).json({
+          success: true,
+          data,
+          message: `已将任务重试额度调整为 ${body.maxRetries} 次。`,
+        } satisfies ApiResponse<typeof data>);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
   router.post(
     "/:id/audiobook/tasks/:taskId/continue",
     validate({ params: taskParamsSchema, body: continueAudiobookTaskSchema }),

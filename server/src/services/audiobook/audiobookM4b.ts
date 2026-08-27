@@ -170,11 +170,49 @@ function escapeFfmetadata(value: string): string {
     .replace(/\n/g, " ");
 }
 
+/**
+ * 基于产物 `.part` 文件大小增长上报进度的定时器周期。
+ * R2-2：m4b 封装是单次长时 spawn（大书数分钟至十几分钟），不加 onProgress 时
+ * progress/stage/itemKey 五元组冻结，会被 watchdog 在 60s×stallPeriods 后误判假 running 杀掉。
+ * 这里每隔 progressIntervalMs 上报一次 `.part` 字节数——只要 ffmpeg 还在写盘就有真推进。
+ */
+const M4B_PROGRESS_INTERVAL_MS = Math.max(
+  5_000,
+  Number(process.env.AUDIOBOOK_M4B_PROGRESS_INTERVAL_MS ?? 10_000) || 10_000,
+);
+
+export interface M4bFfmpegProgress {
+  partBytes: number;
+  elapsedMs: number;
+}
+
+export type M4bProgressCallback = (progress: M4bFfmpegProgress) => void;
+
+/**
+ * ffmpeg 产物路径：args 里最后一个非开关/非 `-` 的参数（`... -f mp4 <partPath>`）。
+ * 与 encodeFullBookM4b 的 args 构造强耦合；显式 partPath 传入时优先。
+ */
+function resolveFfmpegOutputPath(args: string[], explicitPartPath: string | null | undefined): string | null {
+  const explicit = explicitPartPath?.trim();
+  if (explicit) return explicit;
+  for (let index = args.length - 1; index >= 0; index -= 1) {
+    const arg = args[index];
+    if (arg && arg !== "-" && !arg.startsWith("-")) {
+      return arg;
+    }
+  }
+  return null;
+}
+
 function runFfmpeg(input: {
   ffmpeg: string;
   args: string[];
   timeoutMs: number;
   signal?: AbortSignal;
+  /** 可选：封装期间周期性上报 `.part` 文件增长，供 watchdog 推进信号。 */
+  onProgress?: M4bProgressCallback | null;
+  /** 产物 `.part` 路径；缺省从 args 最后一个非开关参数推导。 */
+  partPath?: string | null;
 }): Promise<{ status: number | null; stderr: string }> {
   return new Promise((resolve, reject) => {
     if (input.signal?.aborted) {
@@ -184,11 +222,16 @@ function runFfmpeg(input: {
     const child = spawn(input.ffmpeg, input.args, {
       stdio: ["ignore", "ignore", "pipe"],
     });
+    const partPath = resolveFfmpegOutputPath(input.args, input.partPath);
     let stderr = "";
     let settled = false;
+    let progressTimer: NodeJS.Timeout | null = null;
+    const startedAt = Date.now();
+    let lastPartBytes = 0;
     const cleanup = () => {
       clearTimeout(timer);
       input.signal?.removeEventListener("abort", onAbort);
+      if (progressTimer) clearInterval(progressTimer);
     };
     const finish = (status: number | null, errText: string) => {
       if (settled) return;
@@ -218,6 +261,26 @@ function runFfmpeg(input: {
       }
       fail(new Error(`ffmpeg 封装 m4b 超时（>${input.timeoutMs}ms）。`));
     }, input.timeoutMs);
+
+    // 每 10s 上报 `.part` 大小（>=0 即真推进）。onProgress 抛错绝不中断 ffmpeg。
+    if (typeof input.onProgress === "function" && partPath) {
+      progressTimer = setInterval(() => {
+        let partBytes = lastPartBytes;
+        try {
+          if (fs.existsSync(partPath)) {
+            partBytes = fs.statSync(partPath).size;
+          }
+        } catch {
+          partBytes = lastPartBytes;
+        }
+        lastPartBytes = partBytes;
+        try {
+          input.onProgress?.({ partBytes, elapsedMs: Date.now() - startedAt });
+        } catch {
+          // ignore
+        }
+      }, M4B_PROGRESS_INTERVAL_MS);
+    }
 
     input.signal?.addEventListener("abort", onAbort, { once: true });
     child.stderr?.on("data", (chunk: Buffer | string) => {
@@ -249,6 +312,8 @@ export async function encodeFullBookM4b(input: {
   betweenChapterGapMs?: number;
   signal?: AbortSignal;
   timeoutMs?: number;
+  /** 可选：封装期间周期性上报 `.part` 增长，喂给 watchdog 推进信号避免误杀。 */
+  onProgress?: M4bProgressCallback | null;
 }): Promise<AudiobookM4bEncodeResult> {
   const relativePath = M4B_RELATIVE;
   const outPath = resolveFullBookM4bPath(input.taskDir);
@@ -338,6 +403,8 @@ export async function encodeFullBookM4b(input: {
         args,
         timeoutMs: Math.max(5_000, input.timeoutMs ?? DEFAULT_FFMPEG_TIMEOUT_MS),
         signal: input.signal,
+        onProgress: input.onProgress,
+        partPath,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
