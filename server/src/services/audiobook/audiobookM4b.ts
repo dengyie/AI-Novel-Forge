@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { resolveBetweenChapterGapMs } from "./audiobookGap";
-import { resolveFullBookAudioPath, resolveFullBookM4bPath } from "./audiobookPaths";
+import { resolveFullBookAudioPath, resolveFullBookM4bPath, cleanupStaleM4bParts } from "./audiobookPaths";
 import { parseWavInfo } from "./audiobookWav";
 
 export type AudiobookM4bStatus = "ready" | "skipped" | "failed";
@@ -354,8 +354,15 @@ export async function encodeFullBookM4b(input: {
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "audiobook-m4b-"));
   const metaPath = path.join(tmpDir, "chapters.ffmeta");
-  const partPath = `${outPath}.part`;
+  // 唯一 run part 名：并发的两次 encode 写不同 inode，绝不交错写同一文件；仍与 outPath
+  // 同目录，保证成功后可原子 rename 覆盖规范名。宿主重启后孤儿 ffmpeg 继续写旧 part，
+  // 不会与新 run 冲突。
+  const runId = `${Date.now().toString(36)}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+  const partPath = path.join(path.dirname(outPath), `${path.basename(outPath)}.${runId}.part`);
   try {
+    // 起跑前 best-effort 清掉陈旧半成品（本次 run 的新 part mtime 新，不受影响）。
+    // 不要再 unlink 共享 full-book.m4b.part——唯一名下不存在该文件，且 renameSync 原子覆盖规范名。
+    cleanupStaleM4bParts(input.taskDir, outPath);
     fs.writeFileSync(
       metaPath,
       buildM4bFfmetadata({
@@ -365,13 +372,8 @@ export async function encodeFullBookM4b(input: {
       "utf8",
     );
 
-    try {
-      if (fs.existsSync(partPath)) fs.unlinkSync(partPath);
-      if (fs.existsSync(outPath)) fs.unlinkSync(outPath);
-    } catch {
-      // ignore
-    }
-
+    // 不再预删共享 part；唯一 run part 天然避免新旧交错。但成功覆盖规范名之前，
+    // 若存在旧的成功产物也无需删除——renameSync 原子覆盖它。
     const args = [
       "-y",
       "-hide_banner",

@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import fs from "node:fs";
 import type {
   AudiobookChapterAnnotation,
@@ -26,6 +27,7 @@ import {
 } from "./AudiobookPipelineService";
 import {
   ensureAudiobookTaskDir,
+  hasInFlightM4bPart,
   isFullBookAudioReady,
   isFullBookM4bReady,
   listReadyChapterAudioIds,
@@ -1719,6 +1721,8 @@ export class AudiobookTaskService {
         where: { status: { in: ["queued", "running"] } },
         select: {
           id: true,
+          novelId: true,
+          outputDir: true,
           progress: true,
           progressJson: true,
           currentStage: true,
@@ -1785,6 +1789,21 @@ export class AudiobookTaskService {
         return;
       }
       const ids = resumables.map((row) => row.id);
+      // 宿主重启后，在途 ffmpeg 已变孤儿（PPID=1）继续写 taskDir 的 m4b part；重排队前
+      // best-effort kill，避免与重跑的新 run 交错写同一 inode。失败仅 warn 不阻断。
+      for (const row of resumables) {
+        try {
+          const taskDir = row.outputDir?.trim()
+            || resolveAudiobookTaskDir(row.novelId, row.id);
+          killOrphanM4bFfmpeg(taskDir);
+        } catch (error) {
+          console.warn(
+            "[audiobook] resumePendingTasks killOrphanM4bFfmpeg 失败",
+            row.id,
+            error instanceof Error ? error.message : error,
+          );
+        }
+      }
       await prisma.audiobookTask.updateMany({
         where: { id: { in: ids } },
         data: {
@@ -2744,7 +2763,9 @@ export class AudiobookTaskService {
       try {
         const taskDir = row.outputDir?.trim()
           || resolveAudiobookTaskDir(row.novelId, row.id);
-        m4bEncodingOnDisk = fs.existsSync(`${resolveFullBookM4bPath(taskDir)}.part`);
+        // 唯一 run part 名（full-book.m4b.<runId>.part）下仍要宽容：taskDir 内存在任一
+        // `full-book.m4b*.part` 即判 m4b 在途。
+        m4bEncodingOnDisk = hasInFlightM4bPart(taskDir);
       } catch {
         m4bEncodingOnDisk = false;
       }
@@ -2817,6 +2838,51 @@ export class AudiobookTaskService {
       if (!alive.has(id)) this.watchdogStallState.delete(id);
     }
   }
+}
+
+/**
+ * 扫描本机 ffmpeg 进程并 kill 掉正在写该 taskDir m4b part 的孤儿进程（宿主重启后在途
+ * ffmpeg 变孤儿 PPID=1，仍继续写同一 inode；不杀掉的话，与重排队后的新 run 交错写同文件）。
+ *
+ * 只匹配 cmdline 含该 taskDir 绝对路径（且含 ffmpeg）的进程，绝不匹配其它 taskDir——
+ * 每个 taskDir 含唯一 taskId，天然隔离。best-effort：任何失败仅 warn，不阻断执行器。
+ */
+export function killOrphanM4bFfmpeg(taskDir: string): void {
+  const pattern = taskDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const killByPid = (pids: string[]): void => {
+    for (const raw of pids) {
+      const pid = Number.parseInt(raw, 10);
+      if (!Number.isFinite(pid) || pid <= 0 || pid === process.pid) continue;
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // 进程已退出或无权限，忽略
+      }
+    }
+  };
+  execFile(
+    "pgrep",
+    ["-f", pattern],
+    { timeout: 5000 },
+    (error, stdout) => {
+      if (error && (error as NodeJS.ErrnoException).code !== "1") {
+        // pgrep 退出码 1 = 无匹配，正常；其它错误（pgrep 不存在等）才 warn。
+        console.warn(
+          "[audiobook] killOrphanM4bFfmpeg pgrep 失败",
+          taskDir,
+          (error as Error).message,
+        );
+        return;
+      }
+      const pids = stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+      if (pids.length === 0) return;
+      killByPid(pids);
+      console.warn(
+        `[audiobook] 已清理 ${pids.length} 个孤儿 ffmpeg（写 ${taskDir} 的 m4b part）`,
+        pids.join(","),
+      );
+    },
+  );
 }
 
 export const audiobookTaskService = new AudiobookTaskService();
