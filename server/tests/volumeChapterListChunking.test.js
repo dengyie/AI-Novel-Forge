@@ -80,7 +80,7 @@ function createDocument() {
           createChapter({
             id: "chapter-3",
             chapterOrder: 3,
-            beatKey: "mid_turn",
+            beatKey: "midpoint_turn",
             title: "旧转向一",
             summary: "旧转向摘要一",
             purpose: "保留旧 purpose 3",
@@ -88,7 +88,7 @@ function createDocument() {
           createChapter({
             id: "chapter-4",
             chapterOrder: 4,
-            beatKey: "mid_turn",
+            beatKey: "midpoint_turn",
             title: "旧转向二",
             summary: "旧转向摘要二",
             purpose: "保留旧 purpose 4",
@@ -112,7 +112,7 @@ function createDocument() {
             mustDeliver: ["压迫感"],
           },
           {
-            key: "mid_turn",
+            key: "midpoint_turn",
             label: "中段转向",
             summary: "让局势方向发生变化。",
             chapterSpanHint: "3-4章",
@@ -141,12 +141,12 @@ test("mergeChapterList writes explicit beat keys for full-volume beat blocks", (
         ],
       },
       {
-        beatKey: "mid_turn",
+        beatKey: "midpoint_turn",
         beatLabel: "中段转向",
         chapterCount: 2,
         chapters: [
-          { beatKey: "mid_turn", title: "新的转向一", summary: "新的转向摘要一" },
-          { beatKey: "mid_turn", title: "新的转向二", summary: "新的转向摘要二" },
+          { beatKey: "midpoint_turn", title: "新的转向一", summary: "新的转向摘要一" },
+          { beatKey: "midpoint_turn", title: "新的转向二", summary: "新的转向摘要二" },
         ],
       },
     ],
@@ -154,7 +154,7 @@ test("mergeChapterList writes explicit beat keys for full-volume beat blocks", (
 
   const chapters = merged.volumes[0].chapters;
   assert.equal(chapters.length, 4);
-  assert.deepEqual(chapters.map((chapter) => chapter.beatKey), ["open_hook", "open_hook", "mid_turn", "mid_turn"]);
+  assert.deepEqual(chapters.map((chapter) => chapter.beatKey), ["open_hook", "open_hook", "midpoint_turn", "midpoint_turn"]);
   assert.equal(chapters[0].purpose, "保留旧 purpose 1");
   assert.equal(chapters[2].title, "新的转向一");
 });
@@ -167,18 +167,18 @@ test("mergeChapterList single-beat mode only replaces the targeted beat block", 
     document.beatSheets[0],
     [
       {
-        beatKey: "mid_turn",
+        beatKey: "midpoint_turn",
         beatLabel: "中段转向",
         chapterCount: 2,
         chapters: [
-          { beatKey: "mid_turn", title: "重写转向一", summary: "重写转向摘要一" },
-          { beatKey: "mid_turn", title: "重写转向二", summary: "重写转向摘要二" },
+          { beatKey: "midpoint_turn", title: "重写转向一", summary: "重写转向摘要一" },
+          { beatKey: "midpoint_turn", title: "重写转向二", summary: "重写转向摘要二" },
         ],
       },
     ],
     {
       generationMode: "single_beat",
-      targetBeatKey: "mid_turn",
+      targetBeatKey: "midpoint_turn",
     },
   );
 
@@ -199,18 +199,18 @@ test("mergeChapterList full-volume resume preserves completed prefix beats", () 
     document.beatSheets[0],
     [
       {
-        beatKey: "mid_turn",
+        beatKey: "midpoint_turn",
         beatLabel: "中段转向",
         chapterCount: 2,
         chapters: [
-          { beatKey: "mid_turn", title: "续跑转向一", summary: "续跑转向摘要一" },
-          { beatKey: "mid_turn", title: "续跑转向二", summary: "续跑转向摘要二" },
+          { beatKey: "midpoint_turn", title: "续跑转向一", summary: "续跑转向摘要一" },
+          { beatKey: "midpoint_turn", title: "续跑转向二", summary: "续跑转向摘要二" },
         ],
       },
     ],
     {
       generationMode: "full_volume",
-      resumeFromBeatKey: "mid_turn",
+      resumeFromBeatKey: "midpoint_turn",
     },
   );
 
@@ -221,6 +221,84 @@ test("mergeChapterList full-volume resume preserves completed prefix beats", () 
   assert.equal(chapters[2].title, "续跑转向一");
   assert.equal(chapters[3].title, "续跑转向二");
   assert.equal(chapters[0].purpose, "保留旧 purpose 1");
+});
+
+test("single-beat generation does not repeat completed beat titles in locked context", async () => {
+  const document = createDocument();
+  const originalRunStructuredPrompt = promptRunner.runStructuredPrompt;
+  let receivedPromptInput = null;
+
+  promptRunner.runStructuredPrompt = async ({ promptInput }) => {
+    receivedPromptInput = promptInput;
+    return {
+      output: {
+        beatKey: "midpoint_turn",
+        beatLabel: "中段转向",
+        chapterCount: 2,
+        chapters: [
+          { beatKey: "midpoint_turn", title: "转折逼近", summary: "主角面对新局面，必须改变原有判断。" },
+          { beatKey: "midpoint_turn", title: "退路封死", summary: "新的压力落地，迫使主角进入下一阶段。" },
+        ],
+      },
+    };
+  };
+
+  try {
+    await generateBeatChunkedChapterList({
+      document,
+      novel: {
+        title: "测试小说", description: null, targetAudience: null, bookSellingPoint: null, competingFeel: null,
+        first30ChapterPromise: null, commercialTagsJson: null, estimatedChapterCount: 4, narrativePov: null,
+        pacePreference: null, emotionIntensity: null, storyModePromptBlock: null, genre: null, characters: [],
+      },
+      workspace: { ...document, workspaceVersion: "v2", readiness: {} },
+      storyMacroPlan: null,
+      options: { targetVolumeId: "volume-1", generationMode: "single_beat", targetBeatKey: "midpoint_turn" },
+      notifyPhase: async () => {},
+    });
+
+    assert.match(receivedPromptInput.previousBeatChapterSummary, /旧开卷一/);
+    assert.equal(receivedPromptInput.preservedBeatChapterSummary, "none");
+  } finally {
+    promptRunner.runStructuredPrompt = originalRunStructuredPrompt;
+  }
+});
+
+test("single-beat generation rejects a title copied from a completed beat before persistence", async () => {
+  const document = createDocument();
+  const originalRunStructuredPrompt = promptRunner.runStructuredPrompt;
+  let intermediateDocumentCount = 0;
+
+  promptRunner.runStructuredPrompt = async () => ({
+    output: {
+      beatKey: "midpoint_turn",
+      beatLabel: "中段转向",
+      chapterCount: 2,
+      chapters: [
+        { beatKey: "midpoint_turn", title: "旧开卷一", summary: "错误地复述了已有章节标题。" },
+        { beatKey: "midpoint_turn", title: "退路封死", summary: "新的压力落地，迫使主角进入下一阶段。" },
+      ],
+    },
+  });
+
+  try {
+    await assert.rejects(() => generateBeatChunkedChapterList({
+      document,
+      novel: {
+        title: "测试小说", description: null, targetAudience: null, bookSellingPoint: null, competingFeel: null,
+        first30ChapterPromise: null, commercialTagsJson: null, estimatedChapterCount: 4, narrativePov: null,
+        pacePreference: null, emotionIntensity: null, storyModePromptBlock: null, genre: null, characters: [],
+      },
+      workspace: { ...document, workspaceVersion: "v2", readiness: {} },
+      storyMacroPlan: null,
+      options: { targetVolumeId: "volume-1", generationMode: "single_beat", targetBeatKey: "midpoint_turn" },
+      notifyPhase: async () => {},
+      notifyIntermediateDocument: async () => { intermediateDocumentCount += 1; },
+    }), /章节标题出现重复：旧开卷一/);
+    assert.equal(intermediateDocumentCount, 0);
+  } finally {
+    promptRunner.runStructuredPrompt = originalRunStructuredPrompt;
+  }
 });
 
 test("generateBeatChunkedChapterList skips full-volume regeneration when all beats are already complete", async () => {
@@ -513,9 +591,9 @@ test("generateBeatChunkedChapterList resumes after the last persisted complete b
       },
     });
 
-    assert.deepEqual(generatedBeatKeys, ["mid_turn"]);
+    assert.deepEqual(generatedBeatKeys, ["midpoint_turn"]);
     assert.equal(intermediateEvents[0].isFinal, false);
-    assert.equal(intermediateEvents[0].targetBeatKey, "mid_turn");
+    assert.equal(intermediateEvents[0].targetBeatKey, "midpoint_turn");
     assert.deepEqual(
       intermediateEvents[0].document.volumes[0].chapters.map((chapter) => chapter.title),
       ["旧开卷一", "旧开卷二", "中段转向-续跑1", "中段转向-续跑2"],
@@ -655,7 +733,7 @@ test("generateBeatChunkedChapterList emits a single-beat intermediate document w
       options: {
         targetVolumeId: "volume-1",
         generationMode: "single_beat",
-        targetBeatKey: "mid_turn",
+        targetBeatKey: "midpoint_turn",
       },
       notifyPhase: async () => {},
       notifyIntermediateDocument: async (event) => {
@@ -665,7 +743,7 @@ test("generateBeatChunkedChapterList emits a single-beat intermediate document w
 
     assert.equal(intermediateEvents.length, 2);
     assert.equal(intermediateEvents[0].isFinal, false);
-    assert.equal(intermediateEvents[0].targetBeatKey, "mid_turn");
+    assert.equal(intermediateEvents[0].targetBeatKey, "midpoint_turn");
     assert.deepEqual(
       intermediateEvents[0].document.volumes[0].chapters.map((chapter) => chapter.title),
       ["旧开卷一", "旧开卷二", "中段转向-单段1", "中段转向-单段2"],
@@ -747,13 +825,13 @@ test("generateBeatChunkedChapterList emits a resumable intermediate document aft
       ["开卷抓手-1", "开卷抓手-2"],
     );
     assert.equal(intermediateEvents[1].isFinal, false);
-    assert.equal(intermediateEvents[1].targetBeatKey, "mid_turn");
+    assert.equal(intermediateEvents[1].targetBeatKey, "midpoint_turn");
     assert.deepEqual(
       intermediateEvents[1].document.volumes[0].chapters.map((chapter) => chapter.title),
       ["开卷抓手-1", "开卷抓手-2", "中段转向-1", "中段转向-2"],
     );
     assert.equal(intermediateEvents[2].isFinal, true);
-    assert.equal(intermediateEvents[2].targetBeatKey, "mid_turn");
+    assert.equal(intermediateEvents[2].targetBeatKey, "midpoint_turn");
     assert.deepEqual(intermediateEvents[2].document.volumes[0].chapters, result.mergedDocument.volumes[0].chapters);
   } finally {
     promptRunner.runStructuredPrompt = originalRunStructuredPrompt;

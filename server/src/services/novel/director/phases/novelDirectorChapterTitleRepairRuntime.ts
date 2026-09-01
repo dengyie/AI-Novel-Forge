@@ -52,16 +52,6 @@ export class NovelDirectorChapterTitleRepairRuntime {
       novelId: string | null,
       extra?: Record<string, unknown>,
     ) => Record<string, unknown>;
-    assertHighMemoryStartAllowed: (input: {
-      taskId: string;
-      novelId: string;
-      stage: "structured_outline";
-      itemKey: "beat_sheet" | "chapter_list" | "chapter_detail_bundle" | "chapter_sync";
-      volumeId?: string | null;
-      chapterId?: string | null;
-      scope?: string | null;
-      batchAlreadyStartedCount?: number;
-    }) => Promise<void>;
     scheduleBackgroundRun: (taskId: string, runner: () => Promise<void>) => Promise<void>;
   }) {}
 
@@ -75,10 +65,6 @@ export class NovelDirectorChapterTitleRepairRuntime {
     if (row.lane !== "auto_director") {
       throw new Error("只有自动导演任务支持 AI 修复章节标题。");
     }
-    if (row.status === "running") {
-      throw new Error("当前自动导演仍在运行中，请等待当前步骤完成后再发起标题修复。");
-    }
-
     const seedPayload = parseSeedPayload<DirectorWorkflowSeedPayload>(row.seedPayloadJson) ?? {};
     const directorInput = getDirectorInputFromSeedPayload(seedPayload);
     const novelId = row.novelId ?? seedPayload.novelId ?? null;
@@ -131,14 +117,6 @@ export class NovelDirectorChapterTitleRepairRuntime {
       taskId,
       stage: "structured",
       volumeId: targetVolume.id,
-    });
-    await this.deps.assertHighMemoryStartAllowed({
-      taskId,
-      novelId,
-      stage: "structured_outline",
-      itemKey: "chapter_list",
-      volumeId: targetVolume.id,
-      scope: `volume:${targetVolume.id}`,
     });
     await this.deps.workflowService.bootstrapTask({
       workflowTaskId: taskId,
