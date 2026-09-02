@@ -2,6 +2,7 @@ import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { z } from "zod";
 import type { PromptAsset } from "../../core/promptTypes";
 import { renderSelectedContextBlocks } from "../../core/renderContextBlocks";
+import { renderProseBanBlock } from "./proseBanRules";
 import { fullAuditOutputSchema } from "../../../services/audit/auditSchemas";
 import { chapterSummaryOutputSchema } from "../../../services/novel/chapterSummarySchemas";
 import { NOVEL_PROMPT_BUDGETS } from "./promptBudgetProfiles";
@@ -264,7 +265,8 @@ export const chapterRepairPrompt: PromptAsset<ChapterRepairPromptInput, string, 
       "禁止通过新增大事件掩盖原问题。",
       "禁止输出‘修改说明’‘修复点如下’等额外内容。",
       "禁止把义务合同/功能兑付/提纲措辞原句贴进正文当「已完成证明」。",
-    ].join("\n")),
+      renderProseBanBlock(),
+    ].filter(Boolean).join("\n")),
     new HumanMessage([
       `小说：${input.novelTitle}`,
       `章节：${input.chapterTitle}`,

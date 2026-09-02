@@ -335,7 +335,7 @@ export const chapterAcceptanceAssessmentPrompt: PromptAsset<
       "7. obligation contract 是本章语义层契约（结果须成立）。must hit now 与 forbidden crossing 缺口必须写入 missingObligations；可后续承接的 payoff、角色露面或目标变化缺口，只有会影响下一章入口时才写入 missingObligations，否则放入 riskTags。",
       "8. 角色出场：仅「must_on_page / 本章计划出场 / 核心角色连续高风险缺席」的 character_appearance 记为必须补齐；标注可延后、offscreen、他章计划的角色缺席不得升为 high，summary 中写明「可延后出场/offscreen」。",
       "9. repairability 只能用 none、patchable_obligation_gap、rewrite_needed、plan_misalignment。局部漏写但不阻断下一章时优先 continue_with_risk；只有需要当前章节立刻补齐时才用 patchable_obligation_gap。",
-      "10. style_contract 或反 AI 要求属于强约束；发现明显来源实体泄露、模板腔、总结腔时归入 voice。",
+      "10. style_contract 或反 AI 要求属于强约束；严禁「不是A，而是B」「并非A，反倒是B」等辨析说教腔，若正文高频使用思辨反差或分段辨析句式，归入 voice 并要求修文。检查场景主次镜头：次要场景（赶路位移/日常交代/无关路人/环境流水账）单次严禁超过 30~50 字，严禁喧宾夺主；若核心冲突薄弱、大量篇幅耗费在过渡场景与无关细节，归入 plot 并要求压缩次要场景、加深核心场景。",
       "11. assetSyncRecommendation 只判断资产同步优先级和是否需要全量伏笔对账，不要输出落库细节。",
       "12. blockingIssues.category 只能使用 continuity、character、plot、mode_fit、voice；节奏、重复、中段铺垫、结尾钩子都归入 plot。",
       "13. repairDirectives.target 只能使用 continuity、character、plot、ending、voice；不要输出 middle、pacing、internal_monologue、ending_tone 等自定义目标。",
