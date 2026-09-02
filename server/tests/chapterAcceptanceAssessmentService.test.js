@@ -111,7 +111,7 @@ test("normalizeAssessment injects over_hard risk tag without hard-blocking accep
   assert.equal(normalized.blockingIssues.length, 0);
 });
 
-test("normalizeAssessment routes soft-only missing obligations with patchable_obligation_gap to continue_with_risk", () => {
+test("normalizeAssessment routes plot soft gap (payoff_touch) with patchable_obligation_gap to repairable（上游 bf34b514 块3质量优先移植）", () => {
   const normalized = normalizeAssessment(createAssessment({
     status: "accepted",
     missingObligations: [{
@@ -123,8 +123,42 @@ test("normalizeAssessment routes soft-only missing obligations with patchable_ob
     decisionReason: "只需局部补写即可兑现本章义务。",
   }), "字".repeat(3600), 3000);
 
-  assert.equal(normalized.status, "continue_with_risk");
+  // 可局部补写的情节缺口必须进一次 repair_once 局部 patch，不再被确定性改判跳过
+  assert.equal(normalized.status, "repairable");
+  assert.equal(normalized.continuePolicy, "repair_once");
   assert.equal(normalized.missingObligations[0].kind, "payoff_touch");
+});
+
+test("goal_change soft gap with patchable_obligation_gap also routes to repairable", () => {
+  const normalized = normalizeAssessment(createAssessment({
+    status: "accepted",
+    missingObligations: [{
+      kind: "goal_change",
+      summary: "补出主角目标由守转攻的可见转变。",
+      evidence: "正文目标状态与本章任务单不一致。",
+    }],
+    repairability: "patchable_obligation_gap",
+    decisionReason: "目标变化可局部补写。",
+  }), "字".repeat(3600), 3000);
+
+  assert.equal(normalized.status, "repairable");
+  assert.equal(normalized.continuePolicy, "repair_once");
+});
+
+test("non-plot soft gap (character offscreen) still stays soft and does not hard-block（P2-6/offscreen 收窄保留）", () => {
+  const normalized = normalizeAssessment(createAssessment({
+    status: "accepted",
+    missingObligations: [{
+      kind: "character_appearance",
+      summary: "配角春桃未出场。",
+      evidence: "正文未出现春桃；该角色他章计划 / offscreen。",
+    }],
+    repairability: "patchable_obligation_gap",
+    decisionReason: "非必须出场角色可延后。",
+  }), "字".repeat(3600), 3000);
+
+  assert.equal(normalized.status, "continue_with_risk");
+  assert.match(normalized.missingObligations[0].summary, /可延后|offscreen/);
 });
 
 test("intentional offscreen character_appearance stays soft and does not hard-block", () => {

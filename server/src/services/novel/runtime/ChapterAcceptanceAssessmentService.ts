@@ -354,14 +354,27 @@ export function normalizeAssessment(
     isHardMissingObligation(obligation, { requiredCharacterAppearances })
   ));
   const hasSoftOnlyMissingObligations = missingObligations.length > 0 && !hasHardMissingObligation;
+  // 上游 bf34b514 块3移植（质量优先裁决）：接收闸门 LLM 明确判 patchable_obligation_gap 的
+  // 情节类软缺口（payoff_touch/goal_change/must_preserve）是「可局部补写的可修复事实」，
+  // 不得被确定性代码改判 continue_with_risk 跳过轻修——否则 payoff/目标推进缺口只登记不修，
+  // 连载里会累积断点。保留本仓 P2-6/offscreen 收窄：character_appearance 类软缺席
+  // （offscreen/非必达）不触发修复扰动；failureClassification 仍由 hard/soft 拆分
+  // （soft-only 恒 none），故债板/director 不放大，只是多一次 repair_once 局部 patch。
+  const hasPatchablePlotGap = reconciled.repairability === "patchable_obligation_gap"
+    && missingObligations.some((obligation) => (
+      obligation.kind === "payoff_touch"
+      || obligation.kind === "goal_change"
+      || obligation.kind === "must_preserve"
+    ));
   const hasRepairWork = reconciled.blockingIssues.length > 0
     || reconciled.repairDirectives.length > 0
-    || missingObligations.length > 0;
+    || missingObligations.length > 0
+    || hasPatchablePlotGap;
   let status: ChapterAcceptanceAssessmentOutput["status"] = reconciled.status === "accepted" && hasHighRisk
     ? "repairable"
     : reconciled.status;
   if (status === "accepted" && missingObligations.length > 0) {
-    status = hasHardMissingObligation ? "repairable" : "continue_with_risk";
+    status = hasHardMissingObligation || hasPatchablePlotGap ? "repairable" : "continue_with_risk";
   }
   if (status === "needs_manual_review" && !hasHighRisk) {
     status = hasRepairWork ? "repairable" : "continue_with_risk";
@@ -371,6 +384,7 @@ export function normalizeAssessment(
     && hasSoftOnlyMissingObligations
     && !hasHighRisk
     && reconciled.repairability === "patchable_obligation_gap"
+    && !hasPatchablePlotGap
   ) {
     status = "continue_with_risk";
   }
