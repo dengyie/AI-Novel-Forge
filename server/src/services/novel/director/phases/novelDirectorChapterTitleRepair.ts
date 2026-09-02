@@ -32,15 +32,31 @@ function resolveRepairBeatKeys(input: {
   volume: Awaited<ReturnType<NovelVolumeService["getVolumes"]>>["volumes"][number];
   beatSheet: Awaited<ReturnType<NovelVolumeService["getVolumes"]>>["beatSheets"][number];
 }): string[] {
-  const seenTitles = new Set<string>();
-  const repairBeatKeys = new Set<string>();
+  // 标题修复死锁治理（Review P1）：
+  // 必须把持有「重复标题」的所有 beat 全部标记为待修复，而不能只标记第二次出现的 beat。
+  // 否则卷内有 ≥2 对重复标题（或同一标题出现 ≥3 次）时，逐 beat 重生成先跑第 1 个 beat，
+  // 保留的未处理 beat 间仍保留旧重复对，中间合并断言会立即抛错导致永久死锁。
+  const beatKeysByTitle = new Map<string, Set<string>>();
   for (const chapter of input.volume.chapters.slice().sort((left, right) => left.chapterOrder - right.chapterOrder)) {
     const title = chapter.title.trim();
-    const beatKey = resolveVolumeChapterBeatKey({ chapter, volume: input.volume, beatSheet: input.beatSheet });
-    if (seenTitles.has(title) && beatKey) {
-      repairBeatKeys.add(beatKey);
+    if (!title) {
+      continue;
     }
-    seenTitles.add(title);
+    const beatKey = resolveVolumeChapterBeatKey({ chapter, volume: input.volume, beatSheet: input.beatSheet });
+    if (!beatKey) {
+      continue;
+    }
+    const beatKeys = beatKeysByTitle.get(title) ?? new Set<string>();
+    beatKeys.add(beatKey);
+    beatKeysByTitle.set(title, beatKeys);
+  }
+  const repairBeatKeys = new Set<string>();
+  for (const beatKeys of beatKeysByTitle.values()) {
+    if (beatKeys.size > 1) {
+      for (const beatKey of beatKeys) {
+        repairBeatKeys.add(beatKey);
+      }
+    }
   }
   return repairBeatKeys.size > 0 ? [...repairBeatKeys] : input.beatSheet.beats.map((beat) => beat.key);
 }

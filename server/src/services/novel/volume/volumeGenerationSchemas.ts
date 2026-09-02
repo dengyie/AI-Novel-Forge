@@ -485,14 +485,6 @@ export function createBookVolumeSkeletonSchema(exactVolumeCount?: number) {
   });
 }
 
-export function createVolumeChapterListSchema(exactChapterCount?: number) {
-  return z.object({
-    chapters: typeof exactChapterCount === "number"
-      ? z.array(generatedChapterListItemSchema).length(exactChapterCount)
-      : z.array(generatedChapterListItemSchema).min(1).max(80),
-  });
-}
-
 export function createVolumeChapterBeatBlockSchema(config: {
   exactChapterCount?: number;
   expectedBeatKey?: string;

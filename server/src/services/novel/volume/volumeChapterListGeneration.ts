@@ -26,7 +26,11 @@ import {
   resolveVolumeChapterBeatKey,
   setVolumeChapterListPartialStatus,
 } from "./volumeGenerationHelpers";
-import { assertChapterTitleDiversity } from "./chapterTitleDiversity";
+import {
+  assertChapterTitleDiversity,
+  getChapterTitleCollisionIssue,
+  getChapterTitleDiversityIssue,
+} from "./chapterTitleDiversity";
 import type {
   VolumeGenerateOptions,
   VolumeGenerationNovel,
@@ -399,7 +403,30 @@ export async function generateBeatChunkedChapterList(params: {
     if (!intermediateVolume) {
       throw new Error("当前卷章节列表已生成，但中间合并结果丢失了目标卷。");
     }
-    assertChapterTitleDiversity(intermediateVolume.chapters.map((chapter) => chapter.title));
+    // 中间态校验：全量生成时执行全卷多样性断言；
+    // single_beat 模式（如定向修复）下，只对当前 beat 的内部多样性及与保留标题的碰撞做严格断言，
+    // 避免因未轮到的其他 beat 中残留的旧重复对误杀当前 beat 的修复（见 Review P1）；
+    // 最终合并也按同样边界守门，完整修复流程结束后由外部统一做全卷多样性验收。
+    if (generationMode === "single_beat") {
+      const singleBeatDiversityIssue = getChapterTitleDiversityIssue(
+        generatedBlock.chapters.map((chapter) => chapter.title),
+      );
+      if (singleBeatDiversityIssue) {
+        throw new Error(singleBeatDiversityIssue);
+      }
+      const reservedTitles = targetVolume.chapters
+        .filter((chapter) => chapter.beatKey !== beatPlan.beat.key)
+        .map((chapter) => chapter.title);
+      const singleBeatCollisionIssue = getChapterTitleCollisionIssue(
+        reservedTitles,
+        generatedBlock.chapters.map((chapter) => chapter.title),
+      );
+      if (singleBeatCollisionIssue) {
+        throw new Error(singleBeatCollisionIssue);
+      }
+    } else {
+      assertChapterTitleDiversity(intermediateVolume.chapters.map((chapter) => chapter.title));
+    }
     await params.notifyIntermediateDocument?.({
       scope: "chapter_list",
       document: intermediateDocument,
@@ -440,7 +467,9 @@ export async function generateBeatChunkedChapterList(params: {
   if (!mergedVolume) {
     throw new Error("当前卷章节列表已生成，但合并结果丢失了目标卷。");
   }
-  assertChapterTitleDiversity(mergedVolume.chapters.map((chapter) => chapter.title));
+  if (generationMode !== "single_beat") {
+    assertChapterTitleDiversity(mergedVolume.chapters.map((chapter) => chapter.title));
+  }
   assertMergedVolumeChapterList({
     volume: mergedVolume,
     beatSheet: targetBeatSheet,
