@@ -145,6 +145,53 @@ test("goal_change soft gap with patchable_obligation_gap also routes to repairab
   assert.equal(normalized.continuePolicy, "repair_once");
 });
 
+test("must_preserve soft gap with patchable_obligation_gap routes to repairable", () => {
+  const normalized = normalizeAssessment(createAssessment({
+    status: "accepted",
+    missingObligations: [{
+      kind: "must_preserve",
+      summary: "需保留暗线线索未完全呈现。",
+      evidence: "玉佩暗记未在交接场景中提及。",
+    }],
+    repairability: "patchable_obligation_gap",
+    decisionReason: "暗线线索需局部补全。",
+  }), "字".repeat(3600), 3000);
+
+  assert.equal(normalized.status, "repairable");
+  assert.equal(normalized.continuePolicy, "repair_once");
+});
+
+test("plot soft gap with rewrite_needed also routes to repairable（质量优先缺口修补）", () => {
+  const normalized = normalizeAssessment(createAssessment({
+    status: "accepted",
+    missingObligations: [{
+      kind: "payoff_touch",
+      summary: "整场对峙需重新铺设以兑现伏笔。",
+      evidence: "伏笔涉及全章多处对话，需全面调整。",
+    }],
+    repairability: "rewrite_needed",
+    decisionReason: "情节兑现需要重写整章节奏。",
+  }), "字".repeat(3600), 3000);
+
+  assert.equal(normalized.status, "repairable");
+  assert.equal(normalized.continuePolicy, "repair_once");
+});
+
+test("non-plot soft gap with rewrite_needed stays soft continue_with_risk", () => {
+  const normalized = normalizeAssessment(createAssessment({
+    status: "accepted",
+    missingObligations: [{
+      kind: "character_appearance",
+      summary: "配角春桃未出场。",
+      evidence: "正文未出现春桃；该角色为非必达角色。",
+    }],
+    repairability: "rewrite_needed",
+    decisionReason: "非必达角色缺席不阻断。",
+  }), "字".repeat(3600), 3000);
+
+  assert.equal(normalized.status, "continue_with_risk");
+});
+
 test("non-plot soft gap (character offscreen) still stays soft and does not hard-block（P2-6/offscreen 收窄保留）", () => {
   const normalized = normalizeAssessment(createAssessment({
     status: "accepted",

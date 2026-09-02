@@ -15,7 +15,6 @@ import {
   createChapterBoundarySchema,
   createChapterPurposeSchema,
   createChapterTaskSheetSchema,
-  createVolumeChapterListSchema,
 } from "../../../services/novel/volume/volumeGenerationSchemas";
 
 interface VolumeSkeletonPromptInput {
@@ -26,18 +25,6 @@ interface VolumeSkeletonPromptInput {
   chapterBudget: number;
   targetVolumeCount: number;
   chapterBudgets: number[];
-}
-
-interface VolumeChapterListPromptInput {
-  novel: VolumeGenerationNovel;
-  workspace: VolumeWorkspace;
-  targetVolume: VolumePlan;
-  previousVolume?: VolumePlan;
-  nextVolume?: VolumePlan;
-  storyMacroPlan: StoryMacroPlan | null;
-  guidance?: string;
-  chapterBudget: number;
-  targetChapterCount: number;
 }
 
 interface VolumeChapterDetailPromptInput {
@@ -182,39 +169,6 @@ function buildBookSkeletonPrompt(params: VolumeSkeletonPromptInput): string {
     `当前卷骨架摘要：${buildCompactVolumeContext(workspace.volumes)}`,
     storyMacroPlan?.decomposition ? `故事拆解：${serializePromptJson(storyMacroPlan.decomposition)}` : "故事拆解：无",
     storyMacroPlan?.constraintEngine ? `约束引擎：${serializePromptJson(storyMacroPlan.constraintEngine)}` : "约束引擎：无",
-    guidance?.trim() ? `额外指令：${guidance.trim()}` : "",
-  ].filter(Boolean).join("\n\n");
-}
-
-function buildVolumeChapterListPrompt(params: VolumeChapterListPromptInput): string {
-  const { novel, workspace, targetVolume, previousVolume, nextVolume, storyMacroPlan, guidance, chapterBudget, targetChapterCount } = params;
-  const commercialTags = parseCommercialTags(novel.commercialTagsJson);
-  return [
-    "工作模式：单卷章节列表生成",
-    "这一步只生成章节标题和章节摘要，不要输出章节目标、执行边界、任务单。",
-    `小说标题：${novel.title}`,
-    `题材：${novel.genre?.name ?? "未设置"}`,
-    novel.storyModePromptBlock?.trim() ? novel.storyModePromptBlock.trim() : "",
-    `简介：${novel.description ?? "无"}`,
-    `目标读者：${novel.targetAudience ?? "无"}`,
-    `卖点：${novel.bookSellingPoint ?? "无"}`,
-    `竞品体感：${novel.competingFeel ?? "无"}`,
-    `前30章承诺：${novel.first30ChapterPromise ?? "无"}`,
-    `商业标签：${commercialTags.join("、") || "无"}`,
-    `叙事视角：${novel.narrativePov ?? "未设置"}`,
-    `节奏偏好：${novel.pacePreference ?? "未设置"}`,
-    `情绪强度：${novel.emotionIntensity ?? "未设置"}`,
-    `角色上下文：${buildCharacterContext(novel)}`,
-    `全书章节预算：${chapterBudget}`,
-    `全书卷数：${Math.max(workspace.volumes.length, 1)}`,
-    `本次只允许输出第${targetVolume.sortOrder}卷，目标章节数：${targetChapterCount}`,
-    `上一卷摘要：${previousVolume ? buildCompactVolumeCard(previousVolume) : "无"}`,
-    `当前卷设定：${buildCompactVolumeCard(targetVolume)}`,
-    `当前卷现有章节列表：${buildCurrentVolumeChapterContext(targetVolume)}`,
-    `下一卷摘要：${nextVolume ? buildCompactVolumeCard(nextVolume) : "无"}`,
-    `全书卷骨架摘要：${buildCompactVolumeContext(workspace.volumes)}`,
-    storyMacroPlan?.decomposition ? `故事拆解：${serializePromptJson(storyMacroPlan.decomposition, 1800)}` : "故事拆解：无",
-    storyMacroPlan?.constraintEngine ? `约束引擎：${serializePromptJson(storyMacroPlan.constraintEngine, 1800)}` : "约束引擎：无",
     guidance?.trim() ? `额外指令：${guidance.trim()}` : "",
   ].filter(Boolean).join("\n\n");
 }
@@ -386,71 +340,6 @@ export function createVolumeSkeletonPrompt(
         "4. 结果必须与输入中的书级方向保持一致，不得跑题。",
       ].join("\n")),
       new HumanMessage(buildBookSkeletonPrompt(input)),
-    ],
-  };
-}
-
-export function createVolumeChapterListPrompt(
-  targetChapterCount: number
-): PromptAsset<
-  VolumeChapterListPromptInput,
-  ReturnType<typeof createVolumeChapterListSchema>["_output"]
-> {
-  return {
-    id: "novel.volume.chapter_list",
-    version: "v1",
-    taskType: "planner",
-    mode: "structured",
-    language: "zh",
-    contextPolicy: {
-      maxTokensBudget: 0,
-    },
-    outputSchema: createVolumeChapterListSchema(targetChapterCount),
-    render: (input) => [
-      new SystemMessage([
-        "你是擅长长篇网文章节拆分的章纲策划，负责把单卷骨架拆成可直接继续细化的章节列表。",
-        "你的任务不是写正文，不是写任务单，也不是写执行边界，而是输出“本卷的章节清单”。",
-        "",
-        "只输出严格 JSON，不要输出 Markdown、解释、注释、代码块或额外文本。",
-        "输出必须包含 chapters 数组。",
-        `只允许为第 ${input.targetVolume.sortOrder} 卷生成 ${input.targetChapterCount} 个章节，不能增减章节数。`,
-        "",
-        "结构规则：",
-        "1. chapters 数组长度必须与目标章节数完全一致。",
-        "2. 每章只允许输出以下字段：title、summary。",
-        "3. 不得新增字段，不得删除字段，不得改字段名。",
-        "4. 禁止输出章节目标、执行边界、任务单或其他扩展结构。",
-        "",
-        "章节拆分原则：",
-        "1. 所有章节必须严格服务于当前这一卷的卷目标、卷承诺、升级方式、卷高潮与卷末钩子。",
-        "2. 章节之间必须形成连续推进，而不是一组松散事件。",
-        "3. 每章都要承担明确功能，不能出现无效过渡章或重复章。",
-        "4. 本卷前段要负责进入局面和建立问题，中段要持续升级，后段要收束并推向卷高潮与下一卷钩子。",
-        "5. 章节分布要符合连载节奏，不要前松后挤，也不要平均切块到毫无起伏。",
-        "",
-        "title 要求：",
-        "1. title 必须像真实网文章节名，简洁、明确、有吸引力。",
-        "2. 不要使用占位词或机械编号式标题。",
-        "3. 标题要能体现该章最核心的事件、异常、冲突或悬念，但不要剧透过度。",
-        "",
-        "summary 要求：",
-        "1. summary 必须用 1-3 句写清这一章具体发生什么，以及它如何推进本卷。",
-        "2. 必须具体到事件、冲突、关系变化、信息揭露或局势变化，不能写成抽象套话。",
-        "3. 不要写“推动剧情发展”“矛盾升级”“主角成长”这类空泛表述。",
-        "4. summary 要体现这一章相对上一章的新推进，而不是复述卷简介。",
-        "5. 每章 summary 都应能直接作为后续细化章纲的基础。",
-        "",
-        "质量要求：",
-        "1. 各章之间必须有明显递进关系，避免同质重复。",
-        "2. 至少应有若干章节承担钩子、转折、压迫升级、阶段兑现或高潮前置功能。",
-        "3. 卷末几章必须明显朝卷高潮与 next hook 收束，不要自然散掉。",
-        "4. 整体结果必须与当前卷骨架保持一致，不得跑题或另起一套故事。",
-        "",
-        "风格要求：",
-        "1. 全部内容使用简体中文。",
-        "2. 表达清楚、具体、可执行，像可直接交给后续细化流程的章纲草案。",
-      ].join("\n")),
-      new HumanMessage(buildVolumeChapterListPrompt(input)),
     ],
   };
 }
