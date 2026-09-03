@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -27,11 +27,71 @@ export interface AudiobookM4bEncodeResult {
 
 const M4B_RELATIVE = "full-book.m4b";
 
-/** 默认 20 分钟；可用 AUDIOBOOK_M4B_FFMPEG_TIMEOUT_MS 覆盖。 */
+/** 默认 40 分钟；可用 AUDIOBOOK_M4B_FFMPEG_TIMEOUT_MS 覆盖。 */
 const DEFAULT_FFMPEG_TIMEOUT_MS = Math.max(
   60_000,
-  Number(process.env.AUDIOBOOK_M4B_FFMPEG_TIMEOUT_MS ?? 20 * 60_000) || 20 * 60_000,
+  Number(process.env.AUDIOBOOK_M4B_FFMPEG_TIMEOUT_MS ?? 40 * 60_000) || 40 * 60_000,
 );
+
+/**
+ * ffmpeg 编码线程上限。大书 m4b 是对整本 WAV 的实时重采样+AAC 重编码，默认全核
+ * 会把小巧/共享宿主占满、加剧与其它进程的争抢；这里默认封顶 2 线程，可用
+ * AUDIOBOOK_M4B_FFMPEG_THREADS 覆盖（0 = 不传 `-threads`，交给 ffmpeg 自定）。
+ */
+const FFMPEG_THREADS_CAP = ((): number | null => {
+  const raw = Number(process.env.AUDIOBOOK_M4B_FFMPEG_THREADS ?? 2);
+  if (!Number.isFinite(raw) || raw <= 0) return null;
+  return Math.max(1, Math.floor(raw));
+})();
+
+/**
+ * 编码进程 nice 值（IPC 优先级增量，1~19 更低优先）。默认 +10，让 ffmpeg 在共享
+ * 宿主上主动让渡 CPU 给其它业务，减少被当作资源大户而牵连 novel-server 的 OOM。
+ * 可用 AUDIOBOOK_M4B_FFMPEG_NICE 覆盖（0 = 不额外 renice）。
+ */
+const FFMPEG_NICE = (() => {
+  const raw = Number(process.env.AUDIOBOOK_M4B_FFMPEG_NICE ?? 10);
+  if (!Number.isFinite(raw) || raw <= 0) return null;
+  return Math.max(0, Math.min(19, Math.floor(raw)));
+})();
+
+/**
+ * 同 taskDir 并发编码互斥：模块级在途表，避免 pause/restart/后台队列多个入口
+ * 对同一本书同时 spawn 多个 ffmpeg（每个都会重读整部 WAV，成倍放大资源占用）。
+ * 同一 taskDir 再次请求 encode 时，后到者等待前一轮跑完（并发真正串行化）。
+ */
+const IN_FLIGHT_M4B = new Set<string>();
+const M4B_WAITERS = new Map<string, Array<() => void>>();
+
+async function withTaskDirLock<T>(
+  taskDir: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  if (!IN_FLIGHT_M4B.has(taskDir)) {
+    IN_FLIGHT_M4B.add(taskDir);
+    try {
+      return await fn();
+    } finally {
+      IN_FLIGHT_M4B.delete(taskDir);
+      const waiters = M4B_WAITERS.get(taskDir);
+      if (waiters && waiters.length > 0) {
+        const next = waiters.shift();
+        if (waiters.length === 0) M4B_WAITERS.delete(taskDir);
+        next?.();
+      } else {
+        M4B_WAITERS.delete(taskDir);
+      }
+    }
+  }
+  // 后到者排队；被唤醒后递归重试获取锁（而不是直接执行 fn），否则第三个及以后的
+  // 请求会在第二个请求执行期间看到 IN_FLIGHT 为空而并发进入，锁就失效了。
+  await new Promise<void>((resolve) => {
+    const list = M4B_WAITERS.get(taskDir) ?? [];
+    list.push(resolve);
+    M4B_WAITERS.set(taskDir, list);
+  });
+  return withTaskDirLock(taskDir, fn);
+}
 
 export function resolveFfmpegBinary(): string | null {
   const dedicated = process.env.AUDIOBOOK_FFMPEG_PATH?.trim();
@@ -222,6 +282,20 @@ function runFfmpeg(input: {
     const child = spawn(input.ffmpeg, input.args, {
       stdio: ["ignore", "ignore", "pipe"],
     });
+    // 编码属长时降权任务：renice 到更低优先级，分享宿主下把 CPU 让给其它业务，
+    // 避免大 ffmpeg 长跑被当作资源大户而牵连整机 OOM。renice 失败仅 warn 不中断。
+    if (FFMPEG_NICE != null && child.pid) {
+      execFile(
+        "renice",
+        [String(FFMPEG_NICE), "-p", String(child.pid)],
+        { timeout: 2000 },
+        (error) => {
+          if (error) {
+            console.warn("[audiobook] m4b ffmpeg renice 失败", (error as Error).message);
+          }
+        },
+      );
+    }
     const partPath = resolveFfmpegOutputPath(input.args, input.partPath);
     let stderr = "";
     let settled = false;
@@ -315,6 +389,16 @@ export async function encodeFullBookM4b(input: {
   /** 可选：封装期间周期性上报 `.part` 增长，喂给 watchdog 推进信号避免误杀。 */
   onProgress?: M4bProgressCallback | null;
 }): Promise<AudiobookM4bEncodeResult> {
+  // 同 taskDir 并发互斥：pause/restart/后台队列多个入口可能同时请求同一本书的 m4b，
+  // 各自 spawn 会各读一遍整部 WAV 成倍放大资源占用。后到请求排队，前一轮跑完后
+  // 再执行（此时若已 ready 则复用产物）。
+  return withTaskDirLock(input.taskDir, () => encodeFullBookM4bUnlocked(input));
+}
+
+/** encodeFullBookM4b 的实际实现；由 withTaskDirLock 串行化（见公开包装器）。 */
+async function encodeFullBookM4bUnlocked(
+  input: Parameters<typeof encodeFullBookM4b>[0],
+): Promise<AudiobookM4bEncodeResult> {
   const relativePath = M4B_RELATIVE;
   const outPath = resolveFullBookM4bPath(input.taskDir);
   const sourceWav = input.sourceWavPath ?? resolveFullBookAudioPath(input.taskDir);
@@ -360,6 +444,17 @@ export async function encodeFullBookM4b(input: {
   const runId = `${Date.now().toString(36)}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
   const partPath = path.join(path.dirname(outPath), `${path.basename(outPath)}.${runId}.part`);
   try {
+    // 进入串行区后、真正编码前：若排在前面的一轮已把产物写好（例如后台队列与
+    // 重启兜底并发排队，前一轮先跑完），直接复用已就绪 m4b，不再重复整书编码。
+    if (fs.existsSync(outPath) && fs.statSync(outPath).size >= 64) {
+      return {
+        status: "ready",
+        path: outPath,
+        relativePath,
+        bytes: fs.statSync(outPath).size,
+        chapterCount: metaChapters.length,
+      };
+    }
     // 起跑前 best-effort 清掉陈旧半成品（本次 run 的新 part mtime 新，不受影响）。
     // 不要再 unlink 共享 full-book.m4b.part——唯一名下不存在该文件，且 renameSync 原子覆盖规范名。
     cleanupStaleM4bParts(input.taskDir, outPath);
@@ -379,6 +474,7 @@ export async function encodeFullBookM4b(input: {
       "-hide_banner",
       "-loglevel",
       "error",
+      ...(FFMPEG_THREADS_CAP ? ["-threads", String(FFMPEG_THREADS_CAP)] : []),
       "-i",
       sourceWav,
       "-i",
