@@ -354,13 +354,13 @@ export function hasInFlightM4bPart(taskDir: string): boolean {
   return false;
 }
 
-/** stale m4b part GC 的默认保留窗口：默认超时的 2 倍（40 分钟）。 */
-const M4B_STALE_PART_DEFAULT_TIMEOUT_MS = 2 * 20 * 60_000;
+/** stale m4b part GC 的默认保留窗口：默认超时的 2 倍（80 分钟）。 */
+const M4B_STALE_PART_DEFAULT_TIMEOUT_MS = 2 * 40 * 60_000;
 
 /**
  * 清理 taskDir 内陈旧的 `full-book.m4b*.part` 半成品。
  * 唯一 part 名下，本次 run 新生成的 part（mtime 新）不会被误删；只删 mtime 早于
- * timeoutMs（默认 2×DEFAULT_FFMPEG_TIMEOUT_MS，即 40 分钟）的旧 part——宿主重启/孤儿
+ * timeoutMs（默认 2×DEFAULT_FFMPEG_TIMEOUT_MS，即 80 分钟）的旧 part——宿主重启/孤儿
  * ffmpeg 残留、或更早 run 中断留下的半成品。best-effort，失败不抛错。
  */
 export function cleanupStaleM4bParts(taskDir: string, outPath: string, timeoutMs?: number): void {
