@@ -1302,6 +1302,32 @@ export function registerNovelAudiobookRoutes(input: { router: Router }): void {
   );
 
   router.post(
+    "/:id/audiobook/tasks/:taskId/m4b/redo",
+    validate({ params: taskParamsSchema }),
+    async (req, res, next) => {
+      try {
+        const { id, taskId } = req.params as z.infer<typeof taskParamsSchema>;
+        const existing = await audiobookTaskService.getTask(taskId);
+        if (!existing || existing.novelId !== id) {
+          res.status(404).json({
+            success: false,
+            error: "有声书任务不存在。",
+          } satisfies ApiResponse<null>);
+          return;
+        }
+        const data = await audiobookTaskService.redoTaskM4b(taskId);
+        res.status(200).json({
+          success: true,
+          data,
+          message: "已触发 m4b 重新封装（m4b 后台封装中）。",
+        } satisfies ApiResponse<typeof data>);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  router.post(
     "/:id/audiobook/tasks/:taskId/continue",
     validate({ params: taskParamsSchema, body: continueAudiobookTaskSchema }),
     async (req, res, next) => {

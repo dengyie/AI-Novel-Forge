@@ -1068,6 +1068,91 @@ export class AudiobookTaskService {
     return detail;
   }
 
+  /**
+   * 重做已 succeeded 任务的 m4b 封装（根因修复：m4b 失败/被取消后缺乏受支持的重做入口）。
+   *
+   * 背景：m4b 封装只在任务首次成功时随 scheduleBackgroundM4bEncode 后台触发一次；
+   * 若途中失败（超时/资源争抢/宿主 OOM），任务保持 succeeded 且 label 变成
+   * 「有声书生成完成；m4b 失败（…）」，前端没有按钮也无法再触发，只能靠手工
+   * 脚本绕过代码库（2026-09-03 生产事故实测）。此方法补齐受支持路径：
+   *
+   * - 仅 succeeded 任务可重做（WAV 已在盘，无重合成成本）；
+   * - m4b 已 ready 时幂等早退（不重复编码）；
+   * - 入口先把 label 置回「m4b 后台封装中」并清掉 resultJson 里的旧失败结论，
+   *   再走与首次一致的 scheduleBackgroundM4bEncode(force) 后台封装；
+   * - force settle 的 CAS 不再要求 label 恰是「封装中」（重做时旧 label 是失败文案），
+   *   只要求 status=succeeded，避免重做结论被旧 label 条件拦下。
+   *
+   * 并发安全：encodeFullBookM4b 内部 withTaskDirLock 同 taskDir 串行化，
+   * 重复触发也只 spawn 一个 ffmpeg；本方法与首次触发天然去重（锁内就绪复用）。
+   */
+  async redoTaskM4b(taskId: string): Promise<AudiobookTaskDetail> {
+    const task = await prisma.audiobookTask.findUnique({
+      where: { id: taskId },
+      include: { novel: { select: { id: true, title: true } } },
+    });
+    if (!task) {
+      throw new AppError("有声书任务不存在。", 404);
+    }
+    const taskDir = task.outputDir?.trim();
+    if (!taskDir) {
+      throw new AppError("任务无输出目录，无法封装 m4b。", 400);
+    }
+    if (isFullBookM4bReady(taskDir)) {
+      return toDetail(task as AudiobookTaskRow) ?? this.getTask(taskId);
+    }
+    if (!isFullBookAudioReady(taskDir)) {
+      throw new AppError("全书 WAV 未就绪，无法封装 m4b（请先完成全书合成）。", 400);
+    }
+    if (task.status !== "succeeded") {
+      throw new AppError("仅生成完成（succeeded）的任务可重做 m4b。", 400);
+    }
+
+    const chapterIds = parseChapterIds(task.chapterIdsJson);
+    if (chapterIds.length === 0) {
+      throw new AppError("任务章节列表为空，无法封装 m4b。", 400);
+    }
+
+    // 置回「封装中」label + 清掉 resultJson 里的旧 m4b 结论（有效避免重做期间
+    // 前端仍看到旧 failed 状态）。CAS 只要求 status=succeeded：并发时谁先抢到
+    // 谁有效，后到者见 status 仍 succeeded 也无害（final settle 幂等）。
+    const clearedResultJson = (() => {
+      try {
+        const parsed = JSON.parse(task.resultJson ?? "{}");
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && "m4b" in parsed) {
+          const { m4b: _dropped, ...rest } = parsed as Record<string, unknown> & { m4b?: unknown };
+          return JSON.stringify(rest);
+        }
+      } catch {
+        // resultJson 损坏时保留原样，由 settle 覆盖
+      }
+      return task.resultJson ?? "{}";
+    })();
+    await prisma.audiobookTask.updateMany({
+      where: { id: taskId, status: "succeeded" },
+      data: {
+        currentItemLabel: M4B_ENCODING_LABEL,
+        resultJson: clearedResultJson,
+        heartbeatAt: new Date(),
+      },
+    });
+
+    this.scheduleBackgroundM4bEncode({
+      parentTaskId: taskId,
+      novelId: task.novelId,
+      parentTitle: task.title,
+      taskDir,
+      chapterIds,
+      force: true,
+    });
+
+    const detail = await this.getTask(taskId);
+    if (!detail) {
+      throw new AppError("有声书任务不存在。", 404);
+    }
+    return detail;
+  }
+
   async getAnnotations(taskId: string): Promise<AudiobookTaskAnnotationsView> {
     const task = await prisma.audiobookTask.findUnique({
       where: { id: taskId },
@@ -1501,11 +1586,13 @@ export class AudiobookTaskService {
     parentTitle: string;
     taskDir: string;
     chapterIds: string[];
+    /** 重做场景：即使旧 label 不是「封装中」，也放宽容对象落库新 m4b 结论 */
+    force?: boolean;
   }): void {
-    const { parentTaskId, novelId, parentTitle, taskDir, chapterIds } = input;
+    const { parentTaskId, novelId, parentTitle, taskDir, chapterIds, force } = input;
     void (async () => {
       try {
-        if (isFullBookM4bReady(taskDir)) return;
+        if (!force && isFullBookM4bReady(taskDir)) return;
         if (!isFullBookAudioReady(taskDir)) return;
         const chapterMeta = await prisma.chapter.findMany({
           where: { novelId, id: { in: chapterIds } },
@@ -1533,12 +1620,17 @@ export class AudiobookTaskService {
           }),
         });
         if (m4b.status === "ready") {
-          await this.settleBackgroundM4b(parentTaskId, M4B_DONE_LABEL, {
-            status: "ready",
-            path: m4b.relativePath,
-            bytes: m4b.bytes ?? null,
-            chapterCount: m4b.chapterCount ?? null,
-          });
+          await this.settleBackgroundM4b(
+            parentTaskId,
+            M4B_DONE_LABEL,
+            {
+              status: "ready",
+              path: m4b.relativePath,
+              bytes: m4b.bytes ?? null,
+              chapterCount: m4b.chapterCount ?? null,
+            },
+            { force },
+          );
           return;
         }
         const reason = m4b.reason ?? m4b.status;
@@ -1549,6 +1641,7 @@ export class AudiobookTaskService {
             ? `有声书生成完成；m4b 未生成（${reason}）`
             : `有声书生成完成；m4b 失败（${reason}）`,
           { status: m4b.status === "skipped" ? "skipped" : "failed", reason },
+          { force },
         );
       } catch (error) {
         console.warn(
@@ -1563,6 +1656,7 @@ export class AudiobookTaskService {
             parentTaskId,
             `有声书生成完成；m4b 失败（${errMsg}）`,
             { status: "failed", reason: errMsg },
+            { force },
           );
         } catch (labelError) {
           console.warn("[audiobook] m4b failure label update failed", parentTaskId, labelError);
@@ -1584,6 +1678,7 @@ export class AudiobookTaskService {
     parentTaskId: string,
     label: string,
     m4b: { status: "ready" | "skipped" | "failed"; path?: string | null; reason?: string | null; bytes?: number | null; chapterCount?: number | null },
+    opts: { force?: boolean } = {},
   ): Promise<void> {
     const row = await prisma.audiobookTask.findUnique({
       where: { id: parentTaskId },
@@ -1593,7 +1688,10 @@ export class AudiobookTaskService {
       where: {
         id: parentTaskId,
         status: "succeeded",
-        currentItemLabel: M4B_ENCODING_LABEL,
+        // 首次后台收口只覆盖「仍在封装中」的 label（幂等 CAS）；
+        // force（重做 m4b）放宽容对象为任何 succeeded 终态——此时 label 已是
+        // 失败/跳过文案，原 CAS 永远不命中，必须先清掉旧失败结论再落新态。
+        ...(opts.force ? {} : { currentItemLabel: M4B_ENCODING_LABEL }),
       },
       data: {
         currentItemLabel: label,
