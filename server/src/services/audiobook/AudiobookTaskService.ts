@@ -43,7 +43,7 @@ import {
   wipeChapterAudioArtifacts,
 } from "./audiobookPaths";
 import { resolveBetweenChapterGapMs } from "./audiobookGap";
-import { encodeFullBookM4b } from "./audiobookM4b";
+import { encodeFullBookM4b, withAudiobookTaskDirArtifactLock } from "./audiobookM4b";
 import { concatWavFiles } from "./audiobookWav";
 import { resolveDeliveryStyleMode } from "./deliveryStyle";
 import { checkVoiceRefAudioPath } from "./voiceRefPath";
@@ -1195,23 +1195,25 @@ export class AudiobookTaskService {
       }
       return task.resultJson ?? "{}";
     })();
-    const generationClaim = await prisma.audiobookTask.updateMany({
-      where: {
-        id: taskId,
-        status: "succeeded",
-        m4bGenerationToken: task.m4bGenerationToken,
-      },
-      data: {
-        currentItemLabel: M4B_ENCODING_LABEL,
-        resultJson: markM4bEncodingInResultJson(clearedResultJson),
-        heartbeatAt: new Date(),
-        m4bGenerationToken: generationToken,
-      },
+    await withAudiobookTaskDirArtifactLock(taskDir, async () => {
+      const generationClaim = await prisma.audiobookTask.updateMany({
+        where: {
+          id: taskId,
+          status: "succeeded",
+          m4bGenerationToken: task.m4bGenerationToken,
+        },
+        data: {
+          currentItemLabel: M4B_ENCODING_LABEL,
+          resultJson: markM4bEncodingInResultJson(clearedResultJson),
+          heartbeatAt: new Date(),
+          m4bGenerationToken: generationToken,
+        },
+      });
+      if (generationClaim.count === 0) {
+        throw new AppError("任务已被其它 m4b 操作占用，请刷新后重试。", 409);
+      }
+      this.abortBackgroundM4b(taskId);
     });
-    if (generationClaim.count === 0) {
-      throw new AppError("任务已被其它 m4b 操作占用，请刷新后重试。", 409);
-    }
-    this.abortBackgroundM4b(taskId);
 
     this.scheduleBackgroundM4bEncode({
       parentTaskId: taskId,
@@ -1281,54 +1283,55 @@ export class AudiobookTaskService {
     // 先失效正在封装旧全书的 worker，再做 wipe；否则旧 worker 可能在 wipe 后
     // 仍把旧 full-book.m4b rename 回规范名。
     const generationToken = newM4bGenerationToken();
-    const generationClaim = await prisma.audiobookTask.updateMany({
-      where: {
-        id: task.id,
-        status: { in: ["failed", "cancelled", "succeeded"] },
-        m4bGenerationToken: task.m4bGenerationToken,
-      },
-      data: { m4bGenerationToken: generationToken },
-    });
-    if (generationClaim.count === 0) {
-      throw new AppError("任务已被其它重处理请求占用，请刷新后重试。", 409);
-    }
-    this.abortBackgroundM4b(task.id);
-
     const taskDir = resolveAudiobookTaskDir(task.novelId, task.id);
-    wipeChapterAudioArtifacts(taskDir, chapterId);
-
-    let nextAnnotationsJson = task.annotationsJson;
-    if (input.mode === "reannotate") {
-      wipeChapterAnnotationArtifact(taskDir, chapterId);
-      const remaining = parseAnnotationsJson(task.annotationsJson)
-        .filter((item) => item.chapterId !== chapterId);
-      nextAnnotationsJson = remaining.length > 0 ? JSON.stringify(remaining) : null;
-    }
-
     const modeLabel = input.mode === "reannotate" ? "重标并重合成" : "重合成";
-    const reprocessClaim = await prisma.audiobookTask.updateMany({
-      where: { id: task.id, m4bGenerationToken: generationToken },
-      data: {
-        status: "queued",
-        progress: 0,
-        error: null,
-        finishedAt: null,
-        startedAt: null,
-        cancelRequestedAt: null,
-        pendingManualRecovery: false,
-        heartbeatAt: null,
-        currentStage: "queued",
-        currentItemKey: chapterId,
-        currentItemLabel: `排队：${modeLabel}章节`,
-        fullAudioPath: null,
-        annotationsJson: nextAnnotationsJson,
-        summary: null,
-        resultJson: null,
-      },
+    await withAudiobookTaskDirArtifactLock(taskDir, async () => {
+      const generationClaim = await prisma.audiobookTask.updateMany({
+        where: {
+          id: task.id,
+          status: { in: ["failed", "cancelled", "succeeded"] },
+          m4bGenerationToken: task.m4bGenerationToken,
+        },
+        data: { m4bGenerationToken: generationToken },
+      });
+      if (generationClaim.count === 0) {
+        throw new AppError("任务已被其它重处理请求占用，请刷新后重试。", 409);
+      }
+      this.abortBackgroundM4b(task.id);
+      wipeChapterAudioArtifacts(taskDir, chapterId);
+
+      let nextAnnotationsJson = task.annotationsJson;
+      if (input.mode === "reannotate") {
+        wipeChapterAnnotationArtifact(taskDir, chapterId);
+        const remaining = parseAnnotationsJson(task.annotationsJson)
+          .filter((item) => item.chapterId !== chapterId);
+        nextAnnotationsJson = remaining.length > 0 ? JSON.stringify(remaining) : null;
+      }
+
+      const reprocessClaim = await prisma.audiobookTask.updateMany({
+        where: { id: task.id, m4bGenerationToken: generationToken },
+        data: {
+          status: "queued",
+          progress: 0,
+          error: null,
+          finishedAt: null,
+          startedAt: null,
+          cancelRequestedAt: null,
+          pendingManualRecovery: false,
+          heartbeatAt: null,
+          currentStage: "queued",
+          currentItemKey: chapterId,
+          currentItemLabel: `排队：${modeLabel}章节`,
+          fullAudioPath: null,
+          annotationsJson: nextAnnotationsJson,
+          summary: null,
+          resultJson: null,
+        },
+      });
+      if (reprocessClaim.count === 0) {
+        throw new AppError("任务代际已变更，请刷新后重试。", 409);
+      }
     });
-    if (reprocessClaim.count === 0) {
-      throw new AppError("任务代际已变更，请刷新后重试。", 409);
-    }
     this.enqueueTask(task.id);
     const detail = await this.getTask(task.id);
     if (!detail) {
@@ -1425,33 +1428,36 @@ export class AudiobookTaskService {
     });
 
     const continuationGenerationToken = newM4bGenerationToken();
-    const claimedParent = await prisma.audiobookTask.updateMany({
-      where: {
-        id: parent.id,
-        status: { in: ["succeeded", "failed"] },
-        ...m4bGenerationWhere(parent.m4bGenerationToken),
-      },
-      data: {
-        status: "running",
-        currentStage: "continuing",
-        currentItemLabel: `续生成 ${precheck.chapterCount} 章`,
-        progress: parentProgressBaseline,
-        fullAudioPath: null,
-        resultJson: null,
-        cancelRequestedAt: null,
-        finishedAt: null,
-        heartbeatAt: new Date(),
-        // 续生成会使旧父代际的 m4b worker 失效，必须在 wipe 前持久化轮换。
-        m4bGenerationToken: continuationGenerationToken,
-      },
+    const claimedParent = await withAudiobookTaskDirArtifactLock(parentOutputDir, async () => {
+      const claimed = await prisma.audiobookTask.updateMany({
+        where: {
+          id: parent.id,
+          status: { in: ["succeeded", "failed"] },
+          ...m4bGenerationWhere(parent.m4bGenerationToken),
+        },
+        data: {
+          status: "running",
+          currentStage: "continuing",
+          currentItemLabel: `续生成 ${precheck.chapterCount} 章`,
+          progress: parentProgressBaseline,
+          fullAudioPath: null,
+          resultJson: null,
+          cancelRequestedAt: null,
+          finishedAt: null,
+          heartbeatAt: new Date(),
+          // 续生成会使旧父代际的 m4b worker 失效，必须在 wipe 前持久化轮换。
+          m4bGenerationToken: continuationGenerationToken,
+        },
+      });
+      if (claimed.count === 0) {
+        throw new AppError(
+          "父任务已被其它续生成请求占用或状态已变更，无法续生成。请刷新后重试。",
+          409,
+        );
+      }
+      this.abortBackgroundM4b(parent.id);
+      return claimed;
     });
-    if (claimedParent.count === 0) {
-      throw new AppError(
-        "父任务已被其它续生成请求占用或状态已变更，无法续生成。请刷新后重试。",
-        409,
-      );
-    }
-    this.abortBackgroundM4b(parent.id);
 
     // 抢占成功后父已是 running+continuing：此后任一步失败都必须把父放回原终态，
     // 否则父卡 continuing（watchdog 跳过 + resume 跳过 + 续生成 409，三条自愈路径同时关闭）。
@@ -1532,23 +1538,25 @@ export class AudiobookTaskService {
     // 此时再走 releaseParentOnFailure 会把父放回 succeeded 并声称全书可播，而音频已被删。
     // 反过来放在 create 之后则无失败面——wipe/safeUnlink 全吞异常，其后只剩纯内存的 enqueueTask。
     if (input.mode === "resynthesize") {
-      for (const chapterId of requestedIds) {
-        try {
-          wipeChapterAudioArtifacts(parentOutputDir, chapterId);
-        } catch (wipeError) {
-          console.warn(
-            "[audiobook] continueParentTask resynthesize wipe 失败",
-            parent.id,
-            chapterId,
-            wipeError instanceof Error ? wipeError.message : wipeError,
-          );
+      await withAudiobookTaskDirArtifactLock(parentOutputDir, async () => {
+        for (const chapterId of requestedIds) {
+          try {
+            wipeChapterAudioArtifacts(parentOutputDir, chapterId);
+          } catch (wipeError) {
+            console.warn(
+              "[audiobook] continueParentTask resynthesize wipe 失败",
+              parent.id,
+              chapterId,
+              wipeError instanceof Error ? wipeError.message : wipeError,
+            );
+          }
         }
-      }
-      // wipeChapterAudioArtifacts 已清 full-book；再保险清 m4b part
-      safeUnlink(resolveFullBookAudioPath(parentOutputDir));
-      safeUnlink(`${resolveFullBookAudioPath(parentOutputDir)}.part`);
-      safeUnlink(resolveFullBookM4bPath(parentOutputDir));
-      safeUnlink(`${resolveFullBookM4bPath(parentOutputDir)}.part`);
+        // wipeChapterAudioArtifacts 已清 full-book；再保险清 m4b part
+        safeUnlink(resolveFullBookAudioPath(parentOutputDir));
+        safeUnlink(`${resolveFullBookAudioPath(parentOutputDir)}.part`);
+        safeUnlink(resolveFullBookM4bPath(parentOutputDir));
+        safeUnlink(`${resolveFullBookM4bPath(parentOutputDir)}.part`);
+      });
     }
 
     this.enqueueTask(child.id);

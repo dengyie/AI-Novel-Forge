@@ -10,7 +10,10 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
-const { encodeFullBookM4b } = require("../dist/services/audiobook/audiobookM4b.js");
+const {
+  encodeFullBookM4b,
+  withAudiobookTaskDirArtifactLock,
+} = require("../dist/services/audiobook/audiobookM4b.js");
 const { resolveFullBookM4bPath } = require("../dist/services/audiobook/audiobookPaths.js");
 const { prisma } = require("../dist/db/prisma.js");
 const { AudiobookTaskService } = require("../dist/services/audiobook/AudiobookTaskService.js");
@@ -149,6 +152,51 @@ test("aborted queued generation does not acquire the task-directory lock", { con
     assert.equal(queuedResult.reason, "m4b 封装已取消。");
     assert.equal(firstResult.status, "ready", firstResult.reason);
     assert.equal(fs.existsSync(resolveFullBookM4bPath(taskDir)), true);
+  } finally {
+    if (previousFfmpeg === undefined) delete process.env.AUDIOBOOK_FFMPEG_PATH;
+    else process.env.AUDIOBOOK_FFMPEG_PATH = previousFfmpeg;
+    fs.rmSync(taskDir, { recursive: true, force: true });
+    fs.rmSync(path.dirname(fake.script), { recursive: true, force: true });
+  }
+});
+
+test("generation rotation cannot interleave between publish check and canonical rename", { concurrency: false }, async () => {
+  const taskDir = makeTaskDir("publish-window");
+  const source = path.join(taskDir, "full-book.wav");
+  fs.writeFileSync(source, Buffer.alloc(4096, "P"));
+  const fake = installFakeFfmpeg();
+  const previousFfmpeg = process.env.AUDIOBOOK_FFMPEG_PATH;
+  process.env.AUDIOBOOK_FFMPEG_PATH = fake.script;
+  let releasePublishCheck;
+  const publishCheckBlocked = new Promise((resolve) => { releasePublishCheck = resolve; });
+  let publishCheckEntered;
+  const publishCheckEnteredPromise = new Promise((resolve) => { publishCheckEntered = resolve; });
+  let rotationRan = false;
+  try {
+    const generationA = encodeFullBookM4b({
+      taskDir,
+      bookTitle: "发布窗口 A",
+      chapters: [],
+      generationToken: "generation-A",
+      isGenerationCurrent: async () => {
+        publishCheckEntered();
+        await publishCheckBlocked;
+        return true;
+      },
+    });
+    await waitForFile(fake.started);
+    await publishCheckEnteredPromise;
+
+    const rotation = withAudiobookTaskDirArtifactLock(taskDir, async () => {
+      rotationRan = true;
+      fs.rmSync(resolveFullBookM4bPath(taskDir), { force: true });
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(rotationRan, false, "rotation must wait for the publish lock");
+
+    releasePublishCheck();
+    await Promise.all([generationA, rotation]);
+    assert.equal(fs.existsSync(resolveFullBookM4bPath(taskDir)), false, "new-generation wipe must win after publish");
   } finally {
     if (previousFfmpeg === undefined) delete process.env.AUDIOBOOK_FFMPEG_PATH;
     else process.env.AUDIOBOOK_FFMPEG_PATH = previousFfmpeg;

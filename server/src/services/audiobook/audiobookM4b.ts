@@ -181,6 +181,18 @@ async function withTaskDirLock<T>(
   return withTaskDirLock(taskDir, fn, signal);
 }
 
+/**
+ * Serialize filesystem publication with task-level generation rotation/wipe.
+ * Callers use this around the DB token CAS and any destructive artifact cleanup
+ * so a worker cannot pass its token check while a new generation removes files.
+ */
+export function withAudiobookTaskDirArtifactLock<T>(
+  taskDir: string,
+  fn: () => Promise<T> | T,
+): Promise<T> {
+  return withTaskDirLock(taskDir, async () => fn());
+}
+
 export function resolveFfmpegBinary(): string | null {
   const dedicated = process.env.AUDIOBOOK_FFMPEG_PATH?.trim();
   if (dedicated) {

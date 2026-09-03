@@ -116,6 +116,8 @@ m4b 封装在任务主流水线完成后异步运行，可能跨越章节重做�
 - 代际轮换先于破坏性清理发生，并立即 abort 当前进程内的 ffmpeg；跨重启的孤儿进程依靠旧 token CAS 被拒绝，启动恢复还会清理孤儿进程并轮换 token。
 - 同一任务目录的 m4b 编码使用模块级互斥。等待中的 worker 绑定自己的 `AbortSignal`，代际失效后会从等待队列移除，
   不会在旧锁释放后再次占用编码执行权。
+- token 轮换和删除旧全书产物也必须取得同一个 taskDir artifact lock；这把锁覆盖发布检查到 canonical rename 的窗口，
+  防止“旧 worker 已通过检查、重做刚清理、旧 worker 随后 rename”这种跨代覆盖。
 - `resultJson` 的 m4b settle 必须读改写并保留其它字段；仅由 token + 状态/label CAS 决定是否提交。
 - 迁移前的 `NULL` 或空字符串 token 必须作为精确 CAS 值处理，不能把它们混同为缺少栅栏；首次执行会在成功抢占时签发真实 UUID。
 
