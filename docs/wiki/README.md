@@ -42,6 +42,7 @@ Wiki 不记录单次提交改了什么，也不替代 release notes。它只记�
 - [图片生成确认与统一运行时](./workflows/image-generation-confirmation-runtime.md)
 - [Creative Hub 边界](./workflows/creative-hub-boundary.md)
 - [小说有声书边界](./workflows/novel-audiobook-boundary.md)
+- [启动恢复与服务就绪边界](./workflows/startup-recovery-readiness.md)
 - [小说封面图生成](./workflows/novel-cover-image-generation.md)
 - [小说事实账本](./workflows/novel-fact-ledger.md)
 - [小说快照保留](./workflows/novel-snapshot-retention.md)
