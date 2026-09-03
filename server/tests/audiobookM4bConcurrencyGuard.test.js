@@ -139,3 +139,29 @@ test("同一 taskDir 三次并发也只 spawn 一次 ffmpeg（递归锁）", asy
   assert.equal(callCount() - before, 1, "相同 taskDir 三次并发必须只触发一次底层 ffmpeg spawn");
   assert.equal(fs.readFileSync(resolveFullBookM4bPath(taskDir), "utf8"), "T".repeat(4096));
 });
+
+test("taskDir lock 的等待者 abort 后应立即退出且不阻塞后续等待者", async () => {
+  const taskDir = makeTaskDir("cancel-waiter");
+  const src = path.join(taskDir, "src.wav");
+  writeMarkerFile(src, "W", 8192);
+  const first = encodeFullBookM4b({ taskDir, bookTitle: "持有锁", sourceWavPath: src, chapters: [] });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  const controller = new AbortController();
+  const waiting = encodeFullBookM4b({
+    taskDir,
+    bookTitle: "取消等待",
+    sourceWavPath: src,
+    chapters: [],
+    signal: controller.signal,
+  });
+  controller.abort();
+  await assert.rejects(
+    Promise.race([
+      waiting,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("lock waiter timeout")), 100)),
+    ]),
+    /取消|abort/i,
+  );
+  await first;
+});

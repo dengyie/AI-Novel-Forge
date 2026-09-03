@@ -30,6 +30,7 @@ import {
 import {
   ensureAudiobookTaskDir,
   hasInFlightM4bPart,
+  isChapterAudioReady,
   isFullBookAudioReady,
   isFullBookM4bReady,
   listReadyChapterAudioIds,
@@ -1734,95 +1735,120 @@ export class AudiobookTaskService {
     }
     this.activeM4bControllers.set(parentTaskId, { token: generationToken, controller });
     try {
-        if (!(await this.isCurrentM4bGeneration(parentTaskId, generationToken))) return;
-        if (!isFullBookAudioReady(taskDir)) return;
-        // 先把「正在封装」写入持久 resultJson，再启动 ffmpeg。进程若在编码中退出，
-        // 下次启动可从 succeeded + m4b.encoding 重新发现，而不是依赖内存中的 Promise。
-        const markerRow = await prisma.audiobookTask.findUnique({
-          where: { id: parentTaskId },
-          select: { resultJson: true, status: true, m4bGenerationToken: true },
-        });
-        if (
-          !markerRow
-          || markerRow.status !== "succeeded"
-          || markerRow.m4bGenerationToken !== generationToken
-        ) return;
-        const marked = await prisma.audiobookTask.updateMany({
-          where: {
-            id: parentTaskId,
-            status: "succeeded",
-            m4bGenerationToken: generationToken,
-            resultJson: markerRow.resultJson,
-          },
-          data: {
-            currentItemLabel: M4B_ENCODING_LABEL,
-            resultJson: markM4bEncodingInResultJson(markerRow.resultJson),
-            heartbeatAt: new Date(),
-          },
-        });
-        if (marked.count === 0) return;
-
-        if (!force && isFullBookM4bReady(taskDir)) {
-          await this.settleBackgroundM4b(parentTaskId, M4B_DONE_LABEL, {
-            status: "ready",
-            path: "full-book.m4b",
-            bytes: fs.statSync(resolveFullBookM4bPath(taskDir)).size,
-            chapterCount: chapterIds.length,
-          }, { force, generationToken });
-          return;
-        }
-        const chapterMeta = await prisma.chapter.findMany({
-          where: { novelId, id: { in: chapterIds } },
-          select: { id: true, title: true, order: true },
-        });
-        const orderById = new Map(chapterMeta.map((c) => [c.id, c]));
-        const novel = await prisma.novel.findUnique({
-          where: { id: novelId },
-          select: { title: true },
-        });
-        const gapMs = resolveBetweenChapterGapMs();
-        const m4b = await encodeFullBookM4b({
-          taskDir,
-          bookTitle: novel?.title?.trim() || parentTitle || "有声书",
-          sourceWavPath: resolveFullBookAudioPath(taskDir),
-          betweenChapterGapMs: gapMs,
-          chapters: chapterIds.map((id, index) => {
-            const meta = orderById.get(id);
-            return {
-              chapterId: id,
-              chapterTitle: meta?.title ?? `第 ${index + 1} 章`,
-              chapterOrder: meta?.order ?? index + 1,
-              wavPath: resolveChapterAudioPath(taskDir, id),
-            };
-          }),
-          signal: controller.signal,
-          generationToken,
-          isGenerationCurrent: () => this.isCurrentM4bGeneration(parentTaskId, generationToken),
-        });
-        if (m4b.status === "ready") {
-          await this.settleBackgroundM4b(
-            parentTaskId,
-            M4B_DONE_LABEL,
-            {
-              status: "ready",
-              path: m4b.relativePath,
-              bytes: m4b.bytes ?? null,
-              chapterCount: m4b.chapterCount ?? null,
-            },
-            { force, generationToken },
-          );
-          return;
-        }
-        const reason = m4b.reason ?? m4b.status;
-        console.warn("[audiobook] background m4b encode not ready", parentTaskId, reason);
+      if (!(await this.isCurrentM4bGeneration(parentTaskId, generationToken))) return;
+      // 先读取并校验持久 marker，再决定是编码还是写入明确失败终态。
+      // marker 的 CAS 是重启恢复的唯一依据，不能只依赖内存中的 Promise。
+      const markerRow = await prisma.audiobookTask.findUnique({
+        where: { id: parentTaskId },
+        select: { resultJson: true, status: true, m4bGenerationToken: true },
+      });
+      if (
+        !markerRow
+        || markerRow.status !== "succeeded"
+        || markerRow.m4bGenerationToken !== generationToken
+      ) return;
+      const settleM4bFailure = async (reason: string): Promise<void> => {
         await this.settleBackgroundM4b(
           parentTaskId,
-          m4b.status === "skipped"
-            ? `有声书生成完成；m4b 未生成（${reason}）`
-            : `有声书生成完成；m4b 失败（${reason}）`,
-          { status: m4b.status === "skipped" ? "skipped" : "failed", reason },
+          `有声书生成完成；m4b 失败（${reason}）`,
+          { status: "failed", reason },
           { force, generationToken },
         );
+      };
+      if (!isFullBookAudioReady(taskDir)) {
+        await settleM4bFailure("全书 WAV 缺失或无效");
+        return;
+      }
+      if (chapterIds.length === 0) {
+        await settleM4bFailure("任务章节列表为空");
+        return;
+      }
+      const missingChapterIds = chapterIds.filter(
+        (chapterId) => !isChapterAudioReady(taskDir, chapterId),
+      );
+      if (missingChapterIds.length > 0) {
+        await settleM4bFailure(`章节 WAV 缺失（${missingChapterIds.slice(0, 5).join(",")}）`);
+        return;
+      }
+
+      const marked = await prisma.audiobookTask.updateMany({
+        where: {
+          id: parentTaskId,
+          status: "succeeded",
+          m4bGenerationToken: generationToken,
+          resultJson: markerRow.resultJson,
+        },
+        data: {
+          currentItemLabel: M4B_ENCODING_LABEL,
+          resultJson: markM4bEncodingInResultJson(markerRow.resultJson),
+          heartbeatAt: new Date(),
+        },
+      });
+      if (marked.count === 0) return;
+
+      if (!force && isFullBookM4bReady(taskDir)) {
+        await this.settleBackgroundM4b(parentTaskId, M4B_DONE_LABEL, {
+          status: "ready",
+          path: "full-book.m4b",
+          bytes: fs.statSync(resolveFullBookM4bPath(taskDir)).size,
+          chapterCount: chapterIds.length,
+        }, { force, generationToken });
+        return;
+      }
+      const chapterMeta = await prisma.chapter.findMany({
+        where: { novelId, id: { in: chapterIds } },
+        select: { id: true, title: true, order: true },
+      });
+      const orderById = new Map(chapterMeta.map((c) => [c.id, c]));
+      const novel = await prisma.novel.findUnique({
+        where: { id: novelId },
+        select: { title: true },
+      });
+      const gapMs = resolveBetweenChapterGapMs();
+      const m4b = await encodeFullBookM4b({
+        taskDir,
+        bookTitle: novel?.title?.trim() || parentTitle || "有声书",
+        sourceWavPath: resolveFullBookAudioPath(taskDir),
+        betweenChapterGapMs: gapMs,
+        chapters: chapterIds.map((id, index) => {
+          const meta = orderById.get(id);
+          return {
+            chapterId: id,
+            chapterTitle: meta?.title ?? `第 ${index + 1} 章`,
+            chapterOrder: meta?.order ?? index + 1,
+            wavPath: resolveChapterAudioPath(taskDir, id),
+          };
+        }),
+        signal: controller.signal,
+        generationToken,
+        isGenerationCurrent: () => this.isCurrentM4bGeneration(parentTaskId, generationToken),
+      });
+      if (m4b.status === "ready") {
+        await this.settleBackgroundM4b(
+          parentTaskId,
+          M4B_DONE_LABEL,
+          {
+            status: "ready",
+            path: m4b.relativePath,
+            bytes: m4b.bytes ?? null,
+            chapterCount: m4b.chapterCount ?? null,
+          },
+          { force, generationToken },
+        );
+        return;
+      }
+      const reason = m4b.reason ?? m4b.status;
+      console.warn("[audiobook] background m4b encode not ready", parentTaskId, reason);
+      if (m4b.status === "skipped") {
+        await this.settleBackgroundM4b(
+          parentTaskId,
+          `有声书生成完成；m4b 未生成（${reason}）`,
+          { status: "skipped", reason },
+          { force, generationToken },
+        );
+      } else {
+        await settleM4bFailure(reason);
+      }
     } catch (error) {
         console.warn(
           "[audiobook] background m4b encode exception",

@@ -130,13 +130,41 @@ type M4bLockWaiter = {
 };
 const M4B_WAITERS = new Map<string, Array<M4bLockWaiter>>();
 
+function m4bAbortError(): Error {
+  const error = new Error("m4b 封装已取消。");
+  error.name = "AbortError";
+  return error;
+}
+
+function wakeNextM4bWaiter(taskDir: string): void {
+  const waiters = M4B_WAITERS.get(taskDir);
+  while (waiters && waiters.length > 0) {
+    const next = waiters.shift();
+    if (!next) break;
+    if (waiters.length === 0) M4B_WAITERS.delete(taskDir);
+    if (next.signal?.aborted) {
+      next.signal.removeEventListener("abort", next.onAbort as EventListener);
+      next.reject(m4bAbortError());
+      continue;
+    }
+    next.signal?.removeEventListener("abort", next.onAbort as EventListener);
+    next.resolve();
+    return;
+  }
+  if (waiters?.length === 0) M4B_WAITERS.delete(taskDir);
+}
+
 async function withTaskDirLock<T>(
   taskDir: string,
   fn: () => Promise<T>,
   signal?: AbortSignal,
 ): Promise<T> {
   if (signal?.aborted) {
-    throw new Error("m4b 封装已取消。");
+    // A waiter can be aborted after its wake-up microtask was queued. The
+    // lock is already free in that narrow window; pass it on rather than
+    // strand every later waiter.
+    if (!IN_FLIGHT_M4B.has(taskDir)) wakeNextM4bWaiter(taskDir);
+    throw m4bAbortError();
   }
   if (!IN_FLIGHT_M4B.has(taskDir)) {
     IN_FLIGHT_M4B.add(taskDir);
@@ -144,39 +172,32 @@ async function withTaskDirLock<T>(
       return await fn();
     } finally {
       IN_FLIGHT_M4B.delete(taskDir);
-      const waiters = M4B_WAITERS.get(taskDir);
-      if (waiters && waiters.length > 0) {
-        const next = waiters.shift();
-        if (waiters.length === 0) M4B_WAITERS.delete(taskDir);
-        next?.signal?.removeEventListener("abort", next.onAbort as EventListener);
-        next?.resolve();
-      } else {
-        M4B_WAITERS.delete(taskDir);
-      }
+      wakeNextM4bWaiter(taskDir);
     }
   }
   // 后到者排队；被唤醒后递归重试获取锁（而不是直接执行 fn），否则第三个及以后的
   // 请求会在第二个请求执行期间看到 IN_FLIGHT 为空而并发进入，锁就失效了。
   await new Promise<void>((resolve, reject) => {
-    const waiter: M4bLockWaiter = {
-      resolve,
-      reject,
-      signal,
-    };
-    waiter.onAbort = () => {
-      const waiters = M4B_WAITERS.get(taskDir);
-      const index = waiters?.indexOf(waiter) ?? -1;
-      if (index >= 0) {
-        waiters?.splice(index, 1);
-        if (waiters?.length === 0) M4B_WAITERS.delete(taskDir);
-      }
-      reject(new Error("m4b 封装已取消。"));
-    };
     const list = M4B_WAITERS.get(taskDir) ?? [];
+    const waiter: M4bLockWaiter = { resolve, reject, signal };
+    const onAbort = () => {
+      const current = M4B_WAITERS.get(taskDir);
+      const index = current?.indexOf(waiter) ?? -1;
+      if (index >= 0) {
+        current?.splice(index, 1);
+        if (current.length === 0) M4B_WAITERS.delete(taskDir);
+      }
+      signal?.removeEventListener("abort", onAbort);
+      reject(m4bAbortError());
+    };
+    waiter.onAbort = onAbort;
     list.push(waiter);
     M4B_WAITERS.set(taskDir, list);
-    signal?.addEventListener("abort", waiter.onAbort!, { once: true });
-    if (signal?.aborted) waiter.onAbort();
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
   return withTaskDirLock(taskDir, fn, signal);
 }

@@ -14,30 +14,68 @@ function resolveDefaultSlots(): number {
   return Math.max(4, os.cpus().length);
 }
 
-class ResourceGate {
+type ResourceGateWaiter = {
+  resolve: () => void;
+  reject: (error: Error) => void;
+  signal?: AbortSignal;
+  onAbort?: () => void;
+};
+
+function resourceGateAbortError(): Error {
+  const error = new Error("resource gate acquire aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+export class ResourceGate {
   private active = 0;
-  private readonly waiters: Array<() => void> = [];
+  private readonly waiters: ResourceGateWaiter[] = [];
 
   constructor(private readonly limit: number) {}
 
-  async acquire(): Promise<void> {
+  async acquire(signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) {
+      throw resourceGateAbortError();
+    }
     if (this.limit <= 0) return;
     if (this.active < this.limit) {
       this.active += 1;
       return;
     }
-    await new Promise<void>((resolve) => {
-      this.waiters.push(resolve);
+    await new Promise<void>((resolve, reject) => {
+      const waiter: ResourceGateWaiter = { resolve, reject, signal };
+      const onAbort = () => {
+        const index = this.waiters.indexOf(waiter);
+        if (index >= 0) this.waiters.splice(index, 1);
+        signal?.removeEventListener("abort", onAbort);
+        reject(resourceGateAbortError());
+      };
+      waiter.onAbort = onAbort;
+      this.waiters.push(waiter);
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+      signal?.addEventListener("abort", onAbort, { once: true });
     });
   }
 
   release(): void {
     if (this.limit <= 0) return;
     this.active = Math.max(0, this.active - 1);
-    const next = this.waiters.shift();
-    if (next) {
+    while (this.waiters.length > 0) {
+      const next = this.waiters.shift();
+      if (!next) return;
+      if (next.signal?.aborted) {
+        next.onAbort?.();
+        continue;
+      }
+      if (next.signal && next.onAbort) {
+        next.signal.removeEventListener("abort", next.onAbort);
+      }
       this.active += 1;
-      next();
+      next.resolve();
+      return;
     }
   }
 
@@ -173,7 +211,11 @@ export class DirectorTaskQueue {
     return command ? { command } : null;
   }
 
-  async acquireResourceGate(novelId: string | null | undefined, commandType: string): Promise<void> {
+  async acquireResourceGate(
+    novelId: string | null | undefined,
+    commandType: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
     const resourceClass = resourceClassForCommand(commandType);
     const key = `${novelId?.trim() || "_global"}:${resourceClass}`;
     let gate = this.gates.get(key);
@@ -182,7 +224,7 @@ export class DirectorTaskQueue {
       gate = new ResourceGate(resolveNumberEnv(envName, PER_NOVEL_RESOURCE_LIMITS[resourceClass] ?? 2));
       this.gates.set(key, gate);
     }
-    await gate.acquire();
+    await gate.acquire(signal);
   }
 
   releaseResourceGate(novelId: string | null | undefined, commandType: string): void {

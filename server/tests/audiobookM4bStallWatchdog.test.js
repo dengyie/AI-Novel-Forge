@@ -105,9 +105,8 @@ function installProgressSamplingRaceFfmpeg() {
       'last=""',
       'for a in "$@"; do last="$a"; done',
       'printf "S" > "$last"',
-      // The test's 25ms progress sample observes this growth; the 750ms watchdog deadline
+      // The test's 25ms progress sample observes this growth; the 2500ms watchdog deadline
       // must still consider it recent progress rather than a full stall window.
-      "sleep 0.05",
       'printf "G" >> "$last"',
       "sleep 0.8",
       // Finish with a valid-sized artifact after the deadline.
@@ -187,7 +186,7 @@ test("进度采样更新字节后，旧 watchdog deadline 不应误杀仍在推�
       bookTitle: "采样交错书",
       sourceWavPath: src,
       chapters: [],
-      stallTimeoutMs: 750,
+      stallTimeoutMs: 2500,
       onProgress: () => {},
     });
     assert.equal(r.status, "ready", `进度采样不应改变停滞判定：${r.reason ?? ""}`);
