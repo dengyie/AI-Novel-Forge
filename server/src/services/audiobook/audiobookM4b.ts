@@ -122,12 +122,22 @@ async function withGlobalM4bPermit<T>(fn: () => Promise<T>, signal?: AbortSignal
  * 同一 taskDir 再次请求 encode 时，后到者等待前一轮跑完（并发真正串行化）。
  */
 const IN_FLIGHT_M4B = new Set<string>();
-const M4B_WAITERS = new Map<string, Array<() => void>>();
+type M4bLockWaiter = {
+  resolve: () => void;
+  reject: (error: Error) => void;
+  signal?: AbortSignal;
+  onAbort?: () => void;
+};
+const M4B_WAITERS = new Map<string, Array<M4bLockWaiter>>();
 
 async function withTaskDirLock<T>(
   taskDir: string,
   fn: () => Promise<T>,
+  signal?: AbortSignal,
 ): Promise<T> {
+  if (signal?.aborted) {
+    throw new Error("m4b 封装已取消。");
+  }
   if (!IN_FLIGHT_M4B.has(taskDir)) {
     IN_FLIGHT_M4B.add(taskDir);
     try {
@@ -138,7 +148,8 @@ async function withTaskDirLock<T>(
       if (waiters && waiters.length > 0) {
         const next = waiters.shift();
         if (waiters.length === 0) M4B_WAITERS.delete(taskDir);
-        next?.();
+        next?.signal?.removeEventListener("abort", next.onAbort as EventListener);
+        next?.resolve();
       } else {
         M4B_WAITERS.delete(taskDir);
       }
@@ -146,12 +157,28 @@ async function withTaskDirLock<T>(
   }
   // 后到者排队；被唤醒后递归重试获取锁（而不是直接执行 fn），否则第三个及以后的
   // 请求会在第二个请求执行期间看到 IN_FLIGHT 为空而并发进入，锁就失效了。
-  await new Promise<void>((resolve) => {
+  await new Promise<void>((resolve, reject) => {
+    const waiter: M4bLockWaiter = {
+      resolve,
+      reject,
+      signal,
+    };
+    waiter.onAbort = () => {
+      const waiters = M4B_WAITERS.get(taskDir);
+      const index = waiters?.indexOf(waiter) ?? -1;
+      if (index >= 0) {
+        waiters?.splice(index, 1);
+        if (waiters?.length === 0) M4B_WAITERS.delete(taskDir);
+      }
+      reject(new Error("m4b 封装已取消。"));
+    };
     const list = M4B_WAITERS.get(taskDir) ?? [];
-    list.push(resolve);
+    list.push(waiter);
     M4B_WAITERS.set(taskDir, list);
+    signal?.addEventListener("abort", waiter.onAbort!, { once: true });
+    if (signal?.aborted) waiter.onAbort();
   });
-  return withTaskDirLock(taskDir, fn);
+  return withTaskDirLock(taskDir, fn, signal);
 }
 
 export function resolveFfmpegBinary(): string | null {
@@ -483,14 +510,30 @@ export async function encodeFullBookM4b(input: {
   stallTimeoutMs?: number;
   /** 可选：封装期间周期性上报 `.part` 增长，喂给 watchdog 推进信号避免误杀。 */
   onProgress?: M4bProgressCallback | null;
+  /** 持久化代际；传入时 rename 前必须确认 worker 仍属于当前代。 */
+  generationToken?: string | null;
+  isGenerationCurrent?: (generationToken: string) => Promise<boolean> | boolean;
 }): Promise<AudiobookM4bEncodeResult> {
   // 同 taskDir 并发互斥：pause/restart/后台队列多个入口可能同时请求同一本书的 m4b，
   // 各自 spawn 会各读一遍整部 WAV 成倍放大资源占用。后到请求排队，前一轮跑完后
   // 再执行（此时若已 ready 则复用产物）。
-  return withTaskDirLock(
-    input.taskDir,
-    () => withGlobalM4bPermit(() => encodeFullBookM4bUnlocked(input), input.signal),
-  );
+  try {
+    return await withTaskDirLock(
+      input.taskDir,
+      () => withGlobalM4bPermit(() => encodeFullBookM4bUnlocked(input), input.signal),
+      input.signal,
+    );
+  } catch (error) {
+    if (input.signal?.aborted) {
+      return {
+        status: "failed",
+        path: null,
+        relativePath: null,
+        reason: "m4b 封装已取消。",
+      };
+    }
+    throw error;
+  }
 }
 
 /** encodeFullBookM4b 的实际实现；由 withTaskDirLock 串行化（见公开包装器）。 */
@@ -619,6 +662,17 @@ async function encodeFullBookM4bUnlocked(
         relativePath: null,
         reason: `ffmpeg 封装 m4b 失败：${runResult.stderr || `exit ${runResult.status}`}`,
       };
+    }
+    if (input.generationToken && input.isGenerationCurrent) {
+      const current = await input.isGenerationCurrent(input.generationToken);
+      if (!current) {
+        return {
+          status: "failed",
+          path: null,
+          relativePath: null,
+          reason: "m4b 封装代际已失效，丢弃旧 worker 产物。",
+        };
+      }
     }
     fs.renameSync(partPath, outPath);
     const bytes = fs.statSync(outPath).size;

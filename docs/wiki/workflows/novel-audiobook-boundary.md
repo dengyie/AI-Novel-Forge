@@ -100,6 +100,30 @@ m4b 是单次长时 ffmpeg 任务，进度日志会周期性采样 `.part` 文�
 4. 章 WAV → 全书 WAV → 可选 m4b
 5. `succeeded` + 相对 `fullAudioPath` / `resultJson.m4b` / 质量警告
 
+## m4b 后台代际与并发边界
+
+### 背景
+
+m4b 封装在任务主流水线完成后异步运行，可能跨越章节重做、续生成、重试或服务重启。
+如果旧 worker 只依据 `taskId` 和状态写回，旧的 `full-book.m4b` 可能在新一轮音频产物之后覆盖规范文件，
+并把前端投影误报为 ready。
+
+### 当前规则
+
+- `AudiobookTask.m4bGenerationToken` 是持久化的代际栅栏。新建、重试、恢复、续生成、章节重做和 m4b 重做都会签发新 token。
+- 后台 worker 在启动、`full-book.m4b` rename 前和数据库 settle 前都校验 token；settle 还必须满足 `status=succeeded`，
+  因此旧 worker 的成功、失败或取消结果都不能覆盖新代 `resultJson`。
+- 代际轮换先于破坏性清理发生，并立即 abort 当前进程内的 ffmpeg；跨重启的孤儿进程依靠旧 token CAS 被拒绝，启动恢复还会清理孤儿进程并轮换 token。
+- 同一任务目录的 m4b 编码使用模块级互斥。等待中的 worker 绑定自己的 `AbortSignal`，代际失效后会从等待队列移除，
+  不会在旧锁释放后再次占用编码执行权。
+- `resultJson` 的 m4b settle 必须读改写并保留其它字段；仅由 token + 状态/label CAS 决定是否提交。
+- 迁移前的 `NULL` 或空字符串 token 必须作为精确 CAS 值处理，不能把它们混同为缺少栅栏；首次执行会在成功抢占时签发真实 UUID。
+
+### 失败模式
+
+若发现磁盘上有旧 m4b、但任务投影没有对应状态，先检查任务的 `m4bGenerationToken`、后台 settle CAS 日志和同目录 `.part` 文件。
+不要通过手工复制或直接改状态恢复；应使用 m4b 重做、章节重做或任务恢复入口，让新代际完成清理和投影收口。
+
 取消优先于 failed/succeeded（CAS）。
 
 ## 关键代码

@@ -408,6 +408,9 @@ export interface RunAudiobookPipelineInput {
    * 用 subset concat 覆写父 full-book.wav 会造成静默数据损坏（全书只剩子集章）。
    * 父任务在所有章 ready 后由 reconcileParent 重拼全书。 */
   isContinueChild?: boolean;
+  /** m4b 后台/重跑代际；rename 前由任务服务用持久化 token 校验。 */
+  generationToken?: string | null;
+  isGenerationCurrent?: (generationToken: string) => Promise<boolean> | boolean;
 }
 
 export interface RunAudiobookPipelineResult {
@@ -1259,6 +1262,8 @@ export class AudiobookPipelineService {
       sourceWavPath: fullAudioPath,
       betweenChapterGapMs: resolveBetweenChapterGapMs(),
       signal: input.signal,
+      generationToken: input.generationToken,
+      isGenerationCurrent: input.isGenerationCurrent,
       chapters: orderedChapters.map((chapter) => {
         const found = chapterAudioPaths.find((item) => item.chapterId === chapter.id);
         return {

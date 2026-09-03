@@ -71,6 +71,7 @@ function makeTaskRow(overrides = {}, taskDir) {
     lastTokenRecordedAt: null,
     createdAt: new Date(),
     updatedAt: new Date(),
+    m4bGenerationToken: "generation-old",
     ...overrides,
   };
 }
@@ -197,6 +198,8 @@ test("redoTaskM4b: succeeded + WAV 在 + m4b 缺 → 重置 label/清 resultJson
     assert.ok(reset, "应有重置为「封装中」的 updateMany");
     assert.equal(JSON.parse(reset.data.resultJson).m4b.status, "encoding", "应把 m4b 标记为可恢复的封装中状态");
     assert.equal(reset.where.id, "at-1");
+    assert.equal(reset.where.m4bGenerationToken, "generation-old");
+    assert.notEqual(reset.data.m4bGenerationToken, "generation-old", "重做必须轮换 m4b 代际");
   } finally {
     prisma.audiobookTask.findUnique = originals.taskFindUnique;
     prisma.audiobookTask.updateMany = originals.taskUpdateMany;
