@@ -27,10 +27,21 @@ export interface AudiobookM4bEncodeResult {
 
 const M4B_RELATIVE = "full-book.m4b";
 
-/** 默认 40 分钟；可用 AUDIOBOOK_M4B_FFMPEG_TIMEOUT_MS 覆盖。 */
-const DEFAULT_FFMPEG_TIMEOUT_MS = Math.max(
-  60_000,
-  Number(process.env.AUDIOBOOK_M4B_FFMPEG_TIMEOUT_MS ?? 40 * 60_000) || 40 * 60_000,
+/**
+ * 编码超时语义（根因修复 2026-09-03）：从「绝对墙钟时长」改为「停滞看门狗」。
+ *
+ * 旧模型：超时 = 固定 `timeoutMs`，一遍到就 kill。生产实测（《神通者》2GB WAV、
+ * 降权+限 2 线程）推进中的 ffmpeg 跑到 ~37min 逼近 40min 绝对超时被误杀，而它
+ * 明明在稳定往 `.part` 写盘（每次都被掐断后不得不全量重编码）。
+ *
+ * 新模型：只要 `.part` 仍在增长就视为健康，永不因“慢”被 kill；仅当 `.part`
+ * 连续停滞超过 `stallTimeoutMs`（默认 5 分钟）才判真忙/真挂，kill 并报错。
+ * 既保证大书/降权场景能跑完，又不丢失“ffmpeg 卡死”的资源保护。
+ */
+/** 停滞看门窗口：`.part` 连续不变超过它即掐。默认 5 分钟，可用 AUDIOBOOK_M4B_STALL_TIMEOUT_MS 覆盖。 */
+const DEFAULT_STALL_TIMEOUT_MS = Math.max(
+  30_000,
+  Number(process.env.AUDIOBOOK_M4B_STALL_TIMEOUT_MS ?? 5 * 60_000) || 5 * 60_000,
 );
 
 /**
@@ -267,7 +278,8 @@ function resolveFfmpegOutputPath(args: string[], explicitPartPath: string | null
 function runFfmpeg(input: {
   ffmpeg: string;
   args: string[];
-  timeoutMs: number;
+  /** 停滞看门窗口：`.part` 连续不变超过它即掐。默认 AUDIOBOOK_M4B_STALL_TIMEOUT_MS。 */
+  stallTimeoutMs?: number;
   signal?: AbortSignal;
   /** 可选：封装期间周期性上报 `.part` 文件增长，供 watchdog 推进信号。 */
   onProgress?: M4bProgressCallback | null;
@@ -300,10 +312,13 @@ function runFfmpeg(input: {
     let stderr = "";
     let settled = false;
     let progressTimer: NodeJS.Timeout | null = null;
+    let watchdogTimer: NodeJS.Timeout | null = null;
     const startedAt = Date.now();
     let lastPartBytes = 0;
+    // 停滞窗口：调用方可显式给 stallTimeoutMs，缺省用模块默认。
+    const stallMs = input.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS;
     const cleanup = () => {
-      clearTimeout(timer);
+      if (watchdogTimer) clearTimeout(watchdogTimer);
       input.signal?.removeEventListener("abort", onAbort);
       if (progressTimer) clearInterval(progressTimer);
     };
@@ -319,24 +334,57 @@ function runFfmpeg(input: {
       cleanup();
       reject(error);
     };
-    const onAbort = () => {
+    const killAndFail = (message: string) => {
       try {
         child.kill("SIGKILL");
       } catch {
         // ignore
       }
-      fail(new Error("m4b 封装已取消。"));
+      fail(new Error(message));
     };
-    const timer = setTimeout(() => {
+    const onAbort = () => {
+      killAndFail("m4b 封装已取消。");
+    };
+
+    const readPartBytes = (): number => {
       try {
-        child.kill("SIGKILL");
+        if (partPath && fs.existsSync(partPath)) {
+          return fs.statSync(partPath).size;
+        }
       } catch {
         // ignore
       }
-      fail(new Error(`ffmpeg 封装 m4b 超时（>${input.timeoutMs}ms）。`));
-    }, input.timeoutMs);
+      return lastPartBytes;
+    };
 
-    // 每 10s 上报 `.part` 大小（>=0 即真推进）。onProgress 抛错绝不中断 ffmpeg。
+    /** 停滞看门狗：只要 `.part` 有增长就重置；连续停滞超过 stallTimeoutMs 判死。 */
+    const scheduleWatchdog = () => {
+      if (watchdogTimer) clearTimeout(watchdogTimer);
+      watchdogTimer = setTimeout(() => {
+        const grew = () => {
+          const nowBytes = readPartBytes();
+          if (nowBytes > lastPartBytes) {
+            lastPartBytes = nowBytes;
+            return true;
+          }
+          return false;
+        };
+        // 若推进中则续命；否则已连续停滞整个窗口 → 判真挂
+        if (grew()) {
+          scheduleWatchdog();
+        } else {
+          killAndFail(
+            `ffmpeg 封装 m4b 停滞（>${Math.round(stallMs / 1000)}s 无产物产出）。`,
+          );
+        }
+      }, stallMs);
+    };
+    // 造秒起点即排第一枪：若从头就一点 ".part" 都不写（如输入无效/FFmpeg 无法启动），
+    // 停滞窗口走完直接 kill；若已开始写，增长会 reset 窗口。
+    scheduleWatchdog();
+
+    // 每 10s 取样 `.part` 字节数并上报 onProgress（>=0 即真推进）。
+    // 仅用 dirty 读取观察变化，实际 stall 判定由停滞看门狗（stallTimeoutMs）驱动。
     if (typeof input.onProgress === "function" && partPath) {
       progressTimer = setInterval(() => {
         let partBytes = lastPartBytes;
@@ -385,7 +433,8 @@ export async function encodeFullBookM4b(input: {
   /** 章间静音，默认与全书合并一致 */
   betweenChapterGapMs?: number;
   signal?: AbortSignal;
-  timeoutMs?: number;
+  /** 停滞看门窗口：`.part` 连续不变超过它即掐。默认 AUDIOBOOK_M4B_STALL_TIMEOUT_MS。 */
+  stallTimeoutMs?: number;
   /** 可选：封装期间周期性上报 `.part` 增长，喂给 watchdog 推进信号避免误杀。 */
   onProgress?: M4bProgressCallback | null;
 }): Promise<AudiobookM4bEncodeResult> {
@@ -499,7 +548,7 @@ async function encodeFullBookM4bUnlocked(
       runResult = await runFfmpeg({
         ffmpeg,
         args,
-        timeoutMs: Math.max(5_000, input.timeoutMs ?? DEFAULT_FFMPEG_TIMEOUT_MS),
+        stallTimeoutMs: input.stallTimeoutMs,
         signal: input.signal,
         onProgress: input.onProgress,
         partPath,
