@@ -314,7 +314,10 @@ function runFfmpeg(input: {
     let progressTimer: NodeJS.Timeout | null = null;
     let watchdogTimer: NodeJS.Timeout | null = null;
     const startedAt = Date.now();
-    let lastPartBytes = 0;
+    // 看门狗和进度日志是两个独立的观察者：进度采样不能推进停滞判定的基线。
+    let lastObservedBytes = 0;
+    let lastGrowthAt = startedAt;
+    let lastProgressBytes = 0;
     // 停滞窗口：调用方可显式给 stallTimeoutMs，缺省用模块默认。
     const stallMs = input.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS;
     const cleanup = () => {
@@ -346,7 +349,7 @@ function runFfmpeg(input: {
       killAndFail("m4b 封装已取消。");
     };
 
-    const readPartBytes = (): number => {
+    const readPartBytes = (fallbackBytes: number): number => {
       try {
         if (partPath && fs.existsSync(partPath)) {
           return fs.statSync(partPath).size;
@@ -354,30 +357,30 @@ function runFfmpeg(input: {
       } catch {
         // ignore
       }
-      return lastPartBytes;
+      return fallbackBytes;
     };
 
     /** 停滞看门狗：只要 `.part` 有增长就重置；连续停滞超过 stallTimeoutMs 判死。 */
-    const scheduleWatchdog = () => {
+    const scheduleWatchdog = (delayMs = stallMs) => {
       if (watchdogTimer) clearTimeout(watchdogTimer);
       watchdogTimer = setTimeout(() => {
-        const grew = () => {
-          const nowBytes = readPartBytes();
-          if (nowBytes > lastPartBytes) {
-            lastPartBytes = nowBytes;
-            return true;
-          }
-          return false;
-        };
-        // 若推进中则续命；否则已连续停滞整个窗口 → 判真挂
-        if (grew()) {
-          scheduleWatchdog();
+        const now = Date.now();
+        const nowBytes = readPartBytes(lastObservedBytes);
+        if (nowBytes > lastObservedBytes) {
+          lastObservedBytes = nowBytes;
+          lastGrowthAt = now;
+        }
+        const remainingMs = stallMs - (now - lastGrowthAt);
+        // 若推进中则从最近一次 watchdog 观察到的增长重新计时；否则已连续
+        // 停滞整个窗口 → 判真挂。进度采样不会改变上述两个看门狗状态。
+        if (remainingMs > 0) {
+          scheduleWatchdog(remainingMs);
         } else {
           killAndFail(
             `ffmpeg 封装 m4b 停滞（>${Math.round(stallMs / 1000)}s 无产物产出）。`,
           );
         }
-      }, stallMs);
+      }, delayMs);
     };
     // 造秒起点即排第一枪：若从头就一点 ".part" 都不写（如输入无效/FFmpeg 无法启动），
     // 停滞窗口走完直接 kill；若已开始写，增长会 reset 窗口。
@@ -387,15 +390,8 @@ function runFfmpeg(input: {
     // 仅用 dirty 读取观察变化，实际 stall 判定由停滞看门狗（stallTimeoutMs）驱动。
     if (typeof input.onProgress === "function" && partPath) {
       progressTimer = setInterval(() => {
-        let partBytes = lastPartBytes;
-        try {
-          if (fs.existsSync(partPath)) {
-            partBytes = fs.statSync(partPath).size;
-          }
-        } catch {
-          partBytes = lastPartBytes;
-        }
-        lastPartBytes = partBytes;
+        const partBytes = readPartBytes(lastProgressBytes);
+        lastProgressBytes = partBytes;
         try {
           input.onProgress?.({ partBytes, elapsedMs: Date.now() - startedAt });
         } catch {

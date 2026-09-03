@@ -88,6 +88,55 @@ function installStallFfmpeg() {
   return script;
 }
 
+/**
+ * Race fixture: grow once before the progress sample, then finish after the
+ * original watchdog deadline. The sample updates the shared byte baseline in
+ * the buggy implementation, so that deadline sees no growth and kills the
+ * still-healthy process.
+ */
+function installProgressSamplingRaceFfmpeg() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ab-stall-ffmpeg-"));
+  const script = path.join(dir, "progress-sampling-race.sh");
+  fs.writeFileSync(
+    script,
+    [
+      "#!/bin/sh",
+      "exec >/dev/null 2>&1",
+      'last=""',
+      'for a in "$@"; do last="$a"; done',
+      'printf "S" > "$last"',
+      // The test's 25ms progress sample observes this growth; the 750ms watchdog deadline
+      // must still consider it recent progress rather than a full stall window.
+      "sleep 0.05",
+      'printf "G" >> "$last"',
+      "sleep 0.8",
+      // Finish with a valid-sized artifact after the deadline.
+      'printf "%064d" 0 >> "$last"',
+      "exit 0",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  return script;
+}
+
+/** 假 ffmpeg 不创建任何产物，验证首字节未产生时仍会被看门狗回收。 */
+function installNoOutputFfmpeg() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ab-stall-ffmpeg-"));
+  const script = path.join(dir, "no-output.sh");
+  fs.writeFileSync(
+    script,
+    [
+      "#!/bin/sh",
+      "exec >/dev/null 2>&1",
+      "while :; do sleep 0.05; done",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  return script;
+}
+
 function writeSrcWav(p) {
   fs.mkdirSync(path.dirname(p), { recursive: true });
   fs.writeFileSync(p, Buffer.alloc(64)); // 假源文件，内容无所谓
@@ -114,6 +163,60 @@ test("慢但持续推进的编码不会因绝对时长被误杀（stall 看门�
     const canonical = path.join(taskDir, "full-book.m4b");
     assert.ok(fs.existsSync(canonical), "规范名产物存在");
     assert.ok(fs.statSync(canonical).size > 1, "产物有实际内容");
+  } finally {
+    if (oldPath === undefined) delete process.env.AUDIOBOOK_FFMPEG_PATH;
+    else process.env.AUDIOBOOK_FFMPEG_PATH = oldPath;
+  }
+});
+
+test("进度采样更新字节后，旧 watchdog deadline 不应误杀仍在推进的编码", async () => {
+  const fake = installProgressSamplingRaceFfmpeg();
+  const oldPath = process.env.AUDIOBOOK_FFMPEG_PATH;
+  process.env.AUDIOBOOK_FFMPEG_PATH = fake;
+  const taskDir = makeTaskDir("progress-sampling-race");
+  const src = path.join(taskDir, "src.wav");
+  writeSrcWav(src);
+  // 仅缩短本测试中的采样周期，避免用数秒固定 sleep 让 CI 回归测试变慢；
+  // 生产采样周期和其 5s 下限保持不变。
+  const realSetInterval = global.setInterval;
+  global.setInterval = (callback) => realSetInterval(callback, 25);
+
+  try {
+    const r = await encodeFullBookM4b({
+      taskDir,
+      bookTitle: "采样交错书",
+      sourceWavPath: src,
+      chapters: [],
+      stallTimeoutMs: 750,
+      onProgress: () => {},
+    });
+    assert.equal(r.status, "ready", `进度采样不应改变停滞判定：${r.reason ?? ""}`);
+    assert.ok(fs.existsSync(path.join(taskDir, "full-book.m4b")));
+  } finally {
+    global.setInterval = realSetInterval;
+    if (oldPath === undefined) delete process.env.AUDIOBOOK_FFMPEG_PATH;
+    else process.env.AUDIOBOOK_FFMPEG_PATH = oldPath;
+  }
+});
+
+test("首字节未产生超过 stall 窗口 → 看门狗判死并回收 ffmpeg", async () => {
+  const fake = installNoOutputFfmpeg();
+  const oldPath = process.env.AUDIOBOOK_FFMPEG_PATH;
+  process.env.AUDIOBOOK_FFMPEG_PATH = fake;
+  const taskDir = makeTaskDir("no-output");
+  const src = path.join(taskDir, "src.wav");
+  writeSrcWav(src);
+
+  try {
+    const r = await encodeFullBookM4b({
+      taskDir,
+      bookTitle: "无首字节书",
+      sourceWavPath: src,
+      chapters: [],
+      stallTimeoutMs: 800,
+    });
+    assert.equal(r.status, "failed", "首字节始终未产生应被判 failed");
+    assert.match(r.reason ?? "", /停滞/);
   } finally {
     if (oldPath === undefined) delete process.env.AUDIOBOOK_FFMPEG_PATH;
     else process.env.AUDIOBOOK_FFMPEG_PATH = oldPath;
