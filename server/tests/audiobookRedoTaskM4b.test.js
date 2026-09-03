@@ -195,7 +195,7 @@ test("redoTaskM4b: succeeded + WAV 在 + m4b 缺 → 重置 label/清 resultJson
       (a) => a.data && a.data.currentItemLabel === M4B_ENCODING_LABEL,
     );
     assert.ok(reset, "应有重置为「封装中」的 updateMany");
-    assert.equal(reset.data.resultJson, "{}", "应清掉旧 m4b 失败结论");
+    assert.equal(JSON.parse(reset.data.resultJson).m4b.status, "encoding", "应把 m4b 标记为可恢复的封装中状态");
     assert.equal(reset.where.id, "at-1");
   } finally {
     prisma.audiobookTask.findUnique = originals.taskFindUnique;

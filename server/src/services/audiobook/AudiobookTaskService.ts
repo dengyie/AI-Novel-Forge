@@ -541,6 +541,22 @@ type AudiobookTaskRow = {
 const M4B_ENCODING_LABEL = "有声书生成完成（m4b 后台封装中）";
 const M4B_DONE_LABEL = "有声书生成完成（含 m4b）";
 
+export type BackgroundM4bState = "encoding" | "ready" | "skipped" | "failed";
+
+/** 读取可跨进程识别的 m4b 后台状态；encoding 是唯一需要启动恢复的状态。 */
+export function readBackgroundM4bState(resultJson: string | null | undefined): BackgroundM4bState | null {
+  if (!resultJson?.trim()) return null;
+  try {
+    const parsed = JSON.parse(resultJson) as { m4b?: { status?: unknown } };
+    const status = parsed?.m4b?.status;
+    return status === "encoding" || status === "ready" || status === "skipped" || status === "failed"
+      ? status
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 function parseM4bStatusFromResultJson(resultJson: string | null | undefined): AudiobookTaskSummary["m4bStatus"] {
   if (!resultJson?.trim()) {
     return null;
@@ -592,6 +608,24 @@ function mergeM4bIntoResultJson(
       bytes: m4b.bytes ?? null,
       chapterCount: m4b.chapterCount ?? null,
     },
+  });
+}
+
+function markM4bEncodingInResultJson(resultJson: string | null | undefined): string {
+  let base: Record<string, unknown> = {};
+  if (resultJson?.trim()) {
+    try {
+      const parsed = JSON.parse(resultJson) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        base = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // 由结构化 m4b 状态重建，避免损坏的历史 resultJson 阻断恢复标记。
+    }
+  }
+  return JSON.stringify({
+    ...base,
+    m4b: { ...(typeof base.m4b === "object" && base.m4b ? base.m4b as Record<string, unknown> : {}), status: "encoding" },
   });
 }
 
@@ -1132,7 +1166,7 @@ export class AudiobookTaskService {
       where: { id: taskId, status: "succeeded" },
       data: {
         currentItemLabel: M4B_ENCODING_LABEL,
-        resultJson: clearedResultJson,
+        resultJson: markM4bEncodingInResultJson(clearedResultJson),
         heartbeatAt: new Date(),
       },
     });
@@ -1514,7 +1548,11 @@ export class AudiobookTaskService {
       // 恢复路径并发调用。无 CAS 时被取消的父会被迟到的子回调覆写成 succeeded/failed
       //（用户取消的任务谎报「生成完成」）。终态一旦落定即不可再被本函数改写。
       const claimed = await prisma.audiobookTask.updateMany({
-        where: { id: parent.id, status: { in: ["running", "queued"] } },
+        where: {
+          id: parent.id,
+          status: { in: ["running", "queued"] },
+          resultJson: parent.resultJson,
+        },
         data: {
           progressJson: JSON.stringify(nextProgress),
           progress: 100,
@@ -1523,6 +1561,9 @@ export class AudiobookTaskService {
           status: "succeeded",
           currentStage: "finalizing",
           currentItemLabel: successLabel,
+          resultJson: fullAudioReady && !m4bAlreadyReady
+            ? markM4bEncodingInResultJson(parent.resultJson)
+            : parent.resultJson,
           error: null,
           finishedAt: new Date(),
           heartbeatAt: new Date(),
@@ -1580,7 +1621,7 @@ export class AudiobookTaskService {
    * 父已 succeeded 后后台封装 m4b：不 await、不占 processQueue。
    * 成功后 CAS 更新 label（仅当仍 succeeded 且文案仍是后台中）；失败只 warn。
    */
-  private scheduleBackgroundM4bEncode(input: {
+  private async scheduleBackgroundM4bEncode(input: {
     parentTaskId: string;
     novelId: string;
     parentTitle: string;
@@ -1588,12 +1629,37 @@ export class AudiobookTaskService {
     chapterIds: string[];
     /** 重做场景：即使旧 label 不是「封装中」，也放宽容对象落库新 m4b 结论 */
     force?: boolean;
-  }): void {
+  }): Promise<void> {
     const { parentTaskId, novelId, parentTitle, taskDir, chapterIds, force } = input;
-    void (async () => {
-      try {
-        if (!force && isFullBookM4bReady(taskDir)) return;
-        if (!isFullBookAudioReady(taskDir)) return;
+    try {
+      if (!force && isFullBookM4bReady(taskDir)) {
+        await this.settleBackgroundM4b(parentTaskId, M4B_DONE_LABEL, {
+          status: "ready",
+          path: "full-book.m4b",
+          bytes: fs.statSync(resolveFullBookM4bPath(taskDir)).size,
+          chapterCount: chapterIds.length,
+        });
+        return;
+      }
+      if (!isFullBookAudioReady(taskDir)) return;
+
+      // 先把「正在封装」写入持久 resultJson，再启动 ffmpeg。进程若在编码中退出，
+      // 下次启动可从 succeeded + m4b.encoding 重新发现，而不是依赖内存中的 Promise。
+      const markerRow = await prisma.audiobookTask.findUnique({
+        where: { id: parentTaskId },
+        select: { resultJson: true, status: true },
+      });
+      if (!markerRow || markerRow.status !== "succeeded") return;
+      const marked = await prisma.audiobookTask.updateMany({
+        where: { id: parentTaskId, status: "succeeded", resultJson: markerRow.resultJson },
+        data: {
+          currentItemLabel: M4B_ENCODING_LABEL,
+          resultJson: markM4bEncodingInResultJson(markerRow.resultJson),
+          heartbeatAt: new Date(),
+        },
+      });
+      if (marked.count === 0) return;
+
         const chapterMeta = await prisma.chapter.findMany({
           where: { novelId, id: { in: chapterIds } },
           select: { id: true, title: true, order: true },
@@ -1643,7 +1709,7 @@ export class AudiobookTaskService {
           { status: m4b.status === "skipped" ? "skipped" : "failed", reason },
           { force },
         );
-      } catch (error) {
+    } catch (error) {
         console.warn(
           "[audiobook] background m4b encode exception",
           parentTaskId,
@@ -1661,8 +1727,7 @@ export class AudiobookTaskService {
         } catch (labelError) {
           console.warn("[audiobook] m4b failure label update failed", parentTaskId, labelError);
         }
-      }
-    })();
+    }
   }
 
   /**
@@ -1688,6 +1753,7 @@ export class AudiobookTaskService {
       where: {
         id: parentTaskId,
         status: "succeeded",
+        ...(row ? { resultJson: row.resultJson } : { id: "__missing__" }),
         // 首次后台收口只覆盖「仍在封装中」的 label（幂等 CAS）；
         // force（重做 m4b）放宽容对象为任何 succeeded 终态——此时 label 已是
         // 失败/跳过文案，原 CAS 永远不命中，必须先清掉旧失败结论再落新态。
@@ -1816,10 +1882,14 @@ export class AudiobookTaskService {
   async resumePendingTasks(): Promise<void> {
     try {
       const rows = await prisma.audiobookTask.findMany({
-        where: { status: { in: ["queued", "running"] } },
+        where: { status: { in: ["queued", "running", "succeeded"] } },
         select: {
           id: true,
           novelId: true,
+          title: true,
+          chapterIdsJson: true,
+          status: true,
+          resultJson: true,
           outputDir: true,
           progress: true,
           progressJson: true,
@@ -1851,7 +1921,37 @@ export class AudiobookTaskService {
       // 续生成期间：父任务 status=running + currentStage="continuing"（仅子任务干活）不可重入父流水线，
       // 否则重启会把父当正常 running 重跑全书、覆盖 currentStage/annotationsJson/resultJson，并与子任务抢队列。
       // 续生成子任务（progressJson.parentTaskId 非空）正常恢复。
-      const pending = rows.filter((row) => !row.cancelRequestedAt);
+      const pending = rows.filter((row) => !row.cancelRequestedAt && row.status !== "succeeded");
+      const m4bRecoveries = rows.filter((row) => (
+        row.status === "succeeded"
+        && !row.cancelRequestedAt
+        && readBackgroundM4bState(row.resultJson) === "encoding"
+      ));
+
+      // m4b 是父任务 succeeded 后的独立后台工作，不得重新跑整条 TTS 管线。
+      // 只凭持久 resultJson.m4b=encoding 识别，进程重启后仍可恢复。
+      for (const row of m4bRecoveries) {
+        const taskDir = row.outputDir?.trim() || resolveAudiobookTaskDir(row.novelId, row.id);
+        try {
+          await killOrphanM4bFfmpeg(taskDir);
+          const chapterIds = parseChapterIds(row.chapterIdsJson);
+          if (chapterIds.length > 0) {
+            void this.scheduleBackgroundM4bEncode({
+              parentTaskId: row.id,
+              novelId: row.novelId,
+              parentTitle: row.title,
+              taskDir,
+              chapterIds,
+            });
+          }
+        } catch (error) {
+          console.warn(
+            "[audiobook] resumePendingTasks m4b recovery failed",
+            row.id,
+            error instanceof Error ? error.message : error,
+          );
+        }
+      }
       const continuingParents = pending.filter((row) => row.currentStage === "continuing");
       const resumables = pending.filter((row) => row.currentStage !== "continuing");
 
@@ -1893,7 +1993,7 @@ export class AudiobookTaskService {
         try {
           const taskDir = row.outputDir?.trim()
             || resolveAudiobookTaskDir(row.novelId, row.id);
-          killOrphanM4bFfmpeg(taskDir);
+          await killOrphanM4bFfmpeg(taskDir);
         } catch (error) {
           console.warn(
             "[audiobook] resumePendingTasks killOrphanM4bFfmpeg 失败",
@@ -2945,42 +3045,63 @@ export class AudiobookTaskService {
  * 只匹配 cmdline 含该 taskDir 绝对路径（且含 ffmpeg）的进程，绝不匹配其它 taskDir——
  * 每个 taskDir 含唯一 taskId，天然隔离。best-effort：任何失败仅 warn，不阻断执行器。
  */
-export function killOrphanM4bFfmpeg(taskDir: string): void {
-  const pattern = taskDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const killByPid = (pids: string[]): void => {
-    for (const raw of pids) {
-      const pid = Number.parseInt(raw, 10);
-      if (!Number.isFinite(pid) || pid <= 0 || pid === process.pid) continue;
-      try {
-        process.kill(pid, "SIGKILL");
-      } catch {
-        // 进程已退出或无权限，忽略
-      }
-    }
-  };
-  execFile(
-    "pgrep",
-    ["-f", pattern],
-    { timeout: 5000 },
-    (error, stdout) => {
-      if (error && (error as NodeJS.ErrnoException).code !== "1") {
-        // pgrep 退出码 1 = 无匹配，正常；其它错误（pgrep 不存在等）才 warn。
-        console.warn(
-          "[audiobook] killOrphanM4bFfmpeg pgrep 失败",
-          taskDir,
-          (error as Error).message,
-        );
-        return;
-      }
-      const pids = stdout.split("\n").map((s) => s.trim()).filter(Boolean);
-      if (pids.length === 0) return;
-      killByPid(pids);
-      console.warn(
-        `[audiobook] 已清理 ${pids.length} 个孤儿 ffmpeg（写 ${taskDir} 的 m4b part）`,
-        pids.join(","),
-      );
-    },
-  );
+export function selectOrphanM4bPids(
+  psOutput: string,
+  taskDir: string,
+  selfPid = process.pid,
+): number[] {
+  const target = taskDir.trim();
+  if (!target) return [];
+  const result: number[] = [];
+  for (const line of psOutput.split("\n")) {
+    const match = /^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/.exec(line);
+    if (!match) continue;
+    const pid = Number(match[1]);
+    const ppid = Number(match[2]);
+    const command = match[3];
+    if (!Number.isInteger(pid) || pid <= 0 || pid === selfPid || ppid !== 1) continue;
+    const executable = command.split(/\s+/, 1)[0].split(/[\\/]/).pop() ?? "";
+    if (executable !== "ffmpeg") continue;
+    if (!command.includes(target) || !command.includes("full-book.m4b") || !command.includes(".part")) continue;
+    result.push(pid);
+  }
+  return result;
+}
+
+export function killOrphanM4bFfmpeg(taskDir: string): Promise<void> {
+  return new Promise((resolve) => {
+    execFile(
+      "ps",
+      ["-axo", "pid=,ppid=,command="],
+      { timeout: 5000 },
+      (error, stdout) => {
+        if (error) {
+          console.warn(
+            "[audiobook] killOrphanM4bFfmpeg ps 失败",
+            taskDir,
+            (error as Error).message,
+          );
+          resolve();
+          return;
+        }
+        const pids = selectOrphanM4bPids(stdout, taskDir);
+        for (const pid of pids) {
+          try {
+            process.kill(pid, "SIGKILL");
+          } catch {
+            // 进程已退出或无权限，忽略
+          }
+        }
+        if (pids.length > 0) {
+          console.warn(
+            `[audiobook] 已清理 ${pids.length} 个孤儿 ffmpeg（写 ${taskDir} 的 m4b part）`,
+            pids.join(","),
+          );
+        }
+        resolve();
+      },
+    );
+  });
 }
 
 export const audiobookTaskService = new AudiobookTaskService();

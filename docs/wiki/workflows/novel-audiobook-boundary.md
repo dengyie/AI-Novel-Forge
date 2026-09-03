@@ -27,11 +27,14 @@
   - 章合并 `chapter.wav` → 全书 `full-book.wav`（流式 PCM 拼接）
   - **段间语义停顿**（`AUDIOBOOK_GAP_MS` + `audiobookGap.ts`）：旁白↔角色 420ms、角色↔角色 320ms、同说话人续块 180ms；短句(≤15字) +120ms；章间 700ms。合并时插入静音，不改 TTS 产物。
   - **m4b 可选封装**（`audiobookM4b.ts`）：全书 WAV → `full-book.m4b`（AAC 96k + 章节 ffmetadata）；无 ffmpeg → `skipped`，WAV 仍成功；失败/跳过写入 qualityWarnings
+  - m4b 后台状态必须先持久化为 `resultJson.m4b.status=encoding`，再启动 ffmpeg；启动恢复扫描 `succeeded + encoding` 任务并重新排队，不依赖进程内 Promise。
+  - m4b 编码受进程级有界队列保护，默认 `AUDIOBOOK_M4B_CONCURRENCY=1`（合法正整数可调）；同一 taskDir 仍保持额外互斥。
   - resume：已有 annotation / 合法 chapter.wav / 连续合法 chunk 则跳过
 - 产物路径：`storage/audiobooks/{novelId}/{taskId}/`（磁盘，非 PG base64；id 段拒绝 `..`/`/`）
 - clone 参考音频：`storage/voice-refs/{novelId}/{characterId}/ref.wav`（角色更新可带 `ttsRefAudioBase64` 落盘）
 - TaskCenter / Recovery 已注册 `novel_audiobook`；缺表 `P2021` 时 overview/list/recovery **降级为空**
 - 取消：写 `cancelRequestedAt` + 剔除内存队列 + AbortController + CAS 终态
+- 启动恢复先等待恢复扫描完成；重启清理只读取 `ps` 并验证孤儿为 PPID=1、可执行文件为 ffmpeg 且命令行指向目标 taskDir 的 `.m4b*.part`，清理过程必须可等待且失败有日志。
 - 重试：`retryTask` 断点续跑；`reprocessChapter` 失败章/质量章定点重做（不占 maxRetries）；重拼时删除 full-book.wav **与** full-book.m4b
 - 标注查看：`GET .../annotations` + 小说页「查看标注」
 - 媒体播放：token 模式用短时 `?access=` HMAC（`media-access` 签发）；支持 HTTP Range 206；资源含 `full` / `full_m4b` / `chapter`

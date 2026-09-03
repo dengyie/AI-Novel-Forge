@@ -322,7 +322,7 @@ function scheduleLogRetentionCleanup(): void {
   });
 }
 
-function initializeBackgroundServices(): BackgroundServicesHandle {
+async function initializeBackgroundServices(): Promise<BackgroundServicesHandle> {
   ragServices.ragWorker.start();
   ragServices.ragRetrievalTraceRetention.start();
   taskRetentionService.start();
@@ -385,7 +385,14 @@ function initializeBackgroundServices(): BackgroundServicesHandle {
   void directorWorker.start().catch((error) => {
     console.error("[director.worker] unexpected stop", error);
   });
-  const recoveryInitialization = recoveryTaskService.initializePendingRecoveries();
+  // 恢复扫描必须在服务进入 ready 前完成：m4b 后台作业依靠持久 marker 重建内存队列，
+  // 不能在启动后以未等待 Promise 运行而留下短暂/永久的不可恢复窗口。
+  try {
+    await recoveryTaskService.initializePendingRecoveries();
+  } catch (error) {
+    console.error("[recovery] startup recovery failed; server readiness aborted", error);
+    throw error;
+  }
 
   void loadProviderApiKeys().catch((error) => {
     console.warn("数据库中的模型密钥加载失败，已回退到环境变量。", error);
@@ -401,18 +408,9 @@ function initializeBackgroundServices(): BackgroundServicesHandle {
       console.warn("Failed to bootstrap built-in creative resources.", error);
     });
 
-  void recoveryInitialization
-    .then(() => {
-      bookAnalysisService.startWatchdog();
-      novelPipelineRuntimeService.startWatchdog();
-      audiobookTaskService.startWatchdog();
-    })
-    .catch((error) => {
-      console.warn("Failed to prepare pending recovery candidates.", error);
-      bookAnalysisService.startWatchdog();
-      novelPipelineRuntimeService.startWatchdog();
-      audiobookTaskService.startWatchdog();
-    });
+  bookAnalysisService.startWatchdog();
+  novelPipelineRuntimeService.startWatchdog();
+  audiobookTaskService.startWatchdog();
 
   return {
     stop: async () => {
@@ -437,6 +435,7 @@ function initializeBackgroundServices(): BackgroundServicesHandle {
       volumeReadinessScheduler.stop();
       bookAnalysisService.stopWatchdog();
       novelPipelineRuntimeService.stopWatchdog();
+      audiobookTaskService.stopWatchdog();
     },
   };
 }
@@ -464,7 +463,7 @@ export async function startServer(options?: ServerStartOptions): Promise<Started
     const listeningServer = app.listen(port, host, () => resolve(listeningServer));
     listeningServer.once("error", reject);
   });
-  const backgroundServices = initializeBackgroundServices();
+  const backgroundServices = await initializeBackgroundServices();
 
   logServerReady(host, port);
 

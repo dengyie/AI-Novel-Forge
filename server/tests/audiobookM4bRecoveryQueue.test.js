@@ -1,0 +1,161 @@
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+
+const { prisma } = require("../dist/db/prisma.js");
+const {
+  AudiobookTaskService,
+  readBackgroundM4bState,
+  selectOrphanM4bPids,
+} = require("../dist/services/audiobook/AudiobookTaskService.js");
+const { encodeFullBookM4b } = require("../dist/services/audiobook/audiobookM4b.js");
+
+function makeTaskDir(label) {
+  return fs.mkdtempSync(path.join(os.tmpdir(), `ab-m4b-recovery-${label}-`));
+}
+
+function installOverlapFfmpeg() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ab-m4b-overlap-"));
+  const script = path.join(dir, "fake-ffmpeg.sh");
+  const overlap = path.join(dir, "overlap");
+  fs.writeFileSync(script, [
+    "#!/bin/sh",
+    'last=""; prev=""; src=""',
+    'for a in "$@"; do if [ "$prev" = "-i" ] && [ -z "$src" ]; then src="$a"; fi; last="$a"; prev="$a"; done',
+    `if ! mkdir "${dir}/active" 2>/dev/null; then echo overlap > "${overlap}"; fi`,
+    'sleep 0.15',
+    'cp "$src" "$last"',
+    `rmdir "${dir}/active" 2>/dev/null || true`,
+    "exit 0",
+    "",
+  ].join("\n"), { mode: 0o755 });
+  return { script, overlap };
+}
+
+test("recovery scans succeeded m4b-encoding task after restart", async () => {
+  assert.equal(
+    readBackgroundM4bState(JSON.stringify({ m4b: { status: "encoding" } })),
+    "encoding",
+  );
+  const service = new AudiobookTaskService();
+  const scheduled = [];
+  service.scheduleBackgroundM4bEncode = (input) => { scheduled.push(input); };
+  const originalFindMany = prisma.audiobookTask.findMany;
+  const originalUpdateMany = prisma.audiobookTask.updateMany;
+  prisma.audiobookTask.findMany = async () => ([{
+    id: "task-m4b-1",
+    novelId: "novel-1",
+    outputDir: "/tmp/audiobook/task-m4b-1",
+    progress: 100,
+    status: "succeeded",
+    title: "测试书",
+    chapterIdsJson: JSON.stringify(["c1"]),
+    progressJson: null,
+    resultJson: JSON.stringify({ m4b: { status: "encoding" } }),
+    currentStage: "finalizing",
+    cancelRequestedAt: null,
+  }]);
+  prisma.audiobookTask.updateMany = async () => ({ count: 1 });
+  try {
+    await service.resumePendingTasks();
+    assert.equal(scheduled.length, 1, "restart recovery must requeue the durable m4b job");
+    assert.equal(scheduled[0].parentTaskId, "task-m4b-1");
+  } finally {
+    prisma.audiobookTask.findMany = originalFindMany;
+    prisma.audiobookTask.updateMany = originalUpdateMany;
+  }
+});
+
+test("m4b encoding is globally bounded across different task directories", async () => {
+  const { script, overlap } = installOverlapFfmpeg();
+  const oldPath = process.env.AUDIOBOOK_FFMPEG_PATH;
+  process.env.AUDIOBOOK_FFMPEG_PATH = script;
+  const dirA = makeTaskDir("a");
+  const dirB = makeTaskDir("b");
+  const srcA = path.join(dirA, "src.wav");
+  const srcB = path.join(dirB, "src.wav");
+  fs.writeFileSync(srcA, "A".repeat(128));
+  fs.writeFileSync(srcB, "B".repeat(128));
+  try {
+    const [a, b] = await Promise.all([
+      encodeFullBookM4b({ taskDir: dirA, bookTitle: "A", sourceWavPath: srcA, chapters: [] }),
+      encodeFullBookM4b({ taskDir: dirB, bookTitle: "B", sourceWavPath: srcB, chapters: [] }),
+    ]);
+    assert.equal(a.status, "ready", a.reason);
+    assert.equal(b.status, "ready", b.reason);
+    assert.equal(fs.existsSync(overlap), false, "different taskDir jobs must not spawn ffmpeg concurrently");
+  } finally {
+    if (oldPath === undefined) delete process.env.AUDIOBOOK_FFMPEG_PATH;
+    else process.env.AUDIOBOOK_FFMPEG_PATH = oldPath;
+  }
+});
+
+test("queued m4b encoding abort removes its waiter without consuming a permit", async () => {
+  const dir = makeTaskDir("abort");
+  const src = path.join(dir, "src.wav");
+  fs.writeFileSync(src, "A".repeat(128));
+  const activeDir = makeTaskDir("abort-active");
+  const activeSrc = path.join(activeDir, "src.wav");
+  fs.writeFileSync(activeSrc, "B".repeat(128));
+  const controller = new AbortController();
+  const blocker = installOverlapFfmpeg();
+  const oldPath = process.env.AUDIOBOOK_FFMPEG_PATH;
+  process.env.AUDIOBOOK_FFMPEG_PATH = blocker.script;
+  const active = encodeFullBookM4b({ taskDir: activeDir, bookTitle: "active", sourceWavPath: activeSrc, chapters: [] });
+  const queued = encodeFullBookM4b({ taskDir: dir, bookTitle: "queued", sourceWavPath: src, chapters: [], signal: controller.signal });
+  controller.abort();
+  try {
+    await assert.rejects(queued, /取消/);
+    await active;
+  } finally {
+    if (oldPath === undefined) delete process.env.AUDIOBOOK_FFMPEG_PATH;
+    else process.env.AUDIOBOOK_FFMPEG_PATH = oldPath;
+  }
+});
+
+test("failed m4b encoding releases the global permit for the next task", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ab-m4b-release-"));
+  const script = path.join(dir, "fake-ffmpeg.sh");
+  const calls = path.join(dir, "calls");
+  fs.writeFileSync(script, [
+    "#!/bin/sh",
+    `n=$(wc -l < "${calls}" 2>/dev/null || echo 0)`,
+    `echo call >> "${calls}"`,
+    'last=""; prev=""; src=""',
+    'for a in "$@"; do if [ "$prev" = "-i" ] && [ -z "$src" ]; then src="$a"; fi; last="$a"; prev="$a"; done',
+    'if [ "$n" -eq 0 ]; then exit 1; fi',
+    'cp "$src" "$last"',
+    "exit 0",
+    "",
+  ].join("\n"), { mode: 0o755 });
+  const oldPath = process.env.AUDIOBOOK_FFMPEG_PATH;
+  process.env.AUDIOBOOK_FFMPEG_PATH = script;
+  const first = makeTaskDir("release-first");
+  const second = makeTaskDir("release-second");
+  fs.writeFileSync(path.join(first, "src.wav"), "F".repeat(128));
+  fs.writeFileSync(path.join(second, "src.wav"), "S".repeat(128));
+  try {
+    const [failed, recovered] = await Promise.all([
+      encodeFullBookM4b({ taskDir: first, bookTitle: "first", sourceWavPath: path.join(first, "src.wav"), chapters: [] }),
+      encodeFullBookM4b({ taskDir: second, bookTitle: "second", sourceWavPath: path.join(second, "src.wav"), chapters: [] }),
+    ]);
+    assert.equal(failed.status, "failed");
+    assert.equal(recovered.status, "ready", recovered.reason);
+  } finally {
+    if (oldPath === undefined) delete process.env.AUDIOBOOK_FFMPEG_PATH;
+    else process.env.AUDIOBOOK_FFMPEG_PATH = oldPath;
+  }
+});
+
+test("orphan cleanup selects only orphan ffmpeg writing the requested m4b part", () => {
+  const taskDir = "/data/audiobook/task-1";
+  const ps = [
+    ` 101 1 /usr/bin/ffmpeg /usr/bin/ffmpeg -i src.wav ${taskDir}/full-book.m4b.run.part`,
+    ` 102 1 /usr/bin/not-ffmpeg /usr/bin/not-ffmpeg -i src.wav ${taskDir}/full-book.m4b.run.part`,
+    ` 103 1 /usr/bin/ffmpeg /usr/bin/ffmpeg -i src.wav /data/audiobook/task-2/full-book.m4b.run.part`,
+    ` 104 9 /usr/bin/ffmpeg /usr/bin/ffmpeg -i src.wav ${taskDir}/full-book.m4b.run.part`,
+  ].join("\n");
+  assert.deepEqual(selectOrphanM4bPids(ps, taskDir, 999), [101]);
+});
