@@ -35,6 +35,8 @@ export type RecoveryInitializationResult = {
   failedDomains: string[];
 };
 
+type RecoveryDomain = { name: string; run: () => Promise<unknown> };
+
 interface AutoDirectorRecoveryCommandPort {
   enqueueRecoveryCommand?: (taskId: string) => Promise<unknown>;
   continueTask?: (taskId: string) => Promise<void>;
@@ -95,36 +97,43 @@ export class RecoveryTaskService {
     },
   ) {}
 
+  private buildRecoveryDomains(): RecoveryDomain[] {
+    return [
+      { name: "book_analysis", run: () => this.initializationDeps.resumePendingBookAnalyses() },
+      { name: "image_generation", run: () => this.initializationDeps.resumePendingImageTasks() },
+      { name: "novel_workflow", run: () => this.initializationDeps.resumePendingAutoDirectorTasks() },
+      { name: "novel_pipeline", run: () => this.initializationDeps.resumePendingPipelineJobs() },
+      { name: "style_extraction", run: () => this.initializationDeps.resumePendingStyleTasks() },
+      { name: "novel_audiobook", run: () => this.initializationDeps.resumePendingAudiobookTasks() },
+    ];
+  }
+
+  private runRecoveryDomains(domains: RecoveryDomain[]): Promise<RecoveryInitializationResult> {
+    const pending = domains.map((domain) => {
+      try {
+        return Promise.resolve(domain.run());
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    });
+    return Promise.allSettled(pending).then((settled) => {
+      const failedDomains: string[] = [];
+      settled.forEach((result, index) => {
+        if (result.status !== "rejected") return;
+        const domain = domains[index];
+        failedDomains.push(domain.name);
+        console.error("[recovery] startup domain failed; continuing in degraded mode", {
+          domain: domain.name,
+          error: result.reason instanceof Error ? result.reason.message : String(result.reason),
+        });
+      });
+      return { failedDomains };
+    });
+  }
+
   initializePendingRecoveries(): Promise<RecoveryInitializationResult> {
     if (!this.initializationPromise) {
-      const domains: Array<{ name: string; run: () => Promise<unknown> }> = [
-        { name: "book_analysis", run: () => this.initializationDeps.resumePendingBookAnalyses() },
-        { name: "image_generation", run: () => this.initializationDeps.resumePendingImageTasks() },
-        { name: "novel_workflow", run: () => this.initializationDeps.resumePendingAutoDirectorTasks() },
-        { name: "novel_pipeline", run: () => this.initializationDeps.resumePendingPipelineJobs() },
-        { name: "style_extraction", run: () => this.initializationDeps.resumePendingStyleTasks() },
-        { name: "novel_audiobook", run: () => this.initializationDeps.resumePendingAudiobookTasks() },
-      ];
-      const pending = domains.map((domain) => {
-        try {
-          return Promise.resolve(domain.run());
-        } catch (error) {
-          return Promise.reject(error);
-        }
-      });
-      this.initializationPromise = Promise.allSettled(pending).then((settled) => {
-        const failedDomains: string[] = [];
-        settled.forEach((result, index) => {
-          if (result.status !== "rejected") return;
-          const domain = domains[index];
-          failedDomains.push(domain.name);
-          console.error("[recovery] startup domain failed; continuing in degraded mode", {
-            domain: domain.name,
-            error: result.reason instanceof Error ? result.reason.message : String(result.reason),
-          });
-        });
-        return { failedDomains };
-      });
+      this.initializationPromise = this.runRecoveryDomains(this.buildRecoveryDomains());
     }
     return this.initializationPromise;
   }
@@ -139,8 +148,12 @@ export class RecoveryTaskService {
     this.retryPromise = (async () => {
       const current = await this.initializePendingRecoveries();
       if (current.failedDomains.length === 0) return current;
+      const failed = new Set(current.failedDomains);
       this.initializationPromise = null;
-      return this.initializePendingRecoveries();
+      this.initializationPromise = this.runRecoveryDomains(
+        this.buildRecoveryDomains().filter((domain) => failed.has(domain.name)),
+      );
+      return this.initializationPromise;
     })().finally(() => {
       this.retryPromise = null;
     });

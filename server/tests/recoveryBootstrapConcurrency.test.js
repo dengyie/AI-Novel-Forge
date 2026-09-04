@@ -67,3 +67,32 @@ test("degraded recovery can be retried without duplicating concurrent retry scan
   assert.deepEqual(first.failedDomains, []);
   assert.strictEqual(first, second);
 });
+
+test("degraded recovery retries only the domains that failed", async () => {
+  let failPipeline = true;
+  const calls = [];
+  const service = new RecoveryTaskService({}, {}, {}, {}, {
+    resumePendingBookAnalyses: async () => { calls.push("book"); },
+    resumePendingImageTasks: async () => { calls.push("image"); },
+    resumePendingAutoDirectorTasks: async () => { calls.push("director"); },
+    resumePendingPipelineJobs: async () => {
+      calls.push("pipeline");
+      if (failPipeline) throw new Error("temporary database lock");
+    },
+    resumePendingStyleTasks: async () => { calls.push("style"); },
+    resumePendingAudiobookTasks: async () => { calls.push("audiobook"); },
+  });
+
+  assert.deepEqual((await service.initializePendingRecoveries()).failedDomains, ["novel_pipeline"]);
+  failPipeline = false;
+  assert.deepEqual((await service.retryPendingRecoveries()).failedDomains, []);
+  assert.deepEqual(calls.sort(), [
+    "audiobook",
+    "book",
+    "director",
+    "image",
+    "pipeline",
+    "pipeline",
+    "style",
+  ]);
+});

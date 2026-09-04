@@ -534,6 +534,30 @@ type AudiobookTaskRow = {
   novel?: { id: string; title: string } | null;
 };
 
+/**
+ * Startup recovery only needs this small projection. Keep it separate from the
+ * detail row so the recovery scan can be paged without loading historical task
+ * payloads into one unbounded array.
+ */
+type AudiobookRecoveryRow = Pick<
+  AudiobookTaskRow,
+  | "id"
+  | "novelId"
+  | "title"
+  | "chapterIdsJson"
+  | "status"
+  | "resultJson"
+  | "outputDir"
+  | "progress"
+  | "progressJson"
+  | "currentStage"
+  | "cancelRequestedAt"
+  | "m4bGenerationToken"
+>;
+
+/** Maximum number of rows (and large resultJson values) held per startup page. */
+const AUDIOBOOK_RECOVERY_PAGE_SIZE = 100;
+
 function newM4bGenerationToken(): string {
   return randomUUID();
 }
@@ -2046,9 +2070,30 @@ export class AudiobookTaskService {
 
   async resumePendingTasks(): Promise<void> {
     try {
-      const rows = await prisma.audiobookTask.findMany({
-        where: { status: { in: ["queued", "running", "succeeded"] } },
-        select: {
+      // Active tasks do not need resultJson at all. Keep the large historical
+      // payload column out of that scan; succeeded rows are scanned separately
+      // because only they can carry a durable m4b=encoding marker.
+      await this.scanAudiobookRecoveryPages(
+        { status: { in: ["queued", "running"] } },
+        ["queued", "running"],
+        {
+          id: true,
+          novelId: true,
+          title: true,
+          chapterIdsJson: true,
+          status: true,
+          outputDir: true,
+          progress: true,
+          progressJson: true,
+          currentStage: true,
+          cancelRequestedAt: true,
+          m4bGenerationToken: true,
+        },
+      );
+      await this.scanAudiobookRecoveryPages(
+        { status: "succeeded" },
+        ["succeeded"],
+        {
           id: true,
           novelId: true,
           title: true,
@@ -2062,11 +2107,38 @@ export class AudiobookTaskService {
           cancelRequestedAt: true,
           m4bGenerationToken: true,
         },
-        orderBy: { createdAt: "asc" },
-      });
-      if (rows.length === 0) {
+      );
+    } catch (error) {
+      if (isMissingAudiobookTaskTableError(error)) {
         return;
       }
+      throw error;
+    }
+  }
+
+  private async scanAudiobookRecoveryPages(
+    where: Prisma.AudiobookTaskWhereInput,
+    allowedStatuses: readonly string[],
+    select: Prisma.AudiobookTaskSelect,
+  ): Promise<void> {
+    let cursor: { id: string } | undefined;
+    while (true) {
+      const rows = await prisma.audiobookTask.findMany({
+        where,
+        select,
+        orderBy: { id: "asc" },
+        take: AUDIOBOOK_RECOVERY_PAGE_SIZE,
+        ...(cursor ? { cursor, skip: 1 } : {}),
+      }) as unknown as AudiobookRecoveryRow[];
+      if (rows.length === 0) return;
+      const matchingRows = rows.filter((row) => allowedStatuses.includes(row.status));
+      if (matchingRows.length > 0) await this.resumePendingTaskRows(matchingRows);
+      if (rows.length < AUDIOBOOK_RECOVERY_PAGE_SIZE) return;
+      cursor = { id: rows[rows.length - 1].id };
+    }
+  }
+
+  private async resumePendingTaskRows(rows: AudiobookRecoveryRow[]): Promise<void> {
 
       // 带 cancelRequestedAt 的行：用户已请求取消，执行器在重启中丢失，无人 ack。
       // 原实现把 cancelRequestedAt 一并清空再重排队 = 把用户取消过的任务复活重跑。
@@ -2194,7 +2266,7 @@ export class AudiobookTaskService {
       }
       for (const row of resumables) {
         const claimed = await prisma.audiobookTask.updateMany({
-          where: { id: row.id, m4bGenerationToken: row.m4bGenerationToken },
+          where: { id: row.id, ...m4bGenerationWhere(row.m4bGenerationToken) },
           data: {
             status: "queued",
             pendingManualRecovery: false,
@@ -2208,24 +2280,30 @@ export class AudiobookTaskService {
         });
         if (claimed.count > 0) this.enqueueTask(row.id);
       }
-    } catch (error) {
-      if (isMissingAudiobookTaskTableError(error)) {
-        return;
-      }
-      throw error;
-    }
   }
 
   /** 挂在该父上、仍在 queued/running 的续生成子任务数（用于判断 continuing 父是否成孤儿） */
   private async countLiveContinueChildren(parentTaskId: string): Promise<number> {
-    const rows = await prisma.audiobookTask.findMany({
-      where: { status: { in: ["queued", "running"] } },
-      select: { id: true, progressJson: true },
-      take: 2000,
-    });
-    return rows.filter(
-      (row) => row.id !== parentTaskId && readParentTaskIdFromProgress(row.progressJson) === parentTaskId,
-    ).length;
+    // This is a boolean gate in the caller, but it must scan beyond the first
+    // page: truncating at 2000 can incorrectly finalize a continuing parent
+    // while a live child is on a later page.
+    let cursor: { id: string } | undefined;
+    while (true) {
+      const rows = await prisma.audiobookTask.findMany({
+        where: { status: { in: ["queued", "running"] } },
+        select: { id: true, progressJson: true },
+        orderBy: { id: "asc" },
+        take: 2000,
+        ...(cursor ? { cursor, skip: 1 } : {}),
+      });
+      if (rows.some(
+        (row) => row.id !== parentTaskId && readParentTaskIdFromProgress(row.progressJson) === parentTaskId,
+      )) {
+        return 1;
+      }
+      if (rows.length < 2000) return 0;
+      cursor = { id: rows[rows.length - 1].id };
+    }
   }
 
   async resumeTask(taskId: string): Promise<AudiobookTaskDetail> {

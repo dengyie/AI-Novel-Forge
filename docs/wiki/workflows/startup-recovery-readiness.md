@@ -11,12 +11,15 @@
 - 恢复初始化使用共享的 `Promise.allSettled` 扇出。单个域失败会记录域名并进入 degraded，不取消其它域，也不直接终止 server。
 - degraded 启动保留服务进程和已完成域的能力，同时以 503 阻止 readiness；后台按退避间隔重试幂等恢复扫描，全部成功后才恢复 ready。
 - 若启动阶段发生无法归属为单域恢复失败的异常，必须停止已启动的后台资源并关闭 HTTP listener，再把异常交给 bootstrap 的进程级失败处理。
+- 有声书恢复扫描必须按稳定唯一键分页；活动任务查询不应加载历史 `resultJson`，只有 succeeded 任务需要读取 m4b 持久标记。这样历史任务数量或 JSON 体积增长不会把启动恢复变成一次性内存峰值。
 
 ## 当前规则
 
 `RecoveryTaskService.initializePendingRecoveries()` 返回共享初始化结果，其中 `failedDomains` 是持久任务恢复没有完成的域。`waitUntilReady()` 等待本轮扇出结束，不把 degraded 误报为 rejection；需要重试时通过 `retryPendingRecoveries()` 重新执行幂等扫描。
 
 `startServer()` 在监听期间把 readiness 置为 `starting`，恢复成功后置为 `ready`，存在失败域时置为 `degraded`。启动异常的清理由后台服务初始化和 HTTP 启动层共同负责，避免半启动端口或扫描器继续运行。
+
+`retryPendingRecoveries()` 只重试上一轮失败的域；已经成功的域不因其它域暂时失败而重复扫描或重复入队。每个域仍需保持自身幂等，以应对进程重启和显式重试。
 
 ## 失败模式
 
