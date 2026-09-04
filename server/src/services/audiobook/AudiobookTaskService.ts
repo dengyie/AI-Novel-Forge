@@ -3475,7 +3475,10 @@ export function selectOrphanM4bPids(
   taskDir: string,
   selfPid = process.pid,
 ): number[] {
-  const target = taskDir.trim();
+  // Match a path segment, not an arbitrary string prefix. Without the trailing
+  // separator, task `task-1` also matches `task-10` and recovery can SIGKILL a
+  // different book's encoder.
+  const target = taskDir.trim().replace(/[\\/]+$/, "");
   if (!target) return [];
   const result: number[] = [];
   for (const line of psOutput.split("\n")) {
@@ -3487,7 +3490,8 @@ export function selectOrphanM4bPids(
     if (!Number.isInteger(pid) || pid <= 0 || pid === selfPid || ppid !== 1) continue;
     const executable = command.split(/\s+/, 1)[0].split(/[\\/]/).pop() ?? "";
     if (executable !== "ffmpeg") continue;
-    if (!command.includes(target) || !command.includes("full-book.m4b") || !command.includes(".part")) continue;
+    const targetsTaskDir = command.includes(`${target}/`) || command.includes(`${target}\\`);
+    if (!targetsTaskDir || !command.includes("full-book.m4b") || !command.includes(".part")) continue;
     result.push(pid);
   }
   return result;

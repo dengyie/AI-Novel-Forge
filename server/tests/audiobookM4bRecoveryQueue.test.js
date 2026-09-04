@@ -355,6 +355,7 @@ test("orphan cleanup selects only orphan ffmpeg writing the requested m4b part",
   const taskDir = "/data/audiobook/task-1";
   const ps = [
     ` 101 1 /usr/bin/ffmpeg /usr/bin/ffmpeg -i src.wav ${taskDir}/full-book.m4b.run.part`,
+    ` 105 1 /usr/bin/ffmpeg /usr/bin/ffmpeg -i src.wav /data/audiobook/task-10/full-book.m4b.run.part`,
     ` 102 1 /usr/bin/not-ffmpeg /usr/bin/not-ffmpeg -i src.wav ${taskDir}/full-book.m4b.run.part`,
     ` 103 1 /usr/bin/ffmpeg /usr/bin/ffmpeg -i src.wav /data/audiobook/task-2/full-book.m4b.run.part`,
     ` 104 9 /usr/bin/ffmpeg /usr/bin/ffmpeg -i src.wav ${taskDir}/full-book.m4b.run.part`,
