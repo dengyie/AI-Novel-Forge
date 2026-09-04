@@ -53,6 +53,21 @@ test("全局资源 permit waiter abort 后应移出队列，并唤醒下一个 w
   gate.release();
 });
 
+test("全局资源 permit 被 release 唤醒后若 signal abort，应拒绝且归还 permit", async () => {
+  const gate = new ResourceGate(1);
+  await gate.acquire();
+
+  const controller = new AbortController();
+  const waiter = gate.acquire(controller.signal);
+  gate.release();
+  controller.abort();
+
+  await assert.rejects(waiter, /abort/i);
+  const next = gate.acquire();
+  await next;
+  gate.release();
+});
+
 test("m4b 后台封装前置 WAV 缺失时应收口 marker，而不是永久停在封装中", async () => {
   const taskDir = fs.mkdtempSync(path.join(os.tmpdir(), "ab-marker-missing-wav-"));
   const service = new AudiobookTaskService();

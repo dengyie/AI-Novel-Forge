@@ -2250,7 +2250,8 @@ export class AudiobookTaskService {
         return;
       }
       // 宿主重启后，在途 ffmpeg 已变孤儿（PPID=1）继续写 taskDir 的 m4b part；重排队前
-      // best-effort kill，避免与重跑的新 run 交错写同一 inode。失败仅 warn 不阻断。
+      // best-effort kill，并等待有界退出后再重排队，避免与新 run 交错写同一 inode。
+      // 清理失败仅 warn，不阻断恢复。
       for (const row of resumables) {
         try {
           const taskDir = row.outputDir?.trim()
@@ -3410,40 +3411,63 @@ export function selectOrphanM4bPids(
   return result;
 }
 
-export function killOrphanM4bFfmpeg(taskDir: string): Promise<void> {
-  return new Promise((resolve) => {
-    execFile(
-      "ps",
-      ["-axo", "pid=,ppid=,command="],
-      { timeout: 5000 },
-      (error, stdout) => {
-        if (error) {
-          console.warn(
-            "[audiobook] killOrphanM4bFfmpeg ps 失败",
-            taskDir,
-            (error as Error).message,
-          );
-          resolve();
-          return;
-        }
-        const pids = selectOrphanM4bPids(stdout, taskDir);
-        for (const pid of pids) {
-          try {
-            process.kill(pid, "SIGKILL");
-          } catch {
-            // 进程已退出或无权限，忽略
-          }
-        }
-        if (pids.length > 0) {
-          console.warn(
-            `[audiobook] 已清理 ${pids.length} 个孤儿 ffmpeg（写 ${taskDir} 的 m4b part）`,
-            pids.join(","),
-          );
-        }
-        resolve();
-      },
-    );
+const ORPHAN_M4B_FFMPEG_EXIT_WAIT_MS = 2_000;
+const ORPHAN_M4B_FFMPEG_EXIT_POLL_MS = 50;
+
+export async function killOrphanM4bFfmpeg(taskDir: string): Promise<void> {
+  const { error, stdout } = await new Promise<{ error: Error | null; stdout: string }>((resolve) => {
+    execFile("ps", ["-axo", "pid=,ppid=,command="], { timeout: 5000 }, (psError, psStdout) => {
+      resolve({
+        error: psError,
+        stdout: typeof psStdout === "string" ? psStdout : String(psStdout ?? ""),
+      });
+    });
   });
+  if (error) {
+    console.warn("[audiobook] killOrphanM4bFfmpeg ps 失败", taskDir, error.message);
+    return;
+  }
+  const pids = selectOrphanM4bPids(stdout, taskDir);
+  const killedPids: number[] = [];
+  for (const pid of pids) {
+    try {
+      process.kill(pid, "SIGKILL");
+      killedPids.push(pid);
+    } catch (killError) {
+      // 进程已退出无需等待；权限等其它问题保留在待确认集合里，让超时日志暴露清理不完整。
+      if ((killError as NodeJS.ErrnoException).code !== "ESRCH") killedPids.push(pid);
+    }
+  }
+  if (killedPids.length === 0) return;
+  console.warn(
+    `[audiobook] 已请求清理 ${killedPids.length} 个孤儿 ffmpeg（写 ${taskDir} 的 m4b part）`,
+    killedPids.join(","),
+  );
+
+  const pending = new Set(killedPids);
+  const deadline = Date.now() + ORPHAN_M4B_FFMPEG_EXIT_WAIT_MS;
+  while (pending.size > 0 && Date.now() < deadline) {
+    for (const pid of pending) {
+      try {
+        process.kill(pid, 0);
+      } catch (probeError) {
+        if ((probeError as NodeJS.ErrnoException).code === "ESRCH") pending.delete(pid);
+      }
+    }
+    if (pending.size === 0) return;
+    await new Promise((resolve) => setTimeout(
+      resolve,
+      Math.min(ORPHAN_M4B_FFMPEG_EXIT_POLL_MS, Math.max(1, deadline - Date.now())),
+    ));
+  }
+
+  if (pending.size > 0) {
+    console.warn("[audiobook] 孤儿 ffmpeg 退出等待超时", {
+      taskDir,
+      timeoutMs: ORPHAN_M4B_FFMPEG_EXIT_WAIT_MS,
+      pids: Array.from(pending),
+    });
+}
 }
 
 export const audiobookTaskService = new AudiobookTaskService();

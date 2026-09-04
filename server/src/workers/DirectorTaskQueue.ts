@@ -58,6 +58,13 @@ export class ResourceGate {
       }
       signal?.addEventListener("abort", onAbort, { once: true });
     });
+    // release() may resolve this waiter immediately before an abort callback can run.
+    // Re-check after the await and return the permit so a cancelled command cannot
+    // proceed with a lease it no longer owns.
+    if (signal?.aborted) {
+      this.release();
+      throw resourceGateAbortError();
+    }
   }
 
   release(): void {

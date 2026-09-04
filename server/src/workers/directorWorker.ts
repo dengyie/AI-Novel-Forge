@@ -126,6 +126,10 @@ export class DirectorWorker {
     try {
       await this.queue.acquireResourceGate(command.novelId, command.commandType, renewal.signal);
       try {
+        throwIfDirectorCommandLeaseLost(renewal.signal, {
+          commandId: command.id,
+          leaseOwner: `${this.queue.workerId}:${slotId}`,
+        });
         const stillOwnsLease = await this.queue.markRunning(command.id, slotId);
         if (!stillOwnsLease) {
           console.warn(
