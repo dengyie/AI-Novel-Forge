@@ -2187,10 +2187,21 @@ export class AudiobookTaskService {
 
       // m4b 是父任务 succeeded 后的独立后台工作，不得重新跑整条 TTS 管线。
       // 只凭持久 resultJson.m4b=encoding 识别，进程重启后仍可恢复。
+      const cleanupBlocked = new Set<string>();
       for (const row of m4bRecoveries) {
         const taskDir = row.outputDir?.trim() || resolveAudiobookTaskDir(row.novelId, row.id);
         try {
-          await killOrphanM4bFfmpeg(taskDir);
+          const cleaned = await killOrphanM4bFfmpeg(taskDir);
+          if (!cleaned) {
+            const error = new Error(`任务 ${row.id} 的孤儿 m4b 进程尚未确认退出`);
+            recoveryErrors.push(error);
+            cleanupBlocked.add(row.id);
+            console.warn(
+              "[audiobook] resumePendingTasks m4b 孤儿进程未清理完成，暂不重启编码",
+              row.id,
+            );
+            continue;
+          }
           const chapterIds = parseChapterIds(row.chapterIdsJson);
           if (chapterIds.length > 0) {
             // 重启恢复必须先轮换代际，再启动新 worker：即使旧进程未能及时
@@ -2299,14 +2310,25 @@ export class AudiobookTaskService {
       }
       // 宿主重启后，在途 ffmpeg 已变孤儿（PPID=1）继续写 taskDir 的 m4b part；重排队前
       // best-effort kill，并等待有界退出后再重排队，避免与新 run 交错写同一 inode。
-      // 清理失败仅 warn，不阻断恢复。
+      // 清理未确认完成的行本轮不重排队，等待下一轮域级恢复重试。
       for (const row of resumables) {
         try {
           const taskDir = row.outputDir?.trim()
             || resolveAudiobookTaskDir(row.novelId, row.id);
-          await killOrphanM4bFfmpeg(taskDir);
+          const cleaned = await killOrphanM4bFfmpeg(taskDir);
+          if (!cleaned) {
+            const error = new Error(`任务 ${row.id} 的孤儿 m4b 进程尚未确认退出`);
+            recoveryErrors.push(error);
+            cleanupBlocked.add(row.id);
+            console.warn(
+              "[audiobook] resumePendingTasks 孤儿 m4b 未清理完成，暂不重排队",
+              row.id,
+            );
+            continue;
+          }
         } catch (error) {
           recoveryErrors.push(error);
+          cleanupBlocked.add(row.id);
           console.warn(
             "[audiobook] resumePendingTasks killOrphanM4bFfmpeg 失败",
             row.id,
@@ -2315,6 +2337,7 @@ export class AudiobookTaskService {
         }
       }
       for (const row of resumables) {
+        if (cleanupBlocked.has(row.id)) continue;
         try {
           const claimed = await prisma.audiobookTask.updateMany({
             where: { id: row.id, ...m4bGenerationWhere(row.m4bGenerationToken) },
@@ -3473,7 +3496,7 @@ export function selectOrphanM4bPids(
 const ORPHAN_M4B_FFMPEG_EXIT_WAIT_MS = 2_000;
 const ORPHAN_M4B_FFMPEG_EXIT_POLL_MS = 50;
 
-export async function killOrphanM4bFfmpeg(taskDir: string): Promise<void> {
+export async function killOrphanM4bFfmpeg(taskDir: string): Promise<boolean> {
   const { error, stdout } = await new Promise<{ error: Error | null; stdout: string }>((resolve) => {
     childProcess.execFile("ps", ["-axo", "pid=,ppid=,command="], { timeout: 5000 }, (psError, psStdout) => {
       resolve({
@@ -3484,7 +3507,7 @@ export async function killOrphanM4bFfmpeg(taskDir: string): Promise<void> {
   });
   if (error) {
     console.warn("[audiobook] killOrphanM4bFfmpeg ps 失败", taskDir, error.message);
-    return;
+    return false;
   }
   const pids = selectOrphanM4bPids(stdout, taskDir);
   const killedPids: number[] = [];
@@ -3497,7 +3520,7 @@ export async function killOrphanM4bFfmpeg(taskDir: string): Promise<void> {
       if ((killError as NodeJS.ErrnoException).code !== "ESRCH") killedPids.push(pid);
     }
   }
-  if (killedPids.length === 0) return;
+  if (killedPids.length === 0) return true;
   console.warn(
     `[audiobook] 已请求清理 ${killedPids.length} 个孤儿 ffmpeg（写 ${taskDir} 的 m4b part）`,
     killedPids.join(","),
@@ -3513,7 +3536,7 @@ export async function killOrphanM4bFfmpeg(taskDir: string): Promise<void> {
         if ((probeError as NodeJS.ErrnoException).code === "ESRCH") pending.delete(pid);
       }
     }
-    if (pending.size === 0) return;
+    if (pending.size === 0) return true;
     await new Promise((resolve) => setTimeout(
       resolve,
       Math.min(ORPHAN_M4B_FFMPEG_EXIT_POLL_MS, Math.max(1, deadline - Date.now())),
@@ -3526,7 +3549,9 @@ export async function killOrphanM4bFfmpeg(taskDir: string): Promise<void> {
       timeoutMs: ORPHAN_M4B_FFMPEG_EXIT_WAIT_MS,
       pids: Array.from(pending),
     });
+    return false;
   }
+  return true;
 }
 
 export const audiobookTaskService = new AudiobookTaskService();

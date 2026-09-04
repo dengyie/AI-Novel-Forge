@@ -218,6 +218,55 @@ test("startup recovery reports a failed m4b claim after continuing the page", { 
   }
 });
 
+test("startup recovery does not requeue a task when orphan cleanup is unconfirmed", { concurrency: false }, async () => {
+  const service = new AudiobookTaskService();
+  const originalFindMany = prisma.audiobookTask.findMany;
+  const originalUpdateMany = prisma.audiobookTask.updateMany;
+  const originalPath = process.env.PATH;
+  const fakeBin = fs.mkdtempSync(path.join(os.tmpdir(), "ab-m4b-recovery-ps-fail-"));
+  const fakePs = path.join(fakeBin, "ps");
+  fs.writeFileSync(fakePs, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  const taskDir = makeTaskDir("cleanup-unconfirmed");
+  let updateCalls = 0;
+  process.env.PATH = fakeBin;
+  prisma.audiobookTask.findMany = async (query) => {
+    if (query.select?.resultJson) return [];
+    return [{
+      id: "task-m4b-cleanup-blocked",
+      novelId: "novel-1",
+      outputDir: taskDir,
+      progress: 100,
+      status: "running",
+      title: "清理未确认",
+      chapterIdsJson: JSON.stringify(["c1"]),
+      progressJson: null,
+      resultJson: null,
+      currentStage: "finalizing",
+      cancelRequestedAt: null,
+      m4bGenerationToken: "generation-cleanup-blocked",
+    }];
+  };
+  prisma.audiobookTask.updateMany = async () => {
+    updateCalls += 1;
+    return { count: 1 };
+  };
+  try {
+    await assert.rejects(
+      service.resumePendingTasks(),
+      (error) => error instanceof AggregateError,
+      "unconfirmed orphan cleanup must keep the audiobook recovery domain degraded",
+    );
+    assert.equal(updateCalls, 0, "recovery must not claim or requeue while cleanup is unconfirmed");
+  } finally {
+    prisma.audiobookTask.findMany = originalFindMany;
+    prisma.audiobookTask.updateMany = originalUpdateMany;
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    fs.rmSync(taskDir, { recursive: true, force: true });
+    fs.rmSync(fakeBin, { recursive: true, force: true });
+  }
+});
+
 test("m4b encoding is globally bounded across different task directories", async () => {
   const { script, overlap } = installOverlapFfmpeg();
   const oldPath = process.env.AUDIOBOOK_FFMPEG_PATH;
