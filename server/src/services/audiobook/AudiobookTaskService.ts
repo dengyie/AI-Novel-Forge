@@ -2340,7 +2340,16 @@ export class AudiobookTaskService {
         if (cleanupBlocked.has(row.id)) continue;
         try {
           const claimed = await prisma.audiobookTask.updateMany({
-            where: { id: row.id, ...m4bGenerationWhere(row.m4bGenerationToken) },
+            // The row was read before the cleanup pass. Re-check every mutable
+            // recovery field so a cancel/worker transition that wins in the
+            // meantime cannot be overwritten back to queued.
+            where: {
+              id: row.id,
+              status: row.status as Prisma.AudiobookTaskWhereInput["status"],
+              currentStage: row.currentStage,
+              cancelRequestedAt: row.cancelRequestedAt,
+              ...m4bGenerationWhere(row.m4bGenerationToken),
+            },
             data: {
               status: "queued",
               pendingManualRecovery: false,
