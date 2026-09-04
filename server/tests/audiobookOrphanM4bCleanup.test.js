@@ -8,7 +8,7 @@ const originalNow = Date.now;
 const originalWarn = console.warn;
 const { killOrphanM4bFfmpeg } = require("../dist/services/audiobook/AudiobookTaskService.js");
 
-function stubPgrep(stdout) {
+function stubPs(stdout) {
   childProcess.execFile = (_command, _args, _options, callback) => {
     setImmediate(() => callback(null, stdout, ""));
     return undefined;
@@ -26,7 +26,7 @@ test("orphan m4b cleanup waits until SIGKILL target exits", async () => {
   const pid = 424242;
   let alive = true;
   const killCalls = [];
-  stubPgrep(`${pid}\n`);
+  stubPs(` ${pid} 1 /usr/bin/ffmpeg -i src.wav /tmp/orphan-m4b-wait/full-book.m4b.run.part\n`);
   process.kill = (target, signal) => {
     assert.equal(target, pid);
     killCalls.push(signal);
@@ -57,7 +57,7 @@ test("orphan m4b cleanup logs remaining PIDs when exit wait times out", async ()
   const pid = 434343;
   const warnings = [];
   let now = 0;
-  stubPgrep(`${pid}\n`);
+  stubPs(` ${pid} 1 /usr/bin/ffmpeg -i src.wav /tmp/orphan-m4b-timeout/full-book.m4b.run.part\n`);
   console.warn = (...args) => warnings.push(args);
   Date.now = () => now;
   process.kill = (target, signal) => {

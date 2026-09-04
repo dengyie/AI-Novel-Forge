@@ -26,6 +26,11 @@ test("startup audiobook recovery reads tasks in bounded pages", { concurrency: f
   }
   assert.equal(queries[0].select.resultJson, undefined, "active scan must not load historical resultJson");
   assert.equal(queries[1].select.resultJson, true, "succeeded scan must inspect the m4b marker");
+  assert.deepEqual(
+    queries[1].where.resultJson,
+    { contains: "encoding" },
+    "succeeded scan must let the database discard rows without an encoding marker",
+  );
 });
 
 test("startup audiobook recovery advances with the last task cursor", { concurrency: false }, async () => {

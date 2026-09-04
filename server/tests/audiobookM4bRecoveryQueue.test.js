@@ -68,6 +68,156 @@ test("recovery scans succeeded m4b-encoding task after restart", async () => {
   }
 });
 
+test("startup m4b recovery only schedules work and does not wait for long ffmpeg", { concurrency: false }, async () => {
+  const service = new AudiobookTaskService();
+  let release;
+  const encodeStarted = new Promise((resolve) => { release = resolve; });
+  const originals = {
+    findMany: prisma.audiobookTask.findMany,
+    updateMany: prisma.audiobookTask.updateMany,
+    schedule: service.scheduleBackgroundM4bEncode,
+  };
+  const taskDir = makeTaskDir("startup-nonblocking");
+  prisma.audiobookTask.findMany = async () => ([{
+    id: "task-m4b-long",
+    novelId: "novel-1",
+    outputDir: taskDir,
+    progress: 100,
+    status: "succeeded",
+    title: "长书",
+    chapterIdsJson: JSON.stringify(["c1"]),
+    progressJson: null,
+    resultJson: JSON.stringify({ m4b: { status: "encoding" } }),
+    currentStage: "finalizing",
+    cancelRequestedAt: null,
+    m4bGenerationToken: "generation-A",
+  }]);
+  prisma.audiobookTask.updateMany = async () => ({ count: 1 });
+  service.scheduleBackgroundM4bEncode = async () => encodeStarted;
+  try {
+    const recovery = service.resumePendingTasks();
+    const returned = await Promise.race([
+      recovery.then(() => true),
+      new Promise((resolve) => setTimeout(() => resolve(false), 150)),
+    ]);
+    assert.equal(returned, true, "startup recovery must not wait for the full ffmpeg encode");
+    release();
+    await recovery;
+  } finally {
+    prisma.audiobookTask.findMany = originals.findMany;
+    prisma.audiobookTask.updateMany = originals.updateMany;
+    service.scheduleBackgroundM4bEncode = originals.schedule;
+    fs.rmSync(taskDir, { recursive: true, force: true });
+  }
+});
+
+test("startup recovery closes a legacy encoding marker with an empty chapter list", { concurrency: false }, async () => {
+  const service = new AudiobookTaskService();
+  const originalFindMany = prisma.audiobookTask.findMany;
+  const originalUpdateMany = prisma.audiobookTask.updateMany;
+  const settled = [];
+  const taskDir = makeTaskDir("empty-chapters");
+  service.settleBackgroundM4b = async (...args) => { settled.push(args); };
+  prisma.audiobookTask.findMany = async (query) => {
+    if (query.select?.resultJson) {
+      return [{
+        id: "task-m4b-empty",
+        novelId: "novel-1",
+        outputDir: taskDir,
+        progress: 100,
+        status: "succeeded",
+        title: "坏数据任务",
+        chapterIdsJson: "[]",
+        progressJson: null,
+        // Pretty-printed legacy JSON must still be discovered by the broad DB prefilter.
+        resultJson: JSON.stringify({ m4b: { status: "encoding" } }, null, 2),
+        currentStage: "finalizing",
+        cancelRequestedAt: null,
+        m4bGenerationToken: "generation-legacy",
+      }];
+    }
+    return [];
+  };
+  prisma.audiobookTask.updateMany = async () => ({ count: 1 });
+  try {
+    await service.resumePendingTasks();
+    assert.equal(settled.length, 1, "malformed marker must be settled instead of retried forever");
+    assert.equal(settled[0][0], "task-m4b-empty");
+    assert.match(settled[0][1], /m4b 失败/);
+    assert.deepEqual(settled[0][2], { status: "failed", reason: "任务章节列表为空" });
+  } finally {
+    prisma.audiobookTask.findMany = originalFindMany;
+    prisma.audiobookTask.updateMany = originalUpdateMany;
+    fs.rmSync(taskDir, { recursive: true, force: true });
+  }
+});
+
+test("startup recovery reports a failed m4b claim after continuing the page", { concurrency: false }, async () => {
+  const service = new AudiobookTaskService();
+  const originalFindMany = prisma.audiobookTask.findMany;
+  const originalUpdateMany = prisma.audiobookTask.updateMany;
+  const scheduled = [];
+  const taskDirs = [makeTaskDir("claim-broken"), makeTaskDir("claim-healthy")];
+  let findManyCalls = 0;
+  service.scheduleBackgroundM4bEncode = (input) => { scheduled.push(input); };
+  prisma.audiobookTask.findMany = async (query) => {
+    findManyCalls += 1;
+    if (!query.select?.resultJson) return [];
+    return [
+      {
+        id: "task-m4b-broken",
+        novelId: "novel-1",
+        outputDir: taskDirs[0],
+        progress: 100,
+        status: "succeeded",
+        title: "认领失败",
+        chapterIdsJson: JSON.stringify(["c1"]),
+        progressJson: null,
+        resultJson: JSON.stringify({ m4b: { status: "encoding" } }),
+        currentStage: "finalizing",
+        cancelRequestedAt: null,
+        m4bGenerationToken: "generation-broken",
+      },
+      {
+        id: "task-m4b-healthy",
+        novelId: "novel-1",
+        outputDir: taskDirs[1],
+        progress: 100,
+        status: "succeeded",
+        title: "认领成功",
+        chapterIdsJson: JSON.stringify(["c2"]),
+        progressJson: null,
+        resultJson: JSON.stringify({ m4b: { status: "encoding" } }),
+        currentStage: "finalizing",
+        cancelRequestedAt: null,
+        m4bGenerationToken: "generation-healthy",
+      },
+    ];
+  };
+  prisma.audiobookTask.updateMany = async (query) => {
+    if (query.where.id === "task-m4b-broken") throw new Error("database unavailable");
+    return { count: 1 };
+  };
+  try {
+    await assert.rejects(
+      service.resumePendingTasks(),
+      (error) => error instanceof AggregateError
+        && error.errors.some((item) => item instanceof Error && item.message === "database unavailable"),
+      "the recovery domain must be degraded when any row cannot be claimed",
+    );
+    assert.equal(findManyCalls, 2, "both recovery domains should still be scanned");
+    assert.deepEqual(
+      scheduled.map((item) => item.parentTaskId),
+      ["task-m4b-healthy"],
+      "a failed row must not prevent healthy rows in the same page from recovering",
+    );
+  } finally {
+    prisma.audiobookTask.findMany = originalFindMany;
+    prisma.audiobookTask.updateMany = originalUpdateMany;
+    for (const taskDir of taskDirs) fs.rmSync(taskDir, { recursive: true, force: true });
+  }
+});
+
 test("m4b encoding is globally bounded across different task directories", async () => {
   const { script, overlap } = installOverlapFfmpeg();
   const oldPath = process.env.AUDIOBOOK_FFMPEG_PATH;
@@ -107,8 +257,11 @@ test("queued m4b encoding abort removes its waiter without consuming a permit", 
   const queued = encodeFullBookM4b({ taskDir: dir, bookTitle: "queued", sourceWavPath: src, chapters: [], signal: controller.signal });
   controller.abort();
   try {
-    await assert.rejects(queued, /取消/);
-    await active;
+    const queuedResult = await queued;
+    assert.equal(queuedResult.status, "failed");
+    assert.match(queuedResult.reason ?? "", /取消/);
+    const activeResult = await active;
+    assert.equal(activeResult.status, "ready", activeResult.reason);
   } finally {
     if (oldPath === undefined) delete process.env.AUDIOBOOK_FFMPEG_PATH;
     else process.env.AUDIOBOOK_FFMPEG_PATH = oldPath;

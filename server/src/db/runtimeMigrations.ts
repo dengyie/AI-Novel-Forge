@@ -200,6 +200,13 @@ const REQUIRED_COLUMN_BACKFILLS = [
     columnName: "audiobookNarratorStyle",
     columnDefinition: `"audiobookNarratorStyle" TEXT`,
   },
+  // m4b 代际栅栏：旧 SQLite/桌面数据库可能没有 Prisma 迁移历史，启动时仍需
+  // 幂等补列，避免旧任务在新 worker 与重启恢复之间失去 ownership fence。
+  {
+    tableName: "AudiobookTask",
+    columnName: "m4bGenerationToken",
+    columnDefinition: `"m4bGenerationToken" TEXT NOT NULL DEFAULT ''`,
+  },
   // 站内红点未读标记（P2-6）。autoDirectorFollowUpNotificationLog 无 SQL 迁移（由 db push
   // 建表），readAt 随后加进 schema 时产库未再 push → 缺列导致站内红点写入在启动/自动
   // 恢复时报 "column readAt does not exist"，直接打崩导演续跑。幂等 ADD COLUMN 自愈。

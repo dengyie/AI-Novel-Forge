@@ -76,7 +76,11 @@ test("m4b 后台封装前置 WAV 缺失时应收口 marker，而不是永久停�
     findUnique: prisma.audiobookTask.findUnique,
     updateMany: prisma.audiobookTask.updateMany,
   };
-  prisma.audiobookTask.findUnique = async () => ({ resultJson: "{}" });
+  prisma.audiobookTask.findUnique = async () => ({
+    resultJson: "{}",
+    status: "succeeded",
+    m4bGenerationToken: "test-generation",
+  });
   prisma.audiobookTask.updateMany = async (args) => {
     updates.push(args);
     return { count: 1 };
@@ -89,6 +93,7 @@ test("m4b 后台封装前置 WAV 缺失时应收口 marker，而不是永久停�
       parentTitle: "缺 WAV 书",
       taskDir,
       chapterIds: ["chapter-1"],
+      generationToken: "test-generation",
     });
     await delay(20);
     assert.equal(updates.length, 1, "缺 WAV 时必须写入 m4b 终态，不能只 return");
@@ -109,7 +114,11 @@ test("m4b 后台封装章节 WAV 缺失时应收口 marker", async () => {
     findUnique: prisma.audiobookTask.findUnique,
     updateMany: prisma.audiobookTask.updateMany,
   };
-  prisma.audiobookTask.findUnique = async () => ({ resultJson: "{}" });
+  prisma.audiobookTask.findUnique = async () => ({
+    resultJson: "{}",
+    status: "succeeded",
+    m4bGenerationToken: "test-generation",
+  });
   prisma.audiobookTask.updateMany = async (args) => {
     updates.push(args);
     return { count: 1 };
@@ -122,6 +131,7 @@ test("m4b 后台封装章节 WAV 缺失时应收口 marker", async () => {
       parentTitle: "缺章节 WAV 书",
       taskDir,
       chapterIds: ["chapter-1"],
+      generationToken: "test-generation",
     });
     await delay(20);
     assert.equal(updates.length, 1, "缺章节 WAV 时必须写入 m4b 终态");

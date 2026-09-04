@@ -170,6 +170,29 @@ test("redoTaskM4b: 非 succeeded → 400，不动盘", { concurrency: false }, a
   }
 });
 
+test("redoTaskM4b: 非 succeeded 即使有旧 m4b 也必须拒绝", { concurrency: false }, async () => {
+  const taskDir = makeTaskDir("non-succeeded-ready");
+  fs.writeFileSync(resolveFullBookM4bPath(taskDir), Buffer.alloc(128));
+  const existing = makeTaskRow({ status: "running" }, taskDir);
+  const service = new AudiobookTaskService();
+  const originals = {
+    findUnique: prisma.audiobookTask.findUnique,
+    updateMany: prisma.audiobookTask.updateMany,
+  };
+  prisma.audiobookTask.findUnique = async () => ({ ...existing, novel: { id: "novel-1", title: "测试书" } });
+  prisma.audiobookTask.updateMany = async () => { throw new Error("不应触发 update"); };
+
+  try {
+    await assert.rejects(
+      () => service.redoTaskM4b("at-1"),
+      (e) => e instanceof Error && /仅生成完成/.test(e.message),
+    );
+  } finally {
+    prisma.audiobookTask.findUnique = originals.findUnique;
+    prisma.audiobookTask.updateMany = originals.updateMany;
+  }
+});
+
 test("redoTaskM4b: succeeded + WAV 在 + m4b 缺 → 重置 label/清 resultJson 并触发 force 重封装", { concurrency: false }, async () => {
   const taskDir = makeTaskDir("sched");
   fs.writeFileSync(resolveFullBookAudioPath(taskDir), writeFakeWav(resolveFullBookAudioPath(taskDir)));

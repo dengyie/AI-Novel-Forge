@@ -278,28 +278,33 @@ test("restart recovery rotates the persisted token before re-queueing a stale wo
   const originalEnqueue = service.enqueueTask;
   const updates = [];
   const enqueued = [];
-  prisma.audiobookTask.findMany = async () => [
-    {
-      id: "task-restart",
-      novelId: "novel-1",
-      outputDir: makeTaskDir("restart"),
-      progress: 42,
-      progressJson: null,
-      currentStage: "synthesizing",
-      cancelRequestedAt: null,
-      m4bGenerationToken: "generation-A",
-    },
-    {
-      id: "task-legacy-null",
-      novelId: "novel-1",
-      outputDir: makeTaskDir("legacy-null"),
-      progress: 42,
-      progressJson: null,
-      currentStage: "synthesizing",
-      cancelRequestedAt: null,
-      m4bGenerationToken: null,
-    },
-  ];
+  prisma.audiobookTask.findMany = async (query) => {
+    if (!query.where?.status?.in) return [];
+    return [
+      {
+        id: "task-restart",
+        novelId: "novel-1",
+        outputDir: makeTaskDir("restart"),
+        progress: 42,
+        progressJson: null,
+        currentStage: "synthesizing",
+        status: "running",
+        cancelRequestedAt: null,
+        m4bGenerationToken: "generation-A",
+      },
+      {
+        id: "task-legacy-null",
+        novelId: "novel-1",
+        outputDir: makeTaskDir("legacy-null"),
+        progress: 42,
+        progressJson: null,
+        currentStage: "synthesizing",
+        status: "queued",
+        cancelRequestedAt: null,
+        m4bGenerationToken: null,
+      },
+    ];
+  };
   prisma.audiobookTask.updateMany = async (args) => {
     updates.push(args);
     return { count: 1 };
@@ -349,16 +354,21 @@ test("superseding a background generation aborts its in-process ffmpeg worker", 
     status: "succeeded",
     cancelRequestedAt: null,
   });
-  prisma.audiobookTask.updateMany = async () => ({ count: 0 });
+  prisma.audiobookTask.updateMany = async (args) => ({
+    // The worker must win the persisted marker CAS before ffmpeg starts.
+    count: args?.data?.currentItemLabel === "有声书生成完成（m4b 后台封装中）" ? 1 : 0,
+  });
   prisma.chapter.findMany = async () => [];
   prisma.novel.findUnique = async () => null;
+  fs.mkdirSync(path.join(taskDir, "chapters", "c1"), { recursive: true });
+  writeFakeWav(path.join(taskDir, "chapters", "c1", "chapter.wav"));
   try {
     service.scheduleBackgroundM4bEncode({
       parentTaskId: "task-abort",
       novelId: "novel-1",
       parentTitle: "测试书",
       taskDir,
-      chapterIds: [],
+      chapterIds: ["c1"],
       generationToken: "generation-B",
       force: true,
     });

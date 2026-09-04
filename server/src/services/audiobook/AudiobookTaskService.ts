@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import * as childProcess from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import type {
@@ -1189,16 +1189,15 @@ export class AudiobookTaskService {
     if (!taskDir) {
       throw new AppError("任务无输出目录，无法封装 m4b。", 400);
     }
+    if (task.status !== "succeeded") {
+      throw new AppError("仅生成完成（succeeded）的任务可重做 m4b。", 400);
+    }
     if (isFullBookM4bReady(taskDir)) {
       return toDetail(task as AudiobookTaskRow) ?? this.getTask(taskId);
     }
     if (!isFullBookAudioReady(taskDir)) {
       throw new AppError("全书 WAV 未就绪，无法封装 m4b（请先完成全书合成）。", 400);
     }
-    if (task.status !== "succeeded") {
-      throw new AppError("仅生成完成（succeeded）的任务可重做 m4b。", 400);
-    }
-
     const chapterIds = parseChapterIds(task.chapterIdsJson);
     if (chapterIds.length === 0) {
       throw new AppError("任务章节列表为空，无法封装 m4b。", 400);
@@ -2070,10 +2069,11 @@ export class AudiobookTaskService {
 
   async resumePendingTasks(): Promise<void> {
     try {
+      const recoveryErrors: unknown[] = [];
       // Active tasks do not need resultJson at all. Keep the large historical
       // payload column out of that scan; succeeded rows are scanned separately
       // because only they can carry a durable m4b=encoding marker.
-      await this.scanAudiobookRecoveryPages(
+      recoveryErrors.push(...await this.scanAudiobookRecoveryPages(
         { status: { in: ["queued", "running"] } },
         ["queued", "running"],
         {
@@ -2089,9 +2089,12 @@ export class AudiobookTaskService {
           cancelRequestedAt: true,
           m4bGenerationToken: true,
         },
-      );
-      await this.scanAudiobookRecoveryPages(
-        { status: "succeeded" },
+      ));
+      recoveryErrors.push(...await this.scanAudiobookRecoveryPages(
+        // Legacy rows may contain pretty-printed JSON (`"status": "encoding"`).
+        // Keep the DB prefilter broad; readBackgroundM4bState below remains the
+        // exact semantic filter before any recovery is scheduled.
+        { status: "succeeded", resultJson: { contains: "encoding" } },
         ["succeeded"],
         {
           id: true,
@@ -2107,7 +2110,13 @@ export class AudiobookTaskService {
           cancelRequestedAt: true,
           m4bGenerationToken: true,
         },
-      );
+      ));
+      if (recoveryErrors.length > 0) {
+        throw new AggregateError(
+          recoveryErrors,
+          `${recoveryErrors.length} audiobook task(s) failed startup recovery`,
+        );
+      }
     } catch (error) {
       if (isMissingAudiobookTaskTableError(error)) {
         return;
@@ -2120,7 +2129,8 @@ export class AudiobookTaskService {
     where: Prisma.AudiobookTaskWhereInput,
     allowedStatuses: readonly string[],
     select: Prisma.AudiobookTaskSelect,
-  ): Promise<void> {
+  ): Promise<unknown[]> {
+    const recoveryErrors: unknown[] = [];
     let cursor: { id: string } | undefined;
     while (true) {
       const rows = await prisma.audiobookTask.findMany({
@@ -2130,15 +2140,18 @@ export class AudiobookTaskService {
         take: AUDIOBOOK_RECOVERY_PAGE_SIZE,
         ...(cursor ? { cursor, skip: 1 } : {}),
       }) as unknown as AudiobookRecoveryRow[];
-      if (rows.length === 0) return;
+      if (rows.length === 0) return recoveryErrors;
       const matchingRows = rows.filter((row) => allowedStatuses.includes(row.status));
-      if (matchingRows.length > 0) await this.resumePendingTaskRows(matchingRows);
-      if (rows.length < AUDIOBOOK_RECOVERY_PAGE_SIZE) return;
+      if (matchingRows.length > 0) {
+        recoveryErrors.push(...await this.resumePendingTaskRows(matchingRows));
+      }
+      if (rows.length < AUDIOBOOK_RECOVERY_PAGE_SIZE) return recoveryErrors;
       cursor = { id: rows[rows.length - 1].id };
     }
   }
 
-  private async resumePendingTaskRows(rows: AudiobookRecoveryRow[]): Promise<void> {
+  private async resumePendingTaskRows(rows: AudiobookRecoveryRow[]): Promise<unknown[]> {
+      const recoveryErrors: unknown[] = [];
 
       // 带 cancelRequestedAt 的行：用户已请求取消，执行器在重启中丢失，无人 ack。
       // 原实现把 cancelRequestedAt 一并清空再重排队 = 把用户取消过的任务复活重跑。
@@ -2153,6 +2166,7 @@ export class AudiobookTaskService {
             row.m4bGenerationToken,
           );
         } catch (error) {
+          recoveryErrors.push(error);
           console.warn(
             "[audiobook] resumePendingTasks 收口已请求取消的任务失败",
             row.id,
@@ -2240,6 +2254,7 @@ export class AudiobookTaskService {
             }
           }
         } catch (error) {
+          recoveryErrors.push(error);
           console.warn(
             "[audiobook] resumePendingTasks m4b recovery failed",
             row.id,
@@ -2270,6 +2285,7 @@ export class AudiobookTaskService {
           }
           await this.forceContinueParentTerminal(parentRow.id);
         } catch (error) {
+          recoveryErrors.push(error);
           console.warn(
             "[audiobook] resumePendingTasks 收口孤儿 continuing 父失败",
             parentRow.id,
@@ -2279,7 +2295,7 @@ export class AudiobookTaskService {
       }
 
       if (resumables.length === 0) {
-        return;
+        return recoveryErrors;
       }
       // 宿主重启后，在途 ffmpeg 已变孤儿（PPID=1）继续写 taskDir 的 m4b part；重排队前
       // best-effort kill，并等待有界退出后再重排队，避免与新 run 交错写同一 inode。
@@ -2290,6 +2306,7 @@ export class AudiobookTaskService {
             || resolveAudiobookTaskDir(row.novelId, row.id);
           await killOrphanM4bFfmpeg(taskDir);
         } catch (error) {
+          recoveryErrors.push(error);
           console.warn(
             "[audiobook] resumePendingTasks killOrphanM4bFfmpeg 失败",
             row.id,
@@ -2298,21 +2315,31 @@ export class AudiobookTaskService {
         }
       }
       for (const row of resumables) {
-        const claimed = await prisma.audiobookTask.updateMany({
-          where: { id: row.id, ...m4bGenerationWhere(row.m4bGenerationToken) },
-          data: {
-            status: "queued",
-            pendingManualRecovery: false,
-            error: null,
-            heartbeatAt: null,
-            currentStage: "queued",
-            currentItemKey: null,
-            // 重启恢复是新一代；旧进程/孤儿 worker 仅凭旧 token 不能再写。
-            m4bGenerationToken: newM4bGenerationToken(),
-          },
-        });
-        if (claimed.count > 0) this.enqueueTask(row.id);
+        try {
+          const claimed = await prisma.audiobookTask.updateMany({
+            where: { id: row.id, ...m4bGenerationWhere(row.m4bGenerationToken) },
+            data: {
+              status: "queued",
+              pendingManualRecovery: false,
+              error: null,
+              heartbeatAt: null,
+              currentStage: "queued",
+              currentItemKey: null,
+              // 重启恢复是新一代；旧进程/孤儿 worker 仅凭旧 token 不能再写。
+              m4bGenerationToken: newM4bGenerationToken(),
+            },
+          });
+          if (claimed.count > 0) this.enqueueTask(row.id);
+        } catch (error) {
+          recoveryErrors.push(error);
+          console.warn(
+            "[audiobook] resumePendingTasks 重排任务失败",
+            row.id,
+            error instanceof Error ? error.message : error,
+          );
+        }
       }
+      return recoveryErrors;
   }
 
   /** 挂在该父上、仍在 queued/running 的续生成子任务数（用于判断 continuing 父是否成孤儿） */
@@ -3448,7 +3475,7 @@ const ORPHAN_M4B_FFMPEG_EXIT_POLL_MS = 50;
 
 export async function killOrphanM4bFfmpeg(taskDir: string): Promise<void> {
   const { error, stdout } = await new Promise<{ error: Error | null; stdout: string }>((resolve) => {
-    execFile("ps", ["-axo", "pid=,ppid=,command="], { timeout: 5000 }, (psError, psStdout) => {
+    childProcess.execFile("ps", ["-axo", "pid=,ppid=,command="], { timeout: 5000 }, (psError, psStdout) => {
       resolve({
         error: psError,
         stdout: typeof psStdout === "string" ? psStdout : String(psStdout ?? ""),
@@ -3499,6 +3526,7 @@ export async function killOrphanM4bFfmpeg(taskDir: string): Promise<void> {
       timeoutMs: ORPHAN_M4B_FFMPEG_EXIT_WAIT_MS,
       pids: Array.from(pending),
     });
+  }
 }
 
 export const audiobookTaskService = new AudiobookTaskService();

@@ -183,8 +183,8 @@ async function withTaskDirLock<T>(
     const onAbort = () => {
       const current = M4B_WAITERS.get(taskDir);
       const index = current?.indexOf(waiter) ?? -1;
-      if (index >= 0) {
-        current?.splice(index, 1);
+      if (current && index >= 0) {
+        current.splice(index, 1);
         if (current.length === 0) M4B_WAITERS.delete(taskDir);
       }
       signal?.removeEventListener("abort", onAbort);
@@ -362,6 +362,9 @@ const M4B_PROGRESS_INTERVAL_MS = Math.max(
   Number(process.env.AUDIOBOOK_M4B_PROGRESS_INTERVAL_MS ?? 10_000) || 10_000,
 );
 
+/** SIGKILL 后等待 ChildProcess close 的上限，防止异常 fd/运行时让 permit 永久不释放。 */
+const FFMPEG_KILL_CLOSE_WAIT_MS = 2_000;
+
 export interface M4bFfmpegProgress {
   partBytes: number;
   elapsedMs: number;
@@ -423,6 +426,8 @@ function runFfmpeg(input: {
     let settled = false;
     let progressTimer: NodeJS.Timeout | null = null;
     let watchdogTimer: NodeJS.Timeout | null = null;
+    let killCloseTimer: NodeJS.Timeout | null = null;
+    let pendingKillError: Error | null = null;
     const startedAt = Date.now();
     // 看门狗和进度日志是两个独立的观察者：进度采样不能推进停滞判定的基线。
     let lastObservedBytes = 0;
@@ -434,6 +439,7 @@ function runFfmpeg(input: {
       if (watchdogTimer) clearTimeout(watchdogTimer);
       input.signal?.removeEventListener("abort", onAbort);
       if (progressTimer) clearInterval(progressTimer);
+      if (killCloseTimer) clearTimeout(killCloseTimer);
     };
     const finish = (status: number | null, errText: string) => {
       if (settled) return;
@@ -448,12 +454,21 @@ function runFfmpeg(input: {
       reject(error);
     };
     const killAndFail = (message: string) => {
+      if (settled || pendingKillError) return;
+      pendingKillError = new Error(message);
+      if (watchdogTimer) clearTimeout(watchdogTimer);
+      if (progressTimer) clearInterval(progressTimer);
+      input.signal?.removeEventListener("abort", onAbort);
       try {
         child.kill("SIGKILL");
       } catch {
         // ignore
       }
-      fail(new Error(message));
+      // Keep task/global permits until the child lifecycle has ended. Releasing
+      // immediately after kill() allows the next encoder to overlap briefly.
+      killCloseTimer = setTimeout(() => {
+        fail(pendingKillError ?? new Error(message));
+      }, FFMPEG_KILL_CLOSE_WAIT_MS);
     };
     const onAbort = () => {
       killAndFail("m4b 封装已取消。");
@@ -517,10 +532,14 @@ function runFfmpeg(input: {
       }
     });
     child.on("error", (error) => {
-      fail(error instanceof Error ? error : new Error(String(error)));
+      fail(pendingKillError ?? (error instanceof Error ? error : new Error(String(error))));
     });
     child.on("close", (code) => {
-      finish(code, stderr.slice(0, 400));
+      if (pendingKillError) {
+        fail(pendingKillError);
+      } else {
+        finish(code, stderr.slice(0, 400));
+      }
     });
   });
 }

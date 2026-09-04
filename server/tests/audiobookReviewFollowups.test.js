@@ -122,7 +122,7 @@ test("runWatchdogTick: markFailedIfRunning 命中后对续生成子调 finalizeC
     "watchdog 必须识别续生成子任务",
   );
   assert.ok(
-    /finalizeContinueChild\(row\.id,\s*true\)/.test(body),
+    /finalizeContinueChild\(row\.id,\s*true(?:,\s*[^)]*)?\)/.test(body),
     "watchdog 翻 fail 子任务后必须 finalizeContinueChild 收口父，否则父永久卡 continuing",
   );
   // HIGH-3：翻 fail 只改 DB 行，pipeline 还活着（慢 TTS = 误判）。不 abort 则僵尸子
@@ -179,7 +179,7 @@ test("continueParentTask: CAS 抢占父在 wipe/建子之前，落空即 409", (
     "mode=resynthesize 才会 wipe 被点名章，baseline 必须据此扣减",
   );
   assert.ok(
-    /claimedParent\.count === 0/.test(body),
+    /(?:claimedParent|claimed)\.count === 0/.test(body),
     "抢占落空必须拒绝（409），不得继续",
   );
   assert.ok(

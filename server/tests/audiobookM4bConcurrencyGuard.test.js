@@ -156,12 +156,12 @@ test("taskDir lock 的等待者 abort 后应立即退出且不阻塞后续等待
     signal: controller.signal,
   });
   controller.abort();
-  await assert.rejects(
-    Promise.race([
-      waiting,
-      new Promise((_, reject) => setTimeout(() => reject(new Error("lock waiter timeout")), 100)),
-    ]),
-    /取消|abort/i,
-  );
-  await first;
+  const waitingResult = await Promise.race([
+    waiting,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("lock waiter timeout")), 100)),
+  ]);
+  assert.equal(waitingResult.status, "failed");
+  assert.match(waitingResult.reason ?? "", /取消|abort/i);
+  const firstResult = await first;
+  assert.equal(firstResult.status, "ready", firstResult.reason);
 });
