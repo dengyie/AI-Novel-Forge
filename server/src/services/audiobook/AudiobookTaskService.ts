@@ -2195,17 +2195,49 @@ export class AudiobookTaskService {
               },
             });
             if (claimed.count > 0) {
-              await this.scheduleBackgroundM4bEncode({
+              // The ffmpeg job can legitimately run for tens of minutes. Startup
+              // recovery only needs to claim and enqueue it; awaiting completion
+              // here would keep /health/ready degraded for the whole encode.
+              void Promise.resolve(this.scheduleBackgroundM4bEncode({
                 parentTaskId: row.id,
                 novelId: row.novelId,
                 parentTitle: row.title,
                 taskDir,
                 chapterIds,
                 generationToken: recoveryToken,
+              })).catch((error) => {
+                console.warn(
+                  "[audiobook] detached m4b recovery worker failed",
+                  row.id,
+                  error instanceof Error ? error.message : error,
+                );
               });
             }
           } else {
-            console.warn("[audiobook] m4b recovery skipped: task has no chapters", row.id);
+            // A malformed/legacy marker must not be left in `encoding` forever.
+            // Persist a terminal failure after claiming the same generation so
+            // readiness retries cannot rediscover this row on every restart.
+            const recoveryToken = newM4bGenerationToken();
+            const claimed = await prisma.audiobookTask.updateMany({
+              where: {
+                id: row.id,
+                status: "succeeded",
+                resultJson: row.resultJson,
+                ...m4bGenerationWhere(row.m4bGenerationToken),
+              },
+              data: {
+                m4bGenerationToken: recoveryToken,
+                currentItemLabel: M4B_ENCODING_LABEL,
+              },
+            });
+            if (claimed.count > 0) {
+              await this.settleBackgroundM4b(
+                row.id,
+                "有声书生成完成；m4b 失败（任务章节列表为空）",
+                { status: "failed", reason: "任务章节列表为空" },
+                { generationToken: recoveryToken },
+              );
+            }
           }
         } catch (error) {
           console.warn(
@@ -3467,7 +3499,6 @@ export async function killOrphanM4bFfmpeg(taskDir: string): Promise<void> {
       timeoutMs: ORPHAN_M4B_FFMPEG_EXIT_WAIT_MS,
       pids: Array.from(pending),
     });
-}
 }
 
 export const audiobookTaskService = new AudiobookTaskService();
