@@ -12,7 +12,7 @@
 - degraded 启动保留服务进程与健康诊断入口，同时以 503 阻止普通 API 和 readiness；后台按退避间隔只重试失败域，全部成功后才恢复 ready。
 - `/api/health` 必须位于启动门禁之前；普通 `/api/*` 的启动门禁必须位于 JSON body parser 和限流器之前。恢复期间不能先接收最高 20MB 请求体，也不能消耗恢复完成后的首批限流额度。
 - 持久化模型密钥必须在恢复扫描前载入；可能立即执行长链路的 Director worker、Volume Readiness、RAG/watchdog 与定时扫描器只能在核心恢复扫描结束后启动。
-- “恢复域扫描串行”不等于“真实任务执行串行”。章节 Pipeline、Director 与 m4b 必须各自拥有进程级高负载准入：默认并发 1，显式配置也必须有硬上限。启动期 Volume Readiness 跨小说逐条执行，不能为每本书 fire-and-forget 扇出。
+- “恢复域扫描串行”不等于“真实任务执行串行”。章节 Pipeline、Director 与 m4b 必须各自拥有进程级高负载准入：默认并发 1，显式配置也必须有硬上限。启动期 Volume Readiness 跨小说逐条执行，不能为每本书 fire-and-forget 扇出；Director 必须等待这条后台恢复 Promise 完成后才能开始 leasing，HTTP readiness 不等待整卷长任务。
 - 若启动阶段发生无法归属为单域恢复失败的异常，必须停止已启动的后台资源并关闭 HTTP listener，再把异常交给 bootstrap 的进程级失败处理。
 - 有声书恢复扫描必须按稳定唯一键分页；活动任务查询不应加载历史 `resultJson`，只有 succeeded 任务需要读取 m4b 持久标记。这样历史任务数量或 JSON 体积增长不会把启动恢复变成一次性内存峰值。
 

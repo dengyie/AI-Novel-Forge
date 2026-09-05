@@ -397,9 +397,8 @@ async function initializeBackgroundServices(): Promise<BackgroundServicesHandle>
     });
     // 恢复扫描必须在服务进入 ready 前完成：m4b 后台作业依靠持久 marker 重建内存队列，
     // 不能在启动后以未等待 Promise 运行而留下短暂/永久的不可恢复窗口。
-    // Director 与整卷 readiness 都可能触发长链路，必须等六个核心恢复域完成扫描/认领后
-    // 才启动，避免三条启动路径在 restart 高压窗口同时争抢内存。
-    const recoveryResult = await runStartupRecoverySequence({
+    // 核心恢复后，Volume 真正执行结束才启动 Director；HTTP ready 不等待整卷长任务。
+    const { recoveryResult, backgroundRecovery } = await runStartupRecoverySequence({
       recoverCore: () => recoveryTaskService.initializePendingRecoveries(),
       startDeferredServices: () => {
         // These workers may perform an immediate scan/tick. Starting them only
@@ -418,10 +417,7 @@ async function initializeBackgroundServices(): Promise<BackgroundServicesHandle>
       },
       // VOLUME_READINESS_SCHEDULE 只控制 dry-run 巡检；startup auto-resume 始终开启。
       startVolumeRecovery: () => {
-        void volumeReadinessStartupRecoveryRunner.run(() => stopped)
-          .catch((error) => {
-            console.warn("[volume.readiness] hydrate runs failed", error);
-          })
+        return volumeReadinessStartupRecoveryRunner.run(() => stopped)
           .finally(() => {
             // The optional dry-run scheduler performs an immediate first tick.
             // Do not overlap that tick with startup volume auto-resume.
@@ -434,6 +430,9 @@ async function initializeBackgroundServices(): Promise<BackgroundServicesHandle>
         });
       },
       shouldStop: () => stopped,
+    });
+    void backgroundRecovery.catch((error) => {
+      console.warn("[volume.readiness] startup recovery failed", error);
     });
     if (recoveryResult.failedDomains.length > 0) {
       setServerReadiness("degraded", recoveryResult.failedDomains);
