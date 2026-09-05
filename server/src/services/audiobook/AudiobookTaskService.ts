@@ -1766,6 +1766,10 @@ export class AudiobookTaskService {
       where: {
         id: parent.id,
         status: { in: ["running", "queued"] },
+        // Bind the projection to the snapshot used to derive nextProgress.
+        // A concurrent onProgress/failed-chapter writer must force a retry
+        // instead of allowing this stale whole-blob projection to win.
+        progressJson: parent.progressJson,
         m4bGenerationToken: parent.m4bGenerationToken,
       },
       data: {
