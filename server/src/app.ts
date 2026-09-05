@@ -53,12 +53,7 @@ import { NovelPipelineRuntimeService } from "./services/novel/NovelPipelineRunti
 import { recoveryTaskService } from "./services/task/RecoveryTaskService";
 import { taskRetentionService } from "./services/task/TaskRetentionService";
 import { volumeReadinessScheduler } from "./services/novel/volume/VolumeReadinessScheduler";
-import {
-  ensureVolumeReadinessRunsHydrated,
-  isWallBudgetExhausted,
-  listPlannedLiveReadinessRuns,
-} from "./services/novel/volume/volumeReadinessRunStore";
-import { volumeReadinessExecutor } from "./services/novel/volume/VolumeReadinessExecutor";
+import { volumeReadinessStartupRecoveryRunner } from "./services/novel/volume/readiness/application/VolumeReadinessStartupRecoveryRunner";
 import {
   ensureSystemResourceStarterData,
   hasSystemResourceBootstrapChanges,
@@ -80,6 +75,8 @@ import {
 } from "./services/novel/runtime/ChapterGeneratingLockHygiene";
 import { registerBuiltInEngines } from "./services/audiobook/engine/registerBuiltInEngines";
 import { audiobookTaskService } from "./services/audiobook/AudiobookTaskService";
+import { createStartupReadinessMiddleware } from "./app/startup/StartupReadinessMiddleware";
+import { runStartupRecoverySequence } from "./app/startup/StartupRecoveryCoordinator";
 
 getSharedNovelServices();
 registerNovelEventHandlers(novelEventBus);
@@ -109,7 +106,11 @@ function parsePositiveInt(value: string | undefined, fallback: number): number {
   return fallback;
 }
 
-export function createApp() {
+export interface CreateAppOptions {
+  enforceStartupReadiness?: boolean;
+}
+
+export function createApp(options: CreateAppOptions = {}) {
   getSharedNovelServices();
   const app = express();
   const jsonBodyLimit = process.env.API_JSON_LIMIT ?? "20mb";
@@ -148,6 +149,16 @@ export function createApp() {
     const errorSuffix = errorMessage ? ` | error: ${errorMessage}` : "";
     return `${method} ${url} ${status} ${responseTime} ms - ${contentLength}${errorSuffix}`;
   }));
+
+  // Liveness/readiness must remain reachable while startup recovery is gated.
+  // Reject ordinary API traffic before body parsing and rate-limit accounting:
+  // a restart storm must not allocate up to API_JSON_LIMIT per request or spend
+  // the first post-recovery request budget while the service cannot serve it.
+  app.use("/api/health", healthRouter);
+  if (options.enforceStartupReadiness) {
+    app.use("/api", createStartupReadinessMiddleware());
+  }
+
   app.use(express.json({ limit: jsonBodyLimit }));
 
   // Global inbound rate limit (single-node). Skip liveness for probes.
@@ -175,7 +186,6 @@ export function createApp() {
   app.use("/api/llm", expensiveRateLimit);
   app.use("/api/creative-hub", expensiveRateLimit);
 
-  app.use("/api/health", healthRouter);
   app.use("/api/agent-catalog", agentCatalogRouter);
   app.use("/api/agent-runs", agentRunsRouter);
   app.use("/api/book-analysis", bookAnalysisRouter);
@@ -380,72 +390,51 @@ async function initializeBackgroundServices(): Promise<BackgroundServicesHandle>
   };
 
   try {
-    ragServices.ragWorker.start();
-    ragServices.ragRetrievalTraceRetention.start();
-    taskRetentionService.start();
-    // hydrate 后自动 re-execute 因进程重启降为 planned 的 live run（避免静默卡死）。
-    // VOLUME_READINESS_SCHEDULE 只控制 dry-run 巡检；auto-resume 始终开启。
-    // listPlannedLiveReadinessRuns 默认跳过 wall 已耗尽的 planned（须显式抬 wall 再 resume）。
-    void ensureVolumeReadinessRunsHydrated()
-    .then(() => {
-      if (stopped) return;
-      const allPlanned = listPlannedLiveReadinessRuns({ skipWallExhausted: false });
-      const planned = allPlanned.filter((run) => !isWallBudgetExhausted(run));
-      for (const run of allPlanned) {
-        if (!isWallBudgetExhausted(run)) {
-          continue;
-        }
-        console.warn("[volume.readiness] skip auto-resume: wall already exhausted", {
-          runId: run.runId,
-          novelId: run.novelId,
-          wallMsUsed: run.wallMsUsed,
-          maxWallMinutes: run.budget.maxWallMinutes,
-        });
-      }
-      // #4：同 novel 多 planned 时只 auto-resume 最新一条（list 已按 updatedAt desc），
-      // 其余保持 planned；flight claim 也会拒掉 sibling，避免并发 execute 竞态。
-      const seenNovels = new Set<string>();
-      const dedupedPlanned = planned.filter((run) => {
-        if (seenNovels.has(run.novelId)) {
-          console.log("[volume.readiness] skip auto-resume sibling planned (same novel)", {
-            runId: run.runId,
-            novelId: run.novelId,
-          });
-          return false;
-        }
-        seenNovels.add(run.novelId);
-        return true;
-      });
-      for (const run of dedupedPlanned) {
-        if (stopped) break;
-        console.log("[volume.readiness] auto-resume planned run after hydrate", {
-          runId: run.runId,
-          novelId: run.novelId,
-        });
-        void volumeReadinessExecutor.execute(run.runId).catch((error) => {
-          console.error("[volume.readiness] auto-resume execute failed", {
-            runId: run.runId,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        });
-      }
-    })
-    .catch((error) => {
-      console.warn("[volume.readiness] hydrate runs failed", error);
-    });
-    volumeReadinessScheduler.start();
-    novelSideEffectWorker.start();
-    // Prevent zombie chapterArtifactSyncCheckpoint rows from blocking writer claim paths.
-    startArtifactCheckpointHygieneScanner();
-    // 章节 generating 陈旧锁自愈：writer 超时/崩溃遗留的假 running 由扫描器回收，
-    // 不再依赖人工 SQL（生产曾单章 4 次手动回收）。
-    startChapterLockHygieneScanner();
-    void directorWorker.start().catch((error) => {
-      console.error("[director.worker] unexpected stop", error);
+    // Recovery queues can begin work as soon as they are hydrated. Load the
+    // persisted provider keys before any recovered task is allowed to execute.
+    await loadProviderApiKeys().catch((error) => {
+      console.warn("数据库中的模型密钥加载失败，已回退到环境变量。", error);
     });
     // 恢复扫描必须在服务进入 ready 前完成：m4b 后台作业依靠持久 marker 重建内存队列，
     // 不能在启动后以未等待 Promise 运行而留下短暂/永久的不可恢复窗口。
-    const recoveryResult = await recoveryTaskService.initializePendingRecoveries();
+    // Director 与整卷 readiness 都可能触发长链路，必须等六个核心恢复域完成扫描/认领后
+    // 才启动，避免三条启动路径在 restart 高压窗口同时争抢内存。
+    const recoveryResult = await runStartupRecoverySequence({
+      recoverCore: () => recoveryTaskService.initializePendingRecoveries(),
+      startDeferredServices: () => {
+        // These workers may perform an immediate scan/tick. Starting them only
+        // after durable task recovery avoids adding another restart-time burst.
+        ragServices.ragWorker.start();
+        ragServices.ragRetrievalTraceRetention.start();
+        taskRetentionService.start();
+        novelSideEffectWorker.start();
+        // Prevent zombie chapterArtifactSyncCheckpoint rows from blocking writer claim paths.
+        startArtifactCheckpointHygieneScanner();
+        // 章节 generating 陈旧锁自愈：writer 超时/崩溃遗留的假 running 由扫描器回收。
+        startChapterLockHygieneScanner();
+        bookAnalysisService.startWatchdog();
+        novelPipelineRuntimeService.startWatchdog();
+        audiobookTaskService.startWatchdog();
+      },
+      // VOLUME_READINESS_SCHEDULE 只控制 dry-run 巡检；startup auto-resume 始终开启。
+      startVolumeRecovery: () => {
+        void volumeReadinessStartupRecoveryRunner.run(() => stopped)
+          .catch((error) => {
+            console.warn("[volume.readiness] hydrate runs failed", error);
+          })
+          .finally(() => {
+            // The optional dry-run scheduler performs an immediate first tick.
+            // Do not overlap that tick with startup volume auto-resume.
+            if (!stopped) volumeReadinessScheduler.start();
+          });
+      },
+      startDirectorWorker: () => {
+        void directorWorker.start().catch((error) => {
+          console.error("[director.worker] unexpected stop", error);
+        });
+      },
+      shouldStop: () => stopped,
+    });
     if (recoveryResult.failedDomains.length > 0) {
       setServerReadiness("degraded", recoveryResult.failedDomains);
       console.warn("[recovery] startup recovery degraded; readiness remains blocked", {
@@ -456,10 +445,6 @@ async function initializeBackgroundServices(): Promise<BackgroundServicesHandle>
       setServerReadiness("ready");
     }
 
-    void loadProviderApiKeys().catch((error) => {
-      console.warn("数据库中的模型密钥加载失败，已回退到环境变量。", error);
-    });
-
     void ensureSystemResourceStarterData()
       .then((systemResourceReport) => {
         if (hasSystemResourceBootstrapChanges(systemResourceReport)) {
@@ -469,10 +454,6 @@ async function initializeBackgroundServices(): Promise<BackgroundServicesHandle>
       .catch((error) => {
         console.warn("Failed to bootstrap built-in creative resources.", error);
       });
-
-    bookAnalysisService.startWatchdog();
-    novelPipelineRuntimeService.startWatchdog();
-    audiobookTaskService.startWatchdog();
 
     return { stop };
   } catch (error) {
@@ -498,7 +479,7 @@ export async function startServer(options?: ServerStartOptions): Promise<Started
     console.warn("[server] failed to inspect pending review auto-promotion settings.", error);
   });
 
-  const app = createApp();
+  const app = createApp({ enforceStartupReadiness: true });
   const { host, port, allowLan } = resolveServerStartOptions(options);
   assertProductionAuthSafety({ host, allowLan });
 

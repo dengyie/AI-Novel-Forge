@@ -28,7 +28,7 @@
   - **段间语义停顿**（`AUDIOBOOK_GAP_MS` + `audiobookGap.ts`）：旁白↔角色 420ms、角色↔角色 320ms、同说话人续块 180ms；短句(≤15字) +120ms；章间 700ms。合并时插入静音，不改 TTS 产物。
   - **m4b 可选封装**（`audiobookM4b.ts`）：全书 WAV → `full-book.m4b`（AAC 96k + 章节 ffmetadata）；无 ffmpeg → `skipped`，WAV 仍成功；失败/跳过写入 qualityWarnings
   - m4b 后台状态必须先持久化为 `resultJson.m4b.status=encoding`，再启动 ffmpeg；启动恢复扫描 `succeeded + encoding` 任务并重新排队，不依赖进程内 Promise。
-  - m4b 编码受进程级有界队列保护，默认 `AUDIOBOOK_M4B_CONCURRENCY=1`（合法正整数可调）；同一 taskDir 仍保持额外互斥。
+  - m4b 编码受进程级有界队列保护，默认 `AUDIOBOOK_M4B_CONCURRENCY=1`、硬上限 4；单个 ffmpeg 默认 2 线程、硬上限 4；同一 taskDir 仍保持额外互斥。
   - resume：已有 annotation / 合法 chapter.wav / 连续合法 chunk 则跳过
 - 产物路径：`storage/audiobooks/{novelId}/{taskId}/`（磁盘，非 PG base64；id 段拒绝 `..`/`/`）
 - clone 参考音频：`storage/voice-refs/{novelId}/{characterId}/ref.wav`（角色更新可带 `ttsRefAudioBase64` 落盘）
@@ -53,6 +53,8 @@ m4b 是单次长时 ffmpeg 任务，进度日志会周期性采样 `.part` 文�
 - 停滞窗口是相对最近一次看门狗观察到增长的时间，不使用整次编码的绝对墙钟超时。
 - 同一 `taskDir` 的编码请求通过进程内锁串行化；排队等待者收到 `AbortSignal` 后必须从 waiter 队列移除并立即拒绝，不得等上一轮编码结束才返回。
 - 宿主重启重排队前，孤儿 ffmpeg 清理必须等待已发送 `SIGKILL` 的 PID 消失后再放行新 worker；等待最多 2 秒，仍存活时记录 taskDir 与 PID 告警，并跳过该任务本轮重排队，等待下一轮域级恢复重试，避免新旧进程交错写产物。
+- 单轮启动恢复只允许获取一次进程表快照；每个候选 PID 在 `SIGKILL` 前仍必须按 PID、PPID、可执行文件和完整 taskDir 目录段重新验证，不能用任务目录前缀匹配，也不能因快照复用而跳过 PID 复用检查。
+- POSIX ffmpeg 必须运行在独立进程组中；取消、停滞与孤儿清理均优先终止整个组，避免只杀 wrapper 后留下继续持有管道或写盘的后代。
 - 进程内 m4b worker 在取消或停滞后，必须等待 ffmpeg `close`/`error` 事件再释放全局编码许可；若子进程生命周期异常，最多等待 2 秒后以失败收口，避免正常情况下新旧 ffmpeg 重叠占用资源。
 - 后台 m4b marker 只有在全书 WAV 有效、`chapterIds` 非空且每章 WAV 存在时才继续编码；任一前置条件缺失都要写入失败终态，不能永久停在「m4b 后台封装中」。
 
@@ -122,8 +124,9 @@ m4b 封装在任务主流水线完成后异步运行，可能跨越章节重做�
   不会在旧锁释放后再次占用编码执行权。
 - token 轮换和删除旧全书产物也必须取得同一个 taskDir artifact lock；这把锁覆盖发布检查到 canonical rename 的窗口，
   防止“旧 worker 已通过检查、重做刚清理、旧 worker 随后 rename”这种跨代覆盖。
-- `resultJson` 的 m4b settle 必须读改写并保留其它字段；仅由 token + 状态/label CAS 决定是否提交。
+- `resultJson` 的 m4b settle 必须读改写并保留其它字段；所有权仅由 `status=succeeded + generation token` 确定，乐观并发使用完整 `resultJson` 快照。label 是可变展示文案，禁止作为 CAS 条件；同代 CAS 冲突且尚无终态时必须重试投影，已有合法终态时幂等结束。
 - 迁移前的 `NULL` 或空字符串 token 必须作为精确 CAS 值处理，不能把它们混同为缺少栅栏；首次执行会在成功抢占时签发真实 UUID。
+- 章节重做与续生成必须先把精确清理意图和新 generation 持久化，再删除任何章/全书产物。除 `ENOENT` 外的删除错误必须上抛并保留可恢复任务；启动恢复会重放幂等清理意图，不能把仍可读取的旧 WAV 当作本代成功。
 
 ### 失败模式
 

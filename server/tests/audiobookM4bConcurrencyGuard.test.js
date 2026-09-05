@@ -19,7 +19,10 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
-const { encodeFullBookM4b } = require("../dist/services/audiobook/audiobookM4b.js");
+const {
+  buildM4bFfmpegArgs,
+  encodeFullBookM4b,
+} = require("../dist/services/audiobook/audiobookM4b.js");
 const { resolveFullBookM4bPath } = require("../dist/services/audiobook/audiobookPaths.js");
 
 function makeTaskDir(label) {
@@ -54,6 +57,40 @@ function installFakeFfmpeg() {
   return { script, countFile };
 }
 
+function installPermitHandoffFfmpeg() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ab-m4b-permit-handoff-"));
+  const script = path.join(dir, "fake-ffmpeg.sh");
+  const firstStarted = path.join(dir, "first-started");
+  const releaseFirst = path.join(dir, "release-first");
+  const calls = path.join(dir, "calls");
+  fs.writeFileSync(
+    script,
+    [
+      "#!/bin/sh",
+      `if [ ! -f "${calls}" ]; then`,
+      `  printf "x" > "${calls}"`,
+      `  touch "${firstStarted}"`,
+      `  while [ ! -f "${releaseFirst}" ]; do sleep 0.02; done`,
+      "else",
+      `  printf "x" >> "${calls}"`,
+      "fi",
+      'prev=""',
+      'src=""',
+      'last=""',
+      'for a in "$@"; do',
+      '  if [ "$prev" = "-i" ] && [ -z "$src" ]; then src="$a"; fi',
+      '  last="$a"',
+      '  prev="$a"',
+      "done",
+      'cp "$src" "$last"',
+      "exit 0",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  return { dir, script, firstStarted, releaseFirst, calls };
+}
+
 const { script: FFMPEG_SCRIPT, countFile: COUNT_FILE } = installFakeFfmpeg();
 const OLD_FFMPEG_PATH = process.env.AUDIOBOOK_FFMPEG_PATH;
 
@@ -63,6 +100,21 @@ test.before(() => {
 test.after(() => {
   if (OLD_FFMPEG_PATH === undefined) delete process.env.AUDIOBOOK_FFMPEG_PATH;
   else process.env.AUDIOBOOK_FFMPEG_PATH = OLD_FFMPEG_PATH;
+});
+
+test("ffmpeg thread cap is applied to the AAC output rather than an input decoder", () => {
+  const args = buildM4bFfmpegArgs({
+    sourceWavPath: "/tmp/source.wav",
+    metadataPath: "/tmp/chapters.ffmeta",
+    outputPath: "/tmp/full-book.m4b.part",
+    threads: 2,
+  });
+
+  const lastInputIndex = args.lastIndexOf("-i");
+  const codecIndex = args.indexOf("-c:a");
+  const threadsIndex = args.indexOf("-threads");
+  assert.ok(threadsIndex > lastInputIndex, "-threads must not be parsed as an input option");
+  assert.ok(threadsIndex > codecIndex, "-threads must sit in the output codec option region");
 });
 
 function writeMarkerFile(p, ch, len) {
@@ -164,4 +216,82 @@ test("taskDir lock 的等待者 abort 后应立即退出且不阻塞后续等待
   assert.match(waitingResult.reason ?? "", /取消|abort/i);
   const firstResult = await first;
   assert.equal(firstResult.status, "ready", firstResult.reason);
+});
+
+test("全局许可交给已取消等待者时会继续唤醒下一项", { concurrency: false }, async () => {
+  const fake = installPermitHandoffFfmpeg();
+  const dirs = [
+    makeTaskDir("permit-holder"),
+    makeTaskDir("permit-cancelled"),
+    makeTaskDir("permit-successor"),
+  ];
+  const sources = dirs.map((dir, index) => {
+    const source = path.join(dir, "src.wav");
+    writeMarkerFile(source, String(index + 1), 4096);
+    return source;
+  });
+  const cancelled = new AbortController();
+  const successor = new AbortController();
+  const originalRemoveEventListener = cancelled.signal.removeEventListener;
+  let abortOnHandoff = true;
+  cancelled.signal.removeEventListener = function removeAndAbort(type, listener, options) {
+    const result = originalRemoveEventListener.call(this, type, listener, options);
+    if (type === "abort" && abortOnHandoff) {
+      abortOnHandoff = false;
+      cancelled.abort();
+    }
+    return result;
+  };
+  process.env.AUDIOBOOK_FFMPEG_PATH = fake.script;
+  let holder;
+  let cancelledWaiter;
+  let successorWaiter;
+  try {
+    holder = encodeFullBookM4b({
+      taskDir: dirs[0],
+      bookTitle: "许可持有者",
+      sourceWavPath: sources[0],
+      chapters: [],
+    });
+    const startDeadline = Date.now() + 2_000;
+    while (!fs.existsSync(fake.firstStarted) && Date.now() < startDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(fs.existsSync(fake.firstStarted), true);
+
+    cancelledWaiter = encodeFullBookM4b({
+      taskDir: dirs[1],
+      bookTitle: "交接时取消",
+      sourceWavPath: sources[1],
+      chapters: [],
+      signal: cancelled.signal,
+    });
+    successorWaiter = encodeFullBookM4b({
+      taskDir: dirs[2],
+      bookTitle: "后继任务",
+      sourceWavPath: sources[2],
+      chapters: [],
+      signal: successor.signal,
+    });
+    fs.writeFileSync(fake.releaseFirst, "go");
+
+    const [holderResult, cancelledResult, successorResult] = await Promise.race([
+      Promise.all([holder, cancelledWaiter, successorWaiter]),
+      new Promise((_, reject) => setTimeout(
+        () => reject(new Error("successor global permit waiter timed out")),
+        1_500,
+      )),
+    ]);
+    assert.equal(holderResult.status, "ready", holderResult.reason);
+    assert.equal(cancelledResult.status, "failed");
+    assert.match(cancelledResult.reason ?? "", /取消/);
+    assert.equal(successorResult.status, "ready", successorResult.reason);
+    assert.equal(fs.readFileSync(fake.calls, "utf8").length, 2, "已取消等待者不得 spawn ffmpeg");
+  } finally {
+    successor.abort();
+    await Promise.allSettled([holder, cancelledWaiter, successorWaiter].filter(Boolean));
+    process.env.AUDIOBOOK_FFMPEG_PATH = FFMPEG_SCRIPT;
+    for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(fake.dir, { recursive: true, force: true });
+  }
 });

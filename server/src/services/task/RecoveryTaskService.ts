@@ -108,27 +108,24 @@ export class RecoveryTaskService {
     ];
   }
 
-  private runRecoveryDomains(domains: RecoveryDomain[]): Promise<RecoveryInitializationResult> {
-    const pending = domains.map((domain) => {
+  private async runRecoveryDomains(domains: RecoveryDomain[]): Promise<RecoveryInitializationResult> {
+    const failedDomains: string[] = [];
+    // Recovery methods enqueue real background work as they scan. Starting all
+    // domains with Promise.allSettled created a restart-time burst across image,
+    // director, pipeline, style and audiobook workers. Keep the bootstrap lane
+    // serial; one failed domain is recorded and does not block the next.
+    for (const domain of domains) {
       try {
-        return Promise.resolve(domain.run());
+        await domain.run();
       } catch (error) {
-        return Promise.reject(error);
-      }
-    });
-    return Promise.allSettled(pending).then((settled) => {
-      const failedDomains: string[] = [];
-      settled.forEach((result, index) => {
-        if (result.status !== "rejected") return;
-        const domain = domains[index];
         failedDomains.push(domain.name);
         console.error("[recovery] startup domain failed; continuing in degraded mode", {
           domain: domain.name,
-          error: result.reason instanceof Error ? result.reason.message : String(result.reason),
+          error: error instanceof Error ? error.message : String(error),
         });
-      });
-      return { failedDomains };
-    });
+      }
+    }
+    return { failedDomains };
   }
 
   initializePendingRecoveries(): Promise<RecoveryInitializationResult> {

@@ -111,6 +111,63 @@ test("startup m4b recovery only schedules work and does not wait for long ffmpeg
   }
 });
 
+test("a detached startup schedule rejection settles the claimed generation as failed", { concurrency: false }, async () => {
+  const service = new AudiobookTaskService();
+  const originals = {
+    findMany: prisma.audiobookTask.findMany,
+    updateMany: prisma.audiobookTask.updateMany,
+    schedule: service.scheduleBackgroundM4bEncode,
+    settle: service.settleBackgroundM4b,
+  };
+  const taskDir = makeTaskDir("detached-reject");
+  let recoveryToken = null;
+  const settled = [];
+  prisma.audiobookTask.findMany = async (query) => {
+    if (!query.select?.resultJson) return [];
+    return [{
+      id: "task-m4b-detached-reject",
+      novelId: "novel-1",
+      outputDir: taskDir,
+      progress: 100,
+      status: "succeeded",
+      title: "调度拒绝",
+      chapterIdsJson: JSON.stringify(["c1"]),
+      progressJson: null,
+      resultJson: JSON.stringify({ m4b: { status: "encoding" } }),
+      currentStage: "finalizing",
+      cancelRequestedAt: null,
+      m4bGenerationToken: "generation-before-recovery",
+    }];
+  };
+  prisma.audiobookTask.updateMany = async ({ data }) => {
+    recoveryToken = data.m4bGenerationToken;
+    return { count: 1 };
+  };
+  service.scheduleBackgroundM4bEncode = async () => {
+    throw new Error("synthetic detached schedule rejection");
+  };
+  service.settleBackgroundM4b = async (...args) => { settled.push(args); };
+
+  try {
+    await service.resumePendingTasks();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(settled.length, 1, "the durable encoding marker must reach a terminal state");
+    assert.equal(settled[0][0], "task-m4b-detached-reject");
+    assert.match(settled[0][1], /m4b 失败/);
+    assert.deepEqual(settled[0][2], {
+      status: "failed",
+      reason: "synthetic detached schedule rejection",
+    });
+    assert.equal(settled[0][3].generationToken, recoveryToken);
+  } finally {
+    prisma.audiobookTask.findMany = originals.findMany;
+    prisma.audiobookTask.updateMany = originals.updateMany;
+    service.scheduleBackgroundM4bEncode = originals.schedule;
+    service.settleBackgroundM4b = originals.settle;
+    fs.rmSync(taskDir, { recursive: true, force: true });
+  }
+});
+
 test("startup recovery closes a legacy encoding marker with an empty chapter list", { concurrency: false }, async () => {
   const service = new AudiobookTaskService();
   const originalFindMany = prisma.audiobookTask.findMany;
@@ -361,4 +418,14 @@ test("orphan cleanup selects only orphan ffmpeg writing the requested m4b part",
     ` 104 9 /usr/bin/ffmpeg /usr/bin/ffmpeg -i src.wav ${taskDir}/full-book.m4b.run.part`,
   ].join("\n");
   assert.deepEqual(selectOrphanM4bPids(ps, taskDir, 999), [101]);
+});
+
+test("orphan cleanup recognizes a configured ffmpeg wrapper process-group root", () => {
+  const taskDir = "/data/audiobook/task-wrapper";
+  const wrapper = "/opt/ai-novel/bin/ffmpeg-wrapper.sh";
+  const ps = [
+    ` 201 1 /bin/sh ${wrapper} -i src.wav ${taskDir}/full-book.m4b.run.part`,
+    ` 202 1 /bin/sh /opt/other/wrapper.sh -i src.wav ${taskDir}/full-book.m4b.run.part`,
+  ].join("\n");
+  assert.deepEqual(selectOrphanM4bPids(ps, taskDir, 999, wrapper), [201]);
 });

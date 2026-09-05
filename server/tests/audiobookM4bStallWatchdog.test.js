@@ -166,6 +166,8 @@ function installKillReleaseRaceFfmpeg() {
   const script = path.join(dir, "kill-release-race.sh");
   const firstStarted = path.join(dir, "first-started");
   const secondStarted = path.join(dir, "second-started");
+  const firstDescendantPid = path.join(dir, "first-descendant.pid");
+  const overlap = path.join(dir, "overlap");
   const callCounter = path.join(dir, "call-counter");
   fs.writeFileSync(
     script,
@@ -174,10 +176,12 @@ function installKillReleaseRaceFfmpeg() {
       `if [ ! -f "${callCounter}" ]; then`,
       `  touch "${callCounter}" "${firstStarted}"`,
       "  ( sleep 1.5 ) &",
+      `  printf "%s" "$!" > "${firstDescendantPid}"`,
       "  while :; do sleep 0.05; done",
       "fi",
       'last=""',
       'for a in "$@"; do last="$a"; done',
+      `if kill -0 "$(cat "${firstDescendantPid}")" 2>/dev/null; then touch "${overlap}"; fi`,
       `touch "${secondStarted}"`,
       'printf "%064d" 0 > "$last"',
       "exit 0",
@@ -185,7 +189,7 @@ function installKillReleaseRaceFfmpeg() {
     ].join("\n"),
     { mode: 0o755 },
   );
-  return { script, firstStarted, secondStarted };
+  return { script, firstStarted, secondStarted, overlap };
 }
 
 function writeSrcWav(p) {
@@ -199,10 +203,10 @@ test("慢但持续推进的编码不会因绝对时长被误杀（stall 看门�
   const fake = installSlowFeedFfmpeg(intervalSec, maxSec);
   const oldPath = process.env.AUDIOBOOK_FFMPEG_PATH;
   process.env.AUDIOBOOK_FFMPEG_PATH = fake;
-  // 停滞窗口 1200ms：即使推进粒度 100ms，余量仍达 12 倍；若看门狗误信墙钟（如同旧
-  // 绝对超时模型）会在 1.2s 时误杀——而它其实一直在写，应顺利跑满 4s 判 ready。
-  // 窗口取足够宽以吸收并发负载下的调度抖动，避免测试自身 flake。
-  const stallTimeoutMs = 1200;
+  // 停滞窗口 2500ms：仍明显短于 4s 总墙钟，足以证明旧绝对超时会误杀；同时给
+  // 多文件并行回归时的子进程冷启动/调度抖动留出余量。真正的健康信号仍是每
+  // 100ms 增长，而不是放宽到让停滞进程通过。
+  const stallTimeoutMs = 2500;
 
   const taskDir = makeTaskDir("slow");
   const src = path.join(taskDir, "src.wav");
@@ -332,7 +336,7 @@ test("取消编码后等待 ffmpeg close 再释放调用方", async () => {
   }
 });
 
-test("被取消的 ffmpeg 在 close 前不得释放全局 m4b permit", async () => {
+test("被取消的 ffmpeg 子孙进程退出前不得与下一个 m4b 编码重叠", async () => {
   const fake = installKillReleaseRaceFfmpeg();
   const oldPath = process.env.AUDIOBOOK_FFMPEG_PATH;
   process.env.AUDIOBOOK_FFMPEG_PATH = fake.script;
@@ -367,15 +371,15 @@ test("被取消的 ffmpeg 在 close 前不得释放全局 m4b permit", async () 
       chapters: [],
       stallTimeoutMs: 5_000,
     });
-    await new Promise((resolve) => setTimeout(resolve, 400));
-    assert.equal(
-      fs.existsSync(fake.secondStarted),
-      false,
-      "next m4b job must wait until the killed ffmpeg close event releases the permit",
-    );
     const [firstResult, secondResult] = await Promise.all([first, second]);
     assert.equal(firstResult.status, "failed");
     assert.equal(secondResult.status, "ready", secondResult.reason);
+    assert.equal(fs.existsSync(fake.secondStarted), true);
+    assert.equal(
+      fs.existsSync(fake.overlap),
+      false,
+      "the global permit must not be released while an old encoder descendant is alive",
+    );
   } finally {
     if (oldPath === undefined) delete process.env.AUDIOBOOK_FFMPEG_PATH;
     else process.env.AUDIOBOOK_FFMPEG_PATH = oldPath;

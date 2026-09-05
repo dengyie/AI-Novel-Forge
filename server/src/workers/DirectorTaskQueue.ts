@@ -5,13 +5,25 @@ import { resourceClassForCommand } from "../services/novel/director/commands/Dir
 import { DirectorCommandLeaseLostError } from "../services/novel/director/commands/DirectorCommandLeaseGuard";
 import { taskDispatcher } from "./TaskDispatcher";
 
-function resolveNumberEnv(name: string, fallback: number): number {
+const MAX_NODE_TIMER_MS = 2_147_483_647;
+const MAX_DIRECTOR_EXECUTION_SLOTS = 4;
+
+function resolvePositiveIntEnv(name: string, fallback: number, max = MAX_NODE_TIMER_MS): number {
+  const safeFallback = Number.isFinite(fallback) && fallback > 0
+    ? Math.min(max, Math.floor(fallback))
+    : 1;
   const value = Number(process.env[name]);
-  return Number.isFinite(value) && value > 0 ? value : fallback;
+  return Number.isSafeInteger(value) && value > 0
+    ? Math.min(max, value)
+    : safeFallback;
 }
 
 function resolveDefaultSlots(): number {
-  return Math.max(4, os.cpus().length);
+  // Production can be killed by host global_oom while the container still
+  // reports gigabytes available. Neither CPU count nor process.availableMemory()
+  // can safely infer that external pressure, so parallel high-memory director
+  // work is opt-in through DIRECTOR_WORKER_EXECUTION_SLOTS.
+  return 1;
 }
 
 type ResourceGateWaiter = {
@@ -137,10 +149,14 @@ export class DirectorTaskQueue {
     this.workerId = options.workerId
       ?? process.env.DIRECTOR_WORKER_ID?.trim()
       ?? `director-worker-${os.hostname()}-${process.pid}`;
-    this.leaseMs = resolveNumberEnv("DIRECTOR_WORKER_LEASE_MS", options.leaseMs ?? 120_000);
-    this.staleScanMs = resolveNumberEnv("DIRECTOR_WORKER_STALE_SCAN_MS", options.staleScanMs ?? 30_000);
-    this.executionSlots = resolveNumberEnv("DIRECTOR_WORKER_EXECUTION_SLOTS", options.executionSlots ?? resolveDefaultSlots());
-    this.pollMs = resolveNumberEnv("DIRECTOR_WORKER_POLL_MS", options.pollMs ?? 5_000);
+    this.leaseMs = resolvePositiveIntEnv("DIRECTOR_WORKER_LEASE_MS", options.leaseMs ?? 120_000);
+    this.staleScanMs = resolvePositiveIntEnv("DIRECTOR_WORKER_STALE_SCAN_MS", options.staleScanMs ?? 30_000);
+    this.executionSlots = resolvePositiveIntEnv(
+      "DIRECTOR_WORKER_EXECUTION_SLOTS",
+      options.executionSlots ?? resolveDefaultSlots(),
+      MAX_DIRECTOR_EXECUTION_SLOTS,
+    );
+    this.pollMs = resolvePositiveIntEnv("DIRECTOR_WORKER_POLL_MS", options.pollMs ?? 5_000);
     this.commandService = commandService;
   }
 
@@ -228,7 +244,11 @@ export class DirectorTaskQueue {
     let gate = this.gates.get(key);
     if (!gate) {
       const envName = `DIRECTOR_WORKER_RESOURCE_${resourceClass.toUpperCase()}_LIMIT`;
-      gate = new ResourceGate(resolveNumberEnv(envName, PER_NOVEL_RESOURCE_LIMITS[resourceClass] ?? 2));
+      gate = new ResourceGate(resolvePositiveIntEnv(
+        envName,
+        PER_NOVEL_RESOURCE_LIMITS[resourceClass] ?? 2,
+        MAX_DIRECTOR_EXECUTION_SLOTS,
+      ));
       this.gates.set(key, gate);
     }
     await gate.acquire(signal);

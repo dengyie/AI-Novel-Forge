@@ -22,7 +22,7 @@ function makeTaskDir(label) {
   return fs.mkdtempSync(path.join(os.tmpdir(), `ab-m4b-generation-${label}-`));
 }
 
-function installFakeFfmpeg() {
+function installFakeFfmpeg(sleepSeconds = 0.25) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ab-m4b-generation-ffmpeg-"));
   const started = path.join(dir, "started");
   const script = path.join(dir, "fake-ffmpeg.sh");
@@ -40,7 +40,7 @@ function installFakeFfmpeg() {
       '  prev="$a"',
       "done",
       'cp "$src" "$last"',
-      "sleep 0.25",
+      `sleep ${sleepSeconds}`,
       "exit 0",
       "",
     ].join("\n"),
@@ -116,6 +116,44 @@ test("stale generation A cannot rename over generation B after continue/reproces
     assert.equal(generationB.status, "ready", generationB.reason);
     assert.equal(fs.existsSync(resolveFullBookM4bPath(taskDir)), true);
   } finally {
+    if (previousFfmpeg === undefined) delete process.env.AUDIOBOOK_FFMPEG_PATH;
+    else process.env.AUDIOBOOK_FFMPEG_PATH = previousFfmpeg;
+    fs.rmSync(taskDir, { recursive: true, force: true });
+    fs.rmSync(path.dirname(fake.script), { recursive: true, force: true });
+  }
+});
+
+test("artifact rotation can abort an encoder without waiting for the full encode lock", { concurrency: false }, async () => {
+  const taskDir = makeTaskDir("rotation-abort");
+  const source = path.join(taskDir, "full-book.wav");
+  fs.writeFileSync(source, Buffer.alloc(4096, "R"));
+  const fake = installFakeFfmpeg(5);
+  const previousFfmpeg = process.env.AUDIOBOOK_FFMPEG_PATH;
+  process.env.AUDIOBOOK_FFMPEG_PATH = fake.script;
+  const controller = new AbortController();
+  let encoding;
+  try {
+    encoding = encodeFullBookM4b({
+      taskDir,
+      bookTitle: "轮换中止旧编码",
+      chapters: [],
+      signal: controller.signal,
+    });
+    await waitForFile(fake.started);
+
+    await Promise.race([
+      withAudiobookTaskDirArtifactLock(taskDir, () => controller.abort()),
+      new Promise((_, reject) => setTimeout(
+        () => reject(new Error("artifact rotation waited for the full ffmpeg run")),
+        500,
+      )),
+    ]);
+    const result = await encoding;
+    assert.equal(result.status, "failed");
+    assert.match(result.reason ?? "", /取消/);
+  } finally {
+    controller.abort();
+    if (encoding) await Promise.allSettled([encoding]);
     if (previousFfmpeg === undefined) delete process.env.AUDIOBOOK_FFMPEG_PATH;
     else process.env.AUDIOBOOK_FFMPEG_PATH = previousFfmpeg;
     fs.rmSync(taskDir, { recursive: true, force: true });
@@ -268,6 +306,153 @@ test("same generation token settles the m4b projection, while stale/cancelled wo
   } finally {
     prisma.audiobookTask.findUnique = originalFindUnique;
     prisma.audiobookTask.updateMany = originalUpdateMany;
+  }
+});
+
+test("same-generation encoding CAS miss is retryable instead of silently abandoning the terminal projection", { concurrency: false }, async () => {
+  const service = new AudiobookTaskService();
+  const originals = {
+    findUnique: prisma.audiobookTask.findUnique,
+    updateMany: prisma.audiobookTask.updateMany,
+  };
+  let reads = 0;
+  prisma.audiobookTask.findUnique = async () => {
+    reads += 1;
+    return {
+      resultJson: reads === 1
+        ? JSON.stringify({ qualityWarnings: [] , m4b: { status: "encoding" } })
+        : JSON.stringify({ qualityWarnings: ["concurrent update"], m4b: { status: "encoding" } }),
+      m4bGenerationToken: "generation-current",
+      status: "succeeded",
+      currentItemLabel: "有声书生成完成（m4b 后台封装中）",
+    };
+  };
+  prisma.audiobookTask.updateMany = async () => ({ count: 0 });
+
+  try {
+    await assert.rejects(
+      service.settleBackgroundM4b(
+        "task-cas-race",
+        "有声书生成完成（含 m4b）",
+        { status: "ready", path: "full-book.m4b", bytes: 128 },
+        { force: false, generationToken: "generation-current" },
+      ),
+      /m4b settle CAS/i,
+    );
+    assert.equal(reads, 2, "CAS miss must re-read authority before deciding whether to retry");
+  } finally {
+    prisma.audiobookTask.findUnique = originals.findUnique;
+    prisma.audiobookTask.updateMany = originals.updateMany;
+  }
+});
+
+test("same-generation terminal settle is not coupled to the mutable progress label", { concurrency: false }, async () => {
+  const service = new AudiobookTaskService();
+  const originals = {
+    findUnique: prisma.audiobookTask.findUnique,
+    updateMany: prisma.audiobookTask.updateMany,
+  };
+  const encodingResult = JSON.stringify({ m4b: { status: "encoding" } });
+  const updates = [];
+  prisma.audiobookTask.findUnique = async () => ({
+    resultJson: encodingResult,
+    m4bGenerationToken: "generation-current",
+    status: "succeeded",
+    currentItemLabel: "同代并发更新后的进度文案",
+  });
+  prisma.audiobookTask.updateMany = async (args) => {
+    updates.push(args);
+    return { count: Object.hasOwn(args.where, "currentItemLabel") ? 0 : 1 };
+  };
+
+  try {
+    await service.settleBackgroundM4b(
+      "task-label-race",
+      "有声书生成完成（含 m4b）",
+      { status: "ready", path: "full-book.m4b", bytes: 128 },
+      { force: false, generationToken: "generation-current" },
+    );
+    assert.equal(updates.length, 1);
+    assert.equal(
+      Object.hasOwn(updates[0].where, "currentItemLabel"),
+      false,
+      "generation ownership and resultJson snapshot are the CAS authority",
+    );
+  } finally {
+    prisma.audiobookTask.findUnique = originals.findUnique;
+    prisma.audiobookTask.updateMany = originals.updateMany;
+  }
+});
+
+test("same-generation projection removal after a CAS miss remains retryable", { concurrency: false }, async () => {
+  const service = new AudiobookTaskService();
+  const originals = {
+    findUnique: prisma.audiobookTask.findUnique,
+    updateMany: prisma.audiobookTask.updateMany,
+  };
+  let reads = 0;
+  prisma.audiobookTask.findUnique = async () => {
+    reads += 1;
+    return {
+      resultJson: reads === 1
+        ? JSON.stringify({ m4b: { status: "encoding" } })
+        : JSON.stringify({ qualityWarnings: ["concurrent projection rewrite"] }),
+      m4bGenerationToken: "generation-current",
+      status: "succeeded",
+      currentItemLabel: "同代并发更新后的进度文案",
+    };
+  };
+  prisma.audiobookTask.updateMany = async () => ({ count: 0 });
+
+  try {
+    await assert.rejects(
+      service.settleBackgroundM4b(
+        "task-projection-removed",
+        "有声书生成完成（含 m4b）",
+        { status: "ready", path: "full-book.m4b", bytes: 128 },
+        { force: false, generationToken: "generation-current" },
+      ),
+      /m4b settle CAS/i,
+    );
+    assert.equal(reads, 2);
+  } finally {
+    prisma.audiobookTask.findUnique = originals.findUnique;
+    prisma.audiobookTask.updateMany = originals.updateMany;
+  }
+});
+
+test("same-generation settle treats an existing terminal projection as idempotent", { concurrency: false }, async () => {
+  const service = new AudiobookTaskService();
+  const originals = {
+    findUnique: prisma.audiobookTask.findUnique,
+    updateMany: prisma.audiobookTask.updateMany,
+  };
+  let updates = 0;
+  prisma.audiobookTask.findUnique = async () => ({
+    resultJson: JSON.stringify({
+      qualityWarnings: ["preserve"],
+      m4b: { status: "ready", path: "full-book.m4b", bytes: 128 },
+    }),
+    m4bGenerationToken: "generation-current",
+    status: "succeeded",
+    currentItemLabel: "有声书生成完成（m4b 后台封装中）",
+  });
+  prisma.audiobookTask.updateMany = async () => {
+    updates += 1;
+    return { count: 1 };
+  };
+
+  try {
+    await service.settleBackgroundM4b(
+      "task-already-terminal",
+      "有声书生成完成；m4b 失败（late duplicate）",
+      { status: "failed", reason: "late duplicate" },
+      { force: false, generationToken: "generation-current" },
+    );
+    assert.equal(updates, 0, "a delayed same-generation callback must not replace a durable terminal state");
+  } finally {
+    prisma.audiobookTask.findUnique = originals.findUnique;
+    prisma.audiobookTask.updateMany = originals.updateMany;
   }
 });
 

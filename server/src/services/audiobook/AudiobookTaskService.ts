@@ -1,5 +1,3 @@
-import * as childProcess from "node:child_process";
-import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import type {
   AudiobookChapterAnnotation,
@@ -39,7 +37,6 @@ import {
   resolveChapterAudioPath,
   resolveFullBookAudioPath,
   resolveFullBookM4bPath,
-  safeUnlink,
   wipeChapterAnnotationArtifact,
   wipeChapterAudioArtifacts,
 } from "./audiobookPaths";
@@ -47,6 +44,44 @@ import { resolveBetweenChapterGapMs } from "./audiobookGap";
 import { encodeFullBookM4b, withAudiobookTaskDirArtifactLock } from "./audiobookM4b";
 import { concatWavFiles } from "./audiobookWav";
 import { resolveDeliveryStyleMode } from "./deliveryStyle";
+import { BackgroundM4bSettleRetry } from "./application/BackgroundM4bSettleRetry";
+import {
+  prepareContinueArtifacts,
+  projectContinuePreparationEnvelope,
+  readContinuePreparationIntent,
+  withContinuePreparationFailure,
+} from "./application/continue/AudiobookContinuePreparation";
+import {
+  M4B_DONE_LABEL,
+  M4B_ENCODING_LABEL,
+  m4bGenerationWhere,
+  markM4bEncodingInResultJson,
+  mergeM4bIntoResultJson,
+  newM4bGenerationToken,
+  readBackgroundM4bState,
+  readTerminalM4bState,
+  removeM4bFromResultJson,
+  type BackgroundM4bState,
+} from "./application/m4b/M4bTaskProjection";
+export {
+  readBackgroundM4bState,
+  type BackgroundM4bState,
+} from "./application/m4b/M4bTaskProjection";
+import {
+  readReprocessIntent,
+  withReprocessIntent,
+  type AudiobookReprocessIntent,
+} from "./application/reprocess/AudiobookReprocessIntent";
+import {
+  captureOrphanM4bProcessSnapshot,
+  killOrphanM4bFfmpeg,
+  selectOrphanM4bPids,
+} from "./infrastructure/m4b-recovery/OrphanM4bProcessCleaner";
+export {
+  captureOrphanM4bProcessSnapshot,
+  killOrphanM4bFfmpeg,
+  selectOrphanM4bPids,
+} from "./infrastructure/m4b-recovery/OrphanM4bProcessCleaner";
 import { checkVoiceRefAudioPath } from "./voiceRefPath";
 import { resolveEffectiveCloneRefPath, tryResolveEffectiveCloneRefPath } from "./voiceLibraryService";
 import {
@@ -558,122 +593,6 @@ type AudiobookRecoveryRow = Pick<
 /** Maximum number of rows (and large resultJson values) held per startup page. */
 const AUDIOBOOK_RECOVERY_PAGE_SIZE = 100;
 
-function newM4bGenerationToken(): string {
-  return randomUUID();
-}
-
-/**
- * Build an exact generation CAS predicate. `undefined` means the caller has no
- * snapshot; null/empty string are legacy persisted values and must remain exact.
- * Prisma's generated model is non-null after the migration, so the legacy null
- * branch is intentionally cast at this boundary for pre-migration rows/tests.
- */
-function m4bGenerationWhere(
-  token: string | null | undefined,
-): Prisma.AudiobookTaskWhereInput {
-  if (token === undefined) return {};
-  return { m4bGenerationToken: token } as unknown as Prisma.AudiobookTaskWhereInput;
-}
-
-/**
- * 后台 m4b 封装期的父任务 label。
- *
- * 这不只是文案：scheduleBackgroundM4bEncode 的三个收口分支都拿它当 CAS 的
- * where 条件（只翻「还停在封装中」的行，避免覆盖 cancel/其它路径已写的 label）。
- * 散成字面量时改一个字就会让三处 CAS 静默失配——updateMany 不看 .count，
- * label 会永久停在「封装中」，正是 R5 想根治的假象换个方式复发。
- */
-const M4B_ENCODING_LABEL = "有声书生成完成（m4b 后台封装中）";
-const M4B_DONE_LABEL = "有声书生成完成（含 m4b）";
-
-export type BackgroundM4bState = "encoding" | "ready" | "skipped" | "failed";
-
-/** 读取可跨进程识别的 m4b 后台状态；encoding 是唯一需要启动恢复的状态。 */
-export function readBackgroundM4bState(resultJson: string | null | undefined): BackgroundM4bState | null {
-  if (!resultJson?.trim()) return null;
-  try {
-    const parsed = JSON.parse(resultJson) as { m4b?: { status?: unknown } };
-    const status = parsed?.m4b?.status;
-    return status === "encoding" || status === "ready" || status === "skipped" || status === "failed"
-      ? status
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-function parseM4bStatusFromResultJson(resultJson: string | null | undefined): AudiobookTaskSummary["m4bStatus"] {
-  if (!resultJson?.trim()) {
-    return null;
-  }
-  try {
-    const parsed = JSON.parse(resultJson) as { m4b?: { status?: string } };
-    const status = parsed?.m4b?.status;
-    if (status === "ready" || status === "skipped" || status === "failed") {
-      return status;
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * 把 m4b 终态并回既有 resultJson，保留其余字段。
- *
- * 后台 encode 路径此前只改 currentItemLabel，从不写 resultJson——于是
- * toSummary 的 m4bStatus（:555 从 resultJson 解析）对这类任务恒为 null，
- * 前端 NovelAudiobookPanel `m4bStatus === "ready"` 判定失败，
- * **盘上已存在的 m4b 不给下载入口**（生产实测：任务 cms1rikzm… m4b 7.9MB 可拉取，
- * 但 m4bStatus=null，前端隐藏按钮并提示「m4b 仅在封装成功后提供」）。
- * 走后台 encode 的都是大书/续生成，属于最需要 m4b 的场景。
- */
-function mergeM4bIntoResultJson(
-  resultJson: string | null | undefined,
-  m4b: { status: "ready" | "skipped" | "failed"; path?: string | null; reason?: string | null; bytes?: number | null; chapterCount?: number | null },
-): string {
-  let base: Record<string, unknown> = {};
-  if (resultJson?.trim()) {
-    try {
-      const parsed = JSON.parse(resultJson) as unknown;
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        base = parsed as Record<string, unknown>;
-      }
-    } catch {
-      // resultJson 损坏时不要丢掉 m4b 状态：宁可重建一个只含 m4b 的对象
-      base = {};
-    }
-  }
-  return JSON.stringify({
-    ...base,
-    m4b: {
-      status: m4b.status,
-      path: m4b.path ?? null,
-      reason: m4b.reason ?? null,
-      bytes: m4b.bytes ?? null,
-      chapterCount: m4b.chapterCount ?? null,
-    },
-  });
-}
-
-function markM4bEncodingInResultJson(resultJson: string | null | undefined): string {
-  let base: Record<string, unknown> = {};
-  if (resultJson?.trim()) {
-    try {
-      const parsed = JSON.parse(resultJson) as unknown;
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        base = parsed as Record<string, unknown>;
-      }
-    } catch {
-      // 由结构化 m4b 状态重建，避免损坏的历史 resultJson 阻断恢复标记。
-    }
-  }
-  return JSON.stringify({
-    ...base,
-    m4b: { ...(typeof base.m4b === "object" && base.m4b ? base.m4b as Record<string, unknown> : {}), status: "encoding" },
-  });
-}
-
 /**
  * 续生成抢占父任务时一次性落定的 progress baseline。
  *
@@ -755,7 +674,7 @@ function toSummary(row: AudiobookTaskRow): AudiobookTaskSummary {
     outputDir: row.outputDir,
     fullAudioPath: row.fullAudioPath,
     fullAudioReady,
-    m4bStatus: parseM4bStatusFromResultJson(row.resultJson),
+    m4bStatus: readTerminalM4bState(row.resultJson),
     chunksPruned: parseChunksPrunedFromResultJson(row.resultJson),
     failedContinueChapters: readFailedContinueChapters(row.progressJson),
     parentTaskId: readParentTaskIdFromProgress(row.progressJson) ?? undefined,
@@ -812,6 +731,9 @@ export class AudiobookTaskService {
 
   /** taskId -> 当前后台 m4b worker；代际轮换时立即终止旧 ffmpeg。 */
   private readonly activeM4bControllers = new Map<string, { token: string; controller: AbortController }>();
+
+  /** m4b 文件已产出后，仅重试终态 DB 投影；绝不重复编码。 */
+  private readonly backgroundM4bSettleRetry = new BackgroundM4bSettleRetry();
 
   private processing = false;
 
@@ -956,7 +878,7 @@ export class AudiobookTaskService {
     taskId: string,
     source?: TaskCancelSource,
   ): Promise<AudiobookTaskDetail> {
-    const task = await prisma.audiobookTask.findUnique({ where: { id: taskId } });
+    let task = await prisma.audiobookTask.findUnique({ where: { id: taskId } });
     if (!task) {
       throw new AppError("有声书任务不存在。", 404);
     }
@@ -988,13 +910,53 @@ export class AudiobookTaskService {
     // 归因：ch1 synth 曾被「双路径 POST cancel」打断；日志须区分 novel 面板 / 任务中心 / agent / curl。
     console.warn("[audiobook.cancel]", attribution);
 
-    const isContinueChild = Boolean(readParentTaskIdFromProgress(task.progressJson));
-    const isContinuingParent = !isContinueChild && task.currentStage === "continuing";
-
     // 级联取消挂在本父上的隐闭续生成子任务（queued/running），避免父停子续在父目录产 wav
-    if (!isContinueChild) {
+    if (!readParentTaskIdFromProgress(task.progressJson)) {
       await this.cancelChildContinueTasks(taskId);
     }
+
+    // 取消请求必须绑定读到的状态和 m4b 代际。仅按 id 写入会在并发
+    // retry/resume/reprocess 先轮换代际后，把新一代任务错误标记为待取消。
+    // CAS 未命中时重读一次并只对当前活动代际重试，避免把用户对当前任务的
+    // 取消意图静默丢掉；若期间已进入终态，则沿用终态拒绝语义。
+    let cancelClaim = await prisma.audiobookTask.updateMany({
+      where: {
+        id: taskId,
+        status: task.status,
+        ...m4bGenerationWhere(task.m4bGenerationToken),
+      },
+      data: {
+        cancelRequestedAt: new Date(),
+        heartbeatAt: new Date(),
+      },
+    });
+    if (cancelClaim.count === 0) {
+      const latest = await prisma.audiobookTask.findUnique({ where: { id: taskId } });
+      if (!latest) {
+        throw new AppError("有声书任务不存在。", 404);
+      }
+      if (latest.status === "succeeded" || latest.status === "failed" || latest.status === "cancelled") {
+        throw new AppError("仅排队中或运行中的有声书任务可取消。", 400);
+      }
+      task = latest;
+      cancelClaim = await prisma.audiobookTask.updateMany({
+        where: {
+          id: taskId,
+          status: task.status,
+          ...m4bGenerationWhere(task.m4bGenerationToken),
+        },
+        data: {
+          cancelRequestedAt: new Date(),
+          heartbeatAt: new Date(),
+        },
+      });
+      if (cancelClaim.count === 0) {
+        throw new AppError("任务状态已被其它操作更新，请刷新后重试。", 409);
+      }
+    }
+
+    const isContinueChild = Boolean(readParentTaskIdFromProgress(task.progressJson));
+    const isContinuingParent = !isContinueChild && task.currentStage === "continuing";
 
     // continuing 父无自身 pipeline：不能只靠 cancelRequestedAt 等执行钩子，必须立刻落终态
     if (isContinuingParent) {
@@ -1040,13 +1002,6 @@ export class AudiobookTaskService {
     // 无论 queued/running：先从内存队列剔除，并写 cancelRequestedAt + abort
     this.removeFromQueue(taskId);
     const controller = this.activeControllers.get(taskId);
-    await prisma.audiobookTask.update({
-      where: { id: taskId },
-      data: {
-        cancelRequestedAt: new Date(),
-        heartbeatAt: new Date(),
-      },
-    });
     controller?.abort();
 
     if (task.status === "queued") {
@@ -1169,10 +1124,9 @@ export class AudiobookTaskService {
    *
    * - 仅 succeeded 任务可重做（WAV 已在盘，无重合成成本）；
    * - m4b 已 ready 时幂等早退（不重复编码）；
-   * - 入口先把 label 置回「m4b 后台封装中」并清掉 resultJson 里的旧失败结论，
+   * - 入口先把 label 置回「m4b 后台封装中」、清掉旧 m4b 结论并轮换 generation，
    *   再走与首次一致的 scheduleBackgroundM4bEncode(force) 后台封装；
-   * - force settle 的 CAS 不再要求 label 恰是「封装中」（重做时旧 label 是失败文案），
-   *   只要求 status=succeeded，避免重做结论被旧 label 条件拦下。
+   * - 收口只接受当前 generation；旧失败文案不会参与所有权判断。
    *
    * 并发安全：encodeFullBookM4b 内部 withTaskDirLock 同 taskDir 串行化，
    * 重复触发也只 spawn 一个 ffmpeg；本方法与首次触发天然去重（锁内就绪复用）。
@@ -1192,34 +1146,67 @@ export class AudiobookTaskService {
     if (task.status !== "succeeded") {
       throw new AppError("仅生成完成（succeeded）的任务可重做 m4b。", 400);
     }
-    if (isFullBookM4bReady(taskDir)) {
-      return toDetail(task as AudiobookTaskRow) ?? this.getTask(taskId);
-    }
-    if (!isFullBookAudioReady(taskDir)) {
-      throw new AppError("全书 WAV 未就绪，无法封装 m4b（请先完成全书合成）。", 400);
-    }
     const chapterIds = parseChapterIds(task.chapterIdsJson);
-    if (chapterIds.length === 0) {
-      throw new AppError("任务章节列表为空，无法封装 m4b。", 400);
-    }
-
-    // 置回「封装中」label + 清掉 resultJson 里的旧 m4b 结论（有效避免重做期间
-    // 前端仍看到旧 failed 状态）。CAS 只要求 status=succeeded：并发时谁先抢到
-    // 谁有效；同时轮换持久化代际，令已在途的旧 worker 失效。
-    const generationToken = newM4bGenerationToken();
-    const clearedResultJson = (() => {
-      try {
-        const parsed = JSON.parse(task.resultJson ?? "{}");
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && "m4b" in parsed) {
-          const { m4b: _dropped, ...rest } = parsed as Record<string, unknown> & { m4b?: unknown };
-          return JSON.stringify(rest);
+    const lockResult = await withAudiobookTaskDirArtifactLock(taskDir, async (): Promise<
+      { kind: "ready"; detail: AudiobookTaskDetail } | { kind: "encode"; generationToken: string }
+    > => {
+      if (isFullBookM4bReady(taskDir)) {
+        if (
+          readTerminalM4bState(task.resultJson) === "ready"
+          && task.currentItemLabel === M4B_DONE_LABEL
+        ) {
+          return { kind: "ready", detail: toDetail(task as AudiobookTaskRow) };
         }
-      } catch {
-        // resultJson 损坏时保留原样，由 settle 覆盖
+        const bytes = fs.statSync(resolveFullBookM4bPath(taskDir)).size;
+        const repaired = await prisma.audiobookTask.updateMany({
+          where: {
+            id: taskId,
+            status: "succeeded",
+            m4bGenerationToken: task.m4bGenerationToken,
+            resultJson: task.resultJson,
+          },
+          data: {
+            currentItemLabel: M4B_DONE_LABEL,
+            resultJson: mergeM4bIntoResultJson(task.resultJson, {
+              status: "ready",
+              path: "full-book.m4b",
+              bytes,
+              chapterCount: chapterIds.length,
+            }),
+            heartbeatAt: new Date(),
+          },
+        });
+        if (repaired.count === 0) {
+          const latest = await prisma.audiobookTask.findUnique({
+            where: { id: taskId },
+            include: { novel: { select: { id: true, title: true } } },
+          });
+          if (
+            latest
+            && latest.status === "succeeded"
+            && latest.currentItemLabel === M4B_DONE_LABEL
+            && readTerminalM4bState(latest.resultJson) === "ready"
+          ) {
+            return { kind: "ready", detail: toDetail(latest as AudiobookTaskRow) };
+          }
+          throw new AppError("任务状态已被其它操作更新，请刷新后重试。", 409);
+        }
+        const detail = await this.getTask(taskId);
+        if (!detail) throw new AppError("有声书任务不存在。", 404);
+        return { kind: "ready", detail };
       }
-      return task.resultJson ?? "{}";
-    })();
-    await withAudiobookTaskDirArtifactLock(taskDir, async () => {
+      if (!isFullBookAudioReady(taskDir)) {
+        throw new AppError("全书 WAV 未就绪，无法封装 m4b（请先完成全书合成）。", 400);
+      }
+      if (chapterIds.length === 0) {
+        throw new AppError("任务章节列表为空，无法封装 m4b。", 400);
+      }
+
+      // 置回「封装中」label + 清掉 resultJson 里的旧 m4b 结论（有效避免重做期间
+      // 前端仍看到旧 failed 状态）。CAS 只要求 status=succeeded：并发时谁先抢到
+      // 谁有效；同时轮换持久化代际，令已在途的旧 worker 失效。
+      const generationToken = newM4bGenerationToken();
+      const clearedResultJson = removeM4bFromResultJson(task.resultJson) ?? "{}";
       const generationClaim = await prisma.audiobookTask.updateMany({
         where: {
           id: taskId,
@@ -1237,7 +1224,11 @@ export class AudiobookTaskService {
         throw new AppError("任务已被其它 m4b 操作占用，请刷新后重试。", 409);
       }
       this.abortBackgroundM4b(taskId);
+      return { kind: "encode", generationToken };
     });
+
+    if (lockResult.kind === "ready") return lockResult.detail;
+    const { generationToken } = lockResult;
 
     this.scheduleBackgroundM4bEncode({
       parentTaskId: taskId,
@@ -1307,56 +1298,70 @@ export class AudiobookTaskService {
     // 先失效正在封装旧全书的 worker，再做 wipe；否则旧 worker 可能在 wipe 后
     // 仍把旧 full-book.m4b rename 回规范名。
     const generationToken = newM4bGenerationToken();
-    const taskDir = resolveAudiobookTaskDir(task.novelId, task.id);
+    const taskDir = task.outputDir?.trim() || resolveAudiobookTaskDir(task.novelId, task.id);
     const modeLabel = input.mode === "reannotate" ? "重标并重合成" : "重合成";
-    await withAudiobookTaskDirArtifactLock(taskDir, async () => {
-      const generationClaim = await prisma.audiobookTask.updateMany({
-        where: {
-          id: task.id,
-          status: { in: ["failed", "cancelled", "succeeded"] },
-          m4bGenerationToken: task.m4bGenerationToken,
-        },
-        data: { m4bGenerationToken: generationToken },
-      });
-      if (generationClaim.count === 0) {
-        throw new AppError("任务已被其它重处理请求占用，请刷新后重试。", 409);
-      }
-      this.abortBackgroundM4b(task.id);
-      wipeChapterAudioArtifacts(taskDir, chapterId);
-
-      let nextAnnotationsJson = task.annotationsJson;
-      if (input.mode === "reannotate") {
-        wipeChapterAnnotationArtifact(taskDir, chapterId);
+    // Persist the intent before touching the filesystem. If the process dies
+    // after the wipe (or the follow-up DB write is unavailable), startup can
+    // still identify the exact chapter and replay the idempotent cleanup.
+    const pendingIntent: AudiobookReprocessIntent = {
+      chapterId,
+      mode: input.mode,
+    };
+    const pendingProgressJson = withReprocessIntent(task.progressJson, pendingIntent);
+    const nextAnnotationsJson = input.mode === "reannotate"
+      ? (() => {
         const remaining = parseAnnotationsJson(task.annotationsJson)
           .filter((item) => item.chapterId !== chapterId);
-        nextAnnotationsJson = remaining.length > 0 ? JSON.stringify(remaining) : null;
-      }
-
-      const reprocessClaim = await prisma.audiobookTask.updateMany({
-        where: { id: task.id, m4bGenerationToken: generationToken },
-        data: {
-          status: "queued",
-          progress: 0,
-          error: null,
-          finishedAt: null,
-          startedAt: null,
-          cancelRequestedAt: null,
-          pendingManualRecovery: false,
-          heartbeatAt: null,
-          currentStage: "queued",
-          currentItemKey: chapterId,
-          currentItemLabel: `排队：${modeLabel}章节`,
-          fullAudioPath: null,
-          annotationsJson: nextAnnotationsJson,
-          summary: null,
-          resultJson: null,
-        },
+        return remaining.length > 0 ? JSON.stringify(remaining) : null;
+      })()
+      : task.annotationsJson;
+    let durableIntentClaimed = false;
+    try {
+      await withAudiobookTaskDirArtifactLock(taskDir, async () => {
+        const generationClaim = await prisma.audiobookTask.updateMany({
+          where: {
+            id: task.id,
+            status: { in: ["failed", "cancelled", "succeeded"] },
+            m4bGenerationToken: task.m4bGenerationToken,
+          },
+          data: {
+            // This single write is the durable recovery boundary. It records a
+            // runnable state and exact cleanup intent before any file is removed.
+            status: "queued",
+            progress: 0,
+            error: null,
+            finishedAt: null,
+            startedAt: null,
+            cancelRequestedAt: null,
+            pendingManualRecovery: false,
+            heartbeatAt: null,
+            currentStage: "queued",
+            currentItemKey: chapterId,
+            currentItemLabel: `排队：${modeLabel}章节`,
+            fullAudioPath: null,
+            annotationsJson: nextAnnotationsJson,
+            summary: null,
+            resultJson: null,
+            progressJson: pendingProgressJson,
+            m4bGenerationToken: generationToken,
+          },
+        });
+        if (generationClaim.count === 0) {
+          throw new AppError("任务已被其它重处理请求占用，请刷新后重试。", 409);
+        }
+        durableIntentClaimed = true;
+        this.abortBackgroundM4b(task.id);
+        wipeChapterAudioArtifacts(taskDir, chapterId);
+        if (input.mode === "reannotate") {
+          wipeChapterAnnotationArtifact(taskDir, chapterId);
+        }
       });
-      if (reprocessClaim.count === 0) {
-        throw new AppError("任务代际已变更，请刷新后重试。", 409);
-      }
-    });
-    this.enqueueTask(task.id);
+    } finally {
+      // A cleanup error must not strand a durable queued task until restart.
+      // executeTask replays the idempotent intent and will either recover or
+      // settle the task failed with the concrete filesystem error.
+      if (durableIntentClaimed) this.enqueueTask(task.id);
+    }
     const detail = await this.getTask(task.id);
     if (!detail) {
       throw new AppError("有声书任务不存在。", 404);
@@ -1465,7 +1470,7 @@ export class AudiobookTaskService {
           currentItemLabel: `续生成 ${precheck.chapterCount} 章`,
           progress: parentProgressBaseline,
           fullAudioPath: null,
-          resultJson: null,
+          resultJson: removeM4bFromResultJson(parent.resultJson),
           cancelRequestedAt: null,
           finishedAt: null,
           heartbeatAt: new Date(),
@@ -1500,6 +1505,7 @@ export class AudiobookTaskService {
             currentItemLabel: parent.currentItemLabel,
             progress: parent.progress,
             fullAudioPath: parent.fullAudioPath,
+            resultJson: parent.resultJson,
             error: `续生成启动失败：${reason}`.slice(0, 500),
             finishedAt: new Date(),
             heartbeatAt: new Date(),
@@ -1543,6 +1549,9 @@ export class AudiobookTaskService {
             deliveryStyleMode: parentDeliveryMode,
             hidden: true,
             parentTaskId: parent.id,
+            // Fence the durable cleanup intent to this exact parent continuation.
+            // A delayed child from an older generation must never wipe newer audio.
+            parentGenerationToken: continuationGenerationToken,
             mode: input.mode ?? null,
           }),
         },
@@ -1557,34 +1566,74 @@ export class AudiobookTaskService {
       throw createError;
     }
 
-    // mode=resynthesize：强制 wipe 目标章音频 + 全书，避免 layout fingerprint cache-hit 跳过。
-    // 必须排在 create 成功之后：wipe 一旦执行，父的 fullAudioPath/resultJson 就与磁盘不符，
-    // 此时再走 releaseParentOnFailure 会把父放回 succeeded 并声称全书可播，而音频已被删。
-    // 反过来放在 create 之后则无失败面——wipe/safeUnlink 全吞异常，其后只剩纯内存的 enqueueTask。
-    if (input.mode === "resynthesize") {
-      await withAudiobookTaskDirArtifactLock(parentOutputDir, async () => {
-        for (const chapterId of requestedIds) {
-          try {
-            wipeChapterAudioArtifacts(parentOutputDir, chapterId);
-          } catch (wipeError) {
-            console.warn(
-              "[audiobook] continueParentTask resynthesize wipe 失败",
-              parent.id,
-              chapterId,
-              wipeError instanceof Error ? wipeError.message : wipeError,
-            );
-          }
-        }
-        // wipeChapterAudioArtifacts 已清 full-book；再保险清 m4b part
-        safeUnlink(resolveFullBookAudioPath(parentOutputDir));
-        safeUnlink(`${resolveFullBookAudioPath(parentOutputDir)}.part`);
-        safeUnlink(resolveFullBookM4bPath(parentOutputDir));
-        safeUnlink(`${resolveFullBookM4bPath(parentOutputDir)}.part`);
-      });
-    }
-
+    // The child row is the durable cleanup intent. executeTask validates the
+    // parent generation and performs strict, idempotent invalidation before
+    // any cache-capable read. A crash after create but before enqueue is
+    // recovered by resumePendingTasks without reusing stale output.
     this.enqueueTask(child.id);
     return toDetail(child as AudiobookTaskRow);
+  }
+
+  /**
+   * A continuation cleanup failure cannot be reconciled from disk: an old,
+   * still-readable chapter.wav is not proof that this generation succeeded.
+   * Fence the parent update to the generation stored on the child and expose
+   * every requested chapter as retryable without ever restoring fullAudioPath.
+   */
+  private async failContinueParentPreparation(input: {
+    parentTaskId: string;
+    parentGenerationToken: string | null;
+    failedChapterIds: string[];
+    reason: string;
+  }): Promise<boolean> {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const parent = await prisma.audiobookTask.findUnique({
+        where: { id: input.parentTaskId },
+        select: {
+          status: true,
+          currentStage: true,
+          cancelRequestedAt: true,
+          progressJson: true,
+          m4bGenerationToken: true,
+        },
+      });
+      if (
+        !parent
+        || parent.status !== "running"
+        || parent.currentStage !== "continuing"
+        || parent.cancelRequestedAt
+        || (input.parentGenerationToken !== null
+          && parent.m4bGenerationToken !== input.parentGenerationToken)
+      ) {
+        return false;
+      }
+      const message = `续生成准备失败：${input.reason}`.slice(0, 500);
+      const claimed = await prisma.audiobookTask.updateMany({
+        where: {
+          id: input.parentTaskId,
+          status: "running",
+          currentStage: "continuing",
+          cancelRequestedAt: null,
+          progressJson: parent.progressJson,
+          m4bGenerationToken: parent.m4bGenerationToken,
+        },
+        data: {
+          status: "failed",
+          currentStage: "failed",
+          currentItemLabel: message.slice(0, 200),
+          error: message,
+          fullAudioPath: null,
+          progressJson: withContinuePreparationFailure(
+            parent.progressJson,
+            input.failedChapterIds,
+          ),
+          finishedAt: new Date(),
+          heartbeatAt: new Date(),
+        },
+      });
+      if (claimed.count > 0) return true;
+    }
+    throw new Error(`续生成准备失败后无法收口父任务 ${input.parentTaskId}`);
   }
 
   /**
@@ -1737,7 +1786,7 @@ export class AudiobookTaskService {
 
   /**
    * 父已 succeeded 后后台封装 m4b：不 await、不占 processQueue。
-   * 成功后 CAS 更新 label（仅当仍 succeeded 且文案仍是后台中）；失败只 warn。
+   * 完成后按 generation + resultJson 快照 CAS 同步终态；失败进入小型投影重试队列。
    */
   private async scheduleBackgroundM4bEncode(input: {
     parentTaskId: string;
@@ -1745,7 +1794,7 @@ export class AudiobookTaskService {
     parentTitle: string;
     taskDir: string;
     chapterIds: string[];
-    /** 重做场景：即使旧 label 不是「封装中」，也放宽容对象落库新 m4b 结论 */
+    /** 重做场景：即使盘上已有旧 m4b，也重新执行本代封装。 */
     force?: boolean;
     /** 启动前、rename 前、settle 前均校验的持久化代际。 */
     generationToken: string;
@@ -1771,7 +1820,7 @@ export class AudiobookTaskService {
         || markerRow.m4bGenerationToken !== generationToken
       ) return;
       const settleM4bFailure = async (reason: string): Promise<void> => {
-        await this.settleBackgroundM4b(
+        await this.persistBackgroundM4bSettle(
           parentTaskId,
           `有声书生成完成；m4b 失败（${reason}）`,
           { status: "failed", reason },
@@ -1810,7 +1859,7 @@ export class AudiobookTaskService {
       if (marked.count === 0) return;
 
       if (!force && isFullBookM4bReady(taskDir)) {
-        await this.settleBackgroundM4b(parentTaskId, M4B_DONE_LABEL, {
+        await this.persistBackgroundM4bSettle(parentTaskId, M4B_DONE_LABEL, {
           status: "ready",
           path: "full-book.m4b",
           bytes: fs.statSync(resolveFullBookM4bPath(taskDir)).size,
@@ -1847,7 +1896,7 @@ export class AudiobookTaskService {
         isGenerationCurrent: () => this.isCurrentM4bGeneration(parentTaskId, generationToken),
       });
       if (m4b.status === "ready") {
-        await this.settleBackgroundM4b(
+        await this.persistBackgroundM4bSettle(
           parentTaskId,
           M4B_DONE_LABEL,
           {
@@ -1863,7 +1912,7 @@ export class AudiobookTaskService {
       const reason = m4b.reason ?? m4b.status;
       console.warn("[audiobook] background m4b encode not ready", parentTaskId, reason);
       if (m4b.status === "skipped") {
-        await this.settleBackgroundM4b(
+        await this.persistBackgroundM4bSettle(
           parentTaskId,
           `有声书生成完成；m4b 未生成（${reason}）`,
           { status: "skipped", reason },
@@ -1881,7 +1930,7 @@ export class AudiobookTaskService {
         // R5：终极 catch 也必须收 label，否则父 succeeded 但 label 久留「m4b 后台封装中」假象
         try {
           const errMsg = (error instanceof Error ? error.message : String(error)).slice(0, 120);
-          await this.settleBackgroundM4b(
+          await this.persistBackgroundM4bSettle(
             parentTaskId,
             `有声书生成完成；m4b 失败（${errMsg}）`,
             { status: "failed", reason: errMsg },
@@ -1909,15 +1958,15 @@ export class AudiobookTaskService {
    *
    * label 与 m4bStatus 必须同一次 CAS 落库——分两次写会出现「label 说完成、
    * m4bStatus 仍 null」的中间态，前端正是靠 m4bStatus 决定给不给下载入口。
-   * CAS 条件保持 status=succeeded ∧ label 仍是封装中：cancel/其它路径已改写过
-   * 就不覆盖（幂等）。resultJson 需读-改-写，故先 findUnique 再 updateMany；
-   * 两者之间的竞态由 label 条件兜住（并发只会有一枪命中）。
+   * 所有权由 status=succeeded ∧ generation token 确定；label 只是可变的进度文案，
+   * 不能继续充当 CAS key。resultJson 需读-改-写，故以完整快照做乐观 CAS；
+   * 同代竞态未落终态时交给小型投影重试队列，任一合法终态已存在则幂等结束。
    */
   private async settleBackgroundM4b(
     parentTaskId: string,
     label: string,
     m4b: { status: "ready" | "skipped" | "failed"; path?: string | null; reason?: string | null; bytes?: number | null; chapterCount?: number | null },
-    opts: { force?: boolean; generationToken: string },
+    opts: { generationToken: string },
   ): Promise<void> {
     const row = await prisma.audiobookTask.findUnique({
       where: { id: parentTaskId },
@@ -1927,16 +1976,15 @@ export class AudiobookTaskService {
       console.warn("[audiobook] m4b settle generation stale", parentTaskId, m4b.status);
       return;
     }
+    if (readTerminalM4bState(row.resultJson) !== null) {
+      return;
+    }
     const claimed = await prisma.audiobookTask.updateMany({
       where: {
         id: parentTaskId,
         status: "succeeded",
-        ...(row ? { resultJson: row.resultJson } : { id: "__missing__" }),
+        resultJson: row.resultJson,
         m4bGenerationToken: opts.generationToken,
-        // 首次后台收口只覆盖「仍在封装中」的 label（幂等 CAS）；
-        // force（重做 m4b）放宽容对象为任何 succeeded 终态——此时 label 已是
-        // 失败/跳过文案，原 CAS 永远不命中，必须先清掉旧失败结论再落新态。
-        ...(opts.force ? {} : { currentItemLabel: M4B_ENCODING_LABEL }),
       },
       data: {
         currentItemLabel: label,
@@ -1945,10 +1993,55 @@ export class AudiobookTaskService {
       },
     });
     if (claimed.count === 0) {
-      // 不是错误：任务可能已被 cancel，或 label 已被其它路径改写。留痕便于排查
-      // 「盘上有 m4b 但前端不给下载」这类反馈。
       console.warn("[audiobook] m4b settle CAS missed", parentTaskId, m4b.status);
+      const latest = await prisma.audiobookTask.findUnique({
+        where: { id: parentTaskId },
+        select: {
+          resultJson: true,
+          status: true,
+          currentItemLabel: true,
+          m4bGenerationToken: true,
+        },
+      });
+      // A concurrent resultJson update can make the optimistic CAS miss while
+      // this generation still owns a non-terminal projection. Retrying is
+      // required even when another writer removed the m4b field entirely;
+      // otherwise the completed file has no durable terminal projection.
+      if (
+        latest?.m4bGenerationToken === opts.generationToken
+        && latest.status === "succeeded"
+        && readTerminalM4bState(latest.resultJson) === null
+      ) {
+        throw new Error("m4b settle CAS conflict while the current generation is still non-terminal");
+      }
     }
+  }
+
+  private async persistBackgroundM4bSettle(
+    parentTaskId: string,
+    label: string,
+    m4b: { status: "ready" | "skipped" | "failed"; path?: string | null; reason?: string | null; bytes?: number | null; chapterCount?: number | null },
+    opts: { force?: boolean; generationToken: string },
+  ): Promise<void> {
+    await this.backgroundM4bSettleRetry.persist(
+      parentTaskId,
+      () => this.settleBackgroundM4b(
+        parentTaskId,
+        label,
+        m4b,
+        { generationToken: opts.generationToken },
+      ),
+      (error, context) => {
+        console.warn("[audiobook] m4b terminal projection retry scheduled", {
+          taskId: parentTaskId,
+          generationToken: opts.generationToken,
+          status: m4b.status,
+          attempt: context.attempt,
+          delayMs: context.delayMs,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      },
+    );
   }
 
   /**
@@ -2070,6 +2163,15 @@ export class AudiobookTaskService {
   async resumePendingTasks(): Promise<void> {
     try {
       const recoveryErrors: unknown[] = [];
+      // Orphan cleanup only needs one process table snapshot per recovery
+      // round. Reusing it avoids spawning a short-lived `ps` child for every
+      // recovered row during a large restart, while kill(0) still confirms
+      // each selected PID has actually exited.
+      let orphanProcessSnapshot: Promise<string | null> | null = null;
+      const getOrphanProcessSnapshot = (): Promise<string | null> => {
+        orphanProcessSnapshot ??= captureOrphanM4bProcessSnapshot();
+        return orphanProcessSnapshot;
+      };
       // Active tasks do not need resultJson at all. Keep the large historical
       // payload column out of that scan; succeeded rows are scanned separately
       // because only they can carry a durable m4b=encoding marker.
@@ -2089,6 +2191,7 @@ export class AudiobookTaskService {
           cancelRequestedAt: true,
           m4bGenerationToken: true,
         },
+        getOrphanProcessSnapshot,
       ));
       recoveryErrors.push(...await this.scanAudiobookRecoveryPages(
         // Legacy rows may contain pretty-printed JSON (`"status": "encoding"`).
@@ -2110,6 +2213,7 @@ export class AudiobookTaskService {
           cancelRequestedAt: true,
           m4bGenerationToken: true,
         },
+        getOrphanProcessSnapshot,
       ));
       if (recoveryErrors.length > 0) {
         throw new AggregateError(
@@ -2129,6 +2233,7 @@ export class AudiobookTaskService {
     where: Prisma.AudiobookTaskWhereInput,
     allowedStatuses: readonly string[],
     select: Prisma.AudiobookTaskSelect,
+    getOrphanProcessSnapshot: () => Promise<string | null>,
   ): Promise<unknown[]> {
     const recoveryErrors: unknown[] = [];
     let cursor: { id: string } | undefined;
@@ -2143,14 +2248,17 @@ export class AudiobookTaskService {
       if (rows.length === 0) return recoveryErrors;
       const matchingRows = rows.filter((row) => allowedStatuses.includes(row.status));
       if (matchingRows.length > 0) {
-        recoveryErrors.push(...await this.resumePendingTaskRows(matchingRows));
+        recoveryErrors.push(...await this.resumePendingTaskRows(matchingRows, getOrphanProcessSnapshot));
       }
       if (rows.length < AUDIOBOOK_RECOVERY_PAGE_SIZE) return recoveryErrors;
       cursor = { id: rows[rows.length - 1].id };
     }
   }
 
-  private async resumePendingTaskRows(rows: AudiobookRecoveryRow[]): Promise<unknown[]> {
+  private async resumePendingTaskRows(
+    rows: AudiobookRecoveryRow[],
+    getOrphanProcessSnapshot: () => Promise<string | null>,
+  ): Promise<unknown[]> {
       const recoveryErrors: unknown[] = [];
 
       // 带 cancelRequestedAt 的行：用户已请求取消，执行器在重启中丢失，无人 ack。
@@ -2191,7 +2299,7 @@ export class AudiobookTaskService {
       for (const row of m4bRecoveries) {
         const taskDir = row.outputDir?.trim() || resolveAudiobookTaskDir(row.novelId, row.id);
         try {
-          const cleaned = await killOrphanM4bFfmpeg(taskDir);
+          const cleaned = await killOrphanM4bFfmpeg(taskDir, await getOrphanProcessSnapshot());
           if (!cleaned) {
             const error = new Error(`任务 ${row.id} 的孤儿 m4b 进程尚未确认退出`);
             recoveryErrors.push(error);
@@ -2230,12 +2338,26 @@ export class AudiobookTaskService {
                 taskDir,
                 chapterIds,
                 generationToken: recoveryToken,
-              })).catch((error) => {
-                console.warn(
-                  "[audiobook] detached m4b recovery worker failed",
-                  row.id,
-                  error instanceof Error ? error.message : error,
-                );
+              })).catch(async (error) => {
+                const reason = (error instanceof Error ? error.message : String(error)).slice(0, 240);
+                console.warn("[audiobook] detached m4b recovery worker failed", row.id, reason);
+                // The row was already claimed as encoding. A detached rejection
+                // must not leave that durable marker orphaned forever: settle a
+                // fenced terminal failure so the next recovery scan can move on.
+                try {
+                  await this.persistBackgroundM4bSettle(
+                    row.id,
+                    `有声书生成完成；m4b 失败（${reason}）`,
+                    { status: "failed", reason },
+                    { generationToken: recoveryToken },
+                  );
+                } catch (settleError) {
+                  console.warn(
+                    "[audiobook] detached m4b recovery failure settle failed",
+                    row.id,
+                    settleError instanceof Error ? settleError.message : settleError,
+                  );
+                }
               });
             }
           } else {
@@ -2256,7 +2378,7 @@ export class AudiobookTaskService {
               },
             });
             if (claimed.count > 0) {
-              await this.settleBackgroundM4b(
+              await this.persistBackgroundM4bSettle(
                 row.id,
                 "有声书生成完成；m4b 失败（任务章节列表为空）",
                 { status: "failed", reason: "任务章节列表为空" },
@@ -2315,7 +2437,7 @@ export class AudiobookTaskService {
         try {
           const taskDir = row.outputDir?.trim()
             || resolveAudiobookTaskDir(row.novelId, row.id);
-          const cleaned = await killOrphanM4bFfmpeg(taskDir);
+          const cleaned = await killOrphanM4bFfmpeg(taskDir, await getOrphanProcessSnapshot());
           if (!cleaned) {
             const error = new Error(`任务 ${row.id} 的孤儿 m4b 进程尚未确认退出`);
             recoveryErrors.push(error);
@@ -2498,16 +2620,7 @@ export class AudiobookTaskService {
     const generationToken = task.m4bGenerationToken?.trim() || newM4bGenerationToken();
     // 续生成子任务 envelope（parentTaskId/hidden）不能被 onProgress 重写丢失。
     // onProgress 每次 progressJson 整串写时展开此 envelope，listByNovel/finalizeContinueChild 才能持续识别父子关系。
-    const continueEnvelope = ((): Record<string, unknown> => {
-      const pid = readParentTaskIdFromProgress(task.progressJson);
-      const progress = parseProgressJson(task.progressJson);
-      if (!pid) return {};
-      return {
-        ...(progress.hidden === true ? { hidden: true } : {}),
-        parentTaskId: pid,
-        ...(typeof progress.mode === "string" ? { mode: progress.mode } : {}),
-      };
-    })();
+    const continueEnvelope = projectContinuePreparationEnvelope(task.progressJson);
     if ((task.status !== "queued" && task.status !== "running") || task.pendingManualRecovery) {
       return;
     }
@@ -2519,6 +2632,7 @@ export class AudiobookTaskService {
     const controller = new AbortController();
     this.activeControllers.set(taskId, controller);
     const stopHeartbeat = this.startTaskHeartbeat(taskId, generationToken);
+    let continuePreparationSettlementInProgress = false;
 
     try {
       const claimed = await prisma.audiobookTask.updateMany({
@@ -2560,6 +2674,130 @@ export class AudiobookTaskService {
         await this.markFailedIfRunning(taskId, "任务缺少章节列表，无法继续。", generationToken);
         await this.finalizeContinueChild(taskId, true, generationToken);
         return;
+      }
+
+      // A continuation shares its parent's output directory. Its child row is
+      // therefore also the durable invalidation intent: every run (including a
+      // startup replay) must fence against the exact parent generation and
+      // strictly remove stale full-book/cache artifacts before reading inputs.
+      const continuePreparation = readContinuePreparationIntent(task.progressJson);
+      if (continuePreparation) {
+        const taskDir = task.outputDir?.trim() || resolveAudiobookTaskDir(task.novelId, task.id);
+        try {
+          if (!continuePreparation.parentGenerationToken) {
+            throw new Error("续生成子任务缺少父任务代际，无法安全失效旧音频。");
+          }
+          const prepared = await withAudiobookTaskDirArtifactLock(taskDir, async () => {
+            const [currentChild, currentParent] = await Promise.all([
+              prisma.audiobookTask.findUnique({
+                where: { id: taskId },
+                select: {
+                  status: true,
+                  progressJson: true,
+                  m4bGenerationToken: true,
+                },
+              }),
+              prisma.audiobookTask.findUnique({
+                where: { id: continuePreparation.parentTaskId },
+                select: {
+                  status: true,
+                  currentStage: true,
+                  cancelRequestedAt: true,
+                  m4bGenerationToken: true,
+                },
+              }),
+            ]);
+            const currentIntent = readContinuePreparationIntent(currentChild?.progressJson);
+            if (
+              !currentChild
+              || currentChild.status !== "running"
+              || currentChild.m4bGenerationToken !== generationToken
+              || !currentIntent
+              || currentIntent.parentTaskId !== continuePreparation.parentTaskId
+              || currentIntent.parentGenerationToken !== continuePreparation.parentGenerationToken
+              || currentIntent.mode !== continuePreparation.mode
+              || !currentParent
+              || currentParent.status !== "running"
+              || currentParent.currentStage !== "continuing"
+              || Boolean(currentParent.cancelRequestedAt)
+              || currentParent.m4bGenerationToken !== continuePreparation.parentGenerationToken
+            ) {
+              return false;
+            }
+            prepareContinueArtifacts({
+              taskDir,
+              chapterIds,
+              mode: currentIntent.mode,
+            });
+            return true;
+          });
+          if (!prepared) {
+            // The parent or child has moved to another generation. Settling
+            // only this hidden child avoids a delayed replay touching the
+            // current parent's state or artifacts.
+            await this.markCancelledIfActive(taskId, task.progress, ["running"], generationToken);
+            return;
+          }
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          // Parent first: if this DB write fails, leaving the child active keeps
+          // startup recovery from reconciling the parent against stale disk.
+          continuePreparationSettlementInProgress = true;
+          const parentFailed = await this.failContinueParentPreparation({
+            parentTaskId: continuePreparation.parentTaskId,
+            parentGenerationToken: continuePreparation.parentGenerationToken,
+            failedChapterIds: chapterIds,
+            reason,
+          });
+          continuePreparationSettlementInProgress = false;
+          if (parentFailed) {
+            await this.markFailedIfRunning(taskId, reason, generationToken);
+          } else {
+            // Parent moved/cancelled/new generation won. This child is stale and
+            // must settle without changing the current parent's state.
+            await this.markCancelledIfActive(taskId, task.progress, ["running"], generationToken);
+          }
+          return;
+        }
+      }
+
+      // A reprocess intent is persisted before its destructive wipe. Re-check
+      // and replay the wipe after the queued→running claim so a crash between
+      // either DB write and the filesystem operation cannot resume with stale
+      // chapter audio. The operation is idempotent; repeating it is safe.
+      const reprocessIntent = readReprocessIntent(task.progressJson);
+      if (reprocessIntent) {
+        const taskDir = task.outputDir?.trim() || resolveAudiobookTaskDir(task.novelId, task.id);
+        const prepared = await withAudiobookTaskDirArtifactLock(taskDir, async () => {
+          const current = await prisma.audiobookTask.findUnique({
+            where: { id: taskId },
+            select: {
+              status: true,
+              progressJson: true,
+              m4bGenerationToken: true,
+            },
+          });
+          const currentIntent = readReprocessIntent(current?.progressJson);
+          if (
+            !current
+            || current.status !== "running"
+            || current.m4bGenerationToken !== generationToken
+            || !currentIntent
+            || currentIntent.chapterId !== reprocessIntent.chapterId
+            || currentIntent.mode !== reprocessIntent.mode
+          ) {
+            return false;
+          }
+          // Always replay: the process may have died after deleting only a
+          // subset of files. Every cleanup operation is idempotent, so a full
+          // replay is safer than maintaining another two-phase completion bit.
+          wipeChapterAudioArtifacts(taskDir, currentIntent.chapterId);
+          if (currentIntent.mode === "reannotate") {
+            wipeChapterAnnotationArtifact(taskDir, currentIntent.chapterId);
+          }
+          return true;
+        });
+        if (!prepared) return;
       }
 
       // 执行期用任务快照 chapterIds + 当前角色音色表（不重做 scope 解析）
@@ -2855,15 +3093,9 @@ export class AudiobookTaskService {
         );
       }
 
-      // 续生成子任务：章集变化（父范围的新增/重合成章落盘）→ 父 full-book.wav/m4b
-      // 已过期且不可再用；按「章变则全书必须重拼」设计意图删掉，避免父 reconcile 把
-      // stale full-book 当作有效全书写回 fullAudioPath。全章 ready 后 reconcileParent 重拼。
-      if (isContinueChild) {
-        safeUnlink(resolveFullBookAudioPath(result.outputDir));
-        safeUnlink(`${resolveFullBookAudioPath(result.outputDir)}.part`);
-        safeUnlink(resolveFullBookM4bPath(result.outputDir));
-        safeUnlink(`${resolveFullBookM4bPath(result.outputDir)}.part`);
-      }
+      // Continue children invalidated shared full-book artifacts under the
+      // generation fence before pipeline reads. The child pipeline never
+      // recreates them; reconcileParent alone rebuilds from the full chapter set.
 
       await prisma.audiobookTask.updateMany({
         where: {
@@ -2909,6 +3141,17 @@ export class AudiobookTaskService {
       // 续生成子任务成功 → 重算父 readyChapterIds / chapterProgress（磁盘唯一真相）
       await this.finalizeContinueChild(taskId, false, generationToken);
     } catch (error) {
+      if (continuePreparationSettlementInProgress) {
+        // Do not terminalize the child without the parent failure marker. A
+        // still-active child makes startup recovery retry the durable cleanup
+        // instead of accepting old disk artifacts as a successful generation.
+        console.warn(
+          "[audiobook] continue preparation failure settlement deferred",
+          taskId,
+          error instanceof Error ? error.message : error,
+        );
+        return;
+      }
       if (
         error instanceof PipelineCancelledError
         || controller.signal.aborted
@@ -3338,6 +3581,7 @@ export class AudiobookTaskService {
       this.watchdogTimer = null;
     }
     this.watchdogStallState.clear();
+    this.backgroundM4bSettleRetry.stop();
   }
 
   /**
@@ -3470,101 +3714,6 @@ export class AudiobookTaskService {
       if (!alive.has(id)) this.watchdogStallState.delete(id);
     }
   }
-}
-
-/**
- * 扫描本机 ffmpeg 进程并 kill 掉正在写该 taskDir m4b part 的孤儿进程（宿主重启后在途
- * ffmpeg 变孤儿 PPID=1，仍继续写同一 inode；不杀掉的话，与重排队后的新 run 交错写同文件）。
- *
- * 只匹配 cmdline 含该 taskDir 绝对路径（且含 ffmpeg）的进程，绝不匹配其它 taskDir——
- * 每个 taskDir 含唯一 taskId，天然隔离。best-effort：任何失败仅 warn，不阻断执行器。
- */
-export function selectOrphanM4bPids(
-  psOutput: string,
-  taskDir: string,
-  selfPid = process.pid,
-): number[] {
-  // Match a path segment, not an arbitrary string prefix. Without the trailing
-  // separator, task `task-1` also matches `task-10` and recovery can SIGKILL a
-  // different book's encoder.
-  const target = taskDir.trim().replace(/[\\/]+$/, "");
-  if (!target) return [];
-  const result: number[] = [];
-  for (const line of psOutput.split("\n")) {
-    const match = /^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/.exec(line);
-    if (!match) continue;
-    const pid = Number(match[1]);
-    const ppid = Number(match[2]);
-    const command = match[3];
-    if (!Number.isInteger(pid) || pid <= 0 || pid === selfPid || ppid !== 1) continue;
-    const executable = command.split(/\s+/, 1)[0].split(/[\\/]/).pop() ?? "";
-    if (executable !== "ffmpeg") continue;
-    const targetsTaskDir = command.includes(`${target}/`) || command.includes(`${target}\\`);
-    if (!targetsTaskDir || !command.includes("full-book.m4b") || !command.includes(".part")) continue;
-    result.push(pid);
-  }
-  return result;
-}
-
-const ORPHAN_M4B_FFMPEG_EXIT_WAIT_MS = 2_000;
-const ORPHAN_M4B_FFMPEG_EXIT_POLL_MS = 50;
-
-export async function killOrphanM4bFfmpeg(taskDir: string): Promise<boolean> {
-  const { error, stdout } = await new Promise<{ error: Error | null; stdout: string }>((resolve) => {
-    childProcess.execFile("ps", ["-axo", "pid=,ppid=,command="], { timeout: 5000 }, (psError, psStdout) => {
-      resolve({
-        error: psError,
-        stdout: typeof psStdout === "string" ? psStdout : String(psStdout ?? ""),
-      });
-    });
-  });
-  if (error) {
-    console.warn("[audiobook] killOrphanM4bFfmpeg ps 失败", taskDir, error.message);
-    return false;
-  }
-  const pids = selectOrphanM4bPids(stdout, taskDir);
-  const killedPids: number[] = [];
-  for (const pid of pids) {
-    try {
-      process.kill(pid, "SIGKILL");
-      killedPids.push(pid);
-    } catch (killError) {
-      // 进程已退出无需等待；权限等其它问题保留在待确认集合里，让超时日志暴露清理不完整。
-      if ((killError as NodeJS.ErrnoException).code !== "ESRCH") killedPids.push(pid);
-    }
-  }
-  if (killedPids.length === 0) return true;
-  console.warn(
-    `[audiobook] 已请求清理 ${killedPids.length} 个孤儿 ffmpeg（写 ${taskDir} 的 m4b part）`,
-    killedPids.join(","),
-  );
-
-  const pending = new Set(killedPids);
-  const deadline = Date.now() + ORPHAN_M4B_FFMPEG_EXIT_WAIT_MS;
-  while (pending.size > 0 && Date.now() < deadline) {
-    for (const pid of pending) {
-      try {
-        process.kill(pid, 0);
-      } catch (probeError) {
-        if ((probeError as NodeJS.ErrnoException).code === "ESRCH") pending.delete(pid);
-      }
-    }
-    if (pending.size === 0) return true;
-    await new Promise((resolve) => setTimeout(
-      resolve,
-      Math.min(ORPHAN_M4B_FFMPEG_EXIT_POLL_MS, Math.max(1, deadline - Date.now())),
-    ));
-  }
-
-  if (pending.size > 0) {
-    console.warn("[audiobook] 孤儿 ffmpeg 退出等待超时", {
-      taskDir,
-      timeoutMs: ORPHAN_M4B_FFMPEG_EXIT_WAIT_MS,
-      pids: Array.from(pending),
-    });
-    return false;
-  }
-  return true;
 }
 
 export const audiobookTaskService = new AudiobookTaskService();

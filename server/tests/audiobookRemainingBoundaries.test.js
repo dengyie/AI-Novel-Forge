@@ -7,6 +7,15 @@ const path = require("node:path");
 const { ResourceGate } = require("../dist/workers/DirectorTaskQueue.js");
 const { prisma } = require("../dist/db/prisma.js");
 const { AudiobookTaskService } = require("../dist/services/audiobook/AudiobookTaskService.js");
+const {
+  resolveM4bFfmpegThreads,
+} = require("../dist/services/audiobook/audiobookM4b.js");
+const {
+  resolveM4bGlobalConcurrency,
+} = require("../dist/services/audiobook/infrastructure/m4b/M4bPermitPool.js");
+const {
+  resolveM4bStallTimeoutMs,
+} = require("../dist/services/audiobook/infrastructure/m4b/FfmpegProcessRunner.js");
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -31,6 +40,21 @@ function writeFakeWav(filePath) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, buffer);
 }
+
+test("m4b resource overrides reject fractions and cap hostile values", () => {
+  assert.equal(resolveM4bGlobalConcurrency("2"), 2);
+  assert.equal(resolveM4bGlobalConcurrency("1.5"), 1);
+  assert.equal(resolveM4bGlobalConcurrency("1000000"), 4);
+
+  assert.equal(resolveM4bFfmpegThreads("3"), 3);
+  assert.equal(resolveM4bFfmpegThreads("1.5"), 2);
+  assert.equal(resolveM4bFfmpegThreads("1000000"), 4);
+  assert.equal(resolveM4bFfmpegThreads("0"), 2, "zero must fall back to the bounded default");
+
+  assert.equal(resolveM4bStallTimeoutMs("Infinity"), 5 * 60_000);
+  assert.equal(resolveM4bStallTimeoutMs("1000"), 30_000);
+  assert.equal(resolveM4bStallTimeoutMs("999999999999"), 2_147_483_647);
+});
 
 test("全局资源 permit waiter abort 后应移出队列，并唤醒下一个 waiter", async () => {
   const gate = new ResourceGate(1);
@@ -140,5 +164,55 @@ test("m4b 后台封装章节 WAV 缺失时应收口 marker", async () => {
   } finally {
     prisma.audiobookTask.findUnique = originals.findUnique;
     prisma.audiobookTask.updateMany = originals.updateMany;
+  }
+});
+
+test("m4b 已就绪但终态 DB 写瞬时失败时仍重试落 ready", { concurrency: false }, async () => {
+  const taskDir = fs.mkdtempSync(path.join(os.tmpdir(), "ab-m4b-settle-retry-"));
+  writeFakeWav(path.join(taskDir, "full-book.wav"));
+  writeFakeWav(path.join(taskDir, "chapters", "chapter-1", "chapter.wav"));
+  fs.writeFileSync(path.join(taskDir, "full-book.m4b"), Buffer.alloc(128, 1));
+  const service = new AudiobookTaskService();
+  const terminalStates = [];
+  let terminalAttempts = 0;
+  const originals = {
+    findUnique: prisma.audiobookTask.findUnique,
+    updateMany: prisma.audiobookTask.updateMany,
+  };
+  prisma.audiobookTask.findUnique = async () => ({
+    resultJson: JSON.stringify({ m4b: { status: "encoding" } }),
+    status: "succeeded",
+    cancelRequestedAt: null,
+    m4bGenerationToken: "settle-generation",
+  });
+  prisma.audiobookTask.updateMany = async (args) => {
+    const nextState = JSON.parse(args.data.resultJson).m4b.status;
+    if (nextState === "encoding") return { count: 1 };
+    terminalAttempts += 1;
+    if (terminalAttempts <= 2) throw new Error("synthetic transient database failure");
+    terminalStates.push(nextState);
+    return { count: 1 };
+  };
+
+  try {
+    service.scheduleBackgroundM4bEncode({
+      parentTaskId: "parent-settle-retry",
+      novelId: "novel-1",
+      parentTitle: "终态重试书",
+      taskDir,
+      chapterIds: ["chapter-1"],
+      generationToken: "settle-generation",
+    });
+    const deadline = Date.now() + 1_500;
+    while (terminalStates.length === 0 && Date.now() < deadline) {
+      await delay(20);
+    }
+    assert.deepEqual(terminalStates, ["ready"], "DB 恢复后不得把已生成产物误记为 failed");
+    assert.equal(terminalAttempts, 3, "连续失败必须沿退避链继续重试，而不是只重试一次");
+  } finally {
+    service.stopWatchdog();
+    prisma.audiobookTask.findUnique = originals.findUnique;
+    prisma.audiobookTask.updateMany = originals.updateMany;
+    fs.rmSync(taskDir, { recursive: true, force: true });
   }
 });

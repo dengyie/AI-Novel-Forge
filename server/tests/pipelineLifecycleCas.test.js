@@ -357,7 +357,7 @@ test("lease-lost recovery cannot settle cancellation after ownership moved", asy
   }
 });
 
-test("resumePipelineJob does not schedule after the canonical resume CAS misses", async () => {
+test("resumePipelineJob does not execute after the canonical resume CAS misses", async () => {
   const originalFindUnique = prisma.generationJob.findUnique;
   prisma.generationJob.findUnique = async () => ({
     id: "job-resume-race",
@@ -378,14 +378,24 @@ test("resumePipelineJob does not schedule after the canonical resume CAS misses"
 
   try {
     const service = new NovelCorePipelineService();
-    let scheduleCalls = 0;
-    service.pipelineJobWriteService.claimForResume = async () => ({ count: 0 });
-    service.schedulePipelineExecution = () => {
-      scheduleCalls += 1;
+    let claimCalls = 0;
+    let leaseCalls = 0;
+    let executeCalls = 0;
+    service.pipelineJobWriteService.claimForResume = async () => {
+      claimCalls += 1;
+      return { count: 0 };
     };
+    service.pipelineJobLeaseService.claim = async () => {
+      leaseCalls += 1;
+      return { count: 1 };
+    };
+    service.executePipeline = async () => { executeCalls += 1; };
 
     await service.resumePipelineJob("job-resume-race");
-    assert.equal(scheduleCalls, 0);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(claimCalls, 1);
+    assert.equal(leaseCalls, 0, "a missed recovery CAS must not claim an execution lease");
+    assert.equal(executeCalls, 0, "a missed recovery CAS must not enter pipeline execution");
   } finally {
     prisma.generationJob.findUnique = originalFindUnique;
   }
