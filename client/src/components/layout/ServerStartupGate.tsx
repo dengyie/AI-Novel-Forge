@@ -13,12 +13,12 @@ const STARTUP_CHECK_INTERVAL_MS = 1000;
 const STARTUP_WAIT_THRESHOLD_MS = 1200;
 
 function shouldUseStartupGate(): boolean {
-  return import.meta.env.DEV && APP_RUNTIME !== "desktop";
+  return APP_RUNTIME === "web" || APP_RUNTIME === "desktop";
 }
 
 async function checkServerReady(signal: AbortSignal): Promise<boolean> {
   try {
-    const response = await fetch(`${API_BASE_URL}/health`, {
+    const response = await fetch(`${API_BASE_URL}/health/ready`, {
       cache: "no-store",
       signal,
     });

@@ -155,3 +155,44 @@ test("recovered pipeline jobs claim the database only after admission", async ()
     prisma.generationJob.findUnique = originalFindUnique;
   }
 });
+
+test("recovered cancellation waiting behind admission is finalized instead of left retry-blocked", async () => {
+  const originalFindUnique = prisma.generationJob.findUnique;
+  const service = new NovelCorePipelineService();
+  let finalized = 0;
+  service.pipelineJobWriteService.claimForResume = async () => ({ count: 0 });
+  service.pipelineJobWriteService.markCancelledIfPending = async () => {
+    finalized += 1;
+    return { count: 1 };
+  };
+  prisma.generationJob.findUnique = async () => ({
+    id: "cancelled-while-waiting",
+    novelId: "novel-1",
+    status: "cancelled",
+    cancelRequestedAt: new Date("2026-07-27T10:00:00.000Z"),
+    finishedAt: null,
+    startOrder: 1,
+    endOrder: 1,
+    runMode: "fast",
+    autoReview: true,
+    autoRepair: true,
+    skipCompleted: true,
+    qualityThreshold: null,
+    repairMode: "light_repair",
+    maxRetries: 1,
+    payload: null,
+    error: null,
+  });
+
+  try {
+    service.schedulePipelineExecution("cancelled-while-waiting", "novel-1", {
+      startOrder: 1,
+      endOrder: 1,
+      prepareForResume: true,
+    });
+    await waitFor(() => finalized === 1, "cancelled recovered job was not finalized");
+    assert.equal(finalized, 1);
+  } finally {
+    prisma.generationJob.findUnique = originalFindUnique;
+  }
+});

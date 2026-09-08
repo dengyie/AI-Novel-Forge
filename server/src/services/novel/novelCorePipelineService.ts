@@ -505,6 +505,20 @@ export class NovelCorePipelineService {
       if (options.prepareForResume) {
         const claimed = await this.pipelineJobWriteService.claimForResume(jobId);
         if (claimed.count === 0) {
+          // A recovered job can be cancelled while waiting for the process-wide
+          // admission permit. It is no longer resumable, but still needs the
+          // same terminal cleanup as the startup cancellation scan.
+          const pendingCancellation = await prisma.generationJob.findUnique({
+            where: { id: jobId },
+            select: { status: true, cancelRequestedAt: true, finishedAt: true },
+          });
+          if (
+            pendingCancellation?.status === "cancelled"
+            && pendingCancellation.cancelRequestedAt
+            && !pendingCancellation.finishedAt
+          ) {
+            await this.pipelineJobWriteService.markCancelledIfPending(jobId);
+          }
           return;
         }
       }

@@ -30,6 +30,8 @@
 - Director：`DIRECTOR_WORKER_EXECUTION_SLOTS=1`，硬上限 4；容器内可用内存不能代表宿主 global OOM 水位，禁止依据 CPU 数自动扩槽。
 - m4b：`AUDIOBOOK_M4B_CONCURRENCY=1`，硬上限 4；单个 ffmpeg 默认 2 线程，硬上限 4。
 - Volume Readiness startup auto-resume：同小说只选最新可运行项，不同小说也逐条等待完成；定时巡检只能在该恢复序列结束后启动。
+- 恢复中的 Pipeline 任务如果在进程级高负载准入队列等待期间收到取消，准入边界必须执行取消终态收口；不能仅因恢复认领 CAS 未命中就退出，否则会留下 `cancelRequestedAt` 且 `finishedAt=null` 的不可重试任务。
+- 启动消费者（Web 启动门禁、桌面托管服务探针）必须探测 `/api/health/ready`；`/api/health` 只供进程存活、隧道和 supervisor 使用，不能作为业务入口放行条件。
 
 域内批量扫描允许单条任务失败后继续处理其它任务，但必须在本轮结束后以聚合错误标记该域 degraded；不能只记录日志并把 readiness 报为健康，否则失败任务会永久停在原状态而没有自动重试机会。
 
