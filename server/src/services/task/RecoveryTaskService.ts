@@ -31,6 +31,12 @@ interface RecoveryInitializationDeps {
   resumePendingAudiobookTasks(): Promise<unknown>;
 }
 
+export type RecoveryInitializationResult = {
+  failedDomains: string[];
+};
+
+type RecoveryDomain = { name: string; run: () => Promise<unknown> };
+
 interface AutoDirectorRecoveryCommandPort {
   enqueueRecoveryCommand?: (taskId: string) => Promise<unknown>;
   continueTask?: (taskId: string) => Promise<void>;
@@ -73,7 +79,8 @@ function buildImagePresentation(row: {
 }
 
 export class RecoveryTaskService {
-  private initializationPromise: Promise<void> | null = null;
+  private initializationPromise: Promise<RecoveryInitializationResult> | null = null;
+  private retryPromise: Promise<RecoveryInitializationResult> | null = null;
 
   constructor(
     private readonly novelWorkflowRuntimeService = new NovelWorkflowRuntimeService(),
@@ -90,18 +97,64 @@ export class RecoveryTaskService {
     },
   ) {}
 
-  initializePendingRecoveries(): Promise<void> {
+  private buildRecoveryDomains(): RecoveryDomain[] {
+    return [
+      { name: "book_analysis", run: () => this.initializationDeps.resumePendingBookAnalyses() },
+      { name: "image_generation", run: () => this.initializationDeps.resumePendingImageTasks() },
+      { name: "novel_workflow", run: () => this.initializationDeps.resumePendingAutoDirectorTasks() },
+      { name: "novel_pipeline", run: () => this.initializationDeps.resumePendingPipelineJobs() },
+      { name: "style_extraction", run: () => this.initializationDeps.resumePendingStyleTasks() },
+      { name: "novel_audiobook", run: () => this.initializationDeps.resumePendingAudiobookTasks() },
+    ];
+  }
+
+  private async runRecoveryDomains(domains: RecoveryDomain[]): Promise<RecoveryInitializationResult> {
+    const failedDomains: string[] = [];
+    // Recovery methods enqueue real background work as they scan. Starting all
+    // domains with Promise.allSettled created a restart-time burst across image,
+    // director, pipeline, style and audiobook workers. Keep the bootstrap lane
+    // serial; one failed domain is recorded and does not block the next.
+    for (const domain of domains) {
+      try {
+        await domain.run();
+      } catch (error) {
+        failedDomains.push(domain.name);
+        console.error("[recovery] startup domain failed; continuing in degraded mode", {
+          domain: domain.name,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    return { failedDomains };
+  }
+
+  initializePendingRecoveries(): Promise<RecoveryInitializationResult> {
     if (!this.initializationPromise) {
-      this.initializationPromise = Promise.all([
-        this.initializationDeps.resumePendingBookAnalyses(),
-        this.initializationDeps.resumePendingImageTasks(),
-        this.initializationDeps.resumePendingAutoDirectorTasks(),
-        this.initializationDeps.resumePendingPipelineJobs(),
-        this.initializationDeps.resumePendingStyleTasks(),
-        this.initializationDeps.resumePendingAudiobookTasks(),
-      ]).then(() => undefined);
+      this.initializationPromise = this.runRecoveryDomains(this.buildRecoveryDomains());
     }
     return this.initializationPromise;
+  }
+
+  /**
+   * Re-run the idempotent startup scans after a degraded initialization. The first
+   * result remains shared until a caller explicitly asks for a retry, so normal
+   * readiness waiters never accidentally start a second recovery fan-out.
+   */
+  retryPendingRecoveries(): Promise<RecoveryInitializationResult> {
+    if (this.retryPromise) return this.retryPromise;
+    this.retryPromise = (async () => {
+      const current = await this.initializePendingRecoveries();
+      if (current.failedDomains.length === 0) return current;
+      const failed = new Set(current.failedDomains);
+      this.initializationPromise = null;
+      this.initializationPromise = this.runRecoveryDomains(
+        this.buildRecoveryDomains().filter((domain) => failed.has(domain.name)),
+      );
+      return this.initializationPromise;
+    })().finally(() => {
+      this.retryPromise = null;
+    });
+    return this.retryPromise;
   }
 
   async waitUntilReady(): Promise<void> {

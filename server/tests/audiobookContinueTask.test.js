@@ -157,18 +157,18 @@ test("取消竞态契约：源码 pipeline 返回后 cancel 必须 markCancelled
   // 定位 pipeline.run 之后的 cancel 竞态块（注释锚点 + 两行 await）
   assert.match(
     src,
-    /pipeline 已返回后的取消竞态[\s\S]{0,400}?markCancelledIfActive\([\s\S]{0,120}?finalizeContinueChild\(taskId,\s*true\)/,
+    /pipeline 已返回后的取消竞态[\s\S]{0,400}?markCancelledIfActive\([\s\S]{0,120}?finalizeContinueChild\(taskId,\s*true(?:,[^)]+)?\)/,
     "pipeline 返回后 cancel 必须 finalize",
   );
   // catch 取消/失败路径同样 finalize，避免 orphan 父
   assert.match(
     src,
-    /PipelineCancelledError[\s\S]{0,400}?finalizeContinueChild\(taskId,\s*true\)/,
+    /PipelineCancelledError[\s\S]{0,400}?finalizeContinueChild\(taskId,\s*true(?:,[^)]+)?\)/,
     "PipelineCancelledError 路径必须 finalize",
   );
   assert.match(
     src,
-    /markFailedIfRunning\([\s\S]{0,200}?finalizeContinueChild\(taskId,\s*true\)/,
+    /markFailedIfRunning\([\s\S]{0,200}?finalizeContinueChild\(taskId,\s*true(?:,[^)]+)?\)/,
     "markFailed 后必须 finalize",
   );
 });
@@ -320,7 +320,9 @@ test("m4b 后台封装契约：reconcile 不 await encode；已 ready 则 skip�
   // allReady 成功分支不得在 update 前 await encodeFullBookM4b（避免堵队列）
   const reconcileStart = src.indexOf("async reconcileParent(");
   assert.ok(reconcileStart > 0);
-  const reconcileBody = src.slice(reconcileStart, reconcileStart + 4500);
+  const reconcileEnd = src.indexOf("\n  /**", reconcileStart + 1);
+  assert.ok(reconcileEnd > reconcileStart);
+  const reconcileBody = src.slice(reconcileStart, reconcileEnd);
   assert.match(reconcileBody, /m4bAlreadyReady/, "须 short-circuit 已有 m4b");
   assert.match(
     reconcileBody,

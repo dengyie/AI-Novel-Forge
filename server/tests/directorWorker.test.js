@@ -176,6 +176,48 @@ test("director worker stops before executor when the leased command is no longer
   ]);
 });
 
+test("director worker does not mark a command running after gate acquisition aborts", async () => {
+  const events = [];
+  const controller = new AbortController();
+  const command = {
+    id: "command-gate-abort",
+    taskId: "task-1",
+    novelId: "novel-1",
+    commandType: "continue",
+  };
+  const queue = Object.create(DirectorTaskQueue.prototype);
+  queue.leaseNext = async () => ({ command });
+  queue.startLeaseRenewal = () => ({
+    signal: controller.signal,
+    markLost: () => events.push("mark-lost"),
+    stop: () => events.push("stop-renewal"),
+  });
+  queue.acquireResourceGate = async () => {
+    events.push("acquire-gate");
+    controller.abort(new Error("lease lost while gate was granted"));
+  };
+  queue.releaseResourceGate = () => events.push("release-gate");
+  queue.markRunning = async () => {
+    events.push("mark-running");
+    return true;
+  };
+  queue.completeTask = async () => {
+    events.push("complete");
+    return true;
+  };
+  queue.cancelTask = async () => true;
+  queue.failTask = async () => events.push("fail");
+
+  const worker = new DirectorWorker({
+    queue,
+    commandExecutor: { execute: async () => events.push("execute") },
+  });
+
+  await worker.tick("slot-1");
+
+  assert.deepEqual(events, ["acquire-gate", "release-gate", "stop-renewal"]);
+});
+
 test("director task queue aborts the lease signal when renewal authoritatively loses ownership", async () => {
   let renewCalls = 0;
   const queue = new DirectorTaskQueue(

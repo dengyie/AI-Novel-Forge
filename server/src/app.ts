@@ -22,7 +22,7 @@ import characterRouter from "./routes/character";
 import chatRouter from "./routes/chat";
 import creativeHubRouter from "./routes/creativeHub";
 import genreRouter from "./routes/genre";
-import healthRouter from "./routes/health";
+import healthRouter, { getServerReadiness, setServerReadiness } from "./routes/health";
 import imagesRouter from "./routes/images";
 import knowledgeRouter from "./routes/knowledge";
 import llmRouter from "./routes/llm";
@@ -53,12 +53,7 @@ import { NovelPipelineRuntimeService } from "./services/novel/NovelPipelineRunti
 import { recoveryTaskService } from "./services/task/RecoveryTaskService";
 import { taskRetentionService } from "./services/task/TaskRetentionService";
 import { volumeReadinessScheduler } from "./services/novel/volume/VolumeReadinessScheduler";
-import {
-  ensureVolumeReadinessRunsHydrated,
-  isWallBudgetExhausted,
-  listPlannedLiveReadinessRuns,
-} from "./services/novel/volume/volumeReadinessRunStore";
-import { volumeReadinessExecutor } from "./services/novel/volume/VolumeReadinessExecutor";
+import { volumeReadinessStartupRecoveryRunner } from "./services/novel/volume/readiness/application/VolumeReadinessStartupRecoveryRunner";
 import {
   ensureSystemResourceStarterData,
   hasSystemResourceBootstrapChanges,
@@ -80,6 +75,8 @@ import {
 } from "./services/novel/runtime/ChapterGeneratingLockHygiene";
 import { registerBuiltInEngines } from "./services/audiobook/engine/registerBuiltInEngines";
 import { audiobookTaskService } from "./services/audiobook/AudiobookTaskService";
+import { createStartupReadinessMiddleware } from "./app/startup/StartupReadinessMiddleware";
+import { runStartupRecoverySequence } from "./app/startup/StartupRecoveryCoordinator";
 
 getSharedNovelServices();
 registerNovelEventHandlers(novelEventBus);
@@ -109,7 +106,11 @@ function parsePositiveInt(value: string | undefined, fallback: number): number {
   return fallback;
 }
 
-export function createApp() {
+export interface CreateAppOptions {
+  enforceStartupReadiness?: boolean;
+}
+
+export function createApp(options: CreateAppOptions = {}) {
   getSharedNovelServices();
   const app = express();
   const jsonBodyLimit = process.env.API_JSON_LIMIT ?? "20mb";
@@ -148,6 +149,16 @@ export function createApp() {
     const errorSuffix = errorMessage ? ` | error: ${errorMessage}` : "";
     return `${method} ${url} ${status} ${responseTime} ms - ${contentLength}${errorSuffix}`;
   }));
+
+  // Liveness/readiness must remain reachable while startup recovery is gated.
+  // Reject ordinary API traffic before body parsing and rate-limit accounting:
+  // a restart storm must not allocate up to API_JSON_LIMIT per request or spend
+  // the first post-recovery request budget while the service cannot serve it.
+  app.use("/api/health", healthRouter);
+  if (options.enforceStartupReadiness) {
+    app.use("/api", createStartupReadinessMiddleware());
+  }
+
   app.use(express.json({ limit: jsonBodyLimit }));
 
   // Global inbound rate limit (single-node). Skip liveness for probes.
@@ -175,7 +186,6 @@ export function createApp() {
   app.use("/api/llm", expensiveRateLimit);
   app.use("/api/creative-hub", expensiveRateLimit);
 
-  app.use("/api/health", healthRouter);
   app.use("/api/agent-catalog", agentCatalogRouter);
   app.use("/api/agent-runs", agentRunsRouter);
   app.use("/api/book-analysis", bookAnalysisRouter);
@@ -322,126 +332,138 @@ function scheduleLogRetentionCleanup(): void {
   });
 }
 
-function initializeBackgroundServices(): BackgroundServicesHandle {
-  ragServices.ragWorker.start();
-  ragServices.ragRetrievalTraceRetention.start();
-  taskRetentionService.start();
-  // hydrate 后自动 re-execute 因进程重启降为 planned 的 live run（避免静默卡死）。
-  // VOLUME_READINESS_SCHEDULE 只控制 dry-run 巡检；auto-resume 始终开启。
-  // listPlannedLiveReadinessRuns 默认跳过 wall 已耗尽的 planned（须显式抬 wall 再 resume）。
-  void ensureVolumeReadinessRunsHydrated()
-    .then(() => {
-      const allPlanned = listPlannedLiveReadinessRuns({ skipWallExhausted: false });
-      const planned = allPlanned.filter((run) => !isWallBudgetExhausted(run));
-      for (const run of allPlanned) {
-        if (!isWallBudgetExhausted(run)) {
-          continue;
-        }
-        console.warn("[volume.readiness] skip auto-resume: wall already exhausted", {
-          runId: run.runId,
-          novelId: run.novelId,
-          wallMsUsed: run.wallMsUsed,
-          maxWallMinutes: run.budget.maxWallMinutes,
-        });
-      }
-      // #4：同 novel 多 planned 时只 auto-resume 最新一条（list 已按 updatedAt desc），
-      // 其余保持 planned；flight claim 也会拒掉 sibling，避免并发 execute 竞态。
-      const seenNovels = new Set<string>();
-      const dedupedPlanned = planned.filter((run) => {
-        if (seenNovels.has(run.novelId)) {
-          console.log("[volume.readiness] skip auto-resume sibling planned (same novel)", {
-            runId: run.runId,
-            novelId: run.novelId,
-          });
-          return false;
-        }
-        seenNovels.add(run.novelId);
-        return true;
-      });
-      for (const run of dedupedPlanned) {
-        console.log("[volume.readiness] auto-resume planned run after hydrate", {
-          runId: run.runId,
-          novelId: run.novelId,
-        });
-        void volumeReadinessExecutor.execute(run.runId).catch((error) => {
-          console.error("[volume.readiness] auto-resume execute failed", {
-            runId: run.runId,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        });
-      }
-    })
-    .catch((error) => {
-      console.warn("[volume.readiness] hydrate runs failed", error);
-    });
-  volumeReadinessScheduler.start();
-  novelSideEffectWorker.start();
-  // Prevent zombie chapterArtifactSyncCheckpoint rows from blocking writer claim paths.
-  startArtifactCheckpointHygieneScanner();
-  // 章节 generating 陈旧锁自愈：writer 超时/崩溃遗留的假 running 由扫描器回收，
-  // 不再依赖人工 SQL（生产曾单章 4 次手动回收）。
-  startChapterLockHygieneScanner();
+async function initializeBackgroundServices(): Promise<BackgroundServicesHandle> {
   const directorWorker = new DirectorWorker();
-  void directorWorker.start().catch((error) => {
-    console.error("[director.worker] unexpected stop", error);
-  });
-  const recoveryInitialization = recoveryTaskService.initializePendingRecoveries();
-
-  void loadProviderApiKeys().catch((error) => {
-    console.warn("数据库中的模型密钥加载失败，已回退到环境变量。", error);
-  });
-
-  void ensureSystemResourceStarterData()
-    .then((systemResourceReport) => {
-      if (hasSystemResourceBootstrapChanges(systemResourceReport)) {
-        console.log("[server] built-in creative resources bootstrapped.", systemResourceReport);
-      }
-    })
-    .catch((error) => {
-      console.warn("Failed to bootstrap built-in creative resources.", error);
-    });
-
-  void recoveryInitialization
-    .then(() => {
-      bookAnalysisService.startWatchdog();
-      novelPipelineRuntimeService.startWatchdog();
-      audiobookTaskService.startWatchdog();
-    })
-    .catch((error) => {
-      console.warn("Failed to prepare pending recovery candidates.", error);
-      bookAnalysisService.startWatchdog();
-      novelPipelineRuntimeService.startWatchdog();
-      audiobookTaskService.startWatchdog();
-    });
-
-  return {
-    stop: async () => {
-      // Bound wait for director in-flight ticks; force-exit still owned by SHUTDOWN_TIMEOUT_MS.
-      const drainMs = Math.max(
-        1_000,
-        Math.min(15_000, parsePositiveInt(process.env.SHUTDOWN_TIMEOUT_MS, 20_000) - 5_000),
-      );
-      const drainResult = await directorWorker.waitForStop(drainMs).catch((error) => {
-        console.warn("[director.worker] waitForStop failed", error);
-        return "timeout" as const;
+  let stopped = false;
+  let recoveryRetryTimer: NodeJS.Timeout | null = null;
+  const scheduleRecoveryRetry = (delayMs: number): void => {
+    if (stopped || recoveryRetryTimer) return;
+    recoveryRetryTimer = setTimeout(() => {
+      recoveryRetryTimer = null;
+      void recoveryTaskService.retryPendingRecoveries().then((result) => {
+        if (stopped) return;
+        if (result.failedDomains.length === 0) {
+          setServerReadiness("ready");
+          console.log("[recovery] startup recovery retry succeeded; readiness restored");
+          return;
+        }
+        setServerReadiness("degraded", result.failedDomains);
+        scheduleRecoveryRetry(Math.min(delayMs * 2, 5 * 60_000));
+      }).catch((error) => {
+        if (stopped) return;
+        console.warn("[recovery] startup recovery retry failed", error);
+        setServerReadiness("degraded", ["retry"]);
+        scheduleRecoveryRetry(Math.min(delayMs * 2, 5 * 60_000));
       });
-      if (drainResult === "timeout") {
-        console.warn(`[director.worker] in-flight drain timed out after ${drainMs}ms; continuing shutdown.`);
-      }
-      novelSideEffectWorker.stop();
-      stopArtifactCheckpointHygieneScanner();
-      stopChapterLockHygieneScanner();
-      ragServices.ragWorker.stop();
-      ragServices.ragRetrievalTraceRetention.stop();
-      taskRetentionService.stop();
-      volumeReadinessScheduler.stop();
-      bookAnalysisService.stopWatchdog();
-      novelPipelineRuntimeService.stopWatchdog();
-    },
+    }, delayMs);
+    recoveryRetryTimer.unref?.();
   };
+  const stop = async (): Promise<void> => {
+    if (stopped) return;
+    stopped = true;
+    if (recoveryRetryTimer) {
+      clearTimeout(recoveryRetryTimer);
+      recoveryRetryTimer = null;
+    }
+    // Bound wait for director in-flight ticks; force-exit still owned by SHUTDOWN_TIMEOUT_MS.
+    const drainMs = Math.max(
+      1_000,
+      Math.min(15_000, parsePositiveInt(process.env.SHUTDOWN_TIMEOUT_MS, 20_000) - 5_000),
+    );
+    const drainResult = await directorWorker.waitForStop(drainMs).catch((error) => {
+      console.warn("[director.worker] waitForStop failed", error);
+      return "timeout" as const;
+    });
+    if (drainResult === "timeout") {
+      console.warn(`[director.worker] in-flight drain timed out after ${drainMs}ms; continuing shutdown.`);
+    }
+    novelSideEffectWorker.stop();
+    stopArtifactCheckpointHygieneScanner();
+    stopChapterLockHygieneScanner();
+    ragServices.ragWorker.stop();
+    ragServices.ragRetrievalTraceRetention.stop();
+    taskRetentionService.stop();
+    volumeReadinessScheduler.stop();
+    bookAnalysisService.stopWatchdog();
+    novelPipelineRuntimeService.stopWatchdog();
+    audiobookTaskService.stopWatchdog();
+  };
+
+  try {
+    // Recovery queues can begin work as soon as they are hydrated. Load the
+    // persisted provider keys before any recovered task is allowed to execute.
+    await loadProviderApiKeys().catch((error) => {
+      console.warn("数据库中的模型密钥加载失败，已回退到环境变量。", error);
+    });
+    // 恢复扫描必须在服务进入 ready 前完成：m4b 后台作业依靠持久 marker 重建内存队列，
+    // 不能在启动后以未等待 Promise 运行而留下短暂/永久的不可恢复窗口。
+    // 核心恢复后，Volume 真正执行结束才启动 Director；HTTP ready 不等待整卷长任务。
+    const { recoveryResult, backgroundRecovery } = await runStartupRecoverySequence({
+      recoverCore: () => recoveryTaskService.initializePendingRecoveries(),
+      startDeferredServices: () => {
+        // These workers may perform an immediate scan/tick. Starting them only
+        // after durable task recovery avoids adding another restart-time burst.
+        ragServices.ragWorker.start();
+        ragServices.ragRetrievalTraceRetention.start();
+        taskRetentionService.start();
+        novelSideEffectWorker.start();
+        // Prevent zombie chapterArtifactSyncCheckpoint rows from blocking writer claim paths.
+        startArtifactCheckpointHygieneScanner();
+        // 章节 generating 陈旧锁自愈：writer 超时/崩溃遗留的假 running 由扫描器回收。
+        startChapterLockHygieneScanner();
+        bookAnalysisService.startWatchdog();
+        novelPipelineRuntimeService.startWatchdog();
+        audiobookTaskService.startWatchdog();
+      },
+      // VOLUME_READINESS_SCHEDULE 只控制 dry-run 巡检；startup auto-resume 始终开启。
+      startVolumeRecovery: () => {
+        return volumeReadinessStartupRecoveryRunner.run(() => stopped)
+          .finally(() => {
+            // The optional dry-run scheduler performs an immediate first tick.
+            // Do not overlap that tick with startup volume auto-resume.
+            if (!stopped) volumeReadinessScheduler.start();
+          });
+      },
+      startDirectorWorker: () => {
+        void directorWorker.start().catch((error) => {
+          console.error("[director.worker] unexpected stop", error);
+        });
+      },
+      shouldStop: () => stopped,
+    });
+    void backgroundRecovery.catch((error) => {
+      console.warn("[volume.readiness] startup recovery failed", error);
+    });
+    if (recoveryResult.failedDomains.length > 0) {
+      setServerReadiness("degraded", recoveryResult.failedDomains);
+      console.warn("[recovery] startup recovery degraded; readiness remains blocked", {
+        failedDomains: recoveryResult.failedDomains,
+      });
+      scheduleRecoveryRetry(30_000);
+    } else {
+      setServerReadiness("ready");
+    }
+
+    void ensureSystemResourceStarterData()
+      .then((systemResourceReport) => {
+        if (hasSystemResourceBootstrapChanges(systemResourceReport)) {
+          console.log("[server] built-in creative resources bootstrapped.", systemResourceReport);
+        }
+      })
+      .catch((error) => {
+        console.warn("Failed to bootstrap built-in creative resources.", error);
+      });
+
+    return { stop };
+  } catch (error) {
+    setServerReadiness("degraded", ["startup"]);
+    await stop();
+    throw error;
+  }
 }
 
 export async function startServer(options?: ServerStartOptions): Promise<StartedServer> {
+  setServerReadiness("starting");
   scheduleLogRetentionCleanup();
   await ensureRuntimeDatabaseReady();
 
@@ -456,7 +478,7 @@ export async function startServer(options?: ServerStartOptions): Promise<Started
     console.warn("[server] failed to inspect pending review auto-promotion settings.", error);
   });
 
-  const app = createApp();
+  const app = createApp({ enforceStartupReadiness: true });
   const { host, port, allowLan } = resolveServerStartOptions(options);
   assertProductionAuthSafety({ host, allowLan });
 
@@ -464,9 +486,25 @@ export async function startServer(options?: ServerStartOptions): Promise<Started
     const listeningServer = app.listen(port, host, () => resolve(listeningServer));
     listeningServer.once("error", reject);
   });
-  const backgroundServices = initializeBackgroundServices();
+  let backgroundServices: BackgroundServicesHandle;
+  try {
+    backgroundServices = await initializeBackgroundServices();
+  } catch (error) {
+    // initializeBackgroundServices owns cleanup of any services it started; this closes
+    // the listener that was intentionally opened only to serve the assembled app.
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve());
+    });
+    throw error;
+  }
 
-  logServerReady(host, port);
+  if (getServerReadiness().state === "ready") {
+    logServerReady(host, port);
+  } else {
+    console.warn("[server] listening with degraded readiness; /api/health/ready remains 503", {
+      failedRecoveryDomains: getServerReadiness().failedRecoveryDomains,
+    });
+  }
 
   return {
     app,

@@ -26,6 +26,7 @@ const {
 } = require("../dist/services/audiobook/audiobookPaths.js");
 
 const M4B_ENCODING_LABEL = "有声书生成完成（m4b 后台封装中）";
+const M4B_DONE_LABEL = "有声书生成完成（含 m4b）";
 
 function makeTaskDir(label) {
   return fs.mkdtempSync(path.join(os.tmpdir(), `ab-redo-${label}-`));
@@ -71,6 +72,7 @@ function makeTaskRow(overrides = {}, taskDir) {
     lastTokenRecordedAt: null,
     createdAt: new Date(),
     updatedAt: new Date(),
+    m4bGenerationToken: "generation-old",
     ...overrides,
   };
 }
@@ -104,7 +106,19 @@ test("redoTaskM4b: m4b 已 ready → 幂等早退，不重置 label、不重编�
   const m4bPath = resolveFullBookM4bPath(taskDir);
   fs.mkdirSync(path.dirname(m4bPath), { recursive: true });
   fs.writeFileSync(m4bPath, Buffer.alloc(128)); // >=64 视为 ready
-  const existing = makeTaskRow({}, taskDir);
+  const existing = makeTaskRow({
+    currentItemLabel: M4B_DONE_LABEL,
+    resultJson: JSON.stringify({
+      qualityWarnings: ["保留"],
+      m4b: {
+        status: "ready",
+        path: "full-book.m4b",
+        reason: null,
+        bytes: 128,
+        chapterCount: 2,
+      },
+    }),
+  }, taskDir);
   const service = new AudiobookTaskService();
 
   const originals = {
@@ -122,6 +136,58 @@ test("redoTaskM4b: m4b 已 ready → 幂等早退，不重置 label、不重编�
   } finally {
     prisma.audiobookTask.findUnique = originals.findUnique;
     prisma.audiobookTask.updateMany = originals.updateMany;
+  }
+});
+
+test("redoTaskM4b: 盘上 m4b ready 但 DB 仍 failed 时以 CAS 修复 ready 投影", { concurrency: false }, async () => {
+  const taskDir = makeTaskDir("ready-projection-repair");
+  const m4bPath = resolveFullBookM4bPath(taskDir);
+  fs.writeFileSync(m4bPath, Buffer.alloc(128));
+  const existing = makeTaskRow({
+    resultJson: JSON.stringify({
+      qualityWarnings: ["保留"],
+      m4b: { status: "failed", reason: "旧失败" },
+    }),
+  }, taskDir);
+  const service = new AudiobookTaskService();
+  const originals = {
+    findUnique: prisma.audiobookTask.findUnique,
+    updateMany: prisma.audiobookTask.updateMany,
+  };
+  const updateArgs = [];
+  prisma.audiobookTask.findUnique = async () => ({ ...existing, novel: { id: "novel-1", title: "测试书" } });
+  prisma.audiobookTask.updateMany = async (args) => {
+    updateArgs.push(args);
+    Object.assign(existing, args.data);
+    return { count: 1 };
+  };
+
+  try {
+    const detail = await service.redoTaskM4b("at-1");
+    assert.equal(updateArgs.length, 1, "disk-ready projection repair must not spawn a new encode generation");
+    assert.equal(updateArgs[0].where.status, "succeeded");
+    assert.equal(updateArgs[0].where.m4bGenerationToken, "generation-old");
+    assert.equal(updateArgs[0].where.resultJson, makeTaskRow({
+      resultJson: JSON.stringify({
+        qualityWarnings: ["保留"],
+        m4b: { status: "failed", reason: "旧失败" },
+      }),
+    }, taskDir).resultJson);
+    const projection = JSON.parse(updateArgs[0].data.resultJson);
+    assert.deepEqual(projection.qualityWarnings, ["保留"]);
+    assert.deepEqual(projection.m4b, {
+      status: "ready",
+      path: "full-book.m4b",
+      reason: null,
+      bytes: 128,
+      chapterCount: 2,
+    });
+    assert.equal(updateArgs[0].data.currentItemLabel, M4B_DONE_LABEL);
+    assert.equal(detail.m4bStatus, "ready");
+  } finally {
+    prisma.audiobookTask.findUnique = originals.findUnique;
+    prisma.audiobookTask.updateMany = originals.updateMany;
+    fs.rmSync(taskDir, { recursive: true, force: true });
   }
 });
 
@@ -169,6 +235,29 @@ test("redoTaskM4b: 非 succeeded → 400，不动盘", { concurrency: false }, a
   }
 });
 
+test("redoTaskM4b: 非 succeeded 即使有旧 m4b 也必须拒绝", { concurrency: false }, async () => {
+  const taskDir = makeTaskDir("non-succeeded-ready");
+  fs.writeFileSync(resolveFullBookM4bPath(taskDir), Buffer.alloc(128));
+  const existing = makeTaskRow({ status: "running" }, taskDir);
+  const service = new AudiobookTaskService();
+  const originals = {
+    findUnique: prisma.audiobookTask.findUnique,
+    updateMany: prisma.audiobookTask.updateMany,
+  };
+  prisma.audiobookTask.findUnique = async () => ({ ...existing, novel: { id: "novel-1", title: "测试书" } });
+  prisma.audiobookTask.updateMany = async () => { throw new Error("不应触发 update"); };
+
+  try {
+    await assert.rejects(
+      () => service.redoTaskM4b("at-1"),
+      (e) => e instanceof Error && /仅生成完成/.test(e.message),
+    );
+  } finally {
+    prisma.audiobookTask.findUnique = originals.findUnique;
+    prisma.audiobookTask.updateMany = originals.updateMany;
+  }
+});
+
 test("redoTaskM4b: succeeded + WAV 在 + m4b 缺 → 重置 label/清 resultJson 并触发 force 重封装", { concurrency: false }, async () => {
   const taskDir = makeTaskDir("sched");
   fs.writeFileSync(resolveFullBookAudioPath(taskDir), writeFakeWav(resolveFullBookAudioPath(taskDir)));
@@ -195,8 +284,10 @@ test("redoTaskM4b: succeeded + WAV 在 + m4b 缺 → 重置 label/清 resultJson
       (a) => a.data && a.data.currentItemLabel === M4B_ENCODING_LABEL,
     );
     assert.ok(reset, "应有重置为「封装中」的 updateMany");
-    assert.equal(reset.data.resultJson, "{}", "应清掉旧 m4b 失败结论");
+    assert.equal(JSON.parse(reset.data.resultJson).m4b.status, "encoding", "应把 m4b 标记为可恢复的封装中状态");
     assert.equal(reset.where.id, "at-1");
+    assert.equal(reset.where.m4bGenerationToken, "generation-old");
+    assert.notEqual(reset.data.m4bGenerationToken, "generation-old", "重做必须轮换 m4b 代际");
   } finally {
     prisma.audiobookTask.findUnique = originals.taskFindUnique;
     prisma.audiobookTask.updateMany = originals.taskUpdateMany;

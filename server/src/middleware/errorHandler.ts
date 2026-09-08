@@ -210,6 +210,21 @@ export function errorHandler(
     error
     && typeof error === "object"
     && "type" in error
+    && (error as { type?: string }).type === "entity.parse.failed"
+  ) {
+    const message = "请求体 JSON 格式错误，请检查后重试。";
+    setRequestErrorMessage(res, message);
+    res.status(400).json({
+      success: false,
+      error: message,
+    });
+    return;
+  }
+
+  if (
+    error
+    && typeof error === "object"
+    && "type" in error
     && (error as { type?: string }).type === "entity.too.large"
   ) {
     setRequestErrorMessage(res, "请求体过大，请缩短文本或分段上传。");

@@ -1,10 +1,24 @@
-import { execFile, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { resolveBetweenChapterGapMs } from "./audiobookGap";
 import { resolveFullBookAudioPath, resolveFullBookM4bPath, cleanupStaleM4bParts } from "./audiobookPaths";
 import { parseWavInfo } from "./audiobookWav";
+import {
+  runFfmpegProcess,
+  type M4bProgressCallback,
+} from "./infrastructure/m4b/FfmpegProcessRunner";
+import {
+  getM4bGlobalConcurrency,
+  withGlobalM4bPermit,
+} from "./infrastructure/m4b/M4bPermitPool";
+import {
+  withAudiobookTaskDirArtifactLock,
+  withM4bEncodeLock,
+} from "./infrastructure/m4b/M4bTaskLocks";
+
+export { getM4bGlobalConcurrency, withAudiobookTaskDirArtifactLock };
+export type { M4bFfmpegProgress, M4bProgressCallback } from "./infrastructure/m4b/FfmpegProcessRunner";
 
 export type AudiobookM4bStatus = "ready" | "skipped" | "failed";
 
@@ -28,81 +42,21 @@ export interface AudiobookM4bEncodeResult {
 const M4B_RELATIVE = "full-book.m4b";
 
 /**
- * 编码超时语义（根因修复 2026-09-03）：从「绝对墙钟时长」改为「停滞看门狗」。
- *
- * 旧模型：超时 = 固定 `timeoutMs`，一遍到就 kill。生产实测（《神通者》2GB WAV、
- * 降权+限 2 线程）推进中的 ffmpeg 跑到 ~37min 逼近 40min 绝对超时被误杀，而它
- * 明明在稳定往 `.part` 写盘（每次都被掐断后不得不全量重编码）。
- *
- * 新模型：只要 `.part` 仍在增长就视为健康，永不因“慢”被 kill；仅当 `.part`
- * 连续停滞超过 `stallTimeoutMs`（默认 5 分钟）才判真忙/真挂，kill 并报错。
- * 既保证大书/降权场景能跑完，又不丢失“ffmpeg 卡死”的资源保护。
- */
-/** 停滞看门窗口：`.part` 连续不变超过它即掐。默认 5 分钟，可用 AUDIOBOOK_M4B_STALL_TIMEOUT_MS 覆盖。 */
-const DEFAULT_STALL_TIMEOUT_MS = Math.max(
-  30_000,
-  Number(process.env.AUDIOBOOK_M4B_STALL_TIMEOUT_MS ?? 5 * 60_000) || 5 * 60_000,
-);
-
-/**
  * ffmpeg 编码线程上限。大书 m4b 是对整本 WAV 的实时重采样+AAC 重编码，默认全核
  * 会把小巧/共享宿主占满、加剧与其它进程的争抢；这里默认封顶 2 线程，可用
- * AUDIOBOOK_M4B_FFMPEG_THREADS 覆盖（0 = 不传 `-threads`，交给 ffmpeg 自定）。
+ * AUDIOBOOK_M4B_FFMPEG_THREADS 覆盖。配置为 0 或其它非法值时回退默认值，不能
+ * 让 ffmpeg 自行按宿主 CPU 扩张；显式线程数仍封顶 4，避免错误配置重新制造共享宿主 OOM。
  */
-const FFMPEG_THREADS_CAP = ((): number | null => {
-  const raw = Number(process.env.AUDIOBOOK_M4B_FFMPEG_THREADS ?? 2);
-  if (!Number.isFinite(raw) || raw <= 0) return null;
-  return Math.max(1, Math.floor(raw));
-})();
-
-/**
- * 编码进程 nice 值（IPC 优先级增量，1~19 更低优先）。默认 +10，让 ffmpeg 在共享
- * 宿主上主动让渡 CPU 给其它业务，减少被当作资源大户而牵连 novel-server 的 OOM。
- * 可用 AUDIOBOOK_M4B_FFMPEG_NICE 覆盖（0 = 不额外 renice）。
- */
-const FFMPEG_NICE = (() => {
-  const raw = Number(process.env.AUDIOBOOK_M4B_FFMPEG_NICE ?? 10);
-  if (!Number.isFinite(raw) || raw <= 0) return null;
-  return Math.max(0, Math.min(19, Math.floor(raw)));
-})();
-
-/**
- * 同 taskDir 并发编码互斥：模块级在途表，避免 pause/restart/后台队列多个入口
- * 对同一本书同时 spawn 多个 ffmpeg（每个都会重读整部 WAV，成倍放大资源占用）。
- * 同一 taskDir 再次请求 encode 时，后到者等待前一轮跑完（并发真正串行化）。
- */
-const IN_FLIGHT_M4B = new Set<string>();
-const M4B_WAITERS = new Map<string, Array<() => void>>();
-
-async function withTaskDirLock<T>(
-  taskDir: string,
-  fn: () => Promise<T>,
-): Promise<T> {
-  if (!IN_FLIGHT_M4B.has(taskDir)) {
-    IN_FLIGHT_M4B.add(taskDir);
-    try {
-      return await fn();
-    } finally {
-      IN_FLIGHT_M4B.delete(taskDir);
-      const waiters = M4B_WAITERS.get(taskDir);
-      if (waiters && waiters.length > 0) {
-        const next = waiters.shift();
-        if (waiters.length === 0) M4B_WAITERS.delete(taskDir);
-        next?.();
-      } else {
-        M4B_WAITERS.delete(taskDir);
-      }
-    }
-  }
-  // 后到者排队；被唤醒后递归重试获取锁（而不是直接执行 fn），否则第三个及以后的
-  // 请求会在第二个请求执行期间看到 IN_FLIGHT 为空而并发进入，锁就失效了。
-  await new Promise<void>((resolve) => {
-    const list = M4B_WAITERS.get(taskDir) ?? [];
-    list.push(resolve);
-    M4B_WAITERS.set(taskDir, list);
-  });
-  return withTaskDirLock(taskDir, fn);
+export function resolveM4bFfmpegThreads(
+  value = process.env.AUDIOBOOK_M4B_FFMPEG_THREADS,
+): number {
+  const raw = Number(value ?? 2);
+  if (raw === 0) return 2;
+  if (!Number.isSafeInteger(raw) || raw < 1) return 2;
+  return Math.min(4, raw);
 }
+
+const FFMPEG_THREADS_CAP = resolveM4bFfmpegThreads();
 
 export function resolveFfmpegBinary(): string | null {
   const dedicated = process.env.AUDIOBOOK_FFMPEG_PATH?.trim();
@@ -241,182 +195,36 @@ function escapeFfmetadata(value: string): string {
     .replace(/\n/g, " ");
 }
 
-/**
- * 基于产物 `.part` 文件大小增长上报进度的定时器周期。
- * R2-2：m4b 封装是单次长时 spawn（大书数分钟至十几分钟），不加 onProgress 时
- * progress/stage/itemKey 五元组冻结，会被 watchdog 在 60s×stallPeriods 后误判假 running 杀掉。
- * 这里每隔 progressIntervalMs 上报一次 `.part` 字节数——只要 ffmpeg 还在写盘就有真推进。
- */
-const M4B_PROGRESS_INTERVAL_MS = Math.max(
-  5_000,
-  Number(process.env.AUDIOBOOK_M4B_PROGRESS_INTERVAL_MS ?? 10_000) || 10_000,
-);
-
-export interface M4bFfmpegProgress {
-  partBytes: number;
-  elapsedMs: number;
-}
-
-export type M4bProgressCallback = (progress: M4bFfmpegProgress) => void;
-
-/**
- * ffmpeg 产物路径：args 里最后一个非开关/非 `-` 的参数（`... -f mp4 <partPath>`）。
- * 与 encodeFullBookM4b 的 args 构造强耦合；显式 partPath 传入时优先。
- */
-function resolveFfmpegOutputPath(args: string[], explicitPartPath: string | null | undefined): string | null {
-  const explicit = explicitPartPath?.trim();
-  if (explicit) return explicit;
-  for (let index = args.length - 1; index >= 0; index -= 1) {
-    const arg = args[index];
-    if (arg && arg !== "-" && !arg.startsWith("-")) {
-      return arg;
-    }
-  }
-  return null;
-}
-
-function runFfmpeg(input: {
-  ffmpeg: string;
-  args: string[];
-  /** 停滞看门窗口：`.part` 连续不变超过它即掐。默认 AUDIOBOOK_M4B_STALL_TIMEOUT_MS。 */
-  stallTimeoutMs?: number;
-  signal?: AbortSignal;
-  /** 可选：封装期间周期性上报 `.part` 文件增长，供 watchdog 推进信号。 */
-  onProgress?: M4bProgressCallback | null;
-  /** 产物 `.part` 路径；缺省从 args 最后一个非开关参数推导。 */
-  partPath?: string | null;
-}): Promise<{ status: number | null; stderr: string }> {
-  return new Promise((resolve, reject) => {
-    if (input.signal?.aborted) {
-      reject(new Error("m4b 封装已取消。"));
-      return;
-    }
-    const child = spawn(input.ffmpeg, input.args, {
-      stdio: ["ignore", "ignore", "pipe"],
-    });
-    // 编码属长时降权任务：renice 到更低优先级，分享宿主下把 CPU 让给其它业务，
-    // 避免大 ffmpeg 长跑被当作资源大户而牵连整机 OOM。renice 失败仅 warn 不中断。
-    if (FFMPEG_NICE != null && child.pid) {
-      execFile(
-        "renice",
-        [String(FFMPEG_NICE), "-p", String(child.pid)],
-        { timeout: 2000 },
-        (error) => {
-          if (error) {
-            console.warn("[audiobook] m4b ffmpeg renice 失败", (error as Error).message);
-          }
-        },
-      );
-    }
-    const partPath = resolveFfmpegOutputPath(input.args, input.partPath);
-    let stderr = "";
-    let settled = false;
-    let progressTimer: NodeJS.Timeout | null = null;
-    let watchdogTimer: NodeJS.Timeout | null = null;
-    const startedAt = Date.now();
-    let lastPartBytes = 0;
-    // 停滞窗口：调用方可显式给 stallTimeoutMs，缺省用模块默认。
-    const stallMs = input.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS;
-    const cleanup = () => {
-      if (watchdogTimer) clearTimeout(watchdogTimer);
-      input.signal?.removeEventListener("abort", onAbort);
-      if (progressTimer) clearInterval(progressTimer);
-    };
-    const finish = (status: number | null, errText: string) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      resolve({ status, stderr: errText });
-    };
-    const fail = (error: Error) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      reject(error);
-    };
-    const killAndFail = (message: string) => {
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        // ignore
-      }
-      fail(new Error(message));
-    };
-    const onAbort = () => {
-      killAndFail("m4b 封装已取消。");
-    };
-
-    const readPartBytes = (): number => {
-      try {
-        if (partPath && fs.existsSync(partPath)) {
-          return fs.statSync(partPath).size;
-        }
-      } catch {
-        // ignore
-      }
-      return lastPartBytes;
-    };
-
-    /** 停滞看门狗：只要 `.part` 有增长就重置；连续停滞超过 stallTimeoutMs 判死。 */
-    const scheduleWatchdog = () => {
-      if (watchdogTimer) clearTimeout(watchdogTimer);
-      watchdogTimer = setTimeout(() => {
-        const grew = () => {
-          const nowBytes = readPartBytes();
-          if (nowBytes > lastPartBytes) {
-            lastPartBytes = nowBytes;
-            return true;
-          }
-          return false;
-        };
-        // 若推进中则续命；否则已连续停滞整个窗口 → 判真挂
-        if (grew()) {
-          scheduleWatchdog();
-        } else {
-          killAndFail(
-            `ffmpeg 封装 m4b 停滞（>${Math.round(stallMs / 1000)}s 无产物产出）。`,
-          );
-        }
-      }, stallMs);
-    };
-    // 造秒起点即排第一枪：若从头就一点 ".part" 都不写（如输入无效/FFmpeg 无法启动），
-    // 停滞窗口走完直接 kill；若已开始写，增长会 reset 窗口。
-    scheduleWatchdog();
-
-    // 每 10s 取样 `.part` 字节数并上报 onProgress（>=0 即真推进）。
-    // 仅用 dirty 读取观察变化，实际 stall 判定由停滞看门狗（stallTimeoutMs）驱动。
-    if (typeof input.onProgress === "function" && partPath) {
-      progressTimer = setInterval(() => {
-        let partBytes = lastPartBytes;
-        try {
-          if (fs.existsSync(partPath)) {
-            partBytes = fs.statSync(partPath).size;
-          }
-        } catch {
-          partBytes = lastPartBytes;
-        }
-        lastPartBytes = partBytes;
-        try {
-          input.onProgress?.({ partBytes, elapsedMs: Date.now() - startedAt });
-        } catch {
-          // ignore
-        }
-      }, M4B_PROGRESS_INTERVAL_MS);
-    }
-
-    input.signal?.addEventListener("abort", onAbort, { once: true });
-    child.stderr?.on("data", (chunk: Buffer | string) => {
-      if (stderr.length < 4000) {
-        stderr += chunk.toString();
-      }
-    });
-    child.on("error", (error) => {
-      fail(error instanceof Error ? error : new Error(String(error)));
-    });
-    child.on("close", (code) => {
-      finish(code, stderr.slice(0, 400));
-    });
-  });
+export function buildM4bFfmpegArgs(input: {
+  sourceWavPath: string;
+  metadataPath: string;
+  outputPath: string;
+  threads?: number | null;
+}): string[] {
+  return [
+    "-y",
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-i",
+    input.sourceWavPath,
+    "-i",
+    input.metadataPath,
+    "-map",
+    "0:a:0",
+    "-map_metadata",
+    "1",
+    "-c:a",
+    "aac",
+    ...(input.threads ? ["-threads", String(input.threads)] : []),
+    "-b:a",
+    "96k",
+    "-movflags",
+    "+faststart",
+    "-f",
+    "mp4",
+    input.outputPath,
+  ];
 }
 
 /**
@@ -437,11 +245,30 @@ export async function encodeFullBookM4b(input: {
   stallTimeoutMs?: number;
   /** 可选：封装期间周期性上报 `.part` 增长，喂给 watchdog 推进信号避免误杀。 */
   onProgress?: M4bProgressCallback | null;
+  /** 持久化代际；传入时 rename 前必须确认 worker 仍属于当前代。 */
+  generationToken?: string | null;
+  isGenerationCurrent?: (generationToken: string) => Promise<boolean> | boolean;
 }): Promise<AudiobookM4bEncodeResult> {
   // 同 taskDir 并发互斥：pause/restart/后台队列多个入口可能同时请求同一本书的 m4b，
   // 各自 spawn 会各读一遍整部 WAV 成倍放大资源占用。后到请求排队，前一轮跑完后
   // 再执行（此时若已 ready 则复用产物）。
-  return withTaskDirLock(input.taskDir, () => encodeFullBookM4bUnlocked(input));
+  try {
+    return await withM4bEncodeLock(
+      input.taskDir,
+      () => withGlobalM4bPermit(() => encodeFullBookM4bUnlocked(input), input.signal),
+      input.signal,
+    );
+  } catch (error) {
+    if (input.signal?.aborted) {
+      return {
+        status: "failed",
+        path: null,
+        relativePath: null,
+        reason: "m4b 封装已取消。",
+      };
+    }
+    throw error;
+  }
 }
 
 /** encodeFullBookM4b 的实际实现；由 withTaskDirLock 串行化（见公开包装器）。 */
@@ -518,34 +345,16 @@ async function encodeFullBookM4bUnlocked(
 
     // 不再预删共享 part；唯一 run part 天然避免新旧交错。但成功覆盖规范名之前，
     // 若存在旧的成功产物也无需删除——renameSync 原子覆盖它。
-    const args = [
-      "-y",
-      "-hide_banner",
-      "-loglevel",
-      "error",
-      ...(FFMPEG_THREADS_CAP ? ["-threads", String(FFMPEG_THREADS_CAP)] : []),
-      "-i",
-      sourceWav,
-      "-i",
-      metaPath,
-      "-map",
-      "0:a:0",
-      "-map_metadata",
-      "1",
-      "-c:a",
-      "aac",
-      "-b:a",
-      "96k",
-      "-movflags",
-      "+faststart",
-      "-f",
-      "mp4",
-      partPath,
-    ];
+    const args = buildM4bFfmpegArgs({
+      sourceWavPath: sourceWav,
+      metadataPath: metaPath,
+      outputPath: partPath,
+      threads: FFMPEG_THREADS_CAP,
+    });
 
     let runResult: { status: number | null; stderr: string };
     try {
-      runResult = await runFfmpeg({
+      runResult = await runFfmpegProcess({
         ffmpeg,
         args,
         stallTimeoutMs: input.stallTimeoutMs,
@@ -571,24 +380,37 @@ async function encodeFullBookM4bUnlocked(
         reason: `ffmpeg 封装 m4b 失败：${runResult.stderr || `exit ${runResult.status}`}`,
       };
     }
-    fs.renameSync(partPath, outPath);
-    const bytes = fs.statSync(outPath).size;
-    if (bytes < 64) {
-      try { fs.unlinkSync(outPath); } catch { /* ignore */ }
+    return await withAudiobookTaskDirArtifactLock(input.taskDir, async () => {
+      if (input.generationToken && input.isGenerationCurrent) {
+        const current = await input.isGenerationCurrent(input.generationToken);
+        if (!current) {
+          return {
+            status: "failed",
+            path: null,
+            relativePath: null,
+            reason: "m4b 封装代际已失效，丢弃旧 worker 产物。",
+          };
+        }
+      }
+      fs.renameSync(partPath, outPath);
+      const bytes = fs.statSync(outPath).size;
+      if (bytes < 64) {
+        try { fs.unlinkSync(outPath); } catch { /* ignore */ }
+        return {
+          status: "failed",
+          path: null,
+          relativePath: null,
+          reason: "m4b 产物异常过小。",
+        };
+      }
       return {
-        status: "failed",
-        path: null,
-        relativePath: null,
-        reason: "m4b 产物异常过小。",
+        status: "ready",
+        path: outPath,
+        relativePath,
+        bytes,
+        chapterCount: metaChapters.length,
       };
-    }
-    return {
-      status: "ready",
-      path: outPath,
-      relativePath,
-      bytes,
-      chapterCount: metaChapters.length,
-    };
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return {

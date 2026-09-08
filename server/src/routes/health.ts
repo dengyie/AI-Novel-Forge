@@ -5,6 +5,30 @@ import { authMiddleware } from "../middleware/auth";
 
 const router = Router();
 
+export type ServerReadinessState = "starting" | "ready" | "degraded";
+
+let serverReadiness: {
+  state: ServerReadinessState;
+  failedRecoveryDomains: string[];
+} = {
+  state: "starting",
+  failedRecoveryDomains: [],
+};
+
+export function setServerReadiness(
+  state: ServerReadinessState,
+  failedRecoveryDomains: string[] = [],
+): void {
+  serverReadiness = {
+    state,
+    failedRecoveryDomains: [...failedRecoveryDomains],
+  };
+}
+
+export function getServerReadiness(): Readonly<typeof serverReadiness> {
+  return serverReadiness;
+}
+
 router.use(authMiddleware);
 
 /** Liveness: process is up (auth-exempt). Used by tunnel/orchestrator probes. */
@@ -26,6 +50,29 @@ router.get("/", (_req, res) => {
  */
 router.get("/ready", async (_req, res) => {
   const timestamp = new Date().toISOString();
+  if (serverReadiness.state !== "ready") {
+    const isStarting = serverReadiness.state === "starting";
+    const response: ApiResponse<{
+      status: ServerReadinessState;
+      database: string;
+      timestamp: string;
+      failedRecoveryDomains?: string[];
+    }> = {
+      success: false,
+      data: {
+        status: serverReadiness.state,
+        database: "unknown",
+        timestamp,
+        ...(serverReadiness.failedRecoveryDomains.length > 0
+          ? { failedRecoveryDomains: serverReadiness.failedRecoveryDomains }
+          : {}),
+      },
+      error: isStarting ? "startup recovery is still running" : "startup recovery is degraded",
+      message: isStarting ? "服务正在恢复后台任务。" : "后台任务恢复不完整，服务暂不可用。",
+    };
+    res.status(503).json(response);
+    return;
+  }
   try {
     await prisma.$queryRaw`SELECT 1`;
     const response: ApiResponse<{ status: string; database: string; timestamp: string }> = {
@@ -55,3 +102,4 @@ router.get("/ready", async (_req, res) => {
 });
 
 export default router;
+export { router as healthRouter };
