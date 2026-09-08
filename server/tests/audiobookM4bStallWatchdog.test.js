@@ -143,17 +143,20 @@ function installNoOutputFfmpeg() {
  */
 function installDelayedCloseFfmpeg() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ab-stall-ffmpeg-"));
-  const script = path.join(dir, "delayed-close.sh");
+  const script = path.join(dir, "delayed-close.js");
   const started = path.join(dir, "started");
   fs.writeFileSync(
     script,
     [
-      "#!/bin/sh",
-      `touch "${started}"`,
-      // The background process inherits stderr, so the parent's `close` event is
-      // delayed even though SIGKILL terminates the shell immediately.
-      "( sleep 0.5 ) &",
-      "while :; do sleep 0.05; done",
+      "#!/usr/bin/env node",
+      "const fs = require('node:fs');",
+      "const { spawn } = require('node:child_process');",
+      `fs.writeFileSync(${JSON.stringify(started)}, 'started');`,
+      // Keep stderr open from a separate process group. The runner kills the
+      // ffmpeg group, while this detached holder keeps ChildProcess `close`
+      // delayed long enough to verify that cancellation waits for stream close.
+      "spawn(process.execPath, ['-e', \"setTimeout(() => {}, 500)\"], { detached: true, stdio: ['ignore', 'ignore', process.stderr] }).unref();",
+      "setInterval(() => {}, 50);",
       "",
     ].join("\n"),
     { mode: 0o755 },
