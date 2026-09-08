@@ -308,13 +308,17 @@ export function computeWatchdogDecision(input: {
 async function appendFailedContinueChapters(
   parentTaskId: string,
   failedChapterIds: string[],
+  expectedGenerationToken?: string | null,
 ): Promise<void> {
+  let generationToken = expectedGenerationToken;
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const parent = await prisma.audiobookTask.findUnique({
       where: { id: parentTaskId },
-      select: { progressJson: true },
+      select: { progressJson: true, m4bGenerationToken: true, status: true, cancelRequestedAt: true },
     });
     if (!parent) return;
+    if (generationToken === undefined) generationToken = parent.m4bGenerationToken;
+    if (parent.m4bGenerationToken !== generationToken || parent.cancelRequestedAt || parent.status === "cancelled") return;
     const progress = parseProgressJson(parent.progressJson);
     const existing = readFailedContinueChapters(parent.progressJson);
     const merged = Array.from(new Set([...existing, ...failedChapterIds]));
@@ -325,16 +329,18 @@ async function appendFailedContinueChapters(
       failedContinueChapters: merged,
     };
     const claimed = await prisma.audiobookTask.updateMany({
-      where: { id: parentTaskId, progressJson: parent.progressJson },
+      where: {
+        id: parentTaskId,
+        progressJson: parent.progressJson,
+        ...m4bGenerationWhere(generationToken),
+        cancelRequestedAt: null,
+        status: { not: "cancelled" },
+      },
       data: { progressJson: JSON.stringify(nextProgress) },
     });
     if (claimed.count > 0) return;
   }
-  console.warn(
-    "[audiobook] appendFailedContinueChapters 连续 5 次 CAS 落空，失败章未记录",
-    parentTaskId,
-    failedChapterIds,
-  );
+  throw new Error(`appendFailedContinueChapters CAS conflict: ${parentTaskId}`);
 }
 
 type ChapterProgressEntry = {
@@ -1615,7 +1621,7 @@ export class AudiobookTaskService {
           currentStage: "continuing",
           cancelRequestedAt: null,
           progressJson: parent.progressJson,
-          m4bGenerationToken: parent.m4bGenerationToken,
+          ...m4bGenerationWhere(parent.m4bGenerationToken),
         },
         data: {
           status: "failed",
@@ -1638,14 +1644,27 @@ export class AudiobookTaskService {
 
   /**
    * 续生成子任务终态后重算父 readyChapterIds / chapterProgress（磁盘唯一真相）。
-   * 整串写父 progressJson，避免与父潜在并发 onProgress 抢写——子终态时父 status=running
-   * 由本流程置入且无跑中管线，写安全。
+   * 同代际进度冲突必须重读重算；取消、终态或代际轮换后立即放弃旧回调。
    */
-  async reconcileParent(parentTaskId: string): Promise<void> {
-    const parent = await prisma.audiobookTask.findUnique({ where: { id: parentTaskId } });
-    if (!parent) return;
+  async reconcileParent(parentTaskId: string, expectedGenerationToken?: string | null): Promise<void> {
+    let generationToken = expectedGenerationToken;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const parent = await prisma.audiobookTask.findUnique({ where: { id: parentTaskId } });
+      if (!parent) return;
+      if (generationToken === undefined) generationToken = parent.m4bGenerationToken;
+      if (
+        parent.m4bGenerationToken !== generationToken
+        || parent.cancelRequestedAt
+        || !["running", "queued"].includes(parent.status)
+      ) return;
+      if (await this.tryReconcileParent(parent as AudiobookTaskRow)) return;
+    }
+    throw new Error(`reconcileParent CAS conflict: ${parentTaskId}`);
+  }
+
+  private async tryReconcileParent(parent: AudiobookTaskRow): Promise<boolean> {
     const chapterIds = parseChapterIds(parent.chapterIdsJson);
-    if (chapterIds.length === 0) return;
+    if (chapterIds.length === 0) return true;
     const taskDir = parent.outputDir?.trim() || resolveAudiobookTaskDir(parent.novelId, parent.id);
     let readyChapterIds: string[] = [];
     let fullAudioReady = false;
@@ -1711,8 +1730,10 @@ export class AudiobookTaskService {
         where: {
           id: parent.id,
           status: { in: ["running", "queued"] },
+          cancelRequestedAt: null,
+          progressJson: parent.progressJson,
           resultJson: parent.resultJson,
-          m4bGenerationToken: parent.m4bGenerationToken,
+          ...m4bGenerationWhere(parent.m4bGenerationToken),
         },
         data: {
           progressJson: JSON.stringify(nextProgress),
@@ -1732,7 +1753,7 @@ export class AudiobookTaskService {
         },
       });
       if (claimed.count === 0) {
-        return;
+        return false;
       }
       if (fullAudioReady && !m4bAlreadyReady) {
         this.scheduleBackgroundM4bEncode({
@@ -1744,7 +1765,7 @@ export class AudiobookTaskService {
           generationToken,
         });
       }
-      return;
+      return true;
     }
 
     // 非全就绪：子已终态，父必须离开 running/continuing，否则
@@ -1762,15 +1783,13 @@ export class AudiobookTaskService {
       Math.min(99, Math.round((readyChapterIds.length / Math.max(1, chapterIds.length)) * 100)),
     );
     // 同上 CAS：cancelTask 先落的 cancelled 不得被迟到的子回调改写成 failed。
-    await prisma.audiobookTask.updateMany({
+    const claimed = await prisma.audiobookTask.updateMany({
       where: {
         id: parent.id,
         status: { in: ["running", "queued"] },
-        // Bind the projection to the snapshot used to derive nextProgress.
-        // A concurrent onProgress/failed-chapter writer must force a retry
-        // instead of allowing this stale whole-blob projection to win.
+        cancelRequestedAt: null,
         progressJson: parent.progressJson,
-        m4bGenerationToken: parent.m4bGenerationToken,
+        ...m4bGenerationWhere(parent.m4bGenerationToken),
       },
       data: {
         progressJson: JSON.stringify(nextProgress),
@@ -1786,6 +1805,7 @@ export class AudiobookTaskService {
         heartbeatAt: new Date(),
       },
     });
+    return claimed.count > 0;
   }
 
   /**
@@ -2412,7 +2432,7 @@ export class AudiobookTaskService {
           // reconcile 抛错（WAV 格式不一、磁盘满、DB 抖动）时也必须走兜底，否则孤儿父继续卡
           // continuing。兜底不能与 reconcile 共用一个 catch——那样抛错时兜底反被跳过。
           try {
-            await this.reconcileParent(parentRow.id);
+            await this.reconcileParent(parentRow.id, parentRow.m4bGenerationToken);
           } catch (reconcileError) {
             console.warn(
               "[audiobook] resumePendingTasks reconcileParent 失败，转兜底",
@@ -2420,7 +2440,7 @@ export class AudiobookTaskService {
               reconcileError instanceof Error ? reconcileError.message : reconcileError,
             );
           }
-          await this.forceContinueParentTerminal(parentRow.id);
+          await this.forceContinueParentTerminal(parentRow.id, parentRow.m4bGenerationToken);
         } catch (error) {
           recoveryErrors.push(error);
           console.warn(
@@ -3209,15 +3229,19 @@ export class AudiobookTaskService {
     }
     if (!row) return;
     if (generationToken !== undefined && row.m4bGenerationToken !== generationToken) return;
-    const parentTaskId = readParentTaskIdFromProgress(row.progressJson);
-    if (!parentTaskId) return;
+    const continuation = readContinuePreparationIntent(row.progressJson);
+    if (!continuation) return;
+    const { parentTaskId, parentGenerationToken } = continuation;
+    const parent = await prisma.audiobookTask.findUnique({ where: { id: parentTaskId } });
+    if (
+      !parent
+      || parent.m4bGenerationToken !== parentGenerationToken
+      || parent.cancelRequestedAt
+      || parent.status === "cancelled"
+    ) return;
 
     if (failed) {
       const childChapterIds = parseChapterIds(row.chapterIdsJson);
-      const parent = await prisma.audiobookTask.findUnique({
-        where: { id: parentTaskId },
-        select: { id: true, chapterIdsJson: true, outputDir: true, novelId: true },
-      });
       let readyIds = new Set<string>();
       if (parent) {
         const dir = parent.outputDir?.trim() || resolveAudiobookTaskDir(parent.novelId, parent.id);
@@ -3229,12 +3253,12 @@ export class AudiobookTaskService {
       }
       const failedChapters = childChapterIds.filter((id) => !readyIds.has(id));
       if (failedChapters.length > 0) {
-        await appendFailedContinueChapters(parentTaskId, failedChapters);
+        await appendFailedContinueChapters(parentTaskId, failedChapters, parentGenerationToken);
       }
     }
 
     try {
-      await this.reconcileParent(parentTaskId);
+      await this.reconcileParent(parentTaskId, parentGenerationToken);
     } catch (error) {
       console.warn(
         "[audiobook] reconcileParent failed for continue child",
@@ -3244,7 +3268,7 @@ export class AudiobookTaskService {
       );
       // R4 兜底：reconcile 抛错时父仍卡 running/continuing——按磁盘 ready 强制翻终态
       try {
-        await this.forceContinueParentTerminal(parentTaskId);
+        await this.forceContinueParentTerminal(parentTaskId, parentGenerationToken);
       } catch (fallbackError) {
         console.warn(
           "[audiobook] forceContinueParentTerminal fallback failed",
@@ -3263,7 +3287,7 @@ export class AudiobookTaskService {
    * - 否则 → failed + 写 failedContinueChapters
    * CAS where `status in (running, queued)` 保证 cancelled 等先到的终态不被覆盖。
    */
-  private async forceContinueParentTerminal(parentTaskId: string): Promise<void> {
+  private async forceContinueParentTerminal(parentTaskId: string, expectedGenerationToken?: string | null): Promise<void> {
     const parent = await prisma.audiobookTask.findUnique({
       where: { id: parentTaskId },
       select: {
@@ -3273,9 +3297,16 @@ export class AudiobookTaskService {
         chapterIdsJson: true,
         progressJson: true,
         m4bGenerationToken: true,
+        status: true,
+        cancelRequestedAt: true,
       },
     });
-    if (!parent) return;
+    if (
+      !parent
+      || parent.cancelRequestedAt
+      || !["running", "queued"].includes(parent.status)
+      || (expectedGenerationToken !== undefined && parent.m4bGenerationToken !== expectedGenerationToken)
+    ) return;
     const chapterIds = parseChapterIds(parent.chapterIdsJson);
     const taskDir = parent.outputDir?.trim() || resolveAudiobookTaskDir(parent.novelId, parent.id);
     let readyChapterIds: string[] = [];
@@ -3305,6 +3336,7 @@ export class AudiobookTaskService {
         where: {
           id: parentTaskId,
           status: { in: ["running", "queued"] },
+          cancelRequestedAt: null,
           m4bGenerationToken: parent.m4bGenerationToken,
         },
         data: {
@@ -3325,7 +3357,7 @@ export class AudiobookTaskService {
       const failedChapters = chapterIds.filter((id) => !readySet.has(id));
       if (failedChapters.length > 0) {
         try {
-          await appendFailedContinueChapters(parentTaskId, failedChapters);
+          await appendFailedContinueChapters(parentTaskId, failedChapters, parent.m4bGenerationToken);
         } catch {
           // 兜底层：追加失败章也失败时不抛——翻终态优先
         }
@@ -3335,6 +3367,7 @@ export class AudiobookTaskService {
         where: {
           id: parentTaskId,
           status: { in: ["running", "queued"] },
+          cancelRequestedAt: null,
           m4bGenerationToken: parent.m4bGenerationToken,
         },
         data: {
