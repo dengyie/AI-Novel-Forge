@@ -77,6 +77,7 @@ export interface VolumeChapterListPromptInput {
   nextAvailableChapterOrder: number;
   previousBeatChapterSummary?: string | null;
   preservedBeatChapterSummary?: string | null;
+  reservedChapterTitles?: string[];
   retryReason?: string | null;
 }
 

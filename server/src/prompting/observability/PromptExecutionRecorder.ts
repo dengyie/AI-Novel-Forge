@@ -13,6 +13,7 @@ import type {
   PromptRunResult,
 } from "../core/promptTypes";
 import { safeJsonStringify, stringifyPromptError } from "../validation/PromptPostValidation";
+import { isTimeoutLikeTransportError } from "../../llm/transportRetry";
 
 export function estimateRenderedPromptChars(messages: BaseMessage[]): number {
   return messages.reduce((sum, message) => sum + toText(message.content).length, 0);
@@ -36,6 +37,13 @@ function classifyPromptQualityFailure(error: unknown): PromptQualityFailureKind 
     ].includes(String(marked.promptQualityFailureKind))
   ) {
     return marked.promptQualityFailureKind as PromptQualityFailureKind;
+  }
+  // 超时优先于 schema/postvalidate 关键词兜底：墙钟超时产生的 TimeoutError / "timed out"
+  // 文案 / 泛化 AbortError 必须被单独识别为 timeout，否则一个恰好含 "json" 的超时消息会被
+  // schema 分支抢走，超时专项监控/重试策略/D1 吞吐漂移告警都挂不上。复用 transportRetry 的
+  // 同一判据（已正确排除显式取消），避免双份维护与漂移。
+  if (isTimeoutLikeTransportError(error)) {
+    return "timeout";
   }
   const message = stringifyPromptError(error).toLowerCase();
   if (message.includes("schema") || message.includes("json") || message.includes("zod") || message.includes("structured")) {

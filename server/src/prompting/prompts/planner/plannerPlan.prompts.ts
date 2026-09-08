@@ -241,7 +241,93 @@ function buildPlannerPlanAsset(input: {
 
       return normalized;
     },
+    postValidateFailureRecovery:
+      input.planLevel === "chapter"
+        ? (recoveryInput) => {
+            // E1：planner LLM 偶发输出畸形 JSON（title 复读元描述、objective 缺失），
+            // semantic-retry 用尽后在此兜底，让一次畸形不致命、整章不再 500。
+            // 铁律边界（不可破）：兜底只投影已有契约字段（scopeLabel 章节标题、
+            // context chapter_target 的 expectation/taskSheet），不凭空生成
+            // scenes/participants/objective 的创作性内容。实质内容交持久化层兜底链
+            // （PlannerService.ts:707-711）用 chapter 实体字段补全。
+            const errorText = recoveryInput.validationError ?? "";
+            const isMissingFieldError = /missing objective|missing title/i.test(errorText);
+            if (!isMissingFieldError) {
+              // 对未知错误不盲目兜底（避免掩盖缺陷，违反「卡住先查根因」），重抛。
+              throw new Error(errorText || "Planner postValidate failed (unknown)");
+            }
+
+            const normalized = normalizePlannerOutput(recoveryInput.rawOutput);
+
+            const chapterTargetBlock = recoveryInput.context.blocks.find(
+              (block) => block.group === "chapter_target",
+            );
+            const expectationText = extractLabeledValue(chapterTargetBlock?.content ?? "", "章节目标草稿");
+
+            const defaults = buildDefaultPlanMetadata(input.planLevel, {
+              expectation: expectationText ?? null,
+              chapterOrder: recoveryInput.promptInput?.chapterOrder ?? null,
+              totalChapters: recoveryInput.promptInput?.totalChapters ?? null,
+            });
+
+            const salvagedTitle = normalized.title?.trim() ?? "";
+            const scopeLabelTitle = extractChapterTitleFromScopeLabel(recoveryInput.promptInput?.scopeLabel ?? "");
+            // 结构性判定（非内容语义判定，不破「不代写」铁律）：LLM title 异常长或含元描述标记
+            // （方括号标签、字数标注、严禁截断类复读）时视为不可信，回落 scopeLabel 章节标题。
+            const isTitleUntrustworthy = salvagedTitle.length > 50
+              || /\[[^\]]+\]/.test(salvagedTitle)
+              || /严禁截断|完整版|终态|已校对/.test(salvagedTitle);
+            const title = (!isTitleUntrustworthy && salvagedTitle) || scopeLabelTitle || "";
+            if (!title) {
+              throw new Error("Planner recovery: 无法从 scopeLabel 解析章节标题，且 LLM title 亦为空。");
+            }
+
+            const objective = normalized.objective?.trim() || expectationText?.trim() || "";
+            if (!objective) {
+              // 既无 LLM objective 也无 context expectation：无法投影任何契约，重抛而非发明。
+              throw new Error("Planner recovery: context chapter_target 无 expectation，无法兜底 objective。");
+            }
+
+            return {
+              title,
+              objective,
+              participants: [],
+              reveals: [],
+              riskNotes: [],
+              hookTarget: undefined,
+              planRole: defaults.planRole ?? "progress",
+              phaseLabel: defaults.phaseLabel ?? "推进期",
+              mustAdvance: defaults.mustAdvance.length > 0 ? defaults.mustAdvance : [objective],
+              mustPreserve: defaults.mustPreserve.length > 0
+                ? defaults.mustPreserve
+                : ["保持主线因果连续", "不提前透支终局兑现"],
+              scenes: [],
+            } satisfies PlannerOutput;
+          }
+        : undefined,
   };
+}
+
+/** 从 `${label}：${value}` 格式的多行文本里提取指定 label 后的值。 */
+function extractLabeledValue(content: string, label: string): string | undefined {
+  const lines = content.split("\n");
+  for (const line of lines) {
+    const prefix = `${label}：`;
+    if (line.startsWith(prefix)) {
+      const value = line.slice(prefix.length).trim();
+      if (value && value !== "无") {
+        return value;
+      }
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+/** 从 `章节规划：第N章《X》` 形式的 scopeLabel 里提取章节标题 X。 */
+function extractChapterTitleFromScopeLabel(scopeLabel: string): string | undefined {
+  const match = scopeLabel.match(/《([^》]+)》/);
+  return match?.[1]?.trim() || undefined;
 }
 export const plannerBookPlanPrompt = buildPlannerPlanAsset({
   id: "planner.book.plan",

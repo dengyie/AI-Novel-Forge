@@ -442,12 +442,93 @@ test("chapter writer prompt does not expose scene contract controls", () => {
   const systemContent = String(messages[0].content);
   const humanContent = String(messages[1].content);
   assert.match(systemContent, /本章目标长度：约 3000 字/);
-  assert.match(systemContent, /不得明显超过上限/);
+  // task #27：边界优先于字数硬合同。旧的「不得明显超过上限」措辞已改为
+  // 「边界优先于篇幅」。断言改为现行措辞。
+  assert.match(systemContent, /边界优先于篇幅/);
   assert.doesNotMatch(systemContent, /当前场景合同/);
   assert.doesNotMatch(systemContent, /场景标题/);
   assert.doesNotMatch(systemContent, /控字数模式/);
   assert.doesNotMatch(systemContent, /本轮硬上限/);
   assert.doesNotMatch(humanContent, /只写当前场景/);
+});
+
+test("chapter writer prompt forbids system-panel HUD 【】 blocks in narrative body", () => {
+  const messages = chapterWriterPrompt.render({
+    novelTitle: "测试小说",
+    chapterOrder: 4,
+    chapterTitle: "闸机",
+    mode: "draft",
+    targetWordCount: 3000,
+    minWordCount: 2550,
+    maxWordCount: 3450,
+  }, {
+    blocks: [
+      createContextBlock({
+        id: "chapter-mission",
+        group: "chapter_mission",
+        priority: 100,
+        required: true,
+        content: "本章职责：何屿在校园闸机被读卡器拦截。",
+      }),
+    ],
+    selectedBlockIds: ["chapter-mission"],
+    droppedBlockIds: [],
+    summarizedBlockIds: [],
+    estimatedInputTokens: 0,
+  });
+
+  const systemContent = String(messages[0].content);
+  // 禁止正文里出现【…】系统面板/状态栏/键值块（终端/读卡器/屏幕报错一律改角色可感描写）。
+  // 根因：writer prompt 自身用【】当段落分隔符，writer 会镜像格式进叙事，撞 prose_system_hud 硬门。
+  assert.match(systemContent, /正文/);
+  assert.match(systemContent, /【.*系统面板|状态栏|HUD|读卡|终端.*】/);
+  assert.match(systemContent, /禁止.*正文.*【/);
+});
+
+test("chapter writer prompt renders injected book-level banned terms alongside prose ban block", () => {
+  const messages = chapterWriterPrompt.render({
+    novelTitle: "测试小说",
+    chapterOrder: 2,
+    chapterTitle: "初见",
+    mode: "draft",
+    bannedTerms: ["旧术语甲", "称重", "过秤"],
+  }, {
+    blocks: [],
+    selectedBlockIds: [],
+    droppedBlockIds: [],
+    summarizedBlockIds: [],
+    estimatedInputTokens: 0,
+  });
+
+  const systemContent = String(messages[0].content);
+  // 动态书级禁词块（F5）与固定 renderProseBanBlock 共存
+  assert.match(systemContent, /【书级禁词/);
+  assert.match(systemContent, /- 旧术语甲/);
+  assert.match(systemContent, /- 称重/);
+  assert.match(systemContent, /- 过秤/);
+  // 固定 prose 禁项块仍在（renderProseBanBlock）
+  assert.match(systemContent, /【正文 prose 禁项】/);
+  // 语义核心：书级禁词必然是「禁止以任何形式出现在正文」的措辞
+  assert.match(systemContent, /不得以任何形式出现在正文中/);
+});
+
+test("chapter writer prompt omits book-level banned block when bannedTerms empty", () => {
+  const messages = chapterWriterPrompt.render({
+    novelTitle: "第一章",
+    chapterOrder: 2,
+    chapterTitle: "初见",
+    mode: "draft",
+  }, {
+    blocks: [],
+    selectedBlockIds: [],
+    droppedBlockIds: [],
+    summarizedBlockIds: [],
+    estimatedInputTokens: 0,
+  });
+  const systemContent = String(messages[0].content);
+  assert.doesNotMatch(systemContent, /书级禁词/);
+  // 固定 prose 禁项仍在
+  assert.match(systemContent, /【正文 prose 禁项】/);
 });
 
 test("novel main-chain prompt assets declare explicit non-zero context budgets", () => {
@@ -461,7 +542,7 @@ test("novel main-chain prompt assets declare explicit non-zero context budgets",
     ["novel.volume.strategy.critique@v1", NOVEL_PROMPT_BUDGETS.volumeStrategyCritique],
     ["novel.volume.skeleton@v2", NOVEL_PROMPT_BUDGETS.volumeSkeleton],
     ["novel.volume.beat_sheet@v1", NOVEL_PROMPT_BUDGETS.volumeBeatSheet],
-    ["novel.volume.chapter_list@v7", NOVEL_PROMPT_BUDGETS.volumeChapterList],
+    ["novel.volume.chapter_list@v9", NOVEL_PROMPT_BUDGETS.volumeChapterList],
     ["novel.volume.chapter_purpose@v1", NOVEL_PROMPT_BUDGETS.volumeChapterDetail],
     ["novel.volume.chapter_boundary@v1", NOVEL_PROMPT_BUDGETS.volumeChapterDetail],
     ["novel.volume.chapter_task_sheet@v2", NOVEL_PROMPT_BUDGETS.volumeChapterDetail],
@@ -547,7 +628,9 @@ test("chapter writer prompt carries explicit target length and continuation inst
     estimatedInputTokens: 0,
   });
   assert.match(String(continueMessages[0].content), /不得重写章节开头/);
-  assert.match(String(continueMessages[0].content), /至少缺少约 900 字/);
+  // task #27：续写篇幅缺口指令已改为边界感知口径（约 N 字缺口、不越边界、确有叙事价值才补）。
+  // 旧的「至少缺少约 900 字」措辞已改为「当前仍有约 900 字的篇幅缺口」。断言改为现行措辞。
+  assert.match(String(continueMessages[0].content), /当前仍有约 900 字的篇幅缺口/);
   assert.match(String(continueMessages[1].content), /任务模式：补写当前章节/);
 });
 
@@ -1386,7 +1469,9 @@ test("prompt runner records failed executions without swallowing the original er
     const telemetry = getSinglePromptQualityEntry();
     assert.equal(telemetry.completedCount, 0);
     assert.equal(telemetry.failedCount, 1);
-    assert.equal(telemetry.failuresByKind.llm_error, 1);
+    // "provider timeout" 是超时错误描述：D2 后超时被单独归类为 timeout，不再落 llm_error。
+    assert.equal(telemetry.failuresByKind.timeout, 1);
+    assert.equal(telemetry.failuresByKind.llm_error, 0);
   } finally {
     setPromptRunnerLLMFactoryForTests();
   }

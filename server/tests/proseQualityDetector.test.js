@@ -317,3 +317,31 @@ test("ch1-like heatmap sample: 7× 句首他 run is blocking", () => {
   assert.ok(severitiesByCode(report, "prose_pronoun_subject_stack").includes("critical"));
   assert.equal(report.hasBlockingFindings, true);
 });
+
+test("prose_negative_flip: single occurrence is medium, multiple occurrences upgrade to high blocking", () => {
+  // 单次命中：medium
+  const singleReport = detectProseQuality("他不是害怕，而是终于明白自己已经没有退路。\n门外的雨还在下。");
+  const singleHit = singleReport.findings.find((f) => f.code === "prose_negative_flip");
+  assert.ok(singleHit, "single negative flip should be detected");
+  assert.equal(singleHit.severity, "medium");
+
+  // 多次命中（≥2次）：high blocking
+  const multiReport = detectProseQuality([
+    "他不是害怕，而是终于明白自己已经没有退路。",
+    "那不像是普通的火光，更像是一团燃烧的冷焰。",
+  ].join("\n"));
+  const multiHits = multiReport.findings.filter((f) => f.code === "prose_negative_flip");
+  assert.equal(multiHits.length, 2);
+  assert.ok(multiHits.every((f) => f.severity === "high"));
+  assert.equal(multiReport.hasBlockingFindings, true);
+
+  // 跨段分行辨析体：第一行不是...，第二行而是...
+  const crossParaReport = detectProseQuality([
+    "不是因为恐惧。",
+    "而是那个眼神里没有求救的意思。",
+    "雨水顺着屋檐滴落下来。",
+  ].join("\n"));
+  const crossHit = crossParaReport.findings.find((f) => f.code === "prose_negative_flip");
+  assert.ok(crossHit, "cross paragraph negative flip should be detected");
+});
+

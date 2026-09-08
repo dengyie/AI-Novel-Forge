@@ -9,6 +9,10 @@ import {
 } from "@ai-novel/shared/types/repairAdoptDecision";
 import { extractSotBannedTermsFromNovel } from "@ai-novel/shared/types/sotBannedTerms";
 import {
+  evaluateLengthBudget,
+  type LengthBudgetEvaluation,
+} from "@ai-novel/shared/types/chapterLengthControl";
+import {
   hasBlockingPronounProseFromIssueCodes,
   projectStyleClear,
 } from "@ai-novel/shared/types/styleClearGate";
@@ -89,6 +93,23 @@ export function buildRepairRunStatusFrame(input: {
   };
 }
 
+/**
+ * 组装 discard/plateau 终帧文案。字数硬门触发时给出含字数事实的明确提示
+ * （候选字数/目标/硬下限），便于运维与测试断言识别「未采纳是因为篇幅不足」。
+ */
+function formatRepairDiscardMessage(
+  adoptDecision: { decision: string; reason: string },
+  lengthGate: LengthBudgetEvaluation | null,
+): string {
+  if (lengthGate && lengthGate.band === "under_hard") {
+    const target = lengthGate.budget.targetWordCount;
+    return `修复候选未采纳：候选正文字数 ${lengthGate.actualWordCount} 远低于目标 ${target}（硬下限 ${lengthGate.hardMinWordCount}），未采纳，正文保持 baseline。`;
+  }
+  return adoptDecision.decision === "plateau_stop"
+    ? `修复候选未采纳（plateau）：${adoptDecision.reason} 正文保持 baseline。`
+    : `修复候选未采纳（discard）：${adoptDecision.reason} 正文保持 baseline。`;
+}
+
 function isContentRevisionConflict(error: unknown): boolean {
   return Boolean(
     error
@@ -152,6 +173,7 @@ export class ChapterRepairFinalizer {
         characterScore: true,
         pacingScore: true,
         mustAvoid: true,
+        targetWordCount: true,
         novel: {
           select: {
             storyWorldSliceJson: true,
@@ -200,7 +222,23 @@ export class ChapterRepairFinalizer {
     const candidateBlockingL1Codes = candidateScoreDegraded
       ? []
       : fingerprintReviewIssuesAsL1BlockingCodes(candidateReview.issues);
-    const adoptDecision = decideRepairContentAdoption({
+
+    // 字数硬门（纯计算，无 LLM）：与 generate 路径 reconcileLengthAssessment 同语义。
+    // 候选字数 < target×0.6（under_hard）是不可由 LLM 分数推翻的客观事实，
+    // 必须在 adopt 决策之前强制 discard——短候选不落库，正文保持 baseline。
+    // 无 targetWordCount（旧数据/无合同）时 evaluateLengthBudget 返回 null，不设门。
+    const lengthGate = evaluateLengthBudget({
+      content: repairedContent,
+      targetWordCount: baselineChapter.targetWordCount ?? null,
+    });
+    // lengthPass：自动修复出口的软下限长度硬门。修复有补长度能力，短于 softMin
+    // （band === under_soft / under_hard）一律不算过审，落 needs_repair 继续补写，
+    // 避免「内容对但短 15%」的章长期挂 pending_review 不收口。
+    // 无长度合同（lengthGate === null，旧数据无 targetWordCount）时不设长度门。
+    const lengthPass = lengthGate == null
+      || (lengthGate.band !== "under_soft" && lengthGate.band !== "under_hard");
+
+    let adoptDecision = decideRepairContentAdoption({
       baselineScore: baselineReview.score,
       candidateScore: candidateReview.score,
       baselineBlockingCodes,
@@ -211,6 +249,25 @@ export class ChapterRepairFinalizer {
       skipL1Check: baselineL1Degraded || candidateScoreDegraded,
       skipScoreCheck: candidateScoreDegraded,
     });
+    if (lengthGate && lengthGate.band === "under_hard") {
+      // 覆盖为 discard：字数硬门优先于分数决策。下一轮 repair 会因 QFP avoidRetry
+      // 被 isAutoPatchAvoidedByRiskFlags 强制升级为 heavy_repair，避免 light_repair
+      // 局部补丁反复产出短候选。
+      adoptDecision = {
+        decision: "discard",
+        reason: `length_under_hard:${lengthGate.actualWordCount}/${lengthGate.budget.targetWordCount}/hardMin=${lengthGate.hardMinWordCount}`,
+        scoreDelta: {
+          overall: 0,
+          coherence: 0,
+          repetition: 0,
+          engagement: 0,
+        },
+        introducedBlockingCodes: [],
+        introducedBlockingL1Codes: [],
+        baselineLiteraryPass: false,
+        candidateLiteraryPass: false,
+      };
+    }
     const historyLine = formatRepairAdoptHistoryLine({
       decision: adoptDecision.decision,
       reason: adoptDecision.reason,
@@ -250,9 +307,7 @@ export class ChapterRepairFinalizer {
         chapterId: input.chapterId,
         status: "succeeded",
         phase: "completed",
-        message: adoptDecision.decision === "plateau_stop"
-          ? `修复候选未采纳（plateau）：${adoptDecision.reason} 正文保持 baseline。`
-          : `修复候选未采纳（discard）：${adoptDecision.reason} 正文保持 baseline。`,
+        message: formatRepairDiscardMessage(adoptDecision, lengthGate),
       }));
       return;
     }
@@ -340,7 +395,7 @@ export class ChapterRepairFinalizer {
         expectedContentRevision: committed.contentRevision,
         score: review.score,
         issues: review.issues,
-        chapterPatch: chapterStatePairAfterQualityGates({ literaryPass, styleClear }),
+        chapterPatch: chapterStatePairAfterQualityGates({ literaryPass, styleClear, lengthPass }),
         writeReport: true,
       });
       await chapterQualityLoopService.recordAssessment({
@@ -364,16 +419,17 @@ export class ChapterRepairFinalizer {
       }));
       return;
     }
-    if (literaryPass && styleClear && input.options.auditIssueIds?.length) {
+    const passAll = literaryPass && styleClear && lengthPass;
+    if (passAll && input.options.auditIssueIds?.length) {
       const resolveAuditIssues = this.deps.resolveAuditIssues
         ?? ((novelId: string, issueIds: string[]) => auditService.resolveIssues(novelId, issueIds));
       await resolveAuditIssues(input.novelId, input.options.auditIssueIds).catch(() => null);
     }
     input.helpers.writeFrame(buildRepairRunStatusFrame({
       chapterId: input.chapterId,
-      status: literaryPass && styleClear ? "succeeded" : "failed",
+      status: passAll ? "succeeded" : "failed",
       phase: "completed",
-      message: literaryPass && styleClear
+      message: passAll
         ? "修复候选已采纳，本章已达到可继续推进状态。"
         : "修复候选已采纳并保存，但仍有问题待继续处理。",
     }));

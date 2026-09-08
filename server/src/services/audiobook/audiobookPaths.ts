@@ -336,19 +336,107 @@ export function resolveFullBookM4bPath(taskDir: string): string {
   return path.join(taskDir, "full-book.m4b");
 }
 
+/**
+ * taskDir 内是否存在任一 `full-book.m4b*.part` 半成品（唯一 run part 名或 legacy 名）。
+ * 供 watchdog 磁盘探针与 stale GC 共用：唯一 part 名（full-book.m4b.<runId>.part）下
+ * 不再只认固定 `full-book.m4b.part`。
+ */
+export function hasInFlightM4bPart(taskDir: string): boolean {
+  try {
+    for (const name of fs.readdirSync(taskDir)) {
+      if (name.startsWith("full-book.m4b") && name.endsWith(".part")) {
+        return true;
+      }
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+/** stale m4b part GC 的默认保留窗口：默认超时的 2 倍（80 分钟）。 */
+const M4B_STALE_PART_DEFAULT_TIMEOUT_MS = 2 * 40 * 60_000;
+
+/**
+ * 清理 taskDir 内陈旧的 `full-book.m4b*.part` 半成品。
+ * 唯一 part 名下，本次 run 新生成的 part（mtime 新）不会被误删；只删 mtime 早于
+ * timeoutMs（默认 2×DEFAULT_FFMPEG_TIMEOUT_MS，即 80 分钟）的旧 part——宿主重启/孤儿
+ * ffmpeg 残留、或更早 run 中断留下的半成品。best-effort，失败不抛错。
+ */
+export function cleanupStaleM4bParts(taskDir: string, outPath: string, timeoutMs?: number): void {
+  const threshold = timeoutMs ?? M4B_STALE_PART_DEFAULT_TIMEOUT_MS;
+  const outBase = path.basename(outPath);
+  const now = Date.now();
+  try {
+    for (const name of fs.readdirSync(taskDir)) {
+      if (!name.startsWith(outBase) || !name.endsWith(".part")) {
+        continue;
+      }
+      const full = path.join(taskDir, name);
+      try {
+        if (now - fs.statSync(full).mtimeMs >= threshold) {
+          fs.unlinkSync(full);
+        }
+      } catch {
+        // ignore：文件已被并发清理或删除
+      }
+    }
+  } catch {
+    // ignore：taskDir 不存在/无权限，best-effort
+  }
+}
+
 export function resolveChapterAnnotationPath(taskDir: string, chapterId: string): string {
   const safeChapterId = assertSafePathSegment(chapterId, "chapterId");
   return path.join(taskDir, "annotations", `${safeChapterId}.json`);
 }
 
-/** 删除文件；不存在则忽略。 */
+/**
+ * 删除业务上必须失效的文件；文件本来就不存在视为幂等成功，其它 I/O 错误必须上抛。
+ *
+ * 不先 existsSync 再 unlink，避免检查与删除之间的 TOCTOU 窗口。调用方只有在确认
+ * 旧产物已失效后才可继续生成，否则权限/磁盘错误会让旧 chapter.wav 被错误复用。
+ */
+function unlinkArtifactOrThrow(filePath: string): void {
+  try {
+    fs.unlinkSync(filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw error;
+    }
+  }
+}
+
+/** best-effort 删除，仅供缓存修剪、取消清理等不影响业务正确性的路径。 */
 export function safeUnlink(filePath: string): void {
   try {
-    if (fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
-    }
+    unlinkArtifactOrThrow(filePath);
   } catch {
-    // ignore
+    // ignore：best-effort cleanup；强制失效路径不得调用本函数
+  }
+}
+
+/**
+ * 严格失效共享全书产物。唯一代际的 m4b part 也必须清理，避免恢复扫描把旧封装
+ * 误判为当前续生成仍在途。目录或文件本来不存在视为幂等成功，其它 I/O 错误上抛。
+ */
+export function wipeFullBookAudioArtifacts(taskDir: string): void {
+  unlinkArtifactOrThrow(resolveFullBookAudioPath(taskDir));
+  unlinkArtifactOrThrow(`${resolveFullBookAudioPath(taskDir)}.part`);
+  unlinkArtifactOrThrow(resolveFullBookM4bPath(taskDir));
+  unlinkArtifactOrThrow(`${resolveFullBookM4bPath(taskDir)}.part`);
+
+  let names: string[];
+  try {
+    names = fs.readdirSync(taskDir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  for (const name of names) {
+    if (name.startsWith("full-book.m4b") && name.endsWith(".part")) {
+      unlinkArtifactOrThrow(path.join(taskDir, name));
+    }
   }
 }
 
@@ -358,28 +446,29 @@ export function safeUnlink(filePath: string): void {
  */
 export function wipeChapterAudioArtifacts(taskDir: string, chapterId: string): void {
   const chapterDir = resolveChapterAudioDir(taskDir, chapterId);
-  if (fs.existsSync(chapterDir)) {
-    for (const name of fs.readdirSync(chapterDir)) {
-      if (
-        name.startsWith("chunk-")
-        || name === "chapter.wav"
-        || name === "chunk-layout.sha1"
-        || name.endsWith(".part")
-      ) {
-        safeUnlink(path.join(chapterDir, name));
-      }
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(chapterDir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  for (const name of names) {
+    if (
+      name.startsWith("chunk-")
+      || name === "chapter.wav"
+      || name === "chunk-layout.sha1"
+      || name.endsWith(".part")
+    ) {
+      unlinkArtifactOrThrow(path.join(chapterDir, name));
     }
   }
-  safeUnlink(resolveFullBookAudioPath(taskDir));
-  safeUnlink(`${resolveFullBookAudioPath(taskDir)}.part`);
-  safeUnlink(resolveFullBookM4bPath(taskDir));
-  safeUnlink(`${resolveFullBookM4bPath(taskDir)}.part`);
+  wipeFullBookAudioArtifacts(taskDir);
 }
 
 export function wipeChapterAnnotationArtifact(taskDir: string, chapterId: string): void {
   const ann = resolveChapterAnnotationPath(taskDir, chapterId);
-  safeUnlink(ann);
-  safeUnlink(`${ann}.part`);
+  unlinkArtifactOrThrow(ann);
+  unlinkArtifactOrThrow(`${ann}.part`);
 }
 
 /** 章音频已落盘且为合法 PCM WAV，用于任务摘要/渐进播放。 */

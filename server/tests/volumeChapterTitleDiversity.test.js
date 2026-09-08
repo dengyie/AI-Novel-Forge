@@ -396,3 +396,40 @@ test("normalizeChapterTitleForUniqueness matches diversity normalize semantics",
   const issue = getChapterTitleDiversityIssue(["铁笼突围", "铁笼突围"]);
   assert.match(issue || "", /重复/);
 });
+
+test("volume chapter list prompt blocks copied titles from earlier beats after semantic retries", async () => {
+  const calls = [];
+
+  setPromptRunnerStructuredInvokerForTests(async (input) => {
+    calls.push(input);
+    return {
+      data: {
+        beatKey: "open_hook",
+        beatLabel: "开卷抓手",
+        chapterCount: 3,
+        chapters: [
+          { beatKey: "open_hook", title: "夜探旧温室", summary: "主角夜探温室，确认异常来源并推动探索线正式启动。" },
+          { beatKey: "open_hook", title: "掠夺者逼近", summary: "外部威胁压到眼前，当前卷的生存压力第一次真正落地。" },
+          { beatKey: "open_hook", title: "防线成形", summary: "主角完成阶段性布防，让当前卷第一次出现可见成果。" },
+        ],
+      },
+      repairUsed: false,
+      repairAttempts: 0,
+    };
+  });
+
+  try {
+    await assert.rejects(() => runStructuredPrompt({
+      asset: createVolumeChapterListPrompt({
+        targetChapterCount: 3,
+        targetBeatKey: "open_hook",
+        targetBeatLabel: "开卷抓手",
+        reservedChapterTitles: ["夜探旧温室"],
+      }),
+      promptInput: createPromptInput(3),
+    }), /章节标题出现重复：夜探旧温室/);
+    assert.equal(calls.length, 3);
+  } finally {
+    setPromptRunnerStructuredInvokerForTests();
+  }
+});

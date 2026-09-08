@@ -1,0 +1,387 @@
+/**
+ * m4b 编码「停滞看门狗」回归测试（根因修复 2026-09-03）。
+ *
+ * 生产实证：2GB WAV + 降权(nice 10) + 限 2 线程时，全量重编码需要 ~37 分钟，
+ * 旧「绝对墙钟超时 40min」模型会在推进中的编码即将完成时误杀它，之后每次
+ * 重试都被掐在同一位置，只能全量重跑——这正是「m4b 反复失败收不了尾」的根因之一。
+ *
+ * 新模型：不看墙钟，只看 `.part` 是否仍在增长。
+ *  - 只要产物在涨 → 绝不因「慢」被 kill（本测试用「极慢但持续推进」的假 ffmpeg 证明）；
+ *  - 产物连续停滞超过 stallTimeoutMs → 判真挂 kill（本测试用「写一字节后永久停滞」证明）。
+ *
+ * 用假 ffmpeg（AUDIOBOOK_FFMPEG_PATH）避免依赖真实编码，脚本自身 nohup/无子进程，
+ * 便于测试后彻底回收：
+ *  - slow-feed：循环追加写产物，tick 间隔可控（模拟慢编码但仍在推进）；
+ *  - stall：写首字节后低 CPU 死循环（模拟卡死）。
+ */
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+
+const { encodeFullBookM4b } = require("../dist/services/audiobook/audiobookM4b.js");
+
+function makeTaskDir(label) {
+  return fs.mkdtempSync(path.join(os.tmpdir(), `ab-stall-${label}-`));
+}
+
+/** 慢喂假 ffmpeg：每 $INTERVAL 秒追加 8 字节，直到 $MAX_SECONDS 或收到 SIGKILL。 */
+function installSlowFeedFfmpeg(intervalSec, maxSec) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ab-stall-ffmpeg-"));
+  const script = path.join(dir, "slow-feed.sh");
+  fs.writeFileSync(
+    script,
+    [
+      "#!/bin/sh",
+      "exec >/dev/null 2>&1",
+      "set -e",
+      'out=""',
+      'prev=""',
+      'for a in "$@"; do',
+      '  if [ "$prev" = "-i" ] && [ -z "$src" ]; then src="$a"; fi',
+      '  last="$a"',
+      '  prev="$a"',
+      "done",
+      'out="$last"',
+      `: > "$out"`,
+      `end=$(( $(date +%s) + ${maxSec} ))`,
+      "while [ \"$(date +%s)\" -lt \"$end\" ]; do",
+      // 每 tick 写 8 字节：既确保总量 > 64 字节通过体积门禁，又保持"稀疏但持续"推进。
+      // 不调 sync：stat 走页缓存即时可见，避免落盘延迟在并发负载下追不上停滞窗口。
+      "  printf \"XXXXXXXX\" >> \"$out\"",
+      `  sleep "${intervalSec}"`,
+      "done",
+      "exit 0",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  return script;
+}
+
+/** 停滞假 ffmpeg：写 1 字节后低 CPU 死循环，只有外部 SIGKILL 能终止。 */
+function installStallFfmpeg() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ab-stall-ffmpeg-"));
+  const script = path.join(dir, "stall.sh");
+  fs.writeFileSync(
+    script,
+    [
+      "#!/bin/sh",
+      "exec >/dev/null 2>&1",
+      'out=""',
+      'prev=""',
+      'for a in "$@"; do',
+      '  if [ "$prev" = "-i" ] && [ -z "$src" ]; then src="$a"; fi',
+      '  last="$a"',
+      '  prev="$a"',
+      "done",
+      'printf "S" > "$last"',
+      // 低 CPU 停滞：短睡循环（不派生长命子进程，看门狗 SIGKILL 父 shell 即整体消失，
+      // 也不像纯忙循环那样 100% 自旋抢占并发测试进程）
+      "while :; do sleep 0.05; done",
+      "exit 0",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  return script;
+}
+
+/**
+ * Race fixture: grow once before the progress sample, then finish after the
+ * original watchdog deadline. The sample updates the shared byte baseline in
+ * the buggy implementation, so that deadline sees no growth and kills the
+ * still-healthy process.
+ */
+function installProgressSamplingRaceFfmpeg() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ab-stall-ffmpeg-"));
+  const script = path.join(dir, "progress-sampling-race.sh");
+  fs.writeFileSync(
+    script,
+    [
+      "#!/bin/sh",
+      "exec >/dev/null 2>&1",
+      'last=""',
+      'for a in "$@"; do last="$a"; done',
+      'printf "S" > "$last"',
+      // The test's 25ms progress sample observes this growth; the 2500ms watchdog deadline
+      // must still consider it recent progress rather than a full stall window.
+      'printf "G" >> "$last"',
+      "sleep 0.8",
+      // Finish with a valid-sized artifact after the deadline.
+      'printf "%064d" 0 >> "$last"',
+      "exit 0",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  return script;
+}
+
+/** 假 ffmpeg 不创建任何产物，验证首字节未产生时仍会被看门狗回收。 */
+function installNoOutputFfmpeg() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ab-stall-ffmpeg-"));
+  const script = path.join(dir, "no-output.sh");
+  fs.writeFileSync(
+    script,
+    [
+      "#!/bin/sh",
+      "exec >/dev/null 2>&1",
+      "while :; do sleep 0.05; done",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  return script;
+}
+
+/**
+ * Cancellation fixture whose inherited stderr pipe stays open briefly after the
+ * shell receives SIGKILL. ChildProcess emits `close` only after that pipe closes,
+ * giving a deterministic signal that the encoder lifecycle has really ended.
+ */
+function installDelayedCloseFfmpeg() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ab-stall-ffmpeg-"));
+  const script = path.join(dir, "delayed-close.sh");
+  const started = path.join(dir, "started");
+  fs.writeFileSync(
+    script,
+    [
+      "#!/bin/sh",
+      `touch "${started}"`,
+      // The background process inherits stderr, so the parent's `close` event is
+      // delayed even though SIGKILL terminates the shell immediately.
+      "( sleep 0.5 ) &",
+      "while :; do sleep 0.05; done",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  return { script, started };
+}
+
+function installKillReleaseRaceFfmpeg() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ab-stall-ffmpeg-race-"));
+  const script = path.join(dir, "kill-release-race.sh");
+  const firstStarted = path.join(dir, "first-started");
+  const secondStarted = path.join(dir, "second-started");
+  const firstDescendantPid = path.join(dir, "first-descendant.pid");
+  const overlap = path.join(dir, "overlap");
+  const callCounter = path.join(dir, "call-counter");
+  fs.writeFileSync(
+    script,
+    [
+      "#!/bin/sh",
+      `if [ ! -f "${callCounter}" ]; then`,
+      `  touch "${callCounter}" "${firstStarted}"`,
+      "  ( sleep 1.5 ) &",
+      `  printf "%s" "$!" > "${firstDescendantPid}"`,
+      "  while :; do sleep 0.05; done",
+      "fi",
+      'last=""',
+      'for a in "$@"; do last="$a"; done',
+      `if kill -0 "$(cat "${firstDescendantPid}")" 2>/dev/null; then touch "${overlap}"; fi`,
+      `touch "${secondStarted}"`,
+      'printf "%064d" 0 > "$last"',
+      "exit 0",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  return { script, firstStarted, secondStarted, overlap };
+}
+
+function writeSrcWav(p) {
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, Buffer.alloc(64)); // 假源文件，内容无所谓
+}
+
+test("慢但持续推进的编码不会因绝对时长被误杀（stall 看门狗按增长续命）", async () => {
+  const intervalSec = 0.1; // 每 100ms 写 8 字节
+  const maxSec = 4; // 假 ffmpeg 总共只写 ~4s 就自然退出（总字节 > 64 通过体积门禁）
+  const fake = installSlowFeedFfmpeg(intervalSec, maxSec);
+  const oldPath = process.env.AUDIOBOOK_FFMPEG_PATH;
+  process.env.AUDIOBOOK_FFMPEG_PATH = fake;
+  // 停滞窗口 2500ms：仍明显短于 4s 总墙钟，足以证明旧绝对超时会误杀；同时给
+  // 多文件并行回归时的子进程冷启动/调度抖动留出余量。真正的健康信号仍是每
+  // 100ms 增长，而不是放宽到让停滞进程通过。
+  const stallTimeoutMs = 2500;
+
+  const taskDir = makeTaskDir("slow");
+  const src = path.join(taskDir, "src.wav");
+  writeSrcWav(src);
+
+  try {
+    const r = await encodeFullBookM4b({ taskDir, bookTitle: "慢速书", sourceWavPath: src, chapters: [], stallTimeoutMs });
+    assert.equal(r.status, "ready", `应正常完成：${r.reason ?? "（reason 为空）"}`);
+    const canonical = path.join(taskDir, "full-book.m4b");
+    assert.ok(fs.existsSync(canonical), "规范名产物存在");
+    assert.ok(fs.statSync(canonical).size > 1, "产物有实际内容");
+  } finally {
+    if (oldPath === undefined) delete process.env.AUDIOBOOK_FFMPEG_PATH;
+    else process.env.AUDIOBOOK_FFMPEG_PATH = oldPath;
+  }
+});
+
+test("进度采样更新字节后，旧 watchdog deadline 不应误杀仍在推进的编码", async () => {
+  const fake = installProgressSamplingRaceFfmpeg();
+  const oldPath = process.env.AUDIOBOOK_FFMPEG_PATH;
+  process.env.AUDIOBOOK_FFMPEG_PATH = fake;
+  const taskDir = makeTaskDir("progress-sampling-race");
+  const src = path.join(taskDir, "src.wav");
+  writeSrcWav(src);
+  // 仅缩短本测试中的采样周期，避免用数秒固定 sleep 让 CI 回归测试变慢；
+  // 生产采样周期和其 5s 下限保持不变。
+  const realSetInterval = global.setInterval;
+  global.setInterval = (callback) => realSetInterval(callback, 25);
+
+  try {
+    const r = await encodeFullBookM4b({
+      taskDir,
+      bookTitle: "采样交错书",
+      sourceWavPath: src,
+      chapters: [],
+      stallTimeoutMs: 2500,
+      onProgress: () => {},
+    });
+    assert.equal(r.status, "ready", `进度采样不应改变停滞判定：${r.reason ?? ""}`);
+    assert.ok(fs.existsSync(path.join(taskDir, "full-book.m4b")));
+  } finally {
+    global.setInterval = realSetInterval;
+    if (oldPath === undefined) delete process.env.AUDIOBOOK_FFMPEG_PATH;
+    else process.env.AUDIOBOOK_FFMPEG_PATH = oldPath;
+  }
+});
+
+test("首字节未产生超过 stall 窗口 → 看门狗判死并回收 ffmpeg", async () => {
+  const fake = installNoOutputFfmpeg();
+  const oldPath = process.env.AUDIOBOOK_FFMPEG_PATH;
+  process.env.AUDIOBOOK_FFMPEG_PATH = fake;
+  const taskDir = makeTaskDir("no-output");
+  const src = path.join(taskDir, "src.wav");
+  writeSrcWav(src);
+
+  try {
+    const r = await encodeFullBookM4b({
+      taskDir,
+      bookTitle: "无首字节书",
+      sourceWavPath: src,
+      chapters: [],
+      stallTimeoutMs: 800,
+    });
+    assert.equal(r.status, "failed", "首字节始终未产生应被判 failed");
+    assert.match(r.reason ?? "", /停滞/);
+  } finally {
+    if (oldPath === undefined) delete process.env.AUDIOBOOK_FFMPEG_PATH;
+    else process.env.AUDIOBOOK_FFMPEG_PATH = oldPath;
+  }
+});
+
+test("产物连续停滞超过 stall 窗口 → 看门狗判死并报错", async () => {
+  const fake = installStallFfmpeg();
+  const oldPath = process.env.AUDIOBOOK_FFMPEG_PATH;
+  process.env.AUDIOBOOK_FFMPEG_PATH = fake;
+  const stallTimeoutMs = 800;
+
+  const taskDir = makeTaskDir("stall");
+  const src = path.join(taskDir, "src.wav");
+  writeSrcWav(src);
+
+  try {
+    const r = await encodeFullBookM4b({ taskDir, bookTitle: "停滞书", sourceWavPath: src, chapters: [], stallTimeoutMs });
+    assert.equal(r.status, "failed", "停滞应被判 failed");
+    assert.match(r.reason ?? "", /停滞/, `reason 应含停滞说明：${r.reason}`);
+    // 部署语义：失败原因是「停滞」（不因绝对墙钟时长误杀），而非旧模型的绝对超时文案
+    assert.doesNotMatch(r.reason ?? "", /绝对墙钟/);
+  } finally {
+    if (oldPath === undefined) delete process.env.AUDIOBOOK_FFMPEG_PATH;
+    else process.env.AUDIOBOOK_FFMPEG_PATH = oldPath;
+  }
+});
+
+test("取消编码后等待 ffmpeg close 再释放调用方", async () => {
+  const fake = installDelayedCloseFfmpeg();
+  const oldPath = process.env.AUDIOBOOK_FFMPEG_PATH;
+  process.env.AUDIOBOOK_FFMPEG_PATH = fake.script;
+  const taskDir = makeTaskDir("cancel-close");
+  const src = path.join(taskDir, "src.wav");
+  writeSrcWav(src);
+  const controller = new AbortController();
+
+  try {
+    const startedAt = Date.now();
+    const pending = encodeFullBookM4b({
+      taskDir,
+      bookTitle: "取消等待书",
+      sourceWavPath: src,
+      chapters: [],
+      signal: controller.signal,
+      stallTimeoutMs: 5_000,
+    });
+    const deadline = Date.now() + 2_000;
+    while (!fs.existsSync(fake.started) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(fs.existsSync(fake.started), true, "fake ffmpeg should have started");
+    controller.abort();
+    const result = await pending;
+
+    assert.equal(result.status, "failed");
+    assert.match(result.reason ?? "", /取消/);
+    assert.ok(Date.now() - startedAt >= 350, "encode promise must not settle immediately after kill");
+  } finally {
+    if (oldPath === undefined) delete process.env.AUDIOBOOK_FFMPEG_PATH;
+    else process.env.AUDIOBOOK_FFMPEG_PATH = oldPath;
+  }
+});
+
+test("被取消的 ffmpeg 子孙进程退出前不得与下一个 m4b 编码重叠", async () => {
+  const fake = installKillReleaseRaceFfmpeg();
+  const oldPath = process.env.AUDIOBOOK_FFMPEG_PATH;
+  process.env.AUDIOBOOK_FFMPEG_PATH = fake.script;
+  const firstDir = makeTaskDir("kill-release-first");
+  const secondDir = makeTaskDir("kill-release-second");
+  const firstSrc = path.join(firstDir, "src.wav");
+  const secondSrc = path.join(secondDir, "src.wav");
+  writeSrcWav(firstSrc);
+  writeSrcWav(secondSrc);
+  const controller = new AbortController();
+
+  try {
+    const first = encodeFullBookM4b({
+      taskDir: firstDir,
+      bookTitle: "被取消",
+      sourceWavPath: firstSrc,
+      chapters: [],
+      signal: controller.signal,
+      stallTimeoutMs: 5_000,
+    });
+    const startDeadline = Date.now() + 2_000;
+    while (!fs.existsSync(fake.firstStarted) && Date.now() < startDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(fs.existsSync(fake.firstStarted), true, "first fake ffmpeg should have started");
+
+    controller.abort();
+    const second = encodeFullBookM4b({
+      taskDir: secondDir,
+      bookTitle: "后继任务",
+      sourceWavPath: secondSrc,
+      chapters: [],
+      stallTimeoutMs: 5_000,
+    });
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+    assert.equal(firstResult.status, "failed");
+    assert.equal(secondResult.status, "ready", secondResult.reason);
+    assert.equal(fs.existsSync(fake.secondStarted), true);
+    assert.equal(
+      fs.existsSync(fake.overlap),
+      false,
+      "the global permit must not be released while an old encoder descendant is alive",
+    );
+  } finally {
+    if (oldPath === undefined) delete process.env.AUDIOBOOK_FFMPEG_PATH;
+    else process.env.AUDIOBOOK_FFMPEG_PATH = oldPath;
+  }
+});

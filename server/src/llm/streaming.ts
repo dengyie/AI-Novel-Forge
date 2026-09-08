@@ -92,9 +92,15 @@ export async function streamToSSE(
     fullContent: string,
     helpers: StreamDoneHelpers,
   ) => void | StreamDonePayload | Promise<void | StreamDonePayload>,
-  options?: { signal?: AbortSignal },
+  options?: {
+    signal?: AbortSignal;
+    /** E3：调用方已提前 initSSE（发头 + heartbeat）时传 true，跳过重复初始化。
+     * heartbeat 由调用方持有 dispose，streamToSSE 不再清理（避免双重 clearInterval）。 */
+    alreadyInitialized?: boolean;
+  },
 ): Promise<void> {
-  const disposeHeartbeat = initSSE(res);
+  // E3：若调用方已提前 initSSE，复用其 heartbeat，不重复初始化。
+  const disposeHeartbeat = options?.alreadyInitialized ? () => {} : initSSE(res);
   let fullContent = "";
 
   try {

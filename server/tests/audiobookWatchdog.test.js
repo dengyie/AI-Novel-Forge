@@ -11,6 +11,8 @@ const {
   projectWatchdogSignal,
   watchdogSignalEqual,
   computeWatchdogDecision,
+  isWatchdogFinalizingTolerant,
+  AUDIOBOOK_WATCHDOG_FINALIZE_STALL_PERIODS,
 } = require("../dist/services/audiobook/AudiobookTaskService.js");
 
 // ── projectWatchdogSignal ──
@@ -157,4 +159,58 @@ test("computeWatchdogDecision: progress 推进足以重置（仅 progress 变 �
   const r = computeWatchdogDecision({ prev: { signal: old, stallCount: 3 }, curr: updated, stallPeriods: 5 });
   assert.equal(r.stallCount, 0);
   assert.equal(r.fail, false);
+});
+
+// ── isWatchdogFinalizingTolerant（R2-2 finalizing/m4b 放宽容忍）──
+
+test("isWatchdogFinalizingTolerant: finalizing+progress>=98 → true", () => {
+  assert.equal(
+    isWatchdogFinalizingTolerant({ currentStage: "finalizing", progress: 98 }),
+    true,
+  );
+});
+
+test("isWatchdogFinalizingTolerant: finalizing+progress=97 → false（尚未越过合成）", () => {
+  assert.equal(
+    isWatchdogFinalizingTolerant({ currentStage: "finalizing", progress: 97 }),
+    false,
+  );
+});
+
+test("isWatchdogFinalizingTolerant: 非 finalizing → false", () => {
+  assert.equal(
+    isWatchdogFinalizingTolerant({ currentStage: "synthesizing", progress: 50 }),
+    false,
+  );
+});
+
+test("isWatchdogFinalizingTolerant: m4b 编码中（.part 存在）→ true", () => {
+  assert.equal(
+    isWatchdogFinalizingTolerant({ currentStage: "finalizing", progress: 95, m4bEncodingOnDisk: true }),
+    true,
+  );
+});
+
+test("isWatchdogFinalizingTolerant: progress null 不误判", () => {
+  assert.equal(isWatchdogFinalizingTolerant({ currentStage: "finalizing", progress: null }), false);
+});
+
+test("AUDIOBOOK_WATCHDOG_FINALIZE_STALL_PERIODS: 默认 ≥ 40（40min 宽限）", () => {
+  assert.ok(AUDIOBOOK_WATCHDOG_FINALIZE_STALL_PERIODS >= 40);
+});
+
+// 模拟 finalizing 中五元组停滞 10 个周期（旧逻辑必杀）→ 用宽限阈值 40 周期仍不杀
+// 注意：computeWatchdogDecision 对 prev=null 的首次调用返回 stallCount=0，
+// 因此执行 10 次后实际计到 9 个停滞周期；断言按语义写（fail=false + 实际计数）。
+test("computeWatchdogDecision finalizing: 10 周期停滞仍不 fail（宽限 40）", () => {
+  const signal = { progress: 98, stage: "finalizing", itemKey: "ch-19", completedChapters: 19, completedChunks: 200 };
+  let prev = null;
+  let result;
+  for (let i = 0; i < 10; i += 1) {
+    result = computeWatchdogDecision({ prev, curr: signal, stallPeriods: AUDIOBOOK_WATCHDOG_FINALIZE_STALL_PERIODS });
+    prev = { signal: result.signal, stallCount: result.stallCount };
+  }
+  assert.equal(result.fail, false);
+  assert.ok(result.stallCount >= 9, "10 次调用应至少累计 9 个停滞周期");
+  assert.ok(result.stallCount < AUDIOBOOK_WATCHDOG_FINALIZE_STALL_PERIODS);
 });

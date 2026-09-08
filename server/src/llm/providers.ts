@@ -23,9 +23,8 @@ export const PROVIDERS: Record<BuiltinLLMProvider, ProviderConfig> = {
   deepseek: {
     name: "DeepSeek",
     baseURL: "https://api.deepseek.com/v1",
-    // Prefer pro: flash often 300s-aborts on style.rewrite / long repair on slow gateways.
-    defaultModel: "deepseek-v4-pro",
-    models: ["deepseek-v4-pro", "deepseek-v4-flash"],
+    defaultModel: "deepseek-v4-flash",
+    models: ["deepseek-v4-flash", "deepseek-v4-pro"],
     envKey: "DEEPSEEK_API_KEY",
     envBaseURLKey: "DEEPSEEK_BASE_URL",
     envModelKey: "DEEPSEEK_MODEL",
@@ -48,7 +47,7 @@ export const PROVIDERS: Record<BuiltinLLMProvider, ProviderConfig> = {
     name: "OpenAI",
     baseURL: "https://api.openai.com/v1",
     defaultModel: "gpt-5.5",
-    models: ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.6-luna", "deepseek-v4-pro"],
+    models: ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.6-luna", "deepseek-v4-pro", "gemini-3.7-flash-high"],
     envKey: "OPENAI_API_KEY",
     envBaseURLKey: "OPENAI_BASE_URL",
     envModelKey: "OPENAI_MODEL",

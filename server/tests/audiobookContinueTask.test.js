@@ -157,18 +157,18 @@ test("取消竞态契约：源码 pipeline 返回后 cancel 必须 markCancelled
   // 定位 pipeline.run 之后的 cancel 竞态块（注释锚点 + 两行 await）
   assert.match(
     src,
-    /pipeline 已返回后的取消竞态[\s\S]{0,400}?markCancelledIfActive\([\s\S]{0,120}?finalizeContinueChild\(taskId,\s*true\)/,
+    /pipeline 已返回后的取消竞态[\s\S]{0,400}?markCancelledIfActive\([\s\S]{0,120}?finalizeContinueChild\(taskId,\s*true(?:,[^)]+)?\)/,
     "pipeline 返回后 cancel 必须 finalize",
   );
   // catch 取消/失败路径同样 finalize，避免 orphan 父
   assert.match(
     src,
-    /PipelineCancelledError[\s\S]{0,400}?finalizeContinueChild\(taskId,\s*true\)/,
+    /PipelineCancelledError[\s\S]{0,400}?finalizeContinueChild\(taskId,\s*true(?:,[^)]+)?\)/,
     "PipelineCancelledError 路径必须 finalize",
   );
   assert.match(
     src,
-    /markFailedIfRunning\([\s\S]{0,200}?finalizeContinueChild\(taskId,\s*true\)/,
+    /markFailedIfRunning\([\s\S]{0,200}?finalizeContinueChild\(taskId,\s*true(?:,[^)]+)?\)/,
     "markFailed 后必须 finalize",
   );
 });

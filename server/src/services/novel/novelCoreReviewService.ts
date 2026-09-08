@@ -87,12 +87,12 @@ export class NovelCoreReviewService {
       chapterId,
     );
 
-    // evaluateOnly：修文候选可用性评估，禁止副作用写库（避免 discard 污染 baseline）。
+    // evaluateOnly：仅候选可用性评估，禁止副作用写库（避免污染 baseline）。
     if (options.evaluateOnly) {
       return review;
     }
 
-    // 双门：文学 isPass ∧ styleClear；styleClear 由 L0 pronoun + 确定性 residual 投影（fail-closed）。
+    // 双门：文学 isPass ∧ style；style 由 L0 pronoun + 确定性 residual 投影（fail-closed）。
     const contentForStyle = options.content ?? chapter.content ?? "";
     const literaryPass = isPass(review.score);
     const styleClear = projectStyleClearFromManualReview({

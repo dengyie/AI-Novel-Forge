@@ -101,6 +101,7 @@ export interface AssembledRuntimeChapter {
     content: string | null;
     contentRevision: number;
     expectation: string | null;
+    riskFlags?: string | null;
   };
   contextPackage: GenerationContextPackage;
 }

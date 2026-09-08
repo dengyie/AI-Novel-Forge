@@ -29,6 +29,7 @@ import {
   type FinalizeChapterContentResult,
 } from "./ChapterContentFinalizationService";
 import { persistChapterQualityScores } from "../quality/chapterQualityScorePersist";
+import { chapterQualityLoopService } from "../quality/ChapterQualityLoopService";
 import { buildChapterRunStatusFrame } from "./chapterRunStatusFrame";
 
 export interface ChapterStreamGenerationAgentRuntime {
@@ -171,6 +172,15 @@ export class ChapterStreamGenerationOrchestrator {
             error: error instanceof Error ? error.message : String(error),
           });
         }
+        // 质量环回写：persist 只更新 score/status，qualityLoop/QFP 必须基于新正文
+        // 重新评估（acceptance 已跑），否则 riskFlags.qualityLoop 停留旧 revision，
+        // 下游 writer/repair 看到的是过期反馈。CAS 用 finalized.contentRevision。
+        await this.runPostStreamQualityAssessment({
+          novelId,
+          chapterId,
+          chapterOrder: assembled.chapter.order,
+          finalized,
+        });
         throwIfChapterGenerationAborted(cancelSignal);
         this.emitRunStatus(helpers, buildChapterRunStatusFrame({
           runId: runStatusId,
@@ -196,6 +206,47 @@ export class ChapterStreamGenerationOrchestrator {
     };
   }
 
+  /**
+   * 流式 generate 定稿后的质量环回写。
+   *
+   * persistChapterQualityScores 只更新 qualityScore/chapterStatus，不写
+   * riskFlags.qualityLoop/QFP。若跳过此步，新正文的 acceptance 结果不会沉淀为
+   * 新 QFP，下游 writer/repair 会继续读到旧 revision 的过期反馈（ch6 实证：
+   * 重写后 evaluatedAt/signature 均未变）。
+   *
+   * CAS 用 finalized.contentRevision；冲突时只记日志不抛出——新正文已落库，
+   * 质量环回写失败不应回滚正文，但必须可观测（manual review / repair recheck
+   * 路径仍会基于最新 revision 重新评估）。
+   */
+  async runPostStreamQualityAssessment(input: {
+    novelId: string;
+    chapterId: string;
+    chapterOrder: number;
+    finalized: FinalizeChapterContentResult;
+  }): Promise<void> {
+    const { novelId, chapterId, chapterOrder, finalized } = input;
+    try {
+      await chapterQualityLoopService.recordAssessment({
+        novelId,
+        chapterId,
+        chapterOrder,
+        score: finalized.score,
+        issues: finalized.issues,
+        runtimePackage: finalized.runtimePackage,
+        source: "generate_acceptance",
+        expectedContentRevision: finalized.contentRevision,
+      });
+    } catch (error) {
+      console.warn("[chapter-runtime] stream quality loop record failed", {
+        novelId,
+        chapterId,
+        chapterOrder,
+        expectedContentRevision: finalized.contentRevision,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   async prepareRuntimeChapter(
     novelId: string,
     chapterId: string,
@@ -207,7 +258,26 @@ export class ChapterStreamGenerationOrchestrator {
     const request = this.deps.validateRequest(requestInput);
     await this.deps.ensureNovelCharacters(novelId, "generate chapter content");
     throwIfChapterGenerationAborted(signal, "章节生成已取消。");
-    const assembled = await this.deps.assembler.assemble(novelId, chapterId, request);
+    // E2：prepare 阶段（planner / context 装配 / state snapshot）失败时给错误打
+    // failurePhase 标记，路由层据此返回结构化 JSON（含 failurePhase=prepare），
+    // 而非让请求拖到 CF 524 或返回无 phase 的 500。见 §E2 开发优化文档。
+    let assembled;
+    try {
+      assembled = await this.deps.assembler.assemble(novelId, chapterId, request);
+    } catch (error) {
+      // abort（客户端断连/主动取消）不得标 failurePhase=prepare——不是 prepare 失败。
+      if (error && typeof error === "object" && !signal?.aborted) {
+        try {
+          Object.defineProperty(error, "chapterGenerationFailurePhase", {
+            value: "prepare",
+            configurable: true,
+          });
+        } catch {
+          // Ignore non-extensible errors.
+        }
+      }
+      throw error;
+    }
     throwIfChapterGenerationAborted(signal, "章节生成已取消。");
     // 下章入口硬守卫：上章尚无 timeline checkpoint 时先补齐（stable/degraded），失败只告警。
     // 与定稿后 async schedule 互补，覆盖「异步未完成就开下一章」的长跑缺口。

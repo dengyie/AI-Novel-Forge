@@ -185,9 +185,32 @@ test("assessChapterExecutionContractShape passes taskSheet that only restates ba
 });
 
 test("assessChapterExecutionContractShape passes specific-opponent writing without opponent_line_violation", () => {
-  // 具体对手个体: 黄振 + 三两路人, 不命中对手面词表
+  // 具体对手个体: 黄振 + 三两路人,不命中对手面词表
   const candidate = buildPassingCandidate();
   const result = assessChapterExecutionContractShape(candidate, { settingQualityMode: "enforce" });
   const opponentIssue = result.issues.find((issue) => issue.id === "opponent_line_violation");
   assert.equal(opponentIssue, undefined, "具体对手写作不应触发对手面守卫");
+});
+
+test("stripNegatedOpponentDeclarations strips restated banned terms inside 【风险提醒:】-style caution sections", () => {
+  // 生产 ch4 (神通者) 实证: taskSheet 的「风险提醒」分区整段是避免/警示声明,
+  // 里面复述「全校/集体站队」等禁词是「告诫不要写」, 不是正文实际写成的内容。
+  // 现有实现只剥「否定动词开头」行, 不认「风险提醒:」分区头 → 残留禁词 → 误报假阳性。
+  const taskSheet = [
+    "【本章独占事件】陈师傅按终端核验收回证件,何屿被挡在校门闸口外。",
+    "【在场人物】何屿;陈师傅;辅导员周岚(电话);许工(协助查询)。",
+    "【现场压力】终端两次提示需协查,保安引何屿去值班室,但无人公开点名他。",
+    "【必须推进】何屿用学生身份解释迟到与缺课,终端显示需协查印记。",
+    "【风险提醒】",
+    "- 场景扩大为全校或社会舆论集体站队,失去封闭性和个体化处理。",
+    "- 让周岚主动透露陆深姓名,违反信息边界。",
+    "- 把协调作为主角已被定罪的依据,破坏协查态与判决结果的边界。",
+  ].join("\n");
+  const stripped = stripNegatedOpponentDeclarations(taskSheet);
+  const hit = detectOpponentLineViolation(stripped);
+  assert.equal(hit.violated, false, "风险提醒分区整段都是避免/警示声明,复述禁词应被剥掉,不该残留命中");
+  assert.deepEqual(hit.matched, [], "风险提醒段落的禁词不应残留为我们 records matched 词表");
+  // 正文具体对手描写仍应保留
+  assert.ok(stripped.includes("陈师傅"), "正文具体对手描写不应被 strip 误伤");
+  assert.ok(stripped.includes("必须推进"), "正面指令段(必须推进)不应被误剥");
 });

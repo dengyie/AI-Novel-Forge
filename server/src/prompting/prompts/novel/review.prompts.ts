@@ -2,6 +2,7 @@ import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { z } from "zod";
 import type { PromptAsset } from "../../core/promptTypes";
 import { renderSelectedContextBlocks } from "../../core/renderContextBlocks";
+import { renderProseBanBlock } from "./proseBanRules";
 import { fullAuditOutputSchema } from "../../../services/audit/auditSchemas";
 import { chapterSummaryOutputSchema } from "../../../services/novel/chapterSummarySchemas";
 import { NOVEL_PROMPT_BUDGETS } from "./promptBudgetProfiles";
@@ -30,6 +31,19 @@ export interface ChapterRepairPromptInput {
   modeHint?: string;
   /** 本次修文模式（heavy_repair / light_repair / continuity_only / …）。仅用于 system 文案分支。 */
   repairMode?: string;
+  /**
+   * 章节篇幅合同（来自 targetWordCount 经 resolveLengthBudgetContract）。
+   * 仅 heavy_repair 注入：让 AI 知晓目标/软区间/硬下限，主动写够篇幅。
+   * light_repair 是局部补丁，结构上无力扩写整章，故不注入扩写指令
+   * （由拦截层把短候选升级为 heavy 后由 heavy prompt 承担扩写）。
+   * hardMin（target×0.6）是不可破客观下限——剧情边界优先于凑字数，但不豁免 hardMin。
+   */
+  lengthBudget?: {
+    targetWordCount: number;
+    softMinWordCount: number;
+    softMaxWordCount: number;
+    hardMinWordCount: number;
+  } | null;
 }
 
 export const chapterSummaryPrompt: PromptAsset<
@@ -141,7 +155,8 @@ export const chapterReviewPrompt: PromptAsset<
       "1. issues 必须只抓真正影响阅读与连载质量的问题，避免吹毛求疵式碎问题泛滥。",
       "2. 每条 issue 都必须具体，不能只写“节奏不好”“描写偏弱”“有点重复”这种空泛判断。",
       "3. evidence 必须指向正文中的可观察现象，可以是某类段落问题、某种重复模式、某处逻辑断裂或某段失速现象。",
-      "4. fixSuggestion 必须可执行，应该说明‘如何修’，而不是只说‘加强张力’‘优化表达’。",
+      "4. evidence 逐句对照正文：凡涉及『某人做了某事 / 进入某地 / 展示某物 / 当场对质』等行为断言，必须在 evidence 中逐字引用正文原句（含引号）；正文没有的行为写进 issue 属于幻觉，必须避免。『未展示 / 不再 / 离开 / 无法确认后…』等否定句或方向动词必须按正文原意理解，不得反读成相反含义。",
+      "5. fixSuggestion 必须可执行，应该说明‘怎么写’，而不是只会‘加强张力’。",
       "",
       "【上下文使用规则】",
       "1. chapter_mission、structure_obligations、world_rules 只用于判断是否偏离任务或设定，不得拿来脑补正文未写出的内容。",
@@ -209,6 +224,11 @@ export const chapterRepairPrompt: PromptAsset<ChapterRepairPromptInput, string, 
     const rewriteBoundary = isHeavy
       ? "必要时可重写句段乃至重组段落次序，但保持剧情方向、核心事件次序与角色状态不变；优先复用原章有效推进，不要凭空发明新主线。"
       : "修文以‘最小必要修改’为原则，不要无关重写，不要把原章整体推翻重来。";
+    // 篇幅合同指令：仅 heavy_repair 且有 lengthBudget 时注入。
+    // 语义同 task #27 writer 口径：剧情边界优先于凑字数，但 hardMin（target×0.6）不可破。
+    const lengthBudgetLine = isHeavy && input.lengthBudget
+      ? `7. 本章篇幅合同：目标 ${input.lengthBudget.targetWordCount} 字（建议区间 ${input.lengthBudget.softMinWordCount}–${input.lengthBudget.softMaxWordCount} 字）；正文不得低于硬下限 ${input.lengthBudget.hardMinWordCount} 字。戏核与边界完整时以自然收束为准，但不可短于硬下限——若原章过短，须用场景、动作、反应与细节把推进落到实处，写够篇幅，禁止靠注水、重复或离题支线凑字。`
+      : null;
     return [
     new SystemMessage([
       "你是资深网络小说修文编辑。",
@@ -233,6 +253,7 @@ export const chapterRepairPrompt: PromptAsset<ChapterRepairPromptInput, string, 
       "4. 若存在逻辑、动机、衔接问题，应补足必要过桥与因果，而不是额外发明大设定。",
       "5. 若存在钩子不足、结尾无力问题，应在不违背既有走向的前提下加强章末压力、悬念或决策点。",
       input.modeHint ? `6. 本次修复重点：${input.modeHint}` : "",
+      lengthBudgetLine,
       "",
       "【风格要求】",
       "1. 保持与原章相近的叙述视角、语言风格与人物说话方式。",
@@ -244,7 +265,8 @@ export const chapterRepairPrompt: PromptAsset<ChapterRepairPromptInput, string, 
       "禁止通过新增大事件掩盖原问题。",
       "禁止输出‘修改说明’‘修复点如下’等额外内容。",
       "禁止把义务合同/功能兑付/提纲措辞原句贴进正文当「已完成证明」。",
-    ].join("\n")),
+      renderProseBanBlock(),
+    ].filter(Boolean).join("\n")),
     new HumanMessage([
       `小说：${input.novelTitle}`,
       `章节：${input.chapterTitle}`,

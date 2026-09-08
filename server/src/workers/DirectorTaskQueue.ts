@@ -5,39 +5,96 @@ import { resourceClassForCommand } from "../services/novel/director/commands/Dir
 import { DirectorCommandLeaseLostError } from "../services/novel/director/commands/DirectorCommandLeaseGuard";
 import { taskDispatcher } from "./TaskDispatcher";
 
-function resolveNumberEnv(name: string, fallback: number): number {
+const MAX_NODE_TIMER_MS = 2_147_483_647;
+const MAX_DIRECTOR_EXECUTION_SLOTS = 4;
+
+function resolvePositiveIntEnv(name: string, fallback: number, max = MAX_NODE_TIMER_MS): number {
+  const safeFallback = Number.isFinite(fallback) && fallback > 0
+    ? Math.min(max, Math.floor(fallback))
+    : 1;
   const value = Number(process.env[name]);
-  return Number.isFinite(value) && value > 0 ? value : fallback;
+  return Number.isSafeInteger(value) && value > 0
+    ? Math.min(max, value)
+    : safeFallback;
 }
 
 function resolveDefaultSlots(): number {
-  return Math.max(4, os.cpus().length);
+  // Production can be killed by host global_oom while the container still
+  // reports gigabytes available. Neither CPU count nor process.availableMemory()
+  // can safely infer that external pressure, so parallel high-memory director
+  // work is opt-in through DIRECTOR_WORKER_EXECUTION_SLOTS.
+  return 1;
 }
 
-class ResourceGate {
+type ResourceGateWaiter = {
+  resolve: () => void;
+  reject: (error: Error) => void;
+  signal?: AbortSignal;
+  onAbort?: () => void;
+};
+
+function resourceGateAbortError(): Error {
+  const error = new Error("resource gate acquire aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+export class ResourceGate {
   private active = 0;
-  private readonly waiters: Array<() => void> = [];
+  private readonly waiters: ResourceGateWaiter[] = [];
 
   constructor(private readonly limit: number) {}
 
-  async acquire(): Promise<void> {
+  async acquire(signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) {
+      throw resourceGateAbortError();
+    }
     if (this.limit <= 0) return;
     if (this.active < this.limit) {
       this.active += 1;
       return;
     }
-    await new Promise<void>((resolve) => {
-      this.waiters.push(resolve);
+    await new Promise<void>((resolve, reject) => {
+      const waiter: ResourceGateWaiter = { resolve, reject, signal };
+      const onAbort = () => {
+        const index = this.waiters.indexOf(waiter);
+        if (index >= 0) this.waiters.splice(index, 1);
+        signal?.removeEventListener("abort", onAbort);
+        reject(resourceGateAbortError());
+      };
+      waiter.onAbort = onAbort;
+      this.waiters.push(waiter);
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+      signal?.addEventListener("abort", onAbort, { once: true });
     });
+    // release() may resolve this waiter immediately before an abort callback can run.
+    // Re-check after the await and return the permit so a cancelled command cannot
+    // proceed with a lease it no longer owns.
+    if (signal?.aborted) {
+      this.release();
+      throw resourceGateAbortError();
+    }
   }
 
   release(): void {
     if (this.limit <= 0) return;
     this.active = Math.max(0, this.active - 1);
-    const next = this.waiters.shift();
-    if (next) {
+    while (this.waiters.length > 0) {
+      const next = this.waiters.shift();
+      if (!next) return;
+      if (next.signal?.aborted) {
+        next.onAbort?.();
+        continue;
+      }
+      if (next.signal && next.onAbort) {
+        next.signal.removeEventListener("abort", next.onAbort);
+      }
       this.active += 1;
-      next();
+      next.resolve();
+      return;
     }
   }
 
@@ -92,10 +149,14 @@ export class DirectorTaskQueue {
     this.workerId = options.workerId
       ?? process.env.DIRECTOR_WORKER_ID?.trim()
       ?? `director-worker-${os.hostname()}-${process.pid}`;
-    this.leaseMs = resolveNumberEnv("DIRECTOR_WORKER_LEASE_MS", options.leaseMs ?? 120_000);
-    this.staleScanMs = resolveNumberEnv("DIRECTOR_WORKER_STALE_SCAN_MS", options.staleScanMs ?? 30_000);
-    this.executionSlots = resolveNumberEnv("DIRECTOR_WORKER_EXECUTION_SLOTS", options.executionSlots ?? resolveDefaultSlots());
-    this.pollMs = resolveNumberEnv("DIRECTOR_WORKER_POLL_MS", options.pollMs ?? 5_000);
+    this.leaseMs = resolvePositiveIntEnv("DIRECTOR_WORKER_LEASE_MS", options.leaseMs ?? 120_000);
+    this.staleScanMs = resolvePositiveIntEnv("DIRECTOR_WORKER_STALE_SCAN_MS", options.staleScanMs ?? 30_000);
+    this.executionSlots = resolvePositiveIntEnv(
+      "DIRECTOR_WORKER_EXECUTION_SLOTS",
+      options.executionSlots ?? resolveDefaultSlots(),
+      MAX_DIRECTOR_EXECUTION_SLOTS,
+    );
+    this.pollMs = resolvePositiveIntEnv("DIRECTOR_WORKER_POLL_MS", options.pollMs ?? 5_000);
     this.commandService = commandService;
   }
 
@@ -173,16 +234,24 @@ export class DirectorTaskQueue {
     return command ? { command } : null;
   }
 
-  async acquireResourceGate(novelId: string | null | undefined, commandType: string): Promise<void> {
+  async acquireResourceGate(
+    novelId: string | null | undefined,
+    commandType: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
     const resourceClass = resourceClassForCommand(commandType);
     const key = `${novelId?.trim() || "_global"}:${resourceClass}`;
     let gate = this.gates.get(key);
     if (!gate) {
       const envName = `DIRECTOR_WORKER_RESOURCE_${resourceClass.toUpperCase()}_LIMIT`;
-      gate = new ResourceGate(resolveNumberEnv(envName, PER_NOVEL_RESOURCE_LIMITS[resourceClass] ?? 2));
+      gate = new ResourceGate(resolvePositiveIntEnv(
+        envName,
+        PER_NOVEL_RESOURCE_LIMITS[resourceClass] ?? 2,
+        MAX_DIRECTOR_EXECUTION_SLOTS,
+      ));
       this.gates.set(key, gate);
     }
-    await gate.acquire();
+    await gate.acquire(signal);
   }
 
   releaseResourceGate(novelId: string | null | undefined, commandType: string): void {

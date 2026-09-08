@@ -89,7 +89,7 @@ const PRONOUN_FIX_SUGGESTION =
   "改用专名、动作主语或环境起句打破句首他/她堆叠；禁止循环换称（主角/少年/男人）。";
 
 const TERMINAL_PUNCTUATION = /(?:[。！？!?”"」』）)】》…]|——?|\.{3,})$/u;
-const NEGATIVE_FLIP_PATTERN = /(?:不是|并非|并不是|不算|不能说是|没有|不再是)[^。！？；;\n]{1,36}?[，,、]?\s*(?:而是|却是|反而是|更像是|只是)[^。！？；;\n]{1,36}/gu;
+const NEGATIVE_FLIP_PATTERN = /(?:不是|并非|并不是|不算|不能说是|没有|不再是|与其说是|不像是)[^。！？；;\n]{1,36}?[，,、]?\s*(?:而是|却是|反而是|更像是|只是|倒像是|倒不如说是)[^。！？；;\n]{1,36}/gu;
 const DASH_OR_ELLIPSIS_PATTERN = /——|—|--|……|…{2,}|\.{3,}/gu;
 const AI_SELF_REFERENCE_PATTERN = /作为(?:一名|一个)?(?:AI|人工智能|语言模型)|我是(?:AI|人工智能|语言模型)|我无法(?:继续)?(?:创作|生成|提供|完成)|我不能(?:继续)?(?:创作|生成|提供|完成)|无法满足(?:该|这个)?请求|不能协助|as an AI|I (?:am|cannot|can't)[^。！？.!?\n]{0,40}AI/iu;
 const PLACEHOLDER_PATTERN = /TODO|TBD|待补充|此处省略|省略若干|略写|占位|PLACEHOLDER|\{\{[^}]{0,80}\}\}|\[[^\]]{0,40}待补[^\]]{0,40}\]/iu;
@@ -153,8 +153,10 @@ export function detectProseQuality(
     findings.push(finding);
   };
 
+  // 否定翻转/思辨议论句（支持跨段匹配 + 频次升级）
+  scanNegativeFlip(segments, addFinding);
+
   for (const segment of segments) {
-    scanNegativeFlip(segment, addFinding);
     scanAiSelfReference(segment, addFinding);
     scanPlaceholderLeak(segment, addFinding);
     scanEngineeringTermLeak(segment, addFinding);
@@ -489,25 +491,66 @@ function buildTextSegments(content: string): TextSegment[] {
   return segments;
 }
 
+interface NegativeFlipCandidate {
+  line: number;
+  column: number;
+  excerpt: string;
+}
+
 function scanNegativeFlip(
-  segment: TextSegment,
+  segments: TextSegment[],
   addFinding: (finding: ProseQualityFinding) => void,
 ): void {
-  for (const match of segment.text.matchAll(NEGATIVE_FLIP_PATTERN)) {
-    const index = match.index ?? 0;
-    if (isInsideQuote(segment.text, index) || /不是[^。！？；;\n]{1,16}就是/u.test(match[0])) {
-      continue;
+  const candidates: NegativeFlipCandidate[] = [];
+
+  // 1. 单句/单段内正则扫描
+  for (const segment of segments) {
+    for (const match of segment.text.matchAll(NEGATIVE_FLIP_PATTERN)) {
+      const index = match.index ?? 0;
+      if (isInsideQuote(segment.text, index) || /不是[^。！？；;\n]{1,16}就是/u.test(match[0])) {
+        continue;
+      }
+      candidates.push({
+        line: segment.line,
+        column: index + 1,
+        excerpt: formatExcerpt(match[0]),
+      });
     }
-    // 中文网文「不是 A，而是 B」常见对比叙述：保留质量债信号，但降为 medium，
-    // 避免单条命中 → hasBlockingFindings → needs_repair 误伤正常章节（同破折号门禁策略）。
+  }
+
+  // 2. 跨段辨析体扫描（例：第一段「不是因为恐惧。」第二段「而是那个眼神里没有求救的意思。」）
+  for (let index = 0; index < segments.length - 1; index += 1) {
+    const current = segments[index].text.trim();
+    const next = segments[index + 1].text.trim();
+    const isFirstNegative = /^(?:不是|并非|并不是|不再是|不能说是|没有)[^。！？；;\n]{1,30}[。！？!？]?$/u.test(current);
+    const isSecondPositive = /^(?:而是|却是|反而是|更像是|只是|倒像是|倒不如说是)[^。！？；;\n]{1,40}/u.test(next);
+    if (isFirstNegative && isSecondPositive) {
+      candidates.push({
+        line: segments[index].line,
+        column: 1,
+        excerpt: formatExcerpt(`${current} / ${next}`),
+      });
+    }
+  }
+
+  if (candidates.length === 0) {
+    return;
+  }
+
+  // 门禁策略：单次命中为 medium 提示；单章累计 ≥ 2 次时升为 high 严重问题（阻断放行，避免 AI 思辨腔污染）
+  const severity: RuntimeAuditIssue["severity"] = candidates.length >= 2 ? "high" : "medium";
+
+  for (const candidate of candidates) {
     addFinding({
       code: "prose_negative_flip",
-      severity: "medium",
-      line: segment.line,
-      column: index + 1,
-      message: "正文出现高频 AI 式否定翻转句，容易显得概念化、模板化。",
-      excerpt: formatExcerpt(match[0]),
-      fixSuggestion: "改成具体动作、感官细节或角色判断，避免用“不是 A，而是 B”解释主题。",
+      severity,
+      line: candidate.line,
+      column: candidate.column,
+      message: candidates.length >= 2
+        ? `正文累计出现 ${candidates.length} 处「不是……而是……」否定翻转/思辨议论句，AI 腔调过浓。`
+        : "正文出现 AI 式「不是……而是……」否定翻转句，容易显得概念化与说明腔。",
+      excerpt: candidate.excerpt,
+      fixSuggestion: "直接描写客观动作、实体变化或角色直觉，严禁使用“不是 A，而是 B”或“与其说 A 倒不如说 B”解释情节。",
     });
   }
 }

@@ -1,10 +1,24 @@
-import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { resolveBetweenChapterGapMs } from "./audiobookGap";
-import { resolveFullBookAudioPath, resolveFullBookM4bPath } from "./audiobookPaths";
+import { resolveFullBookAudioPath, resolveFullBookM4bPath, cleanupStaleM4bParts } from "./audiobookPaths";
 import { parseWavInfo } from "./audiobookWav";
+import {
+  runFfmpegProcess,
+  type M4bProgressCallback,
+} from "./infrastructure/m4b/FfmpegProcessRunner";
+import {
+  getM4bGlobalConcurrency,
+  withGlobalM4bPermit,
+} from "./infrastructure/m4b/M4bPermitPool";
+import {
+  withAudiobookTaskDirArtifactLock,
+  withM4bEncodeLock,
+} from "./infrastructure/m4b/M4bTaskLocks";
+
+export { getM4bGlobalConcurrency, withAudiobookTaskDirArtifactLock };
+export type { M4bFfmpegProgress, M4bProgressCallback } from "./infrastructure/m4b/FfmpegProcessRunner";
 
 export type AudiobookM4bStatus = "ready" | "skipped" | "failed";
 
@@ -27,11 +41,22 @@ export interface AudiobookM4bEncodeResult {
 
 const M4B_RELATIVE = "full-book.m4b";
 
-/** 默认 20 分钟；可用 AUDIOBOOK_M4B_FFMPEG_TIMEOUT_MS 覆盖。 */
-const DEFAULT_FFMPEG_TIMEOUT_MS = Math.max(
-  60_000,
-  Number(process.env.AUDIOBOOK_M4B_FFMPEG_TIMEOUT_MS ?? 20 * 60_000) || 20 * 60_000,
-);
+/**
+ * ffmpeg 编码线程上限。大书 m4b 是对整本 WAV 的实时重采样+AAC 重编码，默认全核
+ * 会把小巧/共享宿主占满、加剧与其它进程的争抢；这里默认封顶 2 线程，可用
+ * AUDIOBOOK_M4B_FFMPEG_THREADS 覆盖。配置为 0 或其它非法值时回退默认值，不能
+ * 让 ffmpeg 自行按宿主 CPU 扩张；显式线程数仍封顶 4，避免错误配置重新制造共享宿主 OOM。
+ */
+export function resolveM4bFfmpegThreads(
+  value = process.env.AUDIOBOOK_M4B_FFMPEG_THREADS,
+): number {
+  const raw = Number(value ?? 2);
+  if (raw === 0) return 2;
+  if (!Number.isSafeInteger(raw) || raw < 1) return 2;
+  return Math.min(4, raw);
+}
+
+const FFMPEG_THREADS_CAP = resolveM4bFfmpegThreads();
 
 export function resolveFfmpegBinary(): string | null {
   const dedicated = process.env.AUDIOBOOK_FFMPEG_PATH?.trim();
@@ -170,68 +195,36 @@ function escapeFfmetadata(value: string): string {
     .replace(/\n/g, " ");
 }
 
-function runFfmpeg(input: {
-  ffmpeg: string;
-  args: string[];
-  timeoutMs: number;
-  signal?: AbortSignal;
-}): Promise<{ status: number | null; stderr: string }> {
-  return new Promise((resolve, reject) => {
-    if (input.signal?.aborted) {
-      reject(new Error("m4b 封装已取消。"));
-      return;
-    }
-    const child = spawn(input.ffmpeg, input.args, {
-      stdio: ["ignore", "ignore", "pipe"],
-    });
-    let stderr = "";
-    let settled = false;
-    const cleanup = () => {
-      clearTimeout(timer);
-      input.signal?.removeEventListener("abort", onAbort);
-    };
-    const finish = (status: number | null, errText: string) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      resolve({ status, stderr: errText });
-    };
-    const fail = (error: Error) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      reject(error);
-    };
-    const onAbort = () => {
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        // ignore
-      }
-      fail(new Error("m4b 封装已取消。"));
-    };
-    const timer = setTimeout(() => {
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        // ignore
-      }
-      fail(new Error(`ffmpeg 封装 m4b 超时（>${input.timeoutMs}ms）。`));
-    }, input.timeoutMs);
-
-    input.signal?.addEventListener("abort", onAbort, { once: true });
-    child.stderr?.on("data", (chunk: Buffer | string) => {
-      if (stderr.length < 4000) {
-        stderr += chunk.toString();
-      }
-    });
-    child.on("error", (error) => {
-      fail(error instanceof Error ? error : new Error(String(error)));
-    });
-    child.on("close", (code) => {
-      finish(code, stderr.slice(0, 400));
-    });
-  });
+export function buildM4bFfmpegArgs(input: {
+  sourceWavPath: string;
+  metadataPath: string;
+  outputPath: string;
+  threads?: number | null;
+}): string[] {
+  return [
+    "-y",
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-i",
+    input.sourceWavPath,
+    "-i",
+    input.metadataPath,
+    "-map",
+    "0:a:0",
+    "-map_metadata",
+    "1",
+    "-c:a",
+    "aac",
+    ...(input.threads ? ["-threads", String(input.threads)] : []),
+    "-b:a",
+    "96k",
+    "-movflags",
+    "+faststart",
+    "-f",
+    "mp4",
+    input.outputPath,
+  ];
 }
 
 /**
@@ -248,8 +241,40 @@ export async function encodeFullBookM4b(input: {
   /** 章间静音，默认与全书合并一致 */
   betweenChapterGapMs?: number;
   signal?: AbortSignal;
-  timeoutMs?: number;
+  /** 停滞看门窗口：`.part` 连续不变超过它即掐。默认 AUDIOBOOK_M4B_STALL_TIMEOUT_MS。 */
+  stallTimeoutMs?: number;
+  /** 可选：封装期间周期性上报 `.part` 增长，喂给 watchdog 推进信号避免误杀。 */
+  onProgress?: M4bProgressCallback | null;
+  /** 持久化代际；传入时 rename 前必须确认 worker 仍属于当前代。 */
+  generationToken?: string | null;
+  isGenerationCurrent?: (generationToken: string) => Promise<boolean> | boolean;
 }): Promise<AudiobookM4bEncodeResult> {
+  // 同 taskDir 并发互斥：pause/restart/后台队列多个入口可能同时请求同一本书的 m4b，
+  // 各自 spawn 会各读一遍整部 WAV 成倍放大资源占用。后到请求排队，前一轮跑完后
+  // 再执行（此时若已 ready 则复用产物）。
+  try {
+    return await withM4bEncodeLock(
+      input.taskDir,
+      () => withGlobalM4bPermit(() => encodeFullBookM4bUnlocked(input), input.signal),
+      input.signal,
+    );
+  } catch (error) {
+    if (input.signal?.aborted) {
+      return {
+        status: "failed",
+        path: null,
+        relativePath: null,
+        reason: "m4b 封装已取消。",
+      };
+    }
+    throw error;
+  }
+}
+
+/** encodeFullBookM4b 的实际实现；由 withTaskDirLock 串行化（见公开包装器）。 */
+async function encodeFullBookM4bUnlocked(
+  input: Parameters<typeof encodeFullBookM4b>[0],
+): Promise<AudiobookM4bEncodeResult> {
   const relativePath = M4B_RELATIVE;
   const outPath = resolveFullBookM4bPath(input.taskDir);
   const sourceWav = input.sourceWavPath ?? resolveFullBookAudioPath(input.taskDir);
@@ -289,8 +314,26 @@ export async function encodeFullBookM4b(input: {
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "audiobook-m4b-"));
   const metaPath = path.join(tmpDir, "chapters.ffmeta");
-  const partPath = `${outPath}.part`;
+  // 唯一 run part 名：并发的两次 encode 写不同 inode，绝不交错写同一文件；仍与 outPath
+  // 同目录，保证成功后可原子 rename 覆盖规范名。宿主重启后孤儿 ffmpeg 继续写旧 part，
+  // 不会与新 run 冲突。
+  const runId = `${Date.now().toString(36)}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+  const partPath = path.join(path.dirname(outPath), `${path.basename(outPath)}.${runId}.part`);
   try {
+    // 进入串行区后、真正编码前：若排在前面的一轮已把产物写好（例如后台队列与
+    // 重启兜底并发排队，前一轮先跑完），直接复用已就绪 m4b，不再重复整书编码。
+    if (fs.existsSync(outPath) && fs.statSync(outPath).size >= 64) {
+      return {
+        status: "ready",
+        path: outPath,
+        relativePath,
+        bytes: fs.statSync(outPath).size,
+        chapterCount: metaChapters.length,
+      };
+    }
+    // 起跑前 best-effort 清掉陈旧半成品（本次 run 的新 part mtime 新，不受影响）。
+    // 不要再 unlink 共享 full-book.m4b.part——唯一名下不存在该文件，且 renameSync 原子覆盖规范名。
+    cleanupStaleM4bParts(input.taskDir, outPath);
     fs.writeFileSync(
       metaPath,
       buildM4bFfmetadata({
@@ -300,44 +343,24 @@ export async function encodeFullBookM4b(input: {
       "utf8",
     );
 
-    try {
-      if (fs.existsSync(partPath)) fs.unlinkSync(partPath);
-      if (fs.existsSync(outPath)) fs.unlinkSync(outPath);
-    } catch {
-      // ignore
-    }
-
-    const args = [
-      "-y",
-      "-hide_banner",
-      "-loglevel",
-      "error",
-      "-i",
-      sourceWav,
-      "-i",
-      metaPath,
-      "-map",
-      "0:a:0",
-      "-map_metadata",
-      "1",
-      "-c:a",
-      "aac",
-      "-b:a",
-      "96k",
-      "-movflags",
-      "+faststart",
-      "-f",
-      "mp4",
-      partPath,
-    ];
+    // 不再预删共享 part；唯一 run part 天然避免新旧交错。但成功覆盖规范名之前，
+    // 若存在旧的成功产物也无需删除——renameSync 原子覆盖它。
+    const args = buildM4bFfmpegArgs({
+      sourceWavPath: sourceWav,
+      metadataPath: metaPath,
+      outputPath: partPath,
+      threads: FFMPEG_THREADS_CAP,
+    });
 
     let runResult: { status: number | null; stderr: string };
     try {
-      runResult = await runFfmpeg({
+      runResult = await runFfmpegProcess({
         ffmpeg,
         args,
-        timeoutMs: Math.max(5_000, input.timeoutMs ?? DEFAULT_FFMPEG_TIMEOUT_MS),
+        stallTimeoutMs: input.stallTimeoutMs,
         signal: input.signal,
+        onProgress: input.onProgress,
+        partPath,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -357,24 +380,37 @@ export async function encodeFullBookM4b(input: {
         reason: `ffmpeg 封装 m4b 失败：${runResult.stderr || `exit ${runResult.status}`}`,
       };
     }
-    fs.renameSync(partPath, outPath);
-    const bytes = fs.statSync(outPath).size;
-    if (bytes < 64) {
-      try { fs.unlinkSync(outPath); } catch { /* ignore */ }
+    return await withAudiobookTaskDirArtifactLock(input.taskDir, async () => {
+      if (input.generationToken && input.isGenerationCurrent) {
+        const current = await input.isGenerationCurrent(input.generationToken);
+        if (!current) {
+          return {
+            status: "failed",
+            path: null,
+            relativePath: null,
+            reason: "m4b 封装代际已失效，丢弃旧 worker 产物。",
+          };
+        }
+      }
+      fs.renameSync(partPath, outPath);
+      const bytes = fs.statSync(outPath).size;
+      if (bytes < 64) {
+        try { fs.unlinkSync(outPath); } catch { /* ignore */ }
+        return {
+          status: "failed",
+          path: null,
+          relativePath: null,
+          reason: "m4b 产物异常过小。",
+        };
+      }
       return {
-        status: "failed",
-        path: null,
-        relativePath: null,
-        reason: "m4b 产物异常过小。",
+        status: "ready",
+        path: outPath,
+        relativePath,
+        bytes,
+        chapterCount: metaChapters.length,
       };
-    }
-    return {
-      status: "ready",
-      path: outPath,
-      relativePath,
-      bytes,
-      chapterCount: metaChapters.length,
-    };
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return {

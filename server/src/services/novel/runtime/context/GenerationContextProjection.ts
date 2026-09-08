@@ -21,6 +21,7 @@ export const runtimeChapterSelect = {
   taskSheet: true,
   sceneCards: true,
   hook: true,
+  riskFlags: true,
 } as const;
 
 export function extractOpening(content: string, maxLength = 220): string {

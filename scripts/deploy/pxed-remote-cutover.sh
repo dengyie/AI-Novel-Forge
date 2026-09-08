@@ -16,6 +16,7 @@
 #   SKIP_GIT_RESET=1    跳过 git reset（仅 overlay dist；不推荐）
 #   ALLOW_LOCKFILE_DRIFT=1  允许 pnpm-lock 相对 prev tip 变更而不失败（默认失败，需人工 install）
 #   RUN_PNPM_INSTALL=1  lockfile 变更时尝试 pnpm install --frozen-lockfile（慢）
+#   PRISMA_GENERATE_ON_REMOTE=auto  Prisma schema/config/dependency 变更时生成；1 强制；0 跳过（默认 auto）
 set -euo pipefail
 
 APP_DIR="${APP_DIR:-/personal/pxed/ai-novel}"
@@ -30,6 +31,7 @@ SHARED_TGZ="${SHARED_TGZ:-}"
 SKIP_GIT_RESET="${SKIP_GIT_RESET:-0}"
 ALLOW_LOCKFILE_DRIFT="${ALLOW_LOCKFILE_DRIFT:-0}"
 RUN_PNPM_INSTALL="${RUN_PNPM_INSTALL:-0}"
+PRISMA_GENERATE_ON_REMOTE="${PRISMA_GENERATE_ON_REMOTE:-auto}"
 # 允许在活跃 auto_director 任务时强行 restart（默认拒绝，防止打断在途章节生成）
 ALLOW_RESTART_WITH_ACTIVE_DIRECTOR="${ALLOW_RESTART_WITH_ACTIVE_DIRECTOR:-0}"
 
@@ -361,15 +363,47 @@ if [[ -f "$SERVER_DIR/dist/app.js" ]]; then
   log "dist mark server/dist/app.js md5=$(md5sum "$SERVER_DIR/dist/app.js" | awk '{print $1}')"
 fi
 
-log "prisma generate"
-(
-  cd "$SERVER_DIR"
-  if command -v pnpm >/dev/null 2>&1; then
-    pnpm prisma:generate
-  else
-    npx prisma generate --config prisma.config.ts
-  fi
-)
+case "$PRISMA_GENERATE_ON_REMOTE" in
+  0)
+    log "PRISMA_GENERATE_ON_REMOTE=0 — skip prisma generate"
+    ;;
+  1)
+    log "PRISMA_GENERATE_ON_REMOTE=1 — prisma generate"
+    (
+      cd "$SERVER_DIR"
+      if command -v pnpm >/dev/null 2>&1; then
+        pnpm prisma:generate
+      else
+        npx prisma generate --config prisma.config.ts
+      fi
+    )
+    ;;
+  auto)
+    PRISMA_INPUTS_CHANGED=0
+    if [[ "$PREV_TIP" == "unknown" || "$SKIP_GIT_RESET" == "1" ]]; then
+      PRISMA_INPUTS_CHANGED=1
+    elif ! git diff --quiet "$PREV_TIP" "$DEPLOY_SHA" -- \
+      server/src/prisma server/prisma.config.ts server/package.json package.json pnpm-lock.yaml; then
+      PRISMA_INPUTS_CHANGED=1
+    fi
+    if (( PRISMA_INPUTS_CHANGED == 1 )); then
+      log "prisma inputs changed — prisma generate"
+      (
+        cd "$SERVER_DIR"
+        if command -v pnpm >/dev/null 2>&1; then
+          pnpm prisma:generate
+        else
+          npx prisma generate --config prisma.config.ts
+        fi
+      )
+    else
+      log "prisma inputs unchanged — skip prisma generate"
+    fi
+    ;;
+  *)
+    die "PRISMA_GENERATE_ON_REMOTE must be auto, 0, or 1; got '$PRISMA_GENERATE_ON_REMOTE'"
+    ;;
+esac
 
 # drain 门：若存在进行中的 auto_director 章节生成任务，restart 会 kill 在途 job，
 # 流式输出丢失 → 愈合标记失败需人工续跑。默认拒绝 restart，提示 drain 窗口；

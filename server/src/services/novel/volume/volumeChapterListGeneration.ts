@@ -26,6 +26,11 @@ import {
   resolveVolumeChapterBeatKey,
   setVolumeChapterListPartialStatus,
 } from "./volumeGenerationHelpers";
+import {
+  assertChapterTitleDiversity,
+  getChapterTitleCollisionIssue,
+  getChapterTitleDiversityIssue,
+} from "./chapterTitleDiversity";
 import type {
   VolumeGenerateOptions,
   VolumeGenerationNovel,
@@ -151,11 +156,11 @@ function buildPreviousBeatSummary(params: {
 
 function buildPreservedBeatSummary(params: {
   existingBeatBlocks: GeneratedVolumeChapterBlock[];
-  targetBeatKey: string;
+  targetBeatIndex: number;
 }): string {
-  return summarizeBeatBlocks(
-    params.existingBeatBlocks.filter((block) => block.beatKey !== params.targetBeatKey && block.chapters.length > 0),
-  );
+  return summarizeBeatBlocks(params.existingBeatBlocks
+    .slice(params.targetBeatIndex + 1)
+    .filter((block) => block.chapters.length > 0));
 }
 
 function assertMergedVolumeChapterList(params: {
@@ -222,6 +227,9 @@ async function generateBeatChapterBlock(params: {
       targetChapterCount: params.beatPlan.chapterCount,
       targetBeatKey: params.beatPlan.beat.key,
       targetBeatLabel: params.beatPlan.beat.label,
+      reservedChapterTitles: params.targetVolume.chapters
+        .filter((chapter) => chapter.beatKey !== params.beatPlan.beat.key)
+        .map((chapter) => chapter.title),
     }),
     promptInput,
     contextBlocks: buildVolumeChapterListContextBlocks(promptInput),
@@ -373,7 +381,7 @@ export async function generateBeatChunkedChapterList(params: {
       preservedBeatChapterSummary: generationMode === "single_beat"
         ? buildPreservedBeatSummary({
           existingBeatBlocks,
-          targetBeatKey: beatPlan.beat.key,
+          targetBeatIndex: currentBeatIndex,
         })
         : null,
     });
@@ -391,6 +399,34 @@ export async function generateBeatChunkedChapterList(params: {
         markAsPartial: true,
       },
     );
+    const intermediateVolume = intermediateDocument.volumes.find((volume) => volume.id === targetVolume.id);
+    if (!intermediateVolume) {
+      throw new Error("当前卷章节列表已生成，但中间合并结果丢失了目标卷。");
+    }
+    // 中间态校验：全量生成时执行全卷多样性断言；
+    // single_beat 模式（如定向修复）下，只对当前 beat 的内部多样性及与保留标题的碰撞做严格断言，
+    // 避免因未轮到的其他 beat 中残留的旧重复对误杀当前 beat 的修复（见 Review P1）；
+    // 最终合并也按同样边界守门，完整修复流程结束后由外部统一做全卷多样性验收。
+    if (generationMode === "single_beat") {
+      const singleBeatDiversityIssue = getChapterTitleDiversityIssue(
+        generatedBlock.chapters.map((chapter) => chapter.title),
+      );
+      if (singleBeatDiversityIssue) {
+        throw new Error(singleBeatDiversityIssue);
+      }
+      const reservedTitles = targetVolume.chapters
+        .filter((chapter) => chapter.beatKey !== beatPlan.beat.key)
+        .map((chapter) => chapter.title);
+      const singleBeatCollisionIssue = getChapterTitleCollisionIssue(
+        reservedTitles,
+        generatedBlock.chapters.map((chapter) => chapter.title),
+      );
+      if (singleBeatCollisionIssue) {
+        throw new Error(singleBeatCollisionIssue);
+      }
+    } else {
+      assertChapterTitleDiversity(intermediateVolume.chapters.map((chapter) => chapter.title));
+    }
     await params.notifyIntermediateDocument?.({
       scope: "chapter_list",
       document: intermediateDocument,
@@ -430,6 +466,9 @@ export async function generateBeatChunkedChapterList(params: {
   const mergedVolume = mergedDocument.volumes.find((volume) => volume.id === targetVolume.id);
   if (!mergedVolume) {
     throw new Error("当前卷章节列表已生成，但合并结果丢失了目标卷。");
+  }
+  if (generationMode !== "single_beat") {
+    assertChapterTitleDiversity(mergedVolume.chapters.map((chapter) => chapter.title));
   }
   assertMergedVolumeChapterList({
     volume: mergedVolume,

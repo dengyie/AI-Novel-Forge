@@ -93,13 +93,121 @@ export type MimoTtsEndpoint = {
 /** 5xx / 429 / 超时(504) / 取消以外的瞬时失败可换端点；4xx 客户端错误不换。 */
 export function isRetryableMimoTtsStatus(statusCode: number): boolean {
   if (statusCode === 408) {
-    // 任务 cancel → 408；不重试。仅网络超时在 synthesize 内映射 504。
+    // 任务 cancel → 408，不重试。仅网络超时在 synthesize 内映射 504。
     return false;
   }
   if (statusCode === 429) return true;
   if (statusCode === 504) return true;
   if (statusCode >= 500) return true;
   return false;
+}
+
+// ── P1-7：TTS 上游 503 burst 的指数退避 + 熔断 ────────────────────────────────
+// 上游突发 503/429（服务过载节流）时：所有后续 chunk 也会同命。
+// 应对策略：同实例连续 503/429 计数，读写间指数退避；计数达到阈值后打开熔断，
+// cooldown 内直接抛 AppError(503)，不再盲目打上游。
+
+export const TTS_MAX_BURST_FAILURES = Math.max(
+  1,
+  Number(process.env.AUDIOBOOK_TTS_MAX_BURST_FAILURES ?? 3) || 3,
+);
+export const TTS_BURST_BACKOFF_BASE_MS = Math.max(
+  100,
+  Number(process.env.AUDIOBOOK_TTS_BACKOFF_BASE_MS ?? 400) || 400,
+);
+export const TTS_BURST_BACKOFF_CAP_MS = Math.max(
+  500,
+  Number(process.env.AUDIOBOOK_TTS_BACKOFF_CAP_MS ?? 5000) || 5000,
+);
+export const TTS_BURST_CIRCUIT_COOLDOWN_MS = Math.max(
+  5_000,
+  Number(process.env.AUDIOBOOK_TTS_CIRCUIT_COOLDOWN_MS ?? 30_000) || 30_000,
+);
+
+export const TTS_UPSTREAM_CIRCUIT_BROKEN_MSG = "TTS upstream failed, circuit broken";
+
+/** 是否上游突发码（503 / 429）。 */
+export function isTtsUpstreamStatus(statusCode: number): boolean {
+  return statusCode === 429 || statusCode === 503;
+}
+
+/**
+ * 指数退避曲线：min(cap, 2^burstCount × base)，burstCount 从 0 起。
+ * 默认即 min(5000, 2^attempt × 400)。
+ */
+export function computeTtsUpstreamBackoffMs(input: {
+  burstCount: number;
+  baseMs?: number;
+  capMs?: number;
+}): number {
+  const base = Math.max(4, input.baseMs ?? TTS_BURST_BACKOFF_BASE_MS);
+  const cap = Math.max(base * 2, input.capMs ?? TTS_BURST_BACKOFF_CAP_MS);
+  const count = Math.max(0, Math.floor(input.burstCount));
+  return Math.min(cap, Math.pow(2, count) * base);
+}
+
+/**
+ * 实例级熔断器：同一 provider 实例连续 503/429 计数，达阈值即打开。
+ * recordSuccess / 非突发失败会清空连续序列；cooldown 内 open 直接短路。
+ */
+export class TtsUpstreamCircuitBreaker {
+  private consecutiveFailures = 0;
+  private openUntilMs = 0;
+  readonly maxBurstFailures: number;
+  readonly cooldownMs: number;
+
+  constructor(options?: { maxBurstFailures?: number; cooldownMs?: number }) {
+    this.maxBurstFailures = Math.max(
+      1,
+      options?.maxBurstFailures ?? TTS_MAX_BURST_FAILURES,
+    );
+    this.cooldownMs = Math.max(1_000, options?.cooldownMs ?? TTS_BURST_CIRCUIT_COOLDOWN_MS);
+  }
+
+  /** 是否处于熔断打开状态。 */
+  get isOpen(): boolean {
+    return Date.now() < this.openUntilMs;
+  }
+
+  /** 当前连续 503/429 计数。 */
+  get burstCount(): number {
+    return this.consecutiveFailures;
+  }
+
+  /** 成功（或非突发）→ 清空计数并关闭熔断。 */
+  recordSuccess(): void {
+    this.consecutiveFailures = 0;
+    this.openUntilMs = 0;
+  }
+
+  /**
+   * 记录一次连续 503/429。返回 true 表示本调用已触发熔断。
+   */
+  recordUpstreamFailure(): boolean {
+    this.consecutiveFailures += 1;
+    if (this.consecutiveFailures >= this.maxBurstFailures) {
+      this.openUntilMs = Date.now() + this.cooldownMs;
+      return true;
+    }
+    return false;
+  }
+}
+
+/** 指数退避等待；AbortSignal 提前中断时抛出。 */
+async function sleep(ms: number, signal?: AbortSignal | null): Promise<void> {
+  if (ms <= 0) return;
+  await new Promise<void>((resolvePromise, rejectPromise) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolvePromise();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      rejectPromise(new Error("sleep aborted"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 /**
@@ -462,9 +570,29 @@ function markMimoTtsEndpointChainExhausted(error: unknown, endpointCount: number
 export class MimoChatAudioTTSProvider {
   readonly providerId = "mimo-chat-audio";
 
+  /** P1-7：实例级熔断器；先把单测/构造改为可注入便于确定性。 */
+  private upstreamCircuit: TtsUpstreamCircuitBreaker;
+
+  constructor(options?: { upstreamCircuit?: TtsUpstreamCircuitBreaker }) {
+    this.upstreamCircuit = options?.upstreamCircuit ?? new TtsUpstreamCircuitBreaker();
+  }
+
+  /** 测试/运维：替换熔断器实例（不影响生产默认）。 */
+  setUpstreamCircuit(circuit: TtsUpstreamCircuitBreaker): void {
+    this.upstreamCircuit = circuit;
+  }
+
   async synthesize(input: MimoTtsSynthesizeInput): Promise<MimoTtsSynthesizeResult> {
     const mode = resolveMode(input);
     const body = buildMimoTtsRequestBody(input);
+
+    // P1-7：熔断打开近况直接短路，不打上游。
+    if (this.upstreamCircuit.isOpen) {
+      throw new AppError(TTS_UPSTREAM_CIRCUIT_BROKEN_MSG, 503, {
+        mimoTtsCircuitOpen: true,
+      });
+    }
+
     // input.provider 临时覆盖绑定；未传则走 AppSetting/env/default(openai)
     const transport = await resolveMimoTtsTransportForSynthesize({
       providerOverride: input.provider ?? null,
@@ -473,7 +601,7 @@ export class MimoChatAudioTTSProvider {
     const apiKey = transport.primaryApiKey.trim();
     if (!baseURL) {
       throw new AppError(
-        "未配置 LLM/CPA baseURL，无法调用 MiMo TTS。请配置对应 provider 的 base URL。",
+        "尚未配置 LLM/CPA baseURL，无法调用 MiMo TTS。请配置对应 provider 的 base URL。",
         400,
       );
     }
@@ -501,8 +629,20 @@ export class MimoChatAudioTTSProvider {
         lastError = new AppError(`MiMo TTS 端点 ${endpoint.id} 缺少 API Key。`, 400);
         continue;
       }
+      // P1-7：同一个 503/429 突发序列里，端点切换前先按指数退避。
+      // 连续 3 次突发（含跨端点累计）→ 打开熔断，cooldown 内直接 503。
+      if (this.upstreamCircuit.burstCount > 0) {
+        const backoffMs = computeTtsUpstreamBackoffMs({
+          burstCount: this.upstreamCircuit.burstCount - 1,
+        });
+        await sleep(backoffMs, input.signal);
+        if (input.signal?.aborted) {
+          throw new AppError("MiMo TTS 请求已取消。", 408);
+        }
+      }
+
       try {
-        return await this.synthesizeOnce({
+        const result = await this.synthesizeOnce({
           body,
           mode,
           input,
@@ -510,6 +650,8 @@ export class MimoChatAudioTTSProvider {
           apiKey: endpointKey,
           requestTimeoutMs,
         });
+        this.upstreamCircuit.recordSuccess();
+        return result;
       } catch (error) {
         lastError = error;
         if (input.signal?.aborted) {
@@ -518,9 +660,25 @@ export class MimoChatAudioTTSProvider {
             : new AppError("MiMo TTS 请求已取消。", 408);
         }
         if (error instanceof AppError && !isRetryableMimoTtsStatus(error.statusCode)) {
+          // 4xx 客户端错误——上游没坏，节点无需计数；恢复瞬时成功也可能关闭熔断
+          if (!isTtsUpstreamStatus(error.statusCode)) {
+            this.upstreamCircuit.recordSuccess();
+          }
           throw error;
         }
-        // 还有下一端点则换后端；否则标记链耗尽后抛出
+        if (error instanceof AppError && isTtsUpstreamStatus(error.statusCode)) {
+          const opened = this.upstreamCircuit.recordUpstreamFailure();
+          console.warn(
+            `${summarizeMimoTtsEndpointFailure({ endpointId: endpoint.id, error })}; consecutiveUpstreamFailures=${this.upstreamCircuit.burstCount}`,
+          );
+          if (opened) {
+            throw new AppError(TTS_UPSTREAM_CIRCUIT_BROKEN_MSG, 503, {
+              appTtsCircuitOpen: true,
+              mimoTtsEndpointChainExhausted: true,
+            });
+          }
+        }
+        // 还有下一端点则换后端；否则记链耗尽后抛出
         if (index < endpoints.length - 1) {
           const next = endpoints[index + 1];
           console.warn(

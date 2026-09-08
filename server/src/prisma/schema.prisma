@@ -1109,6 +1109,8 @@ model AudiobookTask {
   annotationsJson       String?
   progressJson          String?
   resultJson            String?
+  /// 持久化 m4b 代际；旧 worker 只能写入仍属于该代际的产物/投影。
+  m4bGenerationToken    String             @default("")
   outputDir             String?
   fullAudioPath         String?
   startedAt             DateTime?

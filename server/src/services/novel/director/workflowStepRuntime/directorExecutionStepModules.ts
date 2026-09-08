@@ -405,9 +405,17 @@ function createChapterDraftExecutableModule(
   );
 }
 
+type ChapterExecutionContractSyncStepInput = {
+  novelId: string;
+  executionContractChapterRange?: {
+    startOrder: number;
+    endOrder: number;
+  } | null;
+};
+
 function createChapterExecutionContractSyncModule(
   descriptor: WorkflowStepModuleDescriptor,
-): WorkflowStepModule<{ novelId: string }, void> {
+): WorkflowStepModule<ChapterExecutionContractSyncStepInput, void> {
   return createWorkflowStepModule(
     descriptor,
     async (input) => getDirectorCoreStepRuntime().executeChapterExecutionContractSyncStep(input),
@@ -442,8 +450,11 @@ function createChapterExecutionContractSyncModule(
           });
       },
       buildInput: async (context) => {
-        const { novelId } = await loadDirectorModuleState(context);
-        return { novelId };
+        const { novelId, state, request } = await loadDirectorModuleState(context);
+        return {
+          novelId,
+          executionContractChapterRange: resolveChapterExecutionProgressScope({ state, request }),
+        };
       },
       validateOutput: async (_output, context) => {
         const summary = await loadFactBaseSummary(context);

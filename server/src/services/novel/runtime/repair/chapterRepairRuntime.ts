@@ -1,6 +1,11 @@
 import type { ChapterRepairContext, ChapterRuntimePackage } from "@ai-novel/shared/types/chapterRuntime";
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
 import type { ReviewIssue } from "@ai-novel/shared/types/novel";
+import {
+  evaluateLengthBudget,
+  resolveHardMinWordCount,
+  resolveLengthBudgetContract,
+} from "@ai-novel/shared/types/chapterLengthControl";
 import { runTextPrompt } from "../../../../prompting/core/promptRunner";
 import { buildChapterRepairContextBlocks } from "../../../../prompting/prompts/novel/chapterLayeredContext";
 import { chapterRepairPrompt } from "../../../../prompting/prompts/novel/review.prompts";
@@ -9,6 +14,16 @@ import {
   ChapterPatchRepairService,
   type PatchRepairMode,
 } from "../../chapterPatchRepairService";
+import {
+  buildRepairIssuesPayload,
+  resolveRepairIssueCodes,
+} from "./repairFeedbackPayload";
+import {
+  QUALITY_FEEDBACK_UNKNOWN_RETRY_MAX,
+  type QualityFeedbackPacket,
+} from "@ai-novel/shared/types/qualityFeedback";
+
+export { buildRepairIssuesPayload } from "./repairFeedbackPayload";
 
 export interface ChapterRepairExecutionOptions {
   provider?: LLMProvider;
@@ -30,8 +45,15 @@ export interface PrepareChapterRepairExecutionInput {
   /** 审计层开放硬伤 code（来自 assembled ContextPackage.openAuditIssues，非 LLM 重跑）。
    * streaming repair 无完整 runtimePackage，但可据此让 heavy 候选见到精确硬伤 code。 */
   auditOpenIssueCodes?: string[] | null;
+  /** 当前章节最近一次质量环反馈；只供 repair prompt，不进入新的质量评估。 */
+  qualityFeedback?: QualityFeedbackPacket[] | null;
   repairContext?: ChapterRepairContext | null;
   bibleContent?: string | null;
+  /**
+   * 章节目标字数（来自 chapter.targetWordCount）。heavy_repair 据此解析篇幅合同
+   * 注入 prompt，让 AI 主动写够（hardMin=target×0.6 不可破）。null/缺失则不设篇幅门。
+   */
+  targetWordCount?: number | null;
   forceFullRewrite?: boolean;
   options: ChapterRepairExecutionOptions;
 }
@@ -47,6 +69,16 @@ export interface ChapterHeavyRepairPromptRequest {
     modeHint: string;
     /** heavy_repair / light_repair — 让 prompt.render 走差异化改写边界（heavy 允许重写句段）。 */
     repairMode?: string;
+    /**
+     * 篇幅合同（target/softMin/softMax/hardMin）。仅 heavy_repair 注入到 prompt.render，
+     * 让 AI 写够篇幅、不破 hardMin。light_repair 不传（结构上无力扩写整章）。
+     */
+    lengthBudget?: {
+      targetWordCount: number;
+      softMinWordCount: number;
+      softMaxWordCount: number;
+      hardMinWordCount: number;
+    } | null;
   };
   contextBlocks?: ReturnType<typeof buildChapterRepairContextBlocks>;
   options: {
@@ -90,6 +122,29 @@ export interface ExecutedChapterRepair {
   patchFailure: ChapterPatchRepairFailedError | null;
 }
 
+/**
+ * 解析 repair 用的篇幅合同（target/softMin/softMax/hardMin）。
+ * 无 targetWordCount（旧数据/无合同）返回 null → 不注入篇幅门。
+ * 仅 heavy_repair 使用（见 prepareChapterRepairExecution）。
+ */
+function resolveRepairLengthBudget(targetWordCount: number | null | undefined): {
+  targetWordCount: number;
+  softMinWordCount: number;
+  softMaxWordCount: number;
+  hardMinWordCount: number;
+} | null {
+  const budget = resolveLengthBudgetContract(targetWordCount);
+  if (!budget) {
+    return null;
+  }
+  return {
+    targetWordCount: budget.targetWordCount,
+    softMinWordCount: budget.softMinWordCount,
+    softMaxWordCount: budget.softMaxWordCount,
+    hardMinWordCount: resolveHardMinWordCount(budget.targetWordCount),
+  };
+}
+
 function normalizeRepairIssues(issues: ReviewIssue[]): ReviewIssue[] {
   return issues.length > 0
     ? issues
@@ -99,60 +154,6 @@ function normalizeRepairIssues(issues: ReviewIssue[]): ReviewIssue[] {
         evidence: "Pipeline quality threshold not met.",
         fixSuggestion: "Tighten continuity, sharpen conflict progression, and improve readability.",
       }];
-}
-
-function resolveIssueCodes(runtimePackage: ChapterRuntimePackage | null | undefined): string[] {
-  return runtimePackage?.audit.openIssues
-    ?.map((issue) => issue.code)
-    .filter((code): code is string => typeof code === "string" && code.trim().length > 0)
-    ?? [];
-}
-
-/**
- * 构建修复 prompt 所用的结构化 issuesJson。
- *
- * Root A 修复：在 ReviewIssue 列表之外，额外透传：
- *  - missingObligations：本章未兑现的义务（kind/summary/evidence），修复器可据此定向补写
- *  - blockingIssueCodes：审计层给出的精确 code（如 OBLIGATION_UNMET / LENGTH_OVER_HARD_MAX），
- *    避免修复器只看压扁文本猜问题类型
- *
- * streaming repair 路径无完整 ChapterRuntimePackage（避免重跑 audit 烧 600s），
- * 但可透传 assembledContextPackage.openAuditIssues 的 code 集合作 auditOpenIssueCodes，
- * 仍让 heavy 候选见到精确硬伤 code（定向修而非漂移重写）。
- */
-function buildRepairIssuesPayload(
-  issues: ReviewIssue[],
-  runtimePackage: ChapterRuntimePackage | null | undefined,
-  auditOpenIssueCodes?: string[] | null,
-): string {
-  const missingObligations = runtimePackage?.obligationCoverage?.missing ?? [];
-  const blockingIssueCodes = [
-    ...resolveIssueCodes(runtimePackage),
-    ...(Array.isArray(auditOpenIssueCodes) ? auditOpenIssueCodes.filter(Boolean) : []),
-  ];
-  const extraCodes = Array.from(new Set(blockingIssueCodes));
-
-  if (missingObligations.length === 0 && extraCodes.length === 0) {
-    return JSON.stringify(issues, null, 2);
-  }
-
-  return JSON.stringify(
-    {
-      issues,
-      ...(missingObligations.length > 0
-        ? {
-          missingObligations: missingObligations.map((o) => ({
-            kind: o.kind,
-            summary: o.summary,
-            ...(o.evidence ? { evidence: o.evidence } : {}),
-          })),
-        }
-        : {}),
-      ...(extraCodes.length > 0 ? { blockingIssueCodes: extraCodes } : {}),
-    },
-    null,
-    2,
-  );
 }
 
 function resolveRepairContext(input: {
@@ -218,13 +219,85 @@ export async function prepareChapterRepairExecution(
   input: PrepareChapterRepairExecutionInput,
 ): Promise<PreparedChapterRepairExecution> {
   const issues = normalizeRepairIssues(input.issues);
-  const issueCodes = resolveIssueCodes(input.runtimePackage);
+  const issueCodes = resolveRepairIssueCodes(
+    input.runtimePackage,
+    input.auditOpenIssueCodes,
+  );
+  // 自动补长度分支（改进二）：确定性实测当前正文是否未达 soft 下界
+  // （length_under_soft / under_hard），或 qualityFeedback/issueCodes 已带 length_under_*。
+  // 命中则把 LENGTH_UNDER_SOFT_MIN 折进 issueCodes（让 getRepairModeHint 自动选
+  // extend_for_length），并让局部补丁走新的 length_expansion 扩写类型，而不是改写替换。
+  // 这防止短候选被 finalizer 的 length_under_hard 强制 discard 后进入死循环。
+  // 守卫：targetWordCount==null（旧数据/无长度合同）时 evaluateLengthBudget 返回 null，
+  // 此时不得仅凭可能 stale 的 length_under_* code 兜底触发 length_expansion，故需同时
+  // 满足「存在权威长度合同」才允许 band/code 证据生效，避免无合同章节被误判扩写。
+  const lengthEvalForUnder = evaluateLengthBudget({
+    content: input.content,
+    targetWordCount: input.targetWordCount ?? null,
+  });
+  const hasLengthContract = input.targetWordCount != null && lengthEvalForUnder !== null;
+  const isUnderLength = (() => {
+    const codeUnder = issueCodes.some((code) =>
+      code.toLowerCase().includes("length_under"));
+    const feedbackUnder = (input.qualityFeedback ?? []).some((packet) =>
+      packet.codes.some((code) => code.toLowerCase().includes("length_under")));
+    const bandEvidence = (lengthEvalForUnder?.band === "under_soft" || lengthEvalForUnder?.band === "under_hard");
+    // 无权威长度合同时一律不算 under length，length_expansion 不会被 stale 的 length_under_* code 触发。
+    if (!hasLengthContract) {
+      return false;
+    }
+    return Boolean(bandEvidence || codeUnder || feedbackUnder);
+  })();
+
   let activeRepairMode = input.options.repairMode ?? "light_repair";
-  let modeHint = getRepairModeHint(activeRepairMode, issueCodes);
+  // 改进二：确定性检测到未达 soft 下界时，非 forceFullRewrite 的局部补丁切到扩写类型。
+  const wantLengthExpansion = isUnderLength
+    && !input.forceFullRewrite
+    && activeRepairMode !== "heavy_repair"
+    && (activeRepairMode === "light_repair" || activeRepairMode === "length_expansion");
+  if (wantLengthExpansion) {
+    activeRepairMode = "length_expansion";
+  }
+  let issueCodesWithLength = issueCodes;
+  if (wantLengthExpansion && !issueCodesWithLength.includes("LENGTH_UNDER_SOFT_MIN")) {
+    issueCodesWithLength = [...issueCodesWithLength, "LENGTH_UNDER_SOFT_MIN"];
+  }
+  // 改进一降级换策略：rootCause=unknown 且未 reachRetry 上限时，下一轮 patch 换角度。
+  // 最新 feedback 包的 failedPatchCount < QUALITY_FEEDBACK_UNKNOWN_RETRY_MAX 且
+  // avoidRetry=false（见 qualityFeedback.buildQualityFeedbackPacket）说明系统允许继续重试；
+  // 这里把同一 signature 第 2 次起的策略从「修复连贯性」轮换到「补长度」或「删冗余」，
+  // 避免同路径空转。
+  const unknownStillRetryable = (() => {
+    const latest = input.qualityFeedback?.at(-1);
+    if (!latest) {
+      return false;
+    }
+    return latest.rootCause === "unknown"
+      && latest.avoidRetry === false
+      && latest.failedPatchCount > 0
+      && latest.failedPatchCount < QUALITY_FEEDBACK_UNKNOWN_RETRY_MAX;
+  })();
+  let resolveModeHint = (mode: PatchRepairMode): string => getRepairModeHint(mode, issueCodesWithLength);
+  let modeHint = resolveModeHint(activeRepairMode);
+  // 篇幅合同仅 heavy_repair 使用（见下方两处 promptInput）。
+  const lengthBudget = resolveRepairLengthBudget(input.targetWordCount ?? null);
 
   if (input.forceFullRewrite && activeRepairMode !== "heavy_repair") {
     activeRepairMode = "heavy_repair";
-    modeHint = getRepairModeHint(activeRepairMode, issueCodes);
+    modeHint = resolveModeHint(activeRepairMode);
+  }
+
+  if (
+    unknownStillRetryable
+    && !isUnderLength
+    && activeRepairMode !== "heavy_repair"
+    // 仅当当前仍为「通用」mode 时才旋转策略。调用方显式指定的专项模式
+    // （character_only / continuity_only / ending_only）需被保留，不得被静默覆盖。
+    && (activeRepairMode === "light_repair")
+  ) {
+    // 该分支仅换提示词切入点（modeHint），不改变实际 repairMode；activeRepairMode 保持 light_repair 不变。
+    // 当前已必然为 light_repair（守卫在上方），仅注入「换角度重试」提示，避免重复上轮同一 patch 思路。
+    modeHint = "unknown_retry_rotate：根因未被归类，按换角度重试——消除重复/冗余表达、收敛疑似未兑现义务的对话回合，避免重放上轮同一 patch 思路。";
   }
 
   if (!input.forceFullRewrite && activeRepairMode !== "heavy_repair") {
@@ -238,7 +311,9 @@ export async function prepareChapterRepairExecution(
         content: input.content,
         issues,
         runtimePackage: input.runtimePackage,
+        auditOpenIssueCodes: input.auditOpenIssueCodes,
         repairContext: input.repairContext,
+        qualityFeedback: input.qualityFeedback,
         provider: input.options.provider,
         model: input.options.model,
         temperature: input.options.temperature,
@@ -262,42 +337,8 @@ export async function prepareChapterRepairExecution(
         throw error;
       }
 
-      // Root B 宽松锚点重试：patch 锚点失配时，用 continuity_only 模式再试一次，
-      // 给 LLM 更宽泛的定位空间，避免直接升级 heavy_repair。
-      const looseAnchorMode: PatchRepairMode = "continuity_only";
-      const looseAnchorHint = "宽松锚点重试（anchor-loose retry）：不要求精确匹配原文，以段落语义为锚，优先修连续性问题。";
-      try {
-        const retried = await patchRepairService.repair({
-          novelId: input.novelId,
-          chapterId: input.chapterId,
-          novelTitle: input.novelTitle,
-          chapterTitle: input.chapterTitle,
-          content: input.content,
-          issues,
-          runtimePackage: input.runtimePackage,
-          repairContext: input.repairContext,
-          provider: input.options.provider,
-          model: input.options.model,
-          temperature: input.options.temperature,
-          repairMode: looseAnchorMode,
-          modeHint: looseAnchorHint,
-        });
-        return {
-          kind: "patched",
-          content: retried.content,
-          issues,
-          finalRepairMode: looseAnchorMode,
-          modeHint: looseAnchorHint,
-          escalatedFromPatch: false,
-          patchFailure: null,
-        };
-      } catch (retryError) {
-        if (!(retryError instanceof ChapterPatchRepairFailedError)) {
-          throw retryError;
-        }
-        // 宽松锚点重试仍失败 → 升级 heavy_repair
-      }
-
+      // 上游 ee979e82：patch 失败后不再隐藏追加第二轮「宽松锚点」patch 调用，
+      // 直接升级一次 heavy_repair，保证「最多一次重试」与实际模型调用一致。
       activeRepairMode = "heavy_repair";
       modeHint = getRepairModeHint(activeRepairMode, issueCodes);
       return {
@@ -313,10 +354,16 @@ export async function prepareChapterRepairExecution(
             bibleContent: resolveBibleContent(input),
             chapterTitle: input.chapterTitle,
             chapterContent: input.content,
-            issuesJson: buildRepairIssuesPayload(issues, input.runtimePackage, input.auditOpenIssueCodes),
+            issuesJson: buildRepairIssuesPayload(
+              issues,
+              input.runtimePackage,
+              input.auditOpenIssueCodes,
+              input.qualityFeedback,
+            ),
             ragContext: buildRepairRagContext(input),
             modeHint,
             repairMode: activeRepairMode,
+            lengthBudget,
           },
           contextBlocks: resolveRepairContext(input)
             ? buildChapterRepairContextBlocks(resolveRepairContext(input) as ChapterRepairContext)
@@ -350,10 +397,16 @@ export async function prepareChapterRepairExecution(
         bibleContent: resolveBibleContent(input),
         chapterTitle: input.chapterTitle,
         chapterContent: input.content,
-        issuesJson: buildRepairIssuesPayload(issues, input.runtimePackage, input.auditOpenIssueCodes),
+        issuesJson: buildRepairIssuesPayload(
+          issues,
+          input.runtimePackage,
+          input.auditOpenIssueCodes,
+          input.qualityFeedback,
+        ),
         ragContext: buildRepairRagContext(input),
         modeHint,
         repairMode: activeRepairMode,
+        lengthBudget,
       },
       contextBlocks: resolveRepairContext(input)
         ? buildChapterRepairContextBlocks(resolveRepairContext(input) as ChapterRepairContext)
@@ -437,6 +490,13 @@ export function getRepairModeHint(
     return "compress_tail_for_length：优先回收尾段冗余展开，保留结尾 hook 和关键冲突。";
   }
   if (issueCodes.includes("LENGTH_UNDER_SOFT_MIN")) {
+    // 原 switch 里 "length_expansion" 的 case 在此分支出现前即被拦截，属死代码；
+    // 此处按 mode 区分合并保留其语义：wantLengthExpansion 时 issueCodes 必带
+    // LENGTH_UNDER_SOFT_MIN（见 prepareChapterRepairExecution），故 mode=length_expansion
+    // 走到这里必然命中该 if，返回扩写专属提示。
+    if (repairMode === "length_expansion") {
+      return "extend_for_length（自动补长度）：章节未达目标篇幅（length_under_soft/under_hard）。在指定薄弱处扩写——补足义务场景的关键节拍、动作、反应与细节，把推进落到实处；禁止注水、重复或离题支线凑字，禁止把结尾 hook 推后。";
+    }
     return "extend_for_length：只补最后的义务场景或结尾 hook，增加有效推进，不要回顾性凑字数。";
   }
   switch (repairMode) {

@@ -215,28 +215,28 @@ test("resolveModel ignores whitespace-only model override from stale job payload
   try {
     // No configured route → default route. Whitespace model must not override.
     const resolved = await resolveModel("writer", { model: "   " });
-    assert.equal(resolved.model, "gpt-5.6-luna");
+    assert.equal(resolved.model, "gemini-3.7-flash-high");
   } finally {
     prisma.modelRouteConfig.findUnique = originalFindUnique;
   }
 });
 
-test("resolveModel uses the approved Luna and DeepSeek defaults", async () => {
+test("resolveModel uses the approved writer gemini / Luna / DeepSeek defaults", async () => {
   const originalFindUnique = prisma.modelRouteConfig.findUnique;
   prisma.modelRouteConfig.findUnique = async () => null;
 
   const expectedModels = {
     planner: "gpt-5.6-luna",
-    writer: "gpt-5.6-luna",
+    writer: "gemini-3.7-flash-high",
     review: "gpt-5.6-luna",
-    light_review: "deepseek-v4-pro",
+    light_review: "deepseek-v4-flash",
     critical_review: "gpt-5.6-luna",
     repair: "gpt-5.6-luna",
     replan: "gpt-5.6-luna",
     state_resolution: "gpt-5.6-luna",
-    summary: "deepseek-v4-pro",
-    fact_extraction: "deepseek-v4-pro",
-    chat: "deepseek-v4-pro",
+    summary: "deepseek-v4-flash",
+    fact_extraction: "deepseek-v4-flash",
+    chat: "deepseek-v4-flash",
     default: "gpt-5.6-luna",
   };
 

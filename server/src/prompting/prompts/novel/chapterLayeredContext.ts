@@ -845,23 +845,20 @@ export function buildChapterWriterContextBlocks(
       })
       : null,
     writeContext.priorQualityFeedback.length > 0
-      ? (() => {
-        // 本章上枪失败反馈不可被预算摘要丢掉；仅上章 QFP 时仍允许 summary。
-        const hasSameChapterGun = writeContext.priorQualityFeedback.some(
-          (line) => typeof line === "string" && line.includes("【本章上枪】"),
-        );
-        return createContextBlock({
-          id: "prior_quality_feedback",
-          group: "prior_quality_feedback",
-          priority: 98,
-          required: hasSameChapterGun,
-          allowSummary: !hasSameChapterGun,
-          content: [
-            "纠偏反馈（上章质量债 / 本章上枪失败；按建议规避同类硬伤，禁止 skip_quality / 同签连 patch）：",
-            ...writeContext.priorQualityFeedback.map((line) => `- ${line}`),
-          ].join("\n"),
-        });
-      })()
+      ? createContextBlock({
+        id: "prior_quality_feedback",
+        group: "prior_quality_feedback",
+        priority: 98,
+        // QFP 是纠偏关键输入（单行 ~15 token、整窗 ~150 token），不允许因预算被无声裁剪；
+        // ch6 实证：required=false 时 writer_draft droppedContextBlockIds 含 prior_quality_feedback，
+        // 导致 writer 看不到「补关键节拍 / 承接因果」等 mustFix，重写仍犯同类错。
+        required: true,
+        allowSummary: false,
+        content: [
+          "纠偏反馈（上章质量债 / 本章上枪失败；按建议规避同类硬伤，禁止 skip_quality / 同签连 patch）：",
+          ...writeContext.priorQualityFeedback.map((line) => `- ${line}`),
+        ].join("\n"),
+      })
       : null,
     hasObligationContract
       ? createContextBlock({

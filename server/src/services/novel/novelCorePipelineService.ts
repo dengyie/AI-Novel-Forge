@@ -33,6 +33,7 @@ import {
   warnGenerationJobLeaseDisabledOnce,
 } from "./pipelineExecutionHelpers";
 import { executePipelineJob } from "./pipelineExecute";
+import { withPipelineExecutionPermit } from "./pipeline/execution/PipelineExecutionAdmission";
 import { PipelineJobCancellationService } from "./pipeline/state/PipelineJobCancellationService";
 import { PipelineJobLeaseService } from "./pipeline/state/PipelineJobLeaseService";
 import { PipelineJobWriteService } from "./pipeline/state/PipelineJobWriteService";
@@ -267,10 +268,6 @@ export class NovelCorePipelineService {
     const jobTransportAutoRetryCount = normalizeJobTransportAutoRetryCount(
       payload.jobTransportAutoRetryCount,
     );
-    const claimed = await this.pipelineJobWriteService.claimForResume(job.id);
-    if (claimed.count === 0) {
-      return;
-    }
     logPipelineInfo("恢复流水线任务调度", {
       jobId: job.id,
       novelId: job.novelId,
@@ -299,6 +296,10 @@ export class NovelCorePipelineService {
       provider: payload.provider,
       model: payload.model,
       temperature: payload.temperature,
+      // Recovery must claim the DB lease only after process-level admission.
+      // Otherwise a serial admission queue can hold an already-claimed lease
+      // until its TTL expires before execution actually starts.
+      prepareForResume: true,
     });
   }
 
@@ -490,12 +491,23 @@ export class NovelCorePipelineService {
     }
   }
 
-  private schedulePipelineExecution(jobId: string, novelId: string, options: PipelineRunOptions): void {
+  private schedulePipelineExecution(
+    jobId: string,
+    novelId: string,
+    options: PipelineRunOptions & { prepareForResume?: boolean },
+  ): void {
     if (NovelCorePipelineService.activeJobIds.has(jobId)) {
       return;
     }
     NovelCorePipelineService.activeJobIds.add(jobId);
-    void (async () => {
+    let leaseOwner: string | null = null;
+    void withPipelineExecutionPermit(async () => {
+      if (options.prepareForResume) {
+        const claimed = await this.pipelineJobWriteService.claimForResume(jobId);
+        if (claimed.count === 0) {
+          return;
+        }
+      }
       // CAS 认领：消除"两个进程同时调度同 jobId"的竞态——内存 activeJobIds 只能防本进程内
       // 重复 dispatch，跨进程（respawn 后新实例 + 旧实例残留）dedup 必须落 DB。leaseExpiresAt
       // null 或已过期才能认领；认领成功后其它实例 updateMany 看到 status=running 且 lease
@@ -507,13 +519,12 @@ export class NovelCorePipelineService {
       }
       // owner 先算（lease disabled 时为 null），认领成功与否都用它灌进 executePipeline，
       // 让 executePipelineJob 的心跳/终写 CAS 带 leaseOwner，count=0 → 抛 lease-lost 早退。
-      const leaseOwner = leaseEnabled ? `pipeline-${process.pid}` : null;
+      leaseOwner = leaseEnabled ? `pipeline-${process.pid}` : null;
       if (leaseOwner) {
         try {
           const claimed = await this.pipelineJobLeaseService.claim(jobId, leaseOwner);
           if (claimed.count === 0) {
             // 已被其它实例认领或租约未过期——不重复调度。
-            NovelCorePipelineService.activeJobIds.delete(jobId);
             return;
           }
         } catch (error) {
@@ -523,23 +534,21 @@ export class NovelCorePipelineService {
             novelId,
             error: error instanceof Error ? error.message : String(error),
           });
-          NovelCorePipelineService.activeJobIds.delete(jobId);
           return;
         }
       }
-      await this.executePipeline(jobId, novelId, options, leaseOwner)
-        .catch(async (error) => {
-          // 防止未处理 rejection 拖垮进程；并保证 job 不永久卡在 running。
-          await this.pipelineJobWriteService.ensureTerminalAfterUnhandledError(
-            jobId,
-            leaseOwner,
-            error,
-          );
-        })
-        .finally(() => {
-          NovelCorePipelineService.activeJobIds.delete(jobId);
-        });
-    })();
+      await this.executePipeline(jobId, novelId, options, leaseOwner);
+    }).catch(async (error) => {
+      // 防止未处理 rejection 拖垮进程；并保证成功认领后出现的意外异常不把 job
+      // 永久留在 running。若租约尚未认领，owner-CAS 会安全地命中 0 行。
+      await this.pipelineJobWriteService.ensureTerminalAfterUnhandledError(
+        jobId,
+        leaseOwner,
+        error,
+      );
+    }).finally(() => {
+      NovelCorePipelineService.activeJobIds.delete(jobId);
+    });
   }
 
   private async executePipeline(

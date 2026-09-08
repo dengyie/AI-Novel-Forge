@@ -85,6 +85,38 @@ keyMilestoneGuards: z.array(volumeKeyMilestoneGuardSchema).default([])
 
 **输出**：`repetitionClusters`、`openingPatternClusters`、`hasCriticalIssues` 和修复建议。
 
+### 八、质量反馈与承接锚点边界
+
+章节质量环产生的 `QualityFeedbackPacket` 是结构化纠偏输入，不是新的质量证据。它可以被后续 writer 和当前章节 repair 消费，用于传递 `rootCause`、`codes`、`evidence`、`mustFix` 与 `planHints`；repair 载荷只保留当前最新 packet，避免历史反馈淹没当前问题。
+
+`chapterStatus=needs_repair` 的正文不得作为下一章的 `previousChapterTail` 或其它直接承接锚点，否则未通过质量门的尾段会被再次当作事实承接。但该章节的 QFP 仍应进入近期反馈窗口，让下一次写作知道上一轮失败的根因。承接正文与反馈来源必须在上下文组装阶段分离。
+
+当前章节的 QFP 只注入 patch/heavy repair prompt，不得注入新的 review/acceptance/quality-loop 评估 prompt。修复后必须基于新正文重新评估；旧反馈不能被当作新正文的通过证据，也不能绕过 `literaryPass`、`l0Clear` 或 `qualityLoop` 质量门。反馈中的篇幅建议只表达场景完整度与因果推进，禁止转化为机械凑字数或固定剧情规则。
+
+### 九、反馈块预算与质量环回写边界
+
+`prior_quality_feedback` 在 writer prompt 中必须 `required: true` 且 `allowSummary: false`。QFP 单行约 15 token、整窗不超过 8 条（约 150 token），成本极低，但它是 writer 唯一能看到「上一章为何失败」的结构化输入；一旦因预算被裁剪，writer 会重复同类硬伤。本章上枪失败反馈与上章 QFP 同等保护，不再区分 required 等级。
+
+流式 `/generate` 定稿后必须调用 `ChapterQualityLoopService.recordAssessment()` 回写 `riskFlags.qualityLoop` 与 QFP。`persistChapterQualityScores` 只更新 `qualityScore` / `chapterStatus`，不写质量环；若跳过回写，下游 writer/repair 会继续读到旧 revision 的过期反馈，修复决策基于失效证据。CAS 必须使用 `finalized.contentRevision`；冲突时记日志不抛出，由 manual review / repair recheck 路径基于最新 revision 重新评估兜底。
+
+### 十、章节边界优先于长度债
+
+`chapter_boundary.endingState` 或 `chapter_boundary.doNotCross` 有具体内容时，它们是写作阶段的停止信号，优先于 `targetWordCount` / `minWordCount`。writer prompt 必须允许戏核完成并抵达结束态后自然收束，不能为补足篇幅越过结束态、开启新场景或偷跑后续章节。
+
+运行时若正文低于长度下限但上下文已有具体边界，不再自动发起 `writer_extend`。系统保留 `chapterLengthDebt`，交由质量门和 repair 评估是否需要在边界内补足；这不是自动通过，也不改变长度质量风险。没有具体边界契约时，旧的长度恢复路径仍可运行，但不得把长度恢复提示写成重复注水。
+
+边界字段为空或退化为抽象钩子时，不能假定 writer 拥有可靠停止坐标；应优先修复章节执行合同/场景卡来源，而不是在续写器里硬编码章节号或字数特例。
+
+### 十一、字数硬门在 generate 与 repair 路径共用（hardMin = target×0.6 不可破）
+
+字数硬下限 `hardMin = floor(targetWordCount × LENGTH_HARD_UNDER_RATIO=0.6)` 是不可由 LLM 分数推翻的客观事实：
+
+- **generate/acceptance 路径**：`ChapterAcceptanceAssessmentService.reconcileLengthAssessment` 在 `evaluateLengthBudget` 判 `under_hard` 时注入 `length_under_hard`（severity high），并把 overall 压到 ≤49，禁止静默 `completed`。
+- **repair 复检路径**：`ChapterRepairFinalizer` 在 `decideRepairContentAdoption` **之前**对候选跑同一个 `evaluateLengthBudget`；命中 `under_hard` 时强制判 discard（不写新正文，正文保持 baseline），并通过 `recordRepairFeedbackDecision(repairDecision: "discard")` 让 QFP `avoidRetry` 生效——下一轮 repair 被 `isAutoPatchAvoidedByRiskFlags` 强制升级为 `heavy_repair`，避免 light_repair 局部补丁反复产出短候选。
+- **引导层**：`chapterRepairPrompt` 在 `heavy_repair` 且带 `lengthBudget` 时注入篇幅合同（目标 / 软区间 / 硬下限），让 AI 主动写够；`light_repair` 不注入扩写指令（结构上无力扩写整章）。
+
+剧情边界优先于凑字数（见第十节），但**不豁免 hardMin**：戏核完整、抵达结束态时以自然收束为准，可低于 `target`/`softMin`，**但不得低于 `hardMin`**；候选低于 `hardMin` 一律 discard。无 `targetWordCount`（旧数据 / 无合同）时 `evaluateLengthBudget` 返回 null，不设字数门，兼容旧章节。
+
 ## 失效模式
 
 - `completedMilestones` 和 `recentScenePatterns` 依赖上游服务在构建上下文时正确填入，若上游不填，这两个守卫就不生效。本次修改只建立了接口契约，数据填充需要在章节运行时协调器中实现。
@@ -103,6 +135,7 @@ keyMilestoneGuards: z.array(volumeKeyMilestoneGuardSchema).default([])
 - `server/src/agents/tools/bookAnalysisTools.ts`（`audit_chapter_continuity`）
 - `server/src/prompting/prompts/novel/chapterLayeredContext.ts`
 - `server/src/prompting/prompts/novel/chapterWriter.prompts.ts`
+- `server/src/services/novel/chapterWritingGraph.ts`（长度恢复与边界停止）
 - `shared/types/chapterRuntime.ts`（`ChapterWriteContext`、`VolumeWindowContext`）
 
 ## 源文档

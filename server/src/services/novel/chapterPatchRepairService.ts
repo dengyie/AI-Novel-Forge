@@ -9,6 +9,8 @@ import {
 import { runStructuredPrompt } from "../../prompting/core/promptRunner";
 import { buildChapterRepairContextBlocks } from "../../prompting/prompts/novel/chapterLayeredContext";
 import { chapterPatchRepairPrompt } from "../../prompting/prompts/novel/chapterPatchRepair.prompts";
+import { buildRepairIssuesPayload } from "./runtime/repair/repairFeedbackPayload";
+import type { QualityFeedbackPacket } from "@ai-novel/shared/types/qualityFeedback";
 
 export type PatchRepairMode =
   | "detect_only"
@@ -16,7 +18,14 @@ export type PatchRepairMode =
   | "heavy_repair"
   | "continuity_only"
   | "character_only"
-  | "ending_only";
+  | "ending_only"
+  /**
+   * 自动补长度：检测到章节字数未达 soft 下界（length_under_soft / under_hard /
+   * chapterLengthDebt）时，指示 LLM 在指定位置**扩写**而非改写替换，把关键节拍、
+   * 动作、反应与细节写实以补足推进。这是质量环自动修复的分支，防止短候选因
+   * length_under_hard 被 finalizer 强制 discard 后陷入死循环。
+   */
+  | "length_expansion";
 
 export interface ChapterPatchRepairInput {
   novelId?: string;
@@ -28,10 +37,13 @@ export interface ChapterPatchRepairInput {
   modeHint?: string;
   repairContext?: ChapterRepairContext | null;
   runtimePackage?: ChapterRuntimePackage | null;
+  auditOpenIssueCodes?: string[] | null;
   provider?: LLMProvider;
   model?: string;
   temperature?: number;
   repairMode?: PatchRepairMode;
+  /** 当前章节最近一次质量环反馈；只供 patch prompt，不进入新的质量评估。 */
+  qualityFeedback?: QualityFeedbackPacket[] | null;
 }
 
 export interface ChapterPatchRepairResult {
@@ -75,7 +87,12 @@ export class ChapterPatchRepairService {
           novelTitle: input.novelTitle,
           chapterTitle: input.chapterTitle,
           chapterContent: input.content,
-          issuesJson: JSON.stringify(input.issues, null, 2),
+          issuesJson: buildRepairIssuesPayload(
+            input.issues,
+            input.runtimePackage,
+            input.auditOpenIssueCodes,
+            input.qualityFeedback,
+          ),
           modeHint: input.modeHint,
         },
         contextBlocks,

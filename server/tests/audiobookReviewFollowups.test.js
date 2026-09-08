@@ -6,7 +6,7 @@
  *     否则 cancelTask 落的 cancelled 会被迟到的子回调覆写成 succeeded/failed
  *  2. resumePendingTasks / resumeTask / markPendingTasksForManualRecovery 不得抹除 cancelRequestedAt
  *  3. watchdog 翻 fail 续生成子任务后必须 finalizeContinueChild 收口父
- *  4. continueParentTask 先 CAS 抢占父再做破坏性 wipe / 建子
+ *  4. continueParentTask 先 CAS 抢占父，再持久化可恢复的子任务清理意图
  *  5. appendFailedContinueChapters 乐观 CAS 防 progressJson 丢更新
  *  6. PatrolAgent P2 读 annotationsJson 真源（parseAnnotations 纯函数）+ P3 尊重 outputDir
  *
@@ -122,7 +122,7 @@ test("runWatchdogTick: markFailedIfRunning 命中后对续生成子调 finalizeC
     "watchdog 必须识别续生成子任务",
   );
   assert.ok(
-    /finalizeContinueChild\(row\.id,\s*true\)/.test(body),
+    /finalizeContinueChild\(row\.id,\s*true(?:,\s*[^)]*)?\)/.test(body),
     "watchdog 翻 fail 子任务后必须 finalizeContinueChild 收口父，否则父永久卡 continuing",
   );
   // HIGH-3：翻 fail 只改 DB 行，pipeline 还活着（慢 TTS = 误判）。不 abort 则僵尸子
@@ -147,24 +147,28 @@ test("markFailedIfRunning 返回命中行数（watchdog 依据它决定是否收
   assert.ok(/return claimed\.count/.test(body), "应返回 claimed.count");
 });
 
-// ── 4. continueParentTask 先抢占后破坏 ──
+// ── 4. continueParentTask 先抢占，再持久化清理意图 ──
 
-test("continueParentTask: CAS 抢占父在 wipe/建子之前，落空即 409", () => {
+test("continueParentTask: CAS 抢占先于建子，破坏性清理由持久化子任务执行", () => {
   const start = taskServiceSrc.indexOf("async continueParentTask(");
   const end = taskServiceSrc.indexOf("async reconcileParent(", start);
   const body = taskServiceSrc.slice(start, end);
 
   const casIdx = body.indexOf('status: { in: ["succeeded", "failed"] }');
-  const wipeIdx = body.indexOf("wipeChapterAudioArtifacts");
   const createIdx = body.indexOf("prisma.audiobookTask.create");
-  assert.ok(casIdx > 0 && wipeIdx > 0 && createIdx > 0, "三个关键点都应存在");
-  assert.ok(casIdx < wipeIdx, "CAS 抢占必须在破坏性 wipe 之前（双提交防双 wipe）");
+  const enqueueIdx = body.indexOf("this.enqueueTask(child.id)");
+  assert.ok(casIdx > 0 && createIdx > 0 && enqueueIdx > 0, "CAS、建子和入队关键点都应存在");
   assert.ok(casIdx < createIdx, "CAS 抢占必须在建子之前（双提交防双子）");
-  // wipe 必须在 create 之后：wipe 先跑则 create 失败时回滚把父放回 succeeded，
-  // 声称全书可播而音频已删
+  assert.ok(createIdx < enqueueIdx, "子任务必须先持久化，再交给内存队列执行");
+  assert.equal(
+    body.indexOf("wipeChapterAudioArtifacts"),
+    -1,
+    "入口不得同步 wipe；否则建子失败或进程崩溃会留下不可恢复的磁盘/DB 分裂",
+  );
   assert.ok(
-    createIdx < wipeIdx,
-    "破坏性 wipe 必须排在建子之后（回滚路径不得回滚到已被删的磁盘状态）",
+    /parentGenerationToken:\s*continuationGenerationToken/.test(body)
+      && /mode:\s*input\.mode \?\? null/.test(body),
+    "子任务必须持久化父代际和清理模式，供 executeTask 在启动恢复后重放",
   );
   // MEDIUM-3 fix: progress baseline 在 CAS 之前预算（listReadyChapterAudioIds - requestedIds），
   // 原「post-wipe 后算」断言不再适用——新断言：baseline 计算必须在 CAS 之前
@@ -179,7 +183,7 @@ test("continueParentTask: CAS 抢占父在 wipe/建子之前，落空即 409", (
     "mode=resynthesize 才会 wipe 被点名章，baseline 必须据此扣减",
   );
   assert.ok(
-    /claimedParent\.count === 0/.test(body),
+    /(?:claimedParent|claimed)\.count === 0/.test(body),
     "抢占落空必须拒绝（409），不得继续",
   );
   assert.ok(
