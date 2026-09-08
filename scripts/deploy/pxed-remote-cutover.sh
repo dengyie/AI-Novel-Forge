@@ -227,7 +227,10 @@ fi
 
 if [[ "$SKIP_GIT_RESET" != "1" ]]; then
   log "git fetch + reset --hard $DEPLOY_SHA"
-  git fetch origin --prune
+  # pxed may retain explicit fetch refspecs for retired deployment branches.
+  # Fetch only the supported production lineage so a deleted historical ref
+  # cannot abort an otherwise valid main cutover.
+  git fetch origin --prune "+refs/heads/main:refs/remotes/origin/main"
   if git cat-file -e "${DEPLOY_SHA}^{commit}" 2>/dev/null; then
     git reset --hard "$DEPLOY_SHA"
   else
