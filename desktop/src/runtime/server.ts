@@ -82,7 +82,7 @@ export async function resolveDesktopServerPort(options: { isPackaged: boolean })
 
 async function waitForServerHealth(port: number, timeoutMs = 30_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
-  const healthUrl = `http://127.0.0.1:${port}/api/health`;
+  const healthUrl = `http://127.0.0.1:${port}/api/health/ready`;
 
   while (Date.now() < deadline) {
     try {
@@ -106,7 +106,7 @@ async function waitForServerHealthOrExit(
   timeoutMs = 45_000,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
-  const healthUrl = `http://127.0.0.1:${port}/api/health`;
+  const healthUrl = `http://127.0.0.1:${port}/api/health/ready`;
 
   while (Date.now() < deadline) {
     if (processHandle.hasExited()) {
@@ -284,7 +284,7 @@ async function startManagedServer(port: number, isPackaged: boolean): Promise<De
 
   try {
     await waitForServerHealthOrExit(port, managedProcess, 45_000);
-    appendDesktopLog("desktop.server.process", `Desktop server is healthy at http://127.0.0.1:${port}/api/health.`);
+    appendDesktopLog("desktop.server.process", `Desktop server is ready at http://127.0.0.1:${port}/api/health/ready.`);
   } catch (error) {
     await managedProcess.stop();
     throw error;
