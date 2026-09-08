@@ -144,8 +144,24 @@ function installNoOutputFfmpeg() {
 function installDelayedCloseFfmpeg() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ab-stall-ffmpeg-"));
   const script = path.join(dir, "delayed-close.js");
+  const holder = path.join(dir, "stderr-holder.js");
   const started = path.join(dir, "started");
-  const holderClosed = path.join(dir, "holder-closed");
+  const holderReady = path.join(dir, "holder-ready");
+  const release = path.join(dir, "release-holder");
+  fs.writeFileSync(
+    holder,
+    [
+      "#!/usr/bin/env node",
+      "const fs = require('node:fs');",
+      `fs.writeFileSync(${JSON.stringify(holderReady)}, 'ready');`,
+      `const release = ${JSON.stringify(release)};`,
+      "const timer = setInterval(() => {",
+      "  if (fs.existsSync(release)) { clearInterval(timer); process.exit(0); }",
+      "}, 10);",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
   fs.writeFileSync(
     script,
     [
@@ -156,13 +172,13 @@ function installDelayedCloseFfmpeg() {
       // Keep stderr open from a separate process group. The runner kills the
       // ffmpeg group, while this detached holder keeps ChildProcess `close`
       // delayed long enough to verify that cancellation waits for stream close.
-      `spawn(process.execPath, ['-e', ${JSON.stringify(`setTimeout(() => { require('node:fs').writeFileSync(${JSON.stringify(holderClosed)}, 'closed'); }, 500)`) }], { detached: true, stdio: ['ignore', 'ignore', process.stderr] }).unref();`,
+      `spawn(process.execPath, [${JSON.stringify(holder)}], { detached: true, stdio: ['ignore', 'ignore', process.stderr] }).unref();`,
       "setInterval(() => {}, 50);",
       "",
     ].join("\n"),
     { mode: 0o755 },
   );
-  return { script, started, holderClosed };
+  return { script, started, holderReady, release };
 }
 
 function installKillReleaseRaceFfmpeg() {
@@ -323,20 +339,21 @@ test("取消编码后等待 ffmpeg close 再释放调用方", async () => {
       stallTimeoutMs: 5_000,
     });
     const deadline = Date.now() + 2_000;
-    while (!fs.existsSync(fake.started) && Date.now() < deadline) {
+    while ((!fs.existsSync(fake.started) || !fs.existsSync(fake.holderReady)) && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     assert.equal(fs.existsSync(fake.started), true, "fake ffmpeg should have started");
+    assert.equal(fs.existsSync(fake.holderReady), true, "stderr holder should have started");
     controller.abort();
+    let settled = false;
+    void pending.then(() => { settled = true; }, () => { settled = true; });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(settled, false, "encode promise must wait for the inherited stderr holder to close");
+    fs.writeFileSync(fake.release, "release");
     const result = await pending;
 
     assert.equal(result.status, "failed");
     assert.match(result.reason ?? "", /取消/);
-    assert.equal(
-      fs.existsSync(fake.holderClosed),
-      true,
-      "encode promise must settle only after the inherited stderr holder closes",
-    );
   } finally {
     if (oldPath === undefined) delete process.env.AUDIOBOOK_FFMPEG_PATH;
     else process.env.AUDIOBOOK_FFMPEG_PATH = oldPath;
