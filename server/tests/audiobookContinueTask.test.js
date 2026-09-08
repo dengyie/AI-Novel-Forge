@@ -320,7 +320,9 @@ test("m4b 后台封装契约：reconcile 不 await encode；已 ready 则 skip�
   // allReady 成功分支不得在 update 前 await encodeFullBookM4b（避免堵队列）
   const reconcileStart = src.indexOf("async reconcileParent(");
   assert.ok(reconcileStart > 0);
-  const reconcileBody = src.slice(reconcileStart, reconcileStart + 4500);
+  const reconcileEnd = src.indexOf("\n  /**", reconcileStart + 1);
+  assert.ok(reconcileEnd > reconcileStart);
+  const reconcileBody = src.slice(reconcileStart, reconcileEnd);
   assert.match(reconcileBody, /m4bAlreadyReady/, "须 short-circuit 已有 m4b");
   assert.match(
     reconcileBody,
