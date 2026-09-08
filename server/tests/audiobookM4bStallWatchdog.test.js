@@ -145,6 +145,7 @@ function installDelayedCloseFfmpeg() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ab-stall-ffmpeg-"));
   const script = path.join(dir, "delayed-close.js");
   const started = path.join(dir, "started");
+  const holderClosed = path.join(dir, "holder-closed");
   fs.writeFileSync(
     script,
     [
@@ -155,13 +156,13 @@ function installDelayedCloseFfmpeg() {
       // Keep stderr open from a separate process group. The runner kills the
       // ffmpeg group, while this detached holder keeps ChildProcess `close`
       // delayed long enough to verify that cancellation waits for stream close.
-      "spawn(process.execPath, ['-e', \"setTimeout(() => {}, 500)\"], { detached: true, stdio: ['ignore', 'ignore', process.stderr] }).unref();",
+      `spawn(process.execPath, ['-e', ${JSON.stringify(`setTimeout(() => { require('node:fs').writeFileSync(${JSON.stringify(holderClosed)}, 'closed'); }, 500)`) }], { detached: true, stdio: ['ignore', 'ignore', process.stderr] }).unref();`,
       "setInterval(() => {}, 50);",
       "",
     ].join("\n"),
     { mode: 0o755 },
   );
-  return { script, started };
+  return { script, started, holderClosed };
 }
 
 function installKillReleaseRaceFfmpeg() {
@@ -313,7 +314,6 @@ test("取消编码后等待 ffmpeg close 再释放调用方", async () => {
   const controller = new AbortController();
 
   try {
-    const startedAt = Date.now();
     const pending = encodeFullBookM4b({
       taskDir,
       bookTitle: "取消等待书",
@@ -332,7 +332,11 @@ test("取消编码后等待 ffmpeg close 再释放调用方", async () => {
 
     assert.equal(result.status, "failed");
     assert.match(result.reason ?? "", /取消/);
-    assert.ok(Date.now() - startedAt >= 350, "encode promise must not settle immediately after kill");
+    assert.equal(
+      fs.existsSync(fake.holderClosed),
+      true,
+      "encode promise must settle only after the inherited stderr holder closes",
+    );
   } finally {
     if (oldPath === undefined) delete process.env.AUDIOBOOK_FFMPEG_PATH;
     else process.env.AUDIOBOOK_FFMPEG_PATH = oldPath;
