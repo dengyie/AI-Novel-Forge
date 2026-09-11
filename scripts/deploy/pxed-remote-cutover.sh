@@ -18,6 +18,9 @@
 #   ALLOW_LOCKFILE_DRIFT=1  允许 pnpm-lock 相对 prev tip 变更而不失败（默认失败，需人工 install）
 #   RUN_PNPM_INSTALL=1  lockfile 变更时尝试 pnpm install --frozen-lockfile（慢）
 #   PRISMA_GENERATE_ON_REMOTE=auto  Prisma schema/config/dependency 变更时生成；1 强制；0 跳过（默认 auto）
+#   RUN_SERVER_SCRIPT   生产启动脚本（默认 /personal/pxed/run-server.sh）
+#   NODE_MAX_OLD_SPACE_SIZE  Node old-space 上限，默认 384 MiB（pxed 约 3.8 GiB 内存）
+#   NODE_MAX_SEMI_SPACE_SIZE Node semi-space 上限，默认 8 MiB
 set -euo pipefail
 
 APP_DIR="${APP_DIR:-/personal/pxed/ai-novel}"
@@ -34,6 +37,11 @@ SKIP_GIT_RESET="${SKIP_GIT_RESET:-0}"
 ALLOW_LOCKFILE_DRIFT="${ALLOW_LOCKFILE_DRIFT:-0}"
 RUN_PNPM_INSTALL="${RUN_PNPM_INSTALL:-0}"
 PRISMA_GENERATE_ON_REMOTE="${PRISMA_GENERATE_ON_REMOTE:-auto}"
+# pxed 的 novel-server 与其它常驻进程共享约 3.8 GiB cgroup；768 MiB old-space
+# 会在冷启动/并发进程时触发宿主 OOM。启动参数由 cutover 幂等写入持久控制面脚本。
+RUN_SERVER_SCRIPT="${RUN_SERVER_SCRIPT:-/personal/pxed/run-server.sh}"
+NODE_MAX_OLD_SPACE_SIZE="${NODE_MAX_OLD_SPACE_SIZE:-384}"
+NODE_MAX_SEMI_SPACE_SIZE="${NODE_MAX_SEMI_SPACE_SIZE:-8}"
 # 允许在活跃 auto_director 任务时强行 restart（默认拒绝，防止打断在途章节生成）
 ALLOW_RESTART_WITH_ACTIVE_DIRECTOR="${ALLOW_RESTART_WITH_ACTIVE_DIRECTOR:-0}"
 
@@ -137,6 +145,9 @@ esac
 
 [[ -d "$APP_DIR" ]] || die "APP_DIR not found: $APP_DIR"
 [[ -f "$SUPERVISOR_CONF" ]] || die "SUPERVISOR_CONF not found: $SUPERVISOR_CONF"
+[[ -f "$RUN_SERVER_SCRIPT" ]] || die "RUN_SERVER_SCRIPT not found: $RUN_SERVER_SCRIPT"
+[[ "$NODE_MAX_OLD_SPACE_SIZE" =~ ^[1-9][0-9]*$ ]] || die "NODE_MAX_OLD_SPACE_SIZE must be a positive integer"
+[[ "$NODE_MAX_SEMI_SPACE_SIZE" =~ ^[1-9][0-9]*$ ]] || die "NODE_MAX_SEMI_SPACE_SIZE must be a positive integer"
 
 # 禁止在生产设 NODE_ENV=production（手册铁律）
 if [[ "${NODE_ENV:-}" == "production" ]]; then
@@ -151,7 +162,7 @@ SERVER_DIR="$APP_DIR/server"
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
 SHORT_SHA="$(printf '%s' "$DEPLOY_SHA" | cut -c1-12)"
 SNAP_DIR="$SNAPSHOT_ROOT/pre-${SHORT_SHA}-${TS}"
-mkdir -p "$SNAP_DIR/db" "$SNAP_DIR/server-dist" "$SNAP_DIR/client-dist" "$SNAP_DIR/shared-dist"
+mkdir -p "$SNAP_DIR/db" "$SNAP_DIR/server-dist" "$SNAP_DIR/client-dist" "$SNAP_DIR/shared-dist" "$SNAP_DIR/control-plane"
 
 PREV_TIP="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 # supervisorctl: "novel-server  RUNNING   pid 2735119, uptime ..."
@@ -176,6 +187,9 @@ fi
   [[ -n "$CLIENT_TGZ" ]] && echo "client_tgz=$(basename "$CLIENT_TGZ")" && echo "client_md5=$(md5sum "$CLIENT_TGZ" | awk '{print $1}')"
   [[ -n "$SHARED_TGZ" ]] && echo "shared_tgz=$(basename "$SHARED_TGZ")" && echo "shared_md5=$(md5sum "$SHARED_TGZ" | awk '{print $1}')"
   echo "prev_lock_md5=${PREV_LOCK_HASH:-none}"
+  echo "run_server_script=$RUN_SERVER_SCRIPT"
+  echo "node_max_old_space_size=$NODE_MAX_OLD_SPACE_SIZE"
+  echo "node_max_semi_space_size=$NODE_MAX_SEMI_SPACE_SIZE"
 } >"$SNAP_DIR/META"
 
 log "snapshot → $SNAP_DIR"
@@ -227,6 +241,25 @@ fi
 if [[ -d "$APP_DIR/shared/dist" ]]; then
   tar czf "$SNAP_DIR/shared-dist/dist.tgz" -C "$APP_DIR/shared" dist
 fi
+
+# The launcher lives in the persistent pxed control plane rather than the git
+# checkout. Snapshot it before enforcing the memory budget so rollback retains
+# the exact pre-cutover control-plane file.
+cp -a "$RUN_SERVER_SCRIPT" "$SNAP_DIR/control-plane/run-server.sh"
+
+configure_run_server() {
+  local tmp current
+  current="$(grep -E '^exec node --max-old-space-size=[0-9]+ --max-semi-space-size=[0-9]+ dist/app\.js$' "$RUN_SERVER_SCRIPT" || true)"
+  [[ -n "$current" ]] || die "run-server launcher has no recognized node exec line: $RUN_SERVER_SCRIPT"
+  tmp="${RUN_SERVER_SCRIPT}.next.$$"
+  sed -E "s#^exec node --max-old-space-size=[0-9]+ --max-semi-space-size=[0-9]+ dist/app\\.js$#exec node --max-old-space-size=$NODE_MAX_OLD_SPACE_SIZE --max-semi-space-size=$NODE_MAX_SEMI_SPACE_SIZE dist/app.js#" \
+    "$RUN_SERVER_SCRIPT" >"$tmp"
+  chmod --reference="$RUN_SERVER_SCRIPT" "$tmp" 2>/dev/null || chmod 755 "$tmp"
+  mv "$tmp" "$RUN_SERVER_SCRIPT"
+  grep -Fxq "exec node --max-old-space-size=$NODE_MAX_OLD_SPACE_SIZE --max-semi-space-size=$NODE_MAX_SEMI_SPACE_SIZE dist/app.js" "$RUN_SERVER_SCRIPT" \
+    || die "run-server launcher update did not produce expected node exec line"
+  log "configured $RUN_SERVER_SCRIPT → node old-space=${NODE_MAX_OLD_SPACE_SIZE}MiB semi-space=${NODE_MAX_SEMI_SPACE_SIZE}MiB"
+}
 
 if [[ "$SKIP_GIT_RESET" != "1" ]]; then
   log "git fetch + reset --hard $DEPLOY_SHA"
@@ -476,6 +509,8 @@ if [[ "$ACTIVE_DIRECTOR" =~ ^[1-9][0-9]*$ ]]; then
     die "drain required: $ACTIVE_DIRECTOR active auto_director task(s) running. Wait for completion then re-run; or set ALLOW_RESTART_WITH_ACTIVE_DIRECTOR=1 to force (risk: in-flight chapter generation lost)."
   fi
 fi
+
+configure_run_server
 
 log "supervisorctl restart novel-server (once)"
 supervisorctl -c "$SUPERVISOR_CONF" restart novel-server
