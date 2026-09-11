@@ -434,11 +434,13 @@ case "$PRISMA_GENERATE_ON_REMOTE" in
       server/src/prisma server/prisma.config.ts server/package.json package.json pnpm-lock.yaml; then
       PRISMA_INPUTS_CHANGED=1
     fi
-    if (( PRISMA_INPUTS_CHANGED == 1 )); then
-      if [[ -n "$PRISMA_CLIENT_TGZ" ]]; then
-        log "prisma inputs changed — install CI-generated Prisma client"
-        install_prisma_client "$PRISMA_CLIENT_TGZ"
-      else
+    if [[ -n "$PRISMA_CLIENT_TGZ" ]]; then
+      # 自动部署始终安装与本次 server dist 同批生成的 client：远端 node_modules
+      # 可能来自更早的部署，即使当前 git diff 未包含 schema 文件，也不能复用旧 client。
+      log "CI-generated Prisma client supplied — install it (inputs_changed=$PRISMA_INPUTS_CHANGED)"
+      install_prisma_client "$PRISMA_CLIENT_TGZ"
+    elif (( PRISMA_INPUTS_CHANGED == 1 )); then
+      if [[ -z "$PRISMA_CLIENT_TGZ" ]]; then
         log "prisma inputs changed — prisma generate (no pre-generated client supplied)"
         (
           cd "$SERVER_DIR"
