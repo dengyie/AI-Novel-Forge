@@ -191,8 +191,15 @@ jobs:
           set -euo pipefail
           SHA="${{ needs.gate.outputs.short_sha }}"
           mkdir -p /tmp/ainovel-deploy
+          PRISMA_CLIENT_LINK="$(readlink -f server/node_modules/@prisma/client)"
+          PRISMA_RUNTIME_ROOT="$(dirname "$(dirname "$PRISMA_CLIENT_LINK")")"
+          PRISMA_CLIENT_DIR="$PRISMA_RUNTIME_ROOT/.prisma/client"
+          test -d "$PRISMA_CLIENT_DIR"
+          tar czf "/tmp/ainovel-deploy/prisma-client-${SHA}.tgz" \
+            -C "$PRISMA_RUNTIME_ROOT" .prisma/client
           tar czf "/tmp/ainovel-deploy/server-dist-${SHA}.tgz" -C server dist
           tar czf "/tmp/ainovel-deploy/shared-dist-${SHA}.tgz" -C shared dist
+          md5sum "/tmp/ainovel-deploy/prisma-client-${SHA}.tgz" | tee /tmp/ainovel-deploy/prisma-client.md5
           md5sum "/tmp/ainovel-deploy/server-dist-${SHA}.tgz" | tee /tmp/ainovel-deploy/server.md5
           md5sum "/tmp/ainovel-deploy/shared-dist-${SHA}.tgz" | tee /tmp/ainovel-deploy/shared.md5
           if [[ "${{ needs.gate.outputs.components }}" != "server" ]]; then
@@ -299,13 +306,15 @@ jobs:
           REMOTE_DIR="/tmp/ainovel-gh-deploy-${SHA}-$$"
           SERVER_TGZ="/tmp/ainovel-deploy/server-dist-${SHA}.tgz"
           SHARED_TGZ="/tmp/ainovel-deploy/shared-dist-${SHA}.tgz"
+          PRISMA_CLIENT_TGZ="/tmp/ainovel-deploy/prisma-client-${SHA}.tgz"
           CLIENT_TGZ="/tmp/ainovel-deploy/client-dist-${SHA}.tgz"
           test -f "$SERVER_TGZ"
           test -f "$SHARED_TGZ"
+          test -f "$PRISMA_CLIENT_TGZ"
           test -f scripts/deploy/pxed-remote-cutover.sh
 
           ssh pxed-deploy "mkdir -p '$REMOTE_DIR'"
-          scp "$SERVER_TGZ" "$SHARED_TGZ" scripts/deploy/pxed-remote-cutover.sh \
+          scp "$SERVER_TGZ" "$SHARED_TGZ" "$PRISMA_CLIENT_TGZ" scripts/deploy/pxed-remote-cutover.sh \
             "pxed-deploy:$REMOTE_DIR/"
           ssh pxed-deploy "chmod +x '$REMOTE_DIR/pxed-remote-cutover.sh'"
 
@@ -324,6 +333,7 @@ jobs:
             DEPLOY_COMPONENTS='$COMPONENTS' \
             SERVER_TGZ='$REMOTE_DIR/$(basename "$SERVER_TGZ")' \
             SHARED_TGZ='$REMOTE_DIR/$(basename "$SHARED_TGZ")' \
+            PRISMA_CLIENT_TGZ='$REMOTE_DIR/$(basename "$PRISMA_CLIENT_TGZ")' \
             $CLIENT_ARG \
             bash '$REMOTE_DIR/pxed-remote-cutover.sh'"
 

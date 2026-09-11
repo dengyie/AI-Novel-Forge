@@ -9,6 +9,7 @@
 # 可选：
 #   CLIENT_TGZ          client dist 包（server-client|all 必填）
 #   SHARED_TGZ          shared dist 包（始终建议传）
+#   PRISMA_CLIENT_TGZ   CI 生成的 `.prisma/client` 包；schema 变化时优先使用，避免远端 OOM
 #   APP_DIR             默认 /personal/pxed/ai-novel
 #   SUPERVISOR_CONF     默认 /personal/pxed/supervisord.conf
 #   SNAPSHOT_ROOT       默认 /data/ainovel/db-snapshots
@@ -28,6 +29,7 @@ DEPLOY_COMPONENTS="${DEPLOY_COMPONENTS:-server}"
 SERVER_TGZ="${SERVER_TGZ:?SERVER_TGZ required}"
 CLIENT_TGZ="${CLIENT_TGZ:-}"
 SHARED_TGZ="${SHARED_TGZ:-}"
+PRISMA_CLIENT_TGZ="${PRISMA_CLIENT_TGZ:-}"
 SKIP_GIT_RESET="${SKIP_GIT_RESET:-0}"
 ALLOW_LOCKFILE_DRIFT="${ALLOW_LOCKFILE_DRIFT:-0}"
 RUN_PNPM_INSTALL="${RUN_PNPM_INSTALL:-0}"
@@ -170,6 +172,7 @@ fi
   echo "db_snapshot=best_effort_live_copy"
   echo "server_tgz=$(basename "$SERVER_TGZ")"
   echo "server_md5=$(md5sum "$SERVER_TGZ" | awk '{print $1}')"
+  [[ -n "$PRISMA_CLIENT_TGZ" ]] && echo "prisma_client_tgz=$(basename "$PRISMA_CLIENT_TGZ")" && echo "prisma_client_md5=$(md5sum "$PRISMA_CLIENT_TGZ" | awk '{print $1}')"
   [[ -n "$CLIENT_TGZ" ]] && echo "client_tgz=$(basename "$CLIENT_TGZ")" && echo "client_md5=$(md5sum "$CLIENT_TGZ" | awk '{print $1}')"
   [[ -n "$SHARED_TGZ" ]] && echo "shared_tgz=$(basename "$SHARED_TGZ")" && echo "shared_md5=$(md5sum "$SHARED_TGZ" | awk '{print $1}')"
   echo "prev_lock_md5=${PREV_LOCK_HASH:-none}"
@@ -328,6 +331,48 @@ unpack_dist() {
   log "unpacked $label → ${dest_parent}/dist (files=$count)"
 }
 
+install_prisma_client() {
+  local tgz="$1"
+  need_file "$tgz"
+
+  local client_link runtime_root stage next prev count
+  client_link="$(readlink -f "$SERVER_DIR/node_modules/@prisma/client" 2>/dev/null || true)"
+  [[ -n "$client_link" ]] || die "cannot resolve server/node_modules/@prisma/client"
+  runtime_root="$(dirname "$(dirname "$client_link")")"
+  [[ -d "$runtime_root" ]] || die "Prisma runtime root missing: $runtime_root"
+  stage="$runtime_root/.prisma-client-stage.$$"
+  next="$runtime_root/.prisma-client.next.$$"
+  prev="$runtime_root/.prisma-client.prev.$$"
+  rm -rf "$stage" "$next" "$prev"
+  mkdir -p "$stage"
+  if ! tar xzf "$tgz" -C "$stage"; then
+    rm -rf "$stage"
+    die "prisma client tar extract failed"
+  fi
+  [[ -d "$stage/.prisma/client" ]] || {
+    rm -rf "$stage"
+    die "prisma client tar missing .prisma/client"
+  }
+  count="$(find "$stage/.prisma/client" -type f | wc -l | tr -d ' ')"
+  [[ "$count" -gt 0 ]] || {
+    rm -rf "$stage"
+    die "prisma client package contains no files"
+  }
+  mkdir -p "$runtime_root/.prisma"
+  mv "$stage/.prisma/client" "$next"
+  rm -rf "$stage"
+  if [[ -d "$runtime_root/.prisma/client" ]]; then
+    mv "$runtime_root/.prisma/client" "$prev"
+  fi
+  if ! mv "$next" "$runtime_root/.prisma/client"; then
+    [[ -d "$prev" ]] && mv "$prev" "$runtime_root/.prisma/client" || true
+    rm -rf "$next"
+    die "failed to promote generated Prisma client"
+  fi
+  rm -rf "$prev"
+  log "installed pre-generated Prisma client → $runtime_root/.prisma/client (files=$count)"
+}
+
 log "unpack server dist"
 unpack_dist "$SERVER_TGZ" "$SERVER_DIR" "server" "app.js"
 
@@ -390,15 +435,20 @@ case "$PRISMA_GENERATE_ON_REMOTE" in
       PRISMA_INPUTS_CHANGED=1
     fi
     if (( PRISMA_INPUTS_CHANGED == 1 )); then
-      log "prisma inputs changed — prisma generate"
-      (
-        cd "$SERVER_DIR"
-        if command -v pnpm >/dev/null 2>&1; then
-          pnpm prisma:generate
-        else
-          npx prisma generate --config prisma.config.ts
-        fi
-      )
+      if [[ -n "$PRISMA_CLIENT_TGZ" ]]; then
+        log "prisma inputs changed — install CI-generated Prisma client"
+        install_prisma_client "$PRISMA_CLIENT_TGZ"
+      else
+        log "prisma inputs changed — prisma generate (no pre-generated client supplied)"
+        (
+          cd "$SERVER_DIR"
+          if command -v pnpm >/dev/null 2>&1; then
+            pnpm prisma:generate
+          else
+            npx prisma generate --config prisma.config.ts
+          fi
+        )
+      fi
     else
       log "prisma inputs unchanged — skip prisma generate"
     fi
