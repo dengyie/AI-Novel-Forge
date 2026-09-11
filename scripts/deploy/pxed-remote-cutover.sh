@@ -252,8 +252,10 @@ configure_run_server() {
   current="$(grep -E '^exec node --max-old-space-size=[0-9]+ --max-semi-space-size=[0-9]+ dist/app\.js$' "$RUN_SERVER_SCRIPT" || true)"
   [[ -n "$current" ]] || die "run-server launcher has no recognized node exec line: $RUN_SERVER_SCRIPT"
   tmp="${RUN_SERVER_SCRIPT}.next.$$"
-  sed -E "s#^exec node --max-old-space-size=[0-9]+ --max-semi-space-size=[0-9]+ dist/app\\.js$#exec node --max-old-space-size=$NODE_MAX_OLD_SPACE_SIZE --max-semi-space-size=$NODE_MAX_SEMI_SPACE_SIZE dist/app.js#" \
-    "$RUN_SERVER_SCRIPT" >"$tmp"
+  awk -v replacement="exec node --max-old-space-size=$NODE_MAX_OLD_SPACE_SIZE --max-semi-space-size=$NODE_MAX_SEMI_SPACE_SIZE dist/app.js" \
+    '/^exec node --max-old-space-size=[0-9]+ --max-semi-space-size=[0-9]+ dist\/app\.js$/ { print replacement; found=1; next } { print } END { if (!found) exit 1 }' \
+    "$RUN_SERVER_SCRIPT" >"$tmp" \
+    || die "failed to rewrite run-server launcher"
   chmod --reference="$RUN_SERVER_SCRIPT" "$tmp" 2>/dev/null || chmod 755 "$tmp"
   mv "$tmp" "$RUN_SERVER_SCRIPT"
   grep -Fxq "exec node --max-old-space-size=$NODE_MAX_OLD_SPACE_SIZE --max-semi-space-size=$NODE_MAX_SEMI_SPACE_SIZE dist/app.js" "$RUN_SERVER_SCRIPT" \
