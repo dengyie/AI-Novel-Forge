@@ -128,6 +128,10 @@ jobs:
       - name: Generate Prisma client
         run: pnpm --filter @ai-novel/server prisma:generate
 
+      - name: Probe generated Prisma runtime model
+        working-directory: server
+        run: node ../scripts/deploy/prisma-runtime-probe.cjs
+
       - name: Push sqlite schema for tests
         env:
           DATABASE_URL: file:./dev.db
@@ -191,8 +195,16 @@ jobs:
           set -euo pipefail
           SHA="${{ needs.gate.outputs.short_sha }}"
           mkdir -p /tmp/ainovel-deploy
+          PRISMA_CLIENT_LINK="$(readlink -f server/node_modules/@prisma/client)"
+          PRISMA_RUNTIME_ROOT="$(dirname "$(dirname "$PRISMA_CLIENT_LINK")")"
+          PRISMA_CLIENT_DIR="$PRISMA_RUNTIME_ROOT/.prisma/client"
+          test -d "$PRISMA_CLIENT_DIR"
+          tar czf "/tmp/ainovel-deploy/prisma-client-${SHA}.tgz" \
+            -C "$PRISMA_RUNTIME_ROOT" .prisma/client
+          node scripts/deploy/create-prisma-manifest.cjs --generated-dir "$PRISMA_CLIENT_DIR" --schema server/src/prisma/schema.prisma --package server/package.json --deploy-sha "${{ needs.gate.outputs.sha }}" --output "/tmp/ainovel-deploy/prisma-manifest-${SHA}.json"
           tar czf "/tmp/ainovel-deploy/server-dist-${SHA}.tgz" -C server dist
           tar czf "/tmp/ainovel-deploy/shared-dist-${SHA}.tgz" -C shared dist
+          md5sum "/tmp/ainovel-deploy/prisma-client-${SHA}.tgz" | tee /tmp/ainovel-deploy/prisma-client.md5
           md5sum "/tmp/ainovel-deploy/server-dist-${SHA}.tgz" | tee /tmp/ainovel-deploy/server.md5
           md5sum "/tmp/ainovel-deploy/shared-dist-${SHA}.tgz" | tee /tmp/ainovel-deploy/shared.md5
           if [[ "${{ needs.gate.outputs.components }}" != "server" ]]; then
@@ -299,13 +311,15 @@ jobs:
           REMOTE_DIR="/tmp/ainovel-gh-deploy-${SHA}-$$"
           SERVER_TGZ="/tmp/ainovel-deploy/server-dist-${SHA}.tgz"
           SHARED_TGZ="/tmp/ainovel-deploy/shared-dist-${SHA}.tgz"
+          PRISMA_CLIENT_TGZ="/tmp/ainovel-deploy/prisma-client-${SHA}.tgz"
           CLIENT_TGZ="/tmp/ainovel-deploy/client-dist-${SHA}.tgz"
           test -f "$SERVER_TGZ"
           test -f "$SHARED_TGZ"
+          test -f "$PRISMA_CLIENT_TGZ"
           test -f scripts/deploy/pxed-remote-cutover.sh
 
           ssh pxed-deploy "mkdir -p '$REMOTE_DIR'"
-          scp "$SERVER_TGZ" "$SHARED_TGZ" scripts/deploy/pxed-remote-cutover.sh \
+          scp "$SERVER_TGZ" "$SHARED_TGZ" "$PRISMA_CLIENT_TGZ" "/tmp/ainovel-deploy/prisma-manifest-${SHA}.json" scripts/deploy/pxed-remote-cutover.sh scripts/deploy/prisma-runtime-probe.cjs \
             "pxed-deploy:$REMOTE_DIR/"
           ssh pxed-deploy "chmod +x '$REMOTE_DIR/pxed-remote-cutover.sh'"
 
@@ -324,6 +338,9 @@ jobs:
             DEPLOY_COMPONENTS='$COMPONENTS' \
             SERVER_TGZ='$REMOTE_DIR/$(basename "$SERVER_TGZ")' \
             SHARED_TGZ='$REMOTE_DIR/$(basename "$SHARED_TGZ")' \
+            PRISMA_CLIENT_TGZ='$REMOTE_DIR/$(basename "$PRISMA_CLIENT_TGZ")' \
+            PRISMA_MANIFEST='$REMOTE_DIR/prisma-manifest-${SHA}.json' \
+            PRISMA_PROBE_SCRIPT='$REMOTE_DIR/prisma-runtime-probe.cjs' \
             $CLIENT_ARG \
             bash '$REMOTE_DIR/pxed-remote-cutover.sh'"
 

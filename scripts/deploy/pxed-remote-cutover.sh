@@ -9,6 +9,8 @@
 # 可选：
 #   CLIENT_TGZ          client dist 包（server-client|all 必填）
 #   SHARED_TGZ          shared dist 包（始终建议传）
+#   PRISMA_CLIENT_TGZ   CI 生成的 `.prisma/client` 包；schema 变化时优先使用，避免远端 OOM
+#   PRISMA_MANIFEST     CI 生成的 Prisma runtime manifest（与 client tar 同批）
 #   APP_DIR             默认 /personal/pxed/ai-novel
 #   SUPERVISOR_CONF     默认 /personal/pxed/supervisord.conf
 #   SNAPSHOT_ROOT       默认 /data/ainovel/db-snapshots
@@ -17,6 +19,9 @@
 #   ALLOW_LOCKFILE_DRIFT=1  允许 pnpm-lock 相对 prev tip 变更而不失败（默认失败，需人工 install）
 #   RUN_PNPM_INSTALL=1  lockfile 变更时尝试 pnpm install --frozen-lockfile（慢）
 #   PRISMA_GENERATE_ON_REMOTE=auto  Prisma schema/config/dependency 变更时生成；1 强制；0 跳过（默认 auto）
+#   RUN_SERVER_SCRIPT   生产启动脚本（默认 /personal/pxed/run-server.sh）
+#   NODE_MAX_OLD_SPACE_SIZE  Node old-space 上限，默认 384 MiB（pxed 约 3.8 GiB 内存）
+#   NODE_MAX_SEMI_SPACE_SIZE Node semi-space 上限，默认 8 MiB
 set -euo pipefail
 
 APP_DIR="${APP_DIR:-/personal/pxed/ai-novel}"
@@ -28,10 +33,18 @@ DEPLOY_COMPONENTS="${DEPLOY_COMPONENTS:-server}"
 SERVER_TGZ="${SERVER_TGZ:?SERVER_TGZ required}"
 CLIENT_TGZ="${CLIENT_TGZ:-}"
 SHARED_TGZ="${SHARED_TGZ:-}"
+PRISMA_CLIENT_TGZ="${PRISMA_CLIENT_TGZ:-}"
+PRISMA_MANIFEST="${PRISMA_MANIFEST:-}"
+PRISMA_PROBE_SCRIPT="${PRISMA_PROBE_SCRIPT:-}"
 SKIP_GIT_RESET="${SKIP_GIT_RESET:-0}"
 ALLOW_LOCKFILE_DRIFT="${ALLOW_LOCKFILE_DRIFT:-0}"
 RUN_PNPM_INSTALL="${RUN_PNPM_INSTALL:-0}"
 PRISMA_GENERATE_ON_REMOTE="${PRISMA_GENERATE_ON_REMOTE:-auto}"
+# pxed 的 novel-server 与其它常驻进程共享约 3.8 GiB cgroup；768 MiB old-space
+# 会在冷启动/并发进程时触发宿主 OOM。启动参数由 cutover 幂等写入持久控制面脚本。
+RUN_SERVER_SCRIPT="${RUN_SERVER_SCRIPT:-/personal/pxed/run-server.sh}"
+NODE_MAX_OLD_SPACE_SIZE="${NODE_MAX_OLD_SPACE_SIZE:-384}"
+NODE_MAX_SEMI_SPACE_SIZE="${NODE_MAX_SEMI_SPACE_SIZE:-8}"
 # 允许在活跃 auto_director 任务时强行 restart（默认拒绝，防止打断在途章节生成）
 ALLOW_RESTART_WITH_ACTIVE_DIRECTOR="${ALLOW_RESTART_WITH_ACTIVE_DIRECTOR:-0}"
 
@@ -120,6 +133,7 @@ need_cmd supervisorctl
 need_cmd md5sum
 need_cmd date
 need_cmd find
+need_cmd sha256sum
 
 need_file "$SERVER_TGZ"
 case "$DEPLOY_COMPONENTS" in
@@ -135,6 +149,9 @@ esac
 
 [[ -d "$APP_DIR" ]] || die "APP_DIR not found: $APP_DIR"
 [[ -f "$SUPERVISOR_CONF" ]] || die "SUPERVISOR_CONF not found: $SUPERVISOR_CONF"
+[[ -f "$RUN_SERVER_SCRIPT" ]] || die "RUN_SERVER_SCRIPT not found: $RUN_SERVER_SCRIPT"
+[[ "$NODE_MAX_OLD_SPACE_SIZE" =~ ^[1-9][0-9]*$ ]] || die "NODE_MAX_OLD_SPACE_SIZE must be a positive integer"
+[[ "$NODE_MAX_SEMI_SPACE_SIZE" =~ ^[1-9][0-9]*$ ]] || die "NODE_MAX_SEMI_SPACE_SIZE must be a positive integer"
 
 # 禁止在生产设 NODE_ENV=production（手册铁律）
 if [[ "${NODE_ENV:-}" == "production" ]]; then
@@ -149,7 +166,7 @@ SERVER_DIR="$APP_DIR/server"
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
 SHORT_SHA="$(printf '%s' "$DEPLOY_SHA" | cut -c1-12)"
 SNAP_DIR="$SNAPSHOT_ROOT/pre-${SHORT_SHA}-${TS}"
-mkdir -p "$SNAP_DIR/db" "$SNAP_DIR/server-dist" "$SNAP_DIR/client-dist" "$SNAP_DIR/shared-dist"
+mkdir -p "$SNAP_DIR/db" "$SNAP_DIR/server-dist" "$SNAP_DIR/client-dist" "$SNAP_DIR/shared-dist" "$SNAP_DIR/control-plane"
 
 PREV_TIP="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 # supervisorctl: "novel-server  RUNNING   pid 2735119, uptime ..."
@@ -170,9 +187,13 @@ fi
   echo "db_snapshot=best_effort_live_copy"
   echo "server_tgz=$(basename "$SERVER_TGZ")"
   echo "server_md5=$(md5sum "$SERVER_TGZ" | awk '{print $1}')"
+  [[ -n "$PRISMA_CLIENT_TGZ" ]] && echo "prisma_client_tgz=$(basename "$PRISMA_CLIENT_TGZ")" && echo "prisma_client_md5=$(md5sum "$PRISMA_CLIENT_TGZ" | awk '{print $1}')"
   [[ -n "$CLIENT_TGZ" ]] && echo "client_tgz=$(basename "$CLIENT_TGZ")" && echo "client_md5=$(md5sum "$CLIENT_TGZ" | awk '{print $1}')"
   [[ -n "$SHARED_TGZ" ]] && echo "shared_tgz=$(basename "$SHARED_TGZ")" && echo "shared_md5=$(md5sum "$SHARED_TGZ" | awk '{print $1}')"
   echo "prev_lock_md5=${PREV_LOCK_HASH:-none}"
+  echo "run_server_script=$RUN_SERVER_SCRIPT"
+  echo "node_max_old_space_size=$NODE_MAX_OLD_SPACE_SIZE"
+  echo "node_max_semi_space_size=$NODE_MAX_SEMI_SPACE_SIZE"
 } >"$SNAP_DIR/META"
 
 log "snapshot → $SNAP_DIR"
@@ -225,9 +246,43 @@ if [[ -d "$APP_DIR/shared/dist" ]]; then
   tar czf "$SNAP_DIR/shared-dist/dist.tgz" -C "$APP_DIR/shared" dist
 fi
 
+# The launcher lives in the persistent pxed control plane rather than the git
+# checkout. Snapshot it before enforcing the memory budget so rollback retains
+# the exact pre-cutover control-plane file.
+cp -a "$RUN_SERVER_SCRIPT" "$SNAP_DIR/control-plane/run-server.sh"
+cp -a "$SUPERVISOR_CONF" "$SNAP_DIR/control-plane/supervisord.conf"
+
+validate_supervisor_policy() {
+  local block retries
+  block="$(awk 'BEGIN{in_novel=0} /^\[program:novel-server\][[:space:]]*$/ {in_novel=1; next} /^\[/ {in_novel=0} in_novel {print}' "$SUPERVISOR_CONF")"
+  printf '%s\n' "$block" | grep -q '^autorestart=false$' || die "Supervisor novel-server must keep autorestart=false during OOM recovery"
+  retries="$(printf '%s\n' "$block" | sed -n 's/^startretries=//p' | head -1)"
+  [[ "$retries" =~ ^[1-9][0-9]*$ && "$retries" -le 5 ]] || die "Supervisor novel-server startretries must be finite (1-5), got '$retries'"
+  log "validated Supervisor novel-server autorestart=false startretries=$retries (manual recovery gate)"
+}
+
+configure_run_server() {
+  local tmp current
+  current="$(grep -E '^exec node --max-old-space-size=[0-9]+ --max-semi-space-size=[0-9]+ dist/app\.js$' "$RUN_SERVER_SCRIPT" || true)"
+  [[ -n "$current" ]] || die "run-server launcher has no recognized node exec line: $RUN_SERVER_SCRIPT"
+  tmp="${RUN_SERVER_SCRIPT}.next.$$"
+  awk -v replacement="exec node --max-old-space-size=$NODE_MAX_OLD_SPACE_SIZE --max-semi-space-size=$NODE_MAX_SEMI_SPACE_SIZE dist/app.js" \
+    '/^exec node --max-old-space-size=[0-9]+ --max-semi-space-size=[0-9]+ dist\/app\.js$/ { print replacement; found=1; next } { print } END { if (!found) exit 1 }' \
+    "$RUN_SERVER_SCRIPT" >"$tmp" \
+    || die "failed to rewrite run-server launcher"
+  chmod --reference="$RUN_SERVER_SCRIPT" "$tmp" 2>/dev/null || chmod 755 "$tmp"
+  mv "$tmp" "$RUN_SERVER_SCRIPT"
+  grep -Fxq "exec node --max-old-space-size=$NODE_MAX_OLD_SPACE_SIZE --max-semi-space-size=$NODE_MAX_SEMI_SPACE_SIZE dist/app.js" "$RUN_SERVER_SCRIPT" \
+    || die "run-server launcher update did not produce expected node exec line"
+  log "configured $RUN_SERVER_SCRIPT → node old-space=${NODE_MAX_OLD_SPACE_SIZE}MiB semi-space=${NODE_MAX_SEMI_SPACE_SIZE}MiB"
+}
+
 if [[ "$SKIP_GIT_RESET" != "1" ]]; then
   log "git fetch + reset --hard $DEPLOY_SHA"
-  git fetch origin --prune
+  # pxed may retain explicit fetch refspecs for retired deployment branches.
+  # Fetch only the supported production lineage so a deleted historical ref
+  # cannot abort an otherwise valid main cutover.
+  git fetch origin --prune "+refs/heads/main:refs/remotes/origin/main"
   if git cat-file -e "${DEPLOY_SHA}^{commit}" 2>/dev/null; then
     git reset --hard "$DEPLOY_SHA"
   else
@@ -325,6 +380,59 @@ unpack_dist() {
   log "unpacked $label → ${dest_parent}/dist (files=$count)"
 }
 
+install_prisma_client() {
+  local tgz="$1"
+  need_file "$tgz"
+
+  local client_link runtime_root stage next prev count
+  client_link="$(readlink -f "$SERVER_DIR/node_modules/@prisma/client" 2>/dev/null || true)"
+  [[ -n "$client_link" ]] || die "cannot resolve server/node_modules/@prisma/client"
+  runtime_root="$(dirname "$(dirname "$client_link")")"
+  [[ -d "$runtime_root" ]] || die "Prisma runtime root missing: $runtime_root"
+  stage="$runtime_root/.prisma-client-stage.$$"
+  next="$runtime_root/.prisma-client.next.$$"
+  prev="$runtime_root/.prisma-client.prev.$$"
+  rm -rf "$stage" "$next" "$prev"
+  mkdir -p "$stage"
+  if ! tar xzf "$tgz" -C "$stage"; then
+    rm -rf "$stage"
+    die "prisma client tar extract failed"
+  fi
+  [[ -d "$stage/.prisma/client" ]] || {
+    rm -rf "$stage"
+    die "prisma client tar missing .prisma/client"
+  }
+  count="$(find "$stage/.prisma/client" -type f | wc -l | tr -d ' ')"
+  [[ "$count" -gt 0 ]] || {
+    rm -rf "$stage"
+    die "prisma client package contains no files"
+  }
+  mkdir -p "$runtime_root/.prisma"
+  mv "$stage/.prisma/client" "$next"
+  rm -rf "$stage"
+  if [[ -d "$runtime_root/.prisma/client" ]]; then
+    mv "$runtime_root/.prisma/client" "$prev"
+  fi
+  if ! mv "$next" "$runtime_root/.prisma/client"; then
+    [[ -d "$prev" ]] && mv "$prev" "$runtime_root/.prisma/client" || true
+    rm -rf "$next"
+    die "failed to promote generated Prisma client"
+  fi
+  rm -rf "$prev"
+  log "installed pre-generated Prisma client → $runtime_root/.prisma/client (files=$count)"
+}
+
+run_prisma_runtime_probe() {
+  local manifest="$1"
+  [[ -f "$manifest" ]] || die "missing Prisma manifest: $manifest"
+  [[ -n "$PRISMA_PROBE_SCRIPT" && -f "$PRISMA_PROBE_SCRIPT" ]] || die "missing Prisma runtime probe upload"
+  local out="$SNAP_DIR/control-plane/prisma-runtime-probe.json"
+  (cd "$SERVER_DIR" && PRISMA_RUNTIME_MANIFEST="$manifest" node "$PRISMA_PROBE_SCRIPT") >"$out"
+  grep -q '"ok":true' "$out" || die "Prisma runtime probe did not report ok"
+  echo "prisma_runtime_probe=$out" >>"$SNAP_DIR/META"
+  log "Prisma runtime probe passed"
+}
+
 log "unpack server dist"
 unpack_dist "$SERVER_TGZ" "$SERVER_DIR" "server" "app.js"
 
@@ -340,6 +448,12 @@ fi
 if [[ "$DEPLOY_COMPONENTS" == "server-client" || "$DEPLOY_COMPONENTS" == "all" ]]; then
   log "unpack client dist"
   unpack_dist "$CLIENT_TGZ" "$APP_DIR/client" "client" "index.html"
+fi
+
+if [[ -n "$PRISMA_CLIENT_TGZ" ]]; then
+  [[ -n "$PRISMA_MANIFEST" ]] || die "PRISMA_MANIFEST required when PRISMA_CLIENT_TGZ is supplied"
+  install_prisma_client "$PRISMA_CLIENT_TGZ"
+  run_prisma_runtime_probe "$PRISMA_MANIFEST"
 fi
 
 # symlink 纪律（手册 §8.3）
@@ -386,16 +500,22 @@ case "$PRISMA_GENERATE_ON_REMOTE" in
       server/src/prisma server/prisma.config.ts server/package.json package.json pnpm-lock.yaml; then
       PRISMA_INPUTS_CHANGED=1
     fi
-    if (( PRISMA_INPUTS_CHANGED == 1 )); then
-      log "prisma inputs changed — prisma generate"
-      (
-        cd "$SERVER_DIR"
-        if command -v pnpm >/dev/null 2>&1; then
-          pnpm prisma:generate
-        else
-          npx prisma generate --config prisma.config.ts
-        fi
-      )
+    if [[ -n "$PRISMA_CLIENT_TGZ" ]]; then
+      # 自动部署始终安装与本次 server dist 同批生成的 client：远端 node_modules
+      # 可能来自更早的部署，即使当前 git diff 未包含 schema 文件，也不能复用旧 client。
+      log "CI-generated Prisma client supplied — already installed and probed (inputs_changed=$PRISMA_INPUTS_CHANGED)"
+    elif (( PRISMA_INPUTS_CHANGED == 1 )); then
+      if [[ -z "$PRISMA_CLIENT_TGZ" ]]; then
+        log "prisma inputs changed — prisma generate (no pre-generated client supplied)"
+        (
+          cd "$SERVER_DIR"
+          if command -v pnpm >/dev/null 2>&1; then
+            pnpm prisma:generate
+          else
+            npx prisma generate --config prisma.config.ts
+          fi
+        )
+      fi
     else
       log "prisma inputs unchanged — skip prisma generate"
     fi
@@ -421,6 +541,9 @@ if [[ "$ACTIVE_DIRECTOR" =~ ^[1-9][0-9]*$ ]]; then
     die "drain required: $ACTIVE_DIRECTOR active auto_director task(s) running. Wait for completion then re-run; or set ALLOW_RESTART_WITH_ACTIVE_DIRECTOR=1 to force (risk: in-flight chapter generation lost)."
   fi
 fi
+
+validate_supervisor_policy
+configure_run_server
 
 log "supervisorctl restart novel-server (once)"
 supervisorctl -c "$SUPERVISOR_CONF" restart novel-server
