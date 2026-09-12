@@ -10,6 +10,7 @@
 #   CLIENT_TGZ          client dist 包（server-client|all 必填）
 #   SHARED_TGZ          shared dist 包（始终建议传）
 #   PRISMA_CLIENT_TGZ   CI 生成的 `.prisma/client` 包；schema 变化时优先使用，避免远端 OOM
+#   PRISMA_MANIFEST     CI 生成的 Prisma runtime manifest（与 client tar 同批）
 #   APP_DIR             默认 /personal/pxed/ai-novel
 #   SUPERVISOR_CONF     默认 /personal/pxed/supervisord.conf
 #   SNAPSHOT_ROOT       默认 /data/ainovel/db-snapshots
@@ -33,6 +34,8 @@ SERVER_TGZ="${SERVER_TGZ:?SERVER_TGZ required}"
 CLIENT_TGZ="${CLIENT_TGZ:-}"
 SHARED_TGZ="${SHARED_TGZ:-}"
 PRISMA_CLIENT_TGZ="${PRISMA_CLIENT_TGZ:-}"
+PRISMA_MANIFEST="${PRISMA_MANIFEST:-}"
+PRISMA_PROBE_SCRIPT="${PRISMA_PROBE_SCRIPT:-}"
 SKIP_GIT_RESET="${SKIP_GIT_RESET:-0}"
 ALLOW_LOCKFILE_DRIFT="${ALLOW_LOCKFILE_DRIFT:-0}"
 RUN_PNPM_INSTALL="${RUN_PNPM_INSTALL:-0}"
@@ -130,6 +133,7 @@ need_cmd supervisorctl
 need_cmd md5sum
 need_cmd date
 need_cmd find
+need_cmd sha256sum
 
 need_file "$SERVER_TGZ"
 case "$DEPLOY_COMPONENTS" in
@@ -246,6 +250,16 @@ fi
 # checkout. Snapshot it before enforcing the memory budget so rollback retains
 # the exact pre-cutover control-plane file.
 cp -a "$RUN_SERVER_SCRIPT" "$SNAP_DIR/control-plane/run-server.sh"
+cp -a "$SUPERVISOR_CONF" "$SNAP_DIR/control-plane/supervisord.conf"
+
+validate_supervisor_policy() {
+  local block retries
+  block="$(awk 'BEGIN{in_novel=0} /^\[program:novel-server\][[:space:]]*$/ {in_novel=1; next} /^\[/ {in_novel=0} in_novel {print}' "$SUPERVISOR_CONF")"
+  printf '%s\n' "$block" | grep -q '^autorestart=false$' || die "Supervisor novel-server must keep autorestart=false during OOM recovery"
+  retries="$(printf '%s\n' "$block" | sed -n 's/^startretries=//p' | head -1)"
+  [[ "$retries" =~ ^[1-9][0-9]*$ && "$retries" -le 5 ]] || die "Supervisor novel-server startretries must be finite (1-5), got '$retries'"
+  log "validated Supervisor novel-server autorestart=false startretries=$retries (manual recovery gate)"
+}
 
 configure_run_server() {
   local tmp current
@@ -408,6 +422,17 @@ install_prisma_client() {
   log "installed pre-generated Prisma client → $runtime_root/.prisma/client (files=$count)"
 }
 
+run_prisma_runtime_probe() {
+  local manifest="$1"
+  [[ -f "$manifest" ]] || die "missing Prisma manifest: $manifest"
+  [[ -n "$PRISMA_PROBE_SCRIPT" && -f "$PRISMA_PROBE_SCRIPT" ]] || die "missing Prisma runtime probe upload"
+  local out="$SNAP_DIR/control-plane/prisma-runtime-probe.json"
+  (cd "$SERVER_DIR" && PRISMA_RUNTIME_MANIFEST="$manifest" node "$PRISMA_PROBE_SCRIPT") >"$out"
+  grep -q '"ok":true' "$out" || die "Prisma runtime probe did not report ok"
+  echo "prisma_runtime_probe=$out" >>"$SNAP_DIR/META"
+  log "Prisma runtime probe passed"
+}
+
 log "unpack server dist"
 unpack_dist "$SERVER_TGZ" "$SERVER_DIR" "server" "app.js"
 
@@ -423,6 +448,12 @@ fi
 if [[ "$DEPLOY_COMPONENTS" == "server-client" || "$DEPLOY_COMPONENTS" == "all" ]]; then
   log "unpack client dist"
   unpack_dist "$CLIENT_TGZ" "$APP_DIR/client" "client" "index.html"
+fi
+
+if [[ -n "$PRISMA_CLIENT_TGZ" ]]; then
+  [[ -n "$PRISMA_MANIFEST" ]] || die "PRISMA_MANIFEST required when PRISMA_CLIENT_TGZ is supplied"
+  install_prisma_client "$PRISMA_CLIENT_TGZ"
+  run_prisma_runtime_probe "$PRISMA_MANIFEST"
 fi
 
 # symlink 纪律（手册 §8.3）
@@ -472,8 +503,7 @@ case "$PRISMA_GENERATE_ON_REMOTE" in
     if [[ -n "$PRISMA_CLIENT_TGZ" ]]; then
       # 自动部署始终安装与本次 server dist 同批生成的 client：远端 node_modules
       # 可能来自更早的部署，即使当前 git diff 未包含 schema 文件，也不能复用旧 client。
-      log "CI-generated Prisma client supplied — install it (inputs_changed=$PRISMA_INPUTS_CHANGED)"
-      install_prisma_client "$PRISMA_CLIENT_TGZ"
+      log "CI-generated Prisma client supplied — already installed and probed (inputs_changed=$PRISMA_INPUTS_CHANGED)"
     elif (( PRISMA_INPUTS_CHANGED == 1 )); then
       if [[ -z "$PRISMA_CLIENT_TGZ" ]]; then
         log "prisma inputs changed — prisma generate (no pre-generated client supplied)"
@@ -512,6 +542,7 @@ if [[ "$ACTIVE_DIRECTOR" =~ ^[1-9][0-9]*$ ]]; then
   fi
 fi
 
+validate_supervisor_policy
 configure_run_server
 
 log "supervisorctl restart novel-server (once)"
