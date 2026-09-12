@@ -1,50 +1,8 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const fs = require("node:fs");
-const path = require("node:path");
-const os = require("node:os");
 const { prisma } = require("../dist/db/prisma.js");
 const { M4bJobQueueService } = require("../dist/services/audiobook/m4b/M4bJobQueueService.js");
-
-// m4b 队列测试共享全局 M4bEncodingJob 表，与 m4bWorker/m4bWorkerManager 测试
-// 并发时互相领走对方 job。用 O_EXCL 文件锁串行化跨文件的 m4b 队列访问。
-const LOCK_PATH = path.join(os.tmpdir(), "m4b-queue-test.lock");
-
-async function withQueueLock(fn) {
-  let fd = null;
-  const deadline = Date.now() + 120000;
-  while (Date.now() < deadline) {
-    try {
-      fd = fs.openSync(LOCK_PATH, "wx");
-      break;
-    } catch (error) {
-      if (error.code !== "EEXIST") throw error;
-      // 锁文件可能是崩溃残留：超过 3 分钟无 mtime 更新则强占
-      try {
-        const stat = fs.statSync(LOCK_PATH);
-        if (Date.now() - stat.mtimeMs > 180000) {
-          fs.unlinkSync(LOCK_PATH);
-          continue;
-        }
-      } catch {
-        // 锁文件刚好被释放，继续重试
-      }
-      await new Promise((resolve) => setTimeout(resolve, 200));
-    }
-  }
-  if (fd === null) throw new Error("m4b queue test lock timeout");
-  try {
-    fs.utimesSync(LOCK_PATH, new Date(), new Date());
-    return await fn();
-  } finally {
-    fs.closeSync(fd);
-    try {
-      fs.unlinkSync(LOCK_PATH);
-    } catch {
-      // 已被强占方删除
-    }
-  }
-}
+const { withQueueLock } = require("./helpers/m4bQueueTestLock.js");
 
 test("M4bJobQueueService.claimNextJob claims and marks processing", { timeout: 150000 }, async () => {
   await withQueueLock(async () => {
