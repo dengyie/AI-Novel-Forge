@@ -1123,8 +1123,41 @@ model AudiobookTask {
   createdAt             DateTime          @default(now())
   updatedAt             DateTime          @updatedAt
 
+  m4bEncodingJob    M4bEncodingJob?
+
   @@index([novelId, updatedAt])
   @@index([status, updatedAt])
+}
+
+model M4bEncodingJob {
+  id                String   @id @default(cuid())
+  audiobookTaskId   String   @unique
+  audiobookTask     AudiobookTask @relation(fields: [audiobookTaskId], references: [id], onDelete: Cascade)
+
+  status            String   // 'pending' | 'processing' | 'completed' | 'failed'
+  workerId          String?  // worker PID for heartbeat tracking
+  workerStartedAt   DateTime?
+
+  inputWavPath      String
+  outputM4bPath     String
+  coverImagePath    String?
+  metadataJson      String   // JSON: {title, author, narrator, chapters: [{title, startMs}]}
+
+  progressPercent   Float    @default(0)
+  errorMessage      String?
+  retryCount        Int      @default(0)  // max 1 retry for OOM failures
+
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([status, createdAt])
+}
+
+model WorkerHeartbeat {
+  workerId    String   @id  // process PID
+  processType String         // 'm4b-worker'
+  lastSeenAt  DateTime @default(now())
+  createdAt   DateTime @default(now())
 }
 
 model ImageAsset {
