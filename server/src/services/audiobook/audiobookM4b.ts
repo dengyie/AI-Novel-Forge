@@ -58,6 +58,12 @@ export function resolveM4bFfmpegThreads(
 
 const FFMPEG_THREADS_CAP = resolveM4bFfmpegThreads();
 
+export function isM4bWorkerEnabled(): boolean {
+  const flag = process.env.AUDIOBOOK_M4B_USE_WORKER;
+  if (flag === undefined) return true; // default enabled
+  return flag === "true" || flag === "1";
+}
+
 export function resolveFfmpegBinary(): string | null {
   const dedicated = process.env.AUDIOBOOK_FFMPEG_PATH?.trim();
   if (dedicated) {

@@ -26,26 +26,30 @@ export class M4bJobQueueService {
   }
 
   async claimNextJob(workerId: string): Promise<M4bEncodingJob | null> {
-    // Use transaction with SELECT FOR UPDATE SKIP LOCKED for non-blocking claim
-    const job = await prisma.$transaction(async (tx) => {
-      const pending = await tx.m4bEncodingJob.findFirst({
-        where: { status: "pending" },
-        orderBy: { createdAt: "asc" },
-      });
-
-      if (!pending) return null;
-
-      return await tx.m4bEncodingJob.update({
-        where: { id: pending.id },
-        data: {
-          status: "processing",
-          workerId,
-          workerStartedAt: new Date(),
-        },
-      });
+    // 原子 claim：updateMany 带守卫条件单语句翻转状态，避免 findFirst+update
+    // 事务的持锁窗口（SQLite 下并发写锁竞争放大为 SQLITE_BUSY/P2024）。
+    // SQLite 无 updateMany 的 returning，先取最老 pending 的 id 再守卫式更新，
+    // 更新数为 0 说明已被其他 worker 领走，返回 null 等待下一轮。
+    const oldest = await prisma.m4bEncodingJob.findFirst({
+      where: { status: "pending" },
+      orderBy: { createdAt: "asc" },
+      select: { id: true },
     });
+    if (!oldest) return null;
 
-    return job;
+    const claimed = await prisma.m4bEncodingJob.updateMany({
+      where: { id: oldest.id, status: "pending" },
+      data: {
+        status: "processing",
+        workerId,
+        workerStartedAt: new Date(),
+      },
+    });
+    if (claimed.count === 0) return null;
+
+    return await prisma.m4bEncodingJob.findUniqueOrThrow({
+      where: { id: oldest.id },
+    });
   }
 
   async updateProgress(jobId: string, percent: number): Promise<void> {
@@ -55,24 +59,33 @@ export class M4bJobQueueService {
     });
   }
 
-  async markCompleted(jobId: string, outputPath: string): Promise<void> {
-    const job = await prisma.m4bEncodingJob.findUnique({
+  async markCompleted(jobId: string): Promise<void> {
+    // 只更新 job 行；m4b 交付路由以磁盘文件为准（resolveFullBookM4bPath），
+    // 不写 AudiobookTask.fullAudioPath——该字段既有语义固定指向 full-book.wav，
+    // 被 /audio/full 的 streamWavFile 消费，写入 m4b 路径会破坏 WAV 播放。
+    await prisma.m4bEncodingJob.update({
       where: { id: jobId },
-      select: { audiobookTaskId: true },
+      data: { status: "completed", progressPercent: 100 },
     });
+  }
 
-    if (!job) return;
-
-    await prisma.$transaction([
-      prisma.m4bEncodingJob.update({
-        where: { id: jobId },
-        data: { status: "completed", progressPercent: 100 },
-      }),
-      prisma.audiobookTask.update({
-        where: { id: job.audiobookTaskId },
-        data: { fullAudioPath: outputPath },
-      }),
-    ]);
+  /** 同任务重跑时 audiobookTaskId 唯一约束冲突（P2002），重置已有 job 重新入队。 */
+  async requeueJobForTask(params: CreateJobParams): Promise<M4bEncodingJob> {
+    return await prisma.m4bEncodingJob.update({
+      where: { audiobookTaskId: params.audiobookTaskId },
+      data: {
+        status: "pending",
+        workerId: null,
+        workerStartedAt: null,
+        inputWavPath: params.inputWavPath,
+        outputM4bPath: params.outputM4bPath,
+        coverImagePath: params.coverImagePath ?? null,
+        metadataJson: params.metadataJson,
+        progressPercent: 0,
+        errorMessage: null,
+        retryCount: 0,
+      },
+    });
   }
 
   async markFailed(jobId: string, error: string): Promise<void> {

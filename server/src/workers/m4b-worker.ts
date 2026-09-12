@@ -99,7 +99,7 @@ async function pollAndExecute() {
         });
 
         if (result.success) {
-          await queueService.markCompleted(job.id, result.outputPath!);
+          await queueService.markCompleted(job.id);
           log(`Job ${job.id} completed: ${result.outputPath}`);
         } else {
           await queueService.markFailed(job.id, result.error || "Unknown error");

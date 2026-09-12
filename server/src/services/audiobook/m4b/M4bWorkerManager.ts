@@ -182,3 +182,5 @@ export class M4bWorkerManager {
     this.activeWorkers.clear();
   }
 }
+
+export const m4bWorkerManager = new M4bWorkerManager();

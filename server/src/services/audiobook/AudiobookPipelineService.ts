@@ -29,13 +29,17 @@ import {
   resolveChapterAudioPath,
   resolveChunkAudioPath,
   resolveFullBookAudioPath,
+  resolveFullBookM4bPath,
   wipeChapterAudioArtifacts,
 } from "./audiobookPaths";
 import { createHash } from "node:crypto";
 import {
   encodeFullBookM4b,
+  isM4bWorkerEnabled,
   type AudiobookM4bEncodeResult,
 } from "./audiobookM4b";
+import { M4bJobQueueService } from "./m4b/M4bJobQueueService";
+import { m4bWorkerManager } from "./m4b/M4bWorkerManager";
 import {
   buildWavBuffer,
   concatWavFiles,
@@ -1256,48 +1260,106 @@ export class AudiobookPipelineService {
       chapterProgress: snapshotChapterProgress(),
     });
 
-    const m4b = await encodeFullBookM4b({
-      taskDir,
-      bookTitle: input.novelTitle?.trim() || "有声书",
-      sourceWavPath: fullAudioPath,
-      betweenChapterGapMs: resolveBetweenChapterGapMs(),
-      signal: input.signal,
-      generationToken: input.generationToken,
-      isGenerationCurrent: input.isGenerationCurrent,
-      chapters: orderedChapters.map((chapter) => {
-        const found = chapterAudioPaths.find((item) => item.chapterId === chapter.id);
-        return {
-          chapterId: chapter.id,
-          chapterTitle: chapter.title,
-          chapterOrder: chapter.order,
-          wavPath: found?.path ?? resolveChapterAudioPath(taskDir, chapter.id),
-        };
-      }),
-      // R2-2: m4b 封装是单次长时 spawn，progress 五元组冻结会被 watchdog 误杀。
-      // ffmpeg 每 10s 上报 `.part` 增长，这里转成 finalizing progress touch，喂给推进信号。
-      onProgress: (p) => {
-        // input.onProgress 类型为 Promise<void> | void，直接 .catch 会 TS2339；
-        // Promise.resolve 归一化后再捕错，onProgress 抛错不中断 ffmpeg。
-        void Promise.resolve(input.onProgress({
-          phase: "finalizing",
-          chapterIndex: orderedChapters.length - 1,
-          chapterCount: orderedChapters.length,
-          chapterId: orderedChapters[orderedChapters.length - 1].id,
-          chapterTitle: orderedChapters[orderedChapters.length - 1].title,
-          completedChapters: orderedChapters.length,
-          completedChunks,
-          totalChunksEstimate,
-          message: `封装 m4b 中（${(p.partBytes / 1024 / 1024).toFixed(1)}MB）`,
-          annotations,
-          chapterAudioPaths: chapterAudioPaths.map((item) => ({ chapterId: item.chapterId, path: item.path })),
-          fullAudioPath,
-          qualityWarnings,
-          chapterProgress: snapshotChapterProgress(),
-        })).catch(() => {
-          // onProgress 抛错不中断 ffmpeg
-        });
-      },
+    const m4bChapterInputs = orderedChapters.map((chapter) => {
+      const found = chapterAudioPaths.find((item) => item.chapterId === chapter.id);
+      return {
+        chapterId: chapter.id,
+        chapterTitle: chapter.title,
+        chapterOrder: chapter.order,
+        wavPath: found?.path ?? resolveChapterAudioPath(taskDir, chapter.id),
+      };
     });
+
+    let m4b: AudiobookM4bEncodeResult;
+    if (isM4bWorkerEnabled()) {
+      // worker 隔离模式：入队后立即返回，编码由 m4b-worker 进程异步完成；
+      // 完成后 worker 写 AudiobookTask.fullAudioPath 与 resultJson 无关，
+      // full m4b 播放路由以磁盘文件为准（resolveFullBookM4bPath）。
+      const queueService = new M4bJobQueueService();
+      try {
+        const { buildM4bChapterTimeline } = await import("./audiobookM4b");
+        const metaChapters = buildM4bChapterTimeline({
+          chapters: m4bChapterInputs,
+          betweenChapterGapMs: resolveBetweenChapterGapMs(),
+        });
+        const jobParams = {
+          audiobookTaskId: input.taskId,
+          inputWavPath: fullAudioPath,
+          outputM4bPath: resolveFullBookM4bPath(taskDir),
+          metadataJson: JSON.stringify({
+            title: input.novelTitle?.trim() || "有声书",
+            chapters: metaChapters,
+          }),
+        };
+        // audiobookTaskId 唯一约束：同任务重跑时重置既有 job 重新入队
+        try {
+          await queueService.createJob(jobParams);
+        } catch (error) {
+          const code = (error as { code?: string })?.code;
+          if (code !== "P2002") throw error;
+          await queueService.requeueJobForTask(jobParams);
+        }
+        await m4bWorkerManager.ensureWorkerForPendingJobs();
+        m4b = {
+          status: "skipped",
+          path: null,
+          relativePath: "full-book.m4b",
+          reason: "m4b 已入队，由独立 worker 进程异步编码",
+        };
+      } catch (queueError) {
+        // 入队失败回退主进程直编，保证交付不因队列故障而失败
+        console.warn(
+          "[audiobook] m4b worker enqueue failed, falling back to in-process encoding",
+          queueError instanceof Error ? queueError.message : queueError,
+        );
+        m4b = await encodeFullBookM4b({
+          taskDir,
+          bookTitle: input.novelTitle?.trim() || "有声书",
+          sourceWavPath: fullAudioPath,
+          betweenChapterGapMs: resolveBetweenChapterGapMs(),
+          signal: input.signal,
+          generationToken: input.generationToken,
+          isGenerationCurrent: input.isGenerationCurrent,
+          chapters: m4bChapterInputs,
+          onProgress: undefined,
+        });
+      }
+    } else {
+      m4b = await encodeFullBookM4b({
+        taskDir,
+        bookTitle: input.novelTitle?.trim() || "有声书",
+        sourceWavPath: fullAudioPath,
+        betweenChapterGapMs: resolveBetweenChapterGapMs(),
+        signal: input.signal,
+        generationToken: input.generationToken,
+        isGenerationCurrent: input.isGenerationCurrent,
+        chapters: m4bChapterInputs,
+        // R2-2: m4b 封装是单次长时 spawn，progress 五元组冻结会被 watchdog 误杀。
+        // ffmpeg 每 10s 上报 `.part` 增长，这里转成 finalizing progress touch，喂给推进信号。
+        onProgress: (p) => {
+          // input.onProgress 类型为 Promise<void> | void，直接 .catch 会 TS2339；
+          // Promise.resolve 归一化后再捕错，onProgress 抛错不中断 ffmpeg。
+          void Promise.resolve(input.onProgress({
+            phase: "finalizing",
+            chapterIndex: orderedChapters.length - 1,
+            chapterCount: orderedChapters.length,
+            chapterId: orderedChapters[orderedChapters.length - 1].id,
+            chapterTitle: orderedChapters[orderedChapters.length - 1].title,
+            completedChapters: orderedChapters.length,
+            completedChunks,
+            totalChunksEstimate,
+            message: `封装 m4b 中（${(p.partBytes / 1024 / 1024).toFixed(1)}MB）`,
+            annotations,
+            chapterAudioPaths: chapterAudioPaths.map((item) => ({ chapterId: item.chapterId, path: item.path })),
+            fullAudioPath,
+            qualityWarnings,
+            chapterProgress: snapshotChapterProgress(),
+          })).catch(() => {
+            // onProgress 抛错不中断 ffmpeg
+          });
+        },
+      });
+    }
 
     await input.onProgress({
       phase: "finalizing",
