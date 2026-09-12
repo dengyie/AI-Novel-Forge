@@ -77,12 +77,11 @@ import { registerBuiltInEngines } from "./services/audiobook/engine/registerBuil
 import { audiobookTaskService } from "./services/audiobook/AudiobookTaskService";
 import { createStartupReadinessMiddleware } from "./app/startup/StartupReadinessMiddleware";
 import { runStartupRecoverySequence } from "./app/startup/StartupRecoveryCoordinator";
-import { M4bWorkerManager } from "./services/audiobook/m4b/M4bWorkerManager";
+import { m4bWorkerManager } from "./services/audiobook/m4b/M4bWorkerManager";
 
 getSharedNovelServices();
 registerNovelEventHandlers(novelEventBus);
 registerBuiltInEngines();
-const m4bWorkerManager = new M4bWorkerManager();
 const novelPipelineRuntimeService = new NovelPipelineRuntimeService();
 
 morgan.token("error-message", (_req, res) => {
