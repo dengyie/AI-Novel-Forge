@@ -26,6 +26,7 @@ set -euo pipefail
 
 APP_DIR="${APP_DIR:-/personal/pxed/ai-novel}"
 SUPERVISOR_CONF="${SUPERVISOR_CONF:-/personal/pxed/supervisord.conf}"
+SUPERVISOR_NOVEL_CONF="${SUPERVISOR_NOVEL_CONF:-${SUPERVISOR_CONF%/*}/supervisor-novel-server.conf}"
 SNAPSHOT_ROOT="${SNAPSHOT_ROOT:-/data/ainovel/db-snapshots}"
 SNAPSHOT_RETENTION_COUNT="${SNAPSHOT_RETENTION_COUNT:-10}"
 DEPLOY_SHA="${DEPLOY_SHA:?DEPLOY_SHA required}"
@@ -251,14 +252,21 @@ fi
 # the exact pre-cutover control-plane file.
 cp -a "$RUN_SERVER_SCRIPT" "$SNAP_DIR/control-plane/run-server.sh"
 cp -a "$SUPERVISOR_CONF" "$SNAP_DIR/control-plane/supervisord.conf"
+if [[ -f "$SUPERVISOR_NOVEL_CONF" && "$SUPERVISOR_NOVEL_CONF" != "$SUPERVISOR_CONF" ]]; then
+  cp -a "$SUPERVISOR_NOVEL_CONF" "$SNAP_DIR/control-plane/supervisor-novel-server.conf"
+fi
 
 validate_supervisor_policy() {
-  local block retries
-  block="$(awk 'BEGIN{in_novel=0} /^\[program:novel-server\][[:space:]]*$/ {in_novel=1; next} /^\[/ {in_novel=0} in_novel {print}' "$SUPERVISOR_CONF")"
-  printf '%s\n' "$block" | grep -q '^autorestart=false$' || die "Supervisor novel-server must keep autorestart=false during OOM recovery"
-  retries="$(printf '%s\n' "$block" | sed -n 's/^startretries=//p' | head -1)"
+  local block retries policy_file
+  policy_file="$SUPERVISOR_NOVEL_CONF"
+  if [[ ! -f "$policy_file" ]]; then
+    policy_file="$SUPERVISOR_CONF"
+  fi
+  block="$(awk 'BEGIN{in_novel=0} /^\[program:novel-server\][[:space:]]*$/ {in_novel=1; next} /^\[/ {in_novel=0} in_novel {print}' "$policy_file")"
+  printf '%s\n' "$block" | grep -Eq '^[[:space:]]*autorestart[[:space:]]*=[[:space:]]*false[[:space:]]*$' || die "Supervisor novel-server must keep autorestart=false during OOM recovery (checked $policy_file)"
+  retries="$(printf '%s\n' "$block" | sed -nE 's/^[[:space:]]*startretries[[:space:]]*=[[:space:]]*([0-9]+)[[:space:]]*$/\1/p' | head -1)"
   [[ "$retries" =~ ^[1-9][0-9]*$ && "$retries" -le 5 ]] || die "Supervisor novel-server startretries must be finite (1-5), got '$retries'"
-  log "validated Supervisor novel-server autorestart=false startretries=$retries (manual recovery gate)"
+  log "validated Supervisor novel-server autorestart=false startretries=$retries (manual recovery gate; source=$policy_file)"
 }
 
 configure_run_server() {
