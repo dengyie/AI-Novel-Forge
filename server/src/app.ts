@@ -77,7 +77,7 @@ import { registerBuiltInEngines } from "./services/audiobook/engine/registerBuil
 import { audiobookTaskService } from "./services/audiobook/AudiobookTaskService";
 import { createStartupReadinessMiddleware } from "./app/startup/StartupReadinessMiddleware";
 import { runStartupRecoverySequence } from "./app/startup/StartupRecoveryCoordinator";
-import { startMemoryPressureGuard } from "./runtime/memoryPressureGuard";
+import { noteMemoryGuardActivity, startMemoryPressureGuard } from "./runtime/memoryPressureGuard";
 import { m4bWorkerManager } from "./services/audiobook/m4b/M4bWorkerManager";
 
 getSharedNovelServices();
@@ -162,6 +162,13 @@ export function createApp(options: CreateAppOptions = {}) {
   }
 
   app.use(express.json({ limit: jsonBodyLimit }));
+  // memoryPressureGuard 的活动上报点：任何请求进出都算「忙」，防止空闲判定误触发 GC。
+  // 放在 body 解析之后、路由分发之前，覆盖全部业务路径。
+  app.use((req, res, next) => {
+    noteMemoryGuardActivity();
+    res.on("finish", noteMemoryGuardActivity);
+    next();
+  });
 
   // Global inbound rate limit (single-node). Skip liveness for probes.
   const rateLimitEnabled = process.env.API_RATE_LIMIT_DISABLED !== "true"

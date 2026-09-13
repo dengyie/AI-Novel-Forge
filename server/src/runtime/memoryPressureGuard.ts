@@ -12,16 +12,15 @@ import { logMemoryUsage } from "./memoryTelemetry";
  * 生效前提：run-server.sh 以 `NODE_OPTIONS="--expose-gc"` 启动（cutover 模板维护）。
  * 无 expose-gc 时本守卫只记录遥测，不做任何 GC（`global.gc` 缺失时静默跳过）。
  *
- * 触发条件（全部满足才 GC，避免打断在途任务）：
- * - 距上次请求完成 ≥ IDLE_AFTER_MS（复用 HTTP keepalive 之外的粗粒度空闲判定）
- * - heapUsed 低于 HEAPUsed_CEILING_MB（高水位说明业务正忙/刚忙完，不抢 GC 时机）
- * - 非 m4b 编码、非 director 任务运行中（通过各自 heartbeat/queue 判定太重，
- *   这里用简化代理：仅靠空闲判定 + heap 阈值，编码在独立子进程，不占主进程堆）
+ * 触发条件：距上次活动（请求/长任务）≥ IDLE_AFTER_MS。
+ * pxed 生产实测：空闲期 heapUsed 稳定在 ~175MB，若再叠加 heap 天花板条件则永远达不到、
+ * GC 永不触发（2026-09-13 10:30 击杀后取证：6 tick 零 GC）。活动上报由 app.ts 全局
+ * 中间件接线（noteMemoryGuardActivity），空闲判定即足够代表「业务不在途」——
+ * m4b 编码在独立子进程，不占主进程堆。
  */
 
 const GUARD_INTERVAL_MS = 60_000;
 const IDLE_AFTER_MS = 90_000;
-const HEAP_USED_CEILING_MB = 96;
 
 function mb(bytes: number): number {
   return Math.round((bytes / 1024 / 1024) * 10) / 10;
@@ -29,6 +28,24 @@ function mb(bytes: number): number {
 
 let lastActivityAt = Date.now();
 let guardTimer: NodeJS.Timeout | null = null;
+
+/** 测试钩子：注入 lastActivityAt / 收集 gcOnce 调用 / 手动触发 tick。 */
+const testHooks = {
+  gcCalls: [] as string[],
+  triggerTick: (): void => guardTick(),
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  setState(patch: { lastActivityAt?: number; gcCalls?: string[] }): any {
+    if (patch.lastActivityAt !== undefined) {
+      lastActivityAt = patch.lastActivityAt;
+    }
+    if (patch.gcCalls !== undefined) {
+      testHooks.gcCalls = patch.gcCalls;
+    }
+    return { lastActivityAt, gcCalls: testHooks.gcCalls };
+  },
+};
+
+export const __testHooks = testHooks;
 
 /** 业务侧活动上报点：任何 LLM 调用/长任务开始结束时调用，推迟 GC 时机。 */
 export function noteMemoryGuardActivity(): void {
@@ -41,6 +58,7 @@ function gcOnce(): void {
   if (typeof maybeGc !== "function") {
     return;
   }
+  testHooks.gcCalls.push("gc");
   // 两段式：先常规 GC 回收代际垃圾，再触发 V8 的 shrink 标志压缩堆并二次回收，
   // 这一组在他处（如 heap 快照前收缩）是标准组合。
   v8.setFlagsFromString("--expose_gc");
@@ -53,9 +71,8 @@ function gcOnce(): void {
 function guardTick(): void {
   const memory = process.memoryUsage();
   const idleForMs = Date.now() - lastActivityAt;
-  const heapUsedMb = mb(memory.heapUsed);
 
-  if (idleForMs >= IDLE_AFTER_MS && heapUsedMb < HEAP_USED_CEILING_MB) {
+  if (idleForMs >= IDLE_AFTER_MS) {
     gcOnce();
   }
 
@@ -81,7 +98,7 @@ export function startMemoryPressureGuard(): void {
   guardTimer.unref();
   console.info(
     `[memory][guard] started intervalMs=${GUARD_INTERVAL_MS} idleAfterMs=${IDLE_AFTER_MS} ` +
-      `heapCeilingMb=${HEAP_USED_CEILING_MB} exposeGc=${typeof (global as Record<string, unknown>).gc === "function"}`,
+      `exposeGc=${typeof (global as Record<string, unknown>).gc === "function"}`,
   );
 }
 
