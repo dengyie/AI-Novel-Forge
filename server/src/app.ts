@@ -77,6 +77,7 @@ import { registerBuiltInEngines } from "./services/audiobook/engine/registerBuil
 import { audiobookTaskService } from "./services/audiobook/AudiobookTaskService";
 import { createStartupReadinessMiddleware } from "./app/startup/StartupReadinessMiddleware";
 import { runStartupRecoverySequence } from "./app/startup/StartupRecoveryCoordinator";
+import { startMemoryPressureGuard } from "./runtime/memoryPressureGuard";
 import { m4bWorkerManager } from "./services/audiobook/m4b/M4bWorkerManager";
 
 getSharedNovelServices();
@@ -114,7 +115,7 @@ export interface CreateAppOptions {
 export function createApp(options: CreateAppOptions = {}) {
   getSharedNovelServices();
   const app = express();
-  const jsonBodyLimit = process.env.API_JSON_LIMIT ?? "20mb";
+  const jsonBodyLimit = process.env.API_JSON_LIMIT ?? "2mb";
   const corsOriginEnv = process.env.CORS_ORIGIN;
   const corsAllowList = corsOriginEnv
     ? corsOriginEnv
@@ -415,6 +416,8 @@ async function initializeBackgroundServices(): Promise<BackgroundServicesHandle>
         bookAnalysisService.startWatchdog();
         novelPipelineRuntimeService.startWatchdog();
         audiobookTaskService.startWatchdog();
+        // pxed 防 OOM：空闲期主动 GC 归还内存（无 expose-gc 时只打遥测）。
+        startMemoryPressureGuard();
       },
       // VOLUME_READINESS_SCHEDULE 只控制 dry-run 巡检；startup auto-resume 始终开启。
       startVolumeRecovery: () => {

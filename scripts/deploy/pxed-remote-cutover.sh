@@ -20,7 +20,7 @@
 #   RUN_PNPM_INSTALL=1  lockfile 变更时尝试 pnpm install --frozen-lockfile（慢）
 #   PRISMA_GENERATE_ON_REMOTE=auto  Prisma schema/config/dependency 变更时生成；1 强制；0 跳过（默认 auto）
 #   RUN_SERVER_SCRIPT   生产启动脚本（默认 /personal/pxed/run-server.sh）
-#   NODE_MAX_OLD_SPACE_SIZE  Node old-space 上限，默认 384 MiB（pxed 约 3.8 GiB 内存）
+#   NODE_MAX_OLD_SPACE_SIZE  Node old-space 上限，默认 224 MiB（pxed 防 OOM：heapUsed 稳态 ~184，逼 GC 勤还内存；原 384）
 #   NODE_MAX_SEMI_SPACE_SIZE Node semi-space 上限，默认 8 MiB
 set -euo pipefail
 
@@ -44,7 +44,7 @@ PRISMA_GENERATE_ON_REMOTE="${PRISMA_GENERATE_ON_REMOTE:-auto}"
 # pxed 的 novel-server 与其它常驻进程共享约 3.8 GiB cgroup；768 MiB old-space
 # 会在冷启动/并发进程时触发宿主 OOM。启动参数由 cutover 幂等写入持久控制面脚本。
 RUN_SERVER_SCRIPT="${RUN_SERVER_SCRIPT:-/personal/pxed/run-server.sh}"
-NODE_MAX_OLD_SPACE_SIZE="${NODE_MAX_OLD_SPACE_SIZE:-384}"
+NODE_MAX_OLD_SPACE_SIZE="${NODE_MAX_OLD_SPACE_SIZE:-224}"
 NODE_MAX_SEMI_SPACE_SIZE="${NODE_MAX_SEMI_SPACE_SIZE:-8}"
 # 允许在活跃 auto_director 任务时强行 restart（默认拒绝，防止打断在途章节生成）
 ALLOW_RESTART_WITH_ACTIVE_DIRECTOR="${ALLOW_RESTART_WITH_ACTIVE_DIRECTOR:-0}"
@@ -278,11 +278,22 @@ configure_run_server() {
     '/^exec node --max-old-space-size=[0-9]+ --max-semi-space-size=[0-9]+ dist\/app\.js$/ { print replacement; found=1; next } { print } END { if (!found) exit 1 }' \
     "$RUN_SERVER_SCRIPT" >"$tmp" \
     || die "failed to rewrite run-server launcher"
+  # 幂等维护环境区（幂等：已有则跳过）。MALLOC_ARENA_MAX 限制 glibc 碎片化 arena
+  # （pxed 11 线程下默认可到 8×64MB）；NODE_OPTIONS --expose-gc 供
+  # runtime/memoryPressureGuard.ts 空闲期归还内存。
+  if ! grep -q '^export MALLOC_ARENA_MAX=' "$tmp"; then
+    awk '/^export RUN_WITH_LOG_PATH=/ { print; print "export MALLOC_ARENA_MAX=2"; print "export NODE_OPTIONS=\"--expose-gc\""; next } { print }' \
+      "$tmp" >"${tmp}.env" && mv "${tmp}.env" "$tmp"
+  fi
   chmod --reference="$RUN_SERVER_SCRIPT" "$tmp" 2>/dev/null || chmod 755 "$tmp"
   mv "$tmp" "$RUN_SERVER_SCRIPT"
   grep -Fxq "exec node --max-old-space-size=$NODE_MAX_OLD_SPACE_SIZE --max-semi-space-size=$NODE_MAX_SEMI_SPACE_SIZE dist/app.js" "$RUN_SERVER_SCRIPT" \
     || die "run-server launcher update did not produce expected node exec line"
-  log "configured $RUN_SERVER_SCRIPT → node old-space=${NODE_MAX_OLD_SPACE_SIZE}MiB semi-space=${NODE_MAX_SEMI_SPACE_SIZE}MiB"
+  grep -q '^export MALLOC_ARENA_MAX=2$' "$RUN_SERVER_SCRIPT" \
+    || die "run-server launcher missing MALLOC_ARENA_MAX=2 (pxed memory guard)"
+  grep -q '^export NODE_OPTIONS="--expose-gc"$' "$RUN_SERVER_SCRIPT" \
+    || die "run-server launcher missing NODE_OPTIONS --expose-gc (memoryPressureGuard)"
+  log "configured $RUN_SERVER_SCRIPT → node old-space=${NODE_MAX_OLD_SPACE_SIZE}MiB semi-space=${NODE_MAX_SEMI_SPACE_SIZE}MiB arena=2 expose-gc=1"
 }
 
 if [[ "$SKIP_GIT_RESET" != "1" ]]; then

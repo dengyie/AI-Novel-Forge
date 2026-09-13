@@ -25,10 +25,11 @@ interface StableLayerEntry {
   cachedAt: number; // Date.now()
 }
 
-/** 最多缓存多少个 novelId（防内存泄漏） */
-const MAX_CACHED_NOVELS = 8;
-/** 稳定层 TTL（毫秒）：30 分钟 */
-const STABLE_LAYER_TTL_MS = 30 * 60 * 1000;
+/** 最多缓存多少个 novelId（防内存泄漏）。pxed 4GB cgroup + 宿主 OOM 压力下，
+ * 8 本全量稳定层行（novel+world+characters+plans）的驻留量不可接受，收紧到 2。 */
+const MAX_CACHED_NOVELS = 2;
+/** 稳定层 TTL（毫秒）：10 分钟（pxed 内存压力收紧，原 30 分钟） */
+const STABLE_LAYER_TTL_MS = 10 * 60 * 1000;
 
 class BatchContextCache {
   private readonly stableLayer = new Map<string, StableLayerEntry>();
