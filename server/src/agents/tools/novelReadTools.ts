@@ -1,5 +1,5 @@
 import { prisma } from "../../db/prisma";
-import { ragServices } from "../../services/rag";
+import { ragMain } from "../../services/rag/mainProcessProxy";
 import { AgentToolError, type AgentToolName } from "../types";
 import type { AgentToolDefinition } from "./toolTypes";
 import { getChapter, getChapterByOrder } from "./shared";
@@ -454,7 +454,7 @@ export const novelReadToolDefinitions: Partial<
     outputSchema: searchKnowledgeOutput,
     execute: async (_context, rawInput) => {
       const input = searchKnowledgeInput.parse(rawInput);
-      const contextBlock = await ragServices.hybridRetrievalService.buildContextBlock(input.query, {
+      const contextBlock = await ragMain.retrieval.buildContextBlock(input.query, {
         novelId: input.novelId,
         worldId: input.worldId,
         finalTopK: input.topK ?? 6,

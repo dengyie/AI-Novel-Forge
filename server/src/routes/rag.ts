@@ -1,10 +1,11 @@
 import { Router } from "express";
 import type { ApiResponse } from "@ai-novel/shared/types/api";
 import { z } from "zod";
+import { prisma } from "../db/prisma";
 import { authMiddleware } from "../middleware/auth";
 import { AppError } from "../middleware/errorHandler";
 import { validate } from "../middleware/validate";
-import { ragServices } from "../services/rag";
+import { ragMain } from "../services/rag/mainProcessProxy";
 import { ragConfig } from "../config/rag";
 
 const router = Router();
@@ -26,15 +27,67 @@ const jobParamsSchema = z.object({
 
 router.use(authMiddleware);
 
+/**
+ * scope → owner 集合的展开（复刻 RagIndexService.collectOwners 的 DB 直查）。
+ * 主进程不 import RAG 重树，这里的展开只为入队（worker 会做真正的重建）。
+ */
+async function collectReindexOwners(scope: "novel" | "world" | "all", id?: string): Promise<Array<{ ownerType: string; ownerId: string }>> {
+  const owners: Array<{ ownerType: string; ownerId: string }> = [];
+  const push = (ownerType: string, ownerId: string) => owners.push({ ownerType, ownerId });
+
+  if (scope === "novel" || scope === "all") {
+    const novelRows = scope === "novel"
+      ? (id ? [{ id }] : await prisma.novel.findMany({ select: { id: true } }))
+      : await prisma.novel.findMany({ select: { id: true } });
+    const novelIds = novelRows.map((item) => item.id);
+    if (novelIds.length === 0) {
+      return owners;
+    }
+    for (const novelId of novelIds) {
+      push("novel", novelId);
+      push("bible", novelId);
+    }
+    const [chapters, summaries, facts, characters, timelines] = await Promise.all([
+      prisma.chapter.findMany({ where: { novelId: { in: novelIds } }, select: { id: true } }),
+      prisma.chapterSummary.findMany({ where: { novelId: { in: novelIds } }, select: { chapterId: true } }),
+      prisma.consistencyFact.findMany({ where: { novelId: { in: novelIds } }, select: { id: true } }),
+      prisma.character.findMany({ where: { novelId: { in: novelIds } }, select: { id: true } }),
+      prisma.characterTimeline.findMany({ where: { novelId: { in: novelIds } }, select: { id: true } }),
+    ]);
+    chapters.forEach((item) => push("chapter", item.id));
+    summaries.forEach((item) => push("chapter_summary", item.chapterId));
+    facts.forEach((item) => push("consistency_fact", item.id));
+    characters.forEach((item) => push("character", item.id));
+    timelines.forEach((item) => push("character_timeline", item.id));
+  }
+
+  if (scope === "world" || scope === "all") {
+    const worldRows = scope === "world"
+      ? (id ? [{ id }] : await prisma.world.findMany({ select: { id: true } }))
+      : await prisma.world.findMany({ select: { id: true } });
+    worldRows.forEach((item) => push("world", item.id));
+    const library = await prisma.worldPropertyLibrary.findMany({
+      where: scope === "world" ? { sourceWorldId: id ?? undefined } : {},
+      select: { id: true },
+    });
+    library.forEach((item) => push("world_library_item", item.id));
+  }
+
+  return owners;
+}
+
 router.post("/reindex", validate({ body: reindexSchema }), async (req, res, next) => {
   try {
     const body = req.body as z.infer<typeof reindexSchema>;
-    const data = await ragServices.ragIndexService.enqueueReindex(body.scope, body.id, body.tenantId);
+    const owners = await collectReindexOwners(body.scope, body.id);
+    const count = await Promise.all(
+      owners.map((owner) => ragMain.jobs.enqueueOwnerJob("rebuild", owner.ownerType, owner.ownerId, { tenantId: body.tenantId })),
+    ).then((rows) => rows.length);
     res.status(202).json({
       success: true,
-      data,
+      data: { scope: body.scope, id: body.id ?? null, count },
       message: "RAG reindex jobs queued.",
-    } satisfies ApiResponse<typeof data>);
+    } satisfies ApiResponse<{ scope: string; id: string | null; count: number }>);
   } catch (error) {
     next(error);
   }
@@ -43,7 +96,32 @@ router.post("/reindex", validate({ body: reindexSchema }), async (req, res, next
 router.get("/jobs", validate({ query: jobsQuerySchema }), async (req, res, next) => {
   try {
     const query = jobsQuerySchema.parse(req.query);
-    const data = await ragServices.ragIndexService.listJobSummaries(query.limit, query.status);
+    const rows = await prisma.ragIndexJob.findMany({
+      where: query.status ? { status: query.status } : {},
+      orderBy: { createdAt: "desc" },
+      take: query.limit,
+    });
+    const data = rows.map((row) => {
+      let progress: unknown = null;
+      try {
+        progress = row.payloadJson ? (JSON.parse(row.payloadJson) as { progress?: unknown }).progress ?? null : null;
+      } catch {
+        progress = null;
+      }
+      return {
+        id: row.id,
+        jobType: row.jobType,
+        ownerType: row.ownerType,
+        ownerId: row.ownerId,
+        status: row.status,
+        attempts: row.attempts,
+        maxAttempts: row.maxAttempts,
+        lastError: row.lastError,
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt,
+        progress,
+      };
+    });
     res.status(200).json({
       success: true,
       data,
@@ -56,7 +134,13 @@ router.get("/jobs", validate({ query: jobsQuerySchema }), async (req, res, next)
 
 router.delete("/jobs/finished", async (_req, res, next) => {
   try {
-    const data = await ragServices.ragJobCleanupService.clearFinishedJobs();
+    const activeCount = await prisma.ragIndexJob.count({
+      where: { status: { in: ["queued", "running"] } },
+    });
+    const deleted = await prisma.ragIndexJob.deleteMany({
+      where: { status: { in: ["succeeded", "failed", "cancelled"] } },
+    });
+    const data = { deletedCount: deleted.count, activeCount };
     res.status(200).json({
       success: true,
       data,
@@ -77,21 +161,71 @@ const cancelStaleSchema = z.object({
 
 /**
  * Cancel multi-day queued / stuck-running RAG jobs (zombie backlog hygiene).
- * When RAG_ENABLED=false the worker never ticks cancelStaleActiveJobs — this
- * endpoint (or SQL) is the manual drain path.
+ * This endpoint (or SQL) is the manual drain path — also used by the rag worker
+ * child at tick start.
  */
 router.post("/jobs/cancel-stale", validate({ body: cancelStaleSchema }), async (req, res, next) => {
   try {
     const body = req.body as z.infer<typeof cancelStaleSchema>;
-    const data = await ragServices.ragJobCleanupService.cancelStaleActiveJobs(body);
-    const activeByOwner = await ragServices.ragJobCleanupService.countActiveByOwnerType();
+    const maxAgeMs = body.maxAgeMs ?? 7 * 24 * 60 * 60 * 1000;
+    const runningMaxAgeMs = body.runningMaxAgeMs ?? 30 * 60 * 1000;
+    const limit = Math.max(1, Math.min(body.limit ?? 2000, 10_000));
+    const now = new Date();
+    const queuedCutoff = new Date(now.getTime() - maxAgeMs);
+    const runningCutoff = new Date(now.getTime() - runningMaxAgeMs);
+
+    const staleQueued = await prisma.ragIndexJob.findMany({
+      where: { status: "queued", createdAt: { lt: queuedCutoff } },
+      select: { id: true },
+      take: limit,
+      orderBy: { createdAt: "asc" },
+    });
+    const staleRunning = await prisma.ragIndexJob.findMany({
+      where: { status: "running", updatedAt: { lt: runningCutoff } },
+      select: { id: true },
+      take: limit,
+      orderBy: { updatedAt: "asc" },
+    });
+
+    let cancelledQueued = 0;
+    let cancelledRunning = 0;
+    if (staleQueued.length > 0) {
+      const result = await prisma.ragIndexJob.updateMany({
+        where: { id: { in: staleQueued.map((row) => row.id) }, status: "queued" },
+        data: { status: "cancelled", lastError: `stale_queued_max_age:${maxAgeMs}ms`, updatedAt: now },
+      });
+      cancelledQueued = result.count;
+    }
+    if (staleRunning.length > 0) {
+      const result = await prisma.ragIndexJob.updateMany({
+        where: { id: { in: staleRunning.map((row) => row.id) }, status: "running" },
+        data: { status: "cancelled", lastError: `stale_running_max_age:${runningMaxAgeMs}ms`, updatedAt: now },
+      });
+      cancelledRunning = result.count;
+    }
+
+    const activeByOwner = await prisma.ragIndexJob.groupBy({
+      by: ["ownerType", "status"],
+      where: { status: { in: ["queued", "running"] } },
+      _count: { _all: true },
+    });
+
+    const data = {
+      cancelledQueued,
+      cancelledRunning,
+      activeByOwner: activeByOwner.map((row) => ({
+        ownerType: row.ownerType,
+        status: row.status,
+        count: row._count._all,
+      })),
+    };
     res.status(200).json({
       success: true,
-      data: { ...data, activeByOwner },
-      message: (data.cancelledQueued + data.cancelledRunning) > 0
-        ? `已取消过期任务 queued=${data.cancelledQueued} running=${data.cancelledRunning}。`
+      data,
+      message: (cancelledQueued + cancelledRunning) > 0
+        ? `已取消过期任务 queued=${cancelledQueued} running=${cancelledRunning}。`
         : "没有可取消的过期活跃任务。",
-    } satisfies ApiResponse<typeof data & { activeByOwner: unknown }>);
+    } satisfies ApiResponse<typeof data>);
   } catch (error) {
     next(error);
   }
@@ -100,45 +234,38 @@ router.post("/jobs/cancel-stale", validate({ body: cancelStaleSchema }), async (
 router.delete("/jobs/:jobId", validate({ params: jobParamsSchema }), async (req, res, next) => {
   try {
     const { jobId } = req.params as z.infer<typeof jobParamsSchema>;
-    const data = await ragServices.ragJobCleanupService.deleteFinishedJob(jobId);
-    if (data.deletedCount === 0) {
-      throw new AppError("排队中或执行中的任务不能删除。", 409);
-    }
-    res.status(200).json({
-      success: true,
-      data: {
-        jobId,
-        ...data,
-      },
-      message: "任务记录已删除。",
-    } satisfies ApiResponse<{ jobId: string; deletedCount: number; status: string }>);
-  } catch (error) {
-    if (error instanceof Error && error.message === "RAG job not found.") {
+    const job = await prisma.ragIndexJob.findUnique({ where: { id: jobId } });
+    if (!job) {
       next(new AppError("没有找到这个任务。", 404));
       return;
     }
+    if (job.status === "queued" || job.status === "running") {
+      throw new AppError("排队中或执行中的任务不能删除。", 409);
+    }
+    await prisma.ragIndexJob.delete({ where: { id: jobId } });
+    const data = { jobId, deletedCount: 1, status: job.status };
+    res.status(200).json({
+      success: true,
+      data,
+      message: "任务记录已删除。",
+    } satisfies ApiResponse<typeof data>);
+  } catch (error) {
     next(error);
   }
 });
 
 router.get("/health", async (_req, res, next) => {
   try {
-    const [embedding, qdrant] = await Promise.all([
-      ragServices.embeddingService.healthCheck(),
-      ragServices.vectorStoreService.healthCheck(),
-    ]);
+    const health = await ragMain.ragHealthCheck();
     const data = {
-      embedding: {
-        ...embedding,
-        timeoutMs: ragConfig.embeddingTimeoutMs,
-        batchSize: ragConfig.embeddingBatchSize,
-        maxRetries: ragConfig.embeddingMaxRetries,
-      },
-      qdrant: {
-        ...qdrant,
-        timeoutMs: ragConfig.qdrantTimeoutMs,
-      },
-      ok: embedding.ok && qdrant.ok,
+      embedding: health.embedding
+        ? { ...health.embedding, timeoutMs: ragConfig.embeddingTimeoutMs, batchSize: ragConfig.embeddingBatchSize, maxRetries: ragConfig.embeddingMaxRetries }
+        : { ok: false, detail: "rag worker child process not running", provider: "", model: "" },
+      qdrant: health.qdrant
+        ? { ...health.qdrant, timeoutMs: ragConfig.qdrantTimeoutMs }
+        : { ok: false, detail: "rag worker child process not running" },
+      worker: health.worker,
+      ok: health.ok,
     };
     res.status(data.ok ? 200 : 503).json({
       success: data.ok,

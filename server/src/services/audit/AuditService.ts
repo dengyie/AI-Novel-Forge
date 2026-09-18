@@ -13,7 +13,7 @@ import {
   resolveLlmQualityScore,
   ruleScore,
 } from "../novel/novelP0Utils";
-import { ragServices } from "../rag";
+import { ragMain } from "../rag/mainProcessProxy";
 import { runStructuredPrompt } from "../../prompting/core/promptRunner";
 import { auditChapterLightPrompt, auditChapterPrompt } from "../../prompting/prompts/audit/audit.prompts";
 import type { LightAuditOutput } from "./auditSchemas";
@@ -307,7 +307,7 @@ export class AuditService {
       let ragContext = "";
       let storyModeContext = "";
       try {
-        ragContext = await ragServices.hybridRetrievalService.buildContextBlock(
+        ragContext = await ragMain.retrieval.buildContextBlock(
           content,
           {
             novelId,
@@ -402,7 +402,7 @@ export class AuditService {
       let ragContext = "";
       let storyModeContext = "";
       try {
-        ragContext = await ragServices.hybridRetrievalService.buildContextBlock(
+        ragContext = await ragMain.retrieval.buildContextBlock(
           content,
           {
             novelId,

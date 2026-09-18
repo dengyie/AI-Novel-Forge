@@ -17,7 +17,7 @@ import { initSSE, writeSSEFrame } from "../llm/streaming";
 import { resolveEnforcedTimeoutMs, runWithEnforcedTimeout } from "../llm/invokeTimeout";
 import { authMiddleware } from "../middleware/auth";
 import { validate } from "../middleware/validate";
-import { ragServices } from "../services/rag";
+import { ragMain } from "../services/rag/mainProcessProxy";
 import type { RagOwnerType } from "../services/rag/types";
 
 const router = Router();
@@ -205,7 +205,7 @@ router.post("/", validate({ body: chatSchema }), async (req, res, next) => {
     let ragContext = "";
     if (shouldEnableRag && latestUserMessage) {
       try {
-        ragContext = await ragServices.hybridRetrievalService.buildContextBlock(latestUserMessage, {
+        ragContext = await ragMain.retrieval.buildContextBlock(latestUserMessage, {
           novelId: scope === "novel" ? body.novelId : undefined,
           worldId: scope === "world" ? body.worldId : undefined,
           ownerTypes,

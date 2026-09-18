@@ -7,7 +7,7 @@ import {
 } from "@ai-novel/shared/types/qualityFeedback";
 import { buildCompressionLog } from "../../../prompting/core/contextBudget";
 import { prisma } from "../../../db/prisma";
-import { ragServices } from "../../rag";
+import { ragMain } from "../../rag/mainProcessProxy";
 import { plannerService } from "../../planner/PlannerService";
 import { buildChapterRagQuery } from "../NovelReferenceService";
 import { NovelContinuationService } from "../NovelContinuationService";
@@ -666,7 +666,7 @@ export class GenerationContextAssembler {
     });
     let ragText = "";
     try {
-      ragText = await ragServices.hybridRetrievalService.buildContextBlock(ragQuery, {
+      ragText = await ragMain.retrieval.buildContextBlock(ragQuery, {
         novelId,
         currentChapterOrder: chapter.order,
       });

@@ -6,7 +6,7 @@ import {
   worldLayerGenerationPrompt,
   worldLayerLocalizationPrompt,
 } from "../../prompting/prompts/world/world.prompts";
-import { ragServices } from "../rag";
+import { ragMain } from "../rag/mainProcessProxy";
 import { buildWorldBlueprintPromptBlock } from "./worldGenerationBlueprint";
 import { getTemplateByKey, LAYER_FIELD_MAP } from "./worldTemplates";
 
@@ -157,7 +157,7 @@ export async function buildWorldLayerGeneration(
   const blueprintPromptBlock = buildWorldBlueprintPromptBlock(world);
   let layerRagContext = "";
   try {
-    layerRagContext = await ragServices.hybridRetrievalService.buildContextBlock(
+    layerRagContext = await ragMain.retrieval.buildContextBlock(
       `世界分层生成 ${layerKey}\n${world.name}\n${world.description ?? ""}`,
       {
         worldId: world.id,

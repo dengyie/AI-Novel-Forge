@@ -1,7 +1,7 @@
 import type { TaskStatus, UnifiedTaskDetail, UnifiedTaskSummary } from "@ai-novel/shared/types/task";
 import { prisma } from "../../../db/prisma";
 import { AppError } from "../../../middleware/errorHandler";
-import { ragServices } from "../../rag";
+import { ragMain } from "../../rag/mainProcessProxy";
 import type { RagJobType } from "../../rag/types";
 import {
   buildTaskRecoveryHint,
@@ -331,7 +331,7 @@ export class KnowledgeTaskAdapter {
       });
     }
 
-    const nextJob = await ragServices.ragIndexService.enqueueOwnerJob(job.jobType as RagJobType, "knowledge_document", job.ownerId, {
+    const nextJob = await ragMain.jobs.enqueueOwnerJob(job.jobType as RagJobType, "knowledge_document", job.ownerId, {
       tenantId: job.tenantId,
       maxAttempts: job.maxAttempts,
     });
@@ -357,7 +357,7 @@ export class KnowledgeTaskAdapter {
       throw new AppError("Only queued or running knowledge index jobs can be cancelled.", 400);
     }
 
-    await ragServices.ragIndexService.updateJobStatus(id, {
+    await ragMain.jobs.updateJobStatus(id, {
       status: "cancelled",
       lastError: null,
     });

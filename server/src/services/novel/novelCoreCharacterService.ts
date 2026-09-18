@@ -7,7 +7,7 @@ import {
 import { writeCharacterVoiceRefFromBase64 } from "../audiobook/audiobookPaths";
 import { voiceLibraryService } from "../audiobook/voiceLibraryService";
 import { parseSpeakerAliases } from "../audiobook/audiobookSpeakerAliases";
-import { ragServices } from "../rag";
+import { ragMain } from "../rag/mainProcessProxy";
 import { decideCharacterVoiceRefUpdate } from "./characterVoiceRefUpdate";
 import { queueRagDelete, queueRagUpsert } from "./novelCoreSupport";
 import { WorldContextGateway } from "./worldContext/WorldContextGateway";
@@ -371,7 +371,7 @@ export class NovelCoreCharacterService {
 
     let ragContext = "";
     try {
-      ragContext = await ragServices.hybridRetrievalService.buildContextBlock(
+      ragContext = await ragMain.retrieval.buildContextBlock(
         `角色演进 ${character.name}\n${timelineText}`,
         {
           novelId,

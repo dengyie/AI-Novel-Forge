@@ -18,7 +18,8 @@ import {
 import { authMiddleware } from "../middleware/auth";
 import { AppError } from "../middleware/errorHandler";
 import { validate } from "../middleware/validate";
-import { ragServices } from "../services/rag";
+import { ragMain, collectAllReindexOwners } from "../services/rag/mainProcessProxy";
+import { prisma } from "../db/prisma";
 import { providerBalanceService } from "../services/settings/ProviderBalanceService";
 import { secretStore } from "../services/settings/secretStore";
 import {
@@ -500,10 +501,10 @@ router.put(
         }),
       ]);
 
+      // RAG worker 已子进程化（RagWorkerManager 按 DB pending 拉起/子进程读设置生效）。
+      // enabled 变化只需确保 DB 已写（上方 updateRagRuntimeSettings），再按需唤醒 poll。
       if (runtimeResult.settings.enabled) {
-        ragServices.ragWorker.start();
-      } else {
-        ragServices.ragWorker.stop();
+        ragMain.kickWorker();
       }
 
       const shouldReindex = (embeddingResult.shouldReindex || runtimeResult.shouldReindex)
@@ -513,8 +514,10 @@ router.put(
       let reindexQueuedCount = 0;
       let message = "Saved RAG settings.";
       if (shouldReindex) {
-        const reindexResult = await ragServices.ragIndexService.enqueueReindex("all");
-        reindexQueuedCount = reindexResult.count;
+        const owners = await collectAllReindexOwners();
+        reindexQueuedCount = await Promise.all(
+          owners.map((owner) => ragMain.jobs.enqueueOwnerJob("rebuild", owner.ownerType, owner.ownerId)),
+        ).then((rows) => rows.length);
         message = `Saved RAG settings and queued ${reindexQueuedCount} reindex job(s).`;
       } else if ((embeddingResult.shouldReindex || runtimeResult.shouldReindex) && !runtimeResult.settings.enabled) {
         message = "Saved RAG settings. Reindex was skipped because RAG is currently disabled.";

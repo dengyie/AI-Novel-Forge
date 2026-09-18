@@ -11,8 +11,12 @@ import {
 import { DirectorTaskQueue, type DirectorTaskQueueOptions } from "./DirectorTaskQueue";
 import { taskDispatcher } from "./TaskDispatcher";
 
-// DirectorWorker 通常由 app.ts 的 initializeBackgroundServices() 在同进程内启动。
-// 此文件保留独立进程入口（`require.main === module`），仅供需要分离部署时使用。
+// DirectorWorker 由 app.ts 经 DirectorWorkerManager 按需 fork 到独立子进程运行
+// （pxed 防 OOM Phase 3：director import 树 +96MB heap 移出主进程）。
+// 此文件同时保留独立进程入口（`require.main === module`）。
+
+/** 子进程空闲（无 queued 命令）退出宽限；由 IPC kick 复位。环境变量 0 关闭。 */
+const IDLE_EXIT_GRACE_MS = Number(process.env.DIRECTOR_WORKER_IDLE_EXIT_MS ?? 5 * 60_000);
 
 export interface DirectorWorkerDeps {
   queue: DirectorTaskQueue;
@@ -209,6 +213,31 @@ async function bootstrap(): Promise<void> {
   const worker = new DirectorWorker();
   process.once("SIGINT", () => worker.stop());
   process.once("SIGTERM", () => worker.stop());
+
+  // 子进程模式（被 DirectorWorkerManager fork）：空闲宽限退出 + kick 复位。
+  if (process.send && IDLE_EXIT_GRACE_MS > 0) {
+    let idleTimer: NodeJS.Timeout | null = setTimeout(() => {
+      console.log(`[director.worker] idle ${IDLE_EXIT_GRACE_MS}ms; exiting to release memory.`);
+      worker.stop();
+    }, IDLE_EXIT_GRACE_MS);
+    idleTimer.unref();
+    const resetIdle = (): void => {
+      if (!idleTimer) return;
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        console.log(`[director.worker] idle ${IDLE_EXIT_GRACE_MS}ms; exiting to release memory.`);
+        worker.stop();
+      }, IDLE_EXIT_GRACE_MS);
+      idleTimer.unref();
+    };
+    process.on("message", (message: unknown) => {
+      if (typeof message === "object" && message !== null && (message as { type?: string }).type === "kick") {
+        resetIdle();
+        taskDispatcher.notify();
+      }
+    });
+  }
+
   await worker.start();
 }
 

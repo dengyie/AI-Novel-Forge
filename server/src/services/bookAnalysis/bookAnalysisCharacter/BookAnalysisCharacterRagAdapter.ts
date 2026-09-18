@@ -3,7 +3,7 @@ import type {
   BookAnalysisCharacterEvidenceItem,
 } from "@ai-novel/shared/types/bookAnalysisCharacter";
 import { BOOK_ANALYSIS_CHARACTER_DIMENSION_LABELS } from "@ai-novel/shared/types/bookAnalysisCharacter";
-import { ragServices } from "../../rag";
+import { ragMain } from "../../rag/mainProcessProxy";
 import { compactSnippet } from "../../rag/utils";
 import type { RetrievedChunk } from "../../rag/types";
 
@@ -61,7 +61,7 @@ export class BookAnalysisCharacterRagAdapter {
     const chunksById = new Map<string, RetrievedChunk & { dimension: BookAnalysisCharacterDimension }>();
 
     await Promise.all(dimensions.map(async (dimension) => {
-      const rows = await ragServices.hybridRetrievalService.retrieveByFacet({
+      const rows = (await ragMain.retrieval.retrieveByFacet({
         query: buildBookAnalysisCharacterDimensionQuery(input, dimension),
         ownerTypes: ["knowledge_document"],
         knowledgeDocumentIds: [input.documentId],
@@ -69,8 +69,8 @@ export class BookAnalysisCharacterRagAdapter {
         facets: {
           characterRole: [input.characterName],
         },
-      });
-      for (const row of rows) {
+      })) as Array<RetrievedChunk & { dimension?: BookAnalysisCharacterDimension }> | null;
+      for (const row of rows ?? []) {
         if (!chunksById.has(row.id)) {
           chunksById.set(row.id, { ...row, dimension });
         }

@@ -15,7 +15,7 @@ import {
   normalizeQuickOptionList,
   nowISO,
 } from "./worldServiceShared";
-import { ragServices } from "../rag";
+import { ragMain } from "../rag/mainProcessProxy";
 
 interface WorldImprovementCallbacks {
   createSnapshot: (worldId: string, label?: string) => Promise<unknown>;
@@ -38,7 +38,7 @@ export async function createWorldDeepeningQuestions(
 
   let ragContext = "";
   try {
-    ragContext = await ragServices.hybridRetrievalService.buildContextBlock(
+    ragContext = await ragMain.retrieval.buildContextBlock(
       `世界深化问题 ${world.name}\n${world.description ?? ""}`,
       {
         worldId,
@@ -308,7 +308,7 @@ export async function checkWorldConsistency(
   try {
     let ragContext = "";
     try {
-      ragContext = await ragServices.hybridRetrievalService.buildContextBlock(
+      ragContext = await ragMain.retrieval.buildContextBlock(
         `世界一致性检查 ${world.name}\n${world.description ?? ""}\n${world.conflicts ?? ""}`,
         {
           worldId,

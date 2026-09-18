@@ -52,7 +52,46 @@ test("pipeline admission releases its permit when execution rejects", async () =
   assert.equal(await admission.run(async () => "next-job-ran"), "next-job-ran");
 });
 
-test("pipeline execution defaults to one active high-memory job per process", async () => {
+test("pipeline admission removes an aborted waiter without consuming the next permit", async () => {
+  const admission = new PipelineExecutionAdmission(1);
+  let releaseFirst;
+  const first = admission.run(() => new Promise((resolve) => { releaseFirst = resolve; }));
+  const controller = new AbortController();
+  const waiting = admission.run(async () => "must-not-run", controller.signal);
+  controller.abort();
+
+  await assert.rejects(waiting, { name: "AbortError" });
+  releaseFirst();
+  await first;
+  assert.equal(await admission.run(async () => "next-job-ran"), "next-job-ran");
+});
+
+test("direct single-chapter execution shares the process high-memory admission", { concurrency: false }, async () => {
+  const service = new NovelCorePipelineService();
+  let active = 0;
+  let maxActive = 0;
+  const releases = [];
+  service.chapterRuntimeCoordinator.runPipelineChapter = async () => {
+    active += 1;
+    maxActive = Math.max(maxActive, active);
+    await new Promise((resolve) => releases.push(resolve));
+    active -= 1;
+    return { ok: true };
+  };
+
+  const first = service.runPipelineChapter("novel-1", "chapter-1");
+  const second = service.runPipelineChapter("novel-2", "chapter-2");
+  await waitFor(() => active === 1, "first direct chapter never started");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(maxActive, 1);
+  releases.shift()();
+  await waitFor(() => releases.length >= 1 && active === 1, "second direct chapter never acquired the permit");
+  releases.shift()();
+  await Promise.all([first, second]);
+  assert.equal(maxActive, 1);
+});
+
+test("pipeline execution defaults to one active high-memory job per process", { concurrency: false }, async () => {
   const service = new NovelCorePipelineService();
   const started = [];
   const releases = new Map();
@@ -92,7 +131,7 @@ test("pipeline execution defaults to one active high-memory job per process", as
   }
 });
 
-test("recovered pipeline jobs claim the database only after admission", async () => {
+test("recovered pipeline jobs claim the database only after admission", { concurrency: false }, async () => {
   const originalFindUnique = prisma.generationJob.findUnique;
   const service = new NovelCorePipelineService();
   const claimed = [];
@@ -156,7 +195,7 @@ test("recovered pipeline jobs claim the database only after admission", async ()
   }
 });
 
-test("recovered cancellation waiting behind admission is finalized instead of left retry-blocked", async () => {
+test("recovered cancellation waiting behind admission is finalized instead of left retry-blocked", { concurrency: false }, async () => {
   const originalFindUnique = prisma.generationJob.findUnique;
   const service = new NovelCorePipelineService();
   let finalized = 0;

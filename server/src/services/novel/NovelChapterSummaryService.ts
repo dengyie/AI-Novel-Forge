@@ -1,6 +1,6 @@
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
 import { prisma } from "../../db/prisma";
-import { ragServices } from "../rag";
+import { ragMain } from "../rag/mainProcessProxy";
 import type { RagOwnerType } from "../rag/types";
 import { runStructuredPrompt } from "../../prompting/core/promptRunner";
 import { chapterSummaryPrompt } from "../../prompting/prompts/novel/review.prompts";
@@ -200,7 +200,7 @@ export class NovelChapterSummaryService {
   }
 
   private queueRagUpsert(ownerType: RagOwnerType, ownerId: string): void {
-    void ragServices.ragIndexService.enqueueUpsert(ownerType, ownerId).catch(() => {
+    void ragMain.jobs.enqueueUpsert(ownerType, ownerId).catch(() => {
       // Keep summary generation resilient when RAG queueing fails.
     });
   }

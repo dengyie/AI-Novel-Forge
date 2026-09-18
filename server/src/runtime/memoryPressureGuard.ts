@@ -52,6 +52,17 @@ export function noteMemoryGuardActivity(): void {
   lastActivityAt = Date.now();
 }
 
+/**
+ * gcOnce:空闲期触发一次完整 GC。
+ *
+ * 历史教训（2026-09-14 pxed 实证）：旧版在这里做
+ * `setFlagsFromString('--reduce-memory-use')` → gc → 还原 的两段式，实际是死代码：
+ * node ≥20 的 V8 已移除该 flag，且 setFlagsFromString 对未知 flag 的行为是
+ * **打 stderr（"unrecognized flag"）但不 throw**（v20.20.2 / v26 实测一致）——
+ * 既不产生 shrink 效果，还每 tick 污染 err.log 两行。真实 RSS 底线由活堆
+ * （heapUsed，pxed 稳态 ~172MB）决定，GC 只能回收瞬时垃圾。要进一步降 RSS
+ * 走 Phase 3：把 director/RAG import 树拆出主进程。
+ */
 function gcOnce(): void {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const maybeGc = (global as any).gc as (() => void) | undefined;
@@ -59,13 +70,7 @@ function gcOnce(): void {
     return;
   }
   testHooks.gcCalls.push("gc");
-  // 两段式：先常规 GC 回收代际垃圾，再触发 V8 的 shrink 标志压缩堆并二次回收，
-  // 这一组在他处（如 heap 快照前收缩）是标准组合。
-  v8.setFlagsFromString("--expose_gc");
   maybeGc();
-  v8.setFlagsFromString("--reduce-memory-use");
-  maybeGc();
-  v8.setFlagsFromString("--no-reduce-memory-use");
 }
 
 function guardTick(): void {

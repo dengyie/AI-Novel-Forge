@@ -58,6 +58,11 @@ export class NovelCorePipelineService {
   private static readonly startLocks = new Set<string>();
   /** 运行中章节的 AbortController：cancel API 可即时 abort，不必等心跳轮询 */
   private static readonly activeChapterAborts = new Map<string, AbortController>();
+  /**
+   * 任务在进程级高负载准入队列中等待时，还没有 activeChapterAborts。
+   * 单独登记 admission controller，确保取消不会让排队任务继续占用后续执行机会。
+   */
+  private static readonly pipelineExecutionAborts = new Map<string, AbortController>();
   private readonly chapterRuntimeCoordinator = new ChapterRuntimeCoordinator();
   private readonly pipelineJobCancellationService = new PipelineJobCancellationService();
   private readonly pipelineJobLeaseService = new PipelineJobLeaseService();
@@ -308,7 +313,10 @@ export class NovelCorePipelineService {
     chapterId: string,
     options: import("./runtime/chapterRuntimePipeline").PipelineRuntimeInput = {},
   ) {
-    return this.chapterRuntimeCoordinator.runPipelineChapter(novelId, chapterId, options);
+    return withPipelineExecutionPermit(
+      () => this.chapterRuntimeCoordinator.runPipelineChapter(novelId, chapterId, options),
+      options.signal,
+    );
   }
 
   async startPipelineJob(novelId: string, options: PipelineRunOptions) {
@@ -463,6 +471,10 @@ export class NovelCorePipelineService {
 
   async cancelPipelineJob(jobId: string) {
     return this.pipelineJobCancellationService.cancel(jobId, () => {
+      const admissionAbort = NovelCorePipelineService.pipelineExecutionAborts.get(jobId);
+      if (admissionAbort && !admissionAbort.signal.aborted) {
+        admissionAbort.abort(new Error("PIPELINE_CANCELLED"));
+      }
       const liveAbort = NovelCorePipelineService.activeChapterAborts.get(jobId);
       if (liveAbort && !liveAbort.signal.aborted) {
         liveAbort.abort(new Error("PIPELINE_CANCELLED"));
@@ -500,6 +512,8 @@ export class NovelCorePipelineService {
       return;
     }
     NovelCorePipelineService.activeJobIds.add(jobId);
+    const executionAbort = new AbortController();
+    NovelCorePipelineService.pipelineExecutionAborts.set(jobId, executionAbort);
     let leaseOwner: string | null = null;
     void withPipelineExecutionPermit(async () => {
       if (options.prepareForResume) {
@@ -552,7 +566,7 @@ export class NovelCorePipelineService {
         }
       }
       await this.executePipeline(jobId, novelId, options, leaseOwner);
-    }).catch(async (error) => {
+    }, executionAbort.signal).catch(async (error) => {
       // 防止未处理 rejection 拖垮进程；并保证成功认领后出现的意外异常不把 job
       // 永久留在 running。若租约尚未认领，owner-CAS 会安全地命中 0 行。
       await this.pipelineJobWriteService.ensureTerminalAfterUnhandledError(
@@ -562,6 +576,10 @@ export class NovelCorePipelineService {
       );
     }).finally(() => {
       NovelCorePipelineService.activeJobIds.delete(jobId);
+      const currentAbort = NovelCorePipelineService.pipelineExecutionAborts.get(jobId);
+      if (currentAbort === executionAbort) {
+        NovelCorePipelineService.pipelineExecutionAborts.delete(jobId);
+      }
     });
   }
 

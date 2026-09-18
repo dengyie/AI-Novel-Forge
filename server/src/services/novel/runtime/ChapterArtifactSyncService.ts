@@ -1,7 +1,7 @@
 import type { RagOwnerType } from "../../rag/types";
 import { prisma } from "../../../db/prisma";
 import { withSqliteRetry } from "../../../db/sqliteRetry";
-import { ragServices } from "../../rag";
+import { ragMain } from "../../rag/mainProcessProxy";
 import { briefSummary, extractFacts } from "../novelP0Utils";
 import { chapterStatePairAfterDraftSave } from "../chapterLifecycleState";
 import { chapterArtifactBackgroundSyncService } from "./ChapterArtifactBackgroundSyncService";
@@ -218,6 +218,6 @@ export class ChapterArtifactSyncService {
   }
 
   private queueRagUpsert(ownerType: RagOwnerType, ownerId: string): void {
-    void ragServices.ragIndexService.enqueueUpsert(ownerType, ownerId).catch(() => {});
+    void ragMain.jobs.enqueueUpsert(ownerType, ownerId).catch(() => {});
   }
 }

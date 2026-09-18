@@ -3,12 +3,14 @@ import fs from "node:fs";
 import { prisma } from "../db/prisma";
 import { M4bJobQueueService } from "../services/audiobook/m4b/M4bJobQueueService";
 import { executeM4bEncoding } from "../services/audiobook/m4b/M4bEncodingCore";
+import { resolveM4bWorkerId } from "../services/audiobook/m4b/M4bWorkerIdentity";
 
 const IDLE_TIMEOUT_MS = Number(process.env.M4B_WORKER_IDLE_TIMEOUT_MS) || 60_000;
 const HEARTBEAT_INTERVAL_MS = 10_000;
 const PROGRESS_UPDATE_INTERVAL_MS = 5_000;
 const POLL_INTERVAL_MS = 5_000;
-const WORKER_ID = process.env.M4B_WORKER_ID || `${process.pid}`;
+/** The queue stores the process that actually owns the ffmpeg job, never the parent API PID. */
+const WORKER_ID = resolveM4bWorkerId(process.pid);
 const LOG_PATH = process.env.M4B_WORKER_LOG_PATH;
 
 function log(message: string) {

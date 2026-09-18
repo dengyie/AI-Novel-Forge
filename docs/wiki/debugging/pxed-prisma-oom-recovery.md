@@ -12,6 +12,18 @@ pxed 上 novel-server 与其它 Node 进程共享约 4 GiB、无 swap 的宿主�
 - 重启前运行 scripts/deploy/prisma-runtime-probe.cjs。探针只构造 Prisma client 并读取 _runtimeDataModel，不执行查询；字段缺失或 hash 不匹配时立即失败，禁止 restart。
 - 线上排障同时记录 Supervisor 状态、PID、RSS、OOM counter、启动时间和 health/ready 响应，不能只看应用日志。
 
+## 高负载执行边界（2026-09-19）
+
+pxed 的 global OOM 不会被应用进程看到，`process.availableMemory()`、V8 heap 上限和容器 cgroup 余量都不能作为并发安全信号。因此高负载入口必须在业务上下文构造之前经过进程级准入：
+
+- 批量章节 Pipeline 与直接单章运行共用 `PipelineExecutionAdmission`，默认并发 1，硬上限 4。
+- 准入等待期间不领取数据库租约；取消请求会从等待队列移除，避免取消任务继续占用下一次执行机会。
+- Volume Readiness 的 polish 入口也通过单章入口，不能从后台恢复路径绕过准入。
+- Director、RAG、m4b 使用按需子进程；Director/RAG 子进程显式继承受控 V8 heap。m4b 队列记录真实 worker PID，API 父进程 PID 不可用于停滞杀进程。
+- worker 异常退出后，持有的 m4b 任务最多自动回队一次；替换 worker 有短暂冷却，避免 crash-loop 形成重启和内存峰值放大器。
+
+诊断时应同时区分三类现象：主进程 RSS 仍高但没有活跃高负载任务，说明是常驻 import/堆底线；worker 被 SIGKILL 后任务回队，说明隔离边界生效但需检查 worker 堆和输入规模；任务长期 `processing` 且 `workerId` 不再对应当前 manager 子进程，说明是历史 ownership 数据，应回队而不能按该 PID 发信号。
+
 ## 失败模式
 
 - SIGKILL 与宿主 oom_kill 计数同时增长：按 OOM 处理，先降低并发/内存占用并恢复 Supervisor，不要把它误判为 Prisma 或业务异常。

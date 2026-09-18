@@ -5,7 +5,7 @@ import type {
   KnowledgeRecallTestResult,
 } from "@ai-novel/shared/types/knowledge";
 import { prisma } from "../../db/prisma";
-import { ragServices } from "../rag";
+import { ragMain } from "../rag/mainProcessProxy";
 import {
   buildKnowledgeContentHash,
   normalizeKnowledgeContent,
@@ -41,13 +41,13 @@ export class KnowledgeService {
   }
 
   private queueKnowledgeRebuild(documentId: string, payload?: Record<string, unknown>): void {
-    void ragServices.ragIndexService.enqueueOwnerJob("rebuild", "knowledge_document", documentId, { payload }).catch(() => {
+    void ragMain.jobs.enqueueOwnerJob("rebuild", "knowledge_document", documentId, { payload }).catch(() => {
       // Keep knowledge document CRUD resilient even if reindex queueing fails.
     });
   }
 
   private queueKnowledgeDelete(documentId: string): void {
-    void ragServices.ragIndexService.enqueueOwnerJob("delete", "knowledge_document", documentId).catch(() => {
+    void ragMain.jobs.enqueueOwnerJob("delete", "knowledge_document", documentId).catch(() => {
       // Keep knowledge document CRUD resilient even if delete queueing fails.
     });
   }
@@ -448,13 +448,13 @@ export class KnowledgeService {
       throw new Error("Knowledge document recall test is only available after indexing succeeds.");
     }
 
-    const hits = await ragServices.hybridRetrievalService.retrieve(query, {
+    const hits = ((await ragMain.retrieval.retrieve(query, {
       ownerTypes: ["knowledge_document"],
       knowledgeDocumentIds: [documentId],
       finalTopK: limit,
       vectorCandidates: Math.max(limit * 2, 10),
       keywordCandidates: Math.max(limit * 2, 10),
-    });
+    })) ?? []) as KnowledgeRecallTestResult["hits"];
 
     return {
       documentId,

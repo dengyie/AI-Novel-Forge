@@ -1,7 +1,7 @@
 import { prisma } from "../../../../db/prisma";
 import { runStructuredPrompt } from "../../../../prompting/core/promptRunner";
 import { chapterArtifactDeltaPrompt } from "../../../../prompting/prompts/novel/chapterArtifactDelta.prompts";
-import { ragServices } from "../../../rag";
+import { ragMain } from "../../../rag/mainProcessProxy";
 import { stateService } from "../../../state/StateService";
 import { characterResourceLedgerService } from "../../characterResource/CharacterResourceLedgerService";
 import { characterResourceStaleScanService } from "../../characterResource/CharacterResourceStaleScanService";
@@ -235,6 +235,6 @@ export class ChapterArtifactDeltaOrchestrator {
   }
 
   private queueRagUpsert(ownerType: "chapter" | "chapter_summary", ownerId: string): void {
-    void ragServices.ragIndexService.enqueueUpsert(ownerType, ownerId).catch(() => null);
+    void ragMain.jobs.enqueueUpsert(ownerType, ownerId).catch(() => null);
   }
 }

@@ -46,7 +46,6 @@ import worldRouter from "./modules/setup/world/http";
 import writingFormulaRouter from "./routes/writingFormula";
 import { novelEventBus, registerNovelEventHandlers } from "./events";
 import { bookAnalysisService } from "./services/bookAnalysis/BookAnalysisService";
-import { ragServices } from "./services/rag";
 import { getSharedNovelServices } from "./services/novel/application/sharedNovelServices";
 import { novelSideEffectWorker } from "./events/sideEffects";
 import { NovelPipelineRuntimeService } from "./services/novel/NovelPipelineRuntimeService";
@@ -62,9 +61,11 @@ import { initializeRagSettingsCompatibility } from "./services/settings/RagCompa
 import { qualityDebtSettingsService } from "./services/settings/QualityDebtSettingsService";
 import { createGlobalErrorHandlers } from "./services/globalErrorHandler";
 import { logPipelineError } from "./services/novel/novelCoreShared";
-import { DirectorWorker } from "./workers/directorWorker";
 import { cleanupLogDirectory, resolveLogRetentionConfig } from "./platform/logging/logRetention";
 import { resolveClientDistPath, resolveLogsRoot } from "./runtime/appPaths";
+import { ragWorkerManager } from "./runtime/RagWorkerManager";
+import { directorWorkerManager } from "./runtime/DirectorWorkerManager";
+import { ragMain } from "./services/rag/mainProcessProxy";
 import {
   startArtifactCheckpointHygieneScanner,
   stopArtifactCheckpointHygieneScanner,
@@ -342,7 +343,6 @@ function scheduleLogRetentionCleanup(): void {
 }
 
 async function initializeBackgroundServices(): Promise<BackgroundServicesHandle> {
-  const directorWorker = new DirectorWorker();
   let stopped = false;
   let recoveryRetryTimer: NodeJS.Timeout | null = null;
   const scheduleRecoveryRetry = (delayMs: number): void => {
@@ -374,23 +374,18 @@ async function initializeBackgroundServices(): Promise<BackgroundServicesHandle>
       clearTimeout(recoveryRetryTimer);
       recoveryRetryTimer = null;
     }
-    // Bound wait for director in-flight ticks; force-exit still owned by SHUTDOWN_TIMEOUT_MS.
-    const drainMs = Math.max(
-      1_000,
-      Math.min(15_000, parsePositiveInt(process.env.SHUTDOWN_TIMEOUT_MS, 20_000) - 5_000),
-    );
-    const drainResult = await directorWorker.waitForStop(drainMs).catch((error) => {
-      console.warn("[director.worker] waitForStop failed", error);
-      return "timeout" as const;
+    // Director worker 现为独立子进程：SIGTERM → 5s drain → SIGKILL（Manager 内）。
+    await directorWorkerManager.shutdown().catch((error) => {
+      console.warn("[director.worker] shutdown failed", error);
     });
-    if (drainResult === "timeout") {
-      console.warn(`[director.worker] in-flight drain timed out after ${drainMs}ms; continuing shutdown.`);
-    }
+    await ragWorkerManager.shutdown().catch((error) => {
+      console.warn("[rag.worker] shutdown failed", error);
+    });
     novelSideEffectWorker.stop();
     stopArtifactCheckpointHygieneScanner();
     stopChapterLockHygieneScanner();
-    ragServices.ragWorker.stop();
-    ragServices.ragRetrievalTraceRetention.stop();
+    ragWorkerManager.stopPolling();
+    ragMain.retrievalTraceRetention.stop();
     taskRetentionService.stop();
     volumeReadinessScheduler.stop();
     bookAnalysisService.stopWatchdog();
@@ -412,8 +407,9 @@ async function initializeBackgroundServices(): Promise<BackgroundServicesHandle>
       startDeferredServices: () => {
         // These workers may perform an immediate scan/tick. Starting them only
         // after durable task recovery avoids adding another restart-time burst.
-        ragServices.ragWorker.start();
-        ragServices.ragRetrievalTraceRetention.start();
+        // RAG worker / director worker 已子进程化：主进程只轮询 DB 按需 fork。
+        ragWorkerManager.startPolling();
+        ragMain.retrievalTraceRetention.start();
         taskRetentionService.start();
         novelSideEffectWorker.start();
         // Prevent zombie chapterArtifactSyncCheckpoint rows from blocking writer claim paths.
@@ -436,9 +432,7 @@ async function initializeBackgroundServices(): Promise<BackgroundServicesHandle>
           });
       },
       startDirectorWorker: () => {
-        void directorWorker.start().catch((error) => {
-          console.error("[director.worker] unexpected stop", error);
-        });
+        directorWorkerManager.startPolling();
       },
       shouldStop: () => stopped,
     });

@@ -74,7 +74,7 @@ import {
 } from "./worldServiceShared";
 import { generateWorldSkeleton, type WorldSkeletonGenerateInput } from "./worldSkeletonGeneration";
 import { exportWorldData, importWorldData } from "./worldTransfer";
-import { ragServices } from "../rag";
+import { ragMain } from "../rag/mainProcessProxy";
 import type { RagOwnerType } from "../rag/types";
 
 function buildGeneratedStructurePersistence(
@@ -163,13 +163,13 @@ export class WorldService {
   }
 
   private queueRagUpsert(ownerType: RagOwnerType, ownerId: string): void {
-    void ragServices.ragIndexService.enqueueUpsert(ownerType, ownerId).catch(() => {
+    void ragMain.jobs.enqueueUpsert(ownerType, ownerId).catch(() => {
       // keep primary workflow resilient even when rag queueing fails
     });
   }
 
   private queueRagDelete(ownerType: RagOwnerType, ownerId: string): void {
-    void ragServices.ragIndexService.enqueueDelete(ownerType, ownerId).catch(() => {
+    void ragMain.jobs.enqueueDelete(ownerType, ownerId).catch(() => {
       // keep primary workflow resilient even when rag queueing fails
     });
   }

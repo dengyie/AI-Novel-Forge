@@ -5,7 +5,7 @@ import { runStructuredPrompt } from "../../prompting/core/promptRunner";
 import {
   chapterReviewPrompt,
 } from "../../prompting/prompts/novel/review.prompts";
-import { ragServices } from "../rag";
+import { ragMain } from "../rag/mainProcessProxy";
 import { auditService } from "../audit/AuditService";
 import { payoffLedgerSyncService } from "../payoff/PayoffLedgerSyncService";
 import { plannerService } from "../planner/PlannerService";
@@ -295,7 +295,7 @@ export class NovelCoreReviewService {
       let ragContext = "";
       if (novelId) {
         try {
-          ragContext = await ragServices.hybridRetrievalService.buildContextBlock(
+          ragContext = await ragMain.retrieval.buildContextBlock(
             `章节审校 ${novelTitle}\n${chapterTitle}\n${content.slice(0, 1500)}`,
             {
               novelId,

@@ -126,4 +126,39 @@ export class M4bJobQueueService {
       },
     });
   }
+
+  /**
+   * Worker 进程被 SIGKILL 或异常退出时立即收口它持有的任务。
+   * 仅允许一次自动回队；重复失败转 failed，避免 worker crash-loop 无限重试并持续抬高宿主内存。
+   */
+  async recoverJobsForWorker(workerId: string): Promise<{ requeued: number; failed: number }> {
+    const requeued = await prisma.m4bEncodingJob.updateMany({
+      where: {
+        status: "processing",
+        workerId,
+        retryCount: { lt: 1 },
+      },
+      data: {
+        status: "pending",
+        workerId: null,
+        workerStartedAt: null,
+        retryCount: { increment: 1 },
+        errorMessage: "m4b worker exited; job requeued.",
+      },
+    });
+    const failed = await prisma.m4bEncodingJob.updateMany({
+      where: {
+        status: "processing",
+        workerId,
+        retryCount: { gte: 1 },
+      },
+      data: {
+        status: "failed",
+        workerId: null,
+        workerStartedAt: null,
+        errorMessage: "m4b worker exited after retry budget was exhausted.",
+      },
+    });
+    return { requeued: requeued.count, failed: failed.count };
+  }
 }
