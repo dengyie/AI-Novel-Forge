@@ -23,7 +23,7 @@ type Pending = {
 
 /** RagClient 只需要 ChildProcess 的 IPC 面（不引 node:child_process 类型进来）。 */
 export type WorkerLike = {
-  postMessage: (message: unknown) => boolean;
+  send: (message: unknown, callback?: (error?: Error | null) => void) => boolean;
   on: (event: "message", listener: (message: unknown) => void) => unknown;
   off: (event: "message", listener: (message: unknown) => void) => unknown;
 };
@@ -158,12 +158,21 @@ export class RagClient {
         timer,
       });
       try {
-        worker.postMessage({ ...message, id });
+        worker.send({ ...message, id }, (error) => {
+          if (!error) return;
+          const pending = this.pending.get(id);
+          if (!pending) return;
+          this.pending.delete(id);
+          clearTimeout(pending.timer);
+          this.noteFailure();
+          console.warn("[RAG][Client] IPC send failed; degrade to empty.", error);
+          pending.resolve(null);
+        });
       } catch (error) {
         this.pending.delete(id);
         clearTimeout(timer);
         this.noteFailure();
-        console.warn("[RAG][Client] postMessage failed; degrade to empty.", error);
+        console.warn("[RAG][Client] IPC send failed; degrade to empty.", error);
         resolve(null);
       }
     });

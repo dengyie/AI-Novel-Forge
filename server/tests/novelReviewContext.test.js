@@ -8,7 +8,7 @@ const { plannerService } = require("../dist/services/planner/PlannerService.js")
 const { GenerationContextAssembler } = require("../dist/services/novel/runtime/GenerationContextAssembler.js");
 const { NovelCoreReviewService } = require("../dist/services/novel/novelCoreReviewService.js");
 const novelCoreShared = require("../dist/services/novel/novelCoreShared.js");
-const { ragServices } = require("../dist/services/rag/index.js");
+const { ragMain } = require("../dist/services/rag/mainProcessProxy.js");
 
 function createAssembledContextPackage() {
   return {
@@ -323,7 +323,7 @@ test("repair stream builds prompt blocks from the assembled repair context packa
   const originalBibleFindUnique = prisma.novelBible.findUnique;
   const originalStreamTextPrompt = promptRunner.streamTextPrompt;
   const originalAssemble = GenerationContextAssembler.prototype.assemble;
-  const originalBuildContextBlock = ragServices.hybridRetrievalService.buildContextBlock;
+  const originalBuildContextBlock = ragMain.retrieval.buildContextBlock;
 
   let capturedContextBlocks = null;
   prisma.novel.findUnique = async () => ({ id: "novel-1", title: "测试小说" });
@@ -333,7 +333,7 @@ test("repair stream builds prompt blocks from the assembled repair context packa
     content: "章节正文",
   });
   prisma.novelBible.findUnique = async () => ({ rawContent: "作品圣经" });
-  ragServices.hybridRetrievalService.buildContextBlock = async () => "";
+  ragMain.retrieval.buildContextBlock = async () => "";
   GenerationContextAssembler.prototype.assemble = async () => ({
     novel: { id: "novel-1", title: "测试小说" },
     chapter: { id: "chapter-1", title: "第1章", order: 1, content: "章节正文", expectation: "推进冲突" },
@@ -382,7 +382,7 @@ test("repair stream builds prompt blocks from the assembled repair context packa
     prisma.novelBible.findUnique = originalBibleFindUnique;
     promptRunner.streamTextPrompt = originalStreamTextPrompt;
     GenerationContextAssembler.prototype.assemble = originalAssemble;
-    ragServices.hybridRetrievalService.buildContextBlock = originalBuildContextBlock;
+    ragMain.retrieval.buildContextBlock = originalBuildContextBlock;
   }
 });
 

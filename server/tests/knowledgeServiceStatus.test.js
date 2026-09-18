@@ -4,13 +4,13 @@ const assert = require("node:assert/strict");
 const { prisma } = require("../dist/db/prisma.js");
 const { KnowledgeService } = require("../dist/services/knowledge/KnowledgeService.js");
 const { RagIndexService } = require("../dist/services/rag/RagIndexService.js");
-const { ragServices } = require("../dist/services/rag/index.js");
+const { ragMain } = require("../dist/services/rag/mainProcessProxy.js");
 
 test("restoring archived knowledge document queues a rebuild and marks indexing queued", async () => {
   const service = new KnowledgeService();
   const originalFindUnique = prisma.knowledgeDocument.findUnique;
   const originalUpdate = prisma.knowledgeDocument.update;
-  const originalEnqueueOwnerJob = ragServices.ragIndexService.enqueueOwnerJob;
+  const originalEnqueueOwnerJob = ragMain.jobs.enqueueOwnerJob;
   const enqueueCalls = [];
   let updateArgs = null;
 
@@ -27,7 +27,7 @@ test("restoring archived knowledge document queues a rebuild and marks indexing 
       latestIndexStatus: args.data.latestIndexStatus,
     };
   };
-  ragServices.ragIndexService.enqueueOwnerJob = async (...args) => {
+  ragMain.jobs.enqueueOwnerJob = async (...args) => {
     enqueueCalls.push(args);
     return { id: "rag-job-rebuild" };
   };
@@ -51,7 +51,7 @@ test("restoring archived knowledge document queues a rebuild and marks indexing 
   } finally {
     prisma.knowledgeDocument.findUnique = originalFindUnique;
     prisma.knowledgeDocument.update = originalUpdate;
-    ragServices.ragIndexService.enqueueOwnerJob = originalEnqueueOwnerJob;
+    ragMain.jobs.enqueueOwnerJob = originalEnqueueOwnerJob;
   }
 });
 
@@ -59,7 +59,7 @@ test("archiving knowledge document queues index cleanup and leaves document cont
   const service = new KnowledgeService();
   const originalFindUnique = prisma.knowledgeDocument.findUnique;
   const originalUpdate = prisma.knowledgeDocument.update;
-  const originalEnqueueOwnerJob = ragServices.ragIndexService.enqueueOwnerJob;
+  const originalEnqueueOwnerJob = ragMain.jobs.enqueueOwnerJob;
   const enqueueCalls = [];
   let updateArgs = null;
 
@@ -76,7 +76,7 @@ test("archiving knowledge document queues index cleanup and leaves document cont
       latestIndexStatus: args.data.latestIndexStatus,
     };
   };
-  ragServices.ragIndexService.enqueueOwnerJob = async (...args) => {
+  ragMain.jobs.enqueueOwnerJob = async (...args) => {
     enqueueCalls.push(args);
     return { id: "rag-job-delete" };
   };
@@ -98,7 +98,7 @@ test("archiving knowledge document queues index cleanup and leaves document cont
   } finally {
     prisma.knowledgeDocument.findUnique = originalFindUnique;
     prisma.knowledgeDocument.update = originalUpdate;
-    ragServices.ragIndexService.enqueueOwnerJob = originalEnqueueOwnerJob;
+    ragMain.jobs.enqueueOwnerJob = originalEnqueueOwnerJob;
   }
 });
 

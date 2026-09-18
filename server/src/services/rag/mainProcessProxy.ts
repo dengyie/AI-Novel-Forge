@@ -146,6 +146,8 @@ export const ragMain = {
   ragHealthCheck,
   /** 子进程按需拉起（入队后立即唤醒，避免等 15s poll）。 */
   kickWorker: () => ragWorkerManager.kickPoll(),
+  /** 设置关闭 RAG 时安全停止当前子进程；重新启用由 kickWorker 按需拉起。 */
+  disableWorker: () => ragWorkerManager.disable(),
   /**
    * 检索轨迹保留（仅 prisma 定时清理，无重依赖）——留主进程运行。
    * 动态 import RagRetrievalTraceRetention（其只依赖 prisma+ragConfig，不引重树）。

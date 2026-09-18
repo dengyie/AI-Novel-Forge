@@ -94,17 +94,7 @@ export class M4bWorkerManager {
       logStream.end();
 
       if (!this.shuttingDown) {
-        void this.queueService.recoverJobsForWorker(String(workerPid)).catch((error) => {
-          console.error(`[M4bWorkerManager] Failed to recover jobs for worker ${workerPid}:`, error);
-        });
-        if (this.replacementTimer) clearTimeout(this.replacementTimer);
-        this.replacementTimer = setTimeout(() => {
-          this.replacementTimer = null;
-          this.ensureWorkerForPendingJobs().catch((error) => {
-            console.error("[M4bWorkerManager] Failed to spawn replacement worker:", error);
-          });
-        }, REPLACEMENT_COOLDOWN_MS);
-        this.replacementTimer.unref?.();
+        void this.recoverAndReplaceWorker(workerPid);
       }
     });
 
@@ -115,6 +105,23 @@ export class M4bWorkerManager {
     });
 
     console.log(`[M4bWorkerManager] Spawned worker ${worker.pid}`);
+  }
+
+  private async recoverAndReplaceWorker(workerPid: number): Promise<void> {
+    try {
+      await this.queueService.recoverJobsForWorker(String(workerPid));
+    } catch (error) {
+      console.error(`[M4bWorkerManager] Failed to recover jobs for worker ${workerPid}:`, error);
+    }
+    if (this.shuttingDown) return;
+    if (this.replacementTimer) clearTimeout(this.replacementTimer);
+    this.replacementTimer = setTimeout(() => {
+      this.replacementTimer = null;
+      this.ensureWorkerForPendingJobs().catch((error) => {
+        console.error("[M4bWorkerManager] Failed to spawn replacement worker:", error);
+      });
+    }, REPLACEMENT_COOLDOWN_MS);
+    this.replacementTimer.unref?.();
   }
 
   private startHeartbeatWatchdog(): void {
@@ -203,6 +210,8 @@ export class M4bWorkerManager {
     }
 
     const workers = Array.from(this.activeWorkers.values());
+    if (workers.length === 0) return;
+
     for (const worker of workers) {
       try {
         worker.kill("SIGTERM");

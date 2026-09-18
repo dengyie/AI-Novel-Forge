@@ -11,7 +11,7 @@ import type { RagWorkerRequest, RagWorkerResponse } from "../runtime/ragWorkerPr
  * 由主进程 RagWorkerManager fork；承载 RAG 全家 import 树（实测 +85MB heap）。
  * 职责：
  * - 处理主进程 IPC-RPC（buildContextBlock / retrieve / retrieveByFacet / healthCheck）
- * - 运行 ragServices.ragWorker（RagIndexJob 轮询）+ ragRetrievalTraceRetention
+ * - 运行 ragServices.ragWorker（RagIndexJob 轮询）
  * - 30s 心跳（RagWorkerManager 看门狗用）
  * - 空闲（idle 消息 + 宽限期无新活）后自行 exit，内存归还 OS；主进程按需再 fork
  */
@@ -150,7 +150,6 @@ async function bootstrap(): Promise<void> {
   heartbeatTimer.unref();
 
   ragServices.ragWorker.start();
-  ragServices.ragRetrievalTraceRetention.start();
   console.log("[rag.worker] started pid=" + process.pid);
 }
 

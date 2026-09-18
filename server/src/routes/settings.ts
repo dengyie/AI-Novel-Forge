@@ -505,6 +505,8 @@ router.put(
       // enabled 变化只需确保 DB 已写（上方 updateRagRuntimeSettings），再按需唤醒 poll。
       if (runtimeResult.settings.enabled) {
         ragMain.kickWorker();
+      } else {
+        ragMain.disableWorker();
       }
 
       const shouldReindex = (embeddingResult.shouldReindex || runtimeResult.shouldReindex)

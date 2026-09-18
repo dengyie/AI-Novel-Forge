@@ -11,7 +11,7 @@ const {
 const { prisma } = require("../dist/db/prisma.js");
 const { plannerService } = require("../dist/services/planner/PlannerService.js");
 const { contextAssemblyService } = require("../dist/services/novel/production/ContextAssemblyService.js");
-const { ragServices } = require("../dist/services/rag/index.js");
+const { ragMain } = require("../dist/services/rag/mainProcessProxy.js");
 const { novelReferenceService } = require("../dist/services/novel/NovelReferenceService.js");
 const { characterDynamicsQueryService } = require("../dist/services/novel/dynamics/CharacterDynamicsQueryService.js");
 const { payoffLedgerSyncService } = require("../dist/services/payoff/PayoffLedgerSyncService.js");
@@ -162,7 +162,7 @@ test("assembler refreshes chapter execution fields after chapter plan regenerati
     buildStateContext: contextAssemblyService.build,
     buildReferenceForStage: novelReferenceService.buildReferenceForStage,
     getCharacterDynamics: characterDynamicsQueryService.getOverview,
-    buildRagContext: ragServices.hybridRetrievalService.buildContextBlock,
+    buildRagContext: ragMain.retrieval.buildContextBlock,
     getPayoffLedger: payoffLedgerSyncService.getPayoffLedger,
     buildCharacterResourceContext: characterResourceLedgerService.buildContext,
     listFactsForChapter: novelFactService.listForChapter,
@@ -244,7 +244,7 @@ test("assembler refreshes chapter execution fields after chapter plan regenerati
     });
     novelReferenceService.buildReferenceForStage = async () => "";
     characterDynamicsQueryService.getOverview = async () => null;
-    ragServices.hybridRetrievalService.buildContextBlock = async () => "";
+    ragMain.retrieval.buildContextBlock = async () => "";
     payoffLedgerSyncService.getPayoffLedger = async () => ({ items: [] });
     characterResourceLedgerService.buildContext = async () => null;
     novelFactService.listForChapter = async () => [];
@@ -313,7 +313,7 @@ test("assembler refreshes chapter execution fields after chapter plan regenerati
     contextAssemblyService.build = originals.buildStateContext;
     novelReferenceService.buildReferenceForStage = originals.buildReferenceForStage;
     characterDynamicsQueryService.getOverview = originals.getCharacterDynamics;
-    ragServices.hybridRetrievalService.buildContextBlock = originals.buildRagContext;
+    ragMain.retrieval.buildContextBlock = originals.buildRagContext;
     payoffLedgerSyncService.getPayoffLedger = originals.getPayoffLedger;
     characterResourceLedgerService.buildContext = originals.buildCharacterResourceContext;
     novelFactService.listForChapter = originals.listFactsForChapter;
@@ -340,7 +340,7 @@ test("assembler injects sceneDiversityForce from prior-chapter lookback when tex
     buildStateContext: contextAssemblyService.build,
     buildReferenceForStage: novelReferenceService.buildReferenceForStage,
     getCharacterDynamics: characterDynamicsQueryService.getOverview,
-    buildRagContext: ragServices.hybridRetrievalService.buildContextBlock,
+    buildRagContext: ragMain.retrieval.buildContextBlock,
     getPayoffLedger: payoffLedgerSyncService.getPayoffLedger,
     buildCharacterResourceContext: characterResourceLedgerService.buildContext,
     listFactsForChapter: novelFactService.listForChapter,
@@ -444,7 +444,7 @@ test("assembler injects sceneDiversityForce from prior-chapter lookback when tex
     });
     novelReferenceService.buildReferenceForStage = async () => "";
     characterDynamicsQueryService.getOverview = async () => null;
-    ragServices.hybridRetrievalService.buildContextBlock = async () => "";
+    ragMain.retrieval.buildContextBlock = async () => "";
     payoffLedgerSyncService.getPayoffLedger = async () => ({ items: [] });
     characterResourceLedgerService.buildContext = async () => null;
     novelFactService.listForChapter = async () => [];
@@ -519,7 +519,7 @@ test("assembler injects sceneDiversityForce from prior-chapter lookback when tex
     contextAssemblyService.build = originals.buildStateContext;
     novelReferenceService.buildReferenceForStage = originals.buildReferenceForStage;
     characterDynamicsQueryService.getOverview = originals.getCharacterDynamics;
-    ragServices.hybridRetrievalService.buildContextBlock = originals.buildRagContext;
+    ragMain.retrieval.buildContextBlock = originals.buildRagContext;
     payoffLedgerSyncService.getPayoffLedger = originals.getPayoffLedger;
     characterResourceLedgerService.buildContext = originals.buildCharacterResourceContext;
     novelFactService.listForChapter = originals.listFactsForChapter;
@@ -546,7 +546,7 @@ test("assembler injects timelineContext from timelineContextService into write p
     buildStateContext: contextAssemblyService.build,
     buildReferenceForStage: novelReferenceService.buildReferenceForStage,
     getCharacterDynamics: characterDynamicsQueryService.getOverview,
-    buildRagContext: ragServices.hybridRetrievalService.buildContextBlock,
+    buildRagContext: ragMain.retrieval.buildContextBlock,
     getPayoffLedger: payoffLedgerSyncService.getPayoffLedger,
     buildCharacterResourceContext: characterResourceLedgerService.buildContext,
     listFactsForChapter: novelFactService.listForChapter,
@@ -626,7 +626,7 @@ test("assembler injects timelineContext from timelineContextService into write p
     });
     novelReferenceService.buildReferenceForStage = async () => "";
     characterDynamicsQueryService.getOverview = async () => null;
-    ragServices.hybridRetrievalService.buildContextBlock = async () => "";
+    ragMain.retrieval.buildContextBlock = async () => "";
     payoffLedgerSyncService.getPayoffLedger = async () => ({ items: [] });
     characterResourceLedgerService.buildContext = async () => null;
     novelFactService.listForChapter = async () => [];
@@ -698,7 +698,7 @@ test("assembler injects timelineContext from timelineContextService into write p
     contextAssemblyService.build = originals.buildStateContext;
     novelReferenceService.buildReferenceForStage = originals.buildReferenceForStage;
     characterDynamicsQueryService.getOverview = originals.getCharacterDynamics;
-    ragServices.hybridRetrievalService.buildContextBlock = originals.buildRagContext;
+    ragMain.retrieval.buildContextBlock = originals.buildRagContext;
     payoffLedgerSyncService.getPayoffLedger = originals.getPayoffLedger;
     characterResourceLedgerService.buildContext = originals.buildCharacterResourceContext;
     novelFactService.listForChapter = originals.listFactsForChapter;
@@ -724,7 +724,7 @@ test("assembler falls back to null timelineContext when buildForChapter fails", 
     buildStateContext: contextAssemblyService.build,
     buildReferenceForStage: novelReferenceService.buildReferenceForStage,
     getCharacterDynamics: characterDynamicsQueryService.getOverview,
-    buildRagContext: ragServices.hybridRetrievalService.buildContextBlock,
+    buildRagContext: ragMain.retrieval.buildContextBlock,
     getPayoffLedger: payoffLedgerSyncService.getPayoffLedger,
     buildCharacterResourceContext: characterResourceLedgerService.buildContext,
     listFactsForChapter: novelFactService.listForChapter,
@@ -805,7 +805,7 @@ test("assembler falls back to null timelineContext when buildForChapter fails", 
     });
     novelReferenceService.buildReferenceForStage = async () => "";
     characterDynamicsQueryService.getOverview = async () => null;
-    ragServices.hybridRetrievalService.buildContextBlock = async () => "";
+    ragMain.retrieval.buildContextBlock = async () => "";
     payoffLedgerSyncService.getPayoffLedger = async () => ({ items: [] });
     characterResourceLedgerService.buildContext = async () => null;
     novelFactService.listForChapter = async () => [];
@@ -861,7 +861,7 @@ test("assembler falls back to null timelineContext when buildForChapter fails", 
     contextAssemblyService.build = originals.buildStateContext;
     novelReferenceService.buildReferenceForStage = originals.buildReferenceForStage;
     characterDynamicsQueryService.getOverview = originals.getCharacterDynamics;
-    ragServices.hybridRetrievalService.buildContextBlock = originals.buildRagContext;
+    ragMain.retrieval.buildContextBlock = originals.buildRagContext;
     payoffLedgerSyncService.getPayoffLedger = originals.getPayoffLedger;
     characterResourceLedgerService.buildContext = originals.buildCharacterResourceContext;
     novelFactService.listForChapter = originals.listFactsForChapter;
