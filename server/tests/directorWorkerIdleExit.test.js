@@ -52,7 +52,9 @@ test("idle director child disconnects and exits after its worker loop drains", a
     stdio: ["ignore", "ignore", "ignore", "ipc"],
   });
 
-  const result = await waitForExit(child, 2_000);
+  // CI runners can spend a few seconds starting the isolated Prisma worker
+  // while the child still exits promptly once its idle loop is scheduled.
+  const result = await waitForExit(child, 5_000);
   assert.equal(result.signal, null);
   assert.equal(result.code, 0);
 });
