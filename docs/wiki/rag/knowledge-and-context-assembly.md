@@ -60,6 +60,14 @@
 - trace 中 `rerankerMs` 恒为 0、`rerankerUsed` 恒为 false：这是 reranker 阶段尚未接入前的预留语义，不代表 reranker 失败；接入交叉编码器重排后会回填。
 - 历史 trace 数据无限增长：检查服务启动时是否调用了 `ragRetrievalTraceRetention.start()`，以及 AppSetting `rag.retrievalTraceRetentionDays` 是否设置合理。
 
+## 运行时设置与 Worker 生命周期
+
+RAG worker 在启动时读取一份运行时设置快照；设置页保存成功后，主进程必须先串行停止旧 worker，等待退出事件触发 running 任务恢复，再根据最新的 `ragConfig.enabled` 和待处理队列按需启动新 worker。不能只调用轮询唤醒，因为那只会让仍在运行的子进程继续使用旧的 Qdrant、Embedding、分块和并发参数。
+
+设置保存的并发请求共享同一条 refresh 队列。刷新期间旧 worker 仍是唯一权威持有者，禁止在它收到停止信号但尚未退出时 fork 替代 worker；如果停止 deadline 先到，后续启动必须由退出处理和恢复流程接管。
+
+相关回归范围：`RagWorkerManager` refresh/disable/stalled 状态转换、设置路由等待 refresh 后再入队，以及 enabled=false 时不重新拉起 worker。
+
 ## 相关模块
 
 - `server/src/services/rag/`

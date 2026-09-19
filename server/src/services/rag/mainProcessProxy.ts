@@ -122,6 +122,8 @@ export const ragMain = {
   ragHealthCheck,
   /** 子进程按需拉起（入队后立即唤醒，避免等 15s poll）。 */
   kickWorker: () => ragWorkerManager.kickPoll(),
+  /** 设置保存后重启子进程，使其从数据库加载最新 RAG 运行时设置。 */
+  refreshWorker: () => ragWorkerManager.refresh(),
   /** 设置关闭 RAG 时安全停止当前子进程；重新启用由 kickWorker 按需拉起。 */
   disableWorker: () => ragWorkerManager.disable(),
   /**

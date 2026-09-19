@@ -505,13 +505,9 @@ router.put(
         }),
       ]);
 
-      // RAG worker 已子进程化（RagWorkerManager 按 DB pending 拉起/子进程读设置生效）。
-      // enabled 变化只需确保 DB 已写（上方 updateRagRuntimeSettings），再按需唤醒 poll。
-      if (runtimeResult.settings.enabled) {
-        ragMain.kickWorker();
-      } else {
-        ragMain.disableWorker();
-      }
+      // 子进程只在启动时加载设置；等待刷新完成，确保后续自动重建任务
+      // 不会先被旧配置的 worker 领取。
+      await ragMain.refreshWorker();
 
       const shouldReindex = (embeddingResult.shouldReindex || runtimeResult.shouldReindex)
         && embeddingResult.settings.autoReindexOnChange

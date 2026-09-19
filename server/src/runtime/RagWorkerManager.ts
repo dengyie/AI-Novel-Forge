@@ -28,7 +28,7 @@ function workerExecArgv(): string[] {
   ];
 }
 
-type WorkerStopReason = "stalled" | "disabled" | "shutdown";
+type WorkerStopReason = "stalled" | "disabled" | "refresh" | "shutdown";
 type WorkerState = "idle" | "running" | "stopping";
 
 /**
@@ -51,6 +51,8 @@ export class RagWorkerManager {
   private stopReason: WorkerStopReason | null = null;
   private stopResolve: (() => void) | null = null;
   private stopTimer: NodeJS.Timeout | null = null;
+  private workerExitPromise: Promise<void> | null = null;
+  private workerExitResolve: (() => void) | null = null;
   private recoveryPromise: Promise<void> | null = null;
   private recoveryTimer: NodeJS.Timeout | null = null;
   private recoveryAttempt = 0;
@@ -58,6 +60,7 @@ export class RagWorkerManager {
   /** Kept true until the corresponding DB recovery attempt succeeds. */
   private recoveryPending = false;
   private idleNotified = false;
+  private refreshPromise: Promise<void> | null = null;
   private lastHeartbeatAt = 0;
   private receivedHeartbeat = false;
 
@@ -104,6 +107,66 @@ export class RagWorkerManager {
     this.desiredAlive = false;
     this.idleNotified = false;
     return this.stopCurrentWorker("disabled");
+  }
+
+  /**
+   * Replace the child after settings have been persisted so it bootstraps a
+   * fresh snapshot from the database. The current child stays authoritative
+   * until its exit event; that event owns the single running-job recovery.
+   */
+  refresh(): Promise<void> {
+    const previous = this.refreshPromise ?? Promise.resolve();
+    const operation = previous
+      .catch(() => undefined)
+      .then(() => this.refreshWorkerInternal());
+    this.refreshPromise = operation;
+    void operation.then(() => {
+      if (this.refreshPromise === operation) {
+        this.refreshPromise = null;
+      }
+    }, () => {
+      if (this.refreshPromise === operation) {
+        this.refreshPromise = null;
+      }
+    });
+    return operation;
+  }
+
+  private async refreshWorkerInternal(): Promise<void> {
+    const hadWorker = this.worker !== null;
+    const enabledAtStart = ragConfig.enabled;
+    this.desiredAlive = enabledAtStart;
+    this.idleNotified = false;
+    await this.stopCurrentWorker("refresh");
+    // stopCurrentWorker resolves at the kill deadline as a bounded caller
+    // barrier. Refresh still waits for the authoritative exit event before
+    // allowing settings callers to enqueue work for the replacement child.
+    if (this.worker && this.workerExitPromise) {
+      await this.workerExitPromise;
+    }
+    const enabled = ragConfig.enabled;
+    this.desiredAlive = enabled;
+
+    // A bounded stop can resolve after SIGKILL but before the exit event. Do
+    // not fork around the still-authoritative child; its exit handler will
+    // retry the recovery/poll path once ownership is released.
+    if (this.worker) return;
+    if (this.recoveryPending) {
+      if (this.recoveryPromise) await this.recoveryPromise;
+      if (this.recoveryPending) return;
+    }
+    if (this.shuttingDown || !enabled || !ragConfig.enabled) return;
+
+    // The exit recovery path owns the first poll after a replacement. Avoid
+    // counting and spawning a second child in parallel with that poll.
+    if (hadWorker) return;
+
+    const activeJobs = await prisma.ragIndexJob.count({
+      where: { status: { in: ["queued", "running"] } },
+    });
+    if (activeJobs > 0) {
+      await this.spawnWorkerIfNeeded();
+    }
   }
 
   private async pollTick(): Promise<void> {
@@ -404,7 +467,7 @@ export class RagWorkerManager {
     if (this.stopPromise && this.stopWorkerRef === worker) return this.stopPromise;
 
     this.workerState = "stopping";
-    if (reason !== "stalled") {
+    if (reason === "disabled" || reason === "shutdown") {
       this.desiredAlive = false;
     }
     this.idleNotified = false;
@@ -414,6 +477,9 @@ export class RagWorkerManager {
     });
     this.stopWorkerRef = worker;
     this.stopReason = reason;
+    this.workerExitPromise = new Promise<void>((resolve) => {
+      this.workerExitResolve = resolve;
+    });
     this.stopTimer = setTimeout(() => {
       try {
         worker.kill("SIGKILL");
@@ -456,6 +522,9 @@ export class RagWorkerManager {
     }
     this.stopResolve?.();
     this.stopResolve = null;
+    this.workerExitResolve?.();
+    this.workerExitResolve = null;
+    this.workerExitPromise = null;
     this.stopPromise = null;
     this.stopWorkerRef = null;
     this.stopReason = null;

@@ -42,8 +42,9 @@ pxed 宿主 OOM 可能按 badness 选择进程；当时的采样曾观察到 nov
    - chat.ts:208 / novelReadTools.ts:457 → `RagClient.buildContextBlock()`（IPC-RPC）。
    - rag.ts 路由：任务列表、重建展开和清理走纯 DB/队列 facade；health 经由主进程 client
      向 RAG worker 发 RPC，不在主进程加载 embedding/vector service。
-   - settings.ts:504-516：worker 启停改为只写 DB runtime 设置（子进程按轮询读取生效）；
-     enqueueReindex 保留 DB 写路径。
+   - settings.ts：保存 runtime / embedding 设置后，先串行 refresh RAG worker：旧 worker
+     必须退出并完成 running 任务恢复，才允许按最新设置和 pending 队列按需启动；不能只
+     依赖轮询唤醒，因为已运行的子进程不会重新读取设置。enqueueReindex 保留 DB 写路径。
    - `RagRetrievalTraceRetention` 定时器保留在主进程（仅 prisma，不引重树）。
 
 ## 不做

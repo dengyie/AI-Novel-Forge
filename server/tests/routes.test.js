@@ -109,6 +109,8 @@ test("GET /api/settings/rag/models/openai returns embedding-only models", async 
 
 test("PUT /api/settings/rag saves extended settings and auto-enqueues reindex", async () => {
   const originalEnqueueOwnerJob = ragMain.jobs.enqueueOwnerJob;
+  const originalRefreshWorker = ragMain.refreshWorker;
+  const lifecycleCalls = [];
   const originalOwnerQueries = {
     novel: prisma.novel.findMany,
     chapter: prisma.chapter.findMany,
@@ -120,7 +122,13 @@ test("PUT /api/settings/rag saves extended settings and auto-enqueues reindex", 
     worldPropertyLibrary: prisma.worldPropertyLibrary.findMany,
     knowledgeDocument: prisma.knowledgeDocument.findMany,
   };
-  ragMain.jobs.enqueueOwnerJob = async () => ({ id: "rag-job-test" });
+  ragMain.refreshWorker = async (...args) => {
+    lifecycleCalls.push({ type: "refresh", args });
+  };
+  ragMain.jobs.enqueueOwnerJob = async () => {
+    lifecycleCalls.push({ type: "enqueue" });
+    return { id: "rag-job-test" };
+  };
   prisma.novel.findMany = async () => [{ id: "novel-fixture" }];
   prisma.chapter.findMany = async () => [];
   prisma.chapterSummary.findMany = async () => [];
@@ -186,6 +194,11 @@ test("PUT /api/settings/rag saves extended settings and auto-enqueues reindex", 
     assert.equal(payload.data.embeddingModel, nextModel);
     assert.equal(payload.data.collectionMode, "auto");
     assert.equal(payload.data.reindexQueuedCount, 2);
+    assert.deepEqual(lifecycleCalls, [
+      { type: "refresh", args: [] },
+      { type: "enqueue" },
+      { type: "enqueue" },
+    ]);
 
     await fetch(`http://127.0.0.1:${port}/api/settings/rag`, {
       method: "PUT",
@@ -225,6 +238,7 @@ test("PUT /api/settings/rag saves extended settings and auto-enqueues reindex", 
       }),
     });
   } finally {
+    ragMain.refreshWorker = originalRefreshWorker;
     ragMain.jobs.enqueueOwnerJob = originalEnqueueOwnerJob;
     prisma.novel.findMany = originalOwnerQueries.novel;
     prisma.chapter.findMany = originalOwnerQueries.chapter;

@@ -120,6 +120,141 @@ test("RAG disable sends a bounded kill when shutdown IPC is accepted but child h
   }
 });
 
+test("RAG refresh stops the current worker before allowing a replacement", async () => {
+  const manager = new RagWorkerManager();
+  const worker = {
+    pid: 999_996,
+    send(_message, callback) {
+      callback?.();
+      return true;
+    },
+    killCount: 0,
+    kill(signal) {
+      this.killCount += 1;
+      this.lastSignal = signal;
+      return true;
+    },
+  };
+  manager.worker = worker;
+  manager.workerState = "running";
+  manager.desiredAlive = true;
+
+  const originalEnabled = ragConfig.enabled;
+  const originalUpdateMany = prisma.ragIndexJob.updateMany;
+  const originalCount = prisma.ragIndexJob.count;
+  const originalSetTimeout = global.setTimeout;
+  const originalClearTimeout = global.clearTimeout;
+  const timers = [];
+  let updateCount = 0;
+  let spawnCount = 0;
+  ragConfig.enabled = true;
+  prisma.ragIndexJob.updateMany = async () => {
+    updateCount += 1;
+    return { count: 1 };
+  };
+  prisma.ragIndexJob.count = async () => 1;
+  manager.spawnWorkerIfNeeded = async () => {
+    spawnCount += 1;
+  };
+  global.setTimeout = (callback) => {
+    const timer = { callback, unref() {} };
+    timers.push(timer);
+    return timer;
+  };
+  global.clearTimeout = (timer) => {
+    timer.cleared = true;
+  };
+
+  try {
+    let refreshed = false;
+    const refreshPromise = manager.refresh().then(() => {
+      refreshed = true;
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(worker.killCount, 0);
+    assert.equal(manager.worker, worker);
+    assert.equal(spawnCount, 0);
+
+    timers.at(-1).callback();
+    assert.equal(worker.killCount, 1);
+    assert.equal(worker.lastSignal, "SIGKILL");
+    assert.equal(manager.worker, worker);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(refreshed, false);
+
+    manager.handleWorkerExit(worker, { end() {} }, 137, "SIGKILL");
+    await refreshPromise;
+
+    assert.equal(manager.worker, null);
+    assert.equal(updateCount, 1);
+    assert.equal(spawnCount, 1);
+  } finally {
+    global.setTimeout = originalSetTimeout;
+    global.clearTimeout = originalClearTimeout;
+    prisma.ragIndexJob.updateMany = originalUpdateMany;
+    prisma.ragIndexJob.count = originalCount;
+    ragConfig.enabled = originalEnabled;
+    manager.worker = null;
+    await manager.shutdown();
+  }
+});
+
+test("RAG refresh does not respawn a worker when the latest settings disable RAG", async () => {
+  const manager = new RagWorkerManager();
+  const worker = {
+    pid: 999_997,
+    send(_message, callback) {
+      callback?.();
+      return true;
+    },
+    kill() {
+      return true;
+    },
+  };
+  manager.worker = worker;
+  manager.workerState = "running";
+
+  const originalEnabled = ragConfig.enabled;
+  const originalUpdateMany = prisma.ragIndexJob.updateMany;
+  const originalSetTimeout = global.setTimeout;
+  const originalClearTimeout = global.clearTimeout;
+  const timers = [];
+  let spawnCount = 0;
+  ragConfig.enabled = true;
+  prisma.ragIndexJob.updateMany = async () => ({ count: 1 });
+  manager.spawnWorkerIfNeeded = async () => {
+    spawnCount += 1;
+  };
+  global.setTimeout = (callback) => {
+    const timer = { callback, unref() {} };
+    timers.push(timer);
+    return timer;
+  };
+  global.clearTimeout = (timer) => {
+    timer.cleared = true;
+  };
+
+  try {
+    const refreshPromise = manager.refresh();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(timers.length >= 1);
+    ragConfig.enabled = false;
+    timers.at(-1).callback();
+    manager.handleWorkerExit(worker, { end() {} }, 137, "SIGKILL");
+    await refreshPromise;
+
+    assert.equal(manager.worker, null);
+    assert.equal(spawnCount, 0);
+  } finally {
+    global.setTimeout = originalSetTimeout;
+    global.clearTimeout = originalClearTimeout;
+    prisma.ragIndexJob.updateMany = originalUpdateMany;
+    ragConfig.enabled = originalEnabled;
+    manager.worker = null;
+    await manager.shutdown();
+  }
+});
+
 test("RAG watchdog kills a stalled worker and requeues running jobs", async () => {
   const manager = new RagWorkerManager();
   const fake = installWorker(manager, {
