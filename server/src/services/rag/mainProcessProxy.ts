@@ -1,11 +1,13 @@
 import { prisma } from "../../db/prisma";
 import { ragWorkerManager } from "../../runtime/RagWorkerManager";
 
+export { collectAllReindexOwners, enqueueReindexOwners } from "./indexing";
+
 /**
  * 主进程侧 RAG 访问面（pxed 防 OOM Phase 3）。
  *
- * RAG 重 import 树（+85MB heap）已整体移入 rag worker 子进程。主进程不再
- * import services/rag 任何子模块——此文件是唯一出口，只含：
+ * RAG 重 import 树（+85MB heap）已整体移入 rag worker 子进程。此文件和
+ * `indexing/` 只依赖 Prisma 的轻量主进程能力，不引入 worker 侧重树；此文件是主进程出口，只含：
  * - RagClient（IPC-RPC，RagWorkerManager 所有）
  * - retrieval trace retention（仅 prisma 轻操作，留主进程）
  * - 入队类操作的 DB 直写（worker 轮询即取走）
@@ -13,32 +15,6 @@ import { ragWorkerManager } from "../../runtime/RagWorkerManager";
  * 消费方（chat / novelReadTools / novel 服务等）统一改从这里 import
  * `ragMain`，检索走 `retrieval.buildContextBlock(...)`（失败降级空串）。
  */
-
-/** 全量重建的 owner 展开（reindex "all"）——与 routes/rag.ts 的逐 scope 展开共用 DB 直查。 */
-export async function collectAllReindexOwners(): Promise<Array<{ ownerType: string; ownerId: string }>> {
-  const owners: Array<{ ownerType: string; ownerId: string }> = [];
-  const push = (ownerType: string, ownerId: string) => owners.push({ ownerType, ownerId });
-  const novelIds = (await prisma.novel.findMany({ select: { id: true } })).map((item) => item.id);
-  for (const novelId of novelIds) {
-    push("novel", novelId);
-    push("bible", novelId);
-  }
-  const [chapters, summaries, facts, characters, timelines] = await Promise.all([
-    prisma.chapter.findMany({ where: { novelId: { in: novelIds } }, select: { id: true } }),
-    prisma.chapterSummary.findMany({ where: { novelId: { in: novelIds } }, select: { chapterId: true } }),
-    prisma.consistencyFact.findMany({ where: { novelId: { in: novelIds } }, select: { id: true } }),
-    prisma.character.findMany({ where: { novelId: { in: novelIds } }, select: { id: true } }),
-    prisma.characterTimeline.findMany({ where: { novelId: { in: novelIds } }, select: { id: true } }),
-  ]);
-  chapters.forEach((item) => push("chapter", item.id));
-  summaries.forEach((item) => push("chapter_summary", item.chapterId));
-  facts.forEach((item) => push("consistency_fact", item.id));
-  characters.forEach((item) => push("character", item.id));
-  timelines.forEach((item) => push("character_timeline", item.id));
-  (await prisma.world.findMany({ select: { id: true } })).forEach((item) => push("world", item.id));
-  (await prisma.worldPropertyLibrary.findMany({ select: { id: true } })).forEach((item) => push("world_library_item", item.id));
-  return owners;
-}
 
 /** 轻量入队/状态更新面：仅 DB 写，不触碰 RAG 类（worker 轮询即取走）。 */
 export const ragJobQueue = {

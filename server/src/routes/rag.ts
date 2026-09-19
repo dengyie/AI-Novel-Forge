@@ -6,6 +6,7 @@ import { authMiddleware } from "../middleware/auth";
 import { AppError } from "../middleware/errorHandler";
 import { validate } from "../middleware/validate";
 import { ragMain } from "../services/rag/mainProcessProxy";
+import { collectReindexOwners, enqueueReindexOwners } from "../services/rag/indexing";
 import { ragConfig } from "../config/rag";
 
 const router = Router();
@@ -27,65 +28,18 @@ const jobParamsSchema = z.object({
 
 router.use(authMiddleware);
 
-/**
- * scope → owner 集合的展开（复刻 RagIndexService.collectOwners 的 DB 直查）。
- * 主进程不 import RAG 重树，这里的展开只为入队（worker 会做真正的重建）。
- */
-async function collectReindexOwners(scope: "novel" | "world" | "all", id?: string): Promise<Array<{ ownerType: string; ownerId: string }>> {
-  const owners: Array<{ ownerType: string; ownerId: string }> = [];
-  const push = (ownerType: string, ownerId: string) => owners.push({ ownerType, ownerId });
-
-  if (scope === "novel" || scope === "all") {
-    const novelRows = scope === "novel"
-      ? (id ? [{ id }] : await prisma.novel.findMany({ select: { id: true } }))
-      : await prisma.novel.findMany({ select: { id: true } });
-    const novelIds = novelRows.map((item) => item.id);
-    if (novelIds.length === 0) {
-      return owners;
-    }
-    for (const novelId of novelIds) {
-      push("novel", novelId);
-      push("bible", novelId);
-    }
-    const [chapters, summaries, facts, characters, timelines] = await Promise.all([
-      prisma.chapter.findMany({ where: { novelId: { in: novelIds } }, select: { id: true } }),
-      prisma.chapterSummary.findMany({ where: { novelId: { in: novelIds } }, select: { chapterId: true } }),
-      prisma.consistencyFact.findMany({ where: { novelId: { in: novelIds } }, select: { id: true } }),
-      prisma.character.findMany({ where: { novelId: { in: novelIds } }, select: { id: true } }),
-      prisma.characterTimeline.findMany({ where: { novelId: { in: novelIds } }, select: { id: true } }),
-    ]);
-    chapters.forEach((item) => push("chapter", item.id));
-    summaries.forEach((item) => push("chapter_summary", item.chapterId));
-    facts.forEach((item) => push("consistency_fact", item.id));
-    characters.forEach((item) => push("character", item.id));
-    timelines.forEach((item) => push("character_timeline", item.id));
-  }
-
-  if (scope === "world" || scope === "all") {
-    const worldRows = scope === "world"
-      ? (id ? [{ id }] : await prisma.world.findMany({ select: { id: true } }))
-      : await prisma.world.findMany({ select: { id: true } });
-    worldRows.forEach((item) => push("world", item.id));
-    const library = await prisma.worldPropertyLibrary.findMany({
-      where: scope === "world" ? { sourceWorldId: id ?? undefined } : {},
-      select: { id: true },
-    });
-    library.forEach((item) => push("world_library_item", item.id));
-  }
-
-  return owners;
-}
-
 router.post("/reindex", validate({ body: reindexSchema }), async (req, res, next) => {
   try {
     const body = req.body as z.infer<typeof reindexSchema>;
     const owners = await collectReindexOwners(body.scope, body.id);
-    const count = await Promise.all(
-      owners.map((owner) => ragMain.jobs.enqueueOwnerJob("rebuild", owner.ownerType, owner.ownerId, { tenantId: body.tenantId })),
-    ).then((rows) => rows.length);
+    const jobs = await enqueueReindexOwners(
+      owners,
+      (owner, options) => ragMain.jobs.enqueueOwnerJob("rebuild", owner.ownerType, owner.ownerId, options),
+      { tenantId: body.tenantId },
+    );
     res.status(202).json({
       success: true,
-      data: { scope: body.scope, id: body.id ?? null, count },
+      data: { scope: body.scope, id: body.id ?? null, count: jobs.length },
       message: "RAG reindex jobs queued.",
     } satisfies ApiResponse<{ scope: string; id: string | null; count: number }>);
   } catch (error) {

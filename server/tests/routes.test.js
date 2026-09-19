@@ -118,6 +118,7 @@ test("PUT /api/settings/rag saves extended settings and auto-enqueues reindex", 
     characterTimeline: prisma.characterTimeline.findMany,
     world: prisma.world.findMany,
     worldPropertyLibrary: prisma.worldPropertyLibrary.findMany,
+    knowledgeDocument: prisma.knowledgeDocument.findMany,
   };
   ragMain.jobs.enqueueOwnerJob = async () => ({ id: "rag-job-test" });
   prisma.novel.findMany = async () => [{ id: "novel-fixture" }];
@@ -128,6 +129,7 @@ test("PUT /api/settings/rag saves extended settings and auto-enqueues reindex", 
   prisma.characterTimeline.findMany = async () => [];
   prisma.world.findMany = async () => [];
   prisma.worldPropertyLibrary.findMany = async () => [];
+  prisma.knowledgeDocument.findMany = async () => [];
 
   const app = createApp();
   const server = http.createServer(app);
@@ -232,6 +234,7 @@ test("PUT /api/settings/rag saves extended settings and auto-enqueues reindex", 
     prisma.characterTimeline.findMany = originalOwnerQueries.characterTimeline;
     prisma.world.findMany = originalOwnerQueries.world;
     prisma.worldPropertyLibrary.findMany = originalOwnerQueries.worldPropertyLibrary;
+    prisma.knowledgeDocument.findMany = originalOwnerQueries.knowledgeDocument;
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 });

@@ -18,7 +18,11 @@ import {
 import { authMiddleware } from "../middleware/auth";
 import { AppError } from "../middleware/errorHandler";
 import { validate } from "../middleware/validate";
-import { ragMain, collectAllReindexOwners } from "../services/rag/mainProcessProxy";
+import {
+  ragMain,
+  collectAllReindexOwners,
+  enqueueReindexOwners,
+} from "../services/rag/mainProcessProxy";
 import { prisma } from "../db/prisma";
 import { providerBalanceService } from "../services/settings/ProviderBalanceService";
 import { secretStore } from "../services/settings/secretStore";
@@ -517,9 +521,11 @@ router.put(
       let message = "Saved RAG settings.";
       if (shouldReindex) {
         const owners = await collectAllReindexOwners();
-        reindexQueuedCount = await Promise.all(
-          owners.map((owner) => ragMain.jobs.enqueueOwnerJob("rebuild", owner.ownerType, owner.ownerId)),
-        ).then((rows) => rows.length);
+        const jobs = await enqueueReindexOwners(
+          owners,
+          (owner, options) => ragMain.jobs.enqueueOwnerJob("rebuild", owner.ownerType, owner.ownerId, options),
+        );
+        reindexQueuedCount = jobs.length;
         message = `Saved RAG settings and queued ${reindexQueuedCount} reindex job(s).`;
       } else if ((embeddingResult.shouldReindex || runtimeResult.shouldReindex) && !runtimeResult.settings.enabled) {
         message = "Saved RAG settings. Reindex was skipped because RAG is currently disabled.";

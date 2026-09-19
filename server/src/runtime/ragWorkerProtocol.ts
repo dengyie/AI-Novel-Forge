@@ -22,6 +22,14 @@ export interface RagWorkerResponse {
 }
 
 export const RAG_WORKER_RPC_TIMEOUT_MS = 30_000;
+/** Max time the client waits for a cold worker to be assigned by the manager. */
+export const RAG_WORKER_ACQUIRE_TIMEOUT_MS = 5_000;
+/** Parent-side graceful drain deadline before a worker is force-killed. */
+export const RAG_WORKER_SHUTDOWN_TIMEOUT_MS = 5_000;
+/** Recovery retries never wait longer than this before another bounded attempt. */
+export const RAG_WORKER_RECOVERY_RETRY_MAX_MS = 30_000;
+/** Bound messages received while the child is still bootstrapping. */
+export const RAG_WORKER_PRE_READY_QUEUE_LIMIT = 64;
 /** 队列空 + 无在途 RPC 后，子进程保活的宽限期（主进程管理 RAG 10min；director 5min 见各自 Manager）。 */
 export const RAG_WORKER_IDLE_GRACE_MS = 10 * 60_000;
 

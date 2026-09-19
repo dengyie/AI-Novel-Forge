@@ -42,3 +42,26 @@ test("RagClient degrades only the failed IPC request", async () => {
   assert.equal(await client.buildContextBlock("query", {}), "");
   assert.equal(client.inflightCount, 0);
 });
+
+test("RagClient waits for a cold worker acquisition before sending the RPC", async () => {
+  let worker = null;
+  const coldWorker = createWorker((message, callback) => {
+    callback?.();
+    setImmediate(() => coldWorker.emit("message", {
+      id: message.id,
+      ok: true,
+      result: "cold-start context",
+    }));
+    return true;
+  });
+  const client = new RagClient({
+    getWorker: () => worker,
+    ensureWorker: async () => {
+      await new Promise((resolve) => setImmediate(resolve));
+      worker = coldWorker;
+    },
+  });
+
+  assert.equal(await client.buildContextBlock("query", {}), "cold-start context");
+  assert.equal(client.inflightCount, 0);
+});

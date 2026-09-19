@@ -6,9 +6,15 @@ import { resolveLogsRoot } from "./appPaths";
 
 const POLL_INTERVAL_MS = 10_000;
 const IDLE_EXIT_AFTER_MS = Number(process.env.DIRECTOR_WORKER_IDLE_EXIT_MS) || 5 * 60_000;
+const LOG_CLOSE_FALLBACK_MS = 1_000;
 const WORKER_HEAP_MB = Number.isSafeInteger(Number(process.env.DIRECTOR_WORKER_HEAP_MB))
   ? Math.max(192, Math.min(768, Number(process.env.DIRECTOR_WORKER_HEAP_MB)))
   : 384;
+
+type CloseEventTarget = {
+  once?: (event: string | symbol, listener: (...args: any[]) => void) => unknown;
+  removeListener?: (event: string | symbol, listener: (...args: any[]) => void) => unknown;
+};
 
 function workerExecArgv(): string[] {
   return [
@@ -24,8 +30,8 @@ function workerExecArgv(): string[] {
  * +96MB heap。worker 逻辑（lease/execute/事件投影）不动，直接 fork 现有
  * `dist/workers/directorWorker.js` 独立入口（自带 bootstrap 与信号处理）。
  *
- * 唤醒模型：DB 轮询兜底（worker 自身 pollMs）；主进程入队路径的秒级唤醒经
- * IPC `kick` 消息转发。状态流照旧走 DB 投影（SSE/routes 无感知）。
+ * 唤醒模型：Manager 的 DB 轮询负责发现待处理命令；`kick()` 为已接入的显式
+ * 唤醒入口发送 IPC 消息并复位 idle 计时。状态流照旧走 DB 投影（SSE/routes 无感知）。
  */
 export class DirectorWorkerManager {
   private worker: ChildProcess | null = null;
@@ -104,7 +110,8 @@ export class DirectorWorkerManager {
       fs.mkdirSync(logDir, { recursive: true });
     }
     const logPath = path.join(logDir, `director-worker-${Date.now()}.log`);
-    this.logStream = fs.createWriteStream(logPath, { flags: "a" });
+    const logStream = fs.createWriteStream(logPath, { flags: "a" });
+    this.logStream = logStream;
 
     const worker = fork(workerScript, [], {
       env: { ...process.env },
@@ -113,14 +120,22 @@ export class DirectorWorkerManager {
     });
     if (!worker.pid) {
       console.error("[DirectorWorkerManager] fork failed: no pid");
-      this.logStream.end();
-      this.logStream = null;
+      logStream.end();
+      if (this.logStream === logStream) this.logStream = null;
       return;
     }
     this.worker = worker;
     this.spawnedAt = Date.now();
-    worker.stdout?.on("data", (chunk) => this.logStream?.write(chunk));
-    worker.stderr?.on("data", (chunk) => this.logStream?.write(chunk));
+    worker.stdout?.on("data", (chunk) => {
+      if (!logStream.destroyed && !logStream.writableEnded) {
+        logStream.write(chunk);
+      }
+    });
+    worker.stderr?.on("data", (chunk) => {
+      if (!logStream.destroyed && !logStream.writableEnded) {
+        logStream.write(chunk);
+      }
+    });
 
     worker.on("message", (message: unknown) => {
       if (typeof message === "object" && message !== null && (message as { type?: string }).type === "idle-exit") {
@@ -134,8 +149,10 @@ export class DirectorWorkerManager {
       if (this.worker === worker) {
         this.worker = null;
       }
-      this.logStream?.end();
-      this.logStream = null;
+      if (this.logStream === logStream) {
+        this.logStream = null;
+      }
+      this.closeLogStreamAfterExit(worker, logStream);
     });
 
     worker.on("error", (error) => {
@@ -143,6 +160,51 @@ export class DirectorWorkerManager {
     });
 
     console.log(`[DirectorWorkerManager] spawned worker ${worker.pid} log=${logPath}`);
+  }
+
+  private closeLogStreamAfterExit(worker: ChildProcess, logStream: fs.WriteStream): void {
+    let closed = false;
+    let pending = 0;
+    let fallbackTimer: NodeJS.Timeout | null = null;
+    const registrations: Array<{
+      target: CloseEventTarget;
+      listener: (...args: any[]) => void;
+    }> = [];
+
+    const close = (): void => {
+      if (closed) return;
+      closed = true;
+      if (fallbackTimer) clearTimeout(fallbackTimer);
+      for (const { target, listener } of registrations) {
+        target.removeListener?.("close", listener);
+      }
+      logStream.end();
+    };
+
+    const waitForClose = (target: CloseEventTarget | null | undefined): void => {
+      if (!target || typeof target.once !== "function") return;
+      const listener = (): void => {
+        pending -= 1;
+        if (pending === 0) close();
+      };
+      pending += 1;
+      registrations.push({ target, listener });
+      target.once("close", listener);
+    };
+
+    const closeTargets: Array<CloseEventTarget | null | undefined> = [
+      worker,
+      worker.stdout,
+      worker.stderr,
+    ];
+    for (const target of closeTargets) waitForClose(target);
+    if (pending === 0) {
+      close();
+      return;
+    }
+
+    fallbackTimer = setTimeout(close, LOG_CLOSE_FALLBACK_MS);
+    fallbackTimer.unref();
   }
 
   async shutdown(): Promise<void> {

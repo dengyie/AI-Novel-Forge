@@ -17,9 +17,12 @@ import {
   type RagChunkFacets,
   type RagPreChunk,
 } from "./chunkFacets";
+import {
+  collectReindexOwners,
+  enqueueReindexOwners,
+  type ReindexScope,
+} from "./indexing";
 import { runWithConcurrency } from "./utils";
-
-type ReindexScope = "novel" | "world" | "all";
 
 export class RagJobCancelledError extends Error {
   constructor() {
@@ -38,11 +41,6 @@ function buildJoinedText(...parts: Array<string | null | undefined>): string {
     .filter(Boolean)
     .join("\n")
     .trim();
-}
-
-interface PendingOwner {
-  ownerType: RagOwnerType;
-  ownerId: string;
 }
 
 interface SourcePiece {
@@ -998,79 +996,12 @@ export class RagIndexService {
     return this.enqueueOwnerJob("delete", ownerType, ownerId, { tenantId });
   }
 
-  private async collectOwners(scope: ReindexScope, id?: string): Promise<PendingOwner[]> {
-    const owners = new Map<string, PendingOwner>();
-    const push = (ownerType: RagOwnerType, ownerId: string) => {
-      const key = `${ownerType}:${ownerId}`;
-      owners.set(key, { ownerType, ownerId });
-    };
-
-    if (scope === "novel" || scope === "all") {
-      const novelIds = scope === "novel"
-        ? (id ? [id] : [])
-        : (await prisma.novel.findMany({ select: { id: true } })).map((item) => item.id);
-      if (scope === "novel" && !id) {
-        const all = await prisma.novel.findMany({ select: { id: true } });
-        all.forEach((item) => novelIds.push(item.id));
-      }
-      for (const novelId of novelIds) {
-        push("novel", novelId);
-        push("bible", novelId);
-      }
-      const [chapters, summaries, facts, characters, timelines] = await Promise.all([
-        prisma.chapter.findMany({
-          where: { novelId: { in: novelIds } },
-          select: { id: true },
-        }),
-        prisma.chapterSummary.findMany({
-          where: { novelId: { in: novelIds } },
-          select: { chapterId: true },
-        }),
-        prisma.consistencyFact.findMany({
-          where: { novelId: { in: novelIds } },
-          select: { id: true },
-        }),
-        prisma.character.findMany({
-          where: { novelId: { in: novelIds } },
-          select: { id: true },
-        }),
-        prisma.characterTimeline.findMany({
-          where: { novelId: { in: novelIds } },
-          select: { id: true },
-        }),
-      ]);
-      chapters.forEach((item) => push("chapter", item.id));
-      summaries.forEach((item) => push("chapter_summary", item.chapterId));
-      facts.forEach((item) => push("consistency_fact", item.id));
-      characters.forEach((item) => push("character", item.id));
-      timelines.forEach((item) => push("character_timeline", item.id));
-    }
-
-    if (scope === "world" || scope === "all") {
-      const worldIds = scope === "world"
-        ? (id ? [id] : [])
-        : (await prisma.world.findMany({ select: { id: true } })).map((item) => item.id);
-      if (scope === "world" && !id) {
-        const all = await prisma.world.findMany({ select: { id: true } });
-        all.forEach((item) => worldIds.push(item.id));
-      }
-      worldIds.forEach((worldId) => push("world", worldId));
-      const library = await prisma.worldPropertyLibrary.findMany({
-        where: scope === "world" ? { sourceWorldId: id ?? undefined } : {},
-        select: { id: true },
-      });
-      library.forEach((item) => push("world_library_item", item.id));
-    }
-
-    return Array.from(owners.values());
-  }
-
   async enqueueReindex(scope: ReindexScope, id?: string, tenantId?: string) {
-    const owners = await this.collectOwners(scope, id);
-    const jobs = await Promise.all(
-      owners.map((owner) =>
-        this.enqueueOwnerJob("rebuild", owner.ownerType, owner.ownerId, { tenantId }),
-      ),
+    const owners = await collectReindexOwners(scope, id);
+    const jobs = await enqueueReindexOwners(
+      owners,
+      (owner, options) => this.enqueueOwnerJob("rebuild", owner.ownerType, owner.ownerId, options),
+      { tenantId },
     );
     return {
       scope,

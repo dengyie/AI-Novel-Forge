@@ -6,10 +6,16 @@ import { ragConfig } from "../config/rag";
 import { resolveLogsRoot } from "./appPaths";
 import { RagClient } from "./RagClient";
 import type { WorkerLike } from "./RagClient";
-import type { RagWorkerRequest, RagWorkerResponse } from "./ragWorkerProtocol";
+import {
+  RAG_WORKER_RECOVERY_RETRY_MAX_MS,
+  RAG_WORKER_SHUTDOWN_TIMEOUT_MS,
+} from "./ragWorkerProtocol";
+import type { RagWorkerResponse } from "./ragWorkerProtocol";
 
 const POLL_INTERVAL_MS = 15_000;
 const HEARTBEAT_STALLED_MS = 2 * 60_000;
+const RECOVERY_RETRY_BASE_MS = 1_000;
+const LOG_CLOSE_FALLBACK_MS = 1_000;
 const configuredHeapMb = Number(process.env.RAG_WORKER_HEAP_MB);
 const WORKER_HEAP_MB = Number.isSafeInteger(configuredHeapMb)
   ? Math.max(96, Math.min(512, configuredHeapMb))
@@ -22,24 +28,36 @@ function workerExecArgv(): string[] {
   ];
 }
 
+type WorkerStopReason = "stalled" | "disabled" | "shutdown";
+type WorkerState = "idle" | "running" | "stopping";
+
 /**
- * RAG worker 子进程管理器（pxed 防 OOM Phase 3）。
+ * RAG 子进程管理器（pxed 防 OOM Phase 3）。
  *
- * RAG 全家 import 树实测 +85MB heap，且检索只在聊天/生成时偶发、索引在后台低速
- * 运行——没必要常驻主进程。本 Manager：
- * - 轮询 RagIndexJob 有无 queued/running → fork 子进程（入口 workers/ragWorkerEntry.ts）
- * - 检索 RPC（buildContextBlock 等）由 RagClient 经 IPC 直连子进程
- * - 心跳看门狗：心跳停更 ≥2min → SIGTERM→SIGKILL→重置 running 任务（下轮重跑）
- * - 任意 worker 异常退出也重置 running 任务，避免 SIGKILL/OOM 后留下永久 running 行
- * - 队列空 + 无在途 RPC 达宽限期 → 子进程自杀，Manager 按需再 fork
- *
- * 主进程因此不再 import services/rag 任何模块（app.ts 已移除该 import）。
+ * Worker ownership is deliberately serialized here. A child remains the
+ * current worker until its `exit` event; only then are interrupted jobs
+ * recovered, and only after recovery succeeds can a replacement be forked.
  */
 export class RagWorkerManager {
   private worker: ChildProcess | null = null;
   private logStream: fs.WriteStream | null = null;
   private pollTimer: NodeJS.Timeout | null = null;
   private shuttingDown = false;
+  private desiredAlive = false;
+  private workerState: WorkerState = "idle";
+  private spawnPromise: Promise<void> | null = null;
+  private stopPromise: Promise<void> | null = null;
+  private stopWorkerRef: ChildProcess | null = null;
+  private stopReason: WorkerStopReason | null = null;
+  private stopResolve: (() => void) | null = null;
+  private stopTimer: NodeJS.Timeout | null = null;
+  private recoveryPromise: Promise<void> | null = null;
+  private recoveryTimer: NodeJS.Timeout | null = null;
+  private recoveryAttempt = 0;
+  private recoveryReason: "stalled" | "exited" = "exited";
+  /** Kept true until the corresponding DB recovery attempt succeeds. */
+  private recoveryPending = false;
+  private idleNotified = false;
   private lastHeartbeatAt = 0;
   private receivedHeartbeat = false;
 
@@ -47,9 +65,15 @@ export class RagWorkerManager {
 
   constructor() {
     this.client = new RagClient({
-      getWorker: () => (this.worker as unknown as WorkerLike | null),
+      getWorker: () => (
+        this.worker && this.workerState === "running"
+          ? this.worker as unknown as WorkerLike
+          : null
+      ),
       ensureWorker: () => {
-        void this.spawnWorkerIfNeeded();
+        this.desiredAlive = true;
+        this.idleNotified = false;
+        return this.spawnWorkerIfNeeded();
       },
     });
   }
@@ -64,10 +88,9 @@ export class RagWorkerManager {
   }
 
   stopPolling(): void {
-    if (this.pollTimer) {
-      clearInterval(this.pollTimer);
-      this.pollTimer = null;
-    }
+    if (!this.pollTimer) return;
+    clearInterval(this.pollTimer);
+    this.pollTimer = null;
   }
 
   /** 入队路径秒级唤醒：立即跑一次 poll（有 pending 即 fork），不等 15s 轮询。 */
@@ -77,37 +100,42 @@ export class RagWorkerManager {
   }
 
   /** Stop an idle/active child after runtime settings disable RAG. */
-  disable(): void {
-    const worker = this.worker;
-    if (!worker) return;
-    try {
-      worker.send({ type: "shutdown" }, (error) => {
-        if (!error || this.worker !== worker) return;
-        console.warn("[RagWorkerManager] disabled worker did not accept shutdown; killing", error);
-        this.killWorkerSync();
-        void this.resetRunningJobs("exited");
-      });
-    } catch (error) {
-      console.warn("[RagWorkerManager] failed to stop disabled worker", error);
-      this.killWorkerSync();
-      void this.resetRunningJobs("exited");
-    }
+  disable(): Promise<void> {
+    this.desiredAlive = false;
+    this.idleNotified = false;
+    return this.stopCurrentWorker("disabled");
   }
 
   private async pollTick(): Promise<void> {
     if (this.shuttingDown) return;
     this.checkStalled();
+
+    if (this.recoveryPending) {
+      if (this.recoveryPromise) {
+        await this.recoveryPromise;
+      }
+      // A failed recovery is fail-closed. The retry timer owns the next
+      // attempt; no poll or RPC may fork around it.
+      if (this.recoveryPending) return;
+    }
+
     try {
       const activeJobs = await prisma.ragIndexJob.count({
         where: { status: { in: ["queued", "running"] } },
       });
       if (activeJobs > 0 && ragConfig.enabled) {
+        this.desiredAlive = true;
+        this.idleNotified = false;
         await this.spawnWorkerIfNeeded();
       } else if (this.worker && !ragConfig.enabled) {
-        this.disable();
-      } else if (this.worker && this.client.inflightCount === 0) {
-        // 无任务也无在途检索：通知子进程进入空闲倒计时（宽限期内来活会被 kick 复位）。
-        this.worker.send({ type: "idle" });
+        await this.disable();
+      } else if (
+        this.worker
+        && this.workerState === "running"
+        && this.client.inflightCount === 0
+        && !this.idleNotified
+      ) {
+        this.sendIdle();
       }
     } catch (error) {
       console.warn("[RagWorkerManager] poll tick failed", error);
@@ -115,9 +143,36 @@ export class RagWorkerManager {
   }
 
   private async spawnWorkerIfNeeded(): Promise<void> {
-    if (this.shuttingDown || this.worker) return;
-    if (!ragConfig.enabled) return;
+    if (this.shuttingDown || !ragConfig.enabled) return;
+    if (this.recoveryPending) {
+      if (this.recoveryPromise) await this.recoveryPromise;
+      if (this.recoveryPending) return;
+    }
+    if (this.workerState === "stopping") {
+      if (this.stopPromise) await this.stopPromise;
+      if (this.worker) return;
+      if (this.recoveryPending) {
+        if (this.recoveryPromise) await this.recoveryPromise;
+        if (this.recoveryPending) return;
+      }
+    }
+    if (this.worker || this.spawnPromise) {
+      if (this.spawnPromise) await this.spawnPromise;
+      return;
+    }
 
+    const spawnPromise = this.spawnWorker();
+    this.spawnPromise = spawnPromise;
+    try {
+      await spawnPromise;
+    } finally {
+      if (this.spawnPromise === spawnPromise) {
+        this.spawnPromise = null;
+      }
+    }
+  }
+
+  private async spawnWorker(): Promise<void> {
     const workerScript = path.join(__dirname, "../workers/ragWorkerEntry.js");
     if (!fs.existsSync(workerScript)) {
       console.error(`[RagWorkerManager] worker script not found: ${workerScript}`);
@@ -156,11 +211,22 @@ export class RagWorkerManager {
       if (this.logStream === logStream) this.logStream = null;
       return;
     }
+
     this.worker = worker;
+    this.workerState = "running";
     this.lastHeartbeatAt = Date.now();
     this.receivedHeartbeat = false;
-    worker.stdout?.on("data", (chunk) => logStream.write(chunk));
-    worker.stderr?.on("data", (chunk) => logStream.write(chunk));
+    this.idleNotified = false;
+    worker.stdout?.on("data", (chunk) => {
+      if (!logStream.destroyed && !logStream.writableEnded) {
+        logStream.write(chunk);
+      }
+    });
+    worker.stderr?.on("data", (chunk) => {
+      if (!logStream.destroyed && !logStream.writableEnded) {
+        logStream.write(chunk);
+      }
+    });
 
     worker.on("message", (message: unknown) => {
       this.handleWorkerMessage(message);
@@ -186,18 +252,46 @@ export class RagWorkerManager {
   ): void {
     const isCurrentWorker = this.worker === worker;
     console.log(`[RagWorkerManager] worker ${worker.pid} exited code=${code} signal=${signal}`);
-    logStream.end();
+    this.closeLogStreamAfterExit(worker, logStream);
     if (!isCurrentWorker) return;
 
+    const recoveryReason = this.workerState === "stopping" && this.stopReason === "stalled"
+      ? "stalled"
+      : "exited";
     this.worker = null;
+    this.workerState = "idle";
     this.logStream = null;
+    this.lastHeartbeatAt = 0;
+    this.receivedHeartbeat = false;
+    this.idleNotified = false;
+    this.finishStop(worker);
     this.client.handleWorkerExit();
+
     if (!this.shuttingDown) {
-      // A crash/SIGKILL has no worker-side cleanup opportunity. Requeue before
-      // the next poll, otherwise the manager only sees queued jobs and a
-      // running row can remain stuck indefinitely.
-      void this.resetRunningJobs("exited");
+      this.recoveryPending = true;
+      this.recoveryReason = recoveryReason;
+      void this.resetRunningJobs(this.recoveryReason);
     }
+  }
+
+  private closeLogStreamAfterExit(worker: ChildProcess, logStream: fs.WriteStream): void {
+    let closed = false;
+    let fallbackTimer: NodeJS.Timeout | null = null;
+    const close = (): void => {
+      if (closed) return;
+      closed = true;
+      if (fallbackTimer) clearTimeout(fallbackTimer);
+      worker.removeListener?.("close", close);
+      logStream.end();
+    };
+    if (typeof worker.once === "function") {
+      worker.once("close", close);
+    } else {
+      close();
+      return;
+    }
+    fallbackTimer = setTimeout(close, LOG_CLOSE_FALLBACK_MS);
+    fallbackTimer.unref();
   }
 
   private handleWorkerMessage(message: unknown): void {
@@ -210,87 +304,174 @@ export class RagWorkerManager {
     }
   }
 
-  /** 心跳看门狗：worker 无响应 ≥2min → 杀掉重置 running 任务。 */
+  /** 心跳看门狗：worker 无响应 ≥2min → SIGTERM/SIGKILL → exit 后重置 running 任务。 */
   private checkStalled(): void {
-    if (!this.worker || !this.lastHeartbeatAt) return;
-    if (!this.receivedHeartbeat) return; // 从未握手，等首轮心跳
+    if (!this.worker || this.workerState === "stopping" || !this.lastHeartbeatAt) return;
     if (Date.now() - this.lastHeartbeatAt < HEARTBEAT_STALLED_MS) return;
     const pid = this.worker.pid;
-    console.warn(`[RagWorkerManager] worker ${pid} heartbeat stalled ≥${HEARTBEAT_STALLED_MS}ms; killing`);
-    this.killWorkerSync();
-    void this.resetRunningJobs("stalled");
+    console.warn(`[RagWorkerManager] worker ${pid} heartbeat stalled ≥${HEARTBEAT_STALLED_MS}ms; stopping`);
+    this.desiredAlive = true;
+    void this.stopCurrentWorker("stalled");
   }
 
   private async resetRunningJobs(reason: "stalled" | "exited"): Promise<void> {
-    try {
-      const lastError = reason === "stalled"
-        ? "RAG worker stalled; job requeued."
-        : "RAG worker exited; job requeued.";
-      const result = await prisma.ragIndexJob.updateMany({
-        where: { status: "running" },
-        data: {
-          status: "queued",
-          runAfter: new Date(),
-          lastError,
-          updatedAt: new Date(),
-        },
-      });
-      if (result.count > 0) {
-        console.warn(`[RagWorkerManager] requeued ${result.count} running job(s) after stall kill.`);
+    if (this.shuttingDown) {
+      this.recoveryPending = false;
+      return;
+    }
+    if (this.recoveryPromise) {
+      await this.recoveryPromise;
+      return;
+    }
+
+    this.recoveryReason = reason;
+    const attempt = (async (): Promise<void> => {
+      try {
+        const lastError = reason === "stalled"
+          ? "RAG worker stalled; job requeued."
+          : "RAG worker exited; job requeued.";
+        const result = await prisma.ragIndexJob.updateMany({
+          where: { status: "running" },
+          data: {
+            status: "queued",
+            runAfter: new Date(),
+            lastError,
+            updatedAt: new Date(),
+          },
+        });
+        this.recoveryPending = false;
+        this.recoveryAttempt = 0;
+        if (this.recoveryTimer) {
+          clearTimeout(this.recoveryTimer);
+          this.recoveryTimer = null;
+        }
+        if (result.count > 0) {
+          console.warn(`[RagWorkerManager] requeued ${result.count} running job(s) after ${reason}.`);
+        }
+        if (!this.shuttingDown && this.desiredAlive) {
+          void this.pollTick();
+        }
+      } catch (error) {
+        this.recoveryPending = true;
+        this.recoveryAttempt += 1;
+        const delayMs = Math.min(
+          RECOVERY_RETRY_BASE_MS * (2 ** Math.min(this.recoveryAttempt - 1, 5)),
+          RAG_WORKER_RECOVERY_RETRY_MAX_MS,
+        );
+        console.error(`[RagWorkerManager] failed to requeue running jobs; retrying in ${delayMs}ms`, error);
+        this.scheduleRecoveryRetry(delayMs);
       }
-    } catch (error) {
-      console.error("[RagWorkerManager] failed to requeue running jobs", error);
+    })();
+    this.recoveryPromise = attempt;
+    try {
+      await attempt;
+    } finally {
+      if (this.recoveryPromise === attempt) {
+        this.recoveryPromise = null;
+      }
     }
   }
 
-  private killWorkerSync(): void {
+  private scheduleRecoveryRetry(delayMs: number): void {
+    if (this.shuttingDown || this.recoveryTimer) return;
+    this.recoveryTimer = setTimeout(() => {
+      this.recoveryTimer = null;
+      void this.resetRunningJobs(this.recoveryReason);
+    }, delayMs);
+    this.recoveryTimer.unref();
+  }
+
+  private sendIdle(): void {
     const worker = this.worker;
-    if (!worker) return;
-    this.worker = null;
+    if (!worker || this.workerState !== "running") return;
+    this.idleNotified = true;
     try {
-      worker.kill("SIGTERM");
-      setTimeout(() => {
-        try {
-          if (worker.pid) process.kill(worker.pid, 0);
-          worker.kill("SIGKILL");
-        } catch {
-          // already dead
+      worker.send({ type: "idle" }, (error) => {
+        if (error && this.worker === worker) {
+          this.idleNotified = false;
+          console.warn("[RagWorkerManager] failed to notify worker of idle state", error);
         }
-      }, 5_000).unref();
+      });
     } catch (error) {
-      console.error("[RagWorkerManager] kill worker failed", error);
+      this.idleNotified = false;
+      console.warn("[RagWorkerManager] failed to notify worker of idle state", error);
     }
-    this.logStream?.end();
-    this.logStream = null;
-    this.client.handleWorkerExit();
+  }
+
+  private stopCurrentWorker(reason: WorkerStopReason): Promise<void> {
+    const worker = this.worker;
+    if (!worker) return Promise.resolve();
+    if (this.stopPromise && this.stopWorkerRef === worker) return this.stopPromise;
+
+    this.workerState = "stopping";
+    if (reason !== "stalled") {
+      this.desiredAlive = false;
+    }
+    this.idleNotified = false;
+
+    this.stopPromise = new Promise<void>((resolve) => {
+      this.stopResolve = resolve;
+    });
+    this.stopWorkerRef = worker;
+    this.stopReason = reason;
+    this.stopTimer = setTimeout(() => {
+      try {
+        worker.kill("SIGKILL");
+      } catch (error) {
+        console.warn("[RagWorkerManager] force-kill worker failed", error);
+      }
+      // The child reference remains authoritative until `exit`; this resolve
+      // only releases callers such as settings/shutdown after the deadline.
+      this.stopResolve?.();
+    }, RAG_WORKER_SHUTDOWN_TIMEOUT_MS);
+    this.stopTimer.unref();
+
+    const onShutdownSend = (error?: Error | null): void => {
+      if (!error) return;
+      try {
+        worker.kill("SIGTERM");
+      } catch (killError) {
+        console.warn("[RagWorkerManager] failed to terminate worker after IPC error", killError);
+      }
+    };
+    if (typeof worker.send !== "function") {
+      onShutdownSend(new Error("worker IPC channel is unavailable"));
+    } else {
+      try {
+        worker.send({ type: "shutdown" }, onShutdownSend);
+      } catch (error) {
+        console.warn("[RagWorkerManager] failed to request worker shutdown", error);
+        onShutdownSend(error instanceof Error ? error : new Error(String(error)));
+      }
+    }
+
+    return this.stopPromise;
+  }
+
+  private finishStop(worker: ChildProcess): void {
+    if (this.stopWorkerRef !== worker) return;
+    if (this.stopTimer) {
+      clearTimeout(this.stopTimer);
+      this.stopTimer = null;
+    }
+    this.stopResolve?.();
+    this.stopResolve = null;
+    this.stopPromise = null;
+    this.stopWorkerRef = null;
+    this.stopReason = null;
   }
 
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
+    this.desiredAlive = false;
     this.stopPolling();
+    if (this.recoveryTimer) {
+      clearTimeout(this.recoveryTimer);
+      this.recoveryTimer = null;
+    }
     const worker = this.worker;
     if (!worker) return;
-    this.worker = null;
-    try {
-      worker.send({ type: "shutdown" });
-    } catch {
-      // ignore
-    }
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(() => resolve(), 5_000);
-      timer.unref();
-      worker.once("exit", () => {
-        clearTimeout(timer);
-        resolve();
-      });
-    });
-    try {
-      worker.kill("SIGKILL");
-    } catch {
-      // already dead
-    }
-    this.logStream?.end();
-    this.logStream = null;
+    await this.stopCurrentWorker("shutdown");
     this.client.handleWorkerExit();
   }
 

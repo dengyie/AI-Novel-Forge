@@ -19,7 +19,7 @@ function installWorker(manager, overrides = {}) {
   return { worker, getKillCount: () => killCount };
 }
 
-test("RAG watchdog waits for the first heartbeat", () => {
+test("RAG watchdog kills a child that never sends its first heartbeat", () => {
   const manager = new RagWorkerManager();
   const fake = installWorker(manager, {
     lastHeartbeatAt: Date.now() - 10 * 60_000,
@@ -28,8 +28,96 @@ test("RAG watchdog waits for the first heartbeat", () => {
 
   manager.checkStalled();
 
-  assert.equal(fake.getKillCount(), 0);
+  assert.equal(fake.getKillCount(), 1);
   assert.equal(manager.worker, fake.worker);
+});
+
+test("RAG manager keeps a stopping child until exit and recovery completes", async () => {
+  const manager = new RagWorkerManager();
+  const worker = {
+    pid: 999_994,
+    killCount: 0,
+    kill() {
+      this.killCount += 1;
+      return true;
+    },
+  };
+  manager.worker = worker;
+  manager.lastHeartbeatAt = Date.now() - 3 * 60_000;
+  manager.receivedHeartbeat = true;
+
+  let releaseRecovery;
+  const recovery = new Promise((resolve) => {
+    releaseRecovery = resolve;
+  });
+  manager.resetRunningJobs = async () => {
+    await recovery;
+    manager.recoveryPending = false;
+  };
+
+  manager.checkStalled();
+  assert.equal(manager.worker, worker);
+  assert.equal(worker.killCount, 1);
+
+  const logStream = { end() {} };
+  manager.handleWorkerExit(worker, logStream, 137, "SIGKILL");
+  assert.equal(manager.worker, null);
+  assert.equal(manager.recoveryPending, true);
+
+  let spawned = false;
+  manager.spawnWorkerIfNeeded = async () => {
+    spawned = true;
+  };
+  await manager.pollTick();
+  assert.equal(spawned, false);
+
+  releaseRecovery();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(manager.recoveryPending, false);
+});
+
+test("RAG disable sends a bounded kill when shutdown IPC is accepted but child hangs", async () => {
+  const manager = new RagWorkerManager();
+  const worker = {
+    pid: 999_995,
+    send(_message, callback) {
+      callback?.();
+      return true;
+    },
+    killCount: 0,
+    kill(signal) {
+      this.killCount += 1;
+      this.lastSignal = signal;
+      return true;
+    },
+  };
+  manager.worker = worker;
+  const originalSetTimeout = global.setTimeout;
+  const originalClearTimeout = global.clearTimeout;
+  const timers = [];
+  global.setTimeout = (callback) => {
+    const timer = { callback, unref() {} };
+    timers.push(timer);
+    return timer;
+  };
+  global.clearTimeout = (timer) => {
+    timer.cleared = true;
+  };
+
+  try {
+    const stopPromise = manager.disable();
+    assert.equal(worker.killCount, 0);
+    assert.ok(timers.length >= 1);
+    timers.at(-1).callback();
+    assert.equal(worker.killCount, 1);
+    assert.equal(worker.lastSignal, "SIGKILL");
+    await stopPromise;
+  } finally {
+    global.setTimeout = originalSetTimeout;
+    global.clearTimeout = originalClearTimeout;
+    manager.worker = null;
+    await manager.shutdown();
+  }
 });
 
 test("RAG watchdog kills a stalled worker and requeues running jobs", async () => {
@@ -39,6 +127,7 @@ test("RAG watchdog kills a stalled worker and requeues running jobs", async () =
     receivedHeartbeat: true,
   });
   const originalUpdateMany = prisma.ragIndexJob.updateMany;
+  const originalCount = prisma.ragIndexJob.count;
   const originalSetTimeout = global.setTimeout;
   let updateArgs = null;
   global.setTimeout = () => ({ unref() {} });
@@ -46,9 +135,12 @@ test("RAG watchdog kills a stalled worker and requeues running jobs", async () =
     updateArgs = args;
     return { count: 2 };
   };
+  prisma.ragIndexJob.count = async () => 0;
 
   try {
     manager.checkStalled();
+    assert.equal(manager.worker, fake.worker);
+    manager.handleWorkerExit(fake.worker, { end() {} }, 137, "SIGKILL");
     await new Promise((resolve) => setImmediate(resolve));
 
     assert.equal(fake.getKillCount(), 1);
@@ -59,6 +151,7 @@ test("RAG watchdog kills a stalled worker and requeues running jobs", async () =
   } finally {
     global.setTimeout = originalSetTimeout;
     prisma.ragIndexJob.updateMany = originalUpdateMany;
+    prisma.ragIndexJob.count = originalCount;
     await manager.shutdown();
   }
 });

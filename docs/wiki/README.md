@@ -71,6 +71,7 @@ Wiki 不记录单次提交改了什么，也不替代 release notes。它只记�
 - [角色连续性硬事实](./debugging/character-continuity-hard-facts.md)
 - [LLM 请求限流器内存泄漏](./debugging/llm-request-limiter-memory-leak.md)
 - [日志保留策略](./debugging/log-retention.md)
+- [pxed 生产运行时一致性与 OOM 恢复](./debugging/pxed-prisma-oom-recovery.md)
 - [开发踩坑知识沉淀](./debugging/development-knowledge.md)（13 条生产根因与修复教训）
 
 ### Product

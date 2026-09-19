@@ -2,7 +2,10 @@ import type {
   RagWorkerRequest,
   RagWorkerResponse,
 } from "./ragWorkerProtocol";
-import { RAG_WORKER_RPC_TIMEOUT_MS } from "./ragWorkerProtocol";
+import {
+  RAG_WORKER_ACQUIRE_TIMEOUT_MS,
+  RAG_WORKER_RPC_TIMEOUT_MS,
+} from "./ragWorkerProtocol";
 
 /**
  * 主进程侧 RAG RPC 客户端。
@@ -32,7 +35,7 @@ export interface RagClientDeps {
   /** 返回当前 rag worker 子进程（可能为 null——未 fork）。 */
   getWorker: () => WorkerLike | null;
   /** 无子进程时请求 fork（Manager 决定是否真的 fork，异步）。 */
-  ensureWorker: () => void;
+  ensureWorker: () => void | Promise<void>;
 }
 
 export class RagClient {
@@ -76,6 +79,7 @@ export class RagClient {
   /** 子进程退出时清空在途请求（Manager 在 exit 回调中调用）。 */
   handleWorkerExit(): void {
     this.rejectAll(new Error("RAG worker exited during RPC"));
+    this.wire();
   }
 
   private handleMessage(message: unknown): void {
@@ -136,10 +140,24 @@ export class RagClient {
     }
     let worker = this.deps.getWorker();
     if (!worker) {
-      this.deps.ensureWorker();
+      let acquireTimer: NodeJS.Timeout | null = null;
+      try {
+        await Promise.race([
+          Promise.resolve().then(() => this.deps.ensureWorker()),
+          new Promise<void>((resolve) => {
+            acquireTimer = setTimeout(resolve, RAG_WORKER_ACQUIRE_TIMEOUT_MS);
+          }),
+        ]);
+      } catch (error) {
+        this.noteFailure();
+        console.warn("[RAG][Client] worker acquisition failed; degrade to empty.", error);
+        return null;
+      } finally {
+        if (acquireTimer) {
+          clearTimeout(acquireTimer);
+        }
+      }
       worker = this.deps.getWorker();
-      // fork 是异步的（冷启动加载模型期间不阻塞生成主链路）；本请求降级为空结果，
-      // 下一次请求大概率已有子进程可用。
       if (!worker) {
         return null;
       }

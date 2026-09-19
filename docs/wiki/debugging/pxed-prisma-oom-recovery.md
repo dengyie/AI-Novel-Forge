@@ -4,6 +4,23 @@
 
 pxed 上 novel-server 与其它 Node 进程共享约 4 GiB、无 swap 的宿主内存。--max-old-space-size 只约束 V8 old space，不能覆盖 native heap、SQLite、Buffer、Prisma、线程和 ffmpeg 子进程；宿主级 OOM 可能直接 SIGKILL 进程。
 
+## 进程隔离边界（2026-09-19）
+
+RAG 与 Director 的边界必须按“谁加载重型 import 树、谁持有执行循环”判断，而不是按路由文件名判断：
+
+- 主进程的 RAG 访问面由 `app.ts` 挂载 HTTP 路由，并通过 `services/rag/mainProcessProxy.ts` 暴露轻量入口。`routes/rag.ts` 的任务列表、清理、重建展开和设置读写走 Prisma/队列 facade；真正的 RAG service barrel（`services/rag/index.ts`）只由 `workers/ragWorkerEntry.ts` 引入。
+- Director 的执行树只从 `runtime/DirectorWorkerManager.ts` fork 的 `workers/directorWorker.ts` 进入。主进程保存 manager、数据库轮询和 IPC 控制面，不直接构造 `DirectorWorker`。
+- 这些静态导入关系只能证明代码边界，不能证明生产进程已经按预期 fork，也不能证明主进程 RSS 已降低。运行验证仍需记录父子 PID、各自 RSS/峰值、worker 日志和退出原因。
+- RAG 冷启动请求的判断要看实际 fork 路径：当前 `RagWorkerManager.spawnWorkerIfNeeded()` 在第一次 `await` 之前完成 `fork` 和 `this.worker` 赋值，因此不能把“调用了 async 方法”直接等同于“本次 RPC 必然降级为空”。只有 fork 前置条件失败、子进程未就绪或 IPC 发送/响应失败时，才有对应的降级证据。
+
+子进程生命周期也属于隔离契约。RAG Manager 负责拉起、看门狗、异常退出后的任务回队和关闭；Director Manager 负责拉起、数据库轮询和关闭，命令队列的 stale lease scanner 负责回收过期租约。Director 当前由 Manager 的数据库轮询发现待处理命令，`kick()` 只是显式 IPC 唤醒入口，不能在没有入队调用点的情况下宣称秒级唤醒。Director worker 进入 idle 或收到 SIGTERM 后，先停止领取新命令并等待当前循环收尾，再移除 IPC listener、清理 idle timer、断开 IPC 并退出。只调用 `worker.stop()` 而留下 `process.on("message")`，会让 IPC channel 继续保持，空闲进程无法释放堆，最终只能依赖 Manager 的 SIGKILL。
+
+## OOM 证据边界（2026-09-19）
+
+`CommitLimit` 与 `Committed_AS` 是 Linux overcommit 账本指标。`Committed_AS` 超过 `CommitLimit` 可以说明后续虚拟内存承诺存在压力，但它不能单独证明是哪一个进程触发 OOM，也不能区分 V8 heap、native allocation、SQLite、Buffer、Prisma、线程或子进程的贡献。类似地，单个 import 树的 heap 增量不能直接相加：共享模块、运行时缓存和 native 内存可能重叠或完全不在 `heapUsed` 中。
+
+确认 OOM 根因至少需要把同一时间窗口的证据对齐：宿主 `dmesg`/journal 或 cgroup `memory.events` 的 kill 记录、进程 PID 与 RSS/峰值、Node `heapUsed`/`external`/`arrayBuffers`、worker 日志中的退出信号，以及 Supervisor 或容器重启记录。缺少这些证据时，结论只能写成“存在 overcommit 风险”或“隔离设计已落地”，不能写成“已证明 OOM 根因”或“隔离后总内存必然下降到某个数值”。
+
 ## 当前规则
 
 - novel-server 的 Supervisor 配置在 OOM 恢复阶段保持 autorestart=false，startretries 必须有限；恢复由人工单次启动并观察，避免 crash-loop 放大器。

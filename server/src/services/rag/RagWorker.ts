@@ -10,6 +10,9 @@ function backoffMs(attempt: number): number {
 export class RagWorker {
   private timer: NodeJS.Timeout | null = null;
   private isTicking = false;
+  private startupPromise: Promise<void> | null = null;
+  private currentTickPromise: Promise<void> | null = null;
+  private stopRequested = false;
   private readonly cleanupService: RagJobCleanupService;
 
   constructor(
@@ -42,7 +45,7 @@ export class RagWorker {
   }
 
   start(): void {
-    if (this.timer) {
+    if (this.timer || this.startupPromise) {
       return;
     }
     // When RAG_ENABLED=false the worker never ticks, so cancelStaleActiveJobs
@@ -58,11 +61,29 @@ export class RagWorker {
       maxAttempts: ragConfig.workerMaxAttempts,
       retryBaseMs: ragConfig.workerRetryBaseMs,
     });
-    void this.requeueInterruptedJobs();
-    this.timer = setInterval(() => {
-      void this.tick();
-    }, ragConfig.workerPollMs);
-    void this.tick();
+    this.stopRequested = false;
+    const startup = (async (): Promise<void> => {
+      try {
+        await this.requeueInterruptedJobs();
+      } catch (error) {
+        // Startup recovery must not become an unhandled rejection or prevent
+        // the worker from serving fresh queued work.
+        console.error("[RAG][Worker] interrupted job recovery failed.", error);
+      }
+      if (this.stopRequested) {
+        return;
+      }
+      this.timer = setInterval(() => {
+        this.scheduleTick();
+      }, ragConfig.workerPollMs);
+      this.scheduleTick();
+    })();
+    this.startupPromise = startup;
+    void startup.finally(() => {
+      if (this.startupPromise === startup) {
+        this.startupPromise = null;
+      }
+    });
   }
 
   private async requeueInterruptedJobs(): Promise<void> {
@@ -86,13 +107,43 @@ export class RagWorker {
     }
   }
 
-  stop(): void {
-    if (!this.timer) {
+  async stop(): Promise<void> {
+    this.stopRequested = true;
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+    const startup = this.startupPromise;
+    if (startup) {
+      await startup;
+    }
+    const currentTick = this.currentTickPromise;
+    if (currentTick) {
+      await currentTick;
+    }
+    this.logInfo("Worker stopped.");
+  }
+
+  /** True while startup recovery or a job tick is still mutating job state. */
+  isBusy(): boolean {
+    return Boolean(this.startupPromise || this.currentTickPromise || this.isTicking);
+  }
+
+  private scheduleTick(): void {
+    if (this.stopRequested || this.currentTickPromise) {
       return;
     }
-    clearInterval(this.timer);
-    this.timer = null;
-    this.logInfo("Worker stopped.");
+    const tickPromise = this.tick();
+    this.currentTickPromise = tickPromise;
+    void tickPromise
+      .catch((error) => {
+        console.error("[RAG][Worker] tick failed.", error);
+      })
+      .finally(() => {
+        if (this.currentTickPromise === tickPromise) {
+          this.currentTickPromise = null;
+        }
+      });
   }
 
   private async tick(): Promise<void> {

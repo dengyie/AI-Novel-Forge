@@ -215,8 +215,11 @@ async function bootstrap(): Promise<void> {
   process.once("SIGTERM", () => worker.stop());
 
   // 子进程模式（被 DirectorWorkerManager fork）：空闲宽限退出 + kick 复位。
-  if (process.send && IDLE_EXIT_GRACE_MS > 0) {
-    let idleTimer: NodeJS.Timeout | null = setTimeout(() => {
+  const childProcessMode = typeof process.send === "function";
+  let idleTimer: NodeJS.Timeout | null = null;
+  let idleMessageHandler: ((message: unknown) => void) | null = null;
+  if (childProcessMode && IDLE_EXIT_GRACE_MS > 0) {
+    idleTimer = setTimeout(() => {
       console.log(`[director.worker] idle ${IDLE_EXIT_GRACE_MS}ms; exiting to release memory.`);
       worker.stop();
     }, IDLE_EXIT_GRACE_MS);
@@ -230,15 +233,35 @@ async function bootstrap(): Promise<void> {
       }, IDLE_EXIT_GRACE_MS);
       idleTimer.unref();
     };
-    process.on("message", (message: unknown) => {
+    idleMessageHandler = (message: unknown) => {
       if (typeof message === "object" && message !== null && (message as { type?: string }).type === "kick") {
         resetIdle();
         taskDispatcher.notify();
       }
-    });
+    };
+    process.on("message", idleMessageHandler);
   }
 
-  await worker.start();
+  try {
+    await worker.start();
+  } finally {
+    if (idleTimer) {
+      clearTimeout(idleTimer);
+      idleTimer = null;
+    }
+    if (idleMessageHandler) {
+      process.off("message", idleMessageHandler);
+      idleMessageHandler = null;
+    }
+  }
+
+  // `process.on("message")` keeps the parent IPC channel referenced after the
+  // worker loop drains. Disconnect before exiting so an idle child actually
+  // releases its heap instead of waiting for the manager to SIGKILL it.
+  if (childProcessMode) {
+    process.disconnect?.();
+    process.exit(0);
+  }
 }
 
 if (require.main === module) {
