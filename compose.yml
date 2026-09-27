@@ -1,0 +1,34 @@
+# ainovel 生产 compose（腾讯轻量云 tencent-vps 专用）
+# 部署目录约定：/opt/ai-novel/（本文件 + .env + data/）
+# 公网入口只走 Cloudflare Tunnel → web:8080；两个容器都不对宿主以外暴露端口。
+# 镜像由 GitHub Actions 构建推送 ghcr.io/dengyie/*，机上只 pull，不 build。
+
+services:
+  api:
+    image: ghcr.io/dengyie/ai-novel-api:latest
+    container_name: ai-novel-api
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+    volumes:
+      - ./data:/data
+    mem_limit: 2g
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+  web:
+    image: ghcr.io/dengyie/ai-novel-web:latest
+    container_name: ai-novel-web
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:8080"
+    mem_limit: 128m

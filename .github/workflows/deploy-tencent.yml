@@ -1,0 +1,215 @@
+name: Deploy tencent
+
+# CI 构建双镜像并部署到腾讯轻量云（tencent-vps，Docker compose）。
+# 触发：
+#   - push 到 main → gate 绿后 build/push ghcr → SSH 上机 pull + up -d
+#   - workflow_dispatch（手动重放）
+# 门禁：
+#   - 仅允许 main 祖先 commit
+#   - 本 workflow 内重跑 prisma:generate + typecheck + fast tests
+#   - Environment `tencent-production` 挂 TENCENT_SSH_* secrets
+# 不做：机上 build（机上只 pull）；不动 pxed 生产。
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-tencent
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  gate:
+    name: Gate (main ancestor + server fast tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      sha: ${{ steps.meta.outputs.sha }}
+      short_sha: ${{ steps.meta.outputs.short_sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Resolve deploy meta
+        id: meta
+        run: |
+          set -euo pipefail
+          SHA="${{ github.sha }}"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHA::12}" >> "$GITHUB_OUTPUT"
+          echo "Deploy target sha=$SHA event=${{ github.event_name }}"
+
+      - name: Require commit is ancestor of origin/main
+        run: |
+          set -euo pipefail
+          git fetch origin main:refs/remotes/origin/main --force
+          SHA="${{ steps.meta.outputs.sha }}"
+          MAIN="$(git rev-parse origin/main)"
+          if [[ "$SHA" == "$MAIN" ]] || git merge-base --is-ancestor "$SHA" origin/main; then
+            echo "OK: $SHA is on origin/main lineage (main=$MAIN)"
+          else
+            echo "::error::Deploy sha is not on origin/main. Refuse non-main production deploys."
+            exit 1
+          fi
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10.6.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build shared
+        run: pnpm --filter @ai-novel/shared build
+
+      - name: Generate Prisma client
+        run: pnpm --filter @ai-novel/server prisma:generate
+
+      - name: Push sqlite schema for tests
+        env:
+          DATABASE_URL: file:./dev.db
+          AI_NOVEL_DATABASE_MODE: sqlite
+        run: pnpm --filter @ai-novel/server prisma:push
+
+      - name: Typecheck server
+        run: pnpm --filter @ai-novel/server typecheck
+
+      - name: Build server
+        run: pnpm --filter @ai-novel/server build
+
+      - name: Run server fast tests
+        env:
+          TEST_ISOLATION: process
+          TEST_CONCURRENCY: "6"
+          DATABASE_URL: file:./dev.db
+          AI_NOVEL_DATABASE_MODE: sqlite
+        run: pnpm --filter @ai-novel/server test:node
+
+  build-push:
+    name: Build & push ghcr images
+    needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          ref: ${{ needs.gate.outputs.sha }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push api image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.api
+          push: true
+          tags: |
+            ghcr.io/dengyie/ai-novel-api:latest
+            ghcr.io/dengyie/ai-novel-api:${{ needs.gate.outputs.short_sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build & push web image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.web
+          push: true
+          tags: |
+            ghcr.io/dengyie/ai-novel-web:latest
+            ghcr.io/dengyie/ai-novel-web:${{ needs.gate.outputs.short_sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to tencent-vps
+    needs: [gate, build-push]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: tencent-production
+    steps:
+      - name: Require SSH secrets
+        env:
+          HOST: ${{ secrets.TENCENT_SSH_HOST }}
+          USER: ${{ secrets.TENCENT_SSH_USER }}
+          KEY: ${{ secrets.TENCENT_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$HOST" || -z "$USER" || -z "$KEY" ]]; then
+            echo "::error::Missing TENCENT_SSH_HOST / TENCENT_SSH_USER / TENCENT_SSH_KEY."
+            exit 1
+          fi
+
+      - name: Configure SSH
+        env:
+          HOST: ${{ secrets.TENCENT_SSH_HOST }}
+          USER: ${{ secrets.TENCENT_SSH_USER }}
+          KEY: ${{ secrets.TENCENT_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.TENCENT_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          echo "$KEY" > ~/.ssh/tencent_deploy_key
+          chmod 600 ~/.ssh/tencent_deploy_key
+          if [[ -n "$KNOWN_HOSTS" ]]; then
+            echo "$KNOWN_HOSTS" >> ~/.ssh/known_hosts
+          else
+            ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          fi
+          cat > ~/.ssh/config <<EOF
+          Host tencent-deploy
+            HostName $HOST
+            User $USER
+            IdentityFile ~/.ssh/tencent_deploy_key
+            StrictHostKeyChecking yes
+            BatchMode yes
+          EOF
+          chmod 600 ~/.ssh/config
+
+      - name: Pull images + compose up
+        run: |
+          set -euo pipefail
+          ssh tencent-deploy "cd /opt/ai-novel && docker compose pull && docker compose up -d --remove-orphans"
+
+      - name: Local health check (no domain dependency)
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 12); do
+            code_api=$(ssh tencent-deploy "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/health" || echo 000)
+            code_ready=$(ssh tencent-deploy "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/health/ready" || echo 000)
+            code_web=$(ssh tencent-deploy "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/" || echo 000)
+            echo "attempt $i: health=$code_api ready=$code_ready web=$code_web"
+            if [[ "$code_api" == "200" && "$code_ready" == "200" && "$code_web" == "200" ]]; then
+              echo "OK: all three endpoints 200 via 127.0.0.1:8080"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::Health check failed after 12 attempts."
+          ssh tencent-deploy "cd /opt/ai-novel && docker compose ps && docker compose logs --tail 50 api" || true
+          exit 1

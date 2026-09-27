@@ -20,7 +20,7 @@ RUN pnpm install --frozen-lockfile
 
 FROM deps AS build
 WORKDIR /app
-ENV AI_NOVEL_DATABASE_MODE=postgresql
+ENV AI_NOVEL_DATABASE_MODE=sqlite
 COPY shared/package.json shared/tsconfig.json ./shared/
 COPY shared/*.ts ./shared/
 COPY shared/types ./shared/types
@@ -40,7 +40,7 @@ COPY shared/package.json ./shared/package.json
 COPY server/prisma.config.ts ./server/prisma.config.ts
 COPY server/src/config/database.ts ./server/src/config/database.ts
 COPY server/src/prisma ./server/src/prisma
-ENV AI_NOVEL_DATABASE_MODE=postgresql
+ENV AI_NOVEL_DATABASE_MODE=sqlite
 RUN pnpm install --frozen-lockfile \
     && pnpm --filter @ai-novel/server prisma:generate
 
@@ -55,10 +55,10 @@ COPY --from=build --chown=node:node /app/pnpm-workspace.yaml ./pnpm-workspace.ya
 COPY --from=prod-deps --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/server ./server
 COPY --from=build --chown=node:node /app/shared ./shared
-RUN mkdir -p /app/storage/generated-images /app/node_modules/.bin \
+RUN mkdir -p /app/storage/generated-images /app/node_modules/.bin /data \
     && printf '%s\n' '#!/bin/sh' 'exec node /app/server/node_modules/prisma/build/index.js --config /app/server/prisma.config.ts "$@"' > /app/node_modules/.bin/prisma \
     && chmod +x /app/node_modules/.bin/prisma \
-    && chown -R node:node /app/storage /app/node_modules/.bin/prisma
+    && chown -R node:node /app/storage /app/node_modules/.bin/prisma /data
 USER node
 EXPOSE 3000
 CMD ["node", "./server/dist/app.js"]
