@@ -24,6 +24,8 @@ COPY shared/*.ts ./shared/
 COPY shared/types ./shared/types
 COPY shared/utils ./shared/utils
 COPY client/package.json client/tsconfig.json client/vite.config.ts client/tailwind.config.ts client/postcss.config.js client/components.json client/index.html ./client/
+# vite.config.ts resolveDesktopAppVersion() 读 ../desktop/package.json 取产品版本
+COPY desktop/package.json ./desktop/package.json
 COPY client/public ./client/public
 COPY client/src ./client/src
 RUN pnpm --filter @ai-novel/shared build \
