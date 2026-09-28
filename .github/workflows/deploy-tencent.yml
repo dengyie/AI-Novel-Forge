@@ -150,7 +150,7 @@ jobs:
     name: Deploy to tencent-vps
     needs: [gate, build-push]
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     environment: tencent-production
     steps:
       - name: Require SSH secrets
@@ -158,11 +158,17 @@ jobs:
           HOST: ${{ secrets.TENCENT_SSH_HOST }}
           USER: ${{ secrets.TENCENT_SSH_USER }}
           KEY: ${{ secrets.TENCENT_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.TENCENT_SSH_KNOWN_HOSTS }}
         run: |
           set -euo pipefail
           if [[ -z "$HOST" || -z "$USER" || -z "$KEY" ]]; then
             echo "::error::Missing TENCENT_SSH_HOST / TENCENT_SSH_USER / TENCENT_SSH_KEY."
             exit 1
+          fi
+          # KNOWN_HOSTS 是生产指纹的权威来源；没有它就现场 keyscan 属于 TOFU 行为
+          # （无法抵御主机替换），必须告警而非静默接受。
+          if [[ -z "$KNOWN_HOSTS" ]]; then
+            echo "::warning::TENCENT_SSH_KNOWN_HOSTS not set; falling back to live ssh-keyscan (TOFU). Populate the secret for production-grade host verification."
           fi
 
       - name: Configure SSH
@@ -191,15 +197,28 @@ jobs:
           EOF
           chmod 600 ~/.ssh/config
 
-      - name: Pull images + compose up
+      - name: Pin deploy image tag to committed sha
+        env:
+          DEPLOY_SHA: ${{ needs.gate.outputs.sha }}
+          SHORT_SHA: ${{ needs.gate.outputs.short_sha }}
         run: |
           set -euo pipefail
-          ssh tencent-deploy "cd /opt/ai-novel && docker compose pull && docker compose up -d --remove-orphans"
+          # 显式 pin：避免「机上 compose 拉到的 latest」与本 pipeline 刚推送的镜像不一致
+          # （并发覆盖、回放旧 run、latest 被他处改写等）。机上 .env 用 IMAGE_TAG=short_sha
+          # 引用 ghcr 的 sha12 标签；compose.yml 通过 ${API_IMAGE_TAG}/${WEB_IMAGE_TAG} 消费。
+          # 若 .env 未配置该变量，机上将回落到 :latest（向后兼容旧部署目录）。
+          ssh tencent-deploy "cd /opt/ai-novel && ./pin-image-tag.sh '${SHORT_SHA}' '${DEPLOY_SHA}' 2>&1 || { echo '::error::pin-image-tag.sh failed on host'; exit 1; }"
+
+      - name: Pull images + compose up (pinned sha)
+        run: |
+          set -euo pipefail
+          ssh tencent-deploy "cd /opt/ai-novel && grep -E '^(API_IMAGE_TAG|WEB_IMAGE_TAG)=' .env || true && docker compose pull && docker compose up -d --remove-orphans"
 
       - name: Local health check (no domain dependency)
         run: |
           set -euo pipefail
-          for i in $(seq 1 12); do
+          # 窗口需 ≥ api start_period(120s) + 首次 SQLite 自迁移时间；实测单次冷启动可达数分钟。
+          for i in $(seq 1 45); do
             code_api=$(ssh tencent-deploy "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/health" || echo 000)
             code_ready=$(ssh tencent-deploy "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/health/ready" || echo 000)
             code_web=$(ssh tencent-deploy "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/" || echo 000)
@@ -210,6 +229,7 @@ jobs:
             fi
             sleep 10
           done
-          echo "::error::Health check failed after 12 attempts."
-          ssh tencent-deploy "cd /opt/ai-novel && docker compose ps && docker compose logs --tail 50 api" || true
+          echo "::error::Health check failed after 45 attempts. Attempting rollback to previous image tag."
+          ssh tencent-deploy "cd /opt/ai-novel && ./rollback-image-tag.sh 2>&1 && docker compose up -d --remove-orphans" || echo "::warning::Rollback step failed; manual intervention required."
+          ssh tencent-deploy "cd /opt/ai-novel && docker compose ps && docker compose logs --tail 80 api" || true
           exit 1

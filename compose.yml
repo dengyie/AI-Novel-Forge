@@ -2,10 +2,12 @@
 # 部署目录约定：/opt/ai-novel/（本文件 + .env + data/）
 # 公网入口只走 Cloudflare Tunnel → web:8080；两个容器都不对宿主以外暴露端口。
 # 镜像由 GitHub Actions 构建推送 ghcr.io/dengyie/*，机上只 pull，不 build。
+# 镜像 tag 由 CI 写入 .env（API_IMAGE_TAG/WEB_IMAGE_TAG = 本次 commit 的 sha12）；
+# 未配置时回落 :latest（向后兼容旧部署目录）。
 
 services:
   api:
-    image: ghcr.io/dengyie/ai-novel-api:latest
+    image: ghcr.io/dengyie/ai-novel-api:${API_IMAGE_TAG:-latest}
     container_name: ai-novel-api
     restart: unless-stopped
     env_file: .env
@@ -23,7 +25,7 @@ services:
       start_period: 120s
 
   web:
-    image: ghcr.io/dengyie/ai-novel-web:latest
+    image: ghcr.io/dengyie/ai-novel-web:${WEB_IMAGE_TAG:-latest}
     container_name: ai-novel-web
     restart: unless-stopped
     depends_on:
