@@ -58,15 +58,28 @@ export function resolveDataRoot(): string {
     : resolveServerRoot();
 }
 
+/**
+ * Web 运行模式下若显式配置 AI_NOVEL_APP_DATA_DIR（如容器挂载 /data），
+ * logs 与 generated-images 一并落到该根下，保证容器重建后数据不丢；
+ * 未配置时保持旧行为（workspace/.logs、serverRoot/storage）。
+ */
 export function resolveLogsRoot(): string {
-  return resolveAppRuntimeMode() === "desktop"
-    ? path.join(resolveAppDataRoot(), "logs")
+  if (resolveAppRuntimeMode() === "desktop") {
+    return path.join(resolveAppDataRoot(), "logs");
+  }
+  const configuredDir = resolveConfiguredAppDataDir();
+  return configuredDir
+    ? path.join(configuredDir, "logs")
     : path.join(resolveWorkspaceRoot(), ".logs");
 }
 
 export function resolveGeneratedImagesRoot(): string {
-  return resolveAppRuntimeMode() === "desktop"
-    ? path.join(resolveAppDataRoot(), "storage", "generated-images")
+  if (resolveAppRuntimeMode() === "desktop") {
+    return path.join(resolveAppDataRoot(), "storage", "generated-images");
+  }
+  const configuredDir = resolveConfiguredAppDataDir();
+  return configuredDir
+    ? path.join(configuredDir, "storage", "generated-images")
     : path.join(resolveServerRoot(), "storage", "generated-images");
 }
 

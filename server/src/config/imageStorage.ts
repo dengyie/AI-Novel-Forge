@@ -20,7 +20,6 @@ function isEnabled(rawValue: string | undefined, defaultValue: boolean): boolean
 
 export const imageStorageConfig = {
   driver: normalizeImageStorageDriver(process.env.IMAGE_STORAGE_DRIVER),
-  localRoot: process.env.IMAGE_STORAGE_ROOT?.trim() || "storage/generated-images",
   s3Endpoint: process.env.IMAGE_STORAGE_S3_ENDPOINT?.trim() || process.env.MINIO_ENDPOINT?.trim() || "",
   s3Region: process.env.IMAGE_STORAGE_S3_REGION?.trim() || process.env.MINIO_REGION?.trim() || "us-east-1",
   s3Bucket: process.env.IMAGE_STORAGE_S3_BUCKET?.trim() || process.env.MINIO_BUCKET?.trim() || "",
