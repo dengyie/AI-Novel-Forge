@@ -150,6 +150,9 @@ function startWorkspaceManagedServer(port: number): ManagedDesktopProcess {
         else child.kill();
       },
       forceKill: () => { child.kill("SIGKILL"); },
+    }).catch((error) => {
+      stopping = null;
+      throw error;
     }),
   };
 }
@@ -198,6 +201,9 @@ function startPackagedManagedServer(port: number): ManagedDesktopProcess {
       events: child, hasExited: () => hasExited,
       terminate: () => { child.postMessage({ type: "ai-novel:shutdown" }); },
       forceKill: () => { if (child.pid != null) process.kill(child.pid, "SIGKILL"); },
+    }).catch((error) => {
+      stopping = null;
+      throw error;
     }),
   };
 }

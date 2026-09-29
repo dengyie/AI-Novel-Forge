@@ -24,3 +24,8 @@ Server build 与交付/续生成/M4B/桌面生命周期初次组合 38/38 通过
 原 health 函数在 20ms deadline 下，100ms 后仍 pending；原 before-quit callback 的 preventDefault=false/stopped=false，确认 Electron 可先退出。移除两份重复 readiness 循环与旧进程停止包装，收敛到 runtime/serverLifecycle。增加仅父 IPC 的 desktop shutdown 入口，避免 Windows 强制终止跳过 workers 收口。
 
 Server 与 desktop build 通过；desktop 生命周期 6/6（含真实 HTTP 与子进程），父 IPC 3/3 通过。未运行 GUI、真实 Windows utilityProcess 或打包；不触及生产数据库。
+
+
+## 交叉复核：关闭失败重试
+
+实际 workspace 和 packaged handle 的两项测试均复现第二次 stop 重放首次 rejection。最小修复在失败时清除 stopping；并发调用继续复用当前尝试，成功后保持幂等。desktop build 与两个生命周期测试文件 8/8 通过。未扩展其他范围。

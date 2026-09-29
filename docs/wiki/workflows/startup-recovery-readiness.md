@@ -65,3 +65,5 @@ Electron before-quit 不等待 Promise。宿主必须 preventDefault、复用同
 Windows 的终止信号不能替代 Node 优雅关闭。宿主通过私有父子 IPC 发送 ai-novel:shutdown；server 仅在 desktop runtime 接受 process.parentPort（utility process）或已连接 Node IPC 的父消息，并进入与 SIGTERM 相同的 shutdown。此入口不暴露 HTTP 路由。宿主等待真实 exit，25 秒后只强制终止自己拥有的服务进程，额外 5 秒仍未退出则报告关闭失败。killed 仅表示信号已发送，不能当作 exit。
 
 验证边界：Node 测试覆盖真实挂起 HTTP、实际子进程 IPC 退出、重复 quit、停止失败和强制终止；Electron/Windows 打包运行与 UI 验收仍需要发行前验证。
+
+停止 handle 只复用进行中或成功的 Promise；失败后必须清除缓存，使下一次退出真正重发关闭请求。仅 quit gate 重置状态不够，底层 handle 若永久缓存 rejection 会让界面的重试永远失败。回归必须经过 workspace/packaged 的实际 handle，而非只测试 quit gate。
