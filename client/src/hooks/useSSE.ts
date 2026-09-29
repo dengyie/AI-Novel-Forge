@@ -37,7 +37,7 @@ export function useSSE(options?: UseSSEOptions) {
   }, []);
 
   const handleFrame = useCallback(
-    (frame: SSEFrame) => {
+    async (frame: SSEFrame) => {
       if (frame.type === "ping") {
         return;
       }
@@ -56,7 +56,7 @@ export function useSSE(options?: UseSSEOptions) {
       if (frame.type === "done") {
         setIsStreaming(false);
         setIsDone(true);
-        void options?.onDone?.(frame.fullContent);
+        await options?.onDone?.(frame.fullContent);
         return;
       }
 
@@ -109,14 +109,16 @@ export function useSSE(options?: UseSSEOptions) {
 
       const controller = new AbortController();
       controllerRef.current = controller;
-      let watchdogTimedOut = false;
+      const ownsRequest = () => controllerRef.current === controller && !controller.signal.aborted;
+      let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+      let terminalReceived = false;
       let watchdogTimer: ReturnType<typeof setTimeout> | null = null;
       const armWatchdog = () => {
         if (watchdogTimer) {
           clearTimeout(watchdogTimer);
         }
         watchdogTimer = setTimeout(() => {
-          watchdogTimedOut = true;
+          if (!ownsRequest()) return;
           setError("生成响应超时（连接静默中断），请重试。");
           setIsStreaming(false);
           controller.abort();
@@ -124,6 +126,7 @@ export function useSSE(options?: UseSSEOptions) {
       };
 
       try {
+        armWatchdog();
         const response = await fetch(url.startsWith("http") ? url : `${API_BASE_URL}${url}`, {
           method: "POST",
           headers: {
@@ -134,19 +137,24 @@ export function useSSE(options?: UseSSEOptions) {
           signal: controller.signal,
         });
 
+        if (!ownsRequest()) {
+          await response.body?.cancel();
+          return;
+        }
         if (!response.ok || !response.body) {
           throw new Error(`请求失败，状态码 ${response.status}`);
         }
 
-        const reader = response.body.getReader();
+        reader = response.body.getReader();
         const decoder = new TextDecoder("utf-8");
         let buffer = "";
         armWatchdog();
 
-        while (true) {
+        while (ownsRequest() && !terminalReceived) {
           const { value, done } = await reader.read();
+          if (!ownsRequest()) return;
           if (done) {
-            break;
+            throw new Error("生成连接提前结束，结果尚未确认，请重试。");
           }
           // 收到任意字节（含 ping 帧）都算活跃，重置看门狗
           armWatchdog();
@@ -167,15 +175,16 @@ export function useSSE(options?: UseSSEOptions) {
               continue;
             }
             const frame = JSON.parse(rawData) as SSEFrame;
-            handleFrame(frame);
+            if (!ownsRequest()) return;
+            terminalReceived = frame.type === "done" || frame.type === "error";
+            if (terminalReceived && watchdogTimer) clearTimeout(watchdogTimer);
+            await handleFrame(frame);
+            if (terminalReceived) break;
           }
         }
       } catch (streamError) {
-        if ((streamError as Error).name !== "AbortError") {
+        if (ownsRequest()) {
           setError(streamError instanceof Error ? streamError.message : "流式请求失败。");
-          setIsStreaming(false);
-        } else if (watchdogTimedOut) {
-          // 看门狗已置过错误态，这里只需确保 streaming 标志落下
           setIsStreaming(false);
         }
       } finally {
@@ -183,7 +192,16 @@ export function useSSE(options?: UseSSEOptions) {
           clearTimeout(watchdogTimer);
           watchdogTimer = null;
         }
-        controllerRef.current = null;
+        // Only this request may clear its cancellation handle; older work can finish late.
+        if (controllerRef.current === controller) {
+          controllerRef.current = null;
+          setIsStreaming(false);
+        }
+        controller.abort();
+        if (reader) {
+          try { await reader.cancel(); } catch { /* Transport already aborted/closed. */ }
+          reader.releaseLock();
+        }
       }
     },
     [abort, handleFrame, options?.headers],

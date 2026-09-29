@@ -86,3 +86,16 @@ test("an actionable projection supplies the query target before task detail is l
   assert.equal(result.requestedTaskId, "task-projected");
   assert.equal(result.visibleTask, null);
 });
+
+test('newer active polling replaces stale requested detail for the same task', () => {
+  const requestedTask = {...buildTask('same'), updatedAt:'2026-09-30T01:00:00Z', progress:0.1, checkpointType:'chapter_generation'};
+  const activeTask = {...buildTask('same','waiting_approval'), updatedAt:'2026-09-30T01:01:00Z', progress:0.8, checkpointType:'replan_required'};
+  const result = resolveCanonicalDirectorTask({directorTaskId:'same', requestedTask, activeTask, projection:null});
+  assert.equal(result.visibleTask.status,'waiting_approval');assert.equal(result.visibleTask.progress,0.8);assert.equal(result.visibleTask.checkpointType,'replan_required');
+});
+
+test('older active poll cannot override a newer explicitly refreshed detail', () => {
+  const requestedTask = {...buildTask('same','waiting_approval'), updatedAt:'2026-09-30T01:01:00Z'};
+  const activeTask = {...buildTask('same'), updatedAt:'2026-09-30T01:00:00Z'};
+  assert.equal(resolveCanonicalDirectorTask({directorTaskId:'same', requestedTask, activeTask, projection:null}).visibleTask.status,'waiting_approval');
+});

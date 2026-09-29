@@ -15,6 +15,8 @@ Wiki 不记录单次提交改了什么，也不替代 release notes。它只记�
 
 ### Architecture
 
+- [前端请求所有权与任务快照](./architecture/frontend-request-ownership.md)
+
 - [模块边界与文档治理](./architecture/module-boundaries.md)
 - [章节身份与规划边界](./architecture/chapter-identity-and-planning-boundary.md)
 - [章节运行时边界](./architecture/chapter-runtime-boundaries.md)

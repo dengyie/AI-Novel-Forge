@@ -100,6 +100,10 @@ export function useNovelDirectorTaskController(
     queryFn: () => getTaskDetail("novel_workflow", requestedDirectorTaskId),
     enabled: Boolean(requestedDirectorTaskId),
     retry: false,
+    refetchInterval: (query) => {
+      const status = query.state.data?.data?.status;
+      return status === "queued" || status === "running" || status === "waiting_approval" ? 4000 : false;
+    },
   });
   const requestedDirectorTask = requestedDirectorTaskQuery.data?.data ?? null;
   const canonicalDirectorTask = useMemo(

@@ -30,7 +30,12 @@ export function resolveCanonicalDirectorTask(
     ? input.requestedTask
     : null;
   const matchingActiveTask = activeTask?.id === requestedTaskId ? activeTask : null;
-  const sourceTask = matchingRequestedTask ?? matchingActiveTask;
+  // Both endpoints describe the same task. Choose by server revision time, not
+  // endpoint priority, otherwise a one-time detail fetch masks later active polls.
+  const sourceTask = matchingRequestedTask && matchingActiveTask
+    && Date.parse(matchingActiveTask.updatedAt) > Date.parse(matchingRequestedTask.updatedAt)
+    ? matchingActiveTask
+    : matchingRequestedTask ?? matchingActiveTask;
 
   if (!pinnedTaskId && sourceTask?.status === "cancelled") {
     return { requestedTaskId: "", visibleTask: null };
