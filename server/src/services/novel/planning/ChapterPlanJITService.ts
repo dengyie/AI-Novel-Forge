@@ -1,3 +1,4 @@
+import { fingerprintPlanningFacts, readPlanningFactFingerprint, type ChapterPlanFactRefresh } from "./ChapterPlanFactRefresh";
 import { parseChapterScenePlan } from "@ai-novel/shared/types/chapterLengthControl";
 import type { ChapterTaskSheetQualityMode } from "@ai-novel/shared/types/chapterTaskSheetQuality";
 import { prisma } from "../../../db/prisma";
@@ -16,14 +17,13 @@ import { novelFactService } from "../fact/NovelFactService";
  * - 只在 autopilot 流水线路径调用（manual 单章模式继续用 ChapterExecutionContractService）。
  */
 
-const JIT_MIN_FACTS_FOR_REFRESH = 3;
-
 export interface ChapterPlanJITDeps {
   ensureChapterExecutionContract: (
     novelId: string,
     chapterId: string,
     options: {
       guidance?: string;
+      factRefresh?: ChapterPlanFactRefresh;
       entrypoint?: string;
       chapterTaskSheetQualityMode?: ChapterTaskSheetQualityMode;
     },
@@ -31,6 +31,7 @@ export interface ChapterPlanJITDeps {
 }
 
 export class ChapterPlanJITService {
+  private static readonly inFlight = new Map<string, Promise<void>>();
   constructor(private readonly deps: ChapterPlanJITDeps) {}
 
   /**
@@ -40,6 +41,17 @@ export class ChapterPlanJITService {
    * 仅在 advanceMode === "full_book_autopilot" 时调用。
    */
   async ensureExecutionReady(novelId: string, chapterId: string): Promise<void> {
+    const key = JSON.stringify([novelId, chapterId]);
+    const existing = ChapterPlanJITService.inFlight.get(key);
+    if (existing) return existing;
+    const run = this.refreshExecutionContract(novelId, chapterId).finally(() => {
+      if (ChapterPlanJITService.inFlight.get(key) === run) ChapterPlanJITService.inFlight.delete(key);
+    });
+    ChapterPlanJITService.inFlight.set(key, run);
+    return run;
+  }
+
+  private async refreshExecutionContract(novelId: string, chapterId: string): Promise<void> {
     const chapter = await prisma.chapter.findFirst({
       where: { id: chapterId, novelId },
       select: {
@@ -51,6 +63,7 @@ export class ChapterPlanJITService {
         mustAvoid: true,
         conflictLevel: true,
         revealLevel: true,
+        riskFlags: true,
       },
     });
     if (!chapter) {
@@ -70,26 +83,12 @@ export class ChapterPlanJITService {
       beforeChapterOrder: chapter.order,
     });
 
-    if (hasCompleteTaskSheet && facts.length < JIT_MIN_FACTS_FOR_REFRESH) {
-      // task sheet 已存在，且前文事实不足（旧小说 / 首章），跳过
-      return;
-    }
-
-    if (hasCompleteTaskSheet && facts.length >= JIT_MIN_FACTS_FOR_REFRESH) {
-      // task sheet 已存在但前文有足够事实 —— 重新生成以纳入实际进度
-      const factGuidance = buildFactLedgerGuidance(facts);
-      await this.deps.ensureChapterExecutionContract(novelId, chapterId, {
-        guidance: factGuidance,
-        entrypoint: "jit_planner",
-        chapterTaskSheetQualityMode: "full_book_autopilot",
-      });
-      return;
-    }
-
-    // task sheet 缺失 —— 生成（含 factLedger 上下文）
-    const factGuidance = facts.length > 0 ? buildFactLedgerGuidance(facts) : undefined;
+    // Existing plans without any fact history need no refresh. Once facts have been
+    // consumed, removing facts is also a changed input and must invalidate reuse.
+    if (hasCompleteTaskSheet && facts.length === 0 && !readPlanningFactFingerprint(chapter.riskFlags)) return;
     await this.deps.ensureChapterExecutionContract(novelId, chapterId, {
-      guidance: factGuidance,
+      guidance: facts.length > 0 ? buildFactLedgerGuidance(facts) : undefined,
+      factRefresh: { fingerprint: fingerprintPlanningFacts(facts) },
       entrypoint: "jit_planner",
       chapterTaskSheetQualityMode: "full_book_autopilot",
     });

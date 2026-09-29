@@ -119,3 +119,16 @@ PR-B 目标：从写章路径彻底移除 timeline 干预，写章上下文不�
 | `chapterRuntimePipeline.ts` | 移除 `finalizeChapterTimeline?` 接口定义及两处调用点，移除 `shouldFinalizeDegradedForDeferredQualityDebt` 函数 |
 
 > `ChapterTimelineFinalizationService` 本身及 `StoryTimelineEvent` 表保留，前端时间轴展示功能不受影响。
+
+
+## JIT 执行合同刷新契约
+
+JIT 的“确保合同存在”和“根据新的前文事实刷新合同”是不同调用语义。`ChapterPlanJITService` 传 `factRefresh.fingerprint`；`ChapterExecutionContractService` 只有在已消费相同事实且合同字段完整时才能复用。不能仅因任务单不为空就吞掉新的事实指导。
+
+指纹由事实的章节序号、类别、文本构造，排序、去重后哈希；它只识别输入是否相同，不参与故事决策。文本内容的增删改都使指纹变化，一条新事实也需要评估，不能要求凑满三条才刷新。空账本且从未做过事实刷新时保留既有合同；已消费事实后来被删除则刷新一次，再复用空集合指纹。
+
+成功生成后，任务单、场景卡与 `Chapter.riskFlags.jitPlanning.factFingerprint` 在同一事务写入。该子对象是规划缓存来源元数据，不是章节质量债，读取方不得据此阻塞章节。写入合并当前 metadata，保留其他 riskFlags 子对象。失败不登记已消费指纹；因此下一次可以真实重试，服务重启后也能识别已成功的刷新。
+
+同进程同章的预取和正式组装共享在途 Promise，并在成功/失败后释放。数据库持久化还须先认领读取时的 `updatedAt + contentRevision` 快照；生成期间正文或规划被修改时，不得把旧 AI 结果覆盖到新状态。新鲜读取后的下一次调用重新判断刷新。
+
+章节执行字段的卷文档映射由 `volume/application/VolumeChapterProjectionService` 承担；`NovelVolumeService` 保持对外门面，合同生成服务拥有刷新和提交决策，避免把卷版本管理、章节投影和 AI 刷新合并为一个大类。

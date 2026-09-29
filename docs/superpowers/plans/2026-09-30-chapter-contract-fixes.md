@@ -17,7 +17,9 @@
 - [x] Run tests and server typecheck; document contract, update release notes and commit.
 
 ## Task 2: JIT refresh
-- [ ] Add JIT-to-contract regression: complete contract plus changed facts must generate; identical facts must reuse; concurrent prefetch must join.
-- [ ] Run the baseline to prove failure.
-- [ ] Pass an explicit `factRefresh` fingerprint; bypass reuse only when identity changed. Persist identity in existing chapter metadata atomically with contract; verify input freshness before persistence.
-- [ ] Run targeted tests and server typecheck; document refresh ownership, update release notes and commit.
+- [x] Add JIT-to-contract regression: complete contract plus changed facts must generate; identical facts must reuse; concurrent prefetch must join.
+- [x] Run the baseline to prove failure.
+- [x] Pass an explicit `factRefresh` fingerprint; bypass reuse only when identity changed. Persist identity in existing chapter metadata atomically with contract; verify input freshness before persistence.
+- [x] Run targeted tests and server typecheck; document refresh ownership, update release notes and commit.
+
+Verification: server build passed; direct artifact/CRUD/pipeline ownership suite 54/54, real SQLite race 2/2, JIT/contract/shape/boundary 31/31, volume integration 20/20. UI unchanged.

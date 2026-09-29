@@ -1,3 +1,4 @@
+import { readPlanningFactFingerprint, recordPlanningFactFingerprint, type ChapterPlanFactRefresh } from "../planning/ChapterPlanFactRefresh";
 import type { Prisma } from "@prisma/client";
 import { parseChapterScenePlan, serializeChapterScenePlan } from "@ai-novel/shared/types/chapterLengthControl";
 import {
@@ -37,11 +38,12 @@ export interface ChapterExecutionContractServiceDeps {
   emitVolumeUpdated: (novelId: string, reason: "chapter_execution_contract_refined") => void;
 }
 
-type EnsureChapterExecutionContractOptions = Pick<
+export type EnsureChapterExecutionContractOptions = Pick<
   VolumeGenerateOptions,
   "provider" | "model" | "temperature" | "guidance" | "chapterTaskSheetQualityMode" | "entrypoint" | "taskId" | "signal"
 > & {
   taskStyleProfileId?: string;
+  factRefresh?: ChapterPlanFactRefresh;
 };
 
 export class ChapterExecutionContractService {
@@ -66,6 +68,7 @@ export class ChapterExecutionContractService {
         taskSheet: true,
         sceneCards: true,
         content: true,
+        contentRevision: true,
         expectation: true,
         chapterStatus: true,
         generationState: true,
@@ -87,8 +90,11 @@ export class ChapterExecutionContractService {
     const existingScenePlan = parseChapterScenePlan(chapter.sceneCards, {
       targetWordCount: chapter.targetWordCount ?? undefined,
     });
+    const needsFactRefresh = options.factRefresh !== undefined
+      && readPlanningFactFingerprint(chapter.riskFlags) !== options.factRefresh.fingerprint;
     if (
-      typeof chapter.conflictLevel === "number"
+      !needsFactRefresh
+      && typeof chapter.conflictLevel === "number"
       && typeof chapter.revealLevel === "number"
       && typeof chapter.targetWordCount === "number"
       && chapter.mustAvoid?.trim()
@@ -206,6 +212,13 @@ export class ChapterExecutionContractService {
     targetChapter.styleContract = styleContract;
 
     const persistedChapter = await runVolumeWorkspaceTransaction(async (tx) => {
+      // Claim the exact planning snapshot before any workspace/version mutation.
+      const claim = await tx.chapter.updateMany({
+        where: { id: chapterId, novelId, updatedAt: chapter.updatedAt, contentRevision: chapter.contentRevision },
+        data: { updatedAt: new Date() },
+      });
+      if (claim.count !== 1) throw new Error("章节规划在生成期间发生变化，请重新读取后刷新执行合同。");
+      const current = await tx.chapter.findUnique({ where: { id: chapterId }, select: { riskFlags: true } });
       const { versionId } = await this.deps.ensureActiveVersionRecord(
         tx,
         novelId,
@@ -232,6 +245,7 @@ export class ChapterExecutionContractService {
           revealLevel: targetChapter.revealLevel ?? chapter.revealLevel ?? null,
           mustAvoid: targetChapter.mustAvoid ?? chapter.mustAvoid ?? null,
           taskSheet,
+          ...(options.factRefresh ? { riskFlags: recordPlanningFactFingerprint(current?.riskFlags, options.factRefresh.fingerprint) } : {}),
           sceneCards: serializeChapterScenePlan(scenePlan),
         },
       });
