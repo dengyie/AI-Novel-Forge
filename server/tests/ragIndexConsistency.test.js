@@ -118,6 +118,7 @@ test('old version success cannot project new document as succeeded and queues ca
   patch(t,prisma.ragIndexJob,'findUnique',async()=>({id:'old',tenantId:'default',payloadJson:JSON.stringify({indexedSourceVersionId:'v1'})}));
   patch(t,prisma.knowledgeDocument,'findUnique',async()=>({activeVersionId:'v2',status:'active'}));
   patch(t,prisma.ragIndexJob,'findFirst',async()=>null);
+  patch(t,prisma.ragIndexJob,'findMany',async()=>[]);
   patch(t,prisma.ragIndexJob,'create',async({data})=>{created=data;return{id:'catch-up',...data};});
   patch(t,prisma.knowledgeDocument,'updateMany',async()=>{updates++;return{count:1};});
   await syncDocumentIndexStatus('knowledge_document','doc','succeeded','rebuild','old');
@@ -203,6 +204,7 @@ test('a succeeded label without published current-version chunks is not proof of
   patch(t,prisma.knowledgeDocument,'findUnique',async()=>({activeVersionId:'v2',status:'enabled',latestIndexStatus:'succeeded'}));
   patch(t,prisma.knowledgeChunk,'findFirst',async()=>({metadataJson:JSON.stringify({activeVersionId:'v1'})}));
   patch(t,prisma.ragIndexJob,'findFirst',async()=>null);
+  patch(t,prisma.ragIndexJob,'findMany',async()=>[]);
   let created;
   patch(t,prisma.ragIndexJob,'create',async({data})=>{created=data;return{id:'catch-up',...data};});
   await syncDocumentIndexStatus('knowledge_document','doc','succeeded','rebuild','v1-retry');
@@ -233,7 +235,8 @@ test('v1 queued backoff does not regress v2 completion and its retry preserves v
   patch(t,prisma.knowledgeChunk,'findFirst',async({where})=>{
     assert.deepEqual(where.indexedAt,{not:null}); return rows.find(row=>row.indexedAt!==null);
   });
-  patch(t,prisma.ragIndexJob,'findFirst',async()=>null); // v2 is succeeded, no queued job exists
+  patch(t,prisma.ragIndexJob,'findFirst',async()=>null);
+  patch(t,prisma.ragIndexJob,'findMany',async()=>[]); // v2 is succeeded, no queued job exists
   patch(t,prisma.ragIndexJob,'create',async({data})=>{queued++;return{id:'bad-default-rebuild',...data};});
   const service=new RagIndexService({},{});
   service.assertJobNotCancelled=async()=>{};service.updateJobProgress=async()=>{};
@@ -245,3 +248,34 @@ test('v1 queued backoff does not regress v2 completion and its retry preserves v
   assert.equal(rows[0].chunkText,'custom v2');
   assert.equal(rows.length,1);
 });
+
+for (const currentStatus of ['running', 'succeeded']) {
+  test(`late v1 enqueue preserves v2 custom chunks when v2 is ${currentStatus}`, async t => {
+    const document = {activeVersionId:'v2', status:'enabled'};
+    const currentJob = {id:'current', status:currentStatus, payloadJson:JSON.stringify({sourceVersionId:'v2', preChunks:[{chunkText:'custom v2'}]})};
+    patch(t, prisma.knowledgeDocument, 'findUnique', async () => document);
+    patch(t, prisma.ragIndexJob, 'findFirst', async () => null);
+    let payload;
+    let creates = 0;
+    patch(t, prisma.ragIndexJob, 'create', async ({data}) => {
+      creates++; payload = JSON.parse(data.payloadJson); return {id:'late', ...data};
+    });
+    patch(t, ragWorkerManager, 'kickPoll', () => {});
+    await ragJobQueue.enqueueOwnerJob('rebuild', 'knowledge_document', 'doc', {payload:{sourceVersionId:'v1', preChunks:[{chunkText:'old v1'}]}});
+    assert.equal(payload.sourceVersionId, 'v1', 'enqueue must not relabel obsolete input as current');
+    patch(t, prisma.ragIndexJob, 'findUnique', async () => ({id:'late', tenantId:'default', payloadJson:JSON.stringify(payload)}));
+    patch(t, prisma.ragIndexJob, 'update', async ({data}) => {payload = JSON.parse(data.payloadJson); return {id:'late'};});
+    patch(t, settings, 'getRagEmbeddingSettings', async () => ({embeddingProvider:'openai', embeddingModel:'text-embedding-3-small'}));
+    const service = new RagIndexService({}, {});
+    service.assertJobNotCancelled = async () => {};
+    service.updateJobProgress = async () => {};
+    service.sourceAssembler.loadSourceDocuments = async () => [{metadata:{activeVersionId:'v2'}}];
+    service.sourceAssembler.buildChunkCandidates = () => {throw Error('obsolete request must not replace custom chunks');};
+    assert.deepEqual(await service.upsertOwnerChunks('knowledge_document', 'doc', 'default', 'late'), {chunks:0});
+    patch(t, prisma.knowledgeChunk, 'findFirst', async () => currentStatus === 'succeeded' ? {metadataJson:JSON.stringify({activeVersionId:'v2'})} : null);
+    patch(t, prisma.ragIndexJob, 'findMany', async () => currentStatus === 'running' ? [currentJob] : []);
+    await require('../dist/services/rag/indexing').syncDocumentIndexStatus('knowledge_document', 'doc', 'succeeded', 'rebuild', 'late');
+    assert.equal(creates, 1, 'newer work or publication must prevent a generic follow-up');
+    assert.deepEqual(JSON.parse(currentJob.payloadJson).preChunks, [{chunkText:'custom v2'}]);
+  });
+}

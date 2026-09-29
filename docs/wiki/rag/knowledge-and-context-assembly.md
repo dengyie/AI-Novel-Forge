@@ -72,7 +72,7 @@ RAG worker 在启动时读取一份运行时设置快照；设置页保存成功
 
 适用范围：知识资料版本变更、所有 owner 分块重建、向量/关键词召回、RAG 任务状态投影。
 
-同一 owner 的 running 任务持有执行输入；新请求必须持久化排队，不能通过返回 running ID 表示已接收。queued 只在同一资料版本下合并，并使用状态与 payload CAS 处理 worker 领取和多生产者竞态。不同版本保持独立；`sourceVersionId` 绑定自定义 `preChunks` 的来源，过期请求不能覆盖较新资料的预分块。worker 若发现请求版本已过期，应跳过写入，补排尚未完成的当前版本；当前版本已完成时不再重建覆盖其定制分块。完成依据必须是本地事务发布的分块版本，不能仅信任 `latestIndexStatus` 文本；新版本收口时只计算同版本待处理请求，较旧版本的退避重试不能把它投影回 queued。
+同一 owner 的 running 任务持有执行输入；新请求必须持久化排队，不能通过返回 running ID 表示已接收。queued 只在同一资料版本下合并，并使用状态与 payload CAS 处理 worker 领取和多生产者竞态。不同版本保持独立；`sourceVersionId` 绑定自定义 `preChunks` 的来源，过期请求不能覆盖较新资料的预分块。延迟请求入队时必须保留原始 `sourceVersionId`，禁止删除预分块后把旧请求改标为当前版本。worker 若发现请求版本已过期，应跳过写入；仅在当前版本既没有已发布分块、也没有 queued/running 请求时补排追赶，避免通用分块覆盖在途定制分块；当前版本已完成时不再重建覆盖其定制分块。完成依据必须是本地事务发布的分块版本，不能仅信任 `latestIndexStatus` 文本；新版本收口时只计算同版本待处理请求，较旧版本的退避重试不能把它投影回 queued。
 
 `indexedSourceVersionId` 记录本次实际索引版本。文档成功状态必须通过 `activeVersionId` 条件写入；有后续 queued/running 请求时保留待处理状态。归档文档不接受旧 rebuild 的成功投影。
 

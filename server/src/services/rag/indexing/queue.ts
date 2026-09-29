@@ -16,11 +16,13 @@ export async function enqueueIndexJob(jobType: RagJobType, ownerType: RagOwnerTy
   const progress = { stage: "queued", label: "等待执行", detail: "索引任务已进入队列。", percent: 0, updatedAt: now.toISOString() };
   let inputPayload = options?.payload ?? {};
   let staleRequest = false;
+  let currentVersion: string | null = null;
   if (ownerType === "knowledge_document") {
     const document = await prisma.knowledgeDocument.findUnique({ where: { id: ownerId }, select: { activeVersionId: true } });
-    const currentVersion = document?.activeVersionId ?? null;
+    currentVersion = document?.activeVersionId ?? null;
     staleRequest = Boolean(inputPayload.sourceVersionId && inputPayload.sourceVersionId !== currentVersion);
-    inputPayload = staleRequest ? { sourceVersionId: currentVersion } : { ...inputPayload, sourceVersionId: currentVersion };
+    // Keep obsolete input bound to its original version so execution can reject it.
+    inputPayload = { ...inputPayload, sourceVersionId: inputPayload.sourceVersionId ?? currentVersion };
   }
   let payloadJson = JSON.stringify({ ...inputPayload, progress });
   // CAS protects against both a concurrent producer and the worker claiming the row.
@@ -31,9 +33,9 @@ export async function enqueueIndexJob(jobType: RagJobType, ownerType: RagOwnerTy
   });
   if (existing?.status === "queued") {
     const previous = JSON.parse(existing.payloadJson ?? "{}") as Record<string, unknown>;
+    if (staleRequest && previous.sourceVersionId === currentVersion) return existing;
     // Different document versions remain distinct even if this producer read an older active version.
     if (previous.sourceVersionId === inputPayload.sourceVersionId) {
-      if (staleRequest) return existing;
       payloadJson = JSON.stringify({ ...previous, ...inputPayload, progress });
       const updated = await prisma.ragIndexJob.updateMany({
         where: { id: existing.id, status: "queued", payloadJson: existing.payloadJson },

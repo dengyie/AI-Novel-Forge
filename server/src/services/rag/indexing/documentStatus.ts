@@ -24,6 +24,13 @@ export async function syncDocumentIndexStatus(ownerType: RagOwnerType, ownerId: 
         publishedVersion = JSON.parse(published?.metadataJson ?? "{}").activeVersionId;
       } catch { /* Unverifiable publication must be rebuilt. */ }
       if (publishedVersion !== document.activeVersionId) {
+        const pending = await prisma.ragIndexJob.findMany({
+          where: { tenantId: job?.tenantId, ownerType, ownerId, id: { not: jobId }, status: { in: ["queued", "running"] } },
+          select: { payloadJson: true },
+        });
+        // Current-version work already owns its custom input and retry lifecycle.
+        // A generic catch-up would replace those chunks after that work succeeds.
+        if (pending.some(candidate => JSON.parse(candidate.payloadJson ?? "{}").sourceVersionId === document.activeVersionId)) return;
         await enqueueIndexJob("rebuild", ownerType, ownerId, { tenantId: job?.tenantId });
       }
     }
