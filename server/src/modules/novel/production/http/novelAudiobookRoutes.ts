@@ -1,3 +1,4 @@
+import { streamAudioFile, streamWavFile } from "./audiobook";
 import fs from "node:fs";
 import path from "node:path";
 import type { Router } from "express";
@@ -100,108 +101,6 @@ const characterVoicePreviewCandidateParamsSchema = z.object({
   charId: z.string().trim().min(1),
   candidateId: z.string().trim().min(1).max(32),
 });
-
-function parseRangeHeader(
-  rangeHeader: string | undefined,
-  size: number,
-): { start: number; end: number } | "invalid" | null {
-  if (!rangeHeader) {
-    return null;
-  }
-  const match = /^bytes=(\d*)-(\d*)$/i.exec(rangeHeader.trim());
-  if (!match) {
-    return "invalid";
-  }
-  const startRaw = match[1];
-  const endRaw = match[2];
-  let start = startRaw ? Number(startRaw) : NaN;
-  let end = endRaw ? Number(endRaw) : NaN;
-  if (!startRaw && !endRaw) {
-    return "invalid";
-  }
-  if (!startRaw) {
-    // suffix: bytes=-N
-    const suffix = Number(endRaw);
-    if (!Number.isFinite(suffix) || suffix <= 0) {
-      return "invalid";
-    }
-    start = Math.max(0, size - suffix);
-    end = size - 1;
-  } else {
-    if (!Number.isFinite(start) || start < 0) {
-      return "invalid";
-    }
-    end = Number.isFinite(end) ? end : size - 1;
-    if (end < start || start >= size) {
-      return "invalid";
-    }
-    end = Math.min(end, size - 1);
-  }
-  return { start, end };
-}
-
-function streamAudioFile(
-  req: import("express").Request,
-  res: import("express").Response,
-  filePath: string,
-  downloadName: string,
-  contentType: string,
-  disposition: "inline" | "attachment" = "inline",
-): void {
-  if (!fs.existsSync(filePath)) {
-    res.status(404).json({
-      success: false,
-      error: "音频文件不存在。",
-    } satisfies ApiResponse<null>);
-    return;
-  }
-  const stat = fs.statSync(filePath);
-  const size = stat.size;
-  const range = parseRangeHeader(req.headers.range, size);
-
-  res.setHeader("Content-Type", contentType);
-  res.setHeader("Accept-Ranges", "bytes");
-  res.setHeader("Cache-Control", "private, max-age=3600");
-  res.setHeader("Content-Disposition", `${disposition}; filename="${downloadName}"`);
-
-  if (range === "invalid") {
-    res.status(416);
-    res.setHeader("Content-Range", `bytes */${size}`);
-    res.end();
-    return;
-  }
-
-  if (range) {
-    const { start, end } = range;
-    const chunkSize = end - start + 1;
-    res.status(206);
-    res.setHeader("Content-Range", `bytes ${start}-${end}/${size}`);
-    res.setHeader("Content-Length", String(chunkSize));
-    fs.createReadStream(filePath, { start, end }).pipe(res);
-    return;
-  }
-
-  res.setHeader("Content-Length", String(size));
-  fs.createReadStream(filePath).pipe(res);
-}
-
-function wantsAttachmentDownload(req: import("express").Request): boolean {
-  const raw = req.query?.download;
-  if (Array.isArray(raw)) {
-    return raw.some((item) => item === "1" || item === "true");
-  }
-  return raw === "1" || raw === "true";
-}
-
-function streamWavFile(
-  req: import("express").Request,
-  res: import("express").Response,
-  filePath: string,
-  downloadName: string,
-): void {
-  const disposition = wantsAttachmentDownload(req) ? "attachment" : "inline";
-  streamAudioFile(req, res, filePath, downloadName, "audio/wav", disposition);
-}
 
 function resolvePlayableFullPath(taskDir: string, stored: string | null | undefined): string {
   const fallback = resolveFullBookAudioPath(taskDir);

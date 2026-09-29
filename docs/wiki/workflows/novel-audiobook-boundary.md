@@ -135,6 +135,14 @@ m4b 封装在任务主流水线完成后异步运行，可能跨越章节重做�
 
 取消优先于 failed/succeeded（CAS）。
 
+## 音频 HTTP 响应的资源所有权
+
+整书、章节、角色试听与音色库下载统一使用 `production/http/audiobook` 门面。该模块只负责文件响应与 Range 协议，不拥有生成任务或文件删除规则。
+
+HTTP 响应拥有读取源的生命周期：客户端切换进度、关闭页面或取消下载时，必须销毁源流并关闭文件描述符。使用 Node `pipeline` 连接源与响应，异步 open/read 错误在回调收口，不能依赖路由外层同步 `try/catch`。正常连接提前关闭无需升级为服务故障；真实读取失败记录错误代码并终止当前响应。
+
+禁止恢复为裸 `createReadStream().pipe(res)`。它不会在目标关闭时自动销毁源，长音频请求反复取消会积累暂停的文件流。回归测试必须使用真实 HTTP 断连，并验证源流 `closed` / `fd`，同时保留完整下载、Range 206 与 416 的协议覆盖。
+
 ## 关键代码
 
 - `shared/types/audiobook.ts` / `shared/types/novelCharacter.ts`
