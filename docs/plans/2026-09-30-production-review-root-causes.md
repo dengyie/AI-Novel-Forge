@@ -30,33 +30,46 @@
 
 文件归属：`server/src/services/audiobook/m4b/`、worker 入口、AudiobookPipelineService / AudiobookTaskService 的 M4B 边界、相关双引擎迁移与测试。
 
-- [ ] pending 队列下验证实际入口路径，入口不存在必须显式失败。
-- [ ] 假时钟验证健康推进超过 120 秒不误杀、停滞才取消，并验证 ffmpeg 进程组结束。
-- [ ] 暂停旧代编码，轮换代际再释放，旧产物不得发布、旧任务不得提交当前状态。
-- [ ] 实现持久代际/领取所有权、发布检查与取消收口，复用编码边界，去掉被替代的重复逻辑。
-- [ ] 新建 SQLite 应用增量迁移验证实际字段；补 Wiki / 发布说明，提交。
+- [x] pending 队列下验证实际入口路径，入口不存在必须显式失败。
+- [x] 假时钟验证健康推进超过 120 秒不误杀、停滞才取消，并验证 ffmpeg 进程组结束。
+- [x] 暂停旧代编码，轮换代际再释放，旧产物不得发布、旧任务不得提交当前状态。
+- [x] 实现持久代际/领取所有权、发布检查与取消收口，复用编码边界，去掉被替代的重复逻辑。
+- [x] 新建 SQLite 应用增量迁移验证实际字段；补 Wiki / 发布说明，提交。
 
 ## 阶段三：章节投影与 JIT（独立子计划）
 
 文件归属：`ChapterArtifactSyncService`、CRUD artifact 写入、pipeline adapter、`ChapterPlanJITService`、`ChapterExecutionContractService`。
 
-- [ ] R7 投影暂停 → R8 提交并投影 → R7 恢复；断言 R8 timeline / facts 保留。
-- [ ] 贯穿提交返回 revision，投影写事务使用已有 `ChapterProjectionRevisionGuard`。
-- [ ] 完整合同 + 新事实连接真实 JIT / Contract，断言生成被调用；同一事实版本复用。
-- [ ] 实现显式刷新合同与事实指纹，避免以 entrypoint 字符串分支替代语义。
-- [ ] 运行章节合同与投影专项回归，补 Wiki / 发布说明，提交。
+- [x] R7 投影暂停 → R8 提交并投影 → R7 恢复；断言 R8 timeline / facts 保留。
+- [x] 贯穿提交返回 revision，投影写事务使用已有 `ChapterProjectionRevisionGuard`。
+- [x] 完整合同 + 新事实连接真实 JIT / Contract，断言生成被调用；同一事实版本复用。
+- [x] 实现显式刷新合同与事实指纹，避免以 entrypoint 字符串分支替代语义。
+- [x] 运行章节合同与投影专项回归，补 Wiki / 发布说明，提交。
 
 ## 阶段四：RAG 版本追赶与清理（独立子计划）
 
 文件归属：`rag/mainProcessProxy.ts`、owned `rag/indexing/`、KnowledgeService、RagIndexService 与相关测试。
 
-- [ ] v1 读取后暂停，上传 v2，释放 v1；断言 v2 最终入索引且旧完成事件不能宣告新版成功。
-- [ ] 注入旧向量删除失败、数据库删除成功场景，断言旧 ID 不丢失且后续可以清理。
-- [ ] 去重只合并尚未消费需求；运行中新增需求持久追赶；清理责任保留到外部删除完成。
-- [ ] 核验 queued payload 合并、重启恢复及失败重试，补 Wiki / 发布说明，提交。
+- [x] v1 读取后暂停，上传 v2，释放 v1；断言 v2 最终入索引且旧完成事件不能宣告新版成功。
+- [x] 注入旧向量删除失败、数据库删除成功场景，断言旧 ID 不丢失且后续可以清理。
+- [x] 去重只合并尚未消费需求；运行中新增需求持久追赶；清理责任保留到外部删除完成。
+- [x] 核验 queued payload 合并、重启恢复及失败重试，补 Wiki / 发布说明，提交。
 
 ## 最终集成
 
-- [ ] 逐份审阅独立提交，合并日期说明并核查双引擎 schema / migration 一致性。
-- [ ] 编译 shared / server，运行受影响的全部回归；客户端无 UI 修改则复用审查基线的检查，不跑浏览器验收。
-- [ ] 核查 diff、工作区、8 项覆盖表及测试输出，完成集成提交；发布和 beta 推进单独报告状态。
+- [x] 逐份审阅独立提交，合并日期说明并核查双引擎 schema / migration 一致性。
+- [x] 编译 shared / server，运行受影响的全部回归；客户端无 UI 修改则复用审查基线的检查，不跑浏览器验收。
+- [x] 核查 diff、工作区、8 项覆盖表及测试输出，完成集成提交；发布和 beta 推进单独报告状态。
+
+## 集成验证记录（2026-09-30）
+
+- 审查基线：`main@f690a22d`。各子系统阶段已提交，集成树包含音频响应、M4B、章节投影/JIT 和 RAG 修复。
+- shared / server 编译通过，Prisma 客户端重新生成；临时 SQLite 空库使用 `prisma migrate deploy` 成功应用全部 89 项迁移，并实查 M4B 三个新增字段。
+- 42 个相关测试文件串行执行：224 项通过、0 失败、0 跳过。包括真实 HTTP 断连、真实 SQLite 双连接与跨进程发布、worker SIGTERM/SIGKILL 进程组清理、JIT 预取追赶、RAG 版本/发布/重试。
+- 交叉审查一并闭环：旧代延迟入队覆盖新租约；预取等待期间事实前进；旧版本退避任务影响新版成功投影与定制分块；延迟入队的旧版本被重标为当前版本；停服时迟到查询/启动通知重新拉起 worker，及提前退出导致启动等待悬挂。
+- 最终代码基线 `f7d714d4`：server 重新编译及 224 项组合回归均通过。M4B 关闭新增 3 项、RAG 延迟入队新增 2 项均有修复前失败与修复后成功证据。后续仅验证记录变更，不重复构建。
+- 本地 beta 将快进到本次已验证树；main 保持 `f690a22d`。集成分支保留用于目标平台验收后的跟进。
+- 删除已被统一实现替代的 `novelChapterArtifacts.ts`，以及无调用的 `M4bWorkerIdentity.ts` 和对应镜像测试。源码/测试引用扫描无残留。
+- 验证边界：无 UI 修改，沿用本轮审查时同一客户端源码的 TypeScript 检查及 8 项任务选择测试；未重复浏览器验收。PostgreSQL 仅 schema validate，未运行真实并发数据库；Windows 原生进程清理与真实 Qdrant 服务未现场验收。
+- 新迁移保留全部任务与音频，将缺失代际归属的历史 pending/processing M4B job 标记 failed，须从现有封装重试入口重试；不能猜测旧任务的发布权。仅在独立临时库应用迁移，未修改业务数据库。
+- 本次未 push、未部署。发布前仍须对目标平台做产品验收。
