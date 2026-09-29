@@ -1,3 +1,4 @@
+import { sendFileResponse } from "../../../http/fileResponse";
 import { Router } from "express";
 import type { ApiResponse } from "@ai-novel/shared/types/api";
 import { z } from "zod";
@@ -131,11 +132,7 @@ router.get("/character-assets/:assetId/image", validate({ params: assetIdParams 
     const { filePath, mimeType } = await comicCharacterAssetService.serveAssetImage(assetId);
     res.setHeader("Content-Type", mimeType);
     res.setHeader("Cache-Control", "public, max-age=86400");
-    res.sendFile(filePath, (error) => {
-      if (!error || res.destroyed) return;
-      if (res.headersSent) res.destroy(error);
-      else next(error);
-    });
+    sendFileResponse(filePath, res, next);
   } catch (err) { next(err); }
 });
 
@@ -245,11 +242,7 @@ router.get("/scenes/:sceneId/image", validate({ params: sceneIdParams }), async 
     const { filePath, mimeType } = await comicSceneService.serveSceneImage(sceneId);
     res.setHeader("Content-Type", mimeType);
     res.setHeader("Cache-Control", "public, max-age=86400");
-    res.sendFile(filePath, (error) => {
-      if (!error || res.destroyed) return;
-      if (res.headersSent) res.destroy(error);
-      else next(error);
-    });
+    sendFileResponse(filePath, res, next);
   } catch (err) { next(err); }
 });
 

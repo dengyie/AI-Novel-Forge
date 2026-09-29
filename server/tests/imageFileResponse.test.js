@@ -58,12 +58,23 @@ for (const kind of ['comic', 'drama']) {
     fs.createReadStream = function(...args) { const stream=original.apply(this,args); if(args[0]===filePath) streams.push(stream); return stream; };
     t.after(() => fs.createReadStream = original);
     const app = express(); app.use(require('../dist/modules/'+kind+'/http/'+kind+'Routes').default);
+    app.use(require('../dist/middleware/errorHandler').errorHandler);
     const server = app.listen(0,'127.0.0.1');
     await new Promise(resolve=>server.once('listening',resolve));
     t.after(async()=>{server.closeAllConnections(); await new Promise(resolve=>server.close(resolve));});
     const url = `http://127.0.0.1:${server.address().port}${route}`;
     const response=await fetch(url); assert.equal(response.status,200);
     assert.deepEqual(Buffer.from(await response.arrayBuffer()), data);
+    const range=await fetch(url,{headers:{Range:'bytes=0-15'}});
+    assert.equal(range.status,206);
+    assert.equal(range.headers.get('content-range'),`bytes 0-15/${data.length}`);
+    assert.deepEqual(Buffer.from(await range.arrayBuffer()),data.subarray(0,16));
+    const invalidRange=await fetch(url,{headers:{Range:`bytes=${data.length+100}-`}});
+    assert.equal(invalidRange.status,416);
+    assert.equal(invalidRange.headers.get('content-range'),`bytes */${data.length}`);
+    assert.match(invalidRange.headers.get('content-type'),/application\/json/);
+    assert.ok(!invalidRange.headers.get('cache-control')?.includes('public'));
+    const errorBody=await invalidRange.text();assert.ok(!errorBody.includes(filePath));
     streams.length=0;
     await new Promise((resolve,reject)=>{
       const request=http.get(url,response=>response.once('data',()=>{response.destroy();request.destroy();resolve();}));

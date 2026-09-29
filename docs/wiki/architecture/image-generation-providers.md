@@ -31,6 +31,8 @@
 
 漫画资产/场景及短剧图片直出使用 Express sendFile。文件存在性查询不能替代流错误处理：文件可能在查询后删除，客户端也可能在下载中断开。未开始响应时交错误中间件，已开始时关闭响应，客户端断开后不追加错误 JSON；读取源必须随响应结束释放。
 
+文件发送适配器 `server/src/http/fileResponse.ts` 仅转换 Express sendFile 产生的已知 4xx 状态；不可满足的 Range 保留 416 与安全的 Content-Range，不交给通用错误处理器变成 500。错误响应清除图片 Content-Type、Content-Length 与公开缓存策略，用户只见通用文件错误，底层错误保留在 cause 用于诊断。业务抛出的任意 status 字段不因此获得信任。
+
 模块 HTTP 子职责见 `server/src/modules/comic/http/README.md` 与 `server/src/modules/drama/http/README.md`；业务服务负责路径解析和持久化，路由门面及子路由只负责合同校验和传输。
 
 ## 漫画角色资产图片发布

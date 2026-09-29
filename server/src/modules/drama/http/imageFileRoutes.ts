@@ -1,3 +1,4 @@
+import { sendFileResponse } from "../../../http/fileResponse";
 import { Router } from "express";
 import { z } from "zod";
 import { validate } from "../../../middleware/validate";
@@ -36,11 +37,7 @@ router.get("/shot-images/:shotId/keyframe", validate({ params: shotImageParamsSc
     }
     res.setHeader("Content-Type", resolved.mimeType);
     res.setHeader("Cache-Control", "public, max-age=86400");
-    res.sendFile(resolved.filePath, (error) => {
-      if (!error || res.destroyed) return;
-      if (res.headersSent) res.destroy(error);
-      else next(error);
-    });
+    sendFileResponse(resolved.filePath, res, next);
   } catch (error) {
     next(error);
   }
@@ -58,11 +55,7 @@ router.get("/shot-images/:shotId/keyframe/:version", validate({ params: shotImag
     }
     res.setHeader("Content-Type", resolved.mimeType);
     res.setHeader("Cache-Control", "public, max-age=86400");
-    res.sendFile(resolved.filePath, (error) => {
-      if (!error || res.destroyed) return;
-      if (res.headersSent) res.destroy(error);
-      else next(error);
-    });
+    sendFileResponse(resolved.filePath, res, next);
   } catch (error) {
     next(error);
   }
@@ -82,11 +75,7 @@ router.get("/character-images/:characterId/character-sheet", async (req, res, ne
     }
     res.setHeader("Content-Type", resolved.mimeType);
     res.setHeader("Cache-Control", "public, max-age=86400");
-    res.sendFile(resolved.filePath, (error) => {
-      if (!error || res.destroyed) return;
-      if (res.headersSent) res.destroy(error);
-      else next(error);
-    });
+    sendFileResponse(resolved.filePath, res, next);
   } catch (error) {
     next(error);
   }
@@ -108,11 +97,7 @@ router.get("/character-images/:characterId/character-sheet/:version", validate({
     }
     res.setHeader("Content-Type", resolved.mimeType);
     res.setHeader("Cache-Control", "public, max-age=86400");
-    res.sendFile(resolved.filePath, (error) => {
-      if (!error || res.destroyed) return;
-      if (res.headersSent) res.destroy(error);
-      else next(error);
-    });
+    sendFileResponse(resolved.filePath, res, next);
   } catch (error) {
     next(error);
   }
@@ -132,11 +117,7 @@ router.get("/character-images/:characterId/portrait", async (req, res, next) => 
     }
     res.setHeader("Content-Type", resolved.mimeType);
     res.setHeader("Cache-Control", "public, max-age=86400");
-    res.sendFile(resolved.filePath, (error) => {
-      if (!error || res.destroyed) return;
-      if (res.headersSent) res.destroy(error);
-      else next(error);
-    });
+    sendFileResponse(resolved.filePath, res, next);
   } catch (error) {
     next(error);
   }
@@ -159,11 +140,7 @@ router.get(
       }
       res.setHeader("Content-Type", resolved.mimeType);
       res.setHeader("Cache-Control", "public, max-age=86400");
-      res.sendFile(resolved.filePath, (error) => {
-      if (!error || res.destroyed) return;
-      if (res.headersSent) res.destroy(error);
-      else next(error);
-    });
+      sendFileResponse(resolved.filePath, res, next);
     } catch (error) {
       next(error);
     }
