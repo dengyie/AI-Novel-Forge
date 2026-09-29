@@ -28,3 +28,11 @@
 - Green: 定向 45 项通过；新增真实 worker / SIGTERM / SIGKILL / 跨进程 SQLite 发布测试通过。
 - 冷启动 shell fixture 实测 3.5 秒，旧测试的 2 秒启动屏障超时调整为 8 秒，仍等待显式启动信号。
 - PostgreSQL 运行时与 Windows 原生进程清理未在本机执行；不把 schema 校验作为这些环境的运行证据。
+
+## Shutdown boundary follow-up
+
+- Baseline: `6bfe62df1ffe020ad92a68db30c6f6dcf3ffb296`.
+- Root cause: 关闭标志仅在 async 方法入口检查，查询和 spawn 等待之后继续创建资源；spawn 等待没有 exit 收口。
+- Minimal fix: 三处异步恢复边界再校验，watchdog 入口拒绝关闭后启动；spawn/error/exit 共同收口且清理临时监听器。
+- Red evidence: `/tmp/m4b-shutdown-red.log`，三个独立异步屏障场景失败。
+- Verification: `m4bShutdownRace`、`m4bLifecycleRegression`、`m4bWorkerRecovery`、`m4bWorkerOwnership` 定向回归及 server build。

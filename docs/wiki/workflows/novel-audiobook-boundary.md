@@ -136,6 +136,8 @@ m4b 封装在任务主流水线完成后异步运行，可能跨越章节重做�
 
 领取时间不是停滞时间。`lastProgressAt` 只在实际 part 字节增长时刷新；达到展示进度上限后仍应刷新增长时间。`WorkerHeartbeat` 表示进程存活，不替代音频推进。
 
+关闭标志也是异步启动的权限边界：查询 pending 前通过校验，不代表查询返回后仍可启动。队列查询返回、spawn 入口和 spawn 通知返回都必须重新检查关闭状态；进程一经创建就同步登记给 shutdown，启动等待同时监听 spawn/error/exit，避免关闭后的迟到通知重建 watchdog 或留下悬挂 Promise。
+
 服务在 readiness 放行前恢复独立编码队列；关闭 worker 模式不得启动恢复扫描或领取旧 pending。SIGTERM 和代际失效均传播至 ffmpeg AbortSignal；SIGKILL/OOM 后，manager 仅根据受管 worker 的 IPC 报告验证唯一 part 命令行并终止进程组，确认退出后才能回队。无法确认清理完成时保留租约，交由后续扫描重试，不能为了继续推进而释放资源所有权。
 
 缺少历史代际/租约的待处理 job 不可猜测归属；迁移将其标记失败，保留任务和已有音频，用户从有声书封装重试入口重新生成。实现职责见 `server/src/services/audiobook/m4b/README.md`。

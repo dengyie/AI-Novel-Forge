@@ -46,11 +46,13 @@ export class M4bWorkerManager {
     }
 
     const hasPending = await this.queueService.hasPendingJobs();
-    if (!hasPending) return;
+    // A completed DB read does not renew permission to start after shutdown.
+    if (!hasPending || this.shuttingDown || !isM4bWorkerEnabled()) return;
 
     if (this.activeWorkers.size >= CONCURRENCY) return;
 
     await this.spawnWorker();
+    if (this.shuttingDown || !isM4bWorkerEnabled()) return;
 
     if (!this.watchdogTimer) {
       this.startHeartbeatWatchdog();
@@ -58,7 +60,7 @@ export class M4bWorkerManager {
   }
 
   private async spawnWorker(): Promise<void> {
-    if (this.activeWorkers.size >= CONCURRENCY) return;
+    if (this.shuttingDown || !isM4bWorkerEnabled() || this.activeWorkers.size >= CONCURRENCY) return;
 
     // ts-node-dev runs this manager under src; workers still use the built server runtime.
     const workerScript = path.join(__dirname, __filename.endsWith(".ts")
@@ -122,10 +124,20 @@ export class M4bWorkerManager {
     });
 
     await new Promise<void>((resolve, reject) => {
-      worker.once("spawn", resolve);
-      worker.once("error", reject);
+      const finish = (error?: Error) => {
+        worker.removeListener("spawn", onSpawn);
+        worker.removeListener("error", onError);
+        worker.removeListener("exit", onExit);
+        if (error) reject(error); else resolve();
+      };
+      const onSpawn = () => finish();
+      const onError = (error: Error) => finish(error);
+      const onExit = () => finish(this.shuttingDown ? undefined : new Error("M4b worker exited before startup"));
+      worker.once("spawn", onSpawn);
+      worker.once("error", onError);
+      worker.once("exit", onExit);
     });
-    console.log(`[M4bWorkerManager] Spawned worker ${worker.pid}`);
+    if (!this.shuttingDown) console.log(`[M4bWorkerManager] Spawned worker ${worker.pid}`);
   }
 
   private async recoverAndReplaceWorker(workerPid: number): Promise<void> {
@@ -151,6 +163,7 @@ export class M4bWorkerManager {
   }
 
   private startHeartbeatWatchdog(): void {
+    if (this.shuttingDown || !isM4bWorkerEnabled() || this.watchdogTimer) return;
     this.watchdogTimer = setInterval(() => {
       this.handleStalledJobs().then(() => this.ensureWorkerForPendingJobs()).catch((error) => {
         console.error("[M4bWorkerManager] Watchdog error:", error);
