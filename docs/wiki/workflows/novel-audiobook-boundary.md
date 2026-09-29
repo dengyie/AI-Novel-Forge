@@ -157,6 +157,12 @@ HTTP 响应拥有读取源的生命周期：客户端切换进度、关闭页面
 
 禁止恢复为裸 `createReadStream().pipe(res)`。它不会在目标关闭时自动销毁源，长音频请求反复取消会积累暂停的文件流。回归测试必须使用真实 HTTP 断连，并验证源流 `closed` / `fd`，同时保留完整下载、Range 206 与 416 的协议覆盖。
 
+## 可变音频地址与超长全书
+
+章节重做和全书重生成会复用媒体 URL，因此完整响应和 Range 响应均使用 `private, no-store`。只有未来显式采用不可变内容版本 URL 时才可考虑 freshness 缓存；任务签名 token 不等同内容版本。
+
+普通 PCM 使用 RIFF，数据长度加容器开销超过 uint32 后使用 RF64 + ds64。全书生成仍先合并 WAV 再封装 M4B；24kHz、16bit、mono 在约 24.85 小时就会到达原 RIFF 上限。必须同时保持拼接偏移、输出总字节数、恢复检查和 M4B 时长解析对 RF64 的一致支持。RF64 输入不能把 data 的 0xffffffff 哨兵当作真实长度，必须从 ds64 读取可安全表示的 uint64 长度。
+
 ## MiMo 请求取消与上游状态边界
 
 Provider 持有端点选择、退避和熔断策略；`infrastructure/mimo` 持有单次 HTTP 请求、超时、取消监听器和响应解码。基础设施层不反向调用 provider。

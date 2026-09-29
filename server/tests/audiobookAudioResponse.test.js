@@ -92,3 +92,14 @@ test("audio response handles asynchronous open failure without an uncaught strea
     assert.equal(streams[0].closed, true);
   });
 });
+
+test('mutable audio URLs never permit stale full or range response reuse', async () => {
+  await fixture(async ({ url, file }) => {
+    for (const [text, range, expected] of [['0123456789', null, '0123456789'], ['abcdefghij', 'bytes=2-5', 'cdef']]) {
+      fs.writeFileSync(file, text);
+      const response = await fetch(url, { headers: range ? { Range: range } : {} });
+      assert.match(response.headers.get('cache-control'), /no-store/);
+      assert.equal(await response.text(), expected);
+    }
+  });
+});

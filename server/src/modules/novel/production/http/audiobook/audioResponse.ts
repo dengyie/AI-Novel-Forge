@@ -62,7 +62,7 @@ export function streamAudioFile(
 
   res.setHeader("Content-Type", contentType);
   res.setHeader("Accept-Ranges", "bytes");
-  res.setHeader("Cache-Control", "private, max-age=3600");
+  res.setHeader("Cache-Control", "private, no-store");
   res.setHeader("Content-Disposition", `${disposition}; filename="${downloadName}"`);
 
   if (range === "invalid") {

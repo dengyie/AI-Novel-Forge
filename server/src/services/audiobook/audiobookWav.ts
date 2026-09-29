@@ -21,16 +21,18 @@ function readUInt32LE(buffer: Buffer, offset: number): number {
 }
 
 /**
- * 解析标准 PCM WAV（RIFF）。返回 fmt + data 位置；不拷贝整段 PCM。
+ * 解析 PCM WAV（RIFF / RF64）。返回 fmt + data 位置；不拷贝整段 PCM。
  */
 export function parseWavInfo(buffer: Buffer): WavFormatInfo {
   if (buffer.length < 44) {
     throw new Error("WAV 文件过短。");
   }
-  if (buffer.toString("ascii", 0, 4) !== "RIFF" || buffer.toString("ascii", 8, 12) !== "WAVE") {
+  const container = buffer.toString("ascii", 0, 4);
+  if ((container !== "RIFF" && container !== "RF64") || buffer.toString("ascii", 8, 12) !== "WAVE") {
     throw new Error("不是合法的 RIFF/WAVE 文件。");
   }
 
+  let rf64DataSize: number | null = null;
   let offset = 12;
   let fmt: Omit<WavFormatInfo, "dataOffset" | "dataSize"> | null = null;
   let dataOffset = -1;
@@ -42,7 +44,12 @@ export function parseWavInfo(buffer: Buffer): WavFormatInfo {
     const chunkDataStart = offset + 8;
     const next = chunkDataStart + chunkSize + (chunkSize % 2);
 
-    if (chunkId === "fmt ") {
+    if (chunkId === "ds64" && container === "RF64") {
+      if (chunkSize < 28 || chunkDataStart + 28 > buffer.length) throw new Error("RF64 ds64 块过短。");
+      const size64 = buffer.readBigUInt64LE(chunkDataStart + 8);
+      if (size64 > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("RF64 data 长度超过安全范围。");
+      rf64DataSize = Number(size64);
+    } else if (chunkId === "fmt ") {
       if (chunkSize < 16) {
         throw new Error("WAV fmt 块过短。");
       }
@@ -56,7 +63,12 @@ export function parseWavInfo(buffer: Buffer): WavFormatInfo {
       };
     } else if (chunkId === "data") {
       dataOffset = chunkDataStart;
-      dataSize = chunkSize;
+      if (container === "RF64" && chunkSize === 0xffffffff) {
+        if (rf64DataSize === null) throw new Error("RF64 缺少 ds64 长度。");
+        dataSize = rf64DataSize;
+      } else {
+        dataSize = chunkSize;
+      }
       break;
     }
 
@@ -123,30 +135,8 @@ export function buildWavBuffer(pcm: Buffer, format: Pick<
   WavFormatInfo,
   "numChannels" | "sampleRate" | "bitsPerSample"
 >): Buffer {
-  const numChannels = format.numChannels;
-  const sampleRate = format.sampleRate;
-  const bitsPerSample = format.bitsPerSample;
-  const blockAlign = (numChannels * bitsPerSample) / 8;
-  const byteRate = sampleRate * blockAlign;
-  const dataSize = pcm.length;
-  const buffer = Buffer.alloc(44 + dataSize);
-
-  buffer.write("RIFF", 0, "ascii");
-  buffer.writeUInt32LE(36 + dataSize, 4);
-  buffer.write("WAVE", 8, "ascii");
-  buffer.write("fmt ", 12, "ascii");
-  buffer.writeUInt32LE(16, 16);
-  buffer.writeUInt16LE(1, 20);
-  buffer.writeUInt16LE(numChannels, 22);
-  buffer.writeUInt32LE(sampleRate, 24);
-  buffer.writeUInt32LE(byteRate, 28);
-  buffer.writeUInt16LE(blockAlign, 32);
-  buffer.writeUInt16LE(bitsPerSample, 34);
-  buffer.write("data", 36, "ascii");
-  buffer.writeUInt32LE(dataSize, 40);
-  pcm.copy(buffer, 44);
-
-  return buffer;
+  const header = buildWavHeaderOnly(pcm.length, format);
+  return Buffer.concat([header, pcm]);
 }
 
 function buildWavHeaderOnly(
@@ -158,20 +148,32 @@ function buildWavHeaderOnly(
   const bitsPerSample = format.bitsPerSample;
   const blockAlign = (numChannels * bitsPerSample) / 8;
   const byteRate = sampleRate * blockAlign;
-  const buffer = Buffer.alloc(44);
-  buffer.write("RIFF", 0, "ascii");
-  buffer.writeUInt32LE(36 + dataSize, 4);
+  if (!Number.isSafeInteger(dataSize) || dataSize < 0) throw new Error("WAV data 长度无效。");
+  const large = dataSize + 36 > 0xffffffff;
+  const buffer = Buffer.alloc(large ? 80 : 44);
+  buffer.write(large ? "RF64" : "RIFF", 0, "ascii");
+  buffer.writeUInt32LE(large ? 0xffffffff : 36 + dataSize, 4);
   buffer.write("WAVE", 8, "ascii");
-  buffer.write("fmt ", 12, "ascii");
-  buffer.writeUInt32LE(16, 16);
-  buffer.writeUInt16LE(1, 20);
-  buffer.writeUInt16LE(numChannels, 22);
-  buffer.writeUInt32LE(sampleRate, 24);
-  buffer.writeUInt32LE(byteRate, 28);
-  buffer.writeUInt16LE(blockAlign, 32);
-  buffer.writeUInt16LE(bitsPerSample, 34);
-  buffer.write("data", 36, "ascii");
-  buffer.writeUInt32LE(dataSize, 40);
+  let fmtOffset = 12;
+  if (large) {
+    buffer.write("ds64", 12, "ascii");
+    buffer.writeUInt32LE(28, 16);
+    buffer.writeBigUInt64LE(BigInt(dataSize) + 72n, 20);
+    buffer.writeBigUInt64LE(BigInt(dataSize), 28);
+    buffer.writeBigUInt64LE(BigInt(Math.floor(dataSize / blockAlign)), 36);
+    buffer.writeUInt32LE(0, 44);
+    fmtOffset = 48;
+  }
+  buffer.write("fmt ", fmtOffset, "ascii");
+  buffer.writeUInt32LE(16, fmtOffset + 4);
+  buffer.writeUInt16LE(1, fmtOffset + 8);
+  buffer.writeUInt16LE(numChannels, fmtOffset + 10);
+  buffer.writeUInt32LE(sampleRate, fmtOffset + 12);
+  buffer.writeUInt32LE(byteRate, fmtOffset + 16);
+  buffer.writeUInt16LE(blockAlign, fmtOffset + 20);
+  buffer.writeUInt16LE(bitsPerSample, fmtOffset + 22);
+  buffer.write("data", fmtOffset + 24, "ascii");
+  buffer.writeUInt32LE(large ? 0xffffffff : dataSize, fmtOffset + 28);
   return buffer;
 }
 
@@ -254,11 +256,11 @@ export function concatWavFiles(
 
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
   const tmpPath = `${outputPath}.part`;
+  const header = buildWavHeaderOnly(totalDataSize, baseFormat);
   const outFd = fs.openSync(tmpPath, "w");
   try {
-    const header = buildWavHeaderOnly(totalDataSize, baseFormat);
     fs.writeSync(outFd, header, 0, header.length, 0);
-    let writeOffset = 44;
+    let writeOffset = header.length;
     const copyBuf = Buffer.alloc(1024 * 1024);
     for (let segIndex = 0; segIndex < segments.length; segIndex += 1) {
       const segment = segments[segIndex];
@@ -293,7 +295,7 @@ export function concatWavFiles(
   }
 
   fs.renameSync(tmpPath, outputPath);
-  const bytes = 44 + totalDataSize;
+  const bytes = header.length + totalDataSize;
 
   return {
     bytes,
