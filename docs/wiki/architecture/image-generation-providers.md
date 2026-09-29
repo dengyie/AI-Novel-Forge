@@ -25,6 +25,14 @@
 - 如果后端只允许固定厂商进入图像生成，前端动态列表会把可选项交给用户，但任务提交后失败。
 - 如果删除自定义厂商时保留旧图像模型设置，后续重建同名厂商可能继承过期图片模型，造成难以解释的配置污染。
 
+## 图片 HTTP 资源生命周期
+
+漫画资产/场景上传属于二进制请求，全局 JSON 解析器的限额不适用。必须在 HTTP 读取阶段限制为 10 MiB、非空 PNG/JPEG/WebP，且对无 Content-Length 的 chunked 上传同样计数，不能收完之后才检查大小。
+
+漫画资产/场景及短剧图片直出使用 Express sendFile。文件存在性查询不能替代流错误处理：文件可能在查询后删除，客户端也可能在下载中断开。未开始响应时交错误中间件，已开始时关闭响应，客户端断开后不追加错误 JSON；读取源必须随响应结束释放。
+
+模块 HTTP 子职责见 `server/src/modules/comic/http/README.md` 与 `server/src/modules/drama/http/README.md`；业务服务负责路径解析和持久化，路由门面及子路由只负责合同校验和传输。
+
 ## Related Modules
 
 - `server/src/services/settings/ProviderImageSettingsService.ts`
