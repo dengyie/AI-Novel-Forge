@@ -64,3 +64,31 @@ for (const pausedTransaction of [1, 2]) {
     } finally { release(); prisma.$transaction = originalTransaction; }
   });
 }
+
+test('character timeline rebuild cannot replace events from a newer chapter save', async()=>{
+  const { NovelCoreCharacterService }=require('../dist/services/novel/novelCoreCharacterService.js');
+  const chapterId='rebuild-chapter';
+  connection.prepare('INSERT INTO Chapter VALUES (?, ?, 2, ?, ?, 7, NULL)').run(chapterId,'novel','第二章','张三还在追查旧案件，沿着小巷寻找线索。');
+  const originalFind=prisma.character.findFirst;
+  const originalTransaction=prisma.$transaction.bind(prisma);
+  let reached,release;
+  const gate=new Promise(resolve=>release=resolve);
+  const paused=new Promise(resolve=>reached=resolve);
+  let first=true;
+  prisma.character.findFirst=async()=>({id:'character',novelId:'novel',name:'张三'});
+  prisma.$transaction=async(...args)=>{
+    if(first){first=false;reached();await gate;}
+    return originalTransaction(...args);
+  };
+  try {
+    const rebuild=new NovelCoreCharacterService().syncCharacterTimeline('novel','character',{startOrder:2,endOrder:2});
+    const rejected=assert.rejects(rebuild,{name:'ChapterProjectionSupersededError'});
+    await paused;
+    const content='张三已经解决新案件，带着最新证据回家。';
+    connection.prepare('UPDATE Chapter SET content=?, contentRevision=8 WHERE id=?').run(content,chapterId);
+    await new ChapterArtifactSyncService().syncChapterArtifacts('novel',chapterId,content,{expectedContentRevision:8,scheduleBackgroundSync:false});
+    const snapshot=connection.prepare('SELECT content FROM CharacterTimeline WHERE chapterId=?').all(chapterId);
+    release();await rejected;
+    assert.deepEqual(connection.prepare('SELECT content FROM CharacterTimeline WHERE chapterId=?').all(chapterId),snapshot);
+  } finally {release();prisma.$transaction=originalTransaction;prisma.character.findFirst=originalFind;}
+});

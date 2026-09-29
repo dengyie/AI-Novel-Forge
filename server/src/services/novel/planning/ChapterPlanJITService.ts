@@ -30,8 +30,10 @@ export interface ChapterPlanJITDeps {
   ) => Promise<unknown>;
 }
 
+interface RefreshedFactSnapshot { chapterOrder: number; fingerprint: string }
+
 export class ChapterPlanJITService {
-  private static readonly inFlight = new Map<string, Promise<void>>();
+  private static readonly inFlight = new Map<string, Promise<RefreshedFactSnapshot | null>>();
   constructor(private readonly deps: ChapterPlanJITDeps) {}
 
   /**
@@ -42,16 +44,26 @@ export class ChapterPlanJITService {
    */
   async ensureExecutionReady(novelId: string, chapterId: string): Promise<void> {
     const key = JSON.stringify([novelId, chapterId]);
-    const existing = ChapterPlanJITService.inFlight.get(key);
-    if (existing) return existing;
-    const run = this.refreshExecutionContract(novelId, chapterId).finally(() => {
-      if (ChapterPlanJITService.inFlight.get(key) === run) ChapterPlanJITService.inFlight.delete(key);
-    });
-    ChapterPlanJITService.inFlight.set(key, run);
-    return run;
+    // Joining a prefetch only proves its earlier fact snapshot was consumed. Facts
+    // can advance while its AI request is pending, so every caller rechecks them.
+    for (let catchUp = 0; catchUp < 3; catchUp += 1) {
+      let run = ChapterPlanJITService.inFlight.get(key);
+      if (!run) {
+        const started = this.refreshExecutionContract(novelId, chapterId).finally(() => {
+          if (ChapterPlanJITService.inFlight.get(key) === started) ChapterPlanJITService.inFlight.delete(key);
+        });
+        ChapterPlanJITService.inFlight.set(key, started);
+        run = started;
+      }
+      const consumed = await run;
+      if (!consumed) return;
+      const latest = await novelFactService.listForChapter({ novelId, beforeChapterOrder: consumed.chapterOrder });
+      if (fingerprintPlanningFacts(latest) === consumed.fingerprint) return;
+    }
+    throw new Error("前文章节事实持续变化，请待正文保存完成后重新组装章节执行合同。");
   }
 
-  private async refreshExecutionContract(novelId: string, chapterId: string): Promise<void> {
+  private async refreshExecutionContract(novelId: string, chapterId: string): Promise<RefreshedFactSnapshot | null> {
     const chapter = await prisma.chapter.findFirst({
       where: { id: chapterId, novelId },
       select: {
@@ -67,7 +79,7 @@ export class ChapterPlanJITService {
       },
     });
     if (!chapter) {
-      return;
+      return null;
     }
 
     const hasCompleteTaskSheet = Boolean(chapter.taskSheet?.trim())
@@ -83,15 +95,17 @@ export class ChapterPlanJITService {
       beforeChapterOrder: chapter.order,
     });
 
+    const consumed = { chapterOrder: chapter.order, fingerprint: fingerprintPlanningFacts(facts) };
     // Existing plans without any fact history need no refresh. Once facts have been
     // consumed, removing facts is also a changed input and must invalidate reuse.
-    if (hasCompleteTaskSheet && facts.length === 0 && !readPlanningFactFingerprint(chapter.riskFlags)) return;
+    if (hasCompleteTaskSheet && facts.length === 0 && !readPlanningFactFingerprint(chapter.riskFlags)) return consumed;
     await this.deps.ensureChapterExecutionContract(novelId, chapterId, {
       guidance: facts.length > 0 ? buildFactLedgerGuidance(facts) : undefined,
-      factRefresh: { fingerprint: fingerprintPlanningFacts(facts) },
+      factRefresh: { fingerprint: consumed.fingerprint },
       entrypoint: "jit_planner",
       chapterTaskSheetQualityMode: "full_book_autopilot",
     });
+    return consumed;
   }
 }
 

@@ -120,3 +120,42 @@ test('successful refresh persists its fingerprint with the contract; new service
     serialization.serializeVolumeWorkspaceDocument=original.serialize;
   }
 });
+
+test('formal assembly joining an older prefetch catches up to facts committed while AI was running', async()=>{
+  const f=fixture();
+  try {
+    let release, started;
+    const blocked=new Promise(resolve=>release=resolve);
+    const reached=new Promise(resolve=>started=resolve);
+    const calls=[];
+    let active=0, peak=0;
+    const jit=new ChapterPlanJITService({ensureChapterExecutionContract:async(n,c,options)=>{
+      active++; peak=Math.max(peak,active); calls.push(options);
+      if(calls.length===1) {started();await blocked;}
+      active--;
+    }});
+    const prefetch=jit.ensureExecutionReady('n','c');
+    await reached;
+    f.setFacts([{category:'completed',chapterOrder:5,text:'fact B committed by previous chapter'}]);
+    const formal=jit.ensureExecutionReady('n','c');
+    release();
+    await Promise.all([prefetch,formal]);
+    assert.equal(calls.length,2);
+    assert.match(calls[1].guidance,/fact B committed/);
+    assert.notEqual(calls[0].factRefresh.fingerprint,calls[1].factRefresh.fingerprint);
+    assert.equal(peak,1,'catch-up must stay serial');
+  } finally { f.cleanup(); }
+});
+
+test('continuously changing facts stop bounded catch-up instead of returning a stale contract', async()=>{
+  const f=fixture();
+  try {
+    let calls=0;
+    const jit=new ChapterPlanJITService({ensureChapterExecutionContract:async()=>{
+      calls++;
+      f.setFacts([{category:'completed',chapterOrder:5,text:`fact changed ${calls}`}]);
+    }});
+    await assert.rejects(()=>jit.ensureExecutionReady('n','c'),/事实持续变化/);
+    assert.equal(calls,3);
+  } finally {f.cleanup();}
+});

@@ -41,6 +41,8 @@ Prompt 返回后先做当前 revision 检查。每个独立 canonical writer 事
 
 人物时间线函数只返回待索引记录；整个同步链结束并确认 owner 后统一排队。`novelChapterArtifacts` 的重复持久化路径不再承担写职责，新增写入必须进入上述唯一服务。
 
+人物页的 `syncCharacterTimeline` 批量重建同样消费章节正文。它必须读取每章 revision，在删除前锁定整个来源快照，且仅删除快照中 chapterId 对应的自动时间线；按章节范围宽泛删除会波及读取后并发新增的章节。任何一章被新正文取代时，整个旧重建事务退出，保留新版事件。
+
 ## Failure Modes
 
 - 只在 Prompt 前检查 revision：Prompt 返回后正文可能已经变化。

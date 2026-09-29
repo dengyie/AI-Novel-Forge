@@ -1,3 +1,4 @@
+import { ChapterProjectionRevisionGuard } from "./runtime/projections";
 import { prisma } from "../../db/prisma";
 import { runStructuredPrompt } from "../../prompting/core/promptRunner";
 import {
@@ -247,6 +248,7 @@ export class NovelCoreCharacterService {
         order: true,
         title: true,
         content: true,
+        contentRevision: true,
       },
     });
 
@@ -280,19 +282,18 @@ export class NovelCoreCharacterService {
     }
 
     await prisma.$transaction(async (tx) => {
+      // Lock all source revisions before deleting any event in the rebuild snapshot.
+      for (const chapter of chapters) {
+        await new ChapterProjectionRevisionGuard(tx).lockCurrentForWrite({
+          novelId, chapterId: chapter.id, expectedContentRevision: chapter.contentRevision,
+        });
+      }
       await tx.characterTimeline.deleteMany({
         where: {
           novelId,
           characterId,
           source: "chapter_extract",
-          ...(typeof options.startOrder === "number" || typeof options.endOrder === "number"
-            ? {
-              chapterOrder: {
-                gte: options.startOrder ?? undefined,
-                lte: options.endOrder ?? undefined,
-              },
-            }
-            : {}),
+          chapterId: { in: chapters.map((chapter) => chapter.id) },
         },
       });
       if (events.length > 0) {

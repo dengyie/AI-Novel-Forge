@@ -23,3 +23,8 @@
 - [x] Run targeted tests and server typecheck; document refresh ownership, update release notes and commit.
 
 Verification: server build passed; direct artifact/CRUD/pipeline ownership suite 54/54, real SQLite race 2/2, JIT/contract/shape/boundary 31/31, volume integration 20/20. UI unchanged.
+
+## Review follow-up
+- [x] Reproduce joined prefetch A missing facts B; re-read after joining and perform at most three serial catch-up rounds. Reproduce continuously changing input and reject stale completion.
+- [x] Reproduce character timeline rebuild overwriting a newer saved chapter against real SQLite; fence every source revision and limit deletion to snapshot chapter IDs.
+- [x] Verify server build and 13 targeted JIT, SQLite race, contract and runtime-boundary tests.
