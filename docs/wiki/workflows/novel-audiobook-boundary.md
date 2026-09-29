@@ -197,3 +197,10 @@ HTTP 429/503 是上游繁忙状态，必须保留到 provider 的熔断计数。
 共享 `m4bStatus=encoding` 是可见的轮询契约：章节生产 succeeded 后仍每 4 秒刷新，ready/failed/skipped 后停止。缺少状态的旧任务不能被解释为编码中，否则会永久轮询。WAV 完成和 M4B 完成是两个独立条件。
 
 部署检查分为 `validate-m4b-worker-migration.sh --preflight` 与 `--post-migration`，都只读真实数据库。前者阻止未收口的 pending/processing 任务直接迁移；后者实际查询 generationToken/leaseToken/lastProgressAt 并拒绝遗留无归属活动任务。检查不代替数据库/音频备份，也不能证明旧操作系统进程已经退出。
+
+
+## 编码进程测试的时间边界
+
+真实子进程启动和文件 I/O 的等待必须使用单调实时时钟与有界预算，并以 ready/输出 ack 确认实际状态。在夹具准备前耗掉短停滞窗口，会把并行构建或冷启动调度延迟误判为编码缺陷。
+
+停滞策略测试只在真实夹具准备后推进父进程的虚拟时钟，覆盖持续增长、首次无输出、增长后停滞、进度采样与 watchdog 竞争。不得为了稳定测试放宽生产超时或降低生产并发。取消、进程组死亡、继承管道 close 和许可交接仍验证真实进程行为；失败清理必须 abort 已启动编码并释放夹具等待条件。

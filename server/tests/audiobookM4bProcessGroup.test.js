@@ -11,6 +11,10 @@ const {
   runFfmpegProcess,
 } = require("../dist/services/audiobook/infrastructure/m4b/FfmpegProcessRunner.js");
 
+const realSetTimeout = setTimeout;
+const { performance } = require("node:perf_hooks");
+const FIXTURE_STARTUP_BUDGET_MS = 15_000;
+
 function makeTaskDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ab-m4b-process-group-task-"));
 }
@@ -42,10 +46,10 @@ function installWrapperWithLongLivedDescendant() {
   return { root, wrapper, heartbeat, descendantPid, started };
 }
 
-async function waitFor(predicate, timeoutMs = 2_000) {
-  const deadline = Date.now() + timeoutMs;
-  while (!predicate() && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 10));
+async function waitFor(predicate, timeoutMs = FIXTURE_STARTUP_BUDGET_MS) {
+  const deadline = performance.now() + timeoutMs;
+  while (!predicate() && performance.now() < deadline) {
+    await new Promise((resolve) => realSetTimeout(resolve, 10));
   }
   return predicate();
 }
@@ -71,15 +75,16 @@ test("aborting an ffmpeg wrapper terminates its long-lived descendant", {
   process.env.AUDIOBOOK_FFMPEG_PATH = fake.wrapper;
   const controller = new AbortController();
   let pid = null;
+  let pending;
 
   try {
-    const pending = encodeFullBookM4b({
+    pending = encodeFullBookM4b({
       taskDir,
       bookTitle: "wrapper descendant regression",
       sourceWavPath,
       chapters: [],
       signal: controller.signal,
-      stallTimeoutMs: 5_000,
+      stallTimeoutMs: FIXTURE_STARTUP_BUDGET_MS * 2,
     });
     assert.equal(
       await waitFor(() => fs.existsSync(fake.started) && fs.existsSync(fake.heartbeat)),
@@ -104,6 +109,8 @@ test("aborting an ffmpeg wrapper terminates its long-lived descendant", {
     );
     assert.equal(after, before, "a cancelled descendant must stop writing after encode returns");
   } finally {
+    controller.abort();
+    await pending;
     if (pid && isProcessAlive(pid)) {
       try { process.kill(pid, "SIGKILL"); } catch { /* already exited */ }
     }
@@ -117,7 +124,7 @@ test("aborting an ffmpeg wrapper terminates its long-lived descendant", {
 test("a stalled ffmpeg wrapper is killed together with its long-lived descendant", {
   concurrency: false,
   skip: process.platform === "win32" ? "POSIX process-group behavior" : false,
-}, async () => {
+}, async (t) => {
   const fake = installWrapperWithLongLivedDescendant();
   const taskDir = makeTaskDir();
   const sourceWavPath = path.join(taskDir, "source.wav");
@@ -126,17 +133,24 @@ test("a stalled ffmpeg wrapper is killed together with its long-lived descendant
   process.env.AUDIOBOOK_FFMPEG_PATH = fake.wrapper;
   let pid = null;
 
+  let pending;
+  const controller = new AbortController();
+  t.mock.timers.enable({ apis: ["Date", "setTimeout", "setInterval"], now: Date.now() });
   try {
-    const result = await encodeFullBookM4b({
+    pending = encodeFullBookM4b({
       taskDir,
       bookTitle: "stalled wrapper descendant regression",
       sourceWavPath,
       chapters: [],
-      // Test files run in parallel worker processes by default. Give the shell
-      // enough time to be scheduled and create its descendant before asserting
-      // process-group cleanup; production uses a five-minute stall window.
+      signal: controller.signal,
+      // Start the virtual stall clock only after both real processes are ready.
       stallTimeoutMs: 2_000,
     });
+    assert.equal(await waitFor(() => fs.existsSync(fake.started) && fs.existsSync(fake.heartbeat)), true,
+      "real wrapper and descendant must be ready before exercising the stall timer");
+    t.mock.timers.tick(2_000);
+    const result = await pending;
+    t.mock.timers.reset();
     assert.equal(result.status, "failed");
     assert.match(result.reason ?? "", /停滞/);
     assert.equal(fs.existsSync(fake.descendantPid), true);
@@ -148,6 +162,9 @@ test("a stalled ffmpeg wrapper is killed together with its long-lived descendant
     assert.equal(await waitFor(() => !isProcessAlive(pid), 1_000), true);
     assert.equal(after, before, "a stalled descendant must stop writing after encode returns");
   } finally {
+    controller.abort();
+    t.mock.timers.reset();
+    await pending;
     if (pid && isProcessAlive(pid)) {
       try { process.kill(pid, "SIGKILL"); } catch { /* already exited */ }
     }

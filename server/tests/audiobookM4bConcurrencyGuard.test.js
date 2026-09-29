@@ -257,7 +257,8 @@ test("全局许可交给已取消等待者时会继续唤醒下一项", { concur
       sourceWavPath: sources[0],
       chapters: [],
     });
-    const startDeadline = Date.now() + 2_000;
+    // A real child startup has its own budget; permit ordering is asserted below.
+    const startDeadline = Date.now() + 15_000;
     while (!fs.existsSync(fake.firstStarted) && Date.now() < startDeadline) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
@@ -283,7 +284,7 @@ test("全局许可交给已取消等待者时会继续唤醒下一项", { concur
       Promise.all([holder, cancelledWaiter, successorWaiter]),
       new Promise((_, reject) => setTimeout(
         () => reject(new Error("successor global permit waiter timed out")),
-        1_500,
+        15_000,
       )),
     ]);
     assert.equal(holderResult.status, "ready", holderResult.reason);
