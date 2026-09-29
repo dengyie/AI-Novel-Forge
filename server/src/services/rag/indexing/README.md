@@ -21,6 +21,6 @@
 - `persistence/` 拥有本地分块与 Qdrant 的发布协议。先以 `indexedAt=null` 保存全部待写 ID；向量全部成功后，在 DB 事务内发布新 ID 并撤下旧 ID；最后向量删除成功才删除本地旧行。
 - 外部部分写入失败或清理失败必须抛回 worker，使用持久任务的有界重试；达到上限后可从失败任务/重建入口恢复。旧行与未发布行不得丢弃，它们也是外部清理的持久依据。
 - 检索通过 `retrieval/` 批量检查 ID 已发布；知识资料还必须匹配当前 `activeVersionId` 且未归档。Qdrant 中残留的旧点不能进入上下文。
-- `documentStatus.ts` 只把实际索引版本完成投影到对应文档版本；版本已变化时补排追赶，待处理后续任务保持 queued/running。
+- `documentStatus.ts` 只把实际索引版本完成投影到对应文档版本；版本已变化时补排追赶，当前版本的待处理后续任务保持 queued/running，旧版本退避任务不计入。是否需要补排按实际发布分块的版本判断，不能只依据文档状态文字。
 
 主进程只使用 `indexing/index.ts` 的轻量入口；source 与 persistence 通过各自 facade 由 worker 索引编排调用，不导出到轻量主进程 barrel。

@@ -104,9 +104,9 @@ test("archiving knowledge document queues index cleanup and leaves document cont
 
 test("completed knowledge delete job leaves archived document index status idle", async () => {
   const originalDocumentFind = prisma.knowledgeDocument.findUnique;
-  const originalPendingFind = prisma.ragIndexJob.findFirst;
+  const originalPendingFind = prisma.ragIndexJob.findMany;
   prisma.knowledgeDocument.findUnique = async () => ({activeVersionId:"knowledge-version-1",status:"archived"});
-  prisma.ragIndexJob.findFirst = async () => null;
+  prisma.ragIndexJob.findMany = async () => [];
   const service = new RagIndexService({}, {});
   const originalFindUnique = prisma.ragIndexJob.findUnique;
   const originalUpdate = prisma.ragIndexJob.update;
@@ -149,6 +149,6 @@ test("completed knowledge delete job leaves archived document index status idle"
     prisma.ragIndexJob.update = originalUpdate;
     prisma.knowledgeDocument.updateMany = originalUpdateMany;
     prisma.knowledgeDocument.findUnique = originalDocumentFind;
-    prisma.ragIndexJob.findFirst = originalPendingFind;
+    prisma.ragIndexJob.findMany = originalPendingFind;
   }
 });

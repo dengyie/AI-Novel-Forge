@@ -22,3 +22,10 @@
 - [x] source/read版本写入job执行快照，终态投影 CAS current version；检索按活跃知识版本过滤旧 payload。
 - [x] 重新 build，重跑新测试及 ragReindexLifecycle/ragProcessBoundary/worker 与检索相关回归。
 - [x] 更新 indexing README、wiki、release notes、README 最新日期块，检查 diff，阶段 commit。
+
+## 跟进验证：过期退避任务
+
+- [x] 复现 v1 queued 退避、v2 定制分块发布并收口、v1 重试的完整状态时序。首提交实现会把 v2 投影为 queued。
+- [x] 状态投影只计同版本 pending；追赶判断使用已发布分块版本，不信任状态文本。
+- [x] 增加状态文字与发布事实不一致的测试，防止错误 succeeded 掩盖缺失索引。
+- [x] server build 与 49 项定向回归通过。

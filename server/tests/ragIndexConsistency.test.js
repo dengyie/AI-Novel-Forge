@@ -112,6 +112,7 @@ test('retrieval rejects inactive IDs and superseded or archived knowledge versio
 });
 
 test('old version success cannot project new document as succeeded and queues catch-up',async t=>{
+  patch(t,prisma.knowledgeChunk,'findFirst',async()=>null);
   const {syncDocumentIndexStatus}=require('../dist/services/rag/indexing');
   let updates=0,created;
   patch(t,prisma.ragIndexJob,'findUnique',async()=>({id:'old',tenantId:'default',payloadJson:JSON.stringify({indexedSourceVersionId:'v1'})}));
@@ -148,7 +149,7 @@ test('matching source completion uses a version CAS and preserves a pending foll
   const {syncDocumentIndexStatus}=require('../dist/services/rag/indexing');
   patch(t,prisma.ragIndexJob,'findUnique',async()=>({payloadJson:JSON.stringify({indexedSourceVersionId:'v2'})}));
   patch(t,prisma.knowledgeDocument,'findUnique',async()=>({activeVersionId:'v2',status:'enabled'}));
-  patch(t,prisma.ragIndexJob,'findFirst',async()=>({status:'queued'}));
+  patch(t,prisma.ragIndexJob,'findMany',async()=>[{status:'queued',payloadJson:JSON.stringify({sourceVersionId:'v2'})}]);
   let write;
   patch(t,prisma.knowledgeDocument,'updateMany',async args=>{write=args;return{count:1};});
   await syncDocumentIndexStatus('knowledge_document','doc','succeeded','rebuild','job');
@@ -172,6 +173,7 @@ test('producer with an older version snapshot cannot replace a newer queued payl
 });
 
 test('delayed superseded job performs no writes and does not rebuild an already indexed current version',async t=>{
+  patch(t,prisma.knowledgeChunk,'findFirst',async()=>({metadataJson:JSON.stringify({activeVersionId:'v2'})}));
   patch(t,settings,'getRagEmbeddingSettings',async()=>({embeddingProvider:'openai',embeddingModel:'text-embedding-3-small'}));
   let payload={sourceVersionId:'v1'};
   patch(t,prisma.ragIndexJob,'findUnique',async()=>({payloadJson:JSON.stringify(payload)}));
@@ -193,4 +195,53 @@ test('late rebuild completion cannot mark an archived document indexed',async t=
   patch(t,prisma.knowledgeDocument,'findUnique',async()=>({activeVersionId:'v1',status:'archived',latestIndexStatus:'idle'}));
   patch(t,prisma.knowledgeDocument,'updateMany',async()=>{throw Error('archived status must stay idle');});
   await require('../dist/services/rag/indexing').syncDocumentIndexStatus('knowledge_document','doc','succeeded','rebuild','old');
+});
+
+test('a succeeded label without published current-version chunks is not proof of catch-up',async t=>{
+  const {syncDocumentIndexStatus}=require('../dist/services/rag/indexing');
+  patch(t,prisma.ragIndexJob,'findUnique',async()=>({id:'v1-retry',tenantId:'default',payloadJson:JSON.stringify({indexedSourceVersionId:'v1'})}));
+  patch(t,prisma.knowledgeDocument,'findUnique',async()=>({activeVersionId:'v2',status:'enabled',latestIndexStatus:'succeeded'}));
+  patch(t,prisma.knowledgeChunk,'findFirst',async()=>({metadataJson:JSON.stringify({activeVersionId:'v1'})}));
+  patch(t,prisma.ragIndexJob,'findFirst',async()=>null);
+  let created;
+  patch(t,prisma.ragIndexJob,'create',async({data})=>{created=data;return{id:'catch-up',...data};});
+  await syncDocumentIndexStatus('knowledge_document','doc','succeeded','rebuild','v1-retry');
+  assert.ok(created,'missing v2 publication still requires a persisted catch-up');
+  assert.equal(JSON.parse(created.payloadJson).sourceVersionId,'v2');
+});
+
+test('v1 queued backoff does not regress v2 completion and its retry preserves v2 custom chunks',async t=>{
+  const {replaceIndexedChunks}=require('../dist/services/rag/indexing/persistence');
+  const rows=[];let queued=0;
+  patch(t,prisma.knowledgeChunk,'createMany',async({data})=>{rows.push(...data);return{count:data.length};});
+  patch(t,prisma.knowledgeChunk,'updateMany',async({where,data})=>{for(const row of rows)if(where.id.in.includes(row.id))Object.assign(row,data);return{count:1};});
+  patch(t,prisma,'$transaction',async promises=>Promise.all(promises));
+  // v2 completes while v1 is waiting in retry backoff.
+  await replaceIndexedChunks({upsertPoints:async()=>{},deletePoints:async()=>{}},[{id:'v2-custom',tenantId:'default',ownerType:'knowledge_document',ownerId:'doc',chunkText:'custom v2',chunkOrder:0,chunkHash:'custom',tokenEstimate:2,language:'en',embedVersion:1,metadataJson:JSON.stringify({activeVersionId:'v2'})}],[[1]],[]);
+  const document={activeVersionId:'v2',status:'enabled',latestIndexStatus:'running'};
+  patch(t,prisma.ragIndexJob,'findUnique',async()=>({id:'v2',tenantId:'default',payloadJson:JSON.stringify({sourceVersionId:'v2',indexedSourceVersionId:'v2'})}));
+  patch(t,prisma.ragIndexJob,'findFirst',async()=>({id:'v1-retry',status:'queued',payloadJson:JSON.stringify({sourceVersionId:'v1'})}));
+  patch(t,prisma.ragIndexJob,'findMany',async()=>[{id:'v1-retry',status:'queued',payloadJson:JSON.stringify({sourceVersionId:'v1'})}]);
+  patch(t,prisma.knowledgeDocument,'findUnique',async()=>document);
+  patch(t,prisma.knowledgeDocument,'updateMany',async({data})=>{Object.assign(document,data);return{count:1};});
+  await require('../dist/services/rag/indexing').syncDocumentIndexStatus('knowledge_document','doc','succeeded','rebuild','v2');
+  assert.equal(document.latestIndexStatus,'succeeded','queued older-version retries do not make v2 pending');
+  let oldPayload={sourceVersionId:'v1',preChunks:[{chunkText:'v1'}]};
+  patch(t,prisma.ragIndexJob,'findUnique',async()=>({id:'v1-retry',tenantId:'default',payloadJson:JSON.stringify(oldPayload)}));
+  patch(t,prisma.ragIndexJob,'update',async({data})=>{oldPayload=JSON.parse(data.payloadJson);return{id:'v1-retry'};});
+  patch(t,prisma.knowledgeDocument,'findUnique',async()=>document);
+  patch(t,prisma.knowledgeChunk,'findFirst',async({where})=>{
+    assert.deepEqual(where.indexedAt,{not:null}); return rows.find(row=>row.indexedAt!==null);
+  });
+  patch(t,prisma.ragIndexJob,'findFirst',async()=>null); // v2 is succeeded, no queued job exists
+  patch(t,prisma.ragIndexJob,'create',async({data})=>{queued++;return{id:'bad-default-rebuild',...data};});
+  const service=new RagIndexService({},{});
+  service.assertJobNotCancelled=async()=>{};service.updateJobProgress=async()=>{};
+  service.sourceAssembler.loadSourceDocuments=async()=>[{metadata:{activeVersionId:'v2'}}];
+  service.sourceAssembler.buildChunkCandidates=()=>{throw Error('v1 must not rebuild v2');};
+  await service.upsertOwnerChunks('knowledge_document','doc','default','v1-retry');
+  await require('../dist/services/rag/indexing').syncDocumentIndexStatus('knowledge_document','doc','succeeded','rebuild','v1-retry');
+  assert.equal(queued,0,'published v2 must not be replaced by a default catch-up');
+  assert.equal(rows[0].chunkText,'custom v2');
+  assert.equal(rows.length,1);
 });
