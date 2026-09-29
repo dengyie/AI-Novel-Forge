@@ -17,3 +17,10 @@
 确认相同 URL 的音频覆盖与 max-age=3600 冲突，完整/Range 响应改 no-store。两个虚拟 2GiB 章节经真实 concat 函数触发 RangeError；通过 RF64/ds64 修复，避免创建或复制 4GiB 测试内容。普通 RIFF 实际文件拼接、RF64 长度/偏移和不安全元数据均有回归。
 
 Server build 与交付/续生成/M4B/桌面生命周期初次组合 38/38 通过，追加 RIFF 与非法 RF64 用例 3/3 通过。未运行真实超长 ffmpeg 编码或 UI 验收。
+
+
+## 桌面生命周期阶段
+
+原 health 函数在 20ms deadline 下，100ms 后仍 pending；原 before-quit callback 的 preventDefault=false/stopped=false，确认 Electron 可先退出。移除两份重复 readiness 循环与旧进程停止包装，收敛到 runtime/serverLifecycle。增加仅父 IPC 的 desktop shutdown 入口，避免 Windows 强制终止跳过 workers 收口。
+
+Server 与 desktop build 通过；desktop 生命周期 6/6（含真实 HTTP 与子进程），父 IPC 3/3 通过。未运行 GUI、真实 Windows utilityProcess 或打包；不触及生产数据库。

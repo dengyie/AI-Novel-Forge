@@ -52,3 +52,16 @@
 - `server/src/app.ts`
 - `server/tests/recoveryBootstrapConcurrency.test.js`
 - `server/tests/startupReadiness.test.js`
+
+
+## 桌面宿主的启动与退出边界
+
+桌面 readiness 等待必须把总期限传入每次 fetch 的 AbortController，同时观察子进程退出，取消响应正文并释放计时器。循环外检查 Date.now 不能中断无响应 HTTP 请求。
+
+Electron before-quit 不等待 Promise。宿主必须 preventDefault、复用同一次 stop Promise，确认服务 exit 后重新 app.quit；relaunch 和安装更新使用同一收口规则。启动尚未分配端口时退出，应阻止后续启动；已经发起启动时，退出必须等待该启动 Promise 及其失败清理，不能仅检查已经赋值的 stop handle。
+
+开发托管模式直接启动 server/dist/app.js 并保留 server 工作目录，避免 pnpm 包装进程被终止后实际服务继续运行。Electron 可执行文件必须设置 ELECTRON_RUN_AS_NODE。
+
+Windows 的终止信号不能替代 Node 优雅关闭。宿主通过私有父子 IPC 发送 ai-novel:shutdown；server 仅在 desktop runtime 接受 process.parentPort（utility process）或已连接 Node IPC 的父消息，并进入与 SIGTERM 相同的 shutdown。此入口不暴露 HTTP 路由。宿主等待真实 exit，25 秒后只强制终止自己拥有的服务进程，额外 5 秒仍未退出则报告关闭失败。killed 仅表示信号已发送，不能当作 exit。
+
+验证边界：Node 测试覆盖真实挂起 HTTP、实际子进程 IPC 退出、重复 quit、停止失败和强制终止；Electron/Windows 打包运行与 UI 验收仍需要发行前验证。

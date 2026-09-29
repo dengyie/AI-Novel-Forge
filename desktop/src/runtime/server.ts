@@ -1,8 +1,7 @@
-import type { ChildProcess } from "node:child_process";
+import { waitForServerHealth, stopOwnedServerProcess } from "./serverLifecycle";
 import { spawn } from "node:child_process";
 import net from "node:net";
 import path from "node:path";
-import type { UtilityProcess } from "electron";
 import { utilityProcess } from "electron";
 import { appendDesktopLog, logDesktopError } from "./logging";
 import {
@@ -80,103 +79,6 @@ export async function resolveDesktopServerPort(options: { isPackaged: boolean })
   return mode === "external" ? resolveExternalServerPort() : resolveManagedServerPort();
 }
 
-async function waitForServerHealth(port: number, timeoutMs = 30_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  const healthUrl = `http://127.0.0.1:${port}/api/health/ready`;
-
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(healthUrl);
-      if (response.ok) {
-        return;
-      }
-    } catch {
-      // Retry until timeout.
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, 500));
-  }
-
-  throw new Error(`Timed out waiting for server health at ${healthUrl}.`);
-}
-
-async function waitForServerHealthOrExit(
-  port: number,
-  processHandle: ManagedDesktopProcess,
-  timeoutMs = 45_000,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  const healthUrl = `http://127.0.0.1:${port}/api/health/ready`;
-
-  while (Date.now() < deadline) {
-    if (processHandle.hasExited()) {
-      throw new Error(`Desktop server exited before becoming healthy at ${healthUrl}.`);
-    }
-
-    try {
-      const response = await fetch(healthUrl);
-      if (response.ok) {
-        return;
-      }
-    } catch {
-      // Retry until timeout.
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, 500));
-  }
-
-  throw new Error(`Timed out waiting for server health at ${healthUrl}.`);
-}
-
-function toPnpmCommand(): string {
-  return process.platform === "win32" ? "pnpm.cmd" : "pnpm";
-}
-
-function buildManagedServerCommand(): {
-  command: string;
-  args: string[];
-  cwd: string;
-} {
-  const explicitEntry = process.env.AI_NOVEL_SERVER_ENTRY?.trim();
-  if (explicitEntry) {
-    return {
-      command: process.execPath,
-      args: [path.resolve(explicitEntry)],
-      cwd: resolveWorkspaceRoot(),
-    };
-  }
-
-  return {
-    command: toPnpmCommand(),
-    args: ["--filter", "@ai-novel/server", "start"],
-    cwd: resolveWorkspaceRoot(),
-  };
-}
-
-function stopChildProcess(child: ChildProcess): Promise<void> {
-  return new Promise((resolve) => {
-    if (child.exitCode !== null || child.killed) {
-      resolve();
-      return;
-    }
-
-    child.once("exit", () => resolve());
-    child.kill();
-  });
-}
-
-function stopUtilityChildProcess(child: UtilityProcess): Promise<void> {
-  return new Promise((resolve) => {
-    if (child.pid == null) {
-      resolve();
-      return;
-    }
-
-    child.once("exit", () => resolve());
-    child.kill();
-  });
-}
-
 function appendProcessOutput(
   stream: NodeJS.ReadableStream | null,
   source: string,
@@ -200,24 +102,33 @@ function appendProcessOutput(
 
 function startWorkspaceManagedServer(port: number): ManagedDesktopProcess {
   const appDataDir = resolveDesktopAppDataDir();
-  const { command, args, cwd } = buildManagedServerCommand();
+  const command = process.execPath;
+  const args = [process.env.AI_NOVEL_SERVER_ENTRY?.trim()
+    ? path.resolve(process.env.AI_NOVEL_SERVER_ENTRY.trim())
+    : path.join(resolveWorkspaceRoot(), "server", "dist", "app.js")];
+  const cwd = process.env.AI_NOVEL_SERVER_ENTRY?.trim()
+    ? resolveWorkspaceRoot()
+    : path.join(resolveWorkspaceRoot(), "server");
   const child = spawn(command, args, {
     cwd,
     env: {
       ...process.env,
+      ELECTRON_RUN_AS_NODE: "1",
       AI_NOVEL_RUNTIME: "desktop",
       AI_NOVEL_APP_DATA_DIR: appDataDir,
       PORT: String(port),
       HOST: "127.0.0.1",
       ALLOW_LAN: "false",
     },
-    stdio: "pipe",
+    stdio: ["ignore", "pipe", "pipe", "ipc"],
     windowsHide: true,
   });
 
   appendProcessOutput(child.stdout, "desktop.server.stdout", "info");
   appendProcessOutput(child.stderr, "desktop.server.stderr", "error");
+  let spawnFailed = false;
   child.on("error", (error) => {
+    if (child.pid == null) spawnFailed = true;
     logDesktopError("desktop.server.process", error);
   });
   child.on("exit", (code, signal) => {
@@ -228,9 +139,18 @@ function startWorkspaceManagedServer(port: number): ManagedDesktopProcess {
     );
   });
 
+  const hasExited = () => spawnFailed || child.exitCode !== null || child.signalCode !== null;
+  let stopping: Promise<void> | null = null;
   return {
-    hasExited: () => child.exitCode !== null || child.killed,
-    stop: async () => stopChildProcess(child),
+    hasExited,
+    stop: () => stopping ??= stopOwnedServerProcess({
+      events: child, hasExited,
+      terminate: () => {
+        if (child.connected) child.send({ type: "ai-novel:shutdown" });
+        else child.kill();
+      },
+      forceKill: () => { child.kill("SIGKILL"); },
+    }),
   };
 }
 
@@ -271,9 +191,14 @@ function startPackagedManagedServer(port: number): ManagedDesktopProcess {
   appendProcessOutput(child.stdout, "desktop.server.stdout", "info");
   appendProcessOutput(child.stderr, "desktop.server.stderr", "error");
 
+  let stopping: Promise<void> | null = null;
   return {
     hasExited: () => hasExited,
-    stop: async () => stopUtilityChildProcess(child),
+    stop: () => stopping ??= stopOwnedServerProcess({
+      events: child, hasExited: () => hasExited,
+      terminate: () => { child.postMessage({ type: "ai-novel:shutdown" }); },
+      forceKill: () => { if (child.pid != null) process.kill(child.pid, "SIGKILL"); },
+    }),
   };
 }
 
@@ -283,7 +208,7 @@ async function startManagedServer(port: number, isPackaged: boolean): Promise<De
     : startWorkspaceManagedServer(port);
 
   try {
-    await waitForServerHealthOrExit(port, managedProcess, 45_000);
+    await waitForServerHealth(port, 45_000, managedProcess.hasExited);
     appendDesktopLog("desktop.server.process", `Desktop server is ready at http://127.0.0.1:${port}/api/health/ready.`);
   } catch (error) {
     await managedProcess.stop();

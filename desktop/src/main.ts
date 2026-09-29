@@ -1,3 +1,4 @@
+import { createServerQuitHandler } from "./runtime/serverLifecycle";
 import path from "node:path";
 import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from "electron";
 import {
@@ -35,6 +36,7 @@ const UPDATER_CHANNEL = "desktop:updater-state-changed";
 let mainWindow: BrowserWindow | null = null;
 let splashWindow: BrowserWindow | null = null;
 let stopServer: (() => Promise<void>) | null = null;
+let serverStartup: ReturnType<typeof startDesktopServer> | null = null;
 let updaterController: DesktopUpdaterController | null = null;
 let rendererReady = false;
 let appShellReady = false;
@@ -42,10 +44,18 @@ let serverHealthy = false;
 let mainWindowShown = false;
 let bootstrapFailed = false;
 let initialUpdateCheckScheduled = false;
+let desktopQuitting = false;
+
+async function stopDesktopServer(): Promise<void> {
+  if (serverStartup) {
+    try { await serverStartup; } catch { /* Startup owns failed-process cleanup. */ }
+  }
+  await stopServer?.();
+}
 
 function relaunchApp(extraArgs?: string[]): void {
   app.relaunch({ args: extraArgs ?? createSanitizedRelaunchArgs() });
-  app.exit(0);
+  app.quit();
 }
 
 function appendBootstrapStage(stage: string, detail: string): void {
@@ -332,6 +342,7 @@ function createSplashWindow(): BrowserWindow {
 }
 
 async function bootstrapDesktopApp(): Promise<void> {
+  if (desktopQuitting) return;
   appendBootstrapStage("app-ready", "Electron app reported ready.");
   cleanupDesktopLogs();
   setBootstrapSnapshot(createBootstrapSnapshot({
@@ -368,6 +379,7 @@ async function bootstrapDesktopApp(): Promise<void> {
   }
 
   const port = await resolveDesktopServerPort({ isPackaged: app.isPackaged });
+  if (desktopQuitting) return;
   mainWindow = createMainWindow(port);
   mainWindow.on("closed", () => {
     mainWindow = null;
@@ -377,7 +389,8 @@ async function bootstrapDesktopApp(): Promise<void> {
   appendBootstrapStage("server-starting", `Starting desktop server on 127.0.0.1:${port}.`);
   updateBootstrapProgress();
 
-  const server = await startDesktopServer({ isPackaged: app.isPackaged, port });
+  serverStartup = startDesktopServer({ isPackaged: app.isPackaged, port });
+  const server = await serverStartup;
   stopServer = server.stop;
   serverHealthy = true;
   appendBootstrapStage("server-healthy", `Desktop server is healthy on 127.0.0.1:${server.port}.`);
@@ -430,7 +443,8 @@ function registerDesktopIpcHandlers(): void {
     await updaterController?.checkForUpdates();
     return desktopUpdaterStore.getSnapshot();
   });
-  ipcMain.handle("desktop:quit-and-install", () => {
+  ipcMain.handle("desktop:quit-and-install", async () => {
+    await stopDesktopServer();
     updaterController?.quitAndInstall();
     return true;
   });
@@ -560,6 +574,7 @@ async function handleBootstrapFailure(error: unknown): Promise<void> {
 
   closeSplashWindow();
   await showBootstrapFailureDialog(error);
+  await stopDesktopServer();
   app.exit(1);
 }
 
@@ -583,11 +598,13 @@ if (!app.requestSingleInstanceLock()) {
     }
   });
 
-  app.on("before-quit", () => {
-    if (stopServer) {
-      void stopServer();
-    }
-  });
+  app.on("before-quit", createServerQuitHandler(async () => {
+    desktopQuitting = true;
+    await stopDesktopServer();
+  }, () => app.quit(), (error) => {
+    desktopQuitting = false;
+    logDesktopError("desktop.server.shutdown", error);
+  }));
 
   app.whenReady()
     .then(() => bootstrapDesktopApp())

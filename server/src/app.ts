@@ -1,3 +1,4 @@
+import { registerDesktopParentShutdown } from "./app/desktopLifecycle";
 import "dotenv/config";
 import type { Server } from "node:http";
 import os from "node:os";
@@ -574,6 +575,12 @@ async function bootstrap(): Promise<void> {
       process.exit(1);
     }
   };
+
+  registerDesktopParentShutdown({
+    runtime: process.env.AI_NOVEL_RUNTIME,
+    nodeProcess: process,
+    shutdown: () => { void shutdown("desktop-parent"); },
+  });
 
   process.once("SIGTERM", () => {
     void shutdown("SIGTERM");
