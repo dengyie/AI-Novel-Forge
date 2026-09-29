@@ -1,3 +1,4 @@
+import { filterPublishedChunks } from "./retrieval";
 import { prisma } from "../../db/prisma";
 import { ragConfig } from "../../config/rag";
 import { compactSnippet, normalizeRagText, toKeywordTerms } from "./utils";
@@ -151,6 +152,7 @@ export class HybridRetrievalService {
     const rows = await prisma.knowledgeChunk.findMany({
       where: {
         tenantId: options.tenantId,
+        indexedAt: { not: null },
         ...(options.novelId ? { novelId: options.novelId } : {}),
         ...(options.worldId ? { worldId: options.worldId } : {}),
         ...(ownerTypes ? { ownerType: { in: ownerTypes } } : {}),
@@ -167,7 +169,7 @@ export class HybridRetrievalService {
       orderBy: [{ updatedAt: "desc" }, { chunkOrder: "asc" }],
       take: options.keywordCandidates ?? ragConfig.keywordCandidates,
     });
-    return rows.map((row) => ({
+    return filterPublishedChunks(rows.map((row) => ({
       id: row.id,
       ownerType: row.ownerType as RagOwnerType,
       ownerId: row.ownerId,
@@ -181,7 +183,7 @@ export class HybridRetrievalService {
       contextPrefix: this.extractContextPrefix(row.metadataJson),
       source: "keyword" as const,
       retrievalSource: "keyword" as const,
-    }));
+    })));
   }
 
   private async vectorSearch(query: string, options: SearchScopeOptions): Promise<RetrievedChunk[]> {
@@ -200,7 +202,7 @@ export class HybridRetrievalService {
         ownerIds: toOwnerIds(options.ownerIds),
         facets: options.facets,
       });
-      return searchRows.map((row) => ({
+      return await filterPublishedChunks(searchRows.map((row) => ({
         id: row.id,
         ownerType: row.payload.ownerType,
         ownerId: row.payload.ownerId,
@@ -214,7 +216,7 @@ export class HybridRetrievalService {
         contextPrefix: row.payload.contextPrefix ?? this.extractContextPrefix(row.payload.metadataJson),
         source: "vector" as const,
         retrievalSource: "vector" as const,
-      }));
+      })));
     } catch {
       return [] as RetrievedChunk[];
     }

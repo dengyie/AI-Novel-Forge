@@ -68,6 +68,25 @@ RAG worker 在启动时读取一份运行时设置快照；设置页保存成功
 
 相关回归范围：`RagWorkerManager` refresh/disable/stalled 状态转换、设置路由等待 refresh 后再入队，以及 enabled=false 时不重新拉起 worker。
 
+## 索引版本追赶与发布边界
+
+适用范围：知识资料版本变更、所有 owner 分块重建、向量/关键词召回、RAG 任务状态投影。
+
+同一 owner 的 running 任务持有执行输入；新请求必须持久化排队，不能通过返回 running ID 表示已接收。queued 只在同一资料版本下合并，并使用状态与 payload CAS 处理 worker 领取和多生产者竞态。不同版本保持独立；`sourceVersionId` 绑定自定义 `preChunks` 的来源，过期请求不能覆盖较新资料的预分块。worker 若发现请求版本已过期，应跳过写入，补排尚未完成的当前版本；当前版本已完成时不再重建覆盖其定制分块。
+
+`indexedSourceVersionId` 记录本次实际索引版本。文档成功状态必须通过 `activeVersionId` 条件写入；有后续 queued/running 请求时保留待处理状态。归档文档不接受旧 rebuild 的成功投影。
+
+分块跨 DB 与 Qdrant 无法使用单一事务，因此 `KnowledgeChunk.indexedAt` 同时是发布标记：
+
+1. 外部写入前先保存全部新分块 ID，`indexedAt=null`，即使部分向量写入失败也保留清理依据。
+2. 向量全部成功后，在本地事务内为新分块设置 `indexedAt`，同时将旧分块置为 null。发布集合切换有原子性。
+3. 先删除旧向量，成功后才删除本地旧行。失败必须抛回 worker，进入持久任务的有界重试。达到上限后任务保持失败，可重建恢复；不能吞错宣布完成或删除待清理 ID。
+4. 向量和关键词召回都批量检查本地发布标记；知识资料还要匹配当前激活版本并排除归档。外部旧点残留或部分写入点不具备独立可见性。
+
+这样外部清理故障影响的是重试进度，不会让旧资料重新进入写作上下文。不得通过只修 UI 状态、无限重试、清空向量集合或删除本地残留行来掩盖一致性问题。历史上已失去本地 ID 的外部孤儿点会被检索门禁拒绝；生产存量物理清理需要单独核验与备份，不能在请求路径猜测删除。
+
+代码边界：轻量入队与状态投影在 `rag/indexing/`；源读取和候选装配在 `indexing/source/`；发布与清理协议在 `indexing/persistence/`；召回有效性检查在 `rag/retrieval/`。主进程不导入 worker 服务 barrel。
+
 ## 相关模块
 
 - `server/src/services/rag/`

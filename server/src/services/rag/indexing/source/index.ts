@@ -1,0 +1,1 @@
+export { SourceDocumentAssembler } from "./SourceDocumentAssembler";

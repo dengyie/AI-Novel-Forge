@@ -1,3 +1,5 @@
+import { enqueueIndexJob } from "./indexing";
+import type { RagOwnerType } from "./types";
 import { prisma } from "../../db/prisma";
 import { ragWorkerManager } from "../../runtime/RagWorkerManager";
 
@@ -29,39 +31,7 @@ export const ragJobQueue = {
       maxAttempts?: number;
     },
   ): Promise<{ id: string }> {
-    const { ragConfig } = await import("../../config/rag");
-    const existing = await prisma.ragIndexJob.findFirst({
-      where: {
-        tenantId: options?.tenantId ?? ragConfig.defaultTenantId,
-        jobType,
-        // ownerType 为 schema enum；调用方传的字符串均来自 RAG_OWNER_TYPES 集合，
-        // 运行时值一致，此处用断言避免主进程为类型引 RAG types 树。
-        ownerType: ownerType as never,
-        ownerId,
-        status: { in: ["queued", "running"] },
-      },
-      orderBy: { createdAt: "desc" },
-    });
-    if (existing) {
-      return existing;
-    }
-    const now = new Date();
-    const created = await prisma.ragIndexJob.create({
-      data: {
-        tenantId: options?.tenantId ?? ragConfig.defaultTenantId,
-        jobType,
-        ownerType: ownerType as never,
-        ownerId,
-        status: "queued",
-        attempts: 0,
-        maxAttempts: options?.maxAttempts ?? ragConfig.workerMaxAttempts,
-        runAfter: options?.runAfter ?? now,
-        payloadJson: JSON.stringify({
-          ...(options?.payload ?? {}),
-          progress: { stage: "queued", label: "等待执行", detail: "索引任务已进入队列。", percent: 0, updatedAt: now.toISOString() },
-        }),
-      },
-    });
+    const created = await enqueueIndexJob(jobType, ownerType as RagOwnerType, ownerId, options);
     ragWorkerManager.kickPoll();
     return created;
   },

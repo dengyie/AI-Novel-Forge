@@ -103,6 +103,10 @@ test("archiving knowledge document queues index cleanup and leaves document cont
 });
 
 test("completed knowledge delete job leaves archived document index status idle", async () => {
+  const originalDocumentFind = prisma.knowledgeDocument.findUnique;
+  const originalPendingFind = prisma.ragIndexJob.findFirst;
+  prisma.knowledgeDocument.findUnique = async () => ({activeVersionId:"knowledge-version-1",status:"archived"});
+  prisma.ragIndexJob.findFirst = async () => null;
   const service = new RagIndexService({}, {});
   const originalFindUnique = prisma.ragIndexJob.findUnique;
   const originalUpdate = prisma.ragIndexJob.update;
@@ -135,7 +139,7 @@ test("completed knowledge delete job leaves archived document index status idle"
     });
 
     assert.deepEqual(updateManyArgs, {
-      where: { id: "knowledge-doc-1" },
+      where: { id: "knowledge-doc-1", activeVersionId:"knowledge-version-1", status:"archived" },
       data: {
         latestIndexStatus: "idle",
       },
@@ -144,5 +148,7 @@ test("completed knowledge delete job leaves archived document index status idle"
     prisma.ragIndexJob.findUnique = originalFindUnique;
     prisma.ragIndexJob.update = originalUpdate;
     prisma.knowledgeDocument.updateMany = originalUpdateMany;
+    prisma.knowledgeDocument.findUnique = originalDocumentFind;
+    prisma.ragIndexJob.findFirst = originalPendingFind;
   }
 });
