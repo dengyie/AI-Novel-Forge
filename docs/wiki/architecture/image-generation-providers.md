@@ -33,6 +33,14 @@
 
 模块 HTTP 子职责见 `server/src/modules/comic/http/README.md` 与 `server/src/modules/drama/http/README.md`；业务服务负责路径解析和持久化，路由门面及子路由只负责合同校验和传输。
 
+## 漫画角色资产图片发布
+
+适用范围：角色资产上传、AI 生成、分镜参考图读取与图片 HTTP 输出。资产的可读文件由 `imageData.fileName` 指向，PNG/JPEG/WebP 是文件格式，不能依靠扫描扩展名优先级判断哪张是当前图。
+
+每次上传或生成写入独立 `asset-UUID.ext` 候选，完整写入后再用数据库事务提交图片状态和文件名。事务同时读取实际被替代的文件名，成功后只清理这个前驱和旧固定命名文件；禁止遍历删除全部候选，以免擦掉另一个请求尚未提交的新图。写入或提交失败仅清理本次候选，原图和原指针不动。提交后的清理失败记录告警，不撤销新图、不把成功返回改成失败。
+
+无 `fileName` 的已有资产仍从固定 `asset.png/jpg/webp` 读取，原因是部署前持久文件没有发布指针；下一次成功发布会清理这些固定文件。已有指针找不到文件时必须报不存在，不准回退显示另一个旧扩展。生成中或生成失败状态保留数据库当前指针，不能用开始生成时的旧快照覆盖期间上传的新图。
+
 ## Related Modules
 
 - `server/src/services/settings/ProviderImageSettingsService.ts`

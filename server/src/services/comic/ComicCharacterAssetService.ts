@@ -4,11 +4,12 @@
  *
  * 资产类型：costume | weapon | item | vehicle | ability | other
  * imageData JSON：{ status, url, prompt, provider, generatedAt, error, origin:"generated"|"uploaded" }
- * 图片存储：generated-images/comic-character-assets/{assetId}/asset.{ext}
+ * 图片存储：独立候选文件，imageData.fileName 在 DB 提交后成为可读版本。
  * HTTP 端点：/api/comic/character-assets/:assetId/image
  */
 import fs from "fs/promises";
 import path from "path";
+import { randomUUID } from "node:crypto";
 
 import { prisma } from "../../db/prisma";
 import { AppError } from "../../middleware/errorHandler";
@@ -29,6 +30,7 @@ export interface AssetImageData {
   generatedAt?: string;
   error?: string;
   origin?: "generated" | "uploaded";
+  fileName?: string;
 }
 
 export interface CreateAssetInput {
@@ -64,15 +66,60 @@ export function assetImageUrl(assetId: string): string {
   return `/api/comic/character-assets/${assetId}/image`;
 }
 
-/** 找已存盘的资产图路径 */
+function storedAssetFile(assetId: string, fileName: string): { filePath: string; mimeType: string } {
+  const match = IMAGE_EXTS.find(([ext]) => fileName.endsWith(`.${ext}`));
+  if (path.basename(fileName) !== fileName || !fileName.startsWith("asset-") || !match) {
+    throw new AppError("资产图片存储路径无效。", 500);
+  }
+  return { filePath: path.join(assetDir(assetId), fileName), mimeType: match[1] };
+}
+
+async function removeAssetCandidate(filePath: string): Promise<void> {
+  try { await fs.unlink(filePath); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      console.warn("[comic.asset] image cleanup failed", { filePath, error });
+    }
+  }
+}
+
+/** Publish only complete files. The transaction captures the predecessor actually replaced. */
+async function publishAssetImage(assetId: string, imageData: AssetImageData & { fileName: string }): Promise<void> {
+  const candidate = storedAssetFile(assetId, imageData.fileName);
+  let previousFileName: string | undefined;
+  try {
+    previousFileName = await prisma.$transaction(async (tx) => {
+      const current = await tx.comicCharacterAsset.findUnique({ where: { id: assetId }, select: { imageData: true } });
+      if (!current) throw new AppError("资产不存在。", 404);
+      const previous = safeJsonParse<AssetImageData>(current.imageData, { status: "idle" });
+      await tx.comicCharacterAsset.update({ where: { id: assetId }, data: { imageData: JSON.stringify(imageData) } });
+      return previous.fileName;
+    });
+  } catch (error) {
+    await removeAssetCandidate(candidate.filePath);
+    throw error;
+  }
+  // Cleanup cannot roll back a committed publication or delete another request's candidate.
+  if (previousFileName && previousFileName !== imageData.fileName) {
+    await removeAssetCandidate(storedAssetFile(assetId, previousFileName).filePath);
+  }
+  for (const [ext] of IMAGE_EXTS) await removeAssetCandidate(path.join(assetDir(assetId), `asset.${ext}`));
+}
+
+/** Published filenames are authoritative; fixed names are only for pre-publication assets. */
 export async function resolveAssetFile(assetId: string): Promise<{ filePath: string; mimeType: string } | null> {
-  const dir = assetDir(assetId);
+  const asset = await prisma.comicCharacterAsset.findUnique({ where: { id: assetId }, select: { imageData: true } });
+  if (!asset) return null;
+  const state = safeJsonParse<AssetImageData>(asset.imageData, { status: "idle" });
+  if (state.fileName) {
+    const published = storedAssetFile(assetId, state.fileName);
+    try { await fs.access(published.filePath); return published; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
+  }
   for (const [ext, mimeType] of IMAGE_EXTS) {
-    const candidate = path.join(dir, `asset.${ext}`);
-    try {
-      await fs.access(candidate);
-      return { filePath: candidate, mimeType };
-    } catch { /* 继续 */ }
+    const filePath = path.join(assetDir(assetId), `asset.${ext}`);
+    try { await fs.access(filePath); return { filePath, mimeType }; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   }
   return null;
 }
@@ -238,24 +285,24 @@ export class ComicCharacterAssetService {
   // ── 图片上传 ──────────────────────────────────────────────────────────────
 
   async uploadAssetImage(assetId: string, fileBuffer: Buffer, mimeType: string): Promise<{ url: string }> {
-    const asset = await this.getAsset(assetId);
+    await this.getAsset(assetId);
     const ext = mimeType === "image/jpeg" ? "jpg" : mimeType === "image/webp" ? "webp" : "png";
     const dir = assetDir(assetId);
     await fs.mkdir(dir, { recursive: true });
-    const filePath = path.join(dir, `asset.${ext}`);
-    await fs.writeFile(filePath, fileBuffer);
+    const fileName = `asset-${randomUUID()}.${ext}`;
+    const filePath = path.join(dir, fileName);
+    try { await fs.writeFile(filePath, fileBuffer, { flag: "wx" }); }
+    catch (error) { await removeAssetCandidate(filePath); throw error; }
 
     const url = assetImageUrl(assetId);
-    const imageData: AssetImageData = {
+    const imageData: AssetImageData & { fileName: string } = {
+      fileName,
       status: "done",
       url,
       origin: "uploaded",
       generatedAt: new Date().toISOString(),
     };
-    await prisma.comicCharacterAsset.update({
-      where: { id: assetId },
-      data: { imageData: JSON.stringify(imageData) },
-    });
+    await publishAssetImage(assetId, imageData);
     return { url };
   }
 
@@ -294,13 +341,29 @@ export class ComicCharacterAssetService {
       });
     }
 
+    let candidateFileName: string | undefined;
     const adapter: import("../image/runtime").ImageTargetAdapter<AssetImageData> = {
       kind: `comic.character-asset:${assetId}`,
       loadState: async () => safeJsonParse<AssetImageData>(asset.imageData, { status: "idle" }),
       saveState: async (next) => {
-        await prisma.comicCharacterAsset.update({ where: { id: assetId }, data: { imageData: JSON.stringify(next) } });
+        if (next.status === "done" && candidateFileName) {
+          await publishAssetImage(assetId, { ...next, fileName: candidateFileName });
+          return;
+        }
+        try {
+          await prisma.$transaction(async (tx) => {
+            const current = await tx.comicCharacterAsset.findUnique({ where: { id: assetId }, select: { imageData: true } });
+            const previous = safeJsonParse<AssetImageData>(current?.imageData, { status: "idle" });
+            await tx.comicCharacterAsset.update({ where: { id: assetId }, data: { imageData: JSON.stringify({ ...next, fileName: previous.fileName }) } });
+          });
+        } finally {
+          if (next.status === "error" && candidateFileName) await removeAssetCandidate(storedAssetFile(assetId, candidateFileName).filePath);
+        }
       },
-      diskPath: (ext) => path.join(assetDir(assetId), `asset.${ext}`),
+      diskPath: (ext) => {
+        candidateFileName = `asset-${randomUUID()}.${ext}`;
+        return storedAssetFile(assetId, candidateFileName).filePath;
+      },
       publicUrl: () => assetImageUrl(assetId),
       buildExtraDoneState: () => ({ origin: "generated" as const }),
     };
