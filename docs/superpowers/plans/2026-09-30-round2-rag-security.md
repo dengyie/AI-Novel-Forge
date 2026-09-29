@@ -11,3 +11,5 @@
 - [ ] 每阶段更新 wiki/release notes，运行 server build 和相应测试后提交。
 
 阶段一验证：server build 通过；archive/consistency/status/worker 四组共 29 tests 通过。仅 stub 数据，不接业务数据库。
+
+阶段二：限流与审计改用 Express 可信代理解析，默认不信任转发头，API_TRUST_PROXY 显式配置代理 IP/CIDR。三项真实 HTTP 测试旧实现全红；修复后 server build + identity/GC/auth 共 14 tests 通过。部署代理网段需在实际环境验收，本阶段不改线上配置。

@@ -118,6 +118,10 @@ export interface CreateAppOptions {
 export function createApp(options: CreateAppOptions = {}) {
   getSharedNovelServices();
   const app = express();
+  // Trust only explicitly configured proxy addresses/subnets, never arbitrary XFF.
+  const trustedProxies = (process.env.API_TRUST_PROXY ?? "")
+    .split(",").map((value) => value.trim()).filter(Boolean);
+  app.set("trust proxy", trustedProxies.length ? trustedProxies : false);
   const jsonBodyLimit = process.env.API_JSON_LIMIT ?? "2mb";
   const corsOriginEnv = process.env.CORS_ORIGIN;
   const corsAllowList = corsOriginEnv

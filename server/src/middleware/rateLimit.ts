@@ -1,3 +1,4 @@
+import { resolveClientIp } from "../http/clientIp";
 import type { NextFunction, Request, Response } from "express";
 import type { ApiResponse } from "@ai-novel/shared/types/api";
 
@@ -25,10 +26,7 @@ export function createRateLimitMiddleware(options: RateLimitOptions) {
   const limit = Math.max(1, options.limit);
   const windowMs = Math.max(1000, options.windowMs);
   const keyGenerator = options.keyGenerator
-    ?? ((req: Request) => {
-      const forwarded = req.header("x-forwarded-for")?.split(",")[0]?.trim();
-      return forwarded || req.ip || req.socket.remoteAddress || "unknown";
-    });
+    ?? ((req: Request) => resolveClientIp(req) ?? "unknown");
 
   // Opportunistic GC so long-lived process does not retain every IP forever.
   const gcEvery = 200;

@@ -107,6 +107,12 @@ embeddingConcurrency: asInt(process.env.EMBEDDING_CONCURRENCY, 4, 1, 16),
 
 - `CHAPTER_WRITER_TRANSPORT_RETRY_MAX_ATTEMPTS`（writer mid-stream / establish 瞬时 transport 失败整章重试上限，`server/src/services/novel/runtime/chapterRuntimePipeline.ts:181-189`）：retry 次数属于本文件 L55 明确禁止走 env 的「业务调优」类，但当前仍直读 `process.env`。已显式标注为 backlog，暂不迁是为：该参数仅启动期读一次、当前无多实例热调诉求；真正迁移需新建 `ChapterWriterRuntimeSettings` + 章节运行时设置面板（四步范式 + 客户端三处），属新领域而非纯收尾。读者遇到该 env 时，不应视为本规范的合法先例或 L48 允许 env 的同类。
 
+## HTTP 可信代理与客户端身份
+
+`API_TRUST_PROXY` 是启动期部署信任边界，值为逗号分隔的代理 IP/CIDR，默认空（不信任转发头）。Express 根据 socket 对端和可信链从右向左确定 `req.ip`；限流与请求审计统一使用这个结果，禁止自行取 `X-Forwarded-For` 首段。
+
+反代部署需按实际连接 API 的最后一跳及受控链配置，不能猜测 Docker 网段或启用全网信任。代理必须覆盖或正确追加客户端头；未配置时多个用户会共享代理 IP 的配额，部署验收需验证两个真实客户端能分桶、伪造前缀不能换桶。该配置不改变产品已接受的 open 模式。
+
 ## 相关模块
 
 - `server/src/config/rag.ts`
