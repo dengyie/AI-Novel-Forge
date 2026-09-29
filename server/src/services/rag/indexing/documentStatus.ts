@@ -9,6 +9,7 @@ export async function syncDocumentIndexStatus(ownerType: RagOwnerType, ownerId: 
   const payload = JSON.parse(job?.payloadJson ?? "{}") as Record<string, unknown>;
   const document = await prisma.knowledgeDocument.findUnique({ where: { id: ownerId }, select: { activeVersionId: true, status: true } });
   if (!document || (document.status === "archived" && jobType !== "delete")) return;
+  if (jobType === "delete" && document.status !== "archived") return;
   const indexedVersion = payload.indexedSourceVersionId;
   const sourceVersion = indexedVersion ?? payload.sourceVersionId;
   if (jobType !== "delete" && sourceVersion !== document.activeVersionId) {

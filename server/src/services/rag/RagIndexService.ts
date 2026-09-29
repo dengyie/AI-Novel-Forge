@@ -557,6 +557,13 @@ export class RagIndexService {
     const ownerType = job.ownerType as RagOwnerType;
     const jobType = job.jobType as RagJobType;
     if (jobType === "delete") {
+      if (ownerType === "knowledge_document") {
+        const document = await prisma.knowledgeDocument.findUnique({
+          where: { id: job.ownerId }, select: { status: true },
+        });
+        // Archive is reversible. A delayed delete must not erase a restored index.
+        if (document && document.status !== "archived") return { chunks: 0 };
+      }
       await this.updateJobProgress(job.id, {
         stage: "deleting_existing",
         label: "清理旧索引",

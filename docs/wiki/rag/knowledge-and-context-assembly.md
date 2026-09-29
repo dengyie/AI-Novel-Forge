@@ -53,7 +53,7 @@
 - Prompt 输入过大：检查 Context Broker 的预算、摘要和 dropped block 记录。
 - 知识库健康正常但生成没引用资料：检查 resolver 是否接入当前 workflow、prompt 是否声明 context requirement。
 - 旧版本内容仍被检索：检查激活版本和 chunk rebuild 是否对齐。
-- 归档文档恢复后无法召回：检查恢复动作是否把索引状态置为 `queued`，以及对应重建任务是否成功完成。
+- 归档文档恢复后无法召回：检查恢复动作是否把索引状态置为 `queued`，以及对应重建任务是否成功完成。归档 delete 的延迟重试必须重新读取当前文档状态；已恢复的文档应跳过删除与 idle 投影，否则旧清理会擦除恢复后新建的索引。文档已被物理删除时仍需清理孤儿分块。
 - facet 检索完全无结果：先检查发布时的 `preChunks` 是否进入 RAG job payload，再检查 `KnowledgeChunk.facetKeys` 和 Qdrant payload 是否都写入同一 facet 字段；如果是历史 chunk 没有 facet，应确认检索服务触发无 facet 回退。
 - 拆书发布后结构化结论召回不准：检查 `bookAnalysis.publish.facets` 的字段映射是否把结构化字段映射到正确 facet，不要在消费方临时发明新的 facet 名。
 - 召回质量难以复盘：检查 AppSetting `rag.retrievalTraceSampleRate` 是否为 0、`RagRetrievalTrace` 是否有近期记录、`timingsJson` 是否包含 vector / keyword / fusion / reranker / decay / total 六项，以及 facet 命中为空时 `fallbackTriggered` 是否写为 true。
