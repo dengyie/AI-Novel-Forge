@@ -43,6 +43,12 @@ Prompt 返回后先做当前 revision 检查。每个独立 canonical writer 事
 
 人物页的 `syncCharacterTimeline` 批量重建同样消费章节正文。它必须读取每章 revision，在删除前锁定整个来源快照，且仅删除快照中 chapterId 对应的自动时间线；按章节范围宽泛删除会波及读取后并发新增的章节。任何一章被新正文取代时，整个旧重建事务退出，保留新版事件。
 
+## Quality assessment ownership
+
+质量报告与质量闭环评估是独立 writer，分别验证同一个 `expectedContentRevision`。报告提交成功不代表后续评估仍有写权限。评估 CAS 被拒绝时，流水线重新读取当前章节质量债，淘汰旧评估及其全局重规划建议；旧章节质量警告不能冒充当前正文结果。
+
+`ChapterQualityLoopService.recordAssessment` 是质量评估唯一持久化入口。瞬态 SQLite 锁冲突重试该入口，不得在异常分支用无 revision 条件的 update 补写 riskFlags 或 chapterStatus。当前 revision 的非瞬态写入失败可保留本轮内存反馈，但不覆盖数据库元数据；正文已更新或删除则只能淘汰旧结果。
+
 ## Failure Modes
 
 - 只在 Prompt 前检查 revision：Prompt 返回后正文可能已经变化。

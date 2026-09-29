@@ -743,6 +743,7 @@ test("executePipeline counts replan debt in memory when recordAssessment fails",
     generationUpdateMany: prisma.generationJob.updateMany,
     novelFindUnique: prisma.novel.findUnique,
     chapterFindMany: prisma.chapter.findMany,
+    chapterFindFirst: prisma.chapter.findFirst,
     createQualityReport: reviewService.createQualityReport,
     emit: novelEventBus.emit,
     recordAssessment: chapterQualityLoopService.recordAssessment,
@@ -800,6 +801,7 @@ test("executePipeline counts replan debt in memory when recordAssessment fails",
       { id: "chapter-4", order: 4, title: "第四章", content: "", chapterStatus: "unplanned" },
     ];
   };
+  prisma.chapter.findFirst = async () => ({ order: 3, riskFlags: null, contentRevision: 7 });
   reviewService.createQualityReport = async () => null;
   novelEventBus.emit = async () => null;
   chapterQualityLoopService.recordAssessment = async () => {
@@ -813,6 +815,7 @@ test("executePipeline counts replan debt in memory when recordAssessment fails",
     return {
       retryCountUsed: 0,
       reviewExecuted: true,
+      contentRevision: 7,
       score: {
         coherence: 70,
         repetition: 80,
@@ -866,6 +869,7 @@ test("executePipeline counts replan debt in memory when recordAssessment fails",
     prisma.generationJob.updateMany = original.generationUpdateMany;
     prisma.novel.findUnique = original.novelFindUnique;
     prisma.chapter.findMany = original.chapterFindMany;
+    prisma.chapter.findFirst = original.chapterFindFirst;
     reviewService.createQualityReport = original.createQualityReport;
     novelEventBus.emit = original.emit;
     chapterQualityLoopService.recordAssessment = original.recordAssessment;

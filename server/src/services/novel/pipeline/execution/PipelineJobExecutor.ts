@@ -404,7 +404,7 @@ export async function executePipelineJob(
         const final = qualityProjection.final;
         settingAlignmentVolumeDocument = qualityProjection.settingAlignmentVolumeDocument;
 
-        if (chapterResult.reviewExecuted && !chapterResult.pass) {
+        if (!qualityProjection.superseded && chapterResult.reviewExecuted && !chapterResult.pass) {
           qualityAlertDetails.push(
             `第${chapter.order}章（coherence=${final.score.coherence}, repetition=${final.score.repetition}, engagement=${final.score.engagement}）`,
           );
@@ -418,7 +418,7 @@ export async function executePipelineJob(
         let shouldStopAfterCurrentChapter = applyPipelineReplanPolicy({
           jobId,
           chapterOrder: chapter.order,
-          recommendation: chapterResult.runtimePackage?.replanRecommendation,
+          recommendation: qualityProjection.replanRecommendation,
           rangeGate: evaluateRangeReplanGate(),
           qualityAlertDetails,
           replanAlertDetails,
