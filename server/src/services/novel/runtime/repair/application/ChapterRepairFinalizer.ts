@@ -345,6 +345,7 @@ export class ChapterRepairFinalizer {
         input.chapterId,
         committed.content,
         {
+          expectedContentRevision: committed.contentRevision,
           scheduleBackgroundSync: true,
           awaitArtifactDelta: false,
           skipLegacySummaryAndFacts: true,

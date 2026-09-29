@@ -81,6 +81,7 @@ export class ChapterPipelineRuntimeAdapter {
               targetChapterId,
               content,
               {
+                expectedContentRevision: syncOptions.expectedContentRevision,
                 scheduleBackgroundSync: true,
                 artifactSyncMode: syncOptions?.artifactSyncMode ?? options.artifactSyncMode,
                 contentProvenance: syncOptions?.contentProvenance,

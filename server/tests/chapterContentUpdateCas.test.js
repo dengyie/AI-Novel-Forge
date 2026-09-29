@@ -73,10 +73,12 @@ test("updateChapter content CAS: matching expectedContentRevision succeeds and b
     prisma.character.findMany = async () => [];
     prisma.consistencyFact.findMany = async () => [];
     // 跳过 syncChapterArtifacts 真实写库（FK 依赖 novel/chapter 行）
-    // product: novelChapterArtifacts 先 findUnique 再 update/create，不能只 stub upsert
+    // Artifact transactions own the committed revision before writing derived rows.
     prisma.$transaction = async (fn) => {
       if (typeof fn === "function") {
         const tx = {
+          $executeRaw: async () => 1,
+          chapter: { findUnique: async () => ({ riskFlags: null }), update: async () => null },
           chapterSummary: {
             findUnique: async () => null,
             update: async () => null,
@@ -188,6 +190,8 @@ test("updateChapter without expectedContentRevision is last-write-wins and still
     prisma.$transaction = async (fn) => {
       if (typeof fn === "function") {
         const tx = {
+          $executeRaw: async () => 1,
+          chapter: { findUnique: async () => ({ riskFlags: null }), update: async () => null },
           chapterSummary: {
             findUnique: async () => null,
             update: async () => null,

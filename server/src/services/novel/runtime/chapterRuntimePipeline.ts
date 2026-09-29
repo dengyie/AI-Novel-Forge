@@ -1,3 +1,4 @@
+import { syncFinalRetainedChapterArtifacts } from "./pipeline/ChapterPipelineArtifactSync";
 import type { ChapterRuntimePackage } from "@ai-novel/shared/types/chapterRuntime";
 import type { ContentProvenance } from "@ai-novel/shared/types/canonicalState";
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
@@ -161,7 +162,7 @@ export async function runPipelineChapterWithRuntime(
 
     if (!autoReview) {
       throwIfChapterGenerationAborted(cancelSignal);
-      await syncFinalRetainedChapterArtifacts(deps, novelId, chapterId, content, artifactSyncMode, "confirmed");
+      await syncFinalRetainedChapterArtifacts(deps, novelId, chapterId, content, contentRevision, artifactSyncMode, "confirmed");
       // 跳过审校 ≠ 质量过审：不传 literaryPass → 只 bump generationState，不写 completed，也不误标 needs_repair（A6）
       await deps.markChapterGenerationState(chapterId, "approved", contentRevision);
       return {
@@ -333,6 +334,7 @@ export async function runPipelineChapterWithRuntime(
     novelId,
     chapterId,
     latestResult.finalContent,
+    contentRevision,
     artifactSyncMode,
     contentProvenance,
   );
@@ -508,22 +510,6 @@ async function generateNonEmptyDraftFromWriter(input: {
   }
 }
 
-async function syncFinalRetainedChapterArtifacts(
-  deps: RunPipelineChapterDeps,
-  novelId: string,
-  chapterId: string,
-  content: string,
-  artifactSyncMode: PipelineRuntimeInput["artifactSyncMode"],
-  contentProvenance: ContentProvenance,
-): Promise<void> {
-  if (!content.trim()) {
-    return;
-  }
-  await deps.syncFinalChapterArtifacts(novelId, chapterId, content, {
-    artifactSyncMode,
-    contentProvenance,
-  });
-}
 
 /**
  * 分数门：文学 isPass（shared 80/75/75）且 overall ≥ qualityThreshold → 本轮可 pass。

@@ -470,6 +470,7 @@ test("runPipelineChapterWithRuntime passes confirmed provenance for approved fin
     options: {
       artifactSyncMode: "adaptive",
       contentProvenance: "confirmed",
+      expectedContentRevision: result.contentRevision,
     },
   }]);
 });
@@ -526,6 +527,7 @@ test("runPipelineChapterWithRuntime passes debt provenance for retained failed c
     options: {
       artifactSyncMode: "adaptive",
       contentProvenance: "debt",
+      expectedContentRevision: result.contentRevision,
     },
   }]);
   assert.deepEqual(result.qualityDebtAttribution.degradedProposalRouting, {

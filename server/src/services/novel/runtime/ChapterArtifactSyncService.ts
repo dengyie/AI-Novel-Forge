@@ -1,3 +1,4 @@
+import { ChapterProjectionRevisionGuard, ChapterProjectionSupersededError } from "./projections";
 import type { RagOwnerType } from "../../rag/types";
 import { prisma } from "../../../db/prisma";
 import { withSqliteRetry } from "../../../db/sqliteRetry";
@@ -12,6 +13,8 @@ import type { CommittedChapterContent } from "./content/ChapterContentCommitType
 import { ChapterContentCommitService } from "./content/ChapterContentCommitService";
 
 export interface ChapterArtifactSyncOptions {
+  expectedContentRevision: number;
+  markSummaryStale?: boolean;
   scheduleBackgroundSync?: boolean;
   artifactSyncMode?: ArtifactSyncMode;
   syncArtifacts?: boolean;
@@ -55,22 +58,46 @@ export class ChapterArtifactSyncService {
     if (options.syncArtifacts === false) {
       return committed;
     }
-    await this.syncChapterArtifacts(novelId, chapterId, safeContent, options);
+    await this.syncChapterArtifacts(novelId, chapterId, safeContent, { ...options, expectedContentRevision: committed.contentRevision });
     return committed;
+  }
+
+  async syncManualChapterArtifacts(novelId: string, chapterId: string, content: string, expectedContentRevision: number): Promise<void> {
+    try {
+      await this.syncChapterArtifacts(novelId, chapterId, content, { expectedContentRevision, markSummaryStale: true });
+    } catch (error) {
+      // A later successful save owns projections; this save's content commit still succeeded.
+      if (!(error instanceof ChapterProjectionSupersededError)) throw error;
+    }
   }
 
   async syncChapterArtifacts(
     novelId: string,
     chapterId: string,
     content: string,
-    options: ChapterArtifactSyncOptions = {},
+    options: ChapterArtifactSyncOptions,
   ): Promise<void> {
+    const owner = { novelId, chapterId, expectedContentRevision: options.expectedContentRevision };
     if (!options.skipLegacySummaryAndFacts) {
       const facts = extractFacts(content);
       const summary = briefSummary(content, facts);
 
       await withSqliteRetry(
         () => prisma.$transaction(async (tx) => {
+          await new ChapterProjectionRevisionGuard(tx).lockCurrentForWrite(owner);
+          if (options.markSummaryStale) {
+            const chapter = await tx.chapter.findUnique({ where: { id: chapterId }, select: { riskFlags: true } });
+            let flags: Record<string, unknown> = {};
+            try {
+              const parsed = JSON.parse(chapter?.riskFlags ?? "{}");
+              if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) flags = parsed;
+            } catch { /* Invalid historical metadata has no mergeable fields. */ }
+            await tx.chapter.update({ where: { id: chapterId }, data: {
+              riskFlags: JSON.stringify({ ...flags, chapterSummaryStale: {
+                at: new Date().toISOString(), reason: "manual_content_saved",
+              } }),
+            } });
+          }
           // regex 摘要仅作 fallback：已有非空 summary（LLM 摘要或此前回填）时不覆写，
           // 避免把 NovelChapterSummaryService 生成的 LLM 摘要降级为正则截断版。
           const existingSummary = await tx.chapterSummary.findUnique({ where: { chapterId } });
@@ -108,7 +135,7 @@ export class ChapterArtifactSyncService {
       );
     }
 
-    await this.syncCharacterTimelineForChapter(novelId, chapterId, content);
+    const timelines = await this.syncCharacterTimelineForChapter(novelId, chapterId, content, options.expectedContentRevision);
     if (options.scheduleBackgroundSync !== false) {
       const artifactSyncMode = options.artifactSyncMode ?? "adaptive";
       if (options.awaitArtifactDelta || artifactSyncMode === "strict") {
@@ -129,21 +156,23 @@ export class ChapterArtifactSyncService {
         });
       }
     }
-    this.queueRagUpsert("chapter", chapterId);
-    this.queueRagUpsert("chapter_summary", chapterId);
-    this.queueRagUpsert("novel", novelId);
 
     const factRows = await prisma.consistencyFact.findMany({
       where: { novelId, chapterId },
       select: { id: true },
     });
+    await new ChapterProjectionRevisionGuard().assertCurrent(owner);
+    this.queueRagUpsert("chapter", chapterId);
+    this.queueRagUpsert("chapter_summary", chapterId);
+    this.queueRagUpsert("novel", novelId);
+    for (const timeline of timelines) this.queueRagUpsert("character_timeline", timeline.id);
     for (const fact of factRows) {
       this.queueRagUpsert("consistency_fact", fact.id);
     }
 
   }
 
-  private async syncCharacterTimelineForChapter(novelId: string, chapterId: string, content: string): Promise<void> {
+  private async syncCharacterTimelineForChapter(novelId: string, chapterId: string, content: string, expectedContentRevision: number): Promise<Array<{ id: string }>> {
     const [chapter, characters] = await Promise.all([
       prisma.chapter.findFirst({
         where: { id: chapterId, novelId },
@@ -156,7 +185,7 @@ export class ChapterArtifactSyncService {
     ]);
 
     if (!chapter || characters.length === 0) {
-      return;
+      return [];
     }
 
     const events: Array<{
@@ -190,6 +219,7 @@ export class ChapterArtifactSyncService {
 
     await withSqliteRetry(
       () => prisma.$transaction(async (tx) => {
+        await new ChapterProjectionRevisionGuard(tx).lockCurrentForWrite({ novelId, chapterId, expectedContentRevision });
         await tx.characterTimeline.deleteMany({
           where: {
             novelId,
@@ -212,9 +242,7 @@ export class ChapterArtifactSyncService {
       },
       select: { id: true },
     });
-    for (const timeline of timelines) {
-      this.queueRagUpsert("character_timeline", timeline.id);
-    }
+    return timelines;
   }
 
   private queueRagUpsert(ownerType: RagOwnerType, ownerId: string): void {

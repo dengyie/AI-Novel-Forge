@@ -33,6 +33,14 @@ Prompt 返回后先做当前 revision 检查。每个独立 canonical writer 事
 - superseded checkpoint 记录为本章局部失败/淘汰并允许当前 revision 后续重建；它不是章节质量失败、pipeline 失败或自动导演重规划信号。
 - 非章节派生的人工/运维调用可以省略 owner，但统一章节 runtime 和 background 自动链不得利用该兼容入口绕过 owner。
 
+## Direct artifact writers
+
+`runtime/pipeline/ChapterPipelineArtifactSync` 负责流水线最终保留正文的同步，主循环只负责决定正文与质量结果。CRUD、初稿提交、修复采纳和章节流水线共用 `ChapterArtifactSyncService`。调用方必须传提交返回的正文与 revision；不得重新读取当前 revision 后给旧正文补一个新版本号。CRUD 的 CAS 成功快照使用 `expectedContentRevision + 1`，因为之后的重新读取可能已看到下一位写者。
+
+摘要/事实事务和人物时间线事务各自首先执行 `lockCurrentForWrite`。人工保存的摘要过期标记也在同一个 revision-owned 事务中合并，避免旧保存覆盖新元数据。人工保存正文已成功但投影被新保存淘汰时，返回保存成功，由新 revision 负责派生数据。
+
+人物时间线函数只返回待索引记录；整个同步链结束并确认 owner 后统一排队。`novelChapterArtifacts` 的重复持久化路径不再承担写职责，新增写入必须进入上述唯一服务。
+
 ## Failure Modes
 
 - 只在 Prompt 前检查 revision：Prompt 返回后正文可能已经变化。

@@ -145,7 +145,8 @@ export interface RunPipelineChapterDeps {
     novelId: string,
     chapterId: string,
     content: string,
-    options?: {
+    options: {
+      expectedContentRevision: number;
       artifactSyncMode?: PipelineRuntimeInput["artifactSyncMode"];
       contentProvenance?: ContentProvenance;
     },

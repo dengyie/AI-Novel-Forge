@@ -106,6 +106,7 @@ export class ChapterContentFinalizationOrchestrator {
         input.chapterId,
         committed.content,
         {
+          expectedContentRevision: committed.contentRevision,
           scheduleBackgroundSync: true,
           artifactSyncMode: input.request.artifactSyncMode,
           awaitArtifactDelta: true,
