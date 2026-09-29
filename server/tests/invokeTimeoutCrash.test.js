@@ -90,3 +90,17 @@ test("resolveEnforcedTimeoutMs: env ceiling raised to 3600s, default stays 300s"
     }
   }
 });
+
+test('already cancelled invocation does not call the underlying operation', async () => {
+  const controller = new AbortController(); controller.abort(); let calls = 0;
+  await assert.rejects(runWithEnforcedTimeout({signal:controller.signal,run:async()=>{calls++;return 'unexpected';}}), {name:'AbortError'});
+  assert.equal(calls, 0);
+});
+
+test('synchronous upstream cancellation reaches operation signal and beats a resolved result', async () => {
+  const controller = new AbortController(); let observedAbort = false;
+  await assert.rejects(runWithEnforcedTimeout({signal:controller.signal,run:signal=>{
+    controller.abort(); observedAbort=signal.aborted; return Promise.resolve('cancelled result');
+  }}), {name:'AbortError'});
+  assert.equal(observedAbort, true);
+});

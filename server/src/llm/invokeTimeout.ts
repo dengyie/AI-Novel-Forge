@@ -58,22 +58,14 @@ export async function runWithEnforcedTimeout<T>(input: {
 
   const controller = new AbortController();
   const upstreamSignal = input.signal;
+  if (upstreamSignal?.aborted) {
+    throw createAbortError(upstreamSignal.reason);
+  }
   let timedOut = false;
   let timeoutHandle: NodeJS.Timeout | null = null;
   let removeAbortListener: (() => void) | null = null;
 
   const raceCandidates: Array<Promise<T>> = [];
-  const workPromise = input.run(controller.signal);
-  raceCandidates.push(workPromise);
-  // P0 修复：墙钟超时/上游 abort 一旦让 race 由 timeout/abort 分支获胜，workPromise 仍在
-  // 后台继续跑。若它之后才因 controller.abort 以 "Request was aborted." 迟到 settle 为
-  // rejection，而该 rejection 没有任何 rejection owner（race 已结束、调用方早已 await 到
-  // timeout 错误），就会触发进程级 unhandledRejection —— Node 20 默认 throw → novel-server
-  // 整体崩溃（生产曾因 [novel.chapter.writer@v5] 480s 超时连崩 25 次）。这里挂一个只观察、
-  // 不再向上传播的 handler，把迟到 rejection 吞掉；它不改变 race 的对外结果。
-  workPromise.catch(() => {
-    // 故意吞掉：race 已对外 settle，这是 loser 分支的迟到 rejection，只能观察。
-  });
 
   if (timeoutMs) {
     raceCandidates.push(new Promise<T>((_resolve, reject) => {
@@ -105,6 +97,14 @@ export async function runWithEnforcedTimeout<T>(input: {
   }
 
   try {
+    // Install cancellation and timeout owners before starting any external work.
+    // The microtask also captures synchronous throws and observes cancellation
+    // between registration and dispatch. Promise.race owns late rejections.
+    const workPromise = Promise.resolve().then(() => {
+      if (controller.signal.aborted) throw createAbortError(controller.signal.reason);
+      return input.run(controller.signal);
+    });
+    raceCandidates.push(workPromise);
     return await Promise.race(raceCandidates);
   } catch (error) {
     // 墙钟先到：无论 workPromise 以 AbortError("Request was aborted.") 还是

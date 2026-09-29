@@ -204,8 +204,14 @@ export function errorHandler(
   error: unknown,
   req: Request,
   res: Response<ApiResponse<null>>,
-  _next: NextFunction,
+  next: NextFunction,
 ): void {
+  if (res.destroyed) return;
+  if (res.headersSent) {
+    // Express's final handler owns terminating an already-started response.
+    next(error);
+    return;
+  }
   if (
     error
     && typeof error === "object"

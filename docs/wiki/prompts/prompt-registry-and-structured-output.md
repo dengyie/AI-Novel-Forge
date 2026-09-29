@@ -97,6 +97,10 @@
 - 角色阵容看起来没有承接身份、题材或隐藏真相：先查角色准备 PromptAsset、上下文块和结构化输出，不加本地正则抽取身份，不用关键词判断候选能否自动应用。
 - 单个 PromptAsset 的 repair 或 semantic retry 频率异常升高：先查看 prompt quality telemetry 中的 promptId/version、上下文块、输出空率和失败分类，再判断是 schema 合同、上下文污染、模型路由还是 prompt 文案问题。
 
+## 调用取消与墙钟所有权
+
+`runWithEnforcedTimeout` 必须在调用 provider 前检查上游取消、注册 abort 转发和墙钟计时器。已取消调用不能发送请求；操作启动时同步触发的取消必须传到实际 signal，且不能被已完成 Promise 抢先误报成功。使用 Promise microtask 启动操作并在 dispatch 前再次检查 signal，统一捕获同步抛错。Promise.race 在工作开始前持有其 rejection，超时后迟到拒绝不会成为无主 rejection；finally 解除计时器和上游监听器。
+
 ## 相关模块
 
 - `server/src/prompting/`
