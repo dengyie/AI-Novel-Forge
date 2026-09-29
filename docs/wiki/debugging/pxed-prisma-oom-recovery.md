@@ -1,4 +1,6 @@
-# pxed 生产运行时一致性与 OOM 恢复
+# pxed 历史运行时一致性与 OOM 恢复
+
+> 本页保留可复用的诊断结论；pxed 已退出生产，禁止据此恢复旧发布与自启动。当前腾讯部署入口见 `docs/deploy/pxed-tag-deploy.md`。
 
 ## 背景
 
@@ -59,4 +61,4 @@ pxed 的 global OOM 不会被应用进程看到，`process.availableMemory()`、
 - scripts/deploy/prisma-runtime-probe.cjs
 - scripts/deploy/create-prisma-manifest.cjs
 - scripts/deploy/pxed-remote-cutover.sh
-- .github/workflows/deploy-pxed.yml
+- 历史 pxed workflow 已删除，可在 Git 历史查看；当前入口为 `.github/workflows/deploy-tencent.yml`。
