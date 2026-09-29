@@ -183,3 +183,7 @@ HTTP 429/503 是上游繁忙状态，必须保留到 provider 的熔断计数。
 - `client/src/pages/novels/components/CharacterAssetWorkspace.tsx`
 
 > 2026-07-17：选书页态势见 `POST /novels/audiobook/workspace-overview`（列表不 probe clone；项目页仍 assess）。详情：`docs/plans/audiobook-workbench-ux-optimization-plan.md`。
+
+## 容器运行依赖
+
+生产 API 镜像必须在 runtime 阶段安装 ffmpeg（含 ffprobe）与 procps，不能只在构建阶段或宿主机安装。M4B worker 在容器内执行编码，进程所有权回收通过 ps 校验；缺失其中任一依赖会导致整书仅有 WAV 或无法安全识别残留编码进程。Docker 构建直接执行版本与进程查询检查；上线验收还需完成一次真实编码与下载。运行期临时安装不构成可复现修复。
