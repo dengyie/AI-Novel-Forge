@@ -61,6 +61,10 @@ interface ChapterRuntimeCoordinatorDeps {
 }
 
 export class ChapterRuntimeCoordinator {
+  static syncManualChapterArtifacts(novelId: string, chapterId: string, content: string, contentRevision: number): Promise<void> {
+    return new ChapterArtifactSyncService().syncManualChapterArtifacts(novelId, chapterId, content, contentRevision);
+  }
+
   private readonly repairStreamRuntime: ChapterRepairStreamRuntime;
   private readonly qualityGateService: ChapterQualityGateService;
   private readonly contentFinalizationService: ChapterContentFinalizationService;

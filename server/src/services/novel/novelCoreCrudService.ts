@@ -11,7 +11,7 @@ import { NovelWorkflowService } from "./workflow/NovelWorkflowService";
 import { NovelContinuationService } from "./NovelContinuationService";
 import { NovelVolumeService } from "./volume/NovelVolumeService";
 import { STORY_WORLD_SLICE_SCHEMA_VERSION } from "./storyWorldSlice/storyWorldSlicePersistence";
-import { ChapterArtifactSyncService } from "./runtime/ChapterArtifactSyncService";
+import { ChapterRuntimeCoordinator } from "./runtime/ChapterRuntimeCoordinator";
 import { listNovelTokenUsageByNovelIds } from "./novelTokenUsageSummary";
 import {
   contentRevisionBumpData,
@@ -506,7 +506,7 @@ export class NovelCoreCrudService {
     });
 
     if (chapter.content) {
-      await new ChapterArtifactSyncService().syncManualChapterArtifacts(novelId, chapter.id, chapter.content, chapter.contentRevision);
+      await ChapterRuntimeCoordinator.syncManualChapterArtifacts(novelId, chapter.id, chapter.content, chapter.contentRevision);
     }
     await this.volumeService.mirrorChapterIntoWorkspace(novelId, {
       id: chapter.id,
@@ -627,7 +627,7 @@ export class NovelCoreCrudService {
     }
 
     if (typeof input.content === "string") {
-      await new ChapterArtifactSyncService().syncManualChapterArtifacts(novelId, chapterId, input.content,
+      await ChapterRuntimeCoordinator.syncManualChapterArtifacts(novelId, chapterId, input.content,
         expectedContentRevision === undefined ? chapter.contentRevision : expectedContentRevision + 1);
     }
     await this.volumeService.mirrorChapterIntoWorkspace(novelId, {
