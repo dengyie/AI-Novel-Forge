@@ -390,8 +390,9 @@ export function useNovelPipelineController(
         setChapterOperationMessage(payload.message);
       }
     },
-    onDone: async () => {
+    onDone: async (_fullContent, request) => {
       await invalidateNovelDetail();
+      if (!request.isCurrent()) return;
       setActiveChapterStream(null);
     },
   });
@@ -403,9 +404,10 @@ export function useNovelPipelineController(
         setChapterOperationMessage(payload.message);
       }
     },
-    onDone: async (fullContent) => {
+    onDone: async (fullContent, request) => {
       setRepairAfterContent(fullContent);
       await invalidateNovelDetail();
+      if (!request.isCurrent()) return;
       setActiveRepairStream(null);
     },
   });

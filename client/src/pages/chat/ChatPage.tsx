@@ -170,7 +170,7 @@ export default function ChatPage() {
   }, [replayStepId, replayableSteps]);
 
   const approvalSse = useSSE({
-    onDone: async (fullContent) => {
+    onDone: async (fullContent, request) => {
       if (!chatStore.currentSessionId || !fullContent.trim()) {
         await runDetailQuery.refetch();
         return;
@@ -182,6 +182,7 @@ export default function ChatPage() {
         createdAt: new Date().toISOString(),
       });
       await runDetailQuery.refetch();
+      if (!request.isCurrent()) return;
       setRuntimeResetToken((prev) => prev + 1);
     },
   });

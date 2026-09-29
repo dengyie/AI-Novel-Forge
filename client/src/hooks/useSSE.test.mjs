@@ -63,3 +63,14 @@ test('completion callback rejection is observed through hook error state',async(
   const hook=mount(async()=>response([{type:'done',fullContent:'ok'}]),{onDone:async()=>{throw Error('refresh failed');}});
   await hook.render().start('/generate',{});assert.equal(hook.render().isStreaming,false);assert.ok(hook.render().error);
 });
+
+test('completion callback can reject stale UI mutations after a newer request starts',async()=>{
+  const refresh=deferred();const secondResponse=deferred();let calls=0;let active='A';
+  const hook=mount(()=>++calls===1?Promise.resolve(response([{type:'done',fullContent:'A'}])):secondResponse.promise,{
+    onDone:async(_text,request)=>{await refresh.promise;if(request?.isCurrent()===false)return;active=null;},
+  });
+  const first=hook.render().start('/generate',{});await new Promise(resolve=>setImmediate(resolve));
+  active='B';const second=hook.render().start('/generate',{});refresh.resolve();await first;
+  assert.equal(active,'B','old completion refresh must not clear the new active chapter');
+  hook.render().abort();secondResponse.resolve(response([]));await second;
+});

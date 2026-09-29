@@ -3,10 +3,15 @@ import type { SSEFrame } from "@ai-novel/shared/types/api";
 import type { ChapterRuntimePackage } from "@ai-novel/shared/types/chapterRuntime";
 import { API_BASE_URL } from "@/lib/constants";
 
+interface StreamCompletionContext {
+  signal: AbortSignal;
+  isCurrent: () => boolean;
+}
+
 interface UseSSEOptions {
   headers?: Record<string, string>;
   onReasoning?: (content: string) => void;
-  onDone?: (fullContent: string) => void | Promise<void>;
+  onDone?: (fullContent: string, request: StreamCompletionContext) => void | Promise<void>;
   onRunStatus?: (payload: { runId: string; status: string; phase?: "streaming" | "finalizing" | "completed"; message?: string }) => void;
 }
 
@@ -37,7 +42,7 @@ export function useSSE(options?: UseSSEOptions) {
   }, []);
 
   const handleFrame = useCallback(
-    async (frame: SSEFrame) => {
+    async (frame: SSEFrame, request: StreamCompletionContext) => {
       if (frame.type === "ping") {
         return;
       }
@@ -56,7 +61,7 @@ export function useSSE(options?: UseSSEOptions) {
       if (frame.type === "done") {
         setIsStreaming(false);
         setIsDone(true);
-        await options?.onDone?.(frame.fullContent);
+        await options?.onDone?.(frame.fullContent, request);
         return;
       }
 
@@ -178,7 +183,7 @@ export function useSSE(options?: UseSSEOptions) {
             if (!ownsRequest()) return;
             terminalReceived = frame.type === "done" || frame.type === "error";
             if (terminalReceived && watchdogTimer) clearTimeout(watchdogTimer);
-            await handleFrame(frame);
+            await handleFrame(frame, { signal: controller.signal, isCurrent: ownsRequest });
             if (terminalReceived) break;
           }
         }
