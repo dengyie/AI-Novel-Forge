@@ -2550,10 +2550,17 @@ test("HybridRetrievalService retrieveByFacet applies facet filters", async () =>
   const originalFindMany = prisma.knowledgeChunk.findMany;
   const originalDocumentFindMany = prisma.knowledgeDocument.findMany;
   let capturedWhere = null;
-  prisma.knowledgeDocument.findMany = async () => [{ id: "doc-1" }];
-  prisma.knowledgeChunk.findMany = async ({ where }) => {
+  let publicationChecks = 0;
+  prisma.knowledgeDocument.findMany = async () => [{ id: "doc-1", activeVersionId: "version-current" }];
+  prisma.knowledgeChunk.findMany = async ({ where, select }) => {
+    if (select?.id) {
+      publicationChecks++;
+      assert.deepEqual(where.indexedAt, { not: null });
+      assert.deepEqual(where.id.in, ["chunk-1", "chunk-stale"]);
+      return [{ id: "chunk-1" }, { id: "chunk-stale" }];
+    }
     capturedWhere = where;
-    return [{
+    const chunk = {
       id: "chunk-1",
       ownerType: "knowledge_document",
       ownerId: "doc-1",
@@ -2562,8 +2569,13 @@ test("HybridRetrievalService retrieveByFacet applies facet filters", async () =>
       chunkOrder: 1,
       novelId: null,
       worldId: null,
-      metadataJson: null,
+      metadataJson: JSON.stringify({ activeVersionId: "version-current" }),
       updatedAt: new Date(),
+    };
+    return [chunk, {
+      ...chunk,
+      id: "chunk-stale",
+      metadataJson: JSON.stringify({ activeVersionId: "version-old" }),
     }];
   };
 
@@ -2586,7 +2598,9 @@ test("HybridRetrievalService retrieveByFacet applies facet filters", async () =>
       facets: { sellingPointTags: ["身份反转"] },
     });
 
-    assert.equal(rows.length, 1);
+    assert.equal(publicationChecks, 1);
+    assert.deepEqual(capturedWhere.indexedAt, { not: null });
+    assert.equal(rows.length, 1, "only the active version can pass the facet retrieval pipeline");
     assert.equal(rows[0].id, "chunk-1");
     assert.deepEqual(capturedWhere.AND, [{
       OR: [{ facetKeys: { contains: "|sellingPointTags=身份反转|" } }],
