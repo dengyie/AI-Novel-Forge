@@ -1,8 +1,8 @@
+import { finalizeAudiobookTask } from "./application/finalization";
 import fs from "node:fs";
 import type {
   AudiobookChapterAnnotation,
   AudiobookChapterReprocessMode,
-  AudiobookQualityFlag,
   AudiobookTaskAnnotationsView,
   AudiobookTaskDetail,
   AudiobookTaskSummary,
@@ -32,7 +32,6 @@ import {
   isFullBookAudioReady,
   isFullBookM4bReady,
   listReadyChapterAudioIds,
-  pruneChunkWavArtifacts,
   resolveAudiobookTaskDir,
   resolveChapterAudioPath,
   resolveFullBookAudioPath,
@@ -84,11 +83,6 @@ export {
 } from "./infrastructure/m4b-recovery/OrphanM4bProcessCleaner";
 import { checkVoiceRefAudioPath } from "./voiceRefPath";
 import { resolveEffectiveCloneRefPath, tryResolveEffectiveCloneRefPath } from "./voiceLibraryService";
-import {
-  buildQualityCompletionLabel,
-  collectTaskQualityFlags,
-  isWholeChapterNarratorFallback,
-} from "./diarize/diarizeQualityGate";
 
 const AUDIOBOOK_HEARTBEAT_INTERVAL_MS = Math.max(
   5_000,
@@ -527,11 +521,6 @@ function collectAnnotationWarnings(annotations: AudiobookChapterAnnotation[]): s
   return warnings;
 }
 
-/** 仅统计「整章旁白回退」；只认 wholeChapterNarratorFallback 布尔位 */
-function countNarratorFallbackChapters(annotations: AudiobookChapterAnnotation[]): number {
-  return annotations.filter((item) => isWholeChapterNarratorFallback(item)).length;
-}
-
 type AudiobookTaskRow = {
   id: string;
   novelId: string;
@@ -680,7 +669,7 @@ function toSummary(row: AudiobookTaskRow): AudiobookTaskSummary {
     outputDir: row.outputDir,
     fullAudioPath: row.fullAudioPath,
     fullAudioReady,
-    m4bStatus: readTerminalM4bState(row.resultJson),
+    m4bStatus: readBackgroundM4bState(row.resultJson),
     chunksPruned: parseChunksPrunedFromResultJson(row.resultJson),
     failedContinueChapters: readFailedContinueChapters(row.progressJson),
     parentTaskId: readParentTaskIdFromProgress(row.progressJson) ?? undefined,
@@ -3074,93 +3063,7 @@ export class AudiobookTaskService {
         return;
       }
 
-      const annotationFallbackCount = countNarratorFallbackChapters(result.annotations);
-      const qualityFlags: AudiobookQualityFlag[] = collectTaskQualityFlags(result.annotations);
-      const annotationSuffix = annotationFallbackCount > 0
-        ? `；标注回退 ${annotationFallbackCount} 章`
-        : qualityFlags.includes("cast_degraded")
-          ? "；cast 降级"
-          : "";
-      const m4bSuffix = result.m4b.status === "ready"
-        ? "，含 m4b"
-        : result.m4b.status === "skipped"
-          ? `；m4b 未生成（${result.m4b.reason ?? "skipped"}）`
-          : result.m4b.status === "failed"
-            ? `；m4b 失败（${result.m4b.reason ?? "failed"}）`
-            : "";
-      const m4bNote = result.m4b.status === "skipped"
-        ? `m4b 未生成（${result.m4b.reason ?? "skipped"}）`
-        : result.m4b.status === "failed"
-          ? `m4b 失败（${result.m4b.reason ?? "failed"}）`
-          : undefined;
-      const currentItemLabel = buildQualityCompletionLabel({
-        qualityFlags,
-        narratorFallbackCount: annotationFallbackCount,
-        m4bReady: result.m4b.status === "ready",
-        m4bNote,
-      });
-
-      // 成功后删 chunk，保留 chapter.wav / full-book.*；重合成会 wipe 整章再生成
-      const chapterIdsForPrune = result.chapterAudioPaths.map((item) => item.chapterId);
-      let chunksPruned = false;
-      let prunedChunkFiles = 0;
-      try {
-        prunedChunkFiles = pruneChunkWavArtifacts(result.outputDir, chapterIdsForPrune);
-        chunksPruned = true;
-      } catch (pruneError) {
-        chunksPruned = false;
-        prunedChunkFiles = 0;
-        console.warn(
-          "[audiobook] pruneChunkWavArtifacts failed",
-          taskId,
-          pruneError instanceof Error ? pruneError.message : pruneError,
-        );
-      }
-
-      // Continue children invalidated shared full-book artifacts under the
-      // generation fence before pipeline reads. The child pipeline never
-      // recreates them; reconcileParent alone rebuilds from the full chapter set.
-
-      await prisma.audiobookTask.updateMany({
-        where: {
-          id: taskId,
-          status: "running",
-          cancelRequestedAt: null,
-          m4bGenerationToken: generationToken,
-        },
-        data: {
-          status: "succeeded",
-          progress: 100,
-          finishedAt: new Date(),
-          currentStage: "finalizing",
-          currentItemLabel,
-          heartbeatAt: new Date(),
-          completedChapterCount: result.completedChapterCount,
-          outputDir: result.outputDir,
-          // 续生成子任务跳过全书写入；存相对逻辑名，避免 DATA_ROOT 迁移后绝对路径失效
-          fullAudioPath: isContinueChild ? null : "full-book.wav",
-          annotationsJson: JSON.stringify(result.annotations),
-          resultJson: JSON.stringify({
-            chapterIds: chapterIdsForPrune,
-            completedChunks: result.completedChunks,
-            qualityWarnings: result.qualityWarnings,
-            qualityFlags,
-            narratorFallbackChapterCount: annotationFallbackCount,
-            castDegraded: qualityFlags.includes("cast_degraded"),
-            chunksPruned,
-            prunedChunkFiles,
-            m4b: {
-              status: result.m4b.status,
-              path: result.m4b.relativePath,
-              reason: result.m4b.reason ?? null,
-              bytes: result.m4b.bytes ?? null,
-              chapterCount: result.m4b.chapterCount ?? null,
-            },
-          }),
-          summary: `有声书完成：${result.completedChapterCount} 章，${result.completedChunks} 个音频块${annotationSuffix}${m4bSuffix}。`,
-          error: null,
-        },
-      });
+      await finalizeAudiobookTask({ taskId, generationToken, isContinueChild, result });
 
       // 续生成子任务成功 → 重算父 readyChapterIds / chapterProgress（磁盘唯一真相）
       await this.finalizeContinueChild(taskId, false, generationToken);

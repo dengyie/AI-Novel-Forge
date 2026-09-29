@@ -5,7 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 const http = require("node:http");
 const express = require("express");
-const { streamAudioFile } = require("../dist/modules/novel/production/http/audiobook");
+const { streamAudioFile, streamWavFile } = require("../dist/modules/novel/production/http/audiobook");
 
 async function fixture(run) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "audio-response-"));
@@ -20,6 +20,7 @@ async function fixture(run) {
   };
   const app = express();
   app.get("/audio", (req, res) => streamAudioFile(req, res, file, "sample.wav", "audio/wav"));
+  app.get("/wav", (req, res) => streamWavFile(req, res, file, "sample.wav"));
   const server = http.createServer(app);
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const url = `http://127.0.0.1:${server.address().port}/audio`;
@@ -100,6 +101,18 @@ test('mutable audio URLs never permit stale full or range response reuse', async
       const response = await fetch(url, { headers: range ? { Range: range } : {} });
       assert.match(response.headers.get('cache-control'), /no-store/);
       assert.equal(await response.text(), expected);
+    }
+  });
+});
+
+
+test('WAV attachment disposition follows download=1 while default remains inline', async () => {
+  await fixture(async ({ url }) => {
+    const base = url.replace('/audio', '/wav');
+    for (const [suffix, expected] of [['', 'inline'], ['?download=1', 'attachment']]) {
+      const response = await fetch(base + suffix);
+      assert.equal(response.headers.get('content-disposition'), `${expected}; filename="sample.wav"`);
+      assert.equal(await response.text(), '0123456789');
     }
   });
 });

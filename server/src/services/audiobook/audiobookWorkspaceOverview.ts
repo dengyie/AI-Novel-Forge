@@ -43,7 +43,7 @@ function parseM4bStatus(resultJson: string | null | undefined): string | null {
   try {
     const parsed = JSON.parse(resultJson) as { m4b?: { status?: string } };
     const status = parsed?.m4b?.status;
-    if (status === "ready" || status === "skipped" || status === "failed") {
+    if (status === "encoding" || status === "ready" || status === "skipped" || status === "failed") {
       return status;
     }
     return null;

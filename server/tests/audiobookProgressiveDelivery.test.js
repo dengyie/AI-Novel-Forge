@@ -5,6 +5,17 @@ const os = require("node:os");
 const path = require("node:path");
 const Module = require("node:module");
 
+const m4bDispatch = require("../dist/services/audiobook/m4b");
+const originalDispatch = m4bDispatch.dispatchM4bJob;
+test.before(() => {
+  // This suite owns TTS/file sequencing, not the persistent worker queue.
+  Object.defineProperty(m4bDispatch, "dispatchM4bJob", { configurable: true, value: async (input) => {
+    assert.equal(input.generationToken, "progressive-test-generation");
+    return { status: "skipped", path: null, relativePath: "full-book.m4b", reason: "test queue boundary" };
+  } });
+});
+test.after(() => Object.defineProperty(m4bDispatch, "dispatchM4bJob", { configurable: true, value: originalDispatch }));
+
 // 逐章交付：每章「标注 → 合成 → chapter.wav 落盘」必须严格按章顺序，
 // 第 1 章合成落盘时第 2 章尚未开始合成。
 // 通过 monkey-patch 模块单例（mimoChatAudioTTSProvider.synthesize、
@@ -184,6 +195,7 @@ test("逐章交付：第 1 章合成完落盘时第 2 章尚未开始合成", as
 
     const runPromise = pipeline.run({
       taskId,
+      generationToken: "progressive-test-generation",
       novelId,
       chapterIds,
       narrator: { voice: "茉莉", style: "知性旁白" },
@@ -259,6 +271,7 @@ test("逐章进度列表：chapterProgress 随 chunk 推进、终态全 ready、
 
     const runPromise = pipeline.run({
       taskId,
+      generationToken: "progressive-test-generation",
       novelId,
       chapterIds,
       narrator: { voice: "茉莉", style: "知性旁白" },

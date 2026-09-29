@@ -187,3 +187,13 @@ HTTP 429/503 是上游繁忙状态，必须保留到 provider 的熔断计数。
 ## 容器运行依赖
 
 生产 API 镜像必须在 runtime 阶段安装 ffmpeg（含 ffprobe）与 procps，不能只在构建阶段或宿主机安装。M4B worker 在容器内执行编码，进程所有权回收通过 ps 校验；缺失其中任一依赖会导致整书仅有 WAV 或无法安全识别残留编码进程。Docker 构建直接执行版本与进程查询检查；上线验收还需完成一次真实编码与下载。运行期临时安装不构成可复现修复。
+
+## 独立 M4B 队列与任务投影收口
+
+`M4bEncodingJob` 是封装执行状态源；`AudiobookTask.resultJson.m4b` 是任务列表与前端交付投影。成功发布、失败与恢复重试耗尽必须在同一 task→job 锁顺序的数据库事务中更新两者。仅把 job 标记 completed 会造成磁盘文件存在但界面永久不可下载。
+
+`application/finalization` 拥有章节生产的成功收口。它先锁当前代际任务，再清理该代际 chunk，读取当前 job，最后写入生成结果。worker 可能早于主任务最终保存，因此最终保存不能盲写 pipeline 的暂态 skipped；须合并同代 job 的 ready/failed/encoding。新代际不允许旧 finalize 删除 chunk，也不允许旧 worker 写新投影。worker 在 task 仍 running 时只更新封装结果，不提前宣称全书完成或显示零章摘要。
+
+共享 `m4bStatus=encoding` 是可见的轮询契约：章节生产 succeeded 后仍每 4 秒刷新，ready/failed/skipped 后停止。缺少状态的旧任务不能被解释为编码中，否则会永久轮询。WAV 完成和 M4B 完成是两个独立条件。
+
+部署检查分为 `validate-m4b-worker-migration.sh --preflight` 与 `--post-migration`，都只读真实数据库。前者阻止未收口的 pending/processing 任务直接迁移；后者实际查询 generationToken/leaseToken/lastProgressAt 并拒绝遗留无归属活动任务。检查不代替数据库/音频备份，也不能证明旧操作系统进程已经退出。

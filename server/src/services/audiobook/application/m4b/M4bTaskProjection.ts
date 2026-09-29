@@ -35,7 +35,7 @@ export function readBackgroundM4bState(
   }
 }
 
-/** Summary projection intentionally hides the in-progress encoding marker. */
+/** Read only terminal values for decisions that require a settled delivery. */
 export function readTerminalM4bState(
   resultJson: string | null | undefined,
 ): TerminalM4bState | null {

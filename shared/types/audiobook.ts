@@ -501,8 +501,8 @@ export interface AudiobookTaskSummary {
   fullAudioPath?: string | null;
   /** 全书 WAV 是否可交付（磁盘 full-book.wav 存在）。 */
   fullAudioReady?: boolean;
-  /** 全书 m4b 状态：ready 才展示下载；skipped/failed 仅提示。 */
-  m4bStatus?: "ready" | "skipped" | "failed" | null;
+  /** 全书 m4b 状态：encoding 继续轮询；ready 展示下载；skipped/failed 仅提示。 */
+  m4bStatus?: "encoding" | "ready" | "skipped" | "failed" | null;
   /** 成功后是否已清理 chunk-*.wav（章 wav / 全书仍保留）。 */
   chunksPruned?: boolean;
   /**

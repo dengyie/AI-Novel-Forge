@@ -1,46 +1,16 @@
 #!/bin/bash
-# scripts/deploy/validate-m4b-worker-migration.sh
-
-set -e
-
-echo "Validating m4b worker migration..."
-
+set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-
-# Check migrations directory
-if [ ! -d "$REPO_ROOT/server/src/prisma/migrations" ]; then
-  echo "❌ Migrations directory not found"
-  exit 1
+MODE="${1:---post-migration}"
+if [[ "$MODE" != "--preflight" && "$MODE" != "--post-migration" ]]; then
+  echo "Usage: $0 [--preflight|--post-migration]" >&2
+  exit 2
 fi
-
-# Check for M4bEncodingJob migration
-if ! ls "$REPO_ROOT"/server/src/prisma/migrations/*add_m4b_encoding_job*/migration.sql >/dev/null 2>&1; then
-  echo "❌ M4bEncodingJob migration not found"
-  exit 1
-fi
-
-# Check worker script built
-if [ ! -f "$REPO_ROOT/server/dist/workers/m4b-worker.js" ]; then
-  echo "❌ Worker script not built (run pnpm run build)"
-  exit 1
-fi
-
-# Check schema has new models
-if ! grep -q "model M4bEncodingJob" "$REPO_ROOT/server/src/prisma/schema.prisma"; then
-  echo "❌ M4bEncodingJob model not in schema"
-  exit 1
-fi
-
-if ! grep -q "model WorkerHeartbeat" "$REPO_ROOT/server/src/prisma/schema.prisma"; then
-  echo "❌ WorkerHeartbeat model not in schema"
-  exit 1
-fi
-
-echo "✓ Migration validation passed"
-echo "✓ Worker script found at server/dist/workers/m4b-worker.js"
-echo "✓ Schema models present"
-echo ""
-echo "Next steps:"
-echo "  1. Apply migration: cd server && npx prisma migrate deploy"
-echo "  2. Restart server: supervisorctl restart novel-server"
-echo "  3. Monitor: tail -f storage/logs/m4b-worker-*.log"
+for directory in migrations migrations.sqlite; do
+  test -f "$REPO_ROOT/server/src/prisma/$directory/20260930000000_m4b_worker_ownership/migration.sql"
+done
+test -f "$REPO_ROOT/server/dist/workers/m4b-worker.js"
+cd "$REPO_ROOT/server"
+node "$REPO_ROOT/scripts/deploy/inspect-m4b-worker-migration.cjs" "$MODE"
+echo "M4B $MODE database inspection passed."
+echo "This read-only check does not back up data or prove old API/worker/ffmpeg processes have stopped."

@@ -1,3 +1,5 @@
+// Timing fixtures must not be deliberately deprioritized against the parallel test runner.
+process.env.AUDIOBOOK_M4B_FFMPEG_NICE = "0";
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");

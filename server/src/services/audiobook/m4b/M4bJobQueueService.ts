@@ -1,3 +1,4 @@
+import { settleCurrentM4bTask } from "./M4bTaskSettlement";
 import fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import { prisma } from "../../../db/prisma";
@@ -22,20 +23,20 @@ async function lockCurrentTask(tx: Prisma.TransactionClient, taskId: string, gen
       status: { in: ["running", "succeeded"] } },
     data: { m4bGenerationToken: generationToken },
   });
-  if (!locked.count) throw new Error("M4B generation is no longer current");
+  return locked.count > 0;
 }
 
 export class M4bJobQueueService {
   async createJob(params: CreateJobParams): Promise<M4bEncodingJob> {
     return prisma.$transaction(async (tx) => {
-      await lockCurrentTask(tx, params.audiobookTaskId, params.generationToken);
+      if (!await lockCurrentTask(tx, params.audiobookTaskId, params.generationToken)) throw new Error("M4B generation is no longer current");
       return tx.m4bEncodingJob.create({ data: { ...params, status: "pending" } });
     });
   }
 
   async requeueJobForTask(params: CreateJobParams): Promise<M4bEncodingJob> {
     return prisma.$transaction(async (tx) => {
-      await lockCurrentTask(tx, params.audiobookTaskId, params.generationToken);
+      if (!await lockCurrentTask(tx, params.audiobookTaskId, params.generationToken)) throw new Error("M4B generation is no longer current");
       const current = await tx.m4bEncodingJob.findUniqueOrThrow({ where: { audiobookTaskId: params.audiobookTaskId } });
       if (current.generationToken === params.generationToken && ["pending", "processing"].includes(current.status)) return current;
       return tx.m4bEncodingJob.update({
@@ -80,19 +81,30 @@ export class M4bJobQueueService {
     if (!job.generationToken || !job.leaseToken) throw new Error("M4B ownership is missing");
     const generationToken = job.generationToken;
     await prisma.$transaction(async (tx) => {
-      await lockCurrentTask(tx, job.audiobookTaskId, generationToken);
+      if (!await lockCurrentTask(tx, job.audiobookTaskId, generationToken)) throw new Error("M4B generation is no longer current");
       const lease = await tx.m4bEncodingJob.updateMany({ where: ownership(job),
         data: { status: "completed", progressPercent: 100 } });
       if (!lease.count || signal?.aborted) throw new Error("M4B worker lease was revoked");
       // Synchronous rename happens while both DB write locks remain held. A rotation
       // either precedes the guarded write (reject) or follows commit (then wipes output).
       fs.renameSync(partPath, job.outputM4bPath);
+      await settleCurrentM4bTask(tx, job.audiobookTaskId, generationToken);
     });
   }
 
   async markFailed(job: M4bEncodingJob, error: string): Promise<void> {
-    await prisma.m4bEncodingJob.updateMany({ where: ownership(job),
-      data: { status: "failed", errorMessage: error.slice(0, 2000) } });
+    if (!job.generationToken) return;
+    const generationToken = job.generationToken;
+    await prisma.$transaction(async (tx) => {
+      if (!await lockCurrentTask(tx, job.audiobookTaskId, generationToken)) {
+        await tx.m4bEncodingJob.updateMany({ where: ownership(job),
+          data: { status: "failed", errorMessage: "M4B generation is no longer current" } });
+        return;
+      }
+      const changed = await tx.m4bEncodingJob.updateMany({ where: ownership(job),
+        data: { status: "failed", errorMessage: error.slice(0, 2000) } });
+      if (changed.count) await settleCurrentM4bTask(tx, job.audiobookTaskId, generationToken);
+    });
   }
 
   async hasPendingJobs(): Promise<boolean> {
@@ -106,11 +118,21 @@ export class M4bJobQueueService {
   }
 
   async resetJob(job: M4bEncodingJob): Promise<void> {
-    await prisma.m4bEncodingJob.updateMany({ where: ownership(job), data: {
-      status: job.retryCount < 1 ? "pending" : "failed", workerId: null,
-      workerStartedAt: null, leaseToken: null, lastProgressAt: null,
-      retryCount: { increment: 1 }, errorMessage: "M4B worker stopped before completion",
-    } });
+    if (!job.generationToken) return;
+    const generationToken = job.generationToken;
+    await prisma.$transaction(async (tx) => {
+      if (!await lockCurrentTask(tx, job.audiobookTaskId, generationToken)) {
+        await tx.m4bEncodingJob.updateMany({ where: ownership(job),
+          data: { status: "failed", errorMessage: "M4B generation is no longer current" } });
+        return;
+      }
+      const changed = await tx.m4bEncodingJob.updateMany({ where: ownership(job), data: {
+        status: job.retryCount < 1 ? "pending" : "failed", workerId: null,
+        workerStartedAt: null, leaseToken: null, lastProgressAt: null,
+        retryCount: { increment: 1 }, errorMessage: "M4B worker stopped before completion",
+      } });
+      if (changed.count) await settleCurrentM4bTask(tx, job.audiobookTaskId, generationToken);
+    });
   }
 
   async recoverJobsForWorker(workerId: string): Promise<{ requeued: number; failed: number }> {

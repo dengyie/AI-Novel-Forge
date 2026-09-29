@@ -1,3 +1,5 @@
+// Timing fixtures must not be deliberately deprioritized against the parallel test runner.
+process.env.AUDIOBOOK_M4B_FFMPEG_NICE = "0";
 /**
  * m4b 并发互斥（withTaskDirLock）回归测试。
  *
@@ -230,6 +232,7 @@ test("全局许可交给已取消等待者时会继续唤醒下一项", { concur
     writeMarkerFile(source, String(index + 1), 4096);
     return source;
   });
+  const holderController = new AbortController();
   const cancelled = new AbortController();
   const successor = new AbortController();
   const originalRemoveEventListener = cancelled.signal.removeEventListener;
@@ -250,6 +253,7 @@ test("全局许可交给已取消等待者时会继续唤醒下一项", { concur
     holder = encodeFullBookM4b({
       taskDir: dirs[0],
       bookTitle: "许可持有者",
+      signal: holderController.signal,
       sourceWavPath: sources[0],
       chapters: [],
     });
@@ -288,6 +292,8 @@ test("全局许可交给已取消等待者时会继续唤醒下一项", { concur
     assert.equal(successorResult.status, "ready", successorResult.reason);
     assert.equal(fs.readFileSync(fake.calls, "utf8").length, 2, "已取消等待者不得 spawn ffmpeg");
   } finally {
+    holderController.abort();
+    cancelled.abort();
     successor.abort();
     await Promise.allSettled([holder, cancelledWaiter, successorWaiter].filter(Boolean));
     process.env.AUDIOBOOK_FFMPEG_PATH = FFMPEG_SCRIPT;

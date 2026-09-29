@@ -1,3 +1,5 @@
+// Timing fixtures must not be deliberately deprioritized against the parallel test runner.
+process.env.AUDIOBOOK_M4B_FFMPEG_NICE = "0";
 /**
  * m4b 编码「停滞看门狗」回归测试（根因修复 2026-09-03）。
  *

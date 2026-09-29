@@ -126,13 +126,3 @@ test("AudiobookTaskSummary progressive delivery fields exist on type surface", (
   assert.equal(sample.fullAudioReady, false);
   assert.equal(sample.chunksPruned, false);
 });
-
-test("WAV stream supports download=1 attachment (source contract)", () => {
-  const routes = fs.readFileSync(
-    path.join(__dirname, "../src/modules/novel/production/http/novelAudiobookRoutes.ts"),
-    "utf8",
-  );
-  assert.match(routes, /wantsAttachmentDownload/);
-  assert.match(routes, /download.*1|raw === "1"/);
-  assert.match(routes, /disposition.*attachment.*inline|attachment" : "inline"/);
-});

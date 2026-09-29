@@ -1,3 +1,4 @@
+import { resolveAudiobookTaskPollInterval } from "../../audiobook/taskPolling";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronDown } from "lucide-react";
@@ -1152,10 +1153,7 @@ export default function NovelAudiobookPanel(props: NovelAudiobookPanelProps) {
       const response = await listAudiobookTasks(novelId);
       return response.data ?? [];
     },
-    refetchInterval: (query) => {
-      const items = query.state.data ?? [];
-      return items.some((item) => item.status === "queued" || item.status === "running") ? 4000 : false;
-    },
+    refetchInterval: (query) => resolveAudiobookTaskPollInterval(query.state.data ?? []),
   });
 
   const invalidateTasksAndOverview = useCallback(async () => {
