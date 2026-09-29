@@ -87,6 +87,12 @@ RAG worker 在启动时读取一份运行时设置快照；设置页保存成功
 
 代码边界：轻量入队与状态投影在 `rag/indexing/`；源读取和候选装配在 `indexing/source/`；发布与清理协议在 `indexing/persistence/`；召回有效性检查在 `rag/retrieval/`。主进程不导入 worker 服务 barrel。
 
+## 外部请求截止时间
+
+Embedding 与 Qdrant 的请求超时必须覆盖响应头、成功 JSON、错误文本读取及不用的响应体取消。fetch 返回 Response 只意味着响应头到达，不能在此时清除计时器；慢响应体否则会占住索引 worker、查询和退出等待。
+
+传输适配器在同一 AbortController 生命周期内执行响应消费，再清理计时器。Embedding 保持应用错误的原有重试/拆批分类，不能把参数错误、解析错误重新包装成可重试网络错误。Qdrant 集合不存在时取消未使用的 404 响应体，随后创建集合和建索引各自拥有独立请求 deadline，不共享已结束的集合查询计时器。
+
 ## 相关模块
 
 - `server/src/services/rag/`

@@ -66,18 +66,22 @@ function truncateErrorText(rawText: string, maxLength = 240): string {
 }
 
 export class EmbeddingService {
-  private async fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
+  private async fetchWithTimeout<T>(url: string, init: RequestInit, consume: (response: Response) => Promise<T>): Promise<T> {
     const controller = new AbortController();
+    let receivedResponse = false;
     const timer = setTimeout(() => controller.abort(), ragConfig.embeddingTimeoutMs);
     try {
-      return await fetch(url, {
+      const response = await fetch(url, {
         ...init,
         signal: controller.signal,
       });
+      receivedResponse = true;
+      return await consume(response);
     } catch (error) {
-      if (error instanceof Error && error.name === "AbortError") {
+      if (controller.signal.aborted) {
         throw new EmbeddingRequestError(`Embedding request timed out (>${ragConfig.embeddingTimeoutMs}ms).`, true, true);
       }
+      if (receivedResponse) throw error;
       throw new EmbeddingRequestError(`Embedding network request failed: ${toErrorMessage(error)}.`, true, true);
     } finally {
       clearTimeout(timer);
@@ -173,7 +177,7 @@ export class EmbeddingService {
   private async requestEmbeddingBatch(texts: string[], target: EmbeddingRuntimeTarget): Promise<number[][]> {
     for (let attempt = 0; attempt <= ragConfig.embeddingMaxRetries; attempt += 1) {
       try {
-        const response = await this.fetchWithTimeout(`${target.baseUrl}/embeddings`, {
+        return await this.fetchWithTimeout(`${target.baseUrl}/embeddings`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -183,34 +187,34 @@ export class EmbeddingService {
             model: target.model,
             input: texts,
           }),
+        }, async (response) => {
+          if (!response.ok) {
+            const errorText = truncateErrorText(await response.text());
+            const status = response.status;
+            const retryable = status === 408 || status === 409 || status === 429 || status >= 500;
+            const shouldSplitBatch = status === 413 || status === 414 || status === 429 || status >= 500;
+            throw new EmbeddingRequestError(
+              `Embedding request failed (${status}): ${errorText || "unknown error"}.`,
+              retryable,
+              shouldSplitBatch,
+            );
+          }
+
+          const payload = await response.json() as {
+            data?: Array<{ embedding?: number[]; index?: number }>;
+          };
+
+          const vectors = (payload.data ?? [])
+            .sort((a, b) => (a.index ?? 0) - (b.index ?? 0))
+            .map((item) => item.embedding ?? [])
+            .filter((item): item is number[] => Array.isArray(item) && item.length > 0);
+
+          if (vectors.length !== texts.length) {
+            throw new EmbeddingRequestError("Embedding response vector count did not match the input count.", false, false);
+          }
+
+          return vectors;
         });
-
-        if (!response.ok) {
-          const errorText = truncateErrorText(await response.text());
-          const status = response.status;
-          const retryable = status === 408 || status === 409 || status === 429 || status >= 500;
-          const shouldSplitBatch = status === 413 || status === 414 || status === 429 || status >= 500;
-          throw new EmbeddingRequestError(
-            `Embedding request failed (${status}): ${errorText || "unknown error"}.`,
-            retryable,
-            shouldSplitBatch,
-          );
-        }
-
-        const payload = await response.json() as {
-          data?: Array<{ embedding?: number[]; index?: number }>;
-        };
-
-        const vectors = (payload.data ?? [])
-          .sort((a, b) => (a.index ?? 0) - (b.index ?? 0))
-          .map((item) => item.embedding ?? [])
-          .filter((item): item is number[] => Array.isArray(item) && item.length > 0);
-
-        if (vectors.length !== texts.length) {
-          throw new EmbeddingRequestError("Embedding response vector count did not match the input count.", false, false);
-        }
-
-        return vectors;
       } catch (error) {
         const normalized = this.normalizeRequestError(error);
         if (normalized.retryable && attempt < ragConfig.embeddingMaxRetries) {

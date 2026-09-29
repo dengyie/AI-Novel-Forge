@@ -92,16 +92,17 @@ export class VectorStoreService {
     console.warn(`${VectorStoreService.logPrefix} ${message}`);
   }
 
-  private async fetchWithTimeout(url: string, init?: RequestInit): Promise<Response> {
+  private async fetchWithTimeout<T>(url: string, init: RequestInit | undefined, consume: (response: Response) => Promise<T>): Promise<T> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), ragConfig.qdrantTimeoutMs);
     try {
-      return await fetch(url, {
+      const response = await fetch(url, {
         ...init,
         signal: controller.signal,
       });
+      return await consume(response);
     } catch (error) {
-      if (error instanceof Error && error.name === "AbortError") {
+      if (controller.signal.aborted) {
         throw new Error(`Qdrant 请求超时（>${ragConfig.qdrantTimeoutMs}ms）。`);
       }
       throw error;
@@ -111,18 +112,19 @@ export class VectorStoreService {
   }
 
   private async request<T>(url: string, init?: RequestInit): Promise<T> {
-    const response = await this.fetchWithTimeout(url, {
+    return this.fetchWithTimeout(url, {
       ...init,
       headers: {
         ...buildHeaders(),
         ...(init?.headers ?? {}),
       },
+    }, async (response) => {
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`Qdrant 请求失败(${response.status})：${text}`);
+      }
+      return await response.json() as T;
     });
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`Qdrant 请求失败(${response.status})：${text}`);
-    }
-    return await response.json() as T;
   }
 
   private async upsertPointBatch(points: QdrantPoint[]): Promise<void> {
@@ -241,8 +243,20 @@ export class VectorStoreService {
       return;
     }
 
-    const getResponse = await this.fetchWithTimeout(toCollectionUrl(""), { headers: buildHeaders() });
-    if (getResponse.status === 404) {
+    const payload = await this.fetchWithTimeout(toCollectionUrl(""), { headers: buildHeaders() }, async (response) => {
+      if (response.status === 404) {
+        await response.body?.cancel();
+        return null;
+      }
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`Qdrant 集合检查失败(${response.status})：${text}`);
+      }
+      return await response.json() as {
+        result?: { config?: { params?: { vectors?: { size?: number } } } };
+      };
+    });
+    if (payload === null) {
       this.logInfo("Collection not found; creating collection.", {
         collection: ragConfig.qdrantCollection,
         dimension,
@@ -260,19 +274,6 @@ export class VectorStoreService {
       this.ensuredDimension = dimension;
       return;
     }
-    if (!getResponse.ok) {
-      const text = await getResponse.text();
-      throw new Error(`Qdrant 集合检查失败(${getResponse.status})：${text}`);
-    }
-    const payload = await getResponse.json() as {
-      result?: {
-        config?: {
-          params?: {
-            vectors?: { size?: number };
-          };
-        };
-      };
-    };
     const existingDimension = payload.result?.config?.params?.vectors?.size;
     if (existingDimension && existingDimension !== dimension) {
       throw new Error(`Qdrant 集合维度不匹配：existing=${existingDimension}, expected=${dimension}`);
@@ -399,13 +400,14 @@ export class VectorStoreService {
 
   async healthCheck(): Promise<{ ok: boolean; detail?: string }> {
     try {
-      const response = await this.fetchWithTimeout(`${ragConfig.qdrantUrl}/healthz`, {
+      await this.fetchWithTimeout(`${ragConfig.qdrantUrl}/healthz`, {
         headers: buildHeaders(),
-      });
-      if (!response.ok) {
+      }, async (response) => {
         const text = await response.text();
-        throw new Error(`Qdrant health check failed(${response.status})：${text}`);
-      }
+        if (!response.ok) {
+          throw new Error(`Qdrant health check failed(${response.status})：${text}`);
+        }
+      });
       return { ok: true };
     } catch (error) {
       return { ok: false, detail: error instanceof Error ? error.message : "qdrant health check failed" };

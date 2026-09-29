@@ -6,12 +6,16 @@
 
 - [x] 复现归档 delete 退避→恢复启用并重建成功→旧 delete 重试导致索引清空。
 - [x] 消费端和状态投影共同拒绝对恢复文档执行旧归档删除，补当前归档仍可清理的回归。
-- [ ] 检查 Embedding/Qdrant 响应头之后的超时；用本地短生命周期 HTTP 服务器验证慢响应体，确认后修复。
-- [ ] 审核知识文档提交和入队的持久边界，以及 API 输入/路径/secret 调用链；只处理确认缺陷。
-- [ ] 每阶段更新 wiki/release notes，运行 server build 和相应测试后提交。
+- [x] 检查 Embedding/Qdrant 响应头之后的超时；用本地短生命周期 HTTP 服务器验证慢响应体，确认后修复。
+- [x] 审核知识文档提交和入队的持久边界，以及 API 输入/路径/secret 调用链；只处理确认缺陷。
+- [x] 每阶段更新 wiki/release notes，运行 server build 和相应测试后提交。
 
 阶段一验证：server build 通过；archive/consistency/status/worker 四组共 29 tests 通过。仅 stub 数据，不接业务数据库。
 
 阶段二：限流与审计改用 Express 可信代理解析，默认不信任转发头，API_TRUST_PROXY 显式配置代理 IP/CIDR。三项真实 HTTP 测试旧实现全红；修复后 server build + identity/GC/auth 共 14 tests 通过。部署代理网段需在实际环境验收，本阶段不改线上配置。
 
 阶段三：超大上传200、丢文件进程退出均已红测复现。上传边界与sendFile错误收口修复后 server build + 6 HTTP tests 通过（普通/chunked超限、格式、空体、完整传输、缺失、中断FD）。comic 64 / drama 45 路由 method/path 清单前后一致；路由按明确HTTP职责拆为575/658行门面并附边界说明，无浏览器验收。
+
+阶段四：Embedding/Qdrant响应体 deadline 六项旧实现全红；修复后慢成功/错误体、集合元数据、健康检查、正常响应、应用错误分类、404取消及独立deadline共8 tests通过；加RAG生命周期/状态共37 tests通过，server build通过。
+
+范围收口：知识提交→fire-and-forget入队失败窗口留为需要确认项，未复现部署可达故障，不据此扩展事务重构。保留明确接受的open策略。后续验收仅需主线集成检查与实际可信代理链配置核验。
