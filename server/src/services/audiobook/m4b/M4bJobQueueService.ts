@@ -1,164 +1,125 @@
+import fs from "node:fs";
+import { randomUUID } from "node:crypto";
 import { prisma } from "../../../db/prisma";
-import type { M4bEncodingJob } from "@prisma/client";
+import type { M4bEncodingJob, Prisma } from "@prisma/client";
 
 export interface CreateJobParams {
   audiobookTaskId: string;
+  generationToken: string;
   inputWavPath: string;
   outputM4bPath: string;
   coverImagePath?: string;
   metadataJson: string;
 }
 
+function ownership(job: M4bEncodingJob) {
+  return { id: job.id, status: "processing", leaseToken: job.leaseToken, generationToken: job.generationToken };
+}
+
+async function lockCurrentTask(tx: Prisma.TransactionClient, taskId: string, generationToken: string) {
+  const locked = await tx.audiobookTask.updateMany({
+    where: { id: taskId, m4bGenerationToken: generationToken, cancelRequestedAt: null,
+      status: { in: ["running", "succeeded"] } },
+    data: { m4bGenerationToken: generationToken },
+  });
+  if (!locked.count) throw new Error("M4B generation is no longer current");
+}
+
 export class M4bJobQueueService {
   async createJob(params: CreateJobParams): Promise<M4bEncodingJob> {
-    return await prisma.m4bEncodingJob.create({
-      data: {
-        audiobookTaskId: params.audiobookTaskId,
-        status: "pending",
-        inputWavPath: params.inputWavPath,
-        outputM4bPath: params.outputM4bPath,
-        coverImagePath: params.coverImagePath ?? null,
-        metadataJson: params.metadataJson,
-        progressPercent: 0,
-        retryCount: 0,
-      },
+    return prisma.$transaction(async (tx) => {
+      await lockCurrentTask(tx, params.audiobookTaskId, params.generationToken);
+      return tx.m4bEncodingJob.create({ data: { ...params, status: "pending" } });
+    });
+  }
+
+  async requeueJobForTask(params: CreateJobParams): Promise<M4bEncodingJob> {
+    return prisma.$transaction(async (tx) => {
+      await lockCurrentTask(tx, params.audiobookTaskId, params.generationToken);
+      const current = await tx.m4bEncodingJob.findUniqueOrThrow({ where: { audiobookTaskId: params.audiobookTaskId } });
+      if (current.generationToken === params.generationToken && ["pending", "processing"].includes(current.status)) return current;
+      return tx.m4bEncodingJob.update({
+        where: { audiobookTaskId: params.audiobookTaskId },
+        data: { ...params, status: "pending", workerId: null, workerStartedAt: null,
+          leaseToken: null, lastProgressAt: null, progressPercent: 0, errorMessage: null, retryCount: 0 },
+      });
     });
   }
 
   async claimNextJob(workerId: string): Promise<M4bEncodingJob | null> {
-    // 原子 claim：updateMany 带守卫条件单语句翻转状态，避免 findFirst+update
-    // 事务的持锁窗口（SQLite 下并发写锁竞争放大为 SQLITE_BUSY/P2024）。
-    // SQLite 无 updateMany 的 returning，先取最老 pending 的 id 再守卫式更新，
-    // 更新数为 0 说明已被其他 worker 领走，返回 null 等待下一轮。
     const oldest = await prisma.m4bEncodingJob.findFirst({
-      where: { status: "pending" },
-      orderBy: { createdAt: "asc" },
-      select: { id: true },
+      where: { status: "pending" }, orderBy: { createdAt: "asc" },
     });
     if (!oldest) return null;
-
+    const leaseToken = randomUUID();
     const claimed = await prisma.m4bEncodingJob.updateMany({
-      where: { id: oldest.id, status: "pending" },
-      data: {
-        status: "processing",
-        workerId,
-        workerStartedAt: new Date(),
-      },
+      where: { id: oldest.id, status: "pending", generationToken: oldest.generationToken },
+      data: { status: "processing", workerId, leaseToken, workerStartedAt: new Date(), lastProgressAt: new Date() },
     });
-    if (claimed.count === 0) return null;
+    if (!claimed.count) return null;
+    return prisma.m4bEncodingJob.findFirst({ where: { id: oldest.id, leaseToken } });
+  }
 
-    return await prisma.m4bEncodingJob.findUniqueOrThrow({
-      where: { id: oldest.id },
+  async isCurrent(job: M4bEncodingJob): Promise<boolean> {
+    if (!job.generationToken || !job.leaseToken) return false;
+    return (await prisma.m4bEncodingJob.count({ where: {
+      ...ownership(job), audiobookTask: { m4bGenerationToken: job.generationToken,
+        cancelRequestedAt: null, status: { in: ["running", "succeeded"] } },
+    } })) > 0;
+  }
+
+  async updateProgress(job: M4bEncodingJob, percent: number): Promise<void> {
+    await prisma.m4bEncodingJob.updateMany({ where: ownership(job),
+      data: { progressPercent: Math.max(0, Math.min(100, percent)), lastProgressAt: new Date() } });
+  }
+
+  /** The task row write lock serializes publication with every persisted generation rotation.
+   * Lock order is task -> job. No encoding or external IO belongs in this short transaction.
+   */
+  async publish(job: M4bEncodingJob, partPath: string, signal?: AbortSignal): Promise<void> {
+    if (!job.generationToken || !job.leaseToken) throw new Error("M4B ownership is missing");
+    const generationToken = job.generationToken;
+    await prisma.$transaction(async (tx) => {
+      await lockCurrentTask(tx, job.audiobookTaskId, generationToken);
+      const lease = await tx.m4bEncodingJob.updateMany({ where: ownership(job),
+        data: { status: "completed", progressPercent: 100 } });
+      if (!lease.count || signal?.aborted) throw new Error("M4B worker lease was revoked");
+      // Synchronous rename happens while both DB write locks remain held. A rotation
+      // either precedes the guarded write (reject) or follows commit (then wipes output).
+      fs.renameSync(partPath, job.outputM4bPath);
     });
   }
 
-  async updateProgress(jobId: string, percent: number): Promise<void> {
-    await prisma.m4bEncodingJob.update({
-      where: { id: jobId },
-      data: { progressPercent: Math.max(0, Math.min(100, percent)) },
-    });
-  }
-
-  async markCompleted(jobId: string): Promise<void> {
-    // 只更新 job 行；m4b 交付路由以磁盘文件为准（resolveFullBookM4bPath），
-    // 不写 AudiobookTask.fullAudioPath——该字段既有语义固定指向 full-book.wav，
-    // 被 /audio/full 的 streamWavFile 消费，写入 m4b 路径会破坏 WAV 播放。
-    await prisma.m4bEncodingJob.update({
-      where: { id: jobId },
-      data: { status: "completed", progressPercent: 100 },
-    });
-  }
-
-  /** 同任务重跑时 audiobookTaskId 唯一约束冲突（P2002），重置已有 job 重新入队。 */
-  async requeueJobForTask(params: CreateJobParams): Promise<M4bEncodingJob> {
-    return await prisma.m4bEncodingJob.update({
-      where: { audiobookTaskId: params.audiobookTaskId },
-      data: {
-        status: "pending",
-        workerId: null,
-        workerStartedAt: null,
-        inputWavPath: params.inputWavPath,
-        outputM4bPath: params.outputM4bPath,
-        coverImagePath: params.coverImagePath ?? null,
-        metadataJson: params.metadataJson,
-        progressPercent: 0,
-        errorMessage: null,
-        retryCount: 0,
-      },
-    });
-  }
-
-  async markFailed(jobId: string, error: string): Promise<void> {
-    await prisma.m4bEncodingJob.update({
-      where: { id: jobId },
-      data: {
-        status: "failed",
-        errorMessage: error.slice(0, 2000),
-      },
-    });
+  async markFailed(job: M4bEncodingJob, error: string): Promise<void> {
+    await prisma.m4bEncodingJob.updateMany({ where: ownership(job),
+      data: { status: "failed", errorMessage: error.slice(0, 2000) } });
   }
 
   async hasPendingJobs(): Promise<boolean> {
-    const count = await prisma.m4bEncodingJob.count({
-      where: { status: "pending" },
-    });
-    return count > 0;
+    return (await prisma.m4bEncodingJob.count({ where: { status: "pending" } })) > 0;
   }
 
   async getStalledJobs(thresholdMs: number): Promise<M4bEncodingJob[]> {
-    const threshold = new Date(Date.now() - thresholdMs);
-    return await prisma.m4bEncodingJob.findMany({
-      where: {
-        status: "processing",
-        workerStartedAt: { lt: threshold },
-      },
-    });
+    return prisma.m4bEncodingJob.findMany({ where: {
+      status: "processing", lastProgressAt: { lt: new Date(Date.now() - thresholdMs) },
+    } });
   }
 
-  async resetJob(jobId: string): Promise<void> {
-    await prisma.m4bEncodingJob.update({
-      where: { id: jobId },
-      data: {
-        status: "pending",
-        workerId: null,
-        workerStartedAt: null,
-        retryCount: { increment: 1 },
-      },
-    });
+  async resetJob(job: M4bEncodingJob): Promise<void> {
+    await prisma.m4bEncodingJob.updateMany({ where: ownership(job), data: {
+      status: job.retryCount < 1 ? "pending" : "failed", workerId: null,
+      workerStartedAt: null, leaseToken: null, lastProgressAt: null,
+      retryCount: { increment: 1 }, errorMessage: "M4B worker stopped before completion",
+    } });
   }
 
-  /**
-   * Worker 进程被 SIGKILL 或异常退出时立即收口它持有的任务。
-   * 仅允许一次自动回队；重复失败转 failed，避免 worker crash-loop 无限重试并持续抬高宿主内存。
-   */
   async recoverJobsForWorker(workerId: string): Promise<{ requeued: number; failed: number }> {
-    const requeued = await prisma.m4bEncodingJob.updateMany({
-      where: {
-        status: "processing",
-        workerId,
-        retryCount: { lt: 1 },
-      },
-      data: {
-        status: "pending",
-        workerId: null,
-        workerStartedAt: null,
-        retryCount: { increment: 1 },
-        errorMessage: "m4b worker exited; job requeued.",
-      },
-    });
-    const failed = await prisma.m4bEncodingJob.updateMany({
-      where: {
-        status: "processing",
-        workerId,
-        retryCount: { gte: 1 },
-      },
-      data: {
-        status: "failed",
-        workerId: null,
-        workerStartedAt: null,
-        errorMessage: "m4b worker exited after retry budget was exhausted.",
-      },
-    });
-    return { requeued: requeued.count, failed: failed.count };
+    const jobs = await prisma.m4bEncodingJob.findMany({ where: { status: "processing", workerId } });
+    let requeued = 0; let failed = 0;
+    for (const job of jobs) {
+      await this.resetJob(job);
+      if (job.retryCount < 1) requeued++; else failed++;
+    }
+    return { requeued, failed };
   }
 }

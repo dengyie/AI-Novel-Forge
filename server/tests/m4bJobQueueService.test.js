@@ -16,12 +16,15 @@ test("M4bJobQueueService.claimNextJob claims and marks processing", { timeout: 1
         title: "Test Task",
         scopeMode: "full",
         narratorVoice: "test-voice",
-        narratorStyle: "neutral"
+        narratorStyle: "neutral",
+        status: "succeeded",
+        m4bGenerationToken: "test-generation"
       }
     });
 
     const created = await service.createJob({
       audiobookTaskId: task.id,
+      generationToken: "test-generation",
       inputWavPath: "/tmp/test.wav",
       outputM4bPath: "/tmp/test.m4b",
       metadataJson: JSON.stringify({ title: "Test", chapters: [] })
@@ -53,12 +56,15 @@ test("M4bJobQueueService.createJob creates pending job", { timeout: 150000 }, as
         title: "Test Task",
         scopeMode: "full",
         narratorVoice: "test-voice",
-        narratorStyle: "neutral"
+        narratorStyle: "neutral",
+        status: "succeeded",
+        m4bGenerationToken: "test-generation"
       }
     });
 
     const job = await service.createJob({
       audiobookTaskId: task.id,
+      generationToken: "test-generation",
       inputWavPath: "/tmp/test.wav",
       outputM4bPath: "/tmp/test.m4b",
       metadataJson: JSON.stringify({ title: "Test", chapters: [] })

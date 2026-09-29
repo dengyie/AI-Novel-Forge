@@ -117,16 +117,28 @@ m4b 封装在任务主流水线完成后异步运行，可能跨越章节重做�
 ### 当前规则
 
 - `AudiobookTask.m4bGenerationToken` 是持久化的代际栅栏。新建、重试、恢复、续生成、章节重做和 m4b 重做都会签发新 token。
-- 后台 worker 在启动、`full-book.m4b` rename 前和数据库 settle 前都校验 token；settle 还必须满足 `status=succeeded`，
+- 主进程后台 worker 在启动、`full-book.m4b` rename 前和数据库 settle 前都校验 token；settle 还必须满足 `status=succeeded`，
   因此旧 worker 的成功、失败或取消结果都不能覆盖新代 `resultJson`。
 - 代际轮换先于破坏性清理发生，并立即 abort 当前进程内的 ffmpeg；跨重启的孤儿进程依靠旧 token CAS 被拒绝，启动恢复还会清理孤儿进程并轮换 token。
 - 同一任务目录的 m4b 编码使用模块级互斥。等待中的 worker 绑定自己的 `AbortSignal`，代际失效后会从等待队列移除，
   不会在旧锁释放后再次占用编码执行权。
-- token 轮换和删除旧全书产物也必须取得同一个 taskDir artifact lock；这把锁覆盖发布检查到 canonical rename 的窗口，
+- 主进程 token 轮换和删除旧全书产物也必须取得同一个 taskDir artifact lock；这把锁覆盖发布检查到 canonical rename 的窗口，
   防止“旧 worker 已通过检查、重做刚清理、旧 worker 随后 rename”这种跨代覆盖。
 - `resultJson` 的 m4b settle 必须读改写并保留其它字段；所有权仅由 `status=succeeded + generation token` 确定，乐观并发使用完整 `resultJson` 快照。label 是可变展示文案，禁止作为 CAS 条件；同代 CAS 冲突且尚无终态时必须重试投影，已有合法终态时幂等结束。
 - 迁移前的 `NULL` 或空字符串 token 必须作为精确 CAS 值处理，不能把它们混同为缺少栅栏；首次执行会在成功抢占时签发真实 UUID。
 - 章节重做与续生成必须先把精确清理意图和新 generation 持久化，再删除任何章/全书产物。除 `ENOENT` 外的删除错误必须上抛并保留可恢复任务；启动恢复会重放幂等清理意图，不能把仍可读取的旧 WAV 当作本代成功。
+
+### 独立编码进程的持久归属
+
+独立 `m4b-worker` 与 API 不共享内存锁。队列的 `generationToken` 绑定任务代际，`leaseToken` 在每次领取时生成；旧请求入队、旧 worker 的进度/失败/成功回写都不能覆盖新租约。同代际重复入队保留当前 pending/processing 租约。
+
+跨进程发布必须在短数据库事务内按 task → job 顺序加写锁：条件更新当前任务代际，再验证领取租约，最后同步 rename 并提交。章节重做先更新同一 task 行再清理，故不会插入到旧发布的校验与 rename 之间。禁止用模块级 mutex 或事务外 select 替代该边界。
+
+领取时间不是停滞时间。`lastProgressAt` 只在实际 part 字节增长时刷新；达到展示进度上限后仍应刷新增长时间。`WorkerHeartbeat` 表示进程存活，不替代音频推进。
+
+服务在 readiness 放行前恢复独立编码队列；关闭 worker 模式不得启动恢复扫描或领取旧 pending。SIGTERM 和代际失效均传播至 ffmpeg AbortSignal；SIGKILL/OOM 后，manager 仅根据受管 worker 的 IPC 报告验证唯一 part 命令行并终止进程组，确认退出后才能回队。无法确认清理完成时保留租约，交由后续扫描重试，不能为了继续推进而释放资源所有权。
+
+缺少历史代际/租约的待处理 job 不可猜测归属；迁移将其标记失败，保留任务和已有音频，用户从有声书封装重试入口重新生成。实现职责见 `server/src/services/audiobook/m4b/README.md`。
 
 ### 失败模式
 

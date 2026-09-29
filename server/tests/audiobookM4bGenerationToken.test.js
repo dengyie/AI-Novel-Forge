@@ -50,7 +50,8 @@ function installFakeFfmpeg(sleepSeconds = 0.25) {
 }
 
 async function waitForFile(filePath) {
-  const deadline = Date.now() + 2_000;
+  // Cold executable launch on macOS may exceed two seconds; wait for the explicit start barrier.
+  const deadline = Date.now() + 8_000;
   while (!fs.existsSync(filePath) && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
@@ -559,7 +560,8 @@ test("superseding a background generation aborts its in-process ffmpeg worker", 
     });
     await waitForFile(started);
     service.abortBackgroundM4b("task-abort");
-    const deadline = Date.now() + 2_000;
+    // Cold executable launch on macOS may exceed two seconds; wait for the explicit start barrier.
+  const deadline = Date.now() + 8_000;
     while (service.activeM4bControllers.size > 0 && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }

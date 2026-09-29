@@ -79,7 +79,8 @@ import { audiobookTaskService } from "./services/audiobook/AudiobookTaskService"
 import { createStartupReadinessMiddleware } from "./app/startup/StartupReadinessMiddleware";
 import { runStartupRecoverySequence } from "./app/startup/StartupRecoveryCoordinator";
 import { noteMemoryGuardActivity, startMemoryPressureGuard } from "./runtime/memoryPressureGuard";
-import { m4bWorkerManager } from "./services/audiobook/m4b/M4bWorkerManager";
+import { m4bWorkerManager } from "./services/audiobook/m4b";
+import { isM4bWorkerEnabled } from "./services/audiobook/audiobookM4b";
 
 getSharedNovelServices();
 registerNovelEventHandlers(novelEventBus);
@@ -374,6 +375,7 @@ async function initializeBackgroundServices(): Promise<BackgroundServicesHandle>
       clearTimeout(recoveryRetryTimer);
       recoveryRetryTimer = null;
     }
+    await m4bWorkerManager.shutdown();
     // Director worker 现为独立子进程：SIGTERM → 5s drain → SIGKILL（Manager 内）。
     await directorWorkerManager.shutdown().catch((error) => {
       console.warn("[director.worker] shutdown failed", error);
@@ -439,6 +441,7 @@ async function initializeBackgroundServices(): Promise<BackgroundServicesHandle>
     void backgroundRecovery.catch((error) => {
       console.warn("[volume.readiness] startup recovery failed", error);
     });
+    if (isM4bWorkerEnabled()) await m4bWorkerManager.start();
     if (recoveryResult.failedDomains.length > 0) {
       setServerReadiness("degraded", recoveryResult.failedDomains);
       console.warn("[recovery] startup recovery degraded; readiness remains blocked", {
@@ -563,7 +566,6 @@ async function bootstrap(): Promise<void> {
     forceExit.unref?.();
 
     try {
-      await m4bWorkerManager.shutdown();
       await started.close();
       console.log("[server] shutdown complete.");
       process.exit(0);

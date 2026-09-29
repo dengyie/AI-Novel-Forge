@@ -8,7 +8,7 @@ import {
   resolveFfmpegBinary,
   resolveM4bFfmpegThreads,
 } from "../audiobookM4b";
-import { cleanupStaleM4bParts } from "../audiobookPaths";
+
 
 export interface M4bEncodeInput {
   sourceWavPath: string;
@@ -16,6 +16,8 @@ export interface M4bEncodeInput {
   bookTitle: string;
   chapters: Array<{ title: string; startMs: number; endMs: number }>;
   signal?: AbortSignal;
+  publish: (partPath: string) => Promise<void>;
+  onProcess?: (pid: number, partPath: string) => void;
   onProgress?: M4bProgressCallback | null;
 }
 
@@ -64,18 +66,6 @@ export async function executeM4bEncoding(input: M4bEncodeInput): Promise<M4bEnco
   );
 
   try {
-    // Check if output already exists (concurrent safety)
-    if (fs.existsSync(input.outputM4bPath) && fs.statSync(input.outputM4bPath).size >= 64) {
-      return {
-        success: true,
-        outputPath: input.outputM4bPath,
-        error: null,
-        skipped: false,
-      };
-    }
-
-    cleanupStaleM4bParts(path.dirname(input.outputM4bPath), input.outputM4bPath);
-
     fs.writeFileSync(
       metaPath,
       buildM4bFfmetadata({
@@ -98,6 +88,7 @@ export async function executeM4bEncoding(input: M4bEncodeInput): Promise<M4bEnco
       partPath,
       signal: input.signal,
       onProgress: input.onProgress,
+      onSpawn: (pid) => input.onProcess?.(pid, partPath),
     });
 
     if (result.status !== 0) {
@@ -118,7 +109,8 @@ export async function executeM4bEncoding(input: M4bEncodeInput): Promise<M4bEnco
       };
     }
 
-    fs.renameSync(partPath, input.outputM4bPath);
+    if (input.signal?.aborted) throw new Error("Encoding was aborted");
+    await input.publish(partPath);
 
     return {
       success: true,

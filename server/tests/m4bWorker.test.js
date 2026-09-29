@@ -22,7 +22,9 @@ test("m4b-worker processes job and exits", { timeout: 300000 }, async () => {
         title: "Test Task",
         scopeMode: "full",
         narratorVoice: "test-voice",
-        narratorStyle: "neutral"
+        narratorStyle: "neutral",
+        status: "succeeded",
+        m4bGenerationToken: "test-generation"
       }
     });
 
@@ -50,6 +52,7 @@ test("m4b-worker processes job and exits", { timeout: 300000 }, async () => {
 
     const job = await service.createJob({
       audiobookTaskId: task.id,
+      generationToken: "test-generation",
       inputWavPath: wavPath,
       outputM4bPath: m4bPath,
       metadataJson: JSON.stringify({

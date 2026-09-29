@@ -2,7 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { M4bWorkerManager } = require("../dist/services/audiobook/m4b/M4bWorkerManager.js");
 
-test("M4bWorkerManager spawns worker when jobs pending", { timeout: 10000 }, async (t) => {
+test("M4bWorkerManager does not spawn without pending jobs", { timeout: 10000 }, async (t) => {
   // Mock spawn to avoid actually starting worker
   const originalSpawn = require("node:child_process").spawn;
   let spawnCalled = false;
@@ -24,6 +24,7 @@ test("M4bWorkerManager spawns worker when jobs pending", { timeout: 10000 }, asy
   });
 
   const manager = new M4bWorkerManager();
+  manager.queueService = { hasPendingJobs: async () => false };
   await manager.ensureWorkerForPendingJobs();
 
   // Immediate call should not spawn (no pending jobs in test DB)

@@ -29,7 +29,6 @@ import {
   resolveChapterAudioPath,
   resolveChunkAudioPath,
   resolveFullBookAudioPath,
-  resolveFullBookM4bPath,
   wipeChapterAudioArtifacts,
 } from "./audiobookPaths";
 import { createHash } from "node:crypto";
@@ -38,8 +37,7 @@ import {
   isM4bWorkerEnabled,
   type AudiobookM4bEncodeResult,
 } from "./audiobookM4b";
-import { M4bJobQueueService } from "./m4b/M4bJobQueueService";
-import { m4bWorkerManager } from "./m4b/M4bWorkerManager";
+import { dispatchM4bJob } from "./m4b";
 import {
   buildWavBuffer,
   concatWavFiles,
@@ -1272,58 +1270,10 @@ export class AudiobookPipelineService {
 
     let m4b: AudiobookM4bEncodeResult;
     if (isM4bWorkerEnabled()) {
-      // worker 隔离模式：入队后立即返回，编码由 m4b-worker 进程异步完成；
-      // 完成后 worker 写 AudiobookTask.fullAudioPath 与 resultJson 无关，
-      // full m4b 播放路由以磁盘文件为准（resolveFullBookM4bPath）。
-      const queueService = new M4bJobQueueService();
-      try {
-        const { buildM4bChapterTimeline } = await import("./audiobookM4b");
-        const metaChapters = buildM4bChapterTimeline({
-          chapters: m4bChapterInputs,
-          betweenChapterGapMs: resolveBetweenChapterGapMs(),
-        });
-        const jobParams = {
-          audiobookTaskId: input.taskId,
-          inputWavPath: fullAudioPath,
-          outputM4bPath: resolveFullBookM4bPath(taskDir),
-          metadataJson: JSON.stringify({
-            title: input.novelTitle?.trim() || "有声书",
-            chapters: metaChapters,
-          }),
-        };
-        // audiobookTaskId 唯一约束：同任务重跑时重置既有 job 重新入队
-        try {
-          await queueService.createJob(jobParams);
-        } catch (error) {
-          const code = (error as { code?: string })?.code;
-          if (code !== "P2002") throw error;
-          await queueService.requeueJobForTask(jobParams);
-        }
-        await m4bWorkerManager.ensureWorkerForPendingJobs();
-        m4b = {
-          status: "skipped",
-          path: null,
-          relativePath: "full-book.m4b",
-          reason: "m4b 已入队，由独立 worker 进程异步编码",
-        };
-      } catch (queueError) {
-        // 入队失败回退主进程直编，保证交付不因队列故障而失败
-        console.warn(
-          "[audiobook] m4b worker enqueue failed, falling back to in-process encoding",
-          queueError instanceof Error ? queueError.message : queueError,
-        );
-        m4b = await encodeFullBookM4b({
-          taskDir,
-          bookTitle: input.novelTitle?.trim() || "有声书",
-          sourceWavPath: fullAudioPath,
-          betweenChapterGapMs: resolveBetweenChapterGapMs(),
-          signal: input.signal,
-          generationToken: input.generationToken,
-          isGenerationCurrent: input.isGenerationCurrent,
-          chapters: m4bChapterInputs,
-          onProgress: undefined,
-        });
-      }
+      m4b = await dispatchM4bJob({
+        taskId: input.taskId, generationToken: input.generationToken,
+        taskDir, fullAudioPath, novelTitle: input.novelTitle, chapters: m4bChapterInputs,
+      });
     } else {
       m4b = await encodeFullBookM4b({
         taskDir,

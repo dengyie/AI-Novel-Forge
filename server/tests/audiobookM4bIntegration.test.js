@@ -16,13 +16,16 @@ test("AudiobookPipelineService creates M4bEncodingJob on finalize", async () => 
       title: "Test Task",
       scopeMode: "full",
       narratorVoice: "test-voice",
-      narratorStyle: "neutral"
+      narratorStyle: "neutral",
+        status: "succeeded",
+        m4bGenerationToken: "test-generation"
     }
   });
 
   // Simulate what finalizeAudiobook should do
   const job = await service.createJob({
     audiobookTaskId: task.id,
+      generationToken: "test-generation",
     inputWavPath: "/tmp/test.wav",
     outputM4bPath: "/tmp/test.m4b",
     metadataJson: JSON.stringify({ title: "Test", chapters: [] })

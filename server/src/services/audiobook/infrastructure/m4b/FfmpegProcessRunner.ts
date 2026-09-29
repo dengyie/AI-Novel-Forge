@@ -57,6 +57,7 @@ export function runFfmpegProcess(input: {
   signal?: AbortSignal;
   onProgress?: M4bProgressCallback | null;
   partPath?: string | null;
+  onSpawn?: (pid: number) => void;
 }): Promise<{ status: number | null; stderr: string }> {
   return new Promise((resolve, reject) => {
     if (input.signal?.aborted) {
@@ -74,6 +75,7 @@ export function runFfmpegProcess(input: {
       });
     }
 
+    if (child.pid) input.onSpawn?.(child.pid);
     const partPath = resolveOutputPath(input.args, input.partPath);
     let stderr = "";
     let settled = false;

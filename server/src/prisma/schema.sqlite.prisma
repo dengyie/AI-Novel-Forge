@@ -1137,6 +1137,9 @@ model M4bEncodingJob {
   status            String   // 'pending' | 'processing' | 'completed' | 'failed'
   workerId          String?  // worker PID for heartbeat tracking
   workerStartedAt   DateTime?
+  generationToken   String?
+  leaseToken        String?
+  lastProgressAt    DateTime?
 
   inputWavPath      String
   outputM4bPath     String
