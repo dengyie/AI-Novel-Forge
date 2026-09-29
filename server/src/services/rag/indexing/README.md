@@ -14,6 +14,8 @@
 
 全量 owner 入队使用固定默认上限 4 的小池，避免一次性为所有 owner 创建待执行数据库写入。调用方仍收到全部成功创建或复用的 job，任何 enqueue 错误仍会向上抛出。
 
+资料 CRUD 调用 `enqueueIndexJob(..., tx)` 与源变更同事务提交；传入事务时所有查版本、合并与创建都必须使用 tx。事务内仅 DB 操作，提交后才 kick worker。禁止恢复 source 提交后吞错入队的路径：worker 的启动恢复不会扫描没有 job 的 queued 资料。
+
 ## 版本与发布契约
 
 - `queue.ts` 是主进程和 worker 的唯一入队实现。只合并 queued；running 的更新请求必须持久化后续任务。合并用 `status + payloadJson` CAS；领取竞态时创建独立后续任务。知识资料 payload 的 `sourceVersionId` 绑定产生它的版本；旧生产者不得覆盖当前 queued 自定义分块。

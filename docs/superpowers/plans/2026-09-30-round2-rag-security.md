@@ -18,4 +18,8 @@
 
 阶段四：Embedding/Qdrant响应体 deadline 六项旧实现全红；修复后慢成功/错误体、集合元数据、健康检查、正常响应、应用错误分类、404取消及独立deadline共8 tests通过；加RAG生命周期/状态共37 tests通过，server build通过。
 
-范围收口：知识提交→fire-and-forget入队失败窗口留为需要确认项，未复现部署可达故障，不据此扩展事务重构。保留明确接受的open策略。后续验收仅需主线集成检查与实际可信代理链配置核验。
+范围收口：知识提交→fire-and-forget入队失败窗口经专项追查确认为缺陷，见阶段五。保留明确接受的open策略。后续验收仅需主线集成检查与实际可信代理链配置核验。
+
+阶段五：确认 worker/manager 只恢复/轮询已有任务，全量owner扫描仅手动重建/设置触发，队列写失败没有自动补偿。新建/同名追加/版本/激活/重建/恢复/归档七条路径的失败回滚及成功持久化14项旧实现全红。复用唯一enqueueIndexJob实现并注入事务client，源与队列同事务提交，提交后kick；删除吞错fire-and-forget方法。验证使用内存事务快照，不连接业务DB。
+
+阶段五验证收口：server build通过；knowledge atomicity/status、RAG archive/consistency/process boundary/worker 六组共45 tests通过。既有状态测试改为拦截事务入队实现（barrel getter不可直接mock），失败测试期间仅本地空测试库查询报缺表，无业务数据库写入。

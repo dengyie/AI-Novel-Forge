@@ -6,6 +6,7 @@ import type {
 } from "@ai-novel/shared/types/knowledge";
 import { prisma } from "../../db/prisma";
 import { ragMain } from "../rag/mainProcessProxy";
+import { enqueueIndexJob } from "../rag/indexing";
 import {
   buildKnowledgeContentHash,
   normalizeKnowledgeContent,
@@ -38,18 +39,6 @@ export class KnowledgeService {
       }
     }
     return errorMap;
-  }
-
-  private queueKnowledgeRebuild(documentId: string, payload?: Record<string, unknown>, sourceVersionId?: string | null): void {
-    void ragMain.jobs.enqueueOwnerJob("rebuild", "knowledge_document", documentId, { payload: { ...payload, ...(sourceVersionId ? { sourceVersionId } : {}) } }).catch(() => {
-      // Keep knowledge document CRUD resilient even if reindex queueing fails.
-    });
-  }
-
-  private queueKnowledgeDelete(documentId: string): void {
-    void ragMain.jobs.enqueueOwnerJob("delete", "knowledge_document", documentId).catch(() => {
-      // Keep knowledge document CRUD resilient even if delete queueing fails.
-    });
   }
 
   private async assertTargetExists(targetType: KnowledgeBindingTargetType, targetId: string): Promise<void> {
@@ -224,7 +213,7 @@ export class KnowledgeService {
             charCount: normalizedContent.length,
           },
         });
-        return tx.knowledgeDocument.update({
+        const updated = await tx.knowledgeDocument.update({
           where: { id: existing.id },
           data: {
             title,
@@ -241,6 +230,8 @@ export class KnowledgeService {
             },
           },
         });
+        await enqueueIndexJob("rebuild", "knowledge_document", updated.id, { payload: { ...input.indexPayload, sourceVersionId: updated.activeVersionId } }, tx);
+        return updated;
       }
 
       const created = await tx.knowledgeDocument.create({
@@ -262,7 +253,7 @@ export class KnowledgeService {
           charCount: normalizedContent.length,
         },
       });
-      return tx.knowledgeDocument.update({
+      const updated = await tx.knowledgeDocument.update({
         where: { id: created.id },
         data: {
           activeVersionId: version.id,
@@ -274,9 +265,11 @@ export class KnowledgeService {
           },
         },
       });
+      await enqueueIndexJob("rebuild", "knowledge_document", updated.id, { payload: { ...input.indexPayload, sourceVersionId: updated.activeVersionId } }, tx);
+      return updated;
     });
 
-    this.queueKnowledgeRebuild(document.id, input.indexPayload, document.activeVersionId);
+    ragMain.kickWorker();
     const detail = await this.getDocumentById(document.id);
     if (!detail) {
       throw new Error("Knowledge document not found after creation.");
@@ -317,7 +310,7 @@ export class KnowledgeService {
           charCount: normalizedContent.length,
         },
       });
-      return tx.knowledgeDocument.update({
+      const updated = await tx.knowledgeDocument.update({
         where: { id: documentId },
         data: {
           title,
@@ -332,9 +325,11 @@ export class KnowledgeService {
           },
         },
       });
+      await enqueueIndexJob("rebuild", "knowledge_document", updated.id, { payload: { ...input.indexPayload, sourceVersionId: updated.activeVersionId } }, tx);
+      return updated;
     });
 
-    this.queueKnowledgeRebuild(document.id, input.indexPayload, document.activeVersionId);
+    ragMain.kickWorker();
     const detail = await this.getDocumentById(document.id);
     if (!detail) {
       throw new Error("Knowledge document not found after version creation.");
@@ -363,7 +358,7 @@ export class KnowledgeService {
       if (!version) {
         throw new Error("Knowledge document version not found.");
       }
-      return tx.knowledgeDocument.update({
+      const updated = await tx.knowledgeDocument.update({
         where: { id: documentId },
         data: {
           activeVersionId: version.id,
@@ -376,9 +371,11 @@ export class KnowledgeService {
           },
         },
       });
+      await enqueueIndexJob("rebuild", "knowledge_document", updated.id, { payload: { sourceVersionId: updated.activeVersionId } }, tx);
+      return updated;
     });
 
-    this.queueKnowledgeRebuild(document.id);
+    ragMain.kickWorker();
     const detail = await this.getDocumentById(document.id);
     if (!detail) {
       throw new Error("Knowledge document not found after version activation.");
@@ -387,50 +384,47 @@ export class KnowledgeService {
   }
 
   async reindexDocument(documentId: string) {
-    const document = await prisma.knowledgeDocument.findUnique({
-      where: { id: documentId },
+    const updated = await prisma.$transaction(async (tx) => {
+      const document = await tx.knowledgeDocument.findUnique({ where: { id: documentId } });
+      if (!document) throw new Error("Knowledge document not found.");
+      if (!document.activeVersionId) throw new Error("Knowledge document has no active version.");
+      if (document.status === "archived") {
+        throw new Error("Archived knowledge documents must be restored before reindexing.");
+      }
+      const result = await tx.knowledgeDocument.update({
+        where: { id: documentId }, data: { latestIndexStatus: "queued" },
+      });
+      await enqueueIndexJob("rebuild", "knowledge_document", documentId, {
+        payload: { sourceVersionId: document.activeVersionId },
+      }, tx);
+      return result;
     });
-    if (!document) {
-      throw new Error("Knowledge document not found.");
-    }
-    if (!document.activeVersionId) {
-      throw new Error("Knowledge document has no active version.");
-    }
-    if (document.status === "archived") {
-      throw new Error("Archived knowledge documents must be restored before reindexing.");
-    }
-    const updated = await prisma.knowledgeDocument.update({
-      where: { id: documentId },
-      data: {
-        latestIndexStatus: "queued",
-      },
-    });
-    this.queueKnowledgeRebuild(documentId);
+    ragMain.kickWorker();
     return updated;
   }
 
   async updateDocumentStatus(documentId: string, status: KnowledgeDocumentStatus) {
-    const document = await prisma.knowledgeDocument.findUnique({
-      where: { id: documentId },
+    const updated = await prisma.$transaction(async (tx) => {
+      const document = await tx.knowledgeDocument.findUnique({ where: { id: documentId } });
+      if (!document) throw new Error("Knowledge document not found.");
+      const shouldArchiveDocument = document.status !== "archived" && status === "archived";
+      const shouldRestoreArchivedDocument = document.status === "archived" && status !== "archived";
+      const result = await tx.knowledgeDocument.update({
+        where: { id: documentId },
+        data: {
+          status,
+          ...(status === "archived" ? { latestIndexStatus: "idle" } : {}),
+          ...(shouldRestoreArchivedDocument && document.activeVersionId ? { latestIndexStatus: "queued" } : {}),
+        },
+      });
+      if (shouldArchiveDocument || (shouldRestoreArchivedDocument && document.activeVersionId)) {
+        await enqueueIndexJob(shouldArchiveDocument ? "delete" : "rebuild", "knowledge_document", documentId, {
+          payload: { sourceVersionId: document.activeVersionId },
+        }, tx);
+      }
+      return result;
     });
-    if (!document) {
-      throw new Error("Knowledge document not found.");
-    }
-    const shouldArchiveDocument = document.status !== "archived" && status === "archived";
-    const shouldRestoreArchivedDocument = document.status === "archived" && status !== "archived";
-    const updated = await prisma.knowledgeDocument.update({
-      where: { id: documentId },
-      data: {
-        status,
-        ...(status === "archived" ? { latestIndexStatus: "idle" } : {}),
-        ...(shouldRestoreArchivedDocument && document.activeVersionId ? { latestIndexStatus: "queued" } : {}),
-      },
-    });
-    if (shouldArchiveDocument) {
-      this.queueKnowledgeDelete(documentId);
-    } else if (shouldRestoreArchivedDocument && document.activeVersionId) {
-      this.queueKnowledgeRebuild(documentId);
-    }
+    ragMain.kickWorker();
     return updated;
   }
 

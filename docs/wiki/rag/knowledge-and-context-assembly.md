@@ -87,6 +87,14 @@ RAG worker 在启动时读取一份运行时设置快照；设置页保存成功
 
 代码边界：轻量入队与状态投影在 `rag/indexing/`；源读取和候选装配在 `indexing/source/`；发布与清理协议在 `indexing/persistence/`；召回有效性检查在 `rag/retrieval/`。主进程不导入 worker 服务 barrel。
 
+## 资料写入与任务持久化
+
+知识资料新建、追加版本、激活历史版本、手动重建、归档与恢复时，源状态和对应 `RagIndexJob` 必须在同一个 Prisma 事务中写入。`enqueueIndexJob` 接受调用方事务 client，版本读取、合并 CAS 与任务创建全部使用这个 client；`sourceVersionId` 与定制预分块在该事务内绑定。
+
+事务中不启动 worker、不调用向量服务；提交后唤醒仅用于降低等待时间。即使进程在提交后、唤醒前退出，持久队列仍可由重启后的轮询处理。任务写入失败则源变更一并回滚并向调用方报错，不能吞错返回成功。
+
+后台恢复只接管已有 queued/running 任务，不扫描所有资料的 `latestIndexStatus=queued` 来补偿丢失的任务。全量 owner 扫描由手动重建或设置操作触发，因此不能把提交后 fire-and-forget 入队当作可靠的最终一致性。历史已丢队列的资料需要显式重建，不在读请求中擅自补造任务。
+
 ## 外部请求截止时间
 
 Embedding 与 Qdrant 的请求超时必须覆盖响应头、成功 JSON、错误文本读取及不用的响应体取消。fetch 返回 Response 只意味着响应头到达，不能在此时清除计时器；慢响应体否则会占住索引 worker、查询和退出等待。
