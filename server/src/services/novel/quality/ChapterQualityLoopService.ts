@@ -14,6 +14,8 @@ import {
   type QualityFeedbackPacket,
   type QualityFeedbackRepairDecision,
 } from "@ai-novel/shared/types/qualityFeedback";
+import { appendRepairAdoptHistoryLine } from "@ai-novel/shared/types/repairAdoptDecision";
+import { withSqliteRetry } from "../../../db/sqliteRetry";
 import { prisma } from "../../../db/prisma";
 import {
   createChapterContentConflictError,
@@ -52,11 +54,13 @@ interface RecordChapterQualityLoopInput {
 /**
  * Projection-only QFP write after repair discard/plateau.
  * Merges feedback into riskFlags without rewriting qualityLoop assessment body,
- * qualityDebtAttribution, settingAlignment, chapterStatus, or repairHistory.
+ * qualityDebtAttribution, settingAlignment, or chapterStatus. History and feedback commit together.
  */
 interface RecordRepairFeedbackDecisionInput {
   novelId: string;
   chapterId: string;
+  expectedContentRevision: number;
+  historyLine: string;
   chapterOrder?: number | null;
   score: QualityScore;
   issues: ReviewIssue[];
@@ -297,46 +301,63 @@ export class ChapterQualityLoopService {
   async recordRepairFeedbackDecision(
     input: RecordRepairFeedbackDecisionInput,
   ): Promise<QualityFeedbackPacket | null> {
-    const chapter = await prisma.chapter.findFirst({
-      where: { id: input.chapterId, novelId: input.novelId },
-      select: {
-        id: true,
-        order: true,
-        riskFlags: true,
-        repairHistory: true,
-      },
-    });
-    if (!chapter) {
-      throw new Error("章节不存在，无法记录修复反馈决策。");
-    }
+    return withSqliteRetry(() => prisma.$transaction(async (tx) => {
+      // Lock before reading metadata: history and feedback share the same revision owner.
+      const locked = await tx.chapter.updateMany({
+        where: { id: input.chapterId, novelId: input.novelId, contentRevision: input.expectedContentRevision },
+        data: { contentRevision: input.expectedContentRevision },
+      });
+      if (locked.count === 0) {
+        const current = await tx.chapter.findFirst({
+          where: { id: input.chapterId, novelId: input.novelId },
+          select: { contentRevision: true },
+        });
+        if (!current) throw createChapterNotFoundError();
+        throw createChapterContentConflictError({
+          currentContentRevision: current.contentRevision,
+          expectedContentRevision: input.expectedContentRevision,
+        });
+      }
+      const chapter = await tx.chapter.findFirst({
+        where: { id: input.chapterId, novelId: input.novelId },
+        select: {
+          id: true,
+          order: true,
+          riskFlags: true,
+          repairHistory: true,
+        },
+      });
+      if (!chapter) {
+        throw new Error("章节不存在，无法记录修复反馈决策。");
+      }
 
-    // Assessment is synthesized only as QFP input; it is not persisted as qualityLoop body.
-    const assessment = buildChapterQualityLoopAssessment({
-      chapterId: input.chapterId,
-      chapterOrder: input.chapterOrder ?? chapter.order,
-      score: input.score,
-      issues: input.issues,
-      runtimePackage: input.runtimePackage,
-      previousRepairHistory: chapter.repairHistory,
-    });
+      const nextRepairHistory = appendRepairAdoptHistoryLine(chapter.repairHistory, input.historyLine);
 
-    const previousFeedback = extractQualityFeedbackFromRiskFlags(chapter.riskFlags);
-    const nextPacket = buildQualityFeedbackPacket({
-      assessment,
-      qualityDebtAttribution: input.qualityDebtAttribution,
-      previousFeedback,
-      repairDecision: input.repairDecision,
-    });
-    if (!nextPacket) {
-      return null;
-    }
-    const feedback = mergeQualityFeedbackList(previousFeedback, nextPacket);
-    const nextRiskFlags = mergeQualityFeedbackIntoRiskFlags(chapter.riskFlags, feedback);
-    await prisma.chapter.update({
-      where: { id: input.chapterId },
-      data: { riskFlags: nextRiskFlags },
-    });
-    return nextPacket;
+      // Assessment is synthesized only as QFP input; it is not persisted as qualityLoop body.
+      const assessment = buildChapterQualityLoopAssessment({
+        chapterId: input.chapterId,
+        chapterOrder: input.chapterOrder ?? chapter.order,
+        score: input.score,
+        issues: input.issues,
+        runtimePackage: input.runtimePackage,
+        previousRepairHistory: nextRepairHistory,
+      });
+
+      const previousFeedback = extractQualityFeedbackFromRiskFlags(chapter.riskFlags);
+      const nextPacket = buildQualityFeedbackPacket({
+        assessment,
+        qualityDebtAttribution: input.qualityDebtAttribution,
+        previousFeedback,
+        repairDecision: input.repairDecision,
+      });
+      const feedback = nextPacket ? mergeQualityFeedbackList(previousFeedback, nextPacket) : previousFeedback;
+      const nextRiskFlags = nextPacket ? mergeQualityFeedbackIntoRiskFlags(chapter.riskFlags, feedback) : chapter.riskFlags;
+      await tx.chapter.update({
+        where: { id: input.chapterId },
+        data: { riskFlags: nextRiskFlags, repairHistory: nextRepairHistory },
+      });
+      return nextPacket;
+    }), { label: "chapter.repair-feedback" });
   }
 }
 

@@ -282,27 +282,28 @@ export class ChapterRepairFinalizer {
     );
 
     if (adoptDecision.decision !== "adopt") {
-      await prisma.chapter.update({
-        where: { id: input.chapterId },
-        data: { repairHistory: nextRepairHistory },
-      });
-      await chapterQualityLoopService.recordRepairFeedbackDecision({
-        novelId: input.novelId,
-        chapterId: input.chapterId,
-        chapterOrder: baselineChapter.order,
-        score: baselineReview.score,
-        issues: baselineReview.issues,
-        repairDecision: adoptDecision.decision === "plateau_stop" ? "plateau_stop" : "discard",
-      }).catch((error) => {
-        logPipelineError("Failed to record QFP repairDecision after discard/plateau.", {
+      try {
+        assertRepairAbortSignal("finalize-discard-write", input.options.signal);
+        await chapterQualityLoopService.recordRepairFeedbackDecision({
           novelId: input.novelId,
           chapterId: input.chapterId,
-          operation: "repair",
-          provider: input.options.provider ?? null,
-          model: input.options.model ?? null,
-          error: error instanceof Error ? error.message : String(error),
+          expectedContentRevision: input.baselineContentRevision,
+          historyLine,
+          chapterOrder: baselineChapter.order,
+          score: baselineReview.score,
+          issues: baselineReview.issues,
+          repairDecision: adoptDecision.decision === "plateau_stop" ? "plateau_stop" : "discard",
         });
-      });
+      } catch (error) {
+        if (!isChapterContentConflictError(error)) throw error;
+        input.helpers.writeFrame(buildRepairRunStatusFrame({
+          chapterId: input.chapterId,
+          status: "failed",
+          phase: "completed",
+          message: "章节正文已由其他操作保存，本次修复结果未应用。",
+        }));
+        return;
+      }
       input.helpers.writeFrame(buildRepairRunStatusFrame({
         chapterId: input.chapterId,
         status: "succeeded",

@@ -908,6 +908,7 @@ test("createRepairStream discards candidate on overall regression without overwr
   const originalChapterFindFirst = prisma.chapter.findFirst;
   const originalBibleFindUnique = prisma.novelBible.findUnique;
   const originalChapterUpdate = prisma.chapter.update;
+  const originalTransaction = prisma.$transaction;
   const originalQualityReportFindFirst = prisma.qualityReport.findFirst;
   const originalRunStructuredPrompt = promptRunner.runStructuredPrompt;
   const originalStreamTextPrompt = promptRunner.streamTextPrompt;
@@ -916,6 +917,11 @@ test("createRepairStream discards candidate on overall regression without overwr
   const syncCalls = [];
   const frames = [];
 
+  prisma.$transaction = async (cb) => cb({ chapter: {
+    findFirst: (...args) => prisma.chapter.findFirst(...args),
+    update: (...args) => prisma.chapter.update(...args),
+    updateMany: async () => ({ count: 1 }),
+  } });
   prisma.novel.findUnique = async () => ({ id: "novel-1", title: "测试小说" });
   prisma.chapter.findFirst = async () => ({
     id: "chapter-1",
@@ -1000,8 +1006,8 @@ test("createRepairStream discards candidate on overall regression without overwr
     });
 
     assert.equal(syncCalls.length, 0, "discard must not sync artifacts");
-    // discard: 1) repairHistory 决策行  2) QFP recordRepairFeedbackDecision 投影更新
-    assert.equal(chapterUpdates.length, 2);
+    // History and feedback are committed together for the same revision.
+    assert.equal(chapterUpdates.length, 1);
     assert.ok(chapterUpdates.every((item) => item.content === undefined), "discard must not overwrite content");
     assert.ok(chapterUpdates.some((item) => item.repairHistory?.includes("decision=discard")));
     assert.match(frames.at(-1)?.message ?? "", /未采纳/);
@@ -1010,6 +1016,7 @@ test("createRepairStream discards candidate on overall regression without overwr
     prisma.chapter.findFirst = originalChapterFindFirst;
     prisma.novelBible.findUnique = originalBibleFindUnique;
     prisma.chapter.update = originalChapterUpdate;
+    prisma.$transaction = originalTransaction;
     prisma.qualityReport.findFirst = originalQualityReportFindFirst;
     promptRunner.runStructuredPrompt = originalRunStructuredPrompt;
     promptRunner.streamTextPrompt = originalStreamTextPrompt;
@@ -1021,6 +1028,7 @@ test("createRepairStream discards candidate that introduces L0 AI self-reference
   const originalChapterFindFirst = prisma.chapter.findFirst;
   const originalBibleFindUnique = prisma.novelBible.findUnique;
   const originalChapterUpdate = prisma.chapter.update;
+  const originalTransaction = prisma.$transaction;
   const originalQualityReportFindFirst = prisma.qualityReport.findFirst;
   const originalRunStructuredPrompt = promptRunner.runStructuredPrompt;
   const originalStreamTextPrompt = promptRunner.streamTextPrompt;
@@ -1028,6 +1036,11 @@ test("createRepairStream discards candidate that introduces L0 AI self-reference
   const chapterUpdates = [];
   const syncCalls = [];
 
+  prisma.$transaction = async (cb) => cb({ chapter: {
+    findFirst: (...args) => prisma.chapter.findFirst(...args),
+    update: (...args) => prisma.chapter.update(...args),
+    updateMany: async () => ({ count: 1 }),
+  } });
   prisma.novel.findUnique = async () => ({ id: "novel-1", title: "测试小说" });
   prisma.chapter.findFirst = async () => ({
     id: "chapter-1",
@@ -1120,6 +1133,7 @@ test("createRepairStream discards candidate that introduces L0 AI self-reference
     prisma.chapter.findFirst = originalChapterFindFirst;
     prisma.novelBible.findUnique = originalBibleFindUnique;
     prisma.chapter.update = originalChapterUpdate;
+    prisma.$transaction = originalTransaction;
     prisma.qualityReport.findFirst = originalQualityReportFindFirst;
     promptRunner.runStructuredPrompt = originalRunStructuredPrompt;
     promptRunner.streamTextPrompt = originalStreamTextPrompt;

@@ -49,6 +49,12 @@ Prompt 返回后先做当前 revision 检查。每个独立 canonical writer 事
 
 `ChapterQualityLoopService.recordAssessment` 是质量评估唯一持久化入口。瞬态 SQLite 锁冲突重试该入口，不得在异常分支用无 revision 条件的 update 补写 riskFlags 或 chapterStatus。当前 revision 的非瞬态写入失败可保留本轮内存反馈，但不覆盖数据库元数据；正文已更新或删除则只能淘汰旧结果。
 
+## Repair discard ownership
+
+未采纳候选也会改变修复历史和质量反馈，属于章节派生写入。discard / plateau 与 adopt 必须消费同一个修复启动时的 `baselineContentRevision`。`recordRepairFeedbackDecision` 在事务内先取得 revision 条件写锁，再读取当前历史和 riskFlags，将决策行与反馈一起提交；不能先写历史、再吞掉反馈写入错误。
+
+候选被新正文淘汰时返回未应用结果，不累计新正文的 failedPatchCount、avoidRetry 或重写升级次数。同 revision 的其他元数据也必须基于锁内最新值合并，不能把评估前的历史快照整段覆盖回来。
+
 ## Failure Modes
 
 - 只在 Prompt 前检查 revision：Prompt 返回后正文可能已经变化。
