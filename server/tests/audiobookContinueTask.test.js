@@ -360,7 +360,7 @@ test("子任务终态后失败章合并契约：appendFailedContinueChapters 去
   assert.deepEqual(merged, ["ch4", "ch7", "ch9"]);
 });
 
-// resolveDataRoot 在 desktop runtime 下走 AI_NOVEL_APP_DATA_DIR；web runtime 走工程根（忽略 env）。
+// desktop runtime 的数据位于 AI_NOVEL_APP_DATA_DIR/data；此夹具按桌面布局隔离任务。
 // 测试内临时切到 desktop + tmpDir，避免污染真实路径；测后还原。
 function withTempDataRoot(fn) {
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "abk-root-"));

@@ -52,10 +52,11 @@ export function resolveClientDistPath(): string | null {
   return fs.existsSync(path.join(dir, "index.html")) ? dir : null;
 }
 
+/** Desktop 保持 app-data/data；Web 显式数据目录同时约束媒体与相对 SQLite 路径。 */
 export function resolveDataRoot(): string {
   return resolveAppRuntimeMode() === "desktop"
     ? path.join(resolveAppDataRoot(), "data")
-    : resolveServerRoot();
+    : resolveConfiguredAppDataDir() ?? resolveServerRoot();
 }
 
 /**
