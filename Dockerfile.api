@@ -40,6 +40,7 @@ COPY server/package.json ./server/package.json
 COPY shared/package.json ./shared/package.json
 COPY server/prisma.config.ts ./server/prisma.config.ts
 COPY server/src/config/database.ts ./server/src/config/database.ts
+COPY server/src/runtime/appPaths.ts ./server/src/runtime/appPaths.ts
 COPY server/src/prisma ./server/src/prisma
 ENV AI_NOVEL_DATABASE_MODE=sqlite
 RUN pnpm install --frozen-lockfile \

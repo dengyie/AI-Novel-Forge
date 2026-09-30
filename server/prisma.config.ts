@@ -1,7 +1,11 @@
 import { defineConfig } from "prisma/config";
 import { resolveDatabaseRuntimeConfig } from "./src/config/database";
+import { resolveDatabaseFilePath } from "./src/runtime/appPaths";
 
 const runtimeConfig = resolveDatabaseRuntimeConfig();
+const datasourceUrl = runtimeConfig.url.startsWith("file:")
+  ? `file:${resolveDatabaseFilePath(runtimeConfig.url.slice("file:".length) || "./dev.db")}`
+  : runtimeConfig.url;
 
 export default defineConfig({
   schema: runtimeConfig.prismaSchemaPath,
@@ -10,6 +14,6 @@ export default defineConfig({
     seed: "ts-node-dev --transpile-only src/db/seed.ts",
   },
   datasource: {
-    url: runtimeConfig.url,
+    url: datasourceUrl,
   },
 });

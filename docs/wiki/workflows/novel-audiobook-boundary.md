@@ -210,6 +210,8 @@ HTTP 429/503 是上游繁忙状态，必须保留到 provider 的熔断计数。
 
 Web 显式设置 `AI_NOVEL_APP_DATA_DIR` 时，`runtime/appPaths.resolveDataRoot()` 必须返回该目录。有声书、参考音频、全站音色库和音频运营产物均从该根的 `storage/` 下派生，不能写入会随容器替换而丢失的应用目录。未配置的 Web 保持 `server/` 数据根；桌面版保持 `<app-data>/data`，图片和日志继续使用既有桌面布局。
 
-相对 SQLite URL（如 `file:./dev.db`）由 Prisma 连接与 runtime migration 共同通过 `resolveDatabaseFilePath()` 解析，必须落在同一个数据根。绝对 SQLite 路径和 PostgreSQL URL 不受影响。部署变更数据根时，不能把在新路径创建空库误判为数据迁移完成；已有相对路径库必须备份并迁移，或显式保留原绝对数据库路径。
+相对 SQLite URL（如 `file:./dev.db`）由 Prisma 连接、runtime migration 与 `server/prisma.config.ts` 共同通过 `resolveDatabaseFilePath()` 解析，必须落在同一个数据根。CLI 配置必须向 Prisma 传入解析后的绝对 `file:` URL；Prisma 配置加载器不会读取应用专属数据目录环境变量，也不会替应用规范化 datasource URL。否则 CLI 迁移成功并不代表运行中的数据库已迁移。绝对 SQLite 路径和 PostgreSQL URL 不受影响。部署变更数据根时，不能把在新路径创建空库误判为数据迁移完成；已有相对路径库必须备份并迁移，或显式保留原绝对数据库路径。
 
 路径解析不自动迁移历史数据。切换目录前应备份并核验媒体文件和数据库，再同步迁移文件与数据库内保存的绝对路径（包括任务 `outputDir` 与参考音频路径）。下载、恢复和参考音频校验仍必须限制在配置的数据根内；不能为兼容旧路径放宽边界。回归测试需要实际创建任务目录、写入音频及参考文件，单测只验证日志或图片路径不足以证明所有产物持久化。
+
+配置层回归应使用 Prisma 自身的配置加载器，覆盖 Web 显式目录、相对目录、未配置目录、桌面数据布局、绝对 SQLite 与 PostgreSQL URL；对比 CLI 和运行时最终数据库地址。该检查只加载配置，不实例化数据库客户端，不执行迁移，也不创建数据库。
