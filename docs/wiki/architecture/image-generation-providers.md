@@ -29,6 +29,10 @@
 
 漫画资产/场景上传属于二进制请求，全局 JSON 解析器的限额不适用。必须在 HTTP 读取阶段限制为 10 MiB、非空 PNG/JPEG/WebP，且对无 Content-Length 的 chunked 上传同样计数，不能收完之后才检查大小。
 
+Docker nginx 的两个漫画图片上传入口同样限制为 10 MiB：已知 Content-Length 超限时在缓冲前拒绝，413 使用前端通用错误拦截器可读的 JSON。其他 API 保持 20 MiB。嵌套 location 必须显式设置无 URI 后缀的 proxy_pass；代理头、超时等继承 /api/，不可假定 proxy_pass 会随之继承。应用层的 MIME、非空和读取限额仍负责直连/桌面模式，不能删除。
+
+未知总长的 chunked 请求只能在收到足够分块信息后判断超限；上游隧道尚未把请求送到 nginx 时的网络超时不受此规则保证。入口回归使用 `python3 scripts/deploy/test-image-upload-ingress.py`，启动独立 nginx 与模拟上游，验证提前拒绝、边界值、分块累计、代理头和其他 API 限额；不能用静态配置文本断言替代。
+
 漫画资产/场景及短剧图片直出使用 Express sendFile。文件存在性查询不能替代流错误处理：文件可能在查询后删除，客户端也可能在下载中断开。未开始响应时交错误中间件，已开始时关闭响应，客户端断开后不追加错误 JSON；读取源必须随响应结束释放。
 
 文件发送适配器 `server/src/http/fileResponse.ts` 仅转换 Express sendFile 产生的已知 4xx 状态；不可满足的 Range 保留 416 与安全的 Content-Range，不交给通用错误处理器变成 500。错误响应清除图片 Content-Type、Content-Length 与公开缓存策略，用户只见通用文件错误，底层错误保留在 cause 用于诊断。业务抛出的任意 status 字段不因此获得信任。

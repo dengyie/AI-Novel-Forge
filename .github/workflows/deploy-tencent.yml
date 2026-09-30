@@ -60,6 +60,9 @@ jobs:
             exit 1
           fi
 
+      - name: Verify nginx image upload boundary
+        run: python3 scripts/deploy/test-image-upload-ingress.py
+
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
         with:
