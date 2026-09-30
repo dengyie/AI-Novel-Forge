@@ -96,3 +96,25 @@
 ## [P1] 退役主机自动部署入口仍响应 main
 
 生产已迁腾讯，旧 pxed workflow 仍 active。main 推送会同时触发两套部署，有重启退役主机并修改旧数据的风险。根因为迁移只关闭运行服务，没有删除发布入口。最小修复是取消尚在 gate 的旧运行、禁用并删除 workflow，移除旧手册中的可执行入口。以 GitHub job 状态核验 Cutover 未启动；无需重跑未变化的应用测试。
+
+## [P1] Web 音频忽略配置的数据根，容器重建后丢失
+
+- 文件与位置：`server/src/runtime/appPaths.ts / resolveDataRoot`。
+- 所属维度：持久化、可靠性。
+- 问题：日志与图片支持配置的数据根，但 Web 音频/参考音频仍落容器 `/app/server/storage`。
+- 触发条件：配置 `AI_NOVEL_APP_DATA_DIR=/data` 的 Docker 生产生成音频后重建容器。
+- 实际影响：数据库仍有成功任务，音频与参考资产文件丢失。
+- 根本原因：基础数据根仅 Desktop 分支读配置，Web 分支始终返回代码目录。
+- 最小修改方案：Web 优先显式数据根；保持未配置 Web 与 Desktop 布局、绝对数据库 URL 不变。现有文件与旧绝对路径需备份后搬迁，不添加旧根越界兼容。
+- 需要补充的测试：显式/未配置 Web、Desktop、相对/绝对 SQLite、音频/参考音频与继续任务；修复前 5 项红，修复后相关 67 项通过，server build 通过。
+- 是否阻塞合并：补丁已修复，发布验收必须证明容器替换后文件仍在持久卷。
+
+# Initial live acceptance and persistence follow-up
+
+- `944b6ca8ea82` 已由 GitHub run `36645147970` 成功部署，API/Web 运行版本一致，重启次数 0；ffmpeg/ffprobe/ps 可用，89 项迁移通过。
+- 真实 AI 章节完成规划、407 字正文 revision 提交、审校、质量投影；另一 running 任务取消后保持 cancelled，正文 revision 0，无迟到写入。
+- 短旁白真实 TTS、worker、任务 ready、M4B 下载/206/416/no-store 通过；ffprobe 验证 13.28 秒、1 个章节标记。
+- 正文 CAS、PNG→JPEG 字节一致性、图片 206/416、资料创建/版本切换/归档恢复通过。大小限制通过生产源站，公网上传首试遇到客户端传输超时，需独立复验，不能标记为通过。
+- 伪造五个不同 XFF 时，同一限流窗口 remaining 299→298→297→296→295，未重置配额。
+- 实测发现上述音频持久化缺陷，追加备份 `/opt/ai-novel/backups/20260930T000339Z-pre-data-root-fix`（DB 3,207,168 字节，完整性 ok；容器 storage 4 文件）。文件复制至 `/opt/ai-novel/data/storage`，哈希一致；旧文件保留。
+- 旧路径扫描仅命中 1 条 AudiobookTask.outputDir 和 1 条 M4B job 的 inputWavPath/outputM4bPath；补丁切换后需同步路径并再次下载验收。
