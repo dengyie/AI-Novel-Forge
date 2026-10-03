@@ -630,6 +630,51 @@ export class NovelDirectorService {
     });
   }
 
+  /**
+   * Validates a takeover request against current novel assets *before* it is
+   * enqueued. Enqueue is otherwise fire-and-forget (background worker runs
+   * `startTakeover` later), so an invalid request would surface as an async
+   * 409 on a task row that is left queued + pendingManualRecovery — a state the
+   * user must manually cancel and which briefly blocks later takeovers. Running
+   * the same validation synchronously lets the route return 409 immediately and
+   * avoids creating a zombie task for a request that can never succeed.
+   */
+  async assertTakeoverRequestAllowed(input: DirectorTakeoverRequest): Promise<void> {
+    const takeoverState = await loadDirectorTakeoverState({
+      novelId: input.novelId,
+      autoExecutionPlan: input.autoExecutionPlan,
+      getStoryMacroPlan: (targetNovelId) => this.storyMacroService.getPlan(targetNovelId),
+      getDirectorAssetSnapshot: (targetNovelId) => this.getDirectorAssetSnapshot(targetNovelId),
+      getVolumeWorkspace: (targetNovelId) => this.volumeService.getVolumes(targetNovelId),
+      findActiveAutoDirectorTask: (targetNovelId) => this.workflowService.findActiveTaskByNovelAndLane(targetNovelId, "auto_director"),
+      findLatestAutoDirectorTask: (targetNovelId) => this.workflowService.findLatestVisibleTaskByNovelId(targetNovelId, "auto_director"),
+    });
+    const takeoverStrategy = input.strategy ?? (input.startPhase ? "restart_current_step" : "continue_existing");
+    if (takeoverState.hasActiveTask && takeoverStrategy !== "continue_existing") {
+      throw new AppError("当前已有自动导演任务在运行或等待审核，请先继续或取消当前任务。", 409);
+    }
+    const takeoverValidation = validateAutoDirectorTakeoverRequest({
+      source: "takeover",
+      request: input,
+      assets: {
+        hasProjectSetup: true,
+        hasStoryMacroPlan: takeoverState.snapshot.hasStoryMacroPlan,
+        hasBookContract: takeoverState.snapshot.hasBookContract,
+        characterCount: takeoverState.snapshot.characterCount,
+        volumeCount: takeoverState.snapshot.volumeCount,
+        hasVolumeStrategyPlan: takeoverState.snapshot.hasVolumeStrategyPlan,
+        hasStructuredOutline: isTakeoverStructuredOutlineReadyForValidation(takeoverState.snapshot),
+        plannedChapterCount: takeoverState.snapshot.plannedChapterCount,
+        totalChapterCount: takeoverState.snapshot.chapterCount,
+        volumeChapterRanges: takeoverState.snapshot.volumeChapterRanges,
+        structuredOutlineChapterOrders: takeoverState.snapshot.structuredOutlineChapterOrders,
+      },
+    });
+    if (!takeoverValidation.allowed) {
+      throw new AppError(takeoverValidation.blockingReasons.join("；") || "当前接管请求需要先重新校验。", 409);
+    }
+  }
+
   async analyzeRuntimeWorkspace(novelId: string, input?: {
     workflowTaskId?: string | null;
     includeAiInterpretation?: boolean;

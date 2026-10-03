@@ -287,6 +287,7 @@ router.post("/tasks", validate({ body: createTaskSchema }), async (req, res, nex
         data = await commandService.enqueueGenerateCandidatesCommand(body.payload);
         break;
       case "takeover":
+        await novelDirectorService.assertTakeoverRequestAllowed(body.payload as DirectorTakeoverRequest);
         data = await commandService.enqueueTakeoverCommand(body.payload as DirectorTakeoverRequest);
         break;
       case "workspace_analysis":
