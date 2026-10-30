@@ -952,22 +952,35 @@ export function buildChapterWriterContextBlocks(
         id: "volume_window",
         group: "volume_window",
         priority: 96,
+        // 复用范围 volume：仅卷身份/使命这类跨章稳定材料。pendingPayoffs 与里程碑
+        // 守卫随章节推进逐章变化（混合状态），按 core/cache 规则拆回 request 块。
         reuseScope: "volume",
         content: writeContext.volumeWindow
           ? [
               `Current volume: ${writeContext.volumeWindow.title}`,
               `Volume mission: ${writeContext.volumeWindow.missionSummary}`,
-              toListBlock("Current volume pending payoffs", writeContext.volumeWindow.pendingPayoffs.slice(0, 3)),
-              writeContext.volumeWindow.keyMilestoneGuards.length > 0
-                ? toListBlock(
-                  "Volume key milestone guards — pacing constraints",
-                  writeContext.volumeWindow.keyMilestoneGuards
-                    .filter((guard) => guard.status !== "done")
-                    .map((guard) => `[${guard.targetChapterRange}] ${guard.event}: ${guard.note}`),
-                )
-                : "",
-            ].filter(Boolean).join("\n")
+            ].join("\n")
           : "Current volume: none",
+      })
+      : null,
+    includeVolumeWindow && writeContext.volumeWindow
+      && (writeContext.volumeWindow.pendingPayoffs.length > 0
+        || writeContext.volumeWindow.keyMilestoneGuards.some((guard) => guard.status !== "done"))
+      ? createContextBlock({
+        id: "volume_pending_state",
+        group: "volume_window",
+        priority: 95,
+        content: [
+          toListBlock("Current volume pending payoffs", writeContext.volumeWindow.pendingPayoffs.slice(0, 3)),
+          writeContext.volumeWindow.keyMilestoneGuards.length > 0
+            ? toListBlock(
+              "Volume key milestone guards — pacing constraints",
+              writeContext.volumeWindow.keyMilestoneGuards
+                .filter((guard) => guard.status !== "done")
+                .map((guard) => `[${guard.targetChapterRange}] ${guard.event}: ${guard.note}`),
+            )
+            : "",
+        ].filter(Boolean).join("\n"),
       })
       : null,
     writeContext.narrativeProgressHint

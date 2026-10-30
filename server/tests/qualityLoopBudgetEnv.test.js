@@ -27,3 +27,36 @@ test('shared loop max attempts only tighten within the fixed 3-step ladder', () 
   assert.equal(resolveQualityLoopMaxAttempts({ QUALITY_LOOP_MAX_ATTEMPTS: '8' }), 3);
   assert.equal(resolveQualityLoopMaxAttempts({ QUALITY_LOOP_MAX_ATTEMPTS: '0.5' }), 1);
 });
+
+test('QUALITY_LOOP_MAX_ATTEMPTS genuinely tightens the exhaustion ladder', () => {
+  const { buildChapterQualityLoopAssessment } = require('../../shared/dist/types/chapterQualityLoop.js');
+  const score = (overrides = {}) => ({
+    coherence: 88, repetition: 60, pacing: 86, voice: 85, engagement: 88, overall: 80, ...overrides,
+  });
+  const input = {
+    chapterId: 'chapter-budget-env',
+    chapterOrder: 6,
+    score: score(),
+    issues: [],
+    evaluatedAt: '2026-04-30T00:00:00.000Z',
+  };
+  const previous = process.env.QUALITY_LOOP_MAX_ATTEMPTS;
+  try {
+    process.env.QUALITY_LOOP_MAX_ATTEMPTS = '1';
+    const first = buildChapterQualityLoopAssessment(input);
+    assert.equal(first.budget.attempt, 1);
+    assert.equal(first.budget.maxAttempts, 1);
+    assert.equal(first.budget.nextAction, 'patch_repair');
+    assert.equal(first.budget.exhausted, false);
+
+    const history = `[quality_loop 2026-04-30T00:00:00.000Z] status=${first.overallStatus} action=${first.recommendedAction} signature=${first.budget.signature} attempt=1/1 budget=${first.budget.nextAction}`;
+    const second = buildChapterQualityLoopAssessment({ ...input, previousRepairHistory: history });
+    assert.equal(second.budget.attempt, 2);
+    assert.equal(second.budget.maxAttempts, 1);
+    assert.equal(second.budget.nextAction, 'hard_stop');
+    assert.equal(second.budget.exhausted, true);
+  } finally {
+    if (previous === undefined) delete process.env.QUALITY_LOOP_MAX_ATTEMPTS;
+    else process.env.QUALITY_LOOP_MAX_ATTEMPTS = previous;
+  }
+});

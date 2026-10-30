@@ -127,14 +127,22 @@ export class ChapterExecutionContractService {
         // 写前连续性核对（上游 2026-10-17 移植）：形状齐全 ≠ 承接了实际前文。
         // 尚无正文的章节在复用已有合同前，先对上一章已保存正文做一次语义核对；
         // 相同有效输入复用核对结果，AI 要求修订时把指导送回现有合同生成链。
+        // CHAPTER_EXECUTION_CONTINUITY_REVIEW=0 为生产逃生开关（回退到无核对的旧行为）。
         let continuityGuidance: string | null = null;
-        if (!chapter.content?.trim() && chapter.order > 1) {
+        const continuityReviewEnabled = process.env.CHAPTER_EXECUTION_CONTINUITY_REVIEW !== "0";
+        if (
+          continuityReviewEnabled
+          && !chapter.content?.trim()
+          && chapter.order > 1
+        ) {
           const previous = await prisma.chapter.findFirst({
             where: { novelId, order: chapter.order - 1 },
             select: { order: true, title: true, content: true },
           });
           if (previous?.content?.trim()) {
             reviewedPrevious = { order: previous.order, content: previous.content };
+            const reviewMode = options.chapterTaskSheetQualityMode
+              ?? (options.entrypoint === "auto_director" ? "full_book_autopilot" : "ai_copilot");
             const checked = await reviewChapterExecutionContinuity(
               {
                 novelId,
@@ -166,19 +174,37 @@ export class ChapterExecutionContractService {
                 taskId: options.taskId,
                 entrypoint: options.entrypoint,
                 signal: options.signal,
-                mode: options.chapterTaskSheetQualityMode
-                  ?? (options.entrypoint === "auto_director" ? "full_book_autopilot" : "ai_copilot"),
+                mode: reviewMode,
               },
             );
-            if (checked && (!checked.result.canEnterExecution || checked.result.status !== "passed")) {
-              if (!checked.result.canEnterExecution) {
-                throw new ChapterTaskSheetQualityGateError(checked.result);
+            if (checked) {
+              const { assessment, result } = checked;
+              if (!assessment) {
+                // 形状阶段已判不可执行（语义未运行）→ 沿用既有 gate 失败语义。
+                if (!result.canEnterExecution) {
+                  throw new ChapterTaskSheetQualityGateError(result);
+                }
+              } else if (
+                assessment.verdict === "unusable"
+                || assessment.recommendedHandling === "replan_window"
+              ) {
+                // 硬阻断：unusable 直接拒；replan_window 沿用 contract_overloaded 失败分类路由整窗重排。
+                throw new ChapterTaskSheetQualityGateError(result);
+              } else if (assessment.recommendedHandling !== "use_as_is") {
+                // repair_contract：autopilot 走「带指导重生成」一次有界自愈；
+                // 副驾/手动需作者确认，不静默覆盖规划（上游同款语义）。
+                if (reviewMode !== "full_book_autopilot") {
+                  throw new ChapterTaskSheetQualityGateError(result);
+                }
+                continuityGuidance = [
+                  result.summary,
+                  ...result.repairGuidance,
+                  ...result.issues.map((issue) => issue.repairHint),
+                ].filter(Boolean).join("\n");
+              } else if (!result.canEnterExecution) {
+                // use_as_is 但未通过（如 safeToSync=false 的矛盾输出）→ 按 gate 失败处理。
+                throw new ChapterTaskSheetQualityGateError(result);
               }
-              continuityGuidance = [
-                checked.result.summary,
-                ...checked.result.repairGuidance,
-                ...checked.result.issues.map((issue) => issue.repairHint),
-              ].filter(Boolean).join("\n");
             }
           }
         }
