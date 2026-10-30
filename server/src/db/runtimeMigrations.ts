@@ -215,6 +215,36 @@ const REQUIRED_COLUMN_BACKFILLS = [
     columnName: "readAt",
     columnDefinition: `"readAt" DATETIME`,
   },
+  // LLM 输入缓存用量列（上游 2026-10-05 llm-cache-observability 移植）。命中包含于输入
+  // 总量，不参与预算口径；只有厂商明确上报的调用才累计，缺报告保持 NULL（未知 ≠ 0）。
+  ...(
+    [
+      "GenerationJob",
+      "NovelWorkflowTask",
+      "StyleExtractionTask",
+      "AudiobookTask",
+    ] as const
+  ).flatMap((tableName) => ([
+    { tableName, columnName: "cacheHitTokens", columnDefinition: `"cacheHitTokens" INTEGER` },
+    { tableName, columnName: "cacheMissTokens", columnDefinition: `"cacheMissTokens" INTEGER` },
+    { tableName, columnName: "cacheWriteTokens", columnDefinition: `"cacheWriteTokens" INTEGER` },
+    { tableName, columnName: "cacheReportedCount", columnDefinition: `"cacheReportedCount" INTEGER` },
+  ])),
+  {
+    tableName: "DirectorLlmUsageRecord",
+    columnName: "cacheHitTokens",
+    columnDefinition: `"cacheHitTokens" INTEGER`,
+  },
+  {
+    tableName: "DirectorLlmUsageRecord",
+    columnName: "cacheMissTokens",
+    columnDefinition: `"cacheMissTokens" INTEGER`,
+  },
+  {
+    tableName: "DirectorLlmUsageRecord",
+    columnName: "cacheWriteTokens",
+    columnDefinition: `"cacheWriteTokens" INTEGER`,
+  },
 ] as const;
 
 function resolveSqliteDatabasePath(): string | null {

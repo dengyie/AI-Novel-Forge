@@ -1,4 +1,6 @@
 import { readPlanningFactFingerprint, recordPlanningFactFingerprint, type ChapterPlanFactRefresh } from "../planning/ChapterPlanFactRefresh";
+import { ChapterTaskSheetQualityGateError } from "./ChapterTaskSheetQualityGateService";
+import { reviewChapterExecutionContinuity } from "./chapterExecutionContinuity";
 import type { Prisma } from "@prisma/client";
 import { parseChapterScenePlan, serializeChapterScenePlan } from "@ai-novel/shared/types/chapterLengthControl";
 import {
@@ -54,6 +56,8 @@ export class ChapterExecutionContractService {
     chapterId: string,
     options: EnsureChapterExecutionContractOptions = {},
   ) {
+    // 写前连续性核对读取到的前章正文快照；持久化前复核是否被并发修改。
+    let reviewedPrevious: { order: number; content: string } | null = null;
     const chapter = await prisma.chapter.findFirst({
       where: { id: chapterId, novelId },
       select: {
@@ -120,15 +124,84 @@ export class ChapterExecutionContractService {
         && targetChapter?.nextChapterEntryState?.trim()
       );
       if (planningFieldsComplete) {
-        const styleContract = await this.resolveStyleContract(
-          novelId,
-          chapterId,
-          options.taskStyleProfileId,
-          chapter.order,
-        );
-        return {
-          ...chapter,
-          styleContract,
+        // 写前连续性核对（上游 2026-10-17 移植）：形状齐全 ≠ 承接了实际前文。
+        // 尚无正文的章节在复用已有合同前，先对上一章已保存正文做一次语义核对；
+        // 相同有效输入复用核对结果，AI 要求修订时把指导送回现有合同生成链。
+        let continuityGuidance: string | null = null;
+        if (!chapter.content?.trim() && chapter.order > 1) {
+          const previous = await prisma.chapter.findFirst({
+            where: { novelId, order: chapter.order - 1 },
+            select: { order: true, title: true, content: true },
+          });
+          if (previous?.content?.trim()) {
+            reviewedPrevious = { order: previous.order, content: previous.content };
+            const checked = await reviewChapterExecutionContinuity(
+              {
+                novelId,
+                volumeId: matched.volumeId,
+                chapterId,
+                chapterOrder: chapter.order,
+                title: chapter.title,
+                summary: targetChapter?.summary ?? null,
+                purpose: targetChapter?.purpose ?? null,
+                exclusiveEvent: targetChapter?.exclusiveEvent ?? null,
+                endingState: targetChapter?.endingState ?? null,
+                nextChapterEntryState: targetChapter?.nextChapterEntryState ?? null,
+                conflictLevel: chapter.conflictLevel,
+                revealLevel: chapter.revealLevel,
+                targetWordCount: chapter.targetWordCount,
+                mustAvoid: chapter.mustAvoid,
+                taskSheet: chapter.taskSheet,
+                sceneCards: chapter.sceneCards,
+                previousChapterResult: {
+                  chapterOrder: previous.order,
+                  title: previous.title,
+                  content: previous.content,
+                },
+              },
+              {
+                provider: options.provider,
+                model: options.model,
+                temperature: options.temperature,
+                taskId: options.taskId,
+                entrypoint: options.entrypoint,
+                signal: options.signal,
+                mode: options.chapterTaskSheetQualityMode
+                  ?? (options.entrypoint === "auto_director" ? "full_book_autopilot" : "ai_copilot"),
+              },
+            );
+            if (checked && (!checked.result.canEnterExecution || checked.result.status !== "passed")) {
+              if (!checked.result.canEnterExecution) {
+                throw new ChapterTaskSheetQualityGateError(checked.result);
+              }
+              continuityGuidance = [
+                checked.result.summary,
+                ...checked.result.repairGuidance,
+                ...checked.result.issues.map((issue) => issue.repairHint),
+              ].filter(Boolean).join("\n");
+            }
+          }
+        }
+        if (!continuityGuidance) {
+          const styleContract = await this.resolveStyleContract(
+            novelId,
+            chapterId,
+            options.taskStyleProfileId,
+            chapter.order,
+          );
+          return {
+            ...chapter,
+            styleContract,
+          };
+        }
+        // 需要协调：把核对结果作为修订指导走现有合同生成链，不添加额外生成循环。
+        options = {
+          ...options,
+          guidance: [
+            options.guidance,
+            "上一章实际正文与本章规划需要协调，保留本章目标并按以下核对结果修订入口、场景和收尾：",
+            continuityGuidance,
+          ].filter(Boolean).join("\n"),
         };
       }
     }
@@ -218,6 +291,15 @@ export class ChapterExecutionContractService {
         data: { updatedAt: new Date() },
       });
       if (claim.count !== 1) throw new Error("章节规划在生成期间发生变化，请重新读取后刷新执行合同。");
+      if (reviewedPrevious) {
+        const source = await tx.chapter.findFirst({
+          where: { novelId, order: reviewedPrevious.order },
+          select: { content: true },
+        });
+        if (source?.content !== reviewedPrevious.content) {
+          throw new Error("前章正文在规划核对期间发生变化，请重新准备本章。");
+        }
+      }
       const current = await tx.chapter.findUnique({ where: { id: chapterId }, select: { riskFlags: true } });
       const { versionId } = await this.deps.ensureActiveVersionRecord(
         tx,

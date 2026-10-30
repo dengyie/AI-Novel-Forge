@@ -355,7 +355,7 @@ test("chapter task sheet quality prompt is registered as a product prompt asset"
     require("node:path").join(__dirname, "..", "src", "prompting", "registry.ts"),
     "utf8",
   );
-  assert.match(registrySource, /novel\.volume\.chapter_task_sheet_quality@v1/);
+  assert.match(registrySource, /novel\.volume\.chapter_task_sheet_quality@v2/);
 });
 
 function buildB4TaskSheet(overrides = {}) {

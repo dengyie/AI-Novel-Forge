@@ -439,17 +439,19 @@ test("chapter writer prompt does not expose scene contract controls", () => {
     estimatedInputTokens: 0,
   });
 
+  // 稳定前缀布局：篇幅指令移到动态 System 段（messages[2]），场景合同控制仍不得出现。
   const systemContent = String(messages[0].content);
-  const humanContent = String(messages[1].content);
-  assert.match(systemContent, /本章目标长度：约 3000 字/);
+  const dynamicSystemContent = String(messages[2].content);
+  const allContent = messages.map((m) => String(m.content)).join("\n");
+  assert.match(dynamicSystemContent, /本章目标长度：约 3000 字/);
   // task #27：边界优先于字数硬合同。旧的「不得明显超过上限」措辞已改为
   // 「边界优先于篇幅」。断言改为现行措辞。
-  assert.match(systemContent, /边界优先于篇幅/);
-  assert.doesNotMatch(systemContent, /当前场景合同/);
-  assert.doesNotMatch(systemContent, /场景标题/);
-  assert.doesNotMatch(systemContent, /控字数模式/);
-  assert.doesNotMatch(systemContent, /本轮硬上限/);
-  assert.doesNotMatch(humanContent, /只写当前场景/);
+  assert.match(dynamicSystemContent, /边界优先于篇幅/);
+  assert.doesNotMatch(allContent, /当前场景合同/);
+  assert.doesNotMatch(allContent, /场景标题/);
+  assert.doesNotMatch(allContent, /控字数模式/);
+  assert.doesNotMatch(allContent, /本轮硬上限/);
+  assert.doesNotMatch(allContent, /只写当前场景/);
 });
 
 test("chapter writer prompt forbids system-panel HUD 【】 blocks in narrative body", () => {
@@ -608,8 +610,9 @@ test("chapter writer prompt carries explicit target length and continuation inst
     summarizedBlockIds: [],
     estimatedInputTokens: 0,
   });
-  assert.match(String(draftMessages[0].content), /本章目标长度：约 3000 字/);
-  assert.match(String(draftMessages[0].content), /2550-3450/);
+  // 稳定前缀布局：篇幅指令在动态 System 段（messages[2]）。
+  assert.match(String(draftMessages[2].content), /本章目标长度：约 3000 字/);
+  assert.match(String(draftMessages[2].content), /2550-3450/);
 
   const continueMessages = asset.render({
     novelTitle: "霜轨档案",
@@ -627,11 +630,11 @@ test("chapter writer prompt carries explicit target length and continuation inst
     summarizedBlockIds: [],
     estimatedInputTokens: 0,
   });
-  assert.match(String(continueMessages[0].content), /不得重写章节开头/);
+  assert.match(String(continueMessages[2].content), /不得重写章节开头/);
   // task #27：续写篇幅缺口指令已改为边界感知口径（约 N 字缺口、不越边界、确有叙事价值才补）。
   // 旧的「至少缺少约 900 字」措辞已改为「当前仍有约 900 字的篇幅缺口」。断言改为现行措辞。
-  assert.match(String(continueMessages[0].content), /当前仍有约 900 字的篇幅缺口/);
-  assert.match(String(continueMessages[1].content), /任务模式：补写当前章节/);
+  assert.match(String(continueMessages[2].content), /当前仍有约 900 字的篇幅缺口/);
+  assert.match(String(continueMessages[3].content), /任务模式：补写当前章节/);
 });
 
 test("director blueprint schema accepts chapter shells without scenes", () => {

@@ -46,6 +46,17 @@ function renderCandidate(candidate: ChapterExecutionContractQualityCandidate): s
     "",
     "sceneCards:",
     renderNullable(candidate.sceneCards),
+    ...(candidate.previousChapterResult?.content?.trim()
+      ? [
+        "",
+        "previousChapterResult（上一章已保存正文，是已发生事实的来源）：",
+        `chapterOrder: ${candidate.previousChapterResult.chapterOrder}`,
+        `title: ${candidate.previousChapterResult.title}`,
+        candidate.previousChapterResult.summary?.trim() ? `summary: ${candidate.previousChapterResult.summary}` : "",
+        "content:",
+        candidate.previousChapterResult.content,
+      ].filter(Boolean)
+      : []),
   ].join("\n");
 }
 
@@ -69,6 +80,8 @@ function createSystemPrompt(mode: ChapterTaskSheetQualityPromptInput["mode"]): s
     "好的 taskSheet 应落在人物选择+现场压力；功能兑付只写可戏剧化场景短提示（动作/对话/代价），不写说明书讲规则、不贴验收检查清单。",
     "还要判断本章是否被塞入过多彼此争夺篇幅的必达义务；如果任务单显示当前章职责已经过载，loadRisk=overloaded，recommendedHandling=replan_window。",
     "如果问题仍可在本章合同内收口，recommendedHandling=repair_contract；只有合同已经足够稳时才用 use_as_is。",
+    "提供上一章实际结果（previousChapterResult）时：已有任务单也必须核对上一章真实结束位置、行动方向与本章全部场景，不能只看开头。若前章已离开某地，本章收尾仍要求在那里，必须明确合理的返回经过，或建议把收尾线索迁移到实际承接地点；不能让写作与审校分别遵守冲突版本。",
+    "区分物品载体、所有者与记载内容，不能把手抄件和复印件当作同义表述。前文状态不是永久不变量：本章计划允许的新字迹、位置或持有变化，只要有明确过程和依据，不因前章状态不同就判违规。",
     "如果存在问题，给出面向自动修复器的具体 repairGuidance（自然语言，不要回写内部 code）。",
     "",
     "输出严格 JSON，不要 Markdown、注释、解释或额外字段。",
@@ -110,7 +123,7 @@ export const chapterTaskSheetQualityPrompt: PromptAsset<
   AiChapterTaskSheetQualityAssessment
 > = {
   id: "novel.volume.chapter_task_sheet_quality",
-  version: "v1",
+  version: "v2",
   taskType: "review",
   mode: "structured",
   language: "zh",

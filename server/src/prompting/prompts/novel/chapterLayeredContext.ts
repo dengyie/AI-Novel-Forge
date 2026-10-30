@@ -952,6 +952,7 @@ export function buildChapterWriterContextBlocks(
         id: "volume_window",
         group: "volume_window",
         priority: 96,
+        reuseScope: "volume",
         content: writeContext.volumeWindow
           ? [
               `Current volume: ${writeContext.volumeWindow.title}`,
@@ -1185,6 +1186,7 @@ export function getAllContextBlocks(contextPackage: GenerationContextPackage): P
       group: "book_contract",
       priority: 100,
       required: true,
+      reuseScope: "book",
       content: renderBookContractText(writeContext.bookContract),
     }),
     ...buildChapterWriterContextBlocks(writeContext),

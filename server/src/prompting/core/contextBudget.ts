@@ -17,6 +17,7 @@ export function createContextBlock(input: {
   conflictGroup?: string;
   freshness?: number;
   allowSummary?: boolean;
+  reuseScope?: PromptContextBlock["reuseScope"];
 }): PromptContextBlock {
   return {
     id: input.id,
@@ -28,6 +29,7 @@ export function createContextBlock(input: {
     conflictGroup: input.conflictGroup,
     freshness: input.freshness,
     allowSummary: input.allowSummary ?? true,
+    reuseScope: input.reuseScope,
   };
 }
 

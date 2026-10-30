@@ -388,6 +388,7 @@ export function createLLMFromResolvedOptions(resolved: ResolvedLLMClientOptions)
       },
     });
   const meta = {
+    requestProtocol: resolved.requestProtocol,
     provider: resolved.provider,
     model: resolved.model,
     temperature: resolved.temperature,

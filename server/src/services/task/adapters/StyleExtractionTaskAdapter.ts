@@ -94,6 +94,9 @@ export class StyleExtractionTaskAdapter {
           completionTokens: row.completionTokens,
           totalTokens: row.totalTokens,
           llmCallCount: row.llmCallCount,
+          cacheHitTokens: row.cacheHitTokens,
+          cacheMissTokens: row.cacheMissTokens,
+          cacheReportedCount: row.cacheReportedCount,
           lastTokenRecordedAt: row.lastTokenRecordedAt,
         }),
         sourceResource: {
@@ -159,6 +162,9 @@ export class StyleExtractionTaskAdapter {
         completionTokens: row.completionTokens,
         totalTokens: row.totalTokens,
         llmCallCount: row.llmCallCount,
+        cacheHitTokens: row.cacheHitTokens,
+        cacheMissTokens: row.cacheMissTokens,
+        cacheReportedCount: row.cacheReportedCount,
         lastTokenRecordedAt: row.lastTokenRecordedAt,
       }),
       sourceResource: {

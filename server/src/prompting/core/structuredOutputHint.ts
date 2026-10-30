@@ -1,5 +1,6 @@
 import { HumanMessage, type BaseMessage } from "@langchain/core/messages";
 import { z } from "zod";
+import { placeStructuredHint } from "./cache";
 import type { PromptAsset, PromptRenderContext } from "./promptTypes";
 
 const DEFAULT_MAX_DEPTH = 6;
@@ -416,8 +417,11 @@ export function appendStructuredOutputHintMessages<I, O, R>(input: {
   const example = resolveStructuredOutputExample(input.asset, input.promptInput, input.context);
   const note = resolveStructuredOutputNote(input.asset, input.promptInput, input.context);
 
-  return [
-    ...input.messages,
-    new HumanMessage(buildStructuredOutputHintText(example, note)),
-  ];
+  const hint = new HumanMessage(buildStructuredOutputHintText(example, note));
+  // 资产显式声明 stable_prefix 且 example/note 均为静态（非函数）时才允许前置骨架。
+  const declared = input.asset.structuredOutputHint;
+  const stable = declared?.placement === "stable_prefix"
+    && typeof declared.example !== "function"
+    && typeof declared.note !== "function";
+  return placeStructuredHint(input.messages, hint, stable);
 }

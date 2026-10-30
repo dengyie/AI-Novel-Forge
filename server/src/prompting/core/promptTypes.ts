@@ -18,6 +18,11 @@ export interface PromptContextBlock {
   conflictGroup?: string;
   freshness?: number;
   allowSummary?: boolean;
+  /**
+   * Prompt 前缀复用范围（上游 2026-10-05 布局设计）：book/volume 层材料在 request 层之前渲染。
+   * 复用范围不是快照缓存——book/volume 块每次仍读取最新内容；混合状态的块缺省 request。
+   */
+  reuseScope?: "book" | "volume" | "request";
 }
 
 export interface ContextPolicy {
@@ -193,6 +198,8 @@ export type PromptStructuredOutputExampleBuilder<I, R> = (input: I, context: Pro
 
 export interface PromptStructuredOutputHint<I, R> {
   mode?: "auto" | "off";
+  /** stable_prefix：静态骨架（example/note 均非函数）前置到动态材料之前，其余保持尾部。 */
+  placement?: "stable_prefix" | "tail";
   example?: unknown | PromptStructuredOutputExampleBuilder<I, R>;
   note?: string | ((input: I, context: PromptRenderContext) => string | undefined);
 }

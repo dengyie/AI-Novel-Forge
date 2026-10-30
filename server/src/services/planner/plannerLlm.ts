@@ -20,6 +20,9 @@ export async function invokePlannerLLM(input: {
   scopeLabel: string;
   planLevel: StoryPlanLevel;
   contextBlocks: PromptContextBlock[];
+  /** 逐章用量归属：全书/分段规划不猜测章节归属，仅章节规划携带 chapterId。 */
+  novelId?: string | null;
+  chapterId?: string | null;
   /** For chapter soft defaults in postValidate (order-aware planRole/phase). */
   chapterOrder?: number | null;
   totalChapters?: number | null;
@@ -38,6 +41,8 @@ export async function invokePlannerLLM(input: {
     },
     contextBlocks: input.contextBlocks,
     options: {
+      novelId: input.novelId ?? undefined,
+      chapterId: input.chapterId ?? undefined,
       provider: input.options.provider,
       model: input.options.model,
       temperature: input.options.temperature ?? 0.4,

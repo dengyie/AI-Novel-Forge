@@ -12,7 +12,9 @@ function renderSystem(input) {
     chapterTitle: "第6章 真同意",
     ...input,
   }, { blocks: [] });
-  return String(messages[0].content ?? messages[0].text ?? "");
+  // 稳定前缀布局：静态规则在 messages[0]，篇幅/补写等章节相关指令在动态 System 段
+  // （messages[2]）。边界类断言按全部消息拼接扫描，避免绑定消息布局。
+  return messages.map((m) => String(m.content ?? m.text ?? "")).join("\n");
 }
 
 test("writer prompt ranks chapter boundary above word count", () => {
