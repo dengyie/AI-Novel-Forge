@@ -630,6 +630,22 @@ function resolveBudgetAction(
   return "hard_stop";
 }
 
+/**
+ * 同签名质量环预算上限（上游 2026-10-17 最小面移植）。
+ * 阶梯固定 3 档（patch → rewrite → replan），只允许收紧（1..3）；放宽无阶梯可走。
+ */
+export function resolveQualityLoopMaxAttempts(env?: Partial<Record<string, string>>): number {
+  const globalProcess = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process;
+  const raw = env
+    ? env.QUALITY_LOOP_MAX_ATTEMPTS
+    : (typeof globalProcess !== "undefined" ? globalProcess.env?.QUALITY_LOOP_MAX_ATTEMPTS : undefined);
+  const parsed = typeof raw === "string" && raw.trim().length > 0 ? Number.parseInt(raw.trim(), 10) : NaN;
+  if (!Number.isFinite(parsed)) {
+    return 3;
+  }
+  return Math.min(3, Math.max(1, Math.round(parsed)));
+}
+
 function buildLoopBudget(input: {
   recommendedAction: ChapterQualityLoopAction;
   signals: ChapterQualityLoopSignal[];
@@ -651,6 +667,7 @@ function buildLoopBudget(input: {
   );
   const attempt = signatureHits + trailingNoImprove + 1;
   const nextAction = resolveBudgetAction(attempt, structural);
+  const maxAttempts = resolveQualityLoopMaxAttempts();
   // 连续被 discard 的 patch：强制升级整章重写，覆盖 attempt 阶梯（如 attempt=3 的 replan_window）。
   // 语义：多次局部补丁无改进说明方向性错误，应先重写而非直接跳到窗口级 replan。
   // hard_stop 例外（预算已尽则不再覆盖）。
@@ -660,7 +677,7 @@ function buildLoopBudget(input: {
   return {
     signature,
     attempt,
-    maxAttempts: 3,
+    maxAttempts,
     nextAction: escalatedByDiscard ? "rewrite_chapter" : nextAction,
     exhausted: nextAction === "hard_stop",
     reason: nextAction === "hard_stop"

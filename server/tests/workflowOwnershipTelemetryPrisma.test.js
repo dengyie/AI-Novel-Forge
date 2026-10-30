@@ -47,6 +47,10 @@ test("tracked LLM usage does not invalidate a real Prisma workflow ownership cla
         "completionTokens" INTEGER NOT NULL DEFAULT 0,
         "totalTokens" INTEGER NOT NULL DEFAULT 0,
         "llmCallCount" INTEGER NOT NULL DEFAULT 0,
+        "cacheHitTokens" INTEGER,
+        "cacheMissTokens" INTEGER,
+        "cacheWriteTokens" INTEGER,
+        "cacheReportedCount" INTEGER,
         "lastTokenRecordedAt" DATETIME,
         "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         "updatedAt" DATETIME NOT NULL

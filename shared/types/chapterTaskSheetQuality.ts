@@ -72,6 +72,17 @@ export interface ChapterExecutionContractQualityCandidate {
   functionIds?: string[] | null;
   /** 已解析的功能兑付短列表文案（可直接对照 taskSheet 是否覆盖） */
   functionPayoffHints?: string[] | null;
+  /**
+   * 写前连续性核对（上游 2026-10-17 移植）：上一章已保存正文。
+   * 提供时任务单质量评估须核对承接关系（结束位置/人物状态/物品载体）；缺省跳过。
+   */
+  previousChapterResult?: {
+    chapterOrder: number;
+    title: string;
+    summary?: string | null;
+    tail?: string | null;
+    content?: string | null;
+  } | null;
 }
 
 export interface AssessChapterExecutionContractShapeOptions {

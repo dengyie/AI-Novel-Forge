@@ -16,12 +16,31 @@ import type {
  * （director → volume 单向成立，volume 反向 import director 会构成循环依赖）。
  * 本模块只依赖 crypto + shared 类型，无副作用，可安全被两端共用。
  */
-export const DIRECTOR_QUALITY_LOOP_BUDGET_LIMITS = {
-  /** patch 预算提升到 2：首次锚点失配后允许一次宽松锚点重试（Root B）*/
-  patchRepair: 2,
-  chapterRewrite: 1,
-  windowReplan: 1,
-} as const;
+/**
+ * 质量环预算上限（上游 2026-10-17「自定义章节检查重试次数及耗尽处理」最小面移植）：
+ * 环境变量可收紧/放宽（各自钳位），耗尽阶梯不变（patch → rewrite → replan → defer）。
+ */
+export function resolveQualityLoopBudgetLimits(env: NodeJS.ProcessEnv = process.env): {
+  patchRepair: number;
+  chapterRewrite: number;
+  windowReplan: number;
+} {
+  const read = (name: string, fallback: number, min: number, max: number): number => {
+    const raw = env?.[name];
+    const parsed = typeof raw === "string" && raw.trim().length > 0 ? Number.parseInt(raw.trim(), 10) : NaN;
+    if (!Number.isFinite(parsed)) {
+      return fallback;
+    }
+    return Math.min(max, Math.max(min, Math.round(parsed)));
+  };
+  return {
+    patchRepair: read("QUALITY_LOOP_PATCH_REPAIR_LIMIT", 2, 1, 5),
+    chapterRewrite: read("QUALITY_LOOP_CHAPTER_REWRITE_LIMIT", 1, 0, 3),
+    windowReplan: read("QUALITY_LOOP_WINDOW_REPLAN_LIMIT", 1, 0, 3),
+  };
+}
+
+export const DIRECTOR_QUALITY_LOOP_BUDGET_LIMITS = resolveQualityLoopBudgetLimits();
 
 const MAX_QUALITY_LEDGER_ENTRIES = 80;
 

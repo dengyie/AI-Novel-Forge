@@ -28,6 +28,8 @@ export interface ChapterTaskSheetQualityGateOptions {
   taskId?: string;
   entrypoint?: string;
   signal?: AbortSignal;
+  /** 写前连续性核对用：捕获语义评估原文以便按相同有效输入缓存复用。 */
+  onEvaluated?: (event: { assessment: AiChapterTaskSheetQualityAssessment }) => void;
 }
 
 export type ChapterTaskSheetSemanticAssessor = (input: {
@@ -77,6 +79,7 @@ export class ChapterTaskSheetQualityGateService {
     const assessment = this.semanticAssessor
       ? await this.semanticAssessor({ candidate, mode, options })
       : await this.runSemanticAssessment(candidate, mode, options);
+    options.onEvaluated?.({ assessment });
     return ensureFailureResult(mapSemanticAssessmentToQualityGate(assessment, mode));
   }
 
