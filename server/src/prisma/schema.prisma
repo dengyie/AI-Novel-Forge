@@ -1072,6 +1072,10 @@ model StyleExtractionTask {
   totalTokens           Int               @default(0)
   llmCallCount          Int               @default(0)
   lastTokenRecordedAt   DateTime?
+  cacheHitTokens        Int?
+  cacheMissTokens       Int?
+  cacheWriteTokens      Int?
+  cacheReportedCount    Int?
   createdAt             DateTime          @default(now())
   updatedAt             DateTime          @updatedAt
 
@@ -1120,6 +1124,10 @@ model AudiobookTask {
   totalTokens           Int               @default(0)
   llmCallCount          Int               @default(0)
   lastTokenRecordedAt   DateTime?
+  cacheHitTokens        Int?
+  cacheMissTokens       Int?
+  cacheWriteTokens      Int?
+  cacheReportedCount    Int?
   createdAt             DateTime          @default(now())
   updatedAt             DateTime          @updatedAt
 
@@ -1673,6 +1681,10 @@ model GenerationJob {
   totalTokens    Int               @default(0)
   llmCallCount   Int               @default(0)
   lastTokenRecordedAt DateTime?
+  cacheHitTokens        Int?
+  cacheMissTokens       Int?
+  cacheWriteTokens      Int?
+  cacheReportedCount    Int?
   payload        String?
   startedAt      DateTime?
   finishedAt     DateTime?
@@ -1965,6 +1977,10 @@ model NovelWorkflowTask {
   totalTokens        Int                     @default(0)
   llmCallCount       Int                     @default(0)
   lastTokenRecordedAt DateTime?
+  cacheHitTokens        Int?
+  cacheMissTokens       Int?
+  cacheWriteTokens      Int?
+  cacheReportedCount    Int?
   novel              Novel?                  @relation(fields: [novelId], references: [id], onDelete: Cascade)
   autoApprovalRecords AutoDirectorAutoApprovalRecord[]
   directorRun        DirectorRun?
@@ -2218,6 +2234,9 @@ model DirectorLlmUsageRecord {
   promptTokens         Int                @default(0)
   completionTokens     Int                @default(0)
   totalTokens          Int                @default(0)
+  cacheHitTokens       Int?
+  cacheMissTokens      Int?
+  cacheWriteTokens     Int?
   metadataJson         String?
   recordedAt           DateTime           @default(now())
   novel                Novel?             @relation(fields: [novelId], references: [id], onDelete: SetNull)

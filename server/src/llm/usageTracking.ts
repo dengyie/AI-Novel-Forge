@@ -2,12 +2,14 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { ChatOpenAI } from "@langchain/openai";
 import { prisma } from "../db/prisma";
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
+import {
+  extractLlmTokenUsage,
+  mergeStreamTokenUsage,
+  type LlmTokenUsageSnapshot,
+} from "../platform/llm/usage";
 
-export interface LlmTokenUsageSnapshot {
-  promptTokens: number;
-  completionTokens: number;
-  totalTokens: number;
-}
+export { extractLlmTokenUsage, mergeStreamTokenUsage } from "../platform/llm/usage";
+export type { LlmTokenUsageSnapshot } from "../platform/llm/usage";
 
 export interface LlmUsageTrackingContext {
   workflowTaskId?: string | null;
@@ -21,6 +23,7 @@ export interface LlmUsageTrackingContext {
 }
 
 export interface LlmUsageTrackingMeta {
+  requestProtocol?: string | null;
   provider?: LLMProvider | string | null;
   model?: string | null;
   taskType?: string | null;
@@ -54,113 +57,8 @@ type PatchableChatOpenAI = ChatOpenAI & {
   [LLM_USAGE_PATCHED]?: boolean;
 };
 
-function toPositiveInteger(value: unknown): number | null {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    return null;
-  }
-  const normalized = Math.max(0, Math.round(value));
-  return normalized;
-}
-
-function normalizeSnapshot(input: {
-  promptTokens?: unknown;
-  completionTokens?: unknown;
-  totalTokens?: unknown;
-}): LlmTokenUsageSnapshot | null {
-  const promptTokens = toPositiveInteger(input.promptTokens) ?? 0;
-  const completionTokens = toPositiveInteger(input.completionTokens) ?? 0;
-  const totalTokens = toPositiveInteger(input.totalTokens)
-    ?? Math.max(promptTokens + completionTokens, 0);
-  if (promptTokens <= 0 && completionTokens <= 0 && totalTokens <= 0) {
-    return null;
-  }
-  return {
-    promptTokens,
-    completionTokens,
-    totalTokens: Math.max(totalTokens, promptTokens + completionTokens),
-  };
-}
-
-function extractUsageObject(value: unknown): LlmTokenUsageSnapshot | null {
-  if (!value || typeof value !== "object") {
-    return null;
-  }
-  const usage = value as {
-    prompt_tokens?: unknown;
-    completion_tokens?: unknown;
-    total_tokens?: unknown;
-    promptTokens?: unknown;
-    completionTokens?: unknown;
-    totalTokens?: unknown;
-    input_tokens?: unknown;
-    output_tokens?: unknown;
-    inputTokens?: unknown;
-    outputTokens?: unknown;
-  };
-  return normalizeSnapshot({
-    promptTokens: usage.prompt_tokens ?? usage.promptTokens ?? usage.input_tokens ?? usage.inputTokens,
-    completionTokens: usage.completion_tokens ?? usage.completionTokens ?? usage.output_tokens ?? usage.outputTokens,
-    totalTokens: usage.total_tokens ?? usage.totalTokens,
-  });
-}
-
-export function extractLlmTokenUsage(output: unknown): LlmTokenUsageSnapshot | null {
-  if (Array.isArray(output)) {
-    return output.reduce<LlmTokenUsageSnapshot | null>((acc, item) => {
-      const next = extractLlmTokenUsage(item);
-      if (!next) {
-        return acc;
-      }
-      if (!acc) {
-        return next;
-      }
-      return {
-        promptTokens: acc.promptTokens + next.promptTokens,
-        completionTokens: acc.completionTokens + next.completionTokens,
-        totalTokens: acc.totalTokens + next.totalTokens,
-      };
-    }, null);
-  }
-
-  if (!output || typeof output !== "object") {
-    return null;
-  }
-
-  const candidate = output as {
-    usage_metadata?: unknown;
-    usageMetadata?: unknown;
-    response_metadata?: { usage?: unknown; tokenUsage?: unknown } | null;
-    responseMetadata?: { usage?: unknown; tokenUsage?: unknown } | null;
-    llmOutput?: { tokenUsage?: unknown; estimatedTokenUsage?: unknown } | null;
-  };
-
-  return (
-    extractUsageObject(candidate.usage_metadata)
-    ?? extractUsageObject(candidate.usageMetadata)
-    ?? extractUsageObject(candidate.response_metadata?.usage)
-    ?? extractUsageObject(candidate.response_metadata?.tokenUsage)
-    ?? extractUsageObject(candidate.responseMetadata?.usage)
-    ?? extractUsageObject(candidate.responseMetadata?.tokenUsage)
-    ?? extractUsageObject(candidate.llmOutput?.tokenUsage)
-    ?? extractUsageObject(candidate.llmOutput?.estimatedTokenUsage)
-  );
-}
-
-export function mergeStreamTokenUsage(
-  current: LlmTokenUsageSnapshot | null,
-  next: LlmTokenUsageSnapshot | null,
-): LlmTokenUsageSnapshot | null {
-  if (!current) {
-    return next;
-  }
-  if (!next) {
-    return current;
-  }
-  return {
-    promptTokens: Math.max(current.promptTokens, next.promptTokens),
-    completionTokens: Math.max(current.completionTokens, next.completionTokens),
-    totalTokens: Math.max(current.totalTokens, next.totalTokens),
-  };
+function decodeProtocol(meta: LlmUsageTrackingMeta | undefined): "anthropic" | "openai-compatible" {
+  return meta?.requestProtocol === "anthropic" ? "anthropic" : "openai-compatible";
 }
 
 function mergeContextValue<T extends string | null | undefined>(current: T, next: T): string | null {
@@ -247,6 +145,7 @@ async function recordDirectorLlmUsage(input: {
     return;
   }
   const promptMeta = input.record?.meta?.promptMeta;
+  const cache = input.usage.inputCache;
   await prisma.directorLlmUsageRecord.create({
     data: {
       novelId: input.context.novelId ?? promptMeta?.novelId ?? null,
@@ -267,6 +166,13 @@ async function recordDirectorLlmUsage(input: {
       promptTokens: input.usage.promptTokens,
       completionTokens: input.usage.completionTokens,
       totalTokens: input.usage.totalTokens,
+      ...(cache?.cacheUsageStatus === "reported"
+        ? {
+          cacheHitTokens: cache.cacheHitTokens,
+          cacheMissTokens: cache.cacheMissTokens,
+          cacheWriteTokens: cache.cacheWriteTokens,
+        }
+        : {}),
       metadataJson: buildDirectorUsageMetadata(input.record),
       recordedAt: input.recordedAt,
     },
@@ -290,6 +196,17 @@ export async function recordTrackedLlmUsage(
     }
   }
   const now = new Date();
+  // 缓存命中包含于真实输入，不参与预算口径；只有厂商明确上报的调用才累计缓存列。
+  const cacheIncrement = usage.inputCache?.cacheUsageStatus === "reported"
+    ? {
+      cacheHitTokens: { increment: usage.inputCache.cacheHitTokens ?? 0 },
+      cacheMissTokens: { increment: usage.inputCache.cacheMissTokens ?? 0 },
+      ...(usage.inputCache.cacheWriteTokens != null
+        ? { cacheWriteTokens: { increment: usage.inputCache.cacheWriteTokens } }
+        : {}),
+      cacheReportedCount: { increment: 1 },
+    }
+    : {};
   await Promise.all([
     context?.directorTelemetry === true
       ? recordDirectorLlmUsage({
@@ -307,6 +224,7 @@ export async function recordTrackedLlmUsage(
           completionTokens: { increment: usage.completionTokens },
           totalTokens: { increment: usage.totalTokens },
           llmCallCount: { increment: 1 },
+          ...cacheIncrement,
           lastTokenRecordedAt: now,
         },
       }).catch(() => null)
@@ -319,6 +237,7 @@ export async function recordTrackedLlmUsage(
           completionTokens: { increment: usage.completionTokens },
           totalTokens: { increment: usage.totalTokens },
           llmCallCount: { increment: 1 },
+          ...cacheIncrement,
           lastTokenRecordedAt: now,
         },
       }).catch(() => null)
@@ -331,6 +250,7 @@ export async function recordTrackedLlmUsage(
           completionTokens: { increment: usage.completionTokens },
           totalTokens: { increment: usage.totalTokens },
           llmCallCount: { increment: 1 },
+          ...cacheIncrement,
           lastTokenRecordedAt: now,
         },
       }).catch(() => null)
@@ -343,12 +263,13 @@ function wrapUsageTrackedStream<T>(
   startedAt: number,
   meta?: LlmUsageTrackingMeta,
 ): AsyncIterable<T> {
+  const protocol = decodeProtocol(meta);
   return {
     async *[Symbol.asyncIterator]() {
       let usage: LlmTokenUsageSnapshot | null = null;
       try {
         for await (const chunk of rawStream) {
-          usage = mergeStreamTokenUsage(usage, extractLlmTokenUsage(chunk));
+          usage = mergeStreamTokenUsage(usage, extractLlmTokenUsage(chunk, { protocol }));
           yield chunk;
         }
       } finally {
@@ -361,12 +282,15 @@ function wrapUsageTrackedStream<T>(
   };
 }
 
+// 通过 invoke 观察过的 SDK 批量子结果不再重复登记（对象身份判定）。
+const observedResults = new WeakSet<object>();
+
 export function attachLLMUsageTracking(llm: ChatOpenAI, meta?: LlmUsageTrackingMeta): ChatOpenAI {
   const patchable = llm as PatchableChatOpenAI;
   if (patchable[LLM_USAGE_PATCHED]) {
     return llm;
   }
-
+  const protocol = decodeProtocol(meta);
   const originalInvoke = llm.invoke.bind(llm);
   const originalStream = llm.stream.bind(llm);
   const originalBatch = llm.batch.bind(llm);
@@ -374,7 +298,10 @@ export function attachLLMUsageTracking(llm: ChatOpenAI, meta?: LlmUsageTrackingM
   patchable.invoke = (async (...args: Parameters<ChatOpenAI["invoke"]>) => {
     const startedAt = Date.now();
     const result = await originalInvoke(...args);
-    await recordTrackedLlmUsage(extractLlmTokenUsage(result), {
+    if (result && typeof result === "object") {
+      observedResults.add(result);
+    }
+    await recordTrackedLlmUsage(extractLlmTokenUsage(result, { protocol }), {
       durationMs: Date.now() - startedAt,
       meta,
     });
@@ -394,10 +321,20 @@ export function attachLLMUsageTracking(llm: ChatOpenAI, meta?: LlmUsageTrackingM
   patchable.batch = (async (...args: Parameters<ChatOpenAI["batch"]>) => {
     const startedAt = Date.now();
     const result = await originalBatch(...args);
-    await recordTrackedLlmUsage(extractLlmTokenUsage(result), {
-      durationMs: Date.now() - startedAt,
-      meta,
-    });
+    // SDK 直接返回的多个结果逐项登记；内部已观察过的子结果不重复计数。
+    const observed = result.filter((item) => item && typeof item === "object" && observedResults.has(item)).length;
+    if (observed === 0) {
+      await recordTrackedLlmUsage(extractLlmTokenUsage(result, { protocol }), {
+        durationMs: Date.now() - startedAt,
+        meta,
+      });
+    } else if (observed < result.length) {
+      const unobserved = result.filter((item) => !(item && typeof item === "object" && observedResults.has(item)));
+      await recordTrackedLlmUsage(extractLlmTokenUsage(unobserved, { protocol }), {
+        durationMs: Date.now() - startedAt,
+        meta,
+      });
+    }
     return result;
   }) as ChatOpenAI["batch"];
 

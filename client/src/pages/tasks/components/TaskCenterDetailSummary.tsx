@@ -71,6 +71,12 @@ export default function TaskCenterDetailSummary({
           <>
             <div>累计调用：{formatTokenCount(task.tokenUsage?.llmCallCount ?? 0)}</div>
             <div>输入 Tokens：{formatTokenCount(task.tokenUsage?.promptTokens ?? 0)}</div>
+            {task.tokenUsage?.inputCache ? (
+              <div>
+                缓存命中 / 未命中：{formatTokenCount(task.tokenUsage.inputCache.cacheHitTokens)} / {formatTokenCount(task.tokenUsage.inputCache.cacheMissTokens)}
+                {task.tokenUsage.inputCache.complete ? "" : "（部分调用未返回缓存统计）"}
+              </div>
+            ) : null}
             <div>输出 Tokens：{formatTokenCount(task.tokenUsage?.completionTokens ?? 0)}</div>
             <div>累计总 Tokens：{formatTokenCount(task.tokenUsage?.totalTokens ?? 0)}</div>
             <div>最近记录：{formatDate(task.tokenUsage?.lastRecordedAt)}</div>

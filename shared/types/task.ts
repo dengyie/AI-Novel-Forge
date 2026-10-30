@@ -22,6 +22,15 @@ export interface TaskTokenUsageSummary {
   totalTokens: number;
   llmCallCount: number;
   lastRecordedAt?: string | null;
+  /**
+   * 厂商上报的输入缓存用量（命中包含于输入总量，不参与预算口径）。
+   * complete=false 表示部分调用未返回缓存统计，数值只是已上报部分的合计。
+   */
+  inputCache?: {
+    cacheHitTokens: number;
+    cacheMissTokens: number;
+    complete: boolean;
+  } | null;
 }
 
 export interface UnifiedTaskStep {

@@ -22,6 +22,7 @@ test("extractLlmTokenUsage reads usage_metadata returned by langchain messages",
     promptTokens: 128,
     completionTokens: 64,
     totalTokens: 192,
+    inputCache: { cacheHitTokens: null, cacheMissTokens: null, cacheWriteTokens: null, cacheUsageStatus: "unavailable" },
   });
 });
 
@@ -40,6 +41,7 @@ test("extractLlmTokenUsage falls back to response_metadata usage payload", () =>
     promptTokens: 40,
     completionTokens: 15,
     totalTokens: 55,
+    inputCache: { cacheHitTokens: null, cacheMissTokens: null, cacheWriteTokens: null, cacheUsageStatus: "unavailable" },
   });
 });
 
@@ -88,4 +90,38 @@ test("toTaskTokenUsageSummary hides empty counters and serializes active totals"
     llmCallCount: 6,
     lastRecordedAt: "2026-04-05T12:00:00.000Z",
   });
+});
+
+test("toTaskTokenUsageSummary reports cache totals only from provider-reported calls", () => {
+  assert.equal(toTaskTokenUsageSummary({
+    promptTokens: 100,
+    completionTokens: 50,
+    totalTokens: 150,
+    llmCallCount: 2,
+    lastTokenRecordedAt: null,
+  })?.inputCache ?? null, null);
+
+  const partial = toTaskTokenUsageSummary({
+    promptTokens: 1000,
+    completionTokens: 200,
+    totalTokens: 1200,
+    llmCallCount: 3,
+    cacheHitTokens: 800,
+    cacheMissTokens: 200,
+    cacheReportedCount: 2,
+    lastTokenRecordedAt: null,
+  });
+  assert.deepEqual(partial?.inputCache, { cacheHitTokens: 800, cacheMissTokens: 200, complete: false });
+
+  const complete = toTaskTokenUsageSummary({
+    promptTokens: 1000,
+    completionTokens: 200,
+    totalTokens: 1200,
+    llmCallCount: 2,
+    cacheHitTokens: 800,
+    cacheMissTokens: 200,
+    cacheReportedCount: 2,
+    lastTokenRecordedAt: null,
+  });
+  assert.deepEqual(complete?.inputCache, { cacheHitTokens: 800, cacheMissTokens: 200, complete: true });
 });

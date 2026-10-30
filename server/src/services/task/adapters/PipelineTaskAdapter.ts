@@ -51,6 +51,10 @@ type PipelineRow = {
   completionTokens: number;
   totalTokens: number;
   llmCallCount: number;
+  cacheHitTokens: number | null;
+  cacheMissTokens: number | null;
+  cacheWriteTokens: number | null;
+  cacheReportedCount: number | null;
   lastTokenRecordedAt: Date | null;
   startedAt?: Date | null;
   finishedAt?: Date | null;
@@ -105,6 +109,9 @@ export class PipelineTaskAdapter {
         completionTokens: row.completionTokens,
         totalTokens: row.totalTokens,
         llmCallCount: row.llmCallCount,
+        cacheHitTokens: row.cacheHitTokens,
+        cacheMissTokens: row.cacheMissTokens,
+        cacheReportedCount: row.cacheReportedCount,
         lastTokenRecordedAt: row.lastTokenRecordedAt,
       }),
       sourceResource: {

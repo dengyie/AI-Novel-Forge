@@ -1,6 +1,6 @@
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import type { PromptAsset } from "../../core/promptTypes";
-import { renderSelectedContextBlocks } from "../../core/renderContextBlocks";
+import { renderCacheContextSections } from "../../core/cache";
 import { renderProseBanBlock } from "./proseBanRules";
 import { NOVEL_PROMPT_BUDGETS } from "./promptBudgetProfiles";
 
@@ -23,7 +23,7 @@ export interface ChapterWriterPromptInput {
 
 export const chapterWriterPrompt: PromptAsset<ChapterWriterPromptInput, string, string> = {
   id: "novel.chapter.writer",
-  version: "v5",
+  version: "v6",
   taskType: "writer",
   mode: "text",
   language: "zh",
@@ -238,15 +238,11 @@ export const chapterWriterPrompt: PromptAsset<ChapterWriterPromptInput, string, 
         "4. " + endingHook,
         "",
         "【篇幅要求】",
-        lengthBlock,
+        "篇幅以当前任务给出的目标长度为准；篇幅是参考目标，不得凌驾于本章任务、chapter_boundary、戏核完整性和自然结束态。",
         "",
         "【连续性约束】",
-        mode === "continue"
-          ? "1. 当前是补写模式，不得重写章节开头；只允许从现有正文尾部自然续接。"
-          : "1. 章节开头必须与 recent_chapters 明显区分，禁止复用相同开场模式（如重复描写环境、回忆开头等）。",
-        "2. 允许短回调，但不得大段复述已发生事件，不得复制上下文原句。",
-        "3. 必须延续当前人物状态与局面，不得让角色行为失去动机或连续性。",
-        continuationBlock ? continuationBlock : "",
+        "1. 允许短回调，但不得大段复述已发生事件，不得复制上下文原句。",
+        "2. 必须延续当前人物状态与局面，不得让角色行为失去动机或连续性。",
         "",
         "【表达要求】",
         "1. " + tonePreference,
@@ -292,13 +288,25 @@ export const chapterWriterPrompt: PromptAsset<ChapterWriterPromptInput, string, 
         "(3) 是否违反了任何禁止规则（新角色、场景模式重复、未铺垫转折）？",
         "确认通过后再开始输出。输出只允许包含章节正文本身：绝对禁止在开头、结尾或任意位置输出自查说明、确认清单、验收结论、『已确认满足全部要求』之类的任何元文字，也不要复述上述（1）（2）（3）的答案。",
       ].filter((line) => line !== "").join("\n")),
+      // 稳定前缀布局（上游 2026-10-05）：书级/卷级材料先渲染，随章节变化的篇幅/补写指令
+      // 与动态上下文后置，最大化连续章节间的厂商前缀缓存复用；每次仍读取最新内容。
       new HumanMessage([
         `小说：${input.novelTitle}`,
+        renderCacheContextSections(context).stable,
+      ].filter(Boolean).join("\n\n")),
+      new SystemMessage([
+        lengthBlock,
+        mode === "continue"
+          ? "当前是补写模式，不得重写章节开头；只允许从现有正文尾部自然续接。"
+          : "章节开头必须与 recent_chapters 明显区分，禁止复用相同开场模式（如重复描写环境、回忆开头等）。",
+        continuationBlock,
+      ].filter(Boolean).join("\n\n")),
+      new HumanMessage([
         `章节：第 ${input.chapterOrder} 章 ${input.chapterTitle}`,
         mode === "continue" ? "任务模式：补写当前章节，补足篇幅并让尚未在情节中落地的本章职责成立。" : "任务模式：完整生成本章正文。",
         "",
         "【写作上下文】",
-        renderSelectedContextBlocks(context),
+        renderCacheContextSections(context).dynamic,
         "",
         "只输出章节正文。",
       ].join("\n")),

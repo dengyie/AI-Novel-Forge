@@ -558,6 +558,10 @@ type AudiobookTaskRow = {
   completionTokens: number;
   totalTokens: number;
   llmCallCount: number;
+  cacheHitTokens: number | null;
+  cacheMissTokens: number | null;
+  cacheWriteTokens: number | null;
+  cacheReportedCount: number | null;
   lastTokenRecordedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
@@ -683,6 +687,9 @@ function toSummary(row: AudiobookTaskRow): AudiobookTaskSummary {
       completionTokens: row.completionTokens,
       totalTokens: row.totalTokens,
       llmCallCount: row.llmCallCount,
+      cacheHitTokens: row.cacheHitTokens,
+      cacheMissTokens: row.cacheMissTokens,
+      cacheReportedCount: row.cacheReportedCount,
       lastTokenRecordedAt: row.lastTokenRecordedAt,
     }),
   };

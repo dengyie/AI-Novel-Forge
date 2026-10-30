@@ -7,6 +7,10 @@ type UsageAccumulator = {
   completionTokens: number;
   totalTokens: number;
   llmCallCount: number;
+  cacheHitTokens: number;
+  cacheMissTokens: number;
+  cacheWriteTokens: number;
+  cacheReportedCount: number;
   lastTokenRecordedAt: Date | null;
 };
 
@@ -16,6 +20,10 @@ function createEmptyAccumulator(): UsageAccumulator {
     completionTokens: 0,
     totalTokens: 0,
     llmCallCount: 0,
+    cacheHitTokens: 0,
+    cacheMissTokens: 0,
+    cacheWriteTokens: 0,
+    cacheReportedCount: 0,
     lastTokenRecordedAt: null,
   };
 }
@@ -32,12 +40,20 @@ function mergeUsage(accumulator: UsageAccumulator, input: {
   completionTokens?: number | null;
   totalTokens?: number | null;
   llmCallCount?: number | null;
+  cacheHitTokens?: number | null;
+  cacheMissTokens?: number | null;
+  cacheWriteTokens?: number | null;
+  cacheReportedCount?: number | null;
   lastTokenRecordedAt?: Date | null;
 }): void {
   accumulator.promptTokens += toSafeNumber(input.promptTokens);
   accumulator.completionTokens += toSafeNumber(input.completionTokens);
   accumulator.totalTokens += toSafeNumber(input.totalTokens);
   accumulator.llmCallCount += toSafeNumber(input.llmCallCount);
+  accumulator.cacheHitTokens += toSafeNumber(input.cacheHitTokens);
+  accumulator.cacheMissTokens += toSafeNumber(input.cacheMissTokens);
+  accumulator.cacheWriteTokens += toSafeNumber(input.cacheWriteTokens);
+  accumulator.cacheReportedCount += toSafeNumber(input.cacheReportedCount);
   if (
     input.lastTokenRecordedAt
     && (!accumulator.lastTokenRecordedAt || input.lastTokenRecordedAt.getTime() > accumulator.lastTokenRecordedAt.getTime())
@@ -82,6 +98,10 @@ export async function listNovelTokenUsageByNovelIds(novelIds: string[]): Promise
         completionTokens: true,
         totalTokens: true,
         llmCallCount: true,
+        cacheHitTokens: true,
+        cacheMissTokens: true,
+        cacheWriteTokens: true,
+        cacheReportedCount: true,
       },
       _max: {
         lastTokenRecordedAt: true,
@@ -105,6 +125,10 @@ export async function listNovelTokenUsageByNovelIds(novelIds: string[]): Promise
         completionTokens: true,
         totalTokens: true,
         llmCallCount: true,
+        cacheHitTokens: true,
+        cacheMissTokens: true,
+        cacheWriteTokens: true,
+        cacheReportedCount: true,
         lastTokenRecordedAt: true,
         payload: true,
       },
@@ -128,6 +152,10 @@ export async function listNovelTokenUsageByNovelIds(novelIds: string[]): Promise
       completionTokens: row._sum.completionTokens,
       totalTokens: row._sum.totalTokens,
       llmCallCount: row._sum.llmCallCount,
+      cacheHitTokens: row._sum.cacheHitTokens,
+      cacheMissTokens: row._sum.cacheMissTokens,
+      cacheWriteTokens: row._sum.cacheWriteTokens,
+      cacheReportedCount: row._sum.cacheReportedCount,
       lastTokenRecordedAt: row._max.lastTokenRecordedAt,
     });
   }
@@ -153,6 +181,9 @@ export async function listNovelTokenUsageByNovelIds(novelIds: string[]): Promise
           completionTokens: accumulator.completionTokens,
           totalTokens: accumulator.totalTokens,
           llmCallCount: accumulator.llmCallCount,
+          cacheHitTokens: accumulator.cacheHitTokens,
+          cacheMissTokens: accumulator.cacheMissTokens,
+          cacheReportedCount: accumulator.cacheReportedCount,
           lastTokenRecordedAt: accumulator.lastTokenRecordedAt,
         }),
       ];
