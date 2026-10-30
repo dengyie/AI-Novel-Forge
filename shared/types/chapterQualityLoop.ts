@@ -600,11 +600,17 @@ function isStructuralRootCause(
 /**
  * @param attempt 1-based 累计尝试次数（signature 命中 + 连续 discard 叠加）
  * @param structural 结构性根因 → 起步即 rewrite_chapter，跳过 patch_repair
+ * @param maxAttempts 预算上限（QUALITY_LOOP_MAX_ATTEMPTS，默认 3）：attempt 超限即
+ *   hard_stop。默认值下与固定 3 档阶梯完全等价；收紧到 1/2 时提前耗尽。
  */
 function resolveBudgetAction(
   attempt: number,
   structural: boolean,
+  maxAttempts: number = 3,
 ): ChapterQualityLoopBudgetAction {
+  if (attempt > maxAttempts) {
+    return "hard_stop";
+  }
   if (structural) {
     // 结构性：patch 在方向上不可行，直接整章重写；attempt 仍递增以保留熔断语义
     if (attempt <= 1) {
@@ -613,10 +619,7 @@ function resolveBudgetAction(
     if (attempt === 2) {
       return "rewrite_chapter";
     }
-    if (attempt === 3) {
-      return "replan_window";
-    }
-    return "hard_stop";
+    return "replan_window";
   }
   if (attempt <= 1) {
     return "patch_repair";
@@ -624,10 +627,7 @@ function resolveBudgetAction(
   if (attempt === 2) {
     return "rewrite_chapter";
   }
-  if (attempt === 3) {
-    return "replan_window";
-  }
-  return "hard_stop";
+  return "replan_window";
 }
 
 /**
@@ -666,8 +666,8 @@ function buildLoopBudget(input: {
     signature,
   );
   const attempt = signatureHits + trailingNoImprove + 1;
-  const nextAction = resolveBudgetAction(attempt, structural);
   const maxAttempts = resolveQualityLoopMaxAttempts();
+  const nextAction = resolveBudgetAction(attempt, structural, maxAttempts);
   // 连续被 discard 的 patch：强制升级整章重写，覆盖 attempt 阶梯（如 attempt=3 的 replan_window）。
   // 语义：多次局部补丁无改进说明方向性错误，应先重写而非直接跳到窗口级 replan。
   // hard_stop 例外（预算已尽则不再覆盖）。

@@ -1,18 +1,21 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { prisma } = require('../dist/db/prisma.js');
+const factory = require('../dist/llm/factory.js');
 const { ChapterTaskSheetQualityGateService } = require('../dist/services/novel/volume/ChapterTaskSheetQualityGateService.js');
 const { reviewChapterExecutionContinuity } = require('../dist/services/novel/volume/chapterExecutionContinuity.js');
 
 // 移植自上游 2026-10-17 executionContinuityReview.test.js（按本仓形态适配）：
 // 形状就绪的已有合同在进入写作前做一次前文语义核对；相同有效输入复用结果；
-// AI 冲突指导送回现有生成链；前文在核对期间变化不得授权过期复用。
+// 身份按解析后的实际模型配置（JIT 链路无显式 provider/model 也能命中缓存）；
+// 解析失败退回不复用；AI 冲突指导送回现有生成链；前文变化不得授权过期复用。
 
 function fixture(t) {
   const originals = [
     ChapterTaskSheetQualityGateService.prototype.evaluate,
     prisma.chapterArtifactSyncCheckpoint.findUnique,
     prisma.chapterArtifactSyncCheckpoint.upsert,
+    factory.resolveLLMClientOptions,
   ];
   const rows = new Map();
   const calls = [];
@@ -38,13 +41,21 @@ function fixture(t) {
       verdict: 'usable', safeToSync: true, loadRisk: 'normal', recommendedHandling: 'use_as_is',
       summary: '可以承接', issues: [], repairGuidance: [], confidence: 0.9,
     },
-    sourceChangesDuringReview: false,
+    resolvedModel: 'offline-model',
   };
   ChapterTaskSheetQualityGateService.prototype.evaluate = async (input, options) => {
-    calls.push(input);
-    if (state.sourceChangesDuringReview) previous.content += '父亲出现了。';
+    calls.push({ candidate: input, provider: options.provider, model: options.model });
+    if (state.throwInEvaluate) throw state.throwInEvaluate;
     await options.onEvaluated({ assessment: state.assessment });
     return { status: 'passed', canEnterExecution: true, issues: [], summary: state.assessment.summary, repairGuidance: [], confidence: 0.9 };
+  };
+  factory.resolveLLMClientOptions = async (_provider, options) => {
+    if (state.resolveThrows) throw new Error('no provider configured');
+    return {
+      provider: 'deepseek', model: state.resolvedModel, baseURL: 'https://offline.invalid',
+      temperature: options?.temperature ?? 0.1, maxTokens: null,
+      requestProtocol: 'openai_compatible', structuredStrategy: null,
+    };
   };
   const key = (input) => JSON.stringify(input.where);
   prisma.chapterArtifactSyncCheckpoint.findUnique = async (input) => rows.get(key(input)) ?? null;
@@ -54,6 +65,7 @@ function fixture(t) {
       ChapterTaskSheetQualityGateService.prototype.evaluate,
       prisma.chapterArtifactSyncCheckpoint.findUnique,
       prisma.chapterArtifactSyncCheckpoint.upsert,
+      factory.resolveLLMClientOptions,
     ] = originals;
   });
   const options = { provider: 'deepseek', model: 'offline-model', mode: 'full_book_autopilot' };
@@ -71,6 +83,29 @@ test('shape-ready plans are checked against saved prose once and reused only wit
   f.candidate.previousChapterResult.content = f.previous.content;
   await reviewChapterExecutionContinuity(f.candidate, f.options);
   assert.equal(f.calls.length, 2, 'changed previous prose invalidates the cached identity');
+});
+
+test('JIT-style calls without explicit model identity still resolve and hit the cache', async (t) => {
+  const f = fixture(t);
+  // 模拟 JIT 链路：provider/model 均未透传，身份由默认路由解析补齐。
+  const jitOptions = { mode: 'full_book_autopilot' };
+  await reviewChapterExecutionContinuity(f.candidate, jitOptions);
+  await reviewChapterExecutionContinuity(f.candidate, jitOptions);
+  assert.equal(f.calls.length, 1, 'resolved default-route identity enables caching');
+  assert.equal(f.rows.size, 1);
+  // 解析后的模型身份进入缓存身份：解析结果变化 → 重新核对。
+  f.state.resolvedModel = 'another-model';
+  await reviewChapterExecutionContinuity(f.candidate, jitOptions);
+  assert.equal(f.calls.length, 2, 'changed resolved model invalidates the cached identity');
+});
+
+test('identity resolution failure falls back to no reuse but still reviews', async (t) => {
+  const f = fixture(t);
+  f.state.resolveThrows = true;
+  await reviewChapterExecutionContinuity(f.candidate, f.options);
+  await reviewChapterExecutionContinuity(f.candidate, f.options);
+  assert.equal(f.calls.length, 2, 'no resolvable identity means no reuse');
+  assert.equal(f.rows.size, 0);
 });
 
 test('AI continuity conflicts surface structured guidance for the existing contract chain', async (t) => {
@@ -99,12 +134,4 @@ test('missing prose and aborted requests cannot trigger a semantic check', async
     /offline cancelled/,
   );
   assert.equal(f.calls.length, 0);
-});
-
-test('without an explicit model identity the review still runs but never caches', async (t) => {
-  const f = fixture(t);
-  await reviewChapterExecutionContinuity(f.candidate, { mode: 'ai_copilot' });
-  await reviewChapterExecutionContinuity(f.candidate, { mode: 'ai_copilot' });
-  assert.equal(f.calls.length, 2, 'no model identity means no reuse');
-  assert.equal(f.rows.size, 0);
 });
