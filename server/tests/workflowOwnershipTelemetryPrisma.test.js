@@ -55,6 +55,22 @@ test("tracked LLM usage does not invalidate a real Prisma workflow ownership cla
         "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         "updatedAt" DATETIME NOT NULL
       );
+      CREATE TABLE "AudiobookTask" (
+        "id" TEXT NOT NULL PRIMARY KEY,
+        "novelId" TEXT,
+        "title" TEXT NOT NULL,
+        "status" TEXT NOT NULL DEFAULT 'queued',
+        "promptTokens" INTEGER NOT NULL DEFAULT 0,
+        "completionTokens" INTEGER NOT NULL DEFAULT 0,
+        "totalTokens" INTEGER NOT NULL DEFAULT 0,
+        "llmCallCount" INTEGER NOT NULL DEFAULT 0,
+        "cacheHitTokens" INTEGER,
+        "cacheMissTokens" INTEGER,
+        "cacheWriteTokens" INTEGER,
+        "cacheReportedCount" INTEGER,
+        "lastTokenRecordedAt" DATETIME,
+        "updatedAt" DATETIME NOT NULL
+      );
     `);
     database.close();
 
@@ -118,6 +134,41 @@ async function main() {
   assert.equal(cached.cacheHitTokens, 90);
   assert.equal(cached.cacheMissTokens, 110);
   assert.equal(cached.cacheWriteTokens, 5);
+
+  // AudiobookTask 的有声书流水线此前没有任何令牌写入点（缓存列随之永远 NULL）。
+  // 现在 executeTask 被 runWithLlmUsageTracking({ audiobookTaskId }) 包住，这里验证：
+  // 1) 令牌真的落行；2) 缺缓存的调用不计入覆盖；3) 首次上报也能从 NULL 累加出来。
+  const audiobookId = "audiobook-telemetry-fixture";
+  await prisma.$executeRawUnsafe(
+    'INSERT INTO "AudiobookTask" ("id", "title", "updatedAt") VALUES (?, ?, ?)',
+    audiobookId,
+    "audiobook telemetry fixture",
+    new Date().toISOString(),
+  );
+  await runWithLlmUsageTracking({ audiobookTaskId: audiobookId }, () => recordTrackedLlmUsage({
+    promptTokens: 50,
+    completionTokens: 5,
+    totalTokens: 55,
+  }));
+  await runWithLlmUsageTracking({ audiobookTaskId: audiobookId }, () => recordTrackedLlmUsage({
+    promptTokens: 200,
+    completionTokens: 20,
+    totalTokens: 220,
+    inputCache: { cacheHitTokens: 150, cacheMissTokens: 50, cacheWriteTokens: 10, cacheUsageStatus: "reported" },
+  }));
+  const audiobookRows = await prisma.$queryRawUnsafe(
+    'SELECT "promptTokens", "completionTokens", "totalTokens", "llmCallCount", "cacheHitTokens", "cacheMissTokens", "cacheWriteTokens", "cacheReportedCount" FROM "AudiobookTask" WHERE "id" = ?',
+    audiobookId,
+  );
+  const audiobookAfter = audiobookRows[0];
+  assert.equal(audiobookAfter.llmCallCount, 2);
+  assert.equal(audiobookAfter.promptTokens, 250);
+  assert.equal(audiobookAfter.completionTokens, 25);
+  assert.equal(audiobookAfter.totalTokens, 275);
+  assert.equal(audiobookAfter.cacheReportedCount, 1);
+  assert.equal(audiobookAfter.cacheHitTokens, 150);
+  assert.equal(audiobookAfter.cacheMissTokens, 50);
+  assert.equal(audiobookAfter.cacheWriteTokens, 10);
 
   const checkpoint = await fence.runOwnedWrite((ownership) => workflowService.recordCheckpoint(task.id, {
     stage: "quality_repair",
