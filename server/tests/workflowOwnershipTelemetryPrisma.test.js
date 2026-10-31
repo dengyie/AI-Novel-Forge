@@ -99,6 +99,26 @@ async function main() {
   assert.equal(afterUsage.ownershipVersion, before.ownershipVersion);
   assert.ok(afterUsage.updatedAt.getTime() >= task.updatedAt.getTime());
 
+  // 回归：缓存列在既有行上是 NULL（缺报告 = 未知），Prisma 原生 increment 会因 NULL + n = NULL
+  // 而空转、永远落不下去。这里验证 NULL 安全加总（COALESCE）能把首次上报真正累计进列。
+  await runWithLlmUsageTracking({ workflowTaskId: task.id }, () => recordTrackedLlmUsage({
+    promptTokens: 100,
+    completionTokens: 10,
+    totalTokens: 110,
+    inputCache: { cacheHitTokens: 60, cacheMissTokens: 40, cacheWriteTokens: null, cacheUsageStatus: "reported" },
+  }));
+  await runWithLlmUsageTracking({ workflowTaskId: task.id }, () => recordTrackedLlmUsage({
+    promptTokens: 100,
+    completionTokens: 10,
+    totalTokens: 110,
+    inputCache: { cacheHitTokens: 30, cacheMissTokens: 70, cacheWriteTokens: 5, cacheUsageStatus: "reported" },
+  }));
+  const cached = await prisma.novelWorkflowTask.findUniqueOrThrow({ where: { id: task.id } });
+  assert.equal(cached.cacheReportedCount, 2);
+  assert.equal(cached.cacheHitTokens, 90);
+  assert.equal(cached.cacheMissTokens, 110);
+  assert.equal(cached.cacheWriteTokens, 5);
+
   const checkpoint = await fence.runOwnedWrite((ownership) => workflowService.recordCheckpoint(task.id, {
     stage: "quality_repair",
     checkpointType: "chapter_batch_ready",

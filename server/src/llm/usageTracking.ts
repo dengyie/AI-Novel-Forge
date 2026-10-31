@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { ChatOpenAI } from "@langchain/openai";
+import { Prisma } from "@prisma/client";
 import { prisma } from "../db/prisma";
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
 import {
@@ -179,6 +180,30 @@ async function recordDirectorLlmUsage(input: {
   }).catch(() => undefined);
 }
 
+type CacheIncrementTarget = "GenerationJob" | "NovelWorkflowTask" | "StyleExtractionTask";
+
+// 缓存列在既有行上默认是 NULL（缺报告必须保持 NULL = 未知），直接用 Prisma 的 increment 会
+// 让 SQL 里的 NULL + n 变成 NULL（自增空转，永远停在 NULL）。改用 COALESCE 做 NULL 安全的累加，
+// SQLite 与 PostgreSQL 都支持，且不依赖「建行时先写默认值」的额外迁移。
+function incrementTaskCacheColumns(cache: NonNullable<LlmTokenUsageSnapshot["inputCache"]>) {
+  const sets: Prisma.Sql[] = [
+    Prisma.sql`"cacheHitTokens" = COALESCE("cacheHitTokens", 0) + ${cache.cacheHitTokens ?? 0}`,
+    Prisma.sql`"cacheMissTokens" = COALESCE("cacheMissTokens", 0) + ${cache.cacheMissTokens ?? 0}`,
+  ];
+  if (cache.cacheWriteTokens != null) {
+    sets.push(Prisma.sql`"cacheWriteTokens" = COALESCE("cacheWriteTokens", 0) + ${cache.cacheWriteTokens}`);
+  }
+  sets.push(Prisma.sql`"cacheReportedCount" = COALESCE("cacheReportedCount", 0) + 1`);
+  return async (tableName: CacheIncrementTarget, id: string): Promise<void> => {
+    const table = Prisma.raw(`"${tableName}"`);
+    await prisma.$executeRaw(Prisma.sql`
+      UPDATE ${table}
+      SET ${Prisma.join(sets, ", ")}
+      WHERE "id" = ${id}
+    `).catch(() => undefined);
+  };
+}
+
 export async function recordTrackedLlmUsage(
   usage: LlmTokenUsageSnapshot | null,
   record?: TrackedUsageRecordInput,
@@ -197,16 +222,16 @@ export async function recordTrackedLlmUsage(
   }
   const now = new Date();
   // 缓存命中包含于真实输入，不参与预算口径；只有厂商明确上报的调用才累计缓存列。
-  const cacheIncrement = usage.inputCache?.cacheUsageStatus === "reported"
-    ? {
-      cacheHitTokens: { increment: usage.inputCache.cacheHitTokens ?? 0 },
-      cacheMissTokens: { increment: usage.inputCache.cacheMissTokens ?? 0 },
-      ...(usage.inputCache.cacheWriteTokens != null
-        ? { cacheWriteTokens: { increment: usage.inputCache.cacheWriteTokens } }
-        : {}),
-      cacheReportedCount: { increment: 1 },
-    }
-    : {};
+  const reportCache = usage.inputCache?.cacheUsageStatus === "reported";
+  const tokenIncrement = {
+    promptTokens: { increment: usage.promptTokens },
+    completionTokens: { increment: usage.completionTokens },
+    totalTokens: { increment: usage.totalTokens },
+    llmCallCount: { increment: 1 },
+  };
+  const cacheIncrement = reportCache
+    ? incrementTaskCacheColumns(usage.inputCache!)
+    : () => Promise.resolve(null);
   await Promise.all([
     context?.directorTelemetry === true
       ? recordDirectorLlmUsage({
@@ -219,41 +244,23 @@ export async function recordTrackedLlmUsage(
     context.workflowTaskId
       ? prisma.novelWorkflowTask.updateMany({
         where: { id: context.workflowTaskId },
-        data: {
-          promptTokens: { increment: usage.promptTokens },
-          completionTokens: { increment: usage.completionTokens },
-          totalTokens: { increment: usage.totalTokens },
-          llmCallCount: { increment: 1 },
-          ...cacheIncrement,
-          lastTokenRecordedAt: now,
-        },
+        data: { ...tokenIncrement, lastTokenRecordedAt: now },
       }).catch(() => null)
+        .then(() => cacheIncrement("NovelWorkflowTask", context.workflowTaskId!))
       : Promise.resolve(null),
     context.generationJobId
       ? prisma.generationJob.updateMany({
         where: { id: context.generationJobId },
-        data: {
-          promptTokens: { increment: usage.promptTokens },
-          completionTokens: { increment: usage.completionTokens },
-          totalTokens: { increment: usage.totalTokens },
-          llmCallCount: { increment: 1 },
-          ...cacheIncrement,
-          lastTokenRecordedAt: now,
-        },
+        data: { ...tokenIncrement, lastTokenRecordedAt: now },
       }).catch(() => null)
+        .then(() => cacheIncrement("GenerationJob", context.generationJobId!))
       : Promise.resolve(null),
     context.styleExtractionTaskId
       ? prisma.styleExtractionTask.updateMany({
         where: { id: context.styleExtractionTaskId },
-        data: {
-          promptTokens: { increment: usage.promptTokens },
-          completionTokens: { increment: usage.completionTokens },
-          totalTokens: { increment: usage.totalTokens },
-          llmCallCount: { increment: 1 },
-          ...cacheIncrement,
-          lastTokenRecordedAt: now,
-        },
+        data: { ...tokenIncrement, lastTokenRecordedAt: now },
       }).catch(() => null)
+        .then(() => cacheIncrement("StyleExtractionTask", context.styleExtractionTaskId!))
       : Promise.resolve(null),
   ]);
 }
