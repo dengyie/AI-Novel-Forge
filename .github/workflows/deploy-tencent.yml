@@ -153,7 +153,9 @@ jobs:
     name: Deploy to tencent-vps
     needs: [gate, build-push]
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # api 镜像约 1.4GB，冷拉在跨网络抖动下可能超过 25 分钟（2026-10-31 PR#28 实测超时）。
+    # 45 分钟覆盖「冷拉 + 健康检查最长窗口」，避免 main 合并后需要人工 SSH 补拉。
+    timeout-minutes: 45
     environment: tencent-production
     steps:
       - name: Require SSH secrets
@@ -215,7 +217,9 @@ jobs:
       - name: Pull images + compose up (pinned sha)
         run: |
           set -euo pipefail
-          ssh tencent-deploy "cd /opt/ai-novel && grep -E '^(API_IMAGE_TAG|WEB_IMAGE_TAG)=' .env || true && docker compose pull && docker compose up -d --remove-orphans"
+          ssh tencent-deploy 'cd /opt/ai-novel && grep -E "^(API_IMAGE_TAG|WEB_IMAGE_TAG)=" .env || true'
+          # docker layer 缓存可复用：拉取中途失败/挂起后重试只补缺失层，不会重下已完成的层。
+          ssh tencent-deploy 'set -e; cd /opt/ai-novel; ok=0; for i in 1 2 3; do if docker compose pull; then ok=1; break; fi; echo "pull attempt $i failed; retry in 20s"; sleep 20; done; if [ "$ok" != "1" ]; then echo "image pull failed after 3 attempts"; exit 1; fi; docker compose up -d --remove-orphans'
 
       - name: Local health check (no domain dependency)
         run: |
