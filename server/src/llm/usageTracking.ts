@@ -16,6 +16,7 @@ export interface LlmUsageTrackingContext {
   workflowTaskId?: string | null;
   generationJobId?: string | null;
   styleExtractionTaskId?: string | null;
+  audiobookTaskId?: string | null;
   directorTelemetry?: boolean | null;
   novelId?: string | null;
   directorRunId?: string | null;
@@ -86,6 +87,7 @@ export function runWithLlmUsageTracking<T>(
       workflowTaskId: mergeContextValue(current?.workflowTaskId, context.workflowTaskId),
       generationJobId: mergeContextValue(current?.generationJobId, context.generationJobId),
       styleExtractionTaskId: mergeContextValue(current?.styleExtractionTaskId, context.styleExtractionTaskId),
+      audiobookTaskId: mergeContextValue(current?.audiobookTaskId, context.audiobookTaskId),
       directorTelemetry: mergeBooleanValue(current?.directorTelemetry, context.directorTelemetry),
       novelId: mergeContextValue(current?.novelId, context.novelId),
       directorRunId: mergeContextValue(current?.directorRunId, context.directorRunId),
@@ -180,7 +182,7 @@ async function recordDirectorLlmUsage(input: {
   }).catch(() => undefined);
 }
 
-type CacheIncrementTarget = "GenerationJob" | "NovelWorkflowTask" | "StyleExtractionTask";
+type CacheIncrementTarget = "GenerationJob" | "NovelWorkflowTask" | "StyleExtractionTask" | "AudiobookTask";
 
 // 缓存列在既有行上默认是 NULL（缺报告必须保持 NULL = 未知），直接用 Prisma 的 increment 会
 // 让 SQL 里的 NULL + n 变成 NULL（自增空转，永远停在 NULL）。改用 COALESCE 做 NULL 安全的累加，
@@ -215,10 +217,12 @@ export async function recordTrackedLlmUsage(
   if (!context) {
     return;
   }
-  if (!context?.workflowTaskId && !context?.generationJobId) {
-    if (!context?.styleExtractionTaskId && context?.directorTelemetry !== true) {
-      return;
-    }
+  const hasAttributionTarget = context.workflowTaskId
+    || context.generationJobId
+    || context.styleExtractionTaskId
+    || context.audiobookTaskId;
+  if (!hasAttributionTarget && context.directorTelemetry !== true) {
+    return;
   }
   const now = new Date();
   // 缓存命中包含于真实输入，不参与预算口径；只有厂商明确上报的调用才累计缓存列。
@@ -261,6 +265,13 @@ export async function recordTrackedLlmUsage(
         data: { ...tokenIncrement, lastTokenRecordedAt: now },
       }).catch(() => null)
         .then(() => cacheIncrement("StyleExtractionTask", context.styleExtractionTaskId!))
+      : Promise.resolve(null),
+    context.audiobookTaskId
+      ? prisma.audiobookTask.updateMany({
+        where: { id: context.audiobookTaskId },
+        data: { ...tokenIncrement, lastTokenRecordedAt: now },
+      }).catch(() => null)
+        .then(() => cacheIncrement("AudiobookTask", context.audiobookTaskId!))
       : Promise.resolve(null),
   ]);
 }

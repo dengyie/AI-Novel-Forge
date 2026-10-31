@@ -14,6 +14,7 @@ import { isMimoTtsPresetVoice } from "@ai-novel/shared/types/audiobook";
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "../../db/prisma";
+import { runWithLlmUsageTracking } from "../../llm/usageTracking";
 import { AppError } from "../../middleware/errorHandler";
 import { toTaskTokenUsageSummary } from "../task/taskTokenUsageSummary";
 import type { TaskCancelSource } from "../task/taskSupport";
@@ -2615,7 +2616,10 @@ export class AudiobookTaskService {
           continue;
         }
         this.queueSet.delete(taskId);
-        await this.executeTask(taskId);
+        // 有声书流水线里的 LLM 调用（diarize/annotate/音色等）默认不属于任何任务上下文；
+        // 用 ALS 包住整轮 executeTask，令牌与缓存用量才能落到 AudiobookTask 行上
+        // （否则 promptTokens/cache* 列永远停在默认值/ NULL）。
+        await runWithLlmUsageTracking({ audiobookTaskId: taskId }, () => this.executeTask(taskId));
       }
     } finally {
       this.processing = false;
